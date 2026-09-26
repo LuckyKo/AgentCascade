@@ -778,3 +778,172 @@ def test_send_to_user_no_error_when_supervisor_absent():
 
     stop_evt.set()
     t.join(timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# H. notify_restart_complete — post-restart phone notice
+# ---------------------------------------------------------------------------
+# The bridge loop is published by PTB's post_init hook AFTER run_polling starts,
+# so right after start() it is usually not live yet. notify_restart_complete does
+# a bounded readiness poll (module constants on supervisor_mod), then schedules a
+# send that falls back to the primary allowlisted id when last_chat_id is wiped.
+
+def _start_live_loop_thread():
+    """Run a real event loop in a daemon thread; returns (thread, stop_evt, loop)."""
+    import asyncio
+
+    loop_ready = threading.Event()
+    stop_evt = threading.Event()
+    loop_holder = {}
+
+    def _loop_thread():
+        l = asyncio.new_event_loop()
+        asyncio.set_event_loop(l)
+        loop_holder['loop'] = l
+        loop_ready.set()
+
+        async def _run():
+            while not stop_evt.is_set():
+                await asyncio.sleep(0.01)
+
+        try:
+            l.run_until_complete(_run())
+        finally:
+            # Cancel leftovers (e.g. a scheduled send still in flight) so the loop
+            # closes cleanly and pytest sees no "Task was destroyed" noise.
+            async def _drain():
+                pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+            try:
+                l.run_until_complete(_drain())
+            except Exception:
+                pass  # drain is best-effort; the loop closes either way
+            l.close()
+
+    t = threading.Thread(target=_loop_thread, daemon=True)
+    t.start()
+    assert loop_ready.wait(timeout=5.0)
+    return t, stop_evt, loop_holder['loop']
+
+
+def test_notify_restart_complete_false_when_loop_never_live(tmp_path, monkeypatch):
+    """No live bridge loop -> bounded wait expires -> False (fast via shrunken constants)."""
+    sup = make_supervisor(tmp_path)
+    # Shrink the readiness window so the test stays fast.
+    monkeypatch.setattr(supervisor_mod, 'DEFAULT_RESTART_NOTICE_WAIT_TIMEOUT_SEC', 0.2)
+    monkeypatch.setattr(supervisor_mod, 'DEFAULT_RESTART_NOTICE_POLL_INTERVAL_SEC', 0.05)
+
+    t0 = time.monotonic()
+    assert sup.notify_restart_complete('back up') is False
+    elapsed = time.monotonic() - t0
+    # It actually waited (not an instant short-circuit) but stayed within budget.
+    assert elapsed >= 0.15, f'should poll until the deadline, took {elapsed:.3f}s'
+    assert elapsed < 2.0
+
+
+def test_notify_restart_complete_sends_to_last_chat_id(tmp_path):
+    """Live loop + stored last_chat_id -> a send is scheduled to that chat id."""
+    import asyncio
+
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {'last_chat_id': 7}
+        sent = []
+
+        async def _fake_send_message(chat_id=None, text=None, **kw):
+            sent.append((chat_id, text))
+
+        fake_app.bot.send_message = _fake_send_message
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        assert sup.notify_restart_complete('✅ Restart complete — the server is back up.') is True
+
+        deadline = time.monotonic() + 5.0
+        while not sent and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(sent) == 1, f'expected one send, got {sent}'
+        assert sent[0] == (7, '✅ Restart complete — the server is back up.')
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_notify_restart_complete_falls_back_to_allowlist(tmp_path):
+    """Live loop + no last_chat_id (fresh post-restart process) -> falls back to the
+    first allowlisted id from the config loader (patched at the source — hermetic)."""
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {}   # last_chat_id wiped on restart
+        sent = []
+
+        async def _fake_send_message(chat_id=None, text=None, **kw):
+            sent.append((chat_id, text))
+
+        fake_app.bot.send_message = _fake_send_message
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        # Patch the config loader at its module path (no real secrets.json read).
+        # The patch must stay active while the SCHEDULED coroutine runs: it does its
+        # `from .config import ...` when the bridge loop executes it, which is after
+        # notify_restart_complete returns — reverting early would leak the real config.
+        with patch('agent_cascade.telegram_bridge.config._load_allowed_users_raw',
+                   return_value='111, 222'), \
+             patch('agent_cascade.telegram_bridge.config._parse_allowed_users',
+                   side_effect=lambda raw: [int(p) for p in raw.split(',') if p.strip()]):
+            assert sup.notify_restart_complete('back up') is True
+
+            deadline = time.monotonic() + 5.0
+            while not sent and time.monotonic() < deadline:
+                time.sleep(0.01)
+        assert len(sent) == 1, f'expected one send to the primary allowlisted id, got {sent}'
+        assert sent[0][0] == 111, 'must target the FIRST allowlisted id'
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_notify_restart_complete_no_target_no_raise(tmp_path):
+    """Live loop but no last_chat_id AND an empty allowlist -> scheduled coroutine
+    no-ops silently; the method still returns True (a send WAS scheduled) and never raises."""
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {}   # no last_chat_id
+        fake_app.bot.send_message = AsyncMock()
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        # Same rule as the fallback test: keep the patch active while the scheduled
+        # coroutine runs, or the real allowlist from secrets.json would be used.
+        coro_ran = threading.Event()
+
+        def _raw():
+            coro_ran.set()   # signals the moment the coroutine touches the loader
+            return ''
+
+        with patch('agent_cascade.telegram_bridge.config._load_allowed_users_raw', side_effect=_raw), \
+             patch('agent_cascade.telegram_bridge.config._parse_allowed_users', return_value=[]):
+            assert sup.notify_restart_complete('back up') is True  # scheduled; coro no-ops
+
+            assert coro_ran.wait(timeout=5.0), 'scheduled coroutine should have run'
+        fake_app.bot.send_message.assert_not_called()
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)

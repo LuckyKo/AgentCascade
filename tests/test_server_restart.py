@@ -78,6 +78,27 @@ def test_restart_execl_stays_alive_on_failure(monkeypatch):
     mock_exit.assert_not_called()
 
 
+def test_restart_sets_env_sentinel_before_execl(monkeypatch):
+    """The _AC_RESTART_IN_PROGRESS sentinel is set to '1' BEFORE os.execl runs.
+
+    The new process inherits env across execl and pops this in its startup hook to
+    send the Telegram restart-complete notice. Captured inside the patched execl's
+    side_effect so we observe exactly what the child will inherit."""
+    from agent_cascade import server_restart
+
+    monkeypatch.delenv('_AC_RESTART_IN_PROGRESS', raising=False)  # start clean
+    seen = {}
+
+    def _capture(*args, **kwargs):
+        seen['sentinel'] = os.environ.get('_AC_RESTART_IN_PROGRESS')
+
+    with patch.object(server_restart.os, 'execl', side_effect=_capture), \
+         patch.object(server_restart.os, '_exit'):
+        server_restart.restart_server_process()
+
+    assert seen['sentinel'] == '1', 'sentinel must be set before execl (child inherits it)'
+
+
 # ---------------------------------------------------------------------------
 # B. Port-race retry — _bind_socket_with_retry (hermetic, small budget)
 # ---------------------------------------------------------------------------

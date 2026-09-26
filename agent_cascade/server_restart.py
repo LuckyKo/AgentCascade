@@ -37,6 +37,12 @@ def restart_server_process() -> NoReturn:
     running server is left alive. The belt-and-braces ``os._exit(1)`` below is
     unreachable unless ``execl`` returns, which only happens on failure (after it
     has already raised).
+
+    Sets the ``_AC_RESTART_IN_PROGRESS`` env sentinel right before the re-exec so
+    the NEW process can tell it came from a restart (env vars survive ``os.execl``;
+    the startup hook pops it first thing, so a crash mid-notice can't leak it into
+    a later boot).
     """
+    os.environ['_AC_RESTART_IN_PROGRESS'] = '1'
     os.execl(sys.executable, sys.executable, *sys.argv)
     os._exit(1)

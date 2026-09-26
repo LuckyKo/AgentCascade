@@ -830,11 +830,24 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # Start-on-boot: if the Telegram bridge toggle was persisted ON, start the
         # in-process daemon thread now (uvicorn is serving, so the client can reach AC).
         tg_sup = getattr(agent_pool, 'telegram_supervisor', None) if agent_pool else None
-        if tg_sup and getattr(getattr(agent_pool, 'settings', None), 'telegram_bridge_enabled', False):
+        _bridge_on = tg_sup and getattr(getattr(agent_pool, 'settings', None), 'telegram_bridge_enabled', False)
+        if _bridge_on:
             try:
                 tg_sup.start()
             except Exception as e:
                 logger.warning(f"Telegram bridge start-on-boot failed (non-critical): {e}")
+
+        # Restart-complete notice (best-effort). The sentinel is set by
+        # restart_server_process() right before os.execl and inherited by this
+        # process. Pop it FIRST so a crash mid-notice can't poison a later boot; env
+        # vars don't survive a dead process, so there's no cross-boot leak (unlike a
+        # sentinel file).
+        if os.environ.pop('_AC_RESTART_IN_PROGRESS', None) is not None:
+            if _bridge_on:
+                try:
+                    tg_sup.notify_restart_complete('✅ Restart complete — the server is back up.')
+                except Exception as e:  # a failed notice must never break boot
+                    logger.debug(f"Telegram restart-complete notice failed (non-critical): {e}")
 
         # Register dismissal callback for real-time UI tab removal when LLM calls dismiss_agent
         if agent_pool and hasattr(agent_pool, 'on_dismissed'):

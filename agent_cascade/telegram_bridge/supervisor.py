@@ -55,6 +55,12 @@ DEFAULT_BACKOFF_CAP = 30.0      # seconds; ceiling for any single backoff delay
 DEFAULT_MAX_RESTART_ATTEMPTS = 5   # TOTAL attempts (initial + retries)
 DEFAULT_STOP_JOIN_TIMEOUT_SEC = 5.0   # bounded join window after scheduling PTB stop
 
+# Readiness wait for notify_restart_complete: the bridge loop is published by PTB's
+# post_init hook, which fires AFTER run_polling starts — so right after start() the
+# loop is usually not live yet. Bounded poll (default ~5s) before giving up.
+DEFAULT_RESTART_NOTICE_WAIT_TIMEOUT_SEC = 5.0   # total wait for a live bridge loop
+DEFAULT_RESTART_NOTICE_POLL_INTERVAL_SEC = 0.1  # sleep between readiness polls (lock released)
+
 
 def _build_app(cfg, ac):
     """Module-level seam around ``bot.build_application`` (tests patch this)."""
@@ -231,6 +237,56 @@ class TelegramBridgeSupervisor:
             return True
         except Exception as e:  # pragma: no cover - defensive
             logger.warning('[TelegramBridge] notify_user failed (non-fatal): %s', e)
+            return False
+
+    def notify_restart_complete(self, message: str) -> bool:
+        """Send a 'restart complete' notice to the operator's phone.
+
+        Unlike notify_user (which targets the ephemeral last_chat_id and no-ops if
+        no message has arrived yet), this waits for the bridge loop to become live
+        (bounded poll) and, if last_chat_id is still absent, falls back to the
+        primary allowlisted user id from config. Returns True if the message was
+        scheduled onto the live bridge loop (even if the scheduled coroutine then
+        finds no valid recipient and no-ops). Returns False only if the bridge loop
+        never became available within the wait timeout. Never raises.
+        """
+        try:
+            # Readiness wait: poll for a live bridge loop (published by PTB's
+            # post_init hook after run_polling starts). Release the lock while
+            # sleeping — the _publish_loop hook needs it to publish the loop.
+            deadline = time.monotonic() + DEFAULT_RESTART_NOTICE_WAIT_TIMEOUT_SEC
+            app = None
+            loop = None
+            while True:
+                with self._lock:
+                    app, loop = self._app, self._loop
+                if app is not None and loop is not None and not loop.is_closed():
+                    break
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(DEFAULT_RESTART_NOTICE_POLL_INTERVAL_SEC)
+
+            async def _do_send(_app=app):
+                chat_id = _app.bot_data.get('last_chat_id')
+                if chat_id is None:
+                    # Fresh post-restart process: no message has arrived yet, so
+                    # last_chat_id is wiped. Fall back to the primary allowlisted
+                    # id from config/secrets.json (the only durable target).
+                    try:
+                        from .config import _load_allowed_users_raw, _parse_allowed_users
+                        ids = _parse_allowed_users(_load_allowed_users_raw())
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.warning('[TelegramBridge] restart-notice allowlist lookup failed: %s', e)
+                        return
+                    if not ids:
+                        return
+                    chat_id = ids[0]
+                await _safe_send(_app.bot, chat_id, message)
+
+            asyncio.run_coroutine_threadsafe(_do_send(), loop)
+            return True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning('[TelegramBridge] notify_restart_complete failed (non-fatal): %s', e)
             return False
 
     # ── Thread spawn / stop internals (caller holds self._lock) ───────────
