@@ -1946,7 +1946,11 @@ class SkillManager:
             # created lazily on the first real rating/load. A rating-less skill has no
             # last_activity_turn, so _activity_age returns 0 → PROTECTED (fair window preserved).
 
-            return True, []
+            # On success `errors` holds only non-blocking warnings (validate_skill appends
+            # structural errors to the same list but early-returns before reaching here when any
+            # are present) — propagate them so callers can surface advisory notes (e.g. the
+            # Tier-2 self-match "below threshold" warning, BUG_0017).
+            return True, errors
 
         except Exception as e:
             logger.warning('[SKILLS] Failed to register skill from content: %s', e)

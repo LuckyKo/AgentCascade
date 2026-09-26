@@ -287,6 +287,25 @@ class TestRegistration:
         assert len(found) == 1
         assert found[0].get('triggers') == triggers
 
+    def test_register_returns_advisory_warnings_on_success(self, fresh_manager):
+        """BUG_0017: register_skill_from_content must propagate validate_skill's
+        non-blocking warnings on success (previously dropped via `return True, []`)."""
+        name = f"warn-prop-test-skill-{_uid()}"
+        # Generic triggers sharing only a couple tokens with the wordy task → advisory band.
+        content = _make_skill_content(
+            name=name,
+            description='Generic workflow for handling queued message delivery',
+            triggers=['queue processing', 'message batching', 'push'],
+            generated_from_task=('Finish the Telegram bridge push-model implementation (todo.md:125): '
+                                 'engine/core.py pre-reflection push + run_agent_unified.py post-run push '
+                                 'deduped by instance._tg_pushed, via TelegramBridgeSupervisor.notify_user.'),
+        )
+        success, messages = fresh_manager.register_skill_from_content(content)
+        assert success, f"registration should succeed: {messages}"
+        self_match_msgs = [m for m in messages if 'Self-match score' in m]
+        assert len(self_match_msgs) == 1, f"expected one advisory self-match warning, got: {messages}"
+        assert 'advisory, non-blocking' in self_match_msgs[0]
+
 
 # ===========================================================================
 # 3. Unit: Self-Match — Tier 2 validation via SkillMatcher
