@@ -227,9 +227,13 @@ class ShellCmd(BaseTool):
         try:
             if 'async_mode' in params and 'execution_mode' not in params:
                 v = params['async_mode']
+                # The legacy async_mode was a boolean flag; reject non-bool values loudly
+                # instead of silently coercing "false" → True via bool().
+                if not isinstance(v, bool):
+                    return f"ERROR: 'async_mode' must be a boolean (true/false), got: {v!r}"
                 params = dict(params)
                 del params['async_mode']
-                params['execution_mode'] = 'async' if bool(v) else 'sync'
+                params['execution_mode'] = 'async' if v else 'sync'
                 logger.info("shell_cmd: coerced legacy alias 'async_mode' -> 'execution_mode'=%s",
                             params['execution_mode'])
             params = self._verify_json_format_args(params)

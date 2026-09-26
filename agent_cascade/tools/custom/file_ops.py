@@ -379,8 +379,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
             try:
                 params = json_loads(params)
             except Exception:
-                params = None  # let _verify_json_format_args report the parse failure
+                params = None
             if not isinstance(params, dict):
+                # Unparseable/non-dict input becomes {} so that _verify_json_format_args
+                # reports the missing 'path' as a normal tool error.
                 params = {}
         if 'offset' in params and 'start_line' not in params:
             try:

@@ -194,7 +194,7 @@ class BaseTool(ABC):
                     ) from e
                 raise
         else:
-            raise ValueError
+            raise ValueError(f"Invalid parameters schema for tool '{self.name}': must be list or dict")
         return params_json
 
     @property

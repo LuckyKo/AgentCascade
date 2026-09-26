@@ -129,3 +129,15 @@ def test_shell_cmd_invalid_json_string_errors_cleanly():
     assert out.startswith('ERROR'), out
     # Pin the expected message so a regression to a different error path is caught.
     assert 'missing required parameter' in out or 'valid JSON' in out, out
+
+
+def test_shell_cmd_non_boolean_async_mode_rejected(monkeypatch):
+    """Non-boolean async_mode (e.g. string 'false') is rejected loudly, not silently coerced."""
+
+    def boom(self, *a, **k):
+        raise AssertionError('_execute_sync must not be called for non-bool async_mode')
+
+    monkeypatch.setattr(ShellCmd, '_execute_sync', boom)
+    out = ShellCmd().call({'command': 'echo hi', 'justification': 't', 'async_mode': 'false'})
+    assert out.startswith('ERROR'), out
+    assert "'async_mode' must be a boolean" in out
