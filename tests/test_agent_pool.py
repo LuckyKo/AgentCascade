@@ -5,6 +5,7 @@ We patch OperationManager / TelemetryCollector to avoid disk I/O side-effects.
 """
 
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -554,3 +555,134 @@ class TestInstanceConversations:
 # It tested the previous tail-only approach that has been replaced by the additive/delta
 # streaming implementation (AGENT_CASCADE_STREAM_DELTA=1). See tests/test_state_builder_tail_cut.py
 # for the current delta-mode unit tests.
+
+
+# ===========================================================================
+# AFK flag persistence + restart restore (server-backed, shared by WebUI + TG)
+# ===========================================================================
+
+
+class _AfkOmDouble:
+    """Real OperationManager-shaped double with the AFK surface set_afk needs.
+
+    Carries every attribute ``_save_pool_settings``/``_apply_pending_config`` read
+    off the OM (work folders, base_dir) so the persistence path runs unmodified.
+    """
+
+    def __init__(self):
+        self.afk_enabled = False
+        self.afk_message = ''
+        self.enable_timeout = True
+        self.approval_timeout_seconds = 300
+        self.base_dir = Path('/tmp/afk_persist_ws')
+        self.extra_work_folders_ro: list = []
+        self.extra_work_folders_rw: list = []
+
+    def set_base_dir(self, path):
+        """Mirror OperationManager.set_base_dir (used by _apply_pending_config)."""
+        self.base_dir = Path(path)
+
+    def set_afk(self, enabled, message=None):
+        self.afk_enabled = bool(enabled)
+        if message is not None:
+            self.afk_message = str(message)
+
+    def set_enable_timeout(self, enabled):
+        self.enable_timeout = bool(enabled)
+
+    def set_approval_timeout(self, seconds):
+        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+
+
+def _build_pool_with_afk_om(config_dir: str):
+    """Build a real AgentPool over ``config_dir`` with an AFK-capable OM double.
+
+    The pool's api_router config dir is pointed at ``config_dir`` so
+    pool_settings.json lives under the test's tmp_path.
+    """
+    from agent_cascade.agent_pool import AgentPool
+    from agent_cascade.api_router import APIRouter
+
+    om = _AfkOmDouble()
+    api_router = APIRouter(default_llm_cfg={'max_parallel_agents': 1}, config_dir=config_dir)
+    pool = AgentPool(
+        llm_cfg={'max_parallel_agents': 1},
+        agents_dir='/tmp/fake_agents',
+        workspace_dir=config_dir,
+        api_router=api_router,
+        operation_manager=om,
+    )
+    return pool, om
+
+
+def _stop_pool(pool):
+    """Stop the background services the pool starts in __init__ (idle checker etc.)."""
+    try:
+        pool._idle.stop()
+    except Exception:
+        pass
+
+
+class TestAfkPersistence:
+    """AFK flag is saved to pool_settings.json and restored on next startup."""
+
+    def test_afk_saved_to_pool_settings_json(self, tmp_path):
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+        pool, om = _build_pool_with_afk_om(config_dir)
+        try:
+            om.afk_enabled = True
+            om.afk_message = 'gone?'
+            pool._save_pool_settings()
+
+            import json
+            with open(pool._pool_settings_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            assert data['afk_enabled'] is True
+            assert data['afk_message'] == 'gone?'
+        finally:
+            _stop_pool(pool)
+
+    def test_afk_restored_on_next_startup(self, tmp_path):
+        """Regression test for the historical lost-on-restart bug (see
+        .agent_lessons/afk-toggle-noop-and-lost-on-restart.md)."""
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+
+        pool1, om1 = _build_pool_with_afk_om(config_dir)
+        try:
+            om1.afk_enabled = True
+            om1.afk_message = 'brb 5'
+            pool1._save_pool_settings()
+        finally:
+            _stop_pool(pool1)
+
+        # Second "server start" over the same config dir with a fresh OM.
+        pool2, om2 = _build_pool_with_afk_om(config_dir)
+        try:
+            assert om2.afk_enabled is True
+            assert om2.afk_message == 'brb 5'
+        finally:
+            _stop_pool(pool2)
+
+    def test_afk_absent_key_leaves_defaults(self, tmp_path):
+        """A settings file with no afk_* keys must leave the OM defaults untouched."""
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+
+        import json
+        # Write the fixture under the EXACT filename the pool will read — derive it from
+        # the pool itself instead of re-deriving the instance id (which can drift if a
+        # sibling test sets AGENT_CASCADE_INSTANCE_ID).
+        pool, om = _build_pool_with_afk_om(config_dir)
+        try:
+            with open(pool._pool_settings_path, 'w', encoding='utf-8') as f:
+                json.dump({'idle_timeout_seconds': 60.0}, f)
+
+            # Re-run the load+restore path against the afk-free file.
+            pool._load_pool_settings()
+            pool._apply_pending_config()
+            assert om.afk_enabled is False
+            assert om.afk_message == ''
+        finally:
+            _stop_pool(pool)

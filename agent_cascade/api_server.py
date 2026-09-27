@@ -34,6 +34,7 @@ import os
 import signal
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -48,6 +49,7 @@ from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting)
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.operation_manager import OperationManager
 from agent_cascade.log import logger
 
 try:
@@ -308,6 +310,43 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
     return sessions
 
 
+# ── AFK idle auto-reply (server-side; replaces the browser's checkAfkAutoReply) ──
+
+AFK_NUDGE_COOLDOWN = 5 * 60  # seconds — matches the browser's 5*60*1000 (app.js:2752)
+AFK_DEFAULT_MESSAGE = ('User is AFK, continue working on given task or polish/verify '
+                       'your work if there are things to improve...')  # verbatim from app.js:2774
+
+
+def afk_idle_nudge_text(om: OperationManager) -> str:
+    """The AFK nudge text, falling back to AFK_DEFAULT_MESSAGE (the original web-UI string)."""
+    return (getattr(om, 'afk_message', '') or '').strip() or AFK_DEFAULT_MESSAGE
+
+
+def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance=None,
+                     generating: bool, now: float) -> bool:
+    """Pure eligibility+cooldown decision for the idle AFK auto-reply. No side effects.
+
+    Returns True exactly once per AFK_NUDGE_COOLDOWN while AFK is on, the agent is idle,
+    and no work is queued. The caller performs the send AND the timestamp claim.
+
+    ``instance`` is the resolved pool instance (the caller resolves it via
+    ``pool.get_instance(instance_name)``); None means the instance is gone and we must
+    not resurrect it.
+    """
+    if om is None or not getattr(om, 'afk_enabled', False):
+        return False
+    if generating or getattr(pool, 'stopped', False):
+        return False
+    if instance is None:
+        return False  # instance dismissed mid-run — never resurrect it
+    if hasattr(pool, 'has_pending') and pool.has_pending(instance_name):
+        return False
+    if hasattr(pool, 'has_messages') and pool.has_messages(instance_name):
+        return False
+    last = pool._afk_last_nudge_ts  # initialized explicitly in create_app (never lazy-minted)
+    return not last or (now - last) >= AFK_NUDGE_COOLDOWN
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.log import logger
 
@@ -355,6 +394,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 )
         except Exception as e:
             logger.warning('[INIT] Telegram bridge supervisor init failed (non-critical): %s', e)
+
+        # AFK idle auto-reply state — initialized EXPLICITLY (not lazily via getattr): two
+        # concurrent run-end threads must share ONE lock and ONE timestamp. See afk_should_nudge().
+        agent_pool._afk_last_nudge_ts = 0.0     # monotonic seconds; 0 = never nudged
+        agent_pool._afk_nudge_lock = threading.Lock()
 
     # Initialize concurrency control for Security advisor checks.
     # Security runs on a separate daemon thread, so we use RLock-based locking
@@ -815,6 +859,48 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Reset session['generating'] when thread completes
             # This ensures the flag is cleared automatically after execution finishes
             _stop_generation(session)
+            # Server-side AFK idle auto-reply (replaces browser checkAfkAutoReply/triggerAfkSend).
+            # MUST run AFTER _stop_generation: /api/message refuses to start while generating=True.
+            # `loop` is the run's own loop (a param of run_agent_thread, not a create_app local).
+            try:
+                _afk_maybe_nudge(target_instance_name or session['session_name'], loop)
+            except Exception as e:
+                logger.warning('[AFK] idle auto-reply hook failed for %s: %s',
+                               target_instance_name or session['session_name'], e)
+
+    def _afk_maybe_nudge(instance_name: str, loop) -> None:
+        """Idle AFK auto-reply (server-side; replaces browser checkAfkAutoReply/triggerAfkSend).
+
+        Nested in create_app because it needs the local `session`/`agent_pool` and the
+        nested run_agent_thread. Decision logic lives in the pure afk_should_nudge().
+        """
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        inst = agent_pool.get_instance(instance_name) if agent_pool else None
+        if inst is None:
+            return                                    # instance dismissed mid-run — do not resurrect it
+        if not afk_should_nudge(agent_pool, om, instance_name=instance_name, instance=inst,
+                                generating=_is_generating(session), now=time.monotonic()):
+            return
+        # Claim the cooldown BEFORE sending so two runs ending concurrently cannot both nudge.
+        with agent_pool._afk_nudge_lock:
+            if not afk_should_nudge(agent_pool, om, instance_name=instance_name, instance=inst,
+                                    generating=_is_generating(session), now=time.monotonic()):
+                return                                # lost the race — someone else claimed it
+            agent_pool._afk_last_nudge_ts = time.monotonic()
+        try:
+            if _is_generating(session):
+                raise RuntimeError('generation already started')  # a real run beat us to it
+            agent_pool.enqueue_message(instance_name, _parse_multimodal_content(afk_idle_nudge_text(om)))
+            gen_id = _start_generation(session)
+            threading.Thread(
+                target=run_agent_thread,
+                args=(None, None, gen_id, loop, instance_name),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            logger.warning('[AFK] idle auto-reply failed for %s: %s', instance_name, e)
+            with agent_pool._afk_nudge_lock:
+                agent_pool._afk_last_nudge_ts = 0.0   # release the claim so the next run-end retries
 
 
     # ── Background tasks ──────────────────────────────────────────────────
@@ -1347,12 +1433,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.post('/api/afk')
     async def api_set_afk(token: str = None, data: dict = None):
-        """Toggle AFK mode — the approval-timeout auto-reject.
+        """Toggle the server-backed AFK flag (shared with WS 'set_afk').
 
-        Semantics (see build plan Decision 2): ``enabled=true`` means pending approvals
-        auto-reject after ``timeout_seconds`` so agents don't hang while the user is away;
-        ``enabled=false`` means wait indefinitely. Persists to pool_settings.json so it
-        survives restart (mirrors how approval-timeout settings persist).
+        Semantics: ``enabled=true`` means pending approvals are auto-rejected at registration
+        AND an idle auto-reply nudge is sent when the agent goes idle; ``enabled=false`` turns
+        both off. Persists to pool_settings.json so it survives restart. The optional
+        ``message`` sets the custom nudge/reject text; when absent the stored message is left
+        untouched (so a toggle-only caller like Telegram cannot clobber a UI-set message).
+
+        ``timeout_seconds`` is no longer accepted: the time-based "Enable Approval Timeout"
+        feature is separate and driven solely by its own UI controls. A legacy client sending
+        it degrades to a plain on/off toggle instead of erroring.
         """
         if not token or token not in api_sessions:
             return _invalid_token_response()
@@ -1362,27 +1453,16 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return JSONResponse(status_code=503, content={'message': 'No operation manager'})
 
         payload = data or {}
-        enabled = bool(payload.get('enabled', False))
-        timeout_raw = payload.get('timeout_seconds')
+        if payload.get('timeout_seconds') is not None:
+            logger.debug('[AFK] /api/afk timeout_seconds ignored — approval timeout is a separate feature')
 
-        try:
-            om.set_enable_timeout(enabled)
-            if timeout_raw is not None:
-                om.set_approval_timeout(int(timeout_raw))  # clamps to 10s–2h internally
-        except Exception as e:
-            logger.warning(f"Failed to apply AFK settings: {e}")
-            # Generic message — don't leak internal exception details to the caller.
-            return JSONResponse(status_code=400, content={'message': 'Failed to set AFK mode'})
-
-        # Persist so the setting survives a restart (same path as the config handlers).
-        if hasattr(agent_pool, '_save_pool_settings'):
-            agent_pool._save_pool_settings()
+        WsMessageHandler.apply_afk(agent_pool, bool(payload.get('enabled', False)), payload.get('message'))
 
         await _broadcast_state()
         return {
             'status': 'ok',
-            'enabled': om.enable_timeout,
-            'timeout_seconds': om.approval_timeout_seconds,
+            'enabled': om.afk_enabled,
+            'message': om.afk_message,
         }
 
     @app.post('/api/session/restore')

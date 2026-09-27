@@ -867,8 +867,10 @@ def test_registry_contains_v1_command_set():
     ('/restart', 'restart', call()),
     ('/security on', 'set_auto_security', call(True)),
     ('/security off', 'set_auto_security', call(False)),
-    ('/afk on 300', 'set_afk', call(True, timeout_seconds=300)),
-    ('/afk off', 'set_afk', call(False, timeout_seconds=None)),
+    # /afk no longer sends timeout_seconds — the time-based approval timeout is a
+    # separate feature. A legacy '/afk on 300' still parses and simply ignores the extra token.
+    ('/afk on 300', 'set_afk', call(True)),
+    ('/afk off', 'set_afk', call(False)),
     ('/restore mysession', 'restore_session', call('mysession')),
 ])
 def test_command_calls_right_client_method(text, method, expected):
@@ -1060,6 +1062,58 @@ def test_afk_and_security_usage_errors_reply_without_ac_call():
         ac.set_auto_security.assert_not_called()
         ac.restore_session.assert_not_called()
         ac.inject_message.assert_not_called()
+
+
+def test_cmd_afk_on_calls_set_afk_true():
+    """'/afk on' toggles the server-backed AFK flag (no timeout_seconds anymore)."""
+    update, context, ac, sent = _cmd_context('/afk on')
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(True)
+    assert len(sent) == 1
+
+
+def test_cmd_afk_off_calls_set_afk_false():
+    update, context, ac, sent = _cmd_context('/afk off')
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(False)
+    assert len(sent) == 1
+
+
+def test_cmd_afk_rejects_bad_arg():
+    """'/afk maybe' → usage string, set_afk never called (also covered by the
+    shared usage-error loop above; kept explicit per plan §8(d) item 16)."""
+    update, context, ac, sent = _cmd_context('/afk maybe')
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    assert 'Usage' in sent[0]
+    ac.set_afk.assert_not_called()
+
+
+def test_cmd_afk_reply_is_honest():
+    """The ON reply must describe BOTH server behaviors (auto-reject AND idle
+    auto-reply); the OFF reply must not repeat the historical 'unlimited' lie."""
+    update, context, ac, sent = _cmd_context('/afk on')
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    on_reply = sent[0].lower()
+    assert 'auto-reject' in on_reply or 'auto reject' in on_reply
+    assert 'idle' in on_reply
+
+    update2, context2, ac2, sent2 = _cmd_context('/afk off')
+    _run(on_message(update2, context2))
+    assert len(sent2) == 1
+    off_reply = sent2[0].lower()
+    assert 'unlimited' not in off_reply
+    assert 'indefinitely' not in off_reply
+
+
+def test_cmd_afk_ignores_legacy_seconds_token():
+    """A legacy '/afk on 300' is accepted and the extra token is ignored —
+    set_afk is called with just the enabled flag."""
+    update, context, ac, sent = _cmd_context('/afk on 300')
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(True)
+    assert len(sent) == 1
 
 
 def test_non_command_slash_text_falls_through_to_inject():

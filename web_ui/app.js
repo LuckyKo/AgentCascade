@@ -295,6 +295,17 @@ function syncPoolSettings(ps) {
     logApiPostEl.checked = saved['log-api-post'];
   }
 
+  // AFK is server-backed (state_builder _add_pool_runtime_settings) — the server is the
+  // single source of truth; localStorage no longer holds afk-enabled/afk-message.
+  if (ps.afk_enabled !== undefined && afkToggle) {
+    if (afkToggle.checked !== !!ps.afk_enabled) changed = true;
+    afkToggle.checked = !!ps.afk_enabled;
+  }
+  if (ps.afk_message !== undefined && settingAfkMessage && document.activeElement !== settingAfkMessage) {
+    if (settingAfkMessage.value !== ps.afk_message) changed = true;
+    settingAfkMessage.value = ps.afk_message;
+  }
+
   // Update two-phase input enabled state after server settings sync
   updateTwoPhaseInputsEnabled();
 
@@ -1227,8 +1238,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
-  if (afkToggle) s['afk-enabled'] = afkToggle.checked;
-  if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
+  // AFK is server-backed now — the server state (pool_settings afk_enabled/afk_message) is the
+  // single source of truth; localStorage no longer holds afk-enabled/afk-message.
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
 
   // Approval timeout settings
@@ -1594,12 +1605,6 @@ function loadSettings() {
       });
     }
 
-    if (afkToggle && _present(s['afk-enabled'])) {
-      afkToggle.checked = s['afk-enabled'];
-    }
-    if (settingAfkMessage && _present(s['afk-message'])) {
-      settingAfkMessage.value = s['afk-message'];
-    }
     if (autoSecurityToggle && _present(s['auto-security'])) {
       autoSecurityToggle.checked = s['auto-security'];
       state.autoSecurity = s['auto-security'];
@@ -1608,10 +1613,6 @@ function loadSettings() {
     // Async shell console window toggle
     if (settingAsyncShellConsoleWindow && _present(s['async-shell-console-window'])) {
       settingAsyncShellConsoleWindow.checked = s['async-shell-console-window'];
-    }
-
-    if (afkToggle && afkToggle.checked && !state.generating) {
-      checkAfkAutoReply();
     }
 
     // Clean up stale hyphenated keys (now stored via generate_cfg as underscore keys)
@@ -1832,16 +1833,17 @@ if (importSettingsBtn && importSettingsInput) {
 if (afkToggle) {
   afkToggle.addEventListener('change', () => {
     saveSettings();
-    if (afkToggle.checked && !state.generating) {
-      checkAfkAutoReply();
-    } else if (!afkToggle.checked) {
-      if (afkPendingTimer) clearTimeout(afkPendingTimer);
-    }
+    // The server owns AFK behavior now; the _broadcast() echoes the authoritative value back.
+    send({ type: 'set_afk', enabled: afkToggle.checked });
   });
 }
 
 if (settingAfkMessage) {
-  settingAfkMessage.addEventListener('input', debouncedSaveSettings);
+  settingAfkMessage.addEventListener('input', () => {
+    debouncedSaveSettings();
+    // Push the custom nudge text to the server on the debounce.
+    send({ type: 'set_afk', enabled: !!(afkToggle && afkToggle.checked), message: settingAfkMessage.value });
+  });
 }
 
 if (autoSecurityToggle) {
@@ -2736,47 +2738,7 @@ function handleServerMessage(data) {
     if (data.type === 'done' && rootCompleted) {
       playSound('completed');
     }
-    checkAfkAutoReply();
   }
-}
-
-// ── AFK Logic ────────────────────────────────────────────────────────────────
-
-let lastAfkTime = 0;
-let afkPendingTimer = null;
-
-function checkAfkAutoReply() {
-  if (afkToggle && afkToggle.checked) {
-    const now = Date.now();
-    const timeSinceLastAfk = now - lastAfkTime;
-    const cooldown = 5 * 60 * 1000; // 5 minutes
-
-    if (timeSinceLastAfk >= cooldown || lastAfkTime === 0) {
-      // Send immediately (after a small delay to ensure UI updates)
-      setTimeout(() => {
-        if (!state.generating && afkToggle.checked) triggerAfkSend();
-      }, 1000);
-    } else {
-      // Wait for the remaining time
-      const remaining = cooldown - timeSinceLastAfk;
-      if (afkPendingTimer) clearTimeout(afkPendingTimer);
-      afkPendingTimer = setTimeout(() => {
-        if (!state.generating && afkToggle.checked) {
-          triggerAfkSend();
-        }
-      }, remaining);
-    }
-  }
-}
-
-function triggerAfkSend() {
-  lastAfkTime = Date.now();
-  const msg = (settingAfkMessage && settingAfkMessage.value.trim()) ? settingAfkMessage.value.trim() : 'User is AFK, continue working on given task or polish/verify your work if there are things to improve...';
-  if (state.generating) return;
-
-  chatInput.value = msg;
-  autoResize(chatInput);
-  sendMessage();
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -4077,21 +4039,8 @@ function renderApprovals() {
     return;
   }
 
-  // Auto-reject if AFK is enabled (and auto-security is OFF)
-  if (afkToggle && afkToggle.checked) {
-    const reason = (settingAfkMessage && settingAfkMessage.value.trim())
-      ? `Auto-rejected (AFK): ${settingAfkMessage.value.trim()}`
-      : 'Auto-rejected (AFK mode active)';
-
-    const pending = [...state.approvals];
-    state.approvals = [];
-    bar.style.display = 'none';
-
-    pending.forEach(ap => {
-      send({ type: 'reject', request_id: ap.request_id, reason: reason, automated: true });
-    });
-    return;
-  }
+  // AFK auto-reject is now server-side (OperationManager rejects at registration) —
+  // the browser no longer sends automated rejects.
 
   // Snapshot-based render skipping: prevent redundant DOM rebuilds that cause flashing.
   if (bar.children.length > 0) {

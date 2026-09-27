@@ -87,6 +87,7 @@ class WsMessageHandler:
             'reject': self.handle_reject,
             'ask_security': self.handle_ask_security,
             'set_auto_security': self.handle_set_auto_security,
+            'set_afk': self.handle_set_afk,
             'edit_message': self.handle_edit_message,
             'delete_messages': self.handle_delete_messages,
             'select_agent': self.handle_select_agent,
@@ -330,6 +331,16 @@ class WsMessageHandler:
             # Persist to disk
             if hasattr(agent_pool, '_save_pool_settings'):
                 agent_pool._save_pool_settings()
+
+    @staticmethod
+    def apply_afk(agent_pool, enabled: bool, message: Optional[str] = None) -> None:
+        """Set the server-backed AFK flag (shared by WS and REST /api/afk)."""
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is None:
+            return
+        om.set_afk(enabled, message)
+        if hasattr(agent_pool, '_save_pool_settings'):
+            agent_pool._save_pool_settings()
 
     def _start_gen_thread(self, history_copy=None, instance_name: str = '') -> None:
         """Launch the generation thread (shared boilerplate)."""
@@ -1065,6 +1076,16 @@ class WsMessageHandler:
         enabled = data.get('enabled', False)
         WsMessageHandler.apply_auto_security(self.app, self.agent_pool, enabled)
         # Broadcast updated state to all clients immediately, preventing stale overrides from pending messages
+        await self._broadcast()
+
+    async def handle_set_afk(self, data: dict) -> None:
+        """Handle 'set_afk' — toggle the server-backed AFK flag.
+
+        Delegates to :meth:`apply_afk` (shared with ``POST /api/afk``) so the WS and REST
+        paths cannot drift, then broadcasts updated state.
+        """
+        WsMessageHandler.apply_afk(
+            self.agent_pool, bool(data.get('enabled', False)), data.get('message'))
         await self._broadcast()
 
     async def handle_edit_message(self, data: dict) -> None:

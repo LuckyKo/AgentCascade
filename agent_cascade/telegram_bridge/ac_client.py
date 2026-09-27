@@ -248,12 +248,12 @@ class ACClient:
         """POST /api/auto_security (session_token)."""
         return await self._token_post('/api/auto_security', {'enabled': bool(enabled)})
 
-    async def set_afk(self, enabled: bool, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
-        """POST /api/afk (session_token)."""
-        body: Dict[str, Any] = {'enabled': bool(enabled)}
-        if timeout_seconds is not None:
-            body['timeout_seconds'] = int(timeout_seconds)
-        return await self._token_post('/api/afk', body)
+    async def set_afk(self, enabled: bool) -> Dict[str, Any]:
+        """POST /api/afk (session_token) — toggle the server-backed AFK flag.
+
+        The time-based approval timeout is a separate feature; it is no longer sent here.
+        """
+        return await self._token_post('/api/afk', {'enabled': bool(enabled)})
 
     async def restore_session(self, name: str) -> Dict[str, Any]:
         """POST /api/session/restore (session_token)."""

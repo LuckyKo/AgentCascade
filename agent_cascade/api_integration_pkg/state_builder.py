@@ -307,6 +307,9 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
         om = pool.operation_manager
         pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
         pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
+        # AFK flag (server-backed, shared by WebUI + Telegram bridge)
+        pool_settings['afk_enabled'] = bool(getattr(om, 'afk_enabled', False))
+        pool_settings['afk_message'] = getattr(om, 'afk_message', '') or ''
 
     # Async shell console window toggle from pool if available
     pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', False)

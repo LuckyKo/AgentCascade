@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ─── Types ────────────────────────────────────────────────────────────────
 
@@ -60,6 +60,17 @@ class ApprovalMixin:
     def set_enable_timeout(self, enabled):
         """Enable or disable approval timeout."""
         self.enable_timeout = bool(enabled)
+
+    def set_afk(self, enabled: bool, message: Optional[str] = None) -> None:
+        """Set the server-backed AFK flag (shared by WebUI and Telegram bridge).
+
+        ``message`` is optional; when absent the stored afk_message is left untouched
+        so a toggle-only caller (e.g. Telegram /afk) cannot clobber a UI-set message.
+        Unrelated to the time-based approval timeout (enable_timeout).
+        """
+        self.afk_enabled = bool(enabled)
+        if message is not None:
+            self.afk_message = str(message)
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
@@ -115,6 +126,13 @@ class ApprovalMixin:
         with self._lock:
             self.pending[request_id] = approval
 
+        # ── AFK auto-reject (server-side; replaces the browser's renderApprovals loop) ──
+        # Fires once, at registration, so the rejection is deterministic and race-free:
+        # the request never enters the wait loop and can never be double-resolved.
+        if self.afk_enabled:
+            self.user_reject(request_id, self._afk_reject_reason())
+            return False, self._afk_reject_reason()
+
         # Block until user responds, timeout, or agent is stopped (FIX 5)
         timeout_val = self.approval_timeout_seconds if self.enable_timeout else 3600
         start_time = time.time()
@@ -150,6 +168,11 @@ class ApprovalMixin:
             return True, approval.outcome_reason
         else:
             return False, approval.outcome_reason or 'Rejected by user.'
+
+    def _afk_reject_reason(self) -> str:
+        """Reason string for AFK auto-rejects (verbatim from the old browser loop)."""
+        msg = (getattr(self, 'afk_message', '') or '').strip()
+        return f'Auto-rejected (AFK): {msg}' if msg else 'Auto-rejected (AFK mode active)'
 
     def user_approve(self, request_id: str, reason: str = '') -> str:
         """Called by WebUI when user clicks Approve."""

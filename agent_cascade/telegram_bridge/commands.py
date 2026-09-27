@@ -206,22 +206,18 @@ def _parse_on_off(arg: str) -> Optional[bool]:
 async def _cmd_afk(ctx: CommandContext) -> str:
     parts = ctx.args.split()
     if not parts:
-        return 'Usage: /afk on|off [seconds]'
+        return 'Usage: /afk on|off'
     enabled = _parse_on_off(parts[0])
     if enabled is None:
-        return 'Usage: /afk on|off [seconds]'
-    timeout_seconds: Optional[int] = None
-    if len(parts) > 1:
-        try:
-            timeout_seconds = int(parts[1])
-        except ValueError:
-            return 'Seconds must be an integer, e.g. /afk on 300'
-    result = await ctx.ac.set_afk(enabled, timeout_seconds=timeout_seconds)
-    if enabled:
-        t = (result or {}).get('timeout_seconds')
-        extra = f' (auto-reject after {t}s)' if t else ''
-        return f'🌙 AFK mode on{extra}'
-    return '🌙 AFK mode off (waiting for approval is unlimited)'
+        return 'Usage: /afk on|off'
+    # Any extra token (e.g. a legacy '/afk on 300') is ignored — the time-based approval
+    # timeout is a separate feature configured in the UI, not via this command.
+    result = await ctx.ac.set_afk(enabled)
+    on = bool((result or {}).get('enabled', enabled))
+    if on:
+        return ('🌙 AFK on — pending approvals auto-rejected, '
+                'and an auto-reply nudge is sent when the agent goes idle.')
+    return '🌙 AFK off — approvals wait for you, no idle nudges.'
 
 
 async def _cmd_security(ctx: CommandContext) -> str:
@@ -252,7 +248,7 @@ COMMANDS: Dict[str, CommandHandler] = {
         CommandHandler('no', 'Reject the first (or named) pending approval', _cmd_no),
         CommandHandler('stop', 'Stop the current agent', _cmd_stop),
         CommandHandler('restart', 'Restart the AC server', _cmd_restart),
-        CommandHandler('afk', 'Toggle AFK auto-reject: /afk on|off [seconds]', _cmd_afk),
+        CommandHandler('afk', 'Toggle AFK (auto-reject approvals + idle auto-reply): /afk on|off', _cmd_afk),
         CommandHandler('security', 'Toggle auto-ask security: /security on|off', _cmd_security),
         CommandHandler('restore', 'Restore a saved session: /restore <name>', _cmd_restore),
         CommandHandler('help', 'List all commands (alias: /?)', _cmd_help),

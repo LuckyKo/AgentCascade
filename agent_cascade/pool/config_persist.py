@@ -62,6 +62,14 @@ class ConfigPersistMixin:
                     if hasattr(om, 'approval_timeout_seconds'):
                         data['approval_timeout_seconds'] = om.approval_timeout_seconds
 
+                # Add AFK settings (server-backed flag shared by WebUI + Telegram bridge)
+                if hasattr(self, 'operation_manager') and self.operation_manager:
+                    om = self.operation_manager
+                    if hasattr(om, 'afk_enabled'):
+                        data['afk_enabled'] = bool(om.afk_enabled)
+                    if hasattr(om, 'afk_message'):
+                        data['afk_message'] = om.afk_message
+
                 # Add async shell console window toggle
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
 
@@ -135,6 +143,8 @@ class ConfigPersistMixin:
             auto_security_raw = data.pop('auto_security', None)
             enable_approval_timeout_raw = data.pop('enable_approval_timeout', None)
             approval_timeout_seconds_raw = data.pop('approval_timeout_seconds', None)
+            afk_enabled_raw = data.pop('afk_enabled', None)
+            afk_message_raw = data.pop('afk_message', None)
             enable_async_shell_console_window_raw = data.pop('enable_async_shell_console_window', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
@@ -168,6 +178,13 @@ class ConfigPersistMixin:
                     self._pending_approval_timeout_seconds = int(approval_timeout_seconds_raw)
                 except (ValueError, TypeError):
                     logger.warning(f"[PoolSettings] Invalid approval_timeout_seconds value, ignoring.")
+
+            # Store AFK settings for later application in _apply_pending_config.
+            # NOTE: always assign (even when the key is absent) — unlike the approval-timeout
+            # pair above, these attrs are not declared in __init__, so a stale value left on a
+            # prior pool instance sharing this object's state would leak across restarts.
+            self._pending_afk_enabled = bool(afk_enabled_raw) if afk_enabled_raw is not None else False
+            self._pending_afk_message = str(afk_message_raw) if afk_message_raw is not None else ''
 
             # Apply async shell console window toggle from disk if present
             if enable_async_shell_console_window_raw is not None:
@@ -497,6 +514,16 @@ class ConfigPersistMixin:
                     om.set_approval_timeout(self._pending_approval_timeout_seconds)
             except Exception as e:
                 logger.warning(f"[PoolSettings] Failed to restore approval timeout settings: {e}")
+
+        # Restore AFK flag (server-backed, shared by WebUI + Telegram bridge)
+        if om:
+            try:
+                if hasattr(self, '_pending_afk_enabled'):
+                    om.set_afk(self._pending_afk_enabled, getattr(self, '_pending_afk_message', None))
+                elif hasattr(self, '_pending_afk_message'):
+                    om.set_afk(getattr(om, 'afk_enabled', False), self._pending_afk_message)
+            except Exception as e:
+                logger.warning(f"[PoolSettings] Failed to restore AFK settings: {e}")
 
     def get_template(self, name: str) -> Optional[Assistant]:
         """Get template by name with case-insensitive fallback.

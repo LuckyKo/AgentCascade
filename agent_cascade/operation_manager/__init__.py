@@ -73,6 +73,11 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         self.enable_timeout: bool = True
         self.approval_timeout_seconds: int = 300  # Default 5 minutes (can be overridden from UI)
 
+        # AFK mode: single server-backed source of truth for BOTH the WebUI and the Telegram bridge.
+        # Drives server-side idle auto-reply + auto-reject. Unrelated to enable_timeout above.
+        self.afk_enabled: bool = False
+        self.afk_message: str = ''
+
         import atexit
         atexit.register(self.cleanup_backups)
 

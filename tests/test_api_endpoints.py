@@ -784,15 +784,26 @@ class _StubOperationManager:
     def __init__(self, pending=None):
         self.enable_timeout = True
         self.approval_timeout_seconds = 300
+        # AFK flag (server-backed) — same semantics as the real OperationManager setter.
+        self.afk_enabled = False
+        self.afk_message = ''
         self._pending = list(pending or [])
-        # build_state()'s fallback path reads operation_manager.base_dir for default_workspace.
+        # build_state() reads operation_manager.base_dir (default_workspace) and the
+        # extra work folders when exposing pool settings to the frontend.
         self.base_dir = Path(__file__).parent
+        self.extra_work_folders_ro: list = []
+        self.extra_work_folders_rw: list = []
 
     def set_enable_timeout(self, enabled):
         self.enable_timeout = bool(enabled)
 
     def set_approval_timeout(self, seconds):
         self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+
+    def set_afk(self, enabled, message=None):
+        self.afk_enabled = bool(enabled)
+        if message is not None:
+            self.afk_message = str(message)
 
     def list_pending_approvals(self):
         return [dict(a) for a in self._pending]
@@ -821,6 +832,7 @@ class _FakePool:
 
     def __init__(self, instances=None):
         self.instances = dict(instances or {})
+        self.templates = {}  # build_state_from_pool → _build_agents_list reads pool.templates
         self._run_generation = 0
         self.terminated_instances = set()
         self.stopped = False
@@ -844,6 +856,32 @@ class _FakePool:
                               clear_sub_agents_before_load=True, caller_name=None):
         self.restore_calls.append((log_input, target_instance))
         return f'Loaded session {target_instance}'
+
+    # ── build_state_from_pool() surface (AFK state-exposure test) ─────────────
+    def get_instance(self, name):
+        return self.instances.get(str(name).strip())
+
+    def get_template(self, name):
+        return None  # no templates → _get_current_model falls back to 'Unknown'
+
+    def slice_history_for_llm(self, history):
+        return list(history or [])
+
+    @property
+    def active_stack(self):
+        return []
+
+    def is_instance_halted(self, name):
+        return False
+
+    def has_messages(self, name):
+        return False
+
+    def get_queue_messages(self, name):
+        return []
+
+    def is_paused(self):
+        return False
 
 
 # Attributes on the real AgentPool that the Phase 1 REST endpoints read/write. We swap these
@@ -1115,8 +1153,12 @@ class TestAuthenticatedCommandEndpoints:
             self._restore_pool(client, saved)
         assert resp.status_code == 503
 
-    def test_afk_enable_with_timeout(self, client):
-        """POST /api/afk {enabled:true, timeout_seconds} sets both + persists."""
+    def test_afk_enable_sets_afk_flag_only(self, client):
+        """POST /api/afk {enabled:true, message} sets ONLY the AFK flag + persists.
+
+        The time-based approval timeout (enable_timeout) is a separate feature and must
+        NOT be touched by this endpoint — that is the whole point of the parity fix.
+        """
         token = self._token(client)
         om = _StubOperationManager()
         fake = _FakePool()
@@ -1125,7 +1167,7 @@ class TestAuthenticatedCommandEndpoints:
         real.operation_manager = om
         try:
             resp = client.post('/api/afk', params={'token': token},
-                               json={'enabled': True, 'timeout_seconds': 120})
+                               json={'enabled': True, 'message': 'BRB'})
         finally:
             self._restore_pool(client, saved)
 
@@ -1133,16 +1175,22 @@ class TestAuthenticatedCommandEndpoints:
         body = resp.json()
         assert body['status'] == 'ok'
         assert body['enabled'] is True
-        assert body['timeout_seconds'] == 120
-        assert om.enable_timeout is True
-        assert om.approval_timeout_seconds == 120
+        assert body['message'] == 'BRB'
+        assert om.afk_enabled is True
+        assert om.afk_message == 'BRB'
         assert fake.save_pool_settings_calls == 1
+        # The untouched-feature guarantee: AFK must not drive the approval timeout.
+        assert om.enable_timeout is True  # unchanged from default
+        assert om.approval_timeout_seconds == 300  # unchanged from default
 
-    def test_afk_disable_keeps_timeout(self, client):
-        """POST /api/afk {enabled:false} disables auto-reject; timeout untouched."""
+    def test_afk_disable_keeps_message(self, client):
+        """POST /api/afk {enabled:false} (no message) cannot clobber a UI-set message.
+
+        Proves a TG toggle-only call leaves the stored nudge text alone.
+        """
         token = self._token(client)
         om = _StubOperationManager()
-        om.approval_timeout_seconds = 300
+        om.afk_message = 'UI-set message'
         fake = _FakePool()
         real = self._real_pool(client)
         saved = self._patch_pool(client, fake)
@@ -1155,10 +1203,15 @@ class TestAuthenticatedCommandEndpoints:
         assert resp.status_code == 200
         body = resp.json()
         assert body['enabled'] is False
-        assert body['timeout_seconds'] == 300  # unchanged (no timeout_seconds supplied)
+        assert om.afk_enabled is False
+        assert om.afk_message == 'UI-set message'  # unchanged (no message supplied)
 
-    def test_afk_timeout_clamped(self, client):
-        """POST /api/afk clamps timeout_seconds via set_approval_timeout (10s floor)."""
+    def test_afk_ignores_legacy_timeout_seconds(self, client):
+        """A legacy client sending timeout_seconds degrades to a plain toggle.
+
+        The field is ignored (debug-logged), not 400'd, and the separate
+        approval-timeout feature is left untouched.
+        """
         token = self._token(client)
         om = _StubOperationManager()
         fake = _FakePool()
@@ -1172,7 +1225,11 @@ class TestAuthenticatedCommandEndpoints:
             self._restore_pool(client, saved)
 
         assert resp.status_code == 200
-        assert resp.json()['timeout_seconds'] == 10  # clamped to the 10s floor
+        body = resp.json()
+        assert body['enabled'] is True
+        assert om.afk_enabled is True
+        # timeout_seconds was ignored — the separate feature is untouched.
+        assert om.approval_timeout_seconds == 300
 
     # ── /api/session/restore ────────────────────────────────────────────────
 
@@ -1383,3 +1440,227 @@ class TestWebSocket:
             ws.receive_json()  # initial state
             ws.send_json({'type': 'nonexistent_type'})
             # Connection remaining open (context exits cleanly) proves no crash
+
+
+# ===========================================================================
+# AFK parity — server auto-reject, state exposure, idle nudge decision
+# ===========================================================================
+
+
+class TestAfkServerAutoReject:
+    """OperationManager.request_user_approval rejects immediately when AFK is on."""
+
+    def _make_om(self):
+        from agent_cascade.operation_manager import OperationManager
+        return OperationManager(base_dir='/tmp/afk_test_ws')
+
+    def test_afk_on_rejects_immediately(self):
+        om = self._make_om()
+        om.afk_enabled = True
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False
+        # No afk_message set → the fallback reason string (approval.py _afk_reject_reason).
+        assert reason == 'Auto-rejected (AFK mode active)'
+        assert om.pending == {}
+
+    def test_afk_on_rejects_with_custom_message(self):
+        """The configured afk_message is surfaced in the reject reason."""
+        om = self._make_om()
+        om.afk_enabled = True
+        om.afk_message = 'brb 5'
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False
+        assert reason == 'Auto-rejected (AFK): brb 5'
+        assert om.pending == {}
+
+    def test_afk_off_waits_normally(self):
+        """The OFF path is untouched: the request blocks until user_approve resolves it."""
+        import threading
+        om = self._make_om()
+        om.afk_enabled = False
+        result = {}
+
+        def _worker():
+            rid = None
+            with om._lock:
+                # capture the registered request id so we can resolve it
+                pass
+            ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+            result['ok'], result['reason'] = ok, reason
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        # Wait until the request is registered (blocks in the wait loop with AFK off).
+        deadline = time.time() + 5
+        while not om.pending and time.time() < deadline:
+            time.sleep(0.01)
+        assert om.pending, 'request should be pending (AFK off must not auto-reject)'
+        rid = next(iter(om.pending))
+        om.user_approve(rid, 'ok')
+        t.join(timeout=5)
+        assert result.get('ok') is True
+
+    def test_afk_reason_uses_custom_message(self):
+        om = self._make_om()
+        om.afk_enabled = True
+        om.afk_message = 'ping me later'
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False
+        assert 'ping me later' in reason
+
+    def test_afk_does_not_disturb_timeout_path(self):
+        """With AFK off and enable_timeout on, the untouched timeout path still works:
+        a short approval_timeout_seconds auto-rejects with the AFK-timeout message."""
+        om = self._make_om()
+        om.afk_enabled = False
+        om.enable_timeout = True
+        # The wait loop uses `self.approval_timeout_seconds if self.enable_timeout else 3600`.
+        # set_approval_timeout clamps to a 10s floor, so set the attr directly for speed.
+        om.approval_timeout_seconds = 0.2
+        start = time.time()
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        elapsed = time.time() - start
+        assert ok is False
+        assert reason == 'User is AFK, try another method if possible'
+        assert elapsed < 5  # timed out via the untouched path, not hung
+
+
+class _AfkNudgePool:
+    """Minimal pool double for the pure afk_should_nudge() tests."""
+
+    def __init__(self, instance=None, stopped=False, has_pending=False, has_messages=False,
+                 last_nudge_ts=0.0):
+        self._instance = instance
+        self.stopped = stopped
+        self._has_pending = has_pending
+        self._has_messages = has_messages
+        self._afk_last_nudge_ts = last_nudge_ts
+        self._afk_nudge_lock = threading.Lock()
+
+    def get_instance(self, name):
+        return self._instance
+
+    def has_pending(self, name):
+        return self._has_pending
+
+    def has_messages(self, name):
+        return self._has_messages
+
+
+class _AfkNudgeOm:
+    def __init__(self, enabled=True, message=''):
+        self.afk_enabled = enabled
+        self.afk_message = message
+
+
+def _nudge(pool, om, *, generating=False, now=1000.0):
+    from agent_cascade.api_server import afk_should_nudge
+    return afk_should_nudge(pool, om, instance_name='w1',
+                            instance=pool.get_instance('w1'),
+                            generating=generating, now=now)
+
+
+class TestAfkIdleNudgeDecision:
+    """The pure afk_should_nudge() / afk_idle_nudge_text() decision function."""
+
+    def test_afk_nudge_disabled_when_flag_off(self):
+        from agent_cascade.api_server import AFK_NUDGE_COOLDOWN
+        pool = _AfkNudgePool(instance=object())
+        om = _AfkNudgeOm(enabled=False)
+        assert _nudge(pool, om) is False
+
+    def test_afk_nudge_fires_when_never_nudged(self):
+        pool = _AfkNudgePool(instance=object(), last_nudge_ts=0.0)
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om) is True
+
+    def test_afk_nudge_blocked_during_cooldown(self):
+        from agent_cascade.api_server import AFK_NUDGE_COOLDOWN
+        now = 1000.0
+        pool = _AfkNudgePool(instance=object(), last_nudge_ts=now - (AFK_NUDGE_COOLDOWN - 1))
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om, now=now) is False
+
+    def test_afk_nudge_allowed_at_cooldown_boundary(self):
+        """Pins the >= vs > off-by-one: exactly one cooldown elapsed IS allowed."""
+        from agent_cascade.api_server import AFK_NUDGE_COOLDOWN
+        now = 1000.0
+        pool = _AfkNudgePool(instance=object(), last_nudge_ts=now - AFK_NUDGE_COOLDOWN)
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om, now=now) is True
+
+    def test_afk_nudge_skipped_while_generating(self):
+        pool = _AfkNudgePool(instance=object())
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om, generating=True) is False
+
+    def test_afk_nudge_skipped_when_pool_stopped(self):
+        pool = _AfkNudgePool(instance=object(), stopped=True)
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om) is False
+
+    def test_afk_nudge_skipped_when_queue_nonempty(self):
+        om = _AfkNudgeOm(enabled=True)
+        pool_pending = _AfkNudgePool(instance=object(), has_pending=True)
+        assert _nudge(pool_pending, om) is False
+        pool_msgs = _AfkNudgePool(instance=object(), has_messages=True)
+        assert _nudge(pool_msgs, om) is False
+
+    def test_afk_nudge_skipped_when_instance_missing(self):
+        """Guards R2: never resurrect a dismissed instance."""
+        pool = _AfkNudgePool(instance=None)
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om) is False
+
+    def test_afk_nudge_text_custom_then_default(self):
+        from agent_cascade.api_server import afk_idle_nudge_text, AFK_DEFAULT_MESSAGE
+        assert afk_idle_nudge_text(_AfkNudgeOm(message='BRB')) == 'BRB'
+        assert afk_idle_nudge_text(_AfkNudgeOm(message='   ')) == AFK_DEFAULT_MESSAGE
+        assert afk_idle_nudge_text(_AfkNudgeOm(message=None)) == AFK_DEFAULT_MESSAGE
+
+
+class TestAfkStateExposure:
+    """build_state_from_pool exposes afk_enabled/afk_message in pool_settings."""
+
+    def test_afk_state_exposed_in_build_state(self):
+        from agent_cascade.api_integration_pkg.state_builder import build_state_from_pool
+        from agent_cascade.agent_instance import AgentInstance, AgentState
+
+        pool = _FakePool()
+        om = _StubOperationManager()
+        om.afk_enabled = True
+        om.afk_message = 'BRB'
+        pool.operation_manager = om
+        inst = AgentInstance(
+            instance_name='Maine', agent_class='coder', conversation=[],
+            created_at=0.0, last_activity=0.0, latest_marker_index=-1,
+            state=AgentState.IDLE,
+        )
+        pool.instances['Maine'] = inst
+
+        state = build_state_from_pool(pool, 'Maine')
+        assert state is not None
+        ps = state['pool_settings']
+        assert ps['afk_enabled'] is True
+        assert ps['afk_message'] == 'BRB'
+
+
+class TestAfkRunEndWiring:
+    """Source-level guard for the run-end hook scoping (plan test 30).
+
+    Proves _afk_maybe_nudge is defined INSIDE create_app and called from the
+    run thread's finally next to _stop_generation — it would fail loudly if the
+    function were ever hoisted to module level.
+    """
+
+    def test_run_end_invokes_afk_nudge(self):
+        import inspect
+        from agent_cascade import api_server
+
+        src = inspect.getsource(api_server)
+        assert '_afk_maybe_nudge(target_instance_name or session[\'session_name\'], loop)' in src
+        # The sender must be nested inside create_app (closes over session/agent_pool).
+        create_app_src = inspect.getsource(api_server.create_app)
+        assert 'def _afk_maybe_nudge' in create_app_src
+        # And it must NOT exist at module level.
+        assert not hasattr(api_server, '_afk_maybe_nudge')
