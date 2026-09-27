@@ -1380,6 +1380,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         with instance._compression_lock:
             conv = list(instance.conversation)
+            sys_prompt_frozen = instance._system_prompt_frozen
 
         if not conv:
             logger.warning('empty conversation for %s - early exit', inst_name)
@@ -1461,7 +1462,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Calling update_history() with fresh timestamp causes dedup to
                 # fail and create duplicates.
 
-            if m0_role == SYSTEM:
+            if m0_role == SYSTEM and not sys_prompt_frozen:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):
                     original_content = m0_content
@@ -1566,6 +1567,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         instance._cached_messages = conv
         instance._cached_llm_messages = llm_messages
         instance._last_config_version = self.pool._config_version
+
+        # Freeze the system prompt at the end of the first successful rebuild.
+        # The M1 block above produced the final prompt; from now on conversation[0]
+        # is immutable for this instance's lifetime (reset_conversation unfreezes).
+        # freeze_system_prompt() is idempotent (no-op if already frozen or conv[0]
+        # is not SYSTEM), so calling it unconditionally is safe and avoids a
+        # lock-free flag read.
+        instance.freeze_system_prompt()
 
         response: List[Message] = []
         # logger.info(f"[SETUP_TURN] messages={len(conv)},

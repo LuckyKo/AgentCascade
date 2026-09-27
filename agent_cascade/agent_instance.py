@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Callable, List, Optional
 
-from agent_cascade.llm.schema import Message
+from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.settings import (
     AGENT_IDLE_CHECK_INTERVAL, AGENT_IDLE_TIMEOUT, AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, AUTO_SKILL_MIN_TURNS, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
@@ -65,6 +65,10 @@ class InvalidStateTransition(Exception):
         self.current_state = current_state
         self.new_state = new_state
         super().__init__(f"Invalid transition from {current_state.name} to {new_state.name}")
+
+
+class _SystemPromptFrozenError(Exception):
+    """Raised when a mutation targets conversation[0] of a frozen live instance."""
 
 
 # ── Cache Pool Data Structures ────────────────────────────────────────────────
@@ -247,7 +251,7 @@ class AgentInstance:
         default=False
     )  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
-    system_started_at: Optional[str] = None  # Wall-clock start (YYYY-MM-DD HH:MM); set at creation, refreshed on reuse; rendered in Session Metadata
+    system_started_at: Optional[str] = None  # Wall-clock start (YYYY-MM-DD HH:MM); set once at creation (frozen with the prompt); rendered in Session Metadata
     _child_instances: List[str] = field(
         default_factory=list
     )  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
@@ -320,6 +324,8 @@ class AgentInstance:
         dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)  # Pool config version at last rebuild
+    _system_prompt_frozen: bool = field(
+        default=False)  # True after first successful _setup_turn; conversation[0] is immutable
 
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
@@ -407,13 +413,16 @@ class AgentInstance:
             self.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
-    # These methods encapsulate ALL conversation mutations, keeping cached lists
-    # in sync and invalidating caches according to the update schema from todo.md:
+    # These methods encapsulate ALL conversation-LIST mutations, keeping cached
+    # lists in sync and invalidating caches according to the update schema:
     #   - append operations: extend cached lists, invalidate token cache only
     #   - edit/trim operations: invalidate working set cache (content changed)
     #   - rebuild/reset operations: full cache invalidation
     # All methods are thread-safe using _compression_lock.
     # Must be called after AgentInstance is fully initialized.
+    # NOTE: Message.content is written directly by _setup_turn,
+    # _inject_metadata_into_message, and _inject_skills_to_system_message —
+    # those sites do NOT go through this API.
 
     def append_message(self, message: Message) -> None:
         """Append a single message. Updates cached lists atomically.
@@ -478,6 +487,9 @@ class AgentInstance:
         Thread Safety: Uses _compression_lock for atomic update
         """
         with self._compression_lock:
+            if index == 0 and self._system_prompt_frozen:
+                raise _SystemPromptFrozenError(
+                    f'edit_message_in_place(0) on frozen {self.instance_name}')
             # Stamp a completion timestamp on the replacement if it has none —
             # an edited message must not lose its clock. Only stamp when absent so
             # a pre-existing ts is preserved (all three lists share this object).
@@ -508,10 +520,23 @@ class AgentInstance:
         Inserting at index 0 shifts all indices, requiring a full rebuild on next turn.
         """
         with self._compression_lock:
+            if self._system_prompt_frozen:
+                raise _SystemPromptFrozenError(
+                    f'insert_message_at_head on frozen {self.instance_name}')
             self.conversation.insert(0, message)
             self._last_token_count_conversation_length = -1
             self._cached_messages.clear()
             self._cached_llm_messages.clear()
+
+    def freeze_system_prompt(self) -> None:
+        """Idempotent. Called at the END of the first successful _setup_turn.
+        After this, conversation[0] is immutable for the lifetime of the object."""
+        with self._compression_lock:
+            if self._system_prompt_frozen or not self.conversation:
+                return
+            if getattr(self.conversation[0], 'role', None) != SYSTEM:
+                return
+            self._system_prompt_frozen = True
 
     def trim_tail(self, count: int) -> List[Message]:
         """Remove last N messages. Returns removed messages. Updates cached lists.
@@ -629,6 +654,7 @@ class AgentInstance:
             self._last_token_count_conversation_length = -1
             self._last_actual_token_count = 0
             self._last_config_version = -1
+            self._system_prompt_frozen = False
             self._last_force_compress_time = 0.0
             self._force_compress_count = 0
             self._current_turn = 0

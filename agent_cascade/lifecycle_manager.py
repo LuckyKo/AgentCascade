@@ -12,7 +12,7 @@ import datetime
 import time
 from typing import TYPE_CHECKING, Optional, Tuple
 
-from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.agent_instance import AgentInstance, AgentState, _SystemPromptFrozenError
 from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.log import logger
@@ -35,6 +35,17 @@ def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance:
         instance: AgentInstance whose metadata should be injected
     """
     from agent_cascade.execution_engine import _build_session_metadata
+
+    # Frozen prompt: skip injection (a missing heading on a frozen prompt is
+    # pre-existing degradation, not a bug worth killing a live turn for).
+    # Lock-free bool read is safe here: the flag only transitions False→True once
+    # (at first successful _setup_turn) and this function is a best-effort no-op
+    # guard — a race would at worst cause one redundant injection on the same
+    # turn that freezes, which M1's own guard already prevents.
+    if getattr(instance, '_system_prompt_frozen', False):
+        logger.warning(
+            '[SYS_PROMPT_FROZEN] metadata injection skipped on live %s', instance.instance_name)
+        return
 
     # Defensive guard for empty content
     if not sys_msg.content or not sys_msg.content.strip():
@@ -141,9 +152,6 @@ class AgentLifecycleManager:
                 # MAJOR FIX: Reset last_activity when reusing instance so idle
                 # timer starts from reuse event
                 inst.last_activity = now
-
-                # Refresh the per-instance startup timestamp on reuse (Session Metadata)
-                inst.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
                 # Clear old child tracking — reused instances start fresh with no children
                 # Track old parent for cleanup, then update to new caller (thread-safe).
@@ -421,7 +429,12 @@ class AgentLifecycleManager:
 
                         # Update the existing system message with new template
                         # content
-                        instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
+                        try:
+                            instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
+                        except _SystemPromptFrozenError:
+                            logger.warning(
+                                '[SYS_PROMPT_FROZEN] edit_message_in_place(0) blocked on live %s — '
+                                'system prompt preserved', instance.instance_name)
                 else:
                     # Fallback: prepend system message if conversation is empty
                     instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync
