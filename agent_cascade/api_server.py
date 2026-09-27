@@ -1455,7 +1455,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not token or token not in api_sessions:
             return _invalid_token_response()
         enabled = bool((data or {}).get('enabled', False))
-        WsMessageHandler.apply_auto_security(app, agent_pool, enabled)
+        # BUG_0029 Phase 2 Step 6: call state setter directly (pool wraps with persistence)
+        if agent_pool:
+            agent_pool.set_auto_security(enabled)
+        else:
+            from agent_cascade.runtime_state import state as _runtime_state
+            _runtime_state.set_auto_security(enabled)
         await _broadcast_state()
         return {'status': 'ok', 'auto_security': enabled}
 

@@ -1054,15 +1054,10 @@ class TestAuthenticatedCommandEndpoints:
         assert pool.stop_session_calls == 1
         assert pool._run_generation == 1
 
-    def test_apply_auto_security_sets_app_and_persists(self):
-        """WsMessageHandler.apply_auto_security: sets the LIVE pool flag + persistence (BUG_0029)."""
-        from agent_cascade.ws_handlers import WsMessageHandler
-
-        class _App:
-            current_auto_security = True
-
+    def test_set_auto_security_sets_app_and_persists(self):
+        """pool.set_auto_security: sets the LIVE pool flag + persistence (BUG_0029)."""
         pool = _FakePool()
-        WsMessageHandler.apply_auto_security(_App(), pool, False)
+        pool.set_auto_security(False)
         assert pool.auto_security is False  # BUG_0029: live single source of truth
         assert pool._loaded_auto_security is False
         assert pool.save_pool_settings_calls == 1
@@ -1829,30 +1824,20 @@ class TestAfkRespectsSecurity:
                        auto_security=auto_security)
             assert pool.auto_security is expected
 
-    def test_apply_auto_security_syncs_pool_flag(self):
+    def test_set_auto_security_syncs_pool_flag(self):
         """Case 5 (BUG_0029): the runtime toggle updates the LIVE pool flag (both ways)."""
-        from agent_cascade.ws_handlers import WsMessageHandler
-
-        class _App:
-            current_auto_security = True
-
         for enabled, expected in ((False, False), (True, True)):
             om = _StubOperationManager()
             pool = _FakePool()
             pool.operation_manager = om
-            WsMessageHandler.apply_auto_security(_App(), pool, enabled)
+            pool.set_auto_security(enabled)
             assert pool.auto_security is expected
 
-    def test_apply_auto_security_without_om_does_not_crash(self):
+    def test_set_auto_security_without_om_does_not_crash(self):
         """Guard: pools without an operation_manager are skipped cleanly."""
-        from agent_cascade.ws_handlers import WsMessageHandler
-
-        class _App:
-            current_auto_security = True
-
         pool = _FakePool()
         pool.operation_manager = None
-        WsMessageHandler.apply_auto_security(_App(), pool, False)  # must not raise
+        pool.set_auto_security(False)  # must not raise
         assert pool._loaded_auto_security is False
 
 
@@ -1907,18 +1892,13 @@ class TestAutoSecuritySingleSourceOfTruth:
             assert pool.auto_security is value, \
                 f'create_app(auto_security={value}) did not set live pool flag'
 
-    def test_apply_auto_security_sets_live_pool_flag(self):
+    def test_set_auto_security_sets_live_pool_flag(self):
         """Entry point 2: the WS/REST toggle writes the LIVE pool flag."""
-        from agent_cascade.ws_handlers import WsMessageHandler
-
-        class _App:
-            current_auto_security = True
-
         for value in (False, True):
             pool = _FakePool()
-            WsMessageHandler.apply_auto_security(_App(), pool, value)
+            pool.set_auto_security(value)
             assert pool.auto_security is value, \
-                f'apply_auto_security({value}) did not set live pool flag'
+                f'set_auto_security({value}) did not set live pool flag'
 
     def test_app_property_alias_reads_live_pool_flag(self):
         """The app.current_auto_security property alias always reflects the live state."""
@@ -1963,3 +1943,25 @@ class TestAutoSecuritySingleSourceOfTruth:
             assert om.pending == {}
         finally:
             state.auto_security = saved
+
+
+class TestApplyAutoSecurityDeleted:
+    """BUG_0029 Phase 2 Step 6: the apply_auto_security indirection is gone.
+
+    Revert-proof: if anyone re-introduces WsMessageHandler.apply_auto_security,
+    this test fails immediately (source-level grep).
+    """
+
+    def test_no_apply_auto_security_in_ws_handlers(self):
+        import inspect
+        from agent_cascade import ws_handlers
+        source = inspect.getsource(ws_handlers)
+        assert 'apply_auto_security' not in source, \
+            'WsMessageHandler.apply_auto_security must remain deleted (BUG_0029 Step 6)'
+
+    def test_no_apply_auto_security_in_api_server(self):
+        import inspect
+        from agent_cascade import api_server
+        source = inspect.getsource(api_server)
+        assert 'apply_auto_security' not in source, \
+            'api_server must not reference apply_auto_security (BUG_0029 Step 6)'

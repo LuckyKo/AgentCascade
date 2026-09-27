@@ -459,7 +459,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         Thin delegate to ``runtime_state.state.set_auto_security`` (the toggle channel),
         wrapped with change-detection and persistence: saves pool settings ONLY when the
         value actually changed (avoids a redundant disk write on startup re-application).
-        All former writers of ``app.current_auto_security`` (create_app, apply_auto_security,
+        All former writers of ``app.current_auto_security`` (create_app, WS/REST handlers,
         the settings-import path) route through this method — so no manual mirror can
         desync anymore.
         """

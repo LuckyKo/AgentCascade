@@ -318,18 +318,6 @@ class WsMessageHandler:
             logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
 
     @staticmethod
-    def apply_auto_security(app, agent_pool, enabled: bool) -> None:
-        """Toggle Auto-Ask Security mode (shared by WS and REST paths).
-
-        BUG_0029: the flag lives on ``agent_pool.auto_security`` (single source of truth,
-        reachable from every thread context); ``app.current_auto_security`` is a property
-        alias that delegates here. The setter updates the persistence shadow and saves
-        pool settings — no manual mirroring anywhere.
-        """
-        if agent_pool:
-            agent_pool.set_auto_security(enabled)
-
-    @staticmethod
     def apply_afk(agent_pool, enabled: bool, message: Optional[str] = None) -> None:
         """Set the server-backed AFK flag (shared by WS and REST /api/afk)."""
         om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
@@ -1069,11 +1057,16 @@ class WsMessageHandler:
     async def handle_set_auto_security(self, data: dict) -> None:
         """Handle 'set_auto_security' — toggle Auto-Ask mode.
 
-        Delegates to :meth:`apply_auto_security` (shared with ``POST /api/auto_security``)
-        so the WS and REST paths cannot drift, then broadcasts updated state.
+        BUG_0029 Phase 2 Step 6: calls state.set_auto_security directly (single setter).
+        The pool's set_auto_security wraps this with change-detection + persistence, so
+        we call through the pool when available for the save-on-change behaviour.
         """
         enabled = data.get('enabled', False)
-        WsMessageHandler.apply_auto_security(self.app, self.agent_pool, enabled)
+        if self.agent_pool:
+            self.agent_pool.set_auto_security(enabled)
+        else:
+            from agent_cascade.runtime_state import state as _runtime_state
+            _runtime_state.set_auto_security(enabled)
         # Broadcast updated state to all clients immediately, preventing stale overrides from pending messages
         await self._broadcast()
 
