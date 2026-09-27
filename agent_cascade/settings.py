@@ -338,7 +338,10 @@ LLM_RETRY_BASE_DELAY: float = float(os.getenv('AGENT_CASCADE_LLM_RETRY_BASE_DELA
 LLM_RETRY_MAX_BACKOFF: float = float(os.getenv('AGENT_CASCADE_LLM_RETRY_MAX_BACKOFF',
                                                5.0))  # Maximum backoff cap in seconds
 
-# Settings for streaming timeouts (Layer 1-3 defense against stuck streams)
+# Settings for streaming timeouts (Layer 1-3 defense against stuck streams).
+# Enforced by the watchdog reader thread in utils/streaming.py::watch_stream, so these
+# values are authoritative even when the endpoint heartbeats without producing events
+# (the transport-level AGENT_CASCADE_HTTP_READ_TIMEOUT below is only an idle-byte backstop).
 STREAM_MAX_SILENCE_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_STREAM_MAX_SILENCE_SECONDS', 180.0))  # Max seconds between chunks before considering stream stalled
 STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv('AGENT_CASCADE_STREAM_MAX_TOTAL_SECONDS',

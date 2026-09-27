@@ -16,7 +16,7 @@ eval_type_backport         # Type evaluation backport
 
 # ── Web Server (API) ────────────────────────────────────────
 fastapi                    # ASGI web framework for API server
-httpx                      # Async HTTP client (telegram bridge)
+httpx==0.28.1              # Pinned: stream read-timeout behavior verified against this version (BUG_0026)
 
 # ── JSON Handling ───────────────────────────────────────────
 json5                      # Lenient JSON parsing
@@ -24,7 +24,7 @@ jsonlines                  # Streaming JSONL format
 jsonschema                 # JSON Schema validation
 lxml                       # Fast XML/HTML parser backend for BeautifulSoup
 mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
-openai                     # OpenAI-compatible API client
+openai==3.1.0              # Pinned: _iter_events() read-timeout behavior verified against this version (BUG_0026)
 
 # ── Image Processing ────────────────────────────────────────
 pillow                     # Image manipulation
