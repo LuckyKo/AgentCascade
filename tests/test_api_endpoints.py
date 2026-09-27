@@ -839,6 +839,8 @@ class _FakePool:
         self.stop_session_calls = 0
         self.save_pool_settings_calls = 0
         self.restore_calls = []
+        # BUG_0029: live single source of truth + persistence shadow (mirrors AgentPool).
+        self.auto_security = True
         self._loaded_auto_security = True
         # build_state()'s fallback path reads operation_manager.base_dir for default_workspace.
         self.operation_manager = _StubOperationManager()
@@ -851,6 +853,15 @@ class _FakePool:
 
     def _save_pool_settings(self):
         self.save_pool_settings_calls += 1
+
+    def set_auto_security(self, enabled: bool) -> None:
+        """BUG_0029: single writer (mirrors AgentPool.set_auto_security)."""
+        new_value = bool(enabled)
+        if self.auto_security == new_value:
+            return  # no-op: value unchanged (mirrors the real pool's change detection)
+        self.auto_security = new_value
+        self._loaded_auto_security = new_value
+        self._save_pool_settings()
 
     def load_session_from_log(self, log_input, target_instance=None,
                               clear_sub_agents_before_load=True, caller_name=None):
@@ -887,9 +898,13 @@ class _FakePool:
 # Attributes on the real AgentPool that the Phase 1 REST endpoints read/write. We swap these
 # onto the REAL pool object (the closure var inside create_app) so the endpoint's calls hit our
 # fakes, then restore them afterwards. Methods are instance-bound on the fake; state attrs copy.
+# BUG_0029: auto_security + set_auto_security route the live flag through the real pool, so
+# the fake's writer must be swapped in too (otherwise the endpoint writes the real pool and
+# assertions against the fake see stale values).
 _POOL_PATCH_ATTRS = (
     'instances', 'operation_manager', '_run_generation', 'terminated_instances', 'stopped',
     '_mark_activity', 'stop_session', '_save_pool_settings', 'load_session_from_log',
+    'auto_security', 'set_auto_security',
 )
 
 
@@ -989,7 +1004,7 @@ class TestAuthenticatedCommandEndpoints:
         assert pool._run_generation == 1
 
     def test_apply_auto_security_sets_app_and_persists(self):
-        """WsMessageHandler.apply_auto_security: sets app flag + pool persistence."""
+        """WsMessageHandler.apply_auto_security: sets the LIVE pool flag + persistence (BUG_0029)."""
         from agent_cascade.ws_handlers import WsMessageHandler
 
         class _App:
@@ -997,6 +1012,7 @@ class TestAuthenticatedCommandEndpoints:
 
         pool = _FakePool()
         WsMessageHandler.apply_auto_security(_App(), pool, False)
+        assert pool.auto_security is False  # BUG_0029: live single source of truth
         assert pool._loaded_auto_security is False
         assert pool.save_pool_settings_calls == 1
 
@@ -1105,6 +1121,10 @@ class TestAuthenticatedCommandEndpoints:
         """POST /api/auto_security (valid token) routes through apply_auto_security."""
         token = self._token(client)
         fake = _FakePool()
+        # BUG_0029: start with security OFF so the toggle to True is a real change —
+        # set_auto_security skips persistence when the value is unchanged.
+        fake.auto_security = False
+        fake._loaded_auto_security = False
         saved = self._patch_pool(client, fake)
         try:
             resp = client.post('/api/auto_security', params={'token': token}, json={'enabled': True})
@@ -1115,8 +1135,10 @@ class TestAuthenticatedCommandEndpoints:
         body = resp.json()
         assert body['status'] == 'ok'
         assert body['auto_security'] is True
-        # Shared helper wrote the flag onto the real app object + pool persistence.
+        # BUG_0029: shared helper wrote the LIVE pool flag + persistence; the app property
+        # alias reads it back.
         assert client.app.current_auto_security is True
+        assert fake.auto_security is True
         assert fake._loaded_auto_security is True
         assert fake.save_pool_settings_calls == 1
 
@@ -1132,7 +1154,10 @@ class TestAuthenticatedCommandEndpoints:
 
         assert resp.status_code == 200
         assert resp.json()['auto_security'] is False
-        assert client.app.current_auto_security is False
+        # BUG_0029: the endpoint's response reflects the live pool flag it wrote. The
+        # app property alias reads the REAL pool (closure var), which _restore_pool put
+        # back — so assert against the fake that captured the write, not the alias.
+        assert fake.auto_security is False
 
     # ── /api/afk ────────────────────────────────────────────────────────────
 
@@ -1457,8 +1482,10 @@ class TestAfkServerAutoReject:
     def test_afk_on_rejects_immediately(self):
         om = self._make_om()
         om.afk_enabled = True
-        # Security review OFF — the at-registration auto-reject only fires in that mode.
-        om.afk_defer_to_security = False
+        # BUG_0029: security review OFF via the live pool flag — the at-registration
+        # auto-reject only fires in that mode.
+        om.agent_pool = _FakePool()
+        om.agent_pool.auto_security = False
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
         # No afk_message set → the fallback reason string (approval.py _afk_reject_reason).
@@ -1469,7 +1496,8 @@ class TestAfkServerAutoReject:
         """The configured afk_message is surfaced in the reject reason."""
         om = self._make_om()
         om.afk_enabled = True
-        om.afk_defer_to_security = False  # security off → auto-reject path active
+        om.agent_pool = _FakePool()  # BUG_0029: security off via live pool flag
+        om.agent_pool.auto_security = False
         om.afk_message = 'brb 5'
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
@@ -1506,7 +1534,8 @@ class TestAfkServerAutoReject:
     def test_afk_reason_uses_custom_message(self):
         om = self._make_om()
         om.afk_enabled = True
-        om.afk_defer_to_security = False  # security off → auto-reject path active
+        om.agent_pool = _FakePool()  # BUG_0029: security off via live pool flag
+        om.agent_pool.auto_security = False
         om.afk_message = 'ping me later'
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
@@ -1708,7 +1737,8 @@ class TestAfkRespectsSecurity:
         """Case 1: AFK on + security off → immediate reject (existing AFK behavior preserved)."""
         om = self._make_om()
         om.afk_enabled = True
-        om.afk_defer_to_security = False
+        om.agent_pool = _FakePool()  # BUG_0029: live pool flag is the single source of truth
+        om.agent_pool.auto_security = False
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
         assert reason == 'Auto-rejected (AFK mode active)'
@@ -1719,7 +1749,7 @@ class TestAfkRespectsSecurity:
         security advisor can vet it; resolving it proves it was never auto-rejected."""
         om = self._make_om()
         om.afk_enabled = True
-        om.afk_defer_to_security = True
+        om.agent_pool = _FakePool()  # BUG_0029: security ON (default) → no auto-reject
         ok, reason = self._drive_pending_and_resolve(om, lambda rid: om.user_reject(rid, 'test'))
         assert ok is False
         assert reason == 'test'  # resolved by our explicit reject, not the AFK auto-reject
@@ -1728,13 +1758,13 @@ class TestAfkRespectsSecurity:
         """Case 3 (regression guard): AFK off + security on → normal pending path."""
         om = self._make_om()
         om.afk_enabled = False
-        om.afk_defer_to_security = True
+        om.agent_pool = _FakePool()  # BUG_0029: pool attached, security ON (default)
         ok, reason = self._drive_pending_and_resolve(om, lambda rid: om.user_approve(rid, 'ok'))
         assert ok is True
         assert reason == 'ok'
 
-    def test_create_app_syncs_afk_defer_flag(self):
-        """Case 4: create_app pushes auto_security onto the OperationManager flag (both ways)."""
+    def test_create_app_syncs_pool_auto_security(self):
+        """Case 4 (BUG_0029): create_app writes auto_security to the LIVE pool flag (both ways)."""
         from agent_cascade.api_server import create_app
         from agent_cascade.operation_manager import OperationManager
 
@@ -1744,10 +1774,10 @@ class TestAfkRespectsSecurity:
             pool.operation_manager = om
             create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
                        auto_security=auto_security)
-            assert om.afk_defer_to_security is expected
+            assert pool.auto_security is expected
 
-    def test_apply_auto_security_syncs_afk_defer_flag(self):
-        """Case 5: the runtime toggle keeps the OperationManager flag in sync (both ways)."""
+    def test_apply_auto_security_syncs_pool_flag(self):
+        """Case 5 (BUG_0029): the runtime toggle updates the LIVE pool flag (both ways)."""
         from agent_cascade.ws_handlers import WsMessageHandler
 
         class _App:
@@ -1758,7 +1788,7 @@ class TestAfkRespectsSecurity:
             pool = _FakePool()
             pool.operation_manager = om
             WsMessageHandler.apply_auto_security(_App(), pool, enabled)
-            assert om.afk_defer_to_security is expected
+            assert pool.auto_security is expected
 
     def test_apply_auto_security_without_om_does_not_crash(self):
         """Guard: pools without an operation_manager are skipped cleanly."""
@@ -1771,3 +1801,67 @@ class TestAfkRespectsSecurity:
         pool.operation_manager = None
         WsMessageHandler.apply_auto_security(_App(), pool, False)  # must not raise
         assert pool._loaded_auto_security is False
+
+
+class TestAutoSecuritySingleSourceOfTruth:
+    """BUG_0029 revert-proof: toggling auto-security via EACH entry point yields a consistent
+    live pool flag readable from the approval path. Fails if any writer bypasses
+    pool.set_auto_security() or reintroduces a manual mirror."""
+
+    def test_create_app_sets_live_pool_flag(self):
+        """Entry point 1: create_app(auto_security=...) writes the LIVE pool flag."""
+        from agent_cascade.api_server import create_app
+
+        for value in (False, True):
+            pool = _FakePool()
+            create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
+                       auto_security=value)
+            assert pool.auto_security is value, \
+                f'create_app(auto_security={value}) did not set live pool flag'
+
+    def test_apply_auto_security_sets_live_pool_flag(self):
+        """Entry point 2: the WS/REST toggle writes the LIVE pool flag."""
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        class _App:
+            current_auto_security = True
+
+        for value in (False, True):
+            pool = _FakePool()
+            WsMessageHandler.apply_auto_security(_App(), pool, value)
+            assert pool.auto_security is value, \
+                f'apply_auto_security({value}) did not set live pool flag'
+
+    def test_app_property_alias_reads_live_pool_flag(self):
+        """The app.current_auto_security property alias always reflects the live pool flag."""
+        from agent_cascade.api_server import create_app
+
+        pool = _FakePool()
+        app = create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
+                         auto_security=True)
+        assert app.current_auto_security is True
+
+        # Toggle via the single writer; the alias must follow without any manual sync.
+        pool.set_auto_security(False)
+        assert app.current_auto_security is False, \
+            'app property alias did not track live pool flag after set_auto_security'
+
+    def test_approval_path_reads_live_pool_flag(self):
+        """The approval path reads the LIVE pool flag — no mirror attribute exists."""
+        from agent_cascade.operation_manager import OperationManager
+
+        # The mirror attribute must be GONE from OperationManager entirely (BUG_0029).
+        om = OperationManager(base_dir='/tmp/afk_sot_test_ws')
+        assert not hasattr(om, 'afk_defer_to_security'), \
+            'afk_defer_to_security mirror still exists on OperationManager (BUG_0029 revert)'
+
+        om.afk_enabled = True
+        pool = _FakePool()
+        om.agent_pool = pool
+
+        # Security OFF via the live flag → AFK auto-rejects immediately.
+        pool.auto_security = False
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False
+        assert reason == 'Auto-rejected (AFK mode active)'
+        assert om.pending == {}

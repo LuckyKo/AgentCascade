@@ -50,9 +50,9 @@ class ConfigPersistMixin:
                 if hasattr(self, 'operation_manager') and self.operation_manager:
                     data['default_workspace'] = str(self.operation_manager.base_dir)
 
-                # Add auto_security if explicitly set
-                if self._loaded_auto_security is not None:
-                    data['auto_security'] = self._loaded_auto_security
+                # Add auto_security (BUG_0029): persist the LIVE pool flag — it is always
+                # a real bool after __init__, so no shadow check needed.
+                data['auto_security'] = bool(self.auto_security)
 
                 # Add approval timeout settings from operation_manager if available
                 if hasattr(self, 'operation_manager') and self.operation_manager:
@@ -166,8 +166,10 @@ class ConfigPersistMixin:
             if default_workspace_raw:
                 self._pending_default_workspace = default_workspace_raw
 
-            # Store auto_security for later application in create_app()
+            # Store auto_security (BUG_0029): populate the LIVE pool flag AND keep the
+            # persistence shadow so launchers can detect "persisted value present".
             if auto_security_raw is not None:
+                self.auto_security = bool(auto_security_raw)
                 self._loaded_auto_security = bool(auto_security_raw)
 
             # Store approval timeout settings for later application in _apply_pending_config

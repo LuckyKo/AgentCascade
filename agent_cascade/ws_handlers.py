@@ -321,19 +321,13 @@ class WsMessageHandler:
     def apply_auto_security(app, agent_pool, enabled: bool) -> None:
         """Toggle Auto-Ask Security mode (shared by WS and REST paths).
 
-        Stores the flag on the FastAPI ``app`` object (read at runtime by the security
-        handler via ``getattr(app, 'current_auto_security', ...)``), mirrors it onto
-        ``agent_pool._loaded_auto_security`` for persistence, and saves pool settings.
+        BUG_0029: the flag lives on ``agent_pool.auto_security`` (single source of truth,
+        reachable from every thread context); ``app.current_auto_security`` is a property
+        alias that delegates here. The setter updates the persistence shadow and saves
+        pool settings — no manual mirroring anywhere.
         """
-        app.current_auto_security = enabled
-        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
-        if om is not None:
-            om.afk_defer_to_security = bool(enabled)
         if agent_pool:
-            agent_pool._loaded_auto_security = enabled
-            # Persist to disk
-            if hasattr(agent_pool, '_save_pool_settings'):
-                agent_pool._save_pool_settings()
+            agent_pool.set_auto_security(enabled)
 
     @staticmethod
     def apply_afk(agent_pool, enabled: bool, message: Optional[str] = None) -> None:
@@ -931,21 +925,18 @@ class WsMessageHandler:
             for instance_name in list(self.agent_pool.instances.keys()):
                 _apply_ui_config(self.agent_pool, instance_name, filtered_cfg)
 
-            # Handle auto_security if present in import data
+            # Handle auto_security if present in import data.
+            # BUG_0029: routes through the single writer (pool.set_auto_security) — this is
+            # no longer a separate "third writer"; there is exactly one writer now.
             if 'auto_security' in settings_json:
-                if hasattr(self.app, 'current_auto_security'):
-                    self.app.current_auto_security = bool(settings_json['auto_security'])
-                    # Keep the OperationManager's AFK-defer flag in sync (this is a third writer
-                    # of current_auto_security, alongside create_app and apply_auto_security).
-                    _om = getattr(self.agent_pool, 'operation_manager', None)
-                    if _om is not None:
-                        _om.afk_defer_to_security = bool(settings_json['auto_security'])
+                if self.agent_pool and hasattr(self.agent_pool, 'set_auto_security'):
+                    self.agent_pool.set_auto_security(bool(settings_json['auto_security']))
                     await self.broadcast_fn({
                         'type': 'info',
                         'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"
                     })
                 else:
-                    logger.warning('App missing current_auto_security attribute during import')
+                    logger.warning('No agent_pool available during import — auto_security not applied')
 
             await self.broadcast_fn({
                 'type': 'import_settings',

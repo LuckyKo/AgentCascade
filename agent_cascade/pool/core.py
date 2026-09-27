@@ -130,7 +130,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         else:
             self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
         self._settings_save_lock = threading.Lock()  # guards concurrent save operations
-        self._loaded_auto_security = None  # persisted auto-security toggle (None = not loaded)
+        self.auto_security = True  # BUG_0029: LIVE single source of truth for auto-security mode
+        self._loaded_auto_security = None  # persistence shadow (None = no persisted value on disk)
         self._load_pool_settings()  # load persisted values, overriding defaults
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
 
@@ -434,6 +435,26 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             except Exception as e:
                 logger.debug(f"Memory-hint manager restart (non-critical): {e}")
             logger.debug('Stopped flag cleared — ready for new execution')
+
+    def set_auto_security(self, enabled: bool) -> None:
+        """BUG_0029: the single writer for auto-security mode.
+
+        Sets the LIVE pool flag (reachable from every thread context via back-refs),
+        updates the persistence shadow, and saves pool settings ONLY when the value
+        actually changed (avoids a redundant disk write on startup re-application).
+        All former writers of ``app.current_auto_security`` (create_app, apply_auto_security,
+        the settings-import path) route through this method — so no manual mirror can
+        desync anymore.
+        """
+        new_value = bool(enabled)
+        if self.auto_security == new_value:
+            return  # no-op: value unchanged (e.g. startup re-applying a persisted value)
+        self.auto_security = new_value
+        self._loaded_auto_security = new_value
+        try:
+            self._save_pool_settings()
+        except Exception as e:  # noqa: BLE001 — persistence failure must not break the toggle
+            logger.warning(f"[PoolSettings] Failed to persist auto_security toggle: {e}")
 
     def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:
         """Update both pool.children and parent's _child_instances.

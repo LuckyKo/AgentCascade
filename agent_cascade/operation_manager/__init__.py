@@ -78,13 +78,6 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         self.afk_enabled: bool = False
         self.afk_message: str = ''
 
-        # Whether an active Auto-Ask Security review will handle pending approvals. When True, the
-        # AFK at-registration auto-reject is SKIPPED so the security advisor can vet/approve/reject the
-        # call instead of AFK pre-empting it. Default True matches app.current_auto_security's default.
-        # NOTE: this is NOT auto-derived — it must be kept in sync manually at every writer of
-        # app.current_auto_security (create_app, apply_auto_security, and the settings-import path).
-        self.afk_defer_to_security: bool = True
-
         import atexit
         atexit.register(self.cleanup_backups)
 

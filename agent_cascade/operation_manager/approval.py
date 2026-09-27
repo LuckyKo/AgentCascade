@@ -132,7 +132,14 @@ class ApprovalMixin:
         # advisor, which vetts it and auto-applies a YES/NO verdict. Only when no automated review
         # will handle it (security off) does AFK reject immediately so the call never waits on an
         # absent user.
-        if self.afk_enabled and not self.afk_defer_to_security:
+        # BUG_0029: reads the LIVE pool flag via the back-ref (same defensive pattern as the
+        # pool.stopped checks below) — no manual mirror attribute exists anymore. When no pool is
+        # attached (tests/REST paths), security is assumed ON (default True) so AFK does not
+        # pre-empt approvals that an automated review would handle.
+        _auto_security = True  # default: assume security active when pool unavailable
+        if self.agent_pool is not None and hasattr(self.agent_pool, 'auto_security'):
+            _auto_security = bool(self.agent_pool.auto_security)
+        if self.afk_enabled and not _auto_security:
             self.user_reject(request_id, self._afk_reject_reason())
             return False, self._afk_reject_reason()
 

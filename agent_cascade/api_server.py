@@ -405,14 +405,34 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # (created lazily in security_handler.py) to prevent unlimited parallelism
     # and allow reentrant acquisition for nested security checks.
 
-    # Initialize Auto-Ask Security mode state
-    # Read by _get_auto_security_enabled() in security_handler.py via getattr(app, ...)
+    # ── BUG_0029: current_auto_security property alias ────────────────────────
+    # The FastAPI `app` object is NOT reachable from every thread context (the
+    # approval/tool-execution threads only hold om.agent_pool), so the live flag lives on
+    # the pool. This per-instance descriptor keeps all existing getattr(app,
+    # 'current_auto_security', ...) read sites and direct assignments working unchanged.
+    # We give THIS app its own lightweight subclass carrying the property — each
+    # create_app() call produces an independent class bound to ITS pool, so multiple
+    # apps in one process never share state (no shared-class mutation).
+    _auto_sec_pool = agent_pool
+
+    def _get_current_auto_security(self):
+        return bool(_auto_sec_pool.auto_security)
+
+    def _set_current_auto_security(self, value):
+        _auto_sec_pool.set_auto_security(bool(value))
+
+    _app_cls = type(app)
+    # Reuse the class if it already serves this exact pool (idempotent re-creation),
+    # otherwise mint a fresh per-app subclass.
+    if getattr(_app_cls, '_auto_security_pool_ref', None) is not _auto_sec_pool:
+        _new_cls = type(f'_FastAPI_{id(app)}', (_app_cls,), {})
+        _new_cls.current_auto_security = property(
+            _get_current_auto_security, _set_current_auto_security)
+        _new_cls._auto_security_pool_ref = _auto_sec_pool  # marker: which pool this class serves
+        app.__class__ = _new_cls
+
+    # Initialize Auto-Ask Security mode state (routes through the single writer).
     app.current_auto_security = auto_security
-    # Keep the OperationManager's AFK-defer flag in sync so request_user_approval() can decide
-    # whether to skip its at-registration auto-reject while security review is active.
-    _om = getattr(agent_pool, 'operation_manager', None)
-    if _om is not None:
-        _om.afk_defer_to_security = bool(auto_security)
 
     app.add_middleware(
         CORSMiddleware,
