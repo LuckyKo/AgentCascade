@@ -1235,10 +1235,12 @@ class SkillManager:
             except OSError as e:
                 logger.warning('[SKILLS] Error scanning %s: %s', root, e)
 
-        # Phase 2: Clear stale + register + rebuild atomically under lock
+        # Phase 2: Clear stale registry + register + rebuild atomically under lock.
+        # NOTE (BUG_0020): do NOT clear the matcher index here — _rebuild_index ->
+        # build_index is atomic (builds into a local dict, swaps on success), so a
+        # failed rebuild leaves the PREVIOUS index intact instead of an empty one.
         with self._write_lock:
             self._skills_registry.clear()
-            self._matcher._inverted_index.clear()
 
             for skill_file, parsed, priority in collected:
                 self._register_single(skill_file, priority=priority, parsed=parsed)
@@ -1340,7 +1342,11 @@ class SkillManager:
             metadata = self.get_all_metadata(include_active_only=False)
             self._matcher.build_index(metadata)
         except Exception as e:
-            logger.debug('[SKILLS] Failed to rebuild matcher index: %s', e)
+            # BUG_0020: a build failure is a data-integrity problem, not a transient
+            # condition — it must be visible at WARNING (DEBUG is off in normal
+            # operation). build_index itself is atomic + per-skill isolated, so this
+            # catch is the last-resort backstop for unexpected failures.
+            logger.warning('[SKILLS] Failed to rebuild matcher index: %s', e)
 
     # ── Tier 1 Queries (Metadata Only) ───────────────────────────────────────
 

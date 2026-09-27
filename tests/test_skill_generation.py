@@ -631,6 +631,69 @@ class TestMatcherTriggerIndexing:
         assert matcher._inverted_index.get('alpha') == ['clean-skill']
         assert matcher._inverted_index.get('beta') == ['clean-skill']
 
+    def test_build_index_atomic_swap_on_failure(self, caplog):
+        """BUG_0020: a build failure must leave the PREVIOUS index intact (atomic swap),
+        not a cleared/partial one that silently disables all skill matching.
+
+        Pre-fix, build_index cleared self._inverted_index at the top and filled it in
+        place — a mid-build exception left a partial index (or empty on first build).
+        This test injects a metadata entry whose .get() raises (the per-skill try/except
+        inside the loop cannot see this: the failure is outside its protection scope),
+        so the exception propagates to the caller and the swap never happens.
+        FAILS pre-fix (index left partial/empty); passes post-fix (old index untouched).
+        """
+        import logging as _logging
+
+        matcher = SkillMatcher()
+        # Seed a known-good previous index.
+        matcher.build_index([{'name': 'prev-skill', 'description': 'gamma delta',
+                              'triggers': ['gamma', 'delta']}])
+        assert matcher._inverted_index.get('gamma') == ['prev-skill']
+
+        class _ExplodingMeta(dict):
+            def get(self, key, default=None):
+                if key == 'name' and self:  # first call inside the loop body
+                    raise RuntimeError('simulated metadata corruption')
+                return super().get(key, default)
+
+        with caplog.at_level(_logging.WARNING, logger='agent_cascade_logger'):
+            try:
+                matcher.build_index([_ExplodingMeta({'name': 'poison', 'description': 'x'})])
+            except RuntimeError:
+                pass  # expected — the backstop in _rebuild_index would catch it there
+
+        # Atomic contract: the previous index must be fully intact after the failed build.
+        assert matcher._inverted_index.get('gamma') == ['prev-skill'], \
+            'failed build corrupted/replaced the previous index (non-atomic clear-then-fill)'
+        assert 'poison' not in str(matcher._inverted_index), \
+            'partial data from a failed build leaked into the shared index'
+
+    def test_rebuild_index_unexpected_failure_logged_at_warning(self, caplog):
+        """BUG_0020: _rebuild_index's backstop catch must log at >= WARNING, not DEBUG.
+
+        The per-skill isolation inside build_index handles malformed entries; a failure
+        OUTSIDE that scope (here: get_all_metadata itself raising) is caught by the
+        backstop in SkillManager._rebuild_index. Pre-fix that catch logged at DEBUG —
+        disabled in normal operation — so every index-build failure was invisible and
+        the 30s safety-net timer repeated the silent failure forever.
+        FAILS pre-fix (no WARNING record); passes post-fix.
+        """
+        import logging as _logging
+
+        from agent_cascade.skills.manager import SkillManager
+
+        sm = SkillManager()
+        # Force the backstop path: metadata retrieval fails before build_index runs.
+        with patch.object(SkillManager, 'get_all_metadata',
+                          side_effect=RuntimeError('simulated metadata corruption')):
+            with caplog.at_level(_logging.WARNING, logger='agent_cascade_logger'):
+                sm._rebuild_index()  # must NOT raise — the backstop swallows + logs
+
+        warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING
+                    and 'Failed to rebuild matcher index' in r.getMessage()]
+        assert warnings, \
+            'expected a WARNING-level log from _rebuild_index on build failure (DEBUG-only is invisible)'
+
     def test_skill_frontmatter_text_clean_triggers(self):
         """§7.4 guard: skill_frontmatter_text on list[str] triggers is the plain 'name desc a b'."""
         assert skill_frontmatter_text('my-name', 'my desc', ['a', 'b']) == 'my-name my desc a b'

@@ -89,38 +89,51 @@ class SkillMatcher:
         Tokenizes each skill's name and description into keywords, then maps
         those keywords back to the skill name for fast lookup during matching.
 
+        Atomic (BUG_0020): builds into a local dict and swaps it in only on
+        success, so a mid-build failure leaves the PREVIOUS index intact rather
+        than a cleared/partial one that silently disables all skill matching.
+        Per-skill isolation: one malformed metadata entry is skipped + logged
+        at WARNING instead of aborting the whole build.
+
         Args:
             skills_metadata: List of Tier 1 metadata dicts (from SkillManager.get_all_metadata).
                             Each dict should have 'name' and 'description' keys.
         """
-        self._inverted_index.clear()
         logger.debug('[SKILLS] Building inverted index from %d skills', len(skills_metadata))
+        new_index: Dict[str, List[str]] = {}
 
         for meta in skills_metadata:
-            skill_name = meta.get('name', '')
-            if not skill_name:
-                continue
+            try:
+                skill_name = meta.get('name', '')
+                if not skill_name:
+                    continue
 
-            description = meta.get('description', '')
-            triggers = meta.get('triggers', [])
-            # Root cause (BUG_0019) is fixed at the parser layer: _normalize_frontmatter guarantees
-            # list[str] for parser-fed metadata. The container isinstance check + per-item str filter
-            # remain only as a total-join guard for hand-built fixtures that call build_index directly,
-            # bypassing the parser (a non-str item would otherwise make ' '.join raise).
-            if isinstance(triggers, list):
-                trigger_text = ' '.join(t for t in triggers if isinstance(t, str))
-            else:
-                trigger_text = ''
-            text = f"{skill_name} {description} {trigger_text}"
-            keywords = _TOKEN_RE.findall(text.lower())
+                description = meta.get('description', '')
+                triggers = meta.get('triggers', [])
+                # Root cause (BUG_0019) is fixed at the parser layer: _normalize_frontmatter guarantees
+                # list[str] for parser-fed metadata. The container isinstance check + per-item str filter
+                # remain only as a total-join guard for hand-built fixtures that call build_index directly,
+                # bypassing the parser (a non-str item would otherwise make ' '.join raise).
+                if isinstance(triggers, list):
+                    trigger_text = ' '.join(t for t in triggers if isinstance(t, str))
+                else:
+                    trigger_text = ''
+                text = f"{skill_name} {description} {trigger_text}"
+                keywords = _TOKEN_RE.findall(text.lower())
 
-            for kw in set(keywords):  # Deduplicate per-skill to avoid index bloat
-                if kw not in self._inverted_index:
-                    self._inverted_index[kw] = []
-                if skill_name not in self._inverted_index[kw]:
-                    self._inverted_index[kw].append(skill_name)
+                for kw in set(keywords):  # Deduplicate per-skill to avoid index bloat
+                    if kw not in new_index:
+                        new_index[kw] = []
+                    if skill_name not in new_index[kw]:
+                        new_index[kw].append(skill_name)
+            except Exception as e:
+                # Per-skill isolation (BUG_0020): one bad entry must not abort the build.
+                logger.warning('[SKILLS] Skipping malformed skill metadata during index build '
+                               '(name=%r): %s', meta.get('name') if isinstance(meta, dict) else None, e)
 
-        total_keywords = len(self._inverted_index)
+        # Atomic swap: only replace shared state once the build fully succeeded.
+        self._inverted_index = new_index
+        total_keywords = len(new_index)
         logger.debug('[SKILLS] Inverted index built: %d unique keywords', total_keywords)
 
     # ── Matching ─────────────────────────────────────────────────────────────

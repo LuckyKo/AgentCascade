@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -728,6 +729,52 @@ class TestSkillManager:
         sm.invalidate_cache()
         assert sm._cache_signature is None
         assert sm._cache_timestamp == 0.0
+
+    def test_discover_failed_rebuild_preserves_previous_index(self, tmp_path):
+        """BUG_0020: a failed index rebuild during discover() must leave the PREVIOUS
+        matcher index intact — not an empty/partial one that silently disables all
+        skill matching (AUTO resolution + scan_skills).
+
+        Pre-fix, discover() cleared self._matcher._inverted_index BEFORE rebuilding
+        (manager.py phase 2), and build_index itself also cleared-then-filled in place.
+        So any mid-build failure left the shared index empty for every caller until
+        the next successful rebuild — with no log at any visible level.
+        Post-fix, discover() does not pre-clear and build_index swaps atomically, so
+        a failed rebuild is a no-op on the shared state.
+
+        Uses an isolated tmp_path skills dir (not the real agents/global/skills) so the
+        skill set is stable for the duration of the test. FAILS pre-fix (index empty).
+        """
+        # Build a hermetic skills dir with two fixed, valid skills.
+        skills_root = tmp_path / 'skills'
+        for name in ('alpha-skill', 'beta-skill'):
+            skill_dir = skills_root / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / 'SKILL.md').write_text(
+                f'---\nname: {name}\ndescription: fixture skill for atomic-discovery test\n'
+                f'version: "1.0.0"\n---\n# Body\n',
+                encoding='utf-8')
+
+        sm = self.manager
+        sm._cache_ttl = 0.0
+
+        # Step 1: successful discovery populates the index with known keywords.
+        # NOTE: tokenization keeps hyphenated names as single tokens (TOKEN_RE), so
+        # assert on the full 'alpha-skill'/'beta-skill' tokens, not bare 'alpha'.
+        sm.discover([skills_root])
+        assert 'alpha-skill' in sm._matcher._inverted_index, 'initial discovery did not index alpha-skill'
+        assert 'beta-skill' in sm._matcher._inverted_index, 'initial discovery did not index beta-skill'
+
+        # Step 2: force the rebuild inside discover() to fail (metadata retrieval blows up).
+        with patch.object(SkillManager, 'get_all_metadata',
+                          side_effect=RuntimeError('simulated metadata corruption')):
+            sm.discover([skills_root])  # must NOT raise — _rebuild_index backstop swallows + warns
+
+        # Atomic contract: the previous index must be fully intact after the failed rebuild.
+        assert 'alpha-skill' in sm._matcher._inverted_index, \
+            'failed rebuild during discover() emptied/corrupted the previous index (non-atomic)'
+        assert 'beta-skill' in sm._matcher._inverted_index, \
+            'failed rebuild during discover() emptied/corrupted the previous index (non-atomic)'
 
     # -- Tier 1 Metadata Queries --
 
