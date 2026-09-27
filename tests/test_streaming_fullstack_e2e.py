@@ -92,7 +92,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── Seed log + instance name ───────────────────────────────────────────────────
-SEED_LOG = Path(r'N:\work\WD\AgentWorkspace\logs\researcher_thinking_stream_trace_20260903_051317.jsonl')
+# The seed is a version-controlled fixture (NOT a live logs/ file, which gets packed
+# into logs_archive.7z and cleaned out). It only needs the first 3 lines (metadata +
+# system prompt + initial user message) — see _build_seed_with_turns below.
+FIXTURES_DIR = Path(__file__).parent / 'fixtures'
+SEED_LOG = FIXTURES_DIR / 'fullstack_e2e_seed_log.jsonl'
 INSTANCE_NAME = 'thinking_stream_trace'   # matches the seed log's metadata.instance_name
 APP_JS = AC_ROOT / 'web_ui' / 'app.js'
 
