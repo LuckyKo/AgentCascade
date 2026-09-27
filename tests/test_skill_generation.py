@@ -204,11 +204,10 @@ class TestValidation:
         surface the YAML reason / actionable guidance instead of the bare 'No valid YAML frontmatter
         found'. (BUG_0018: the original unescaped-colon input now parses via the lenient fallback —
         see test_colon_in_value_now_parses; this test keeps covering the still-invalid case with a
-        stray non-key line that the fallback also bails on.)"""
+        block the tolerant fallback recovers NOTHING from — a tab-started garbage line that strict
+        rejects and lenient skips as unrecognized, yielding {}.)"""
         raw = ('---\n'
-               'name: test-skill\n'
-               'this line is not valid frontmatter at all\n'
-               'description: A skill for testing purposes with enough characters\n'
+               '\tgarbage with no colon at all\n'
                '---\n\n'
                '## Instructions\n\n'
                'Follow these steps carefully to complete the task. '
@@ -223,10 +222,10 @@ class TestValidation:
         assert 'unescaped' in msg, f"frontmatter error should carry the quoting hint, got: {msg!r}"
         # ...AND the underlying YAML reason must actually be surfaced (not just the static hint).
         # Without this check the test would pass even if _frontmatter_failure_reason regressed to ''.
-        # The exact PyYAML wording for a stray non-key line is "could not find expected ':'"
-        # ("mapping values are not allowed here" is the wording for the unescaped-colon case,
-        # which now parses via the lenient fallback — see test_colon_in_value_now_parses).
-        assert 'could not find expected' in msg, \
+        # PyYAML's exact wording for a tab-started line drifts across versions ("cannot start any
+        # token" in 6.x, "could not start any token" in 5.x), so assert on the stable core substring
+        # 'token' — still fails if the reason is empty or regresses to a non-YAML string.
+        assert 'token' in msg, \
             f"frontmatter error should include the YAML reason, got: {msg!r}"
 
     def test_colon_in_value_now_parses(self):
@@ -323,20 +322,20 @@ _COLON_TRIGGER_SKILL = (
 
 
 class TestTriggersItemTypes:
-    """BUG_0019: non-string trigger items must be rejected, not crash downstream."""
+    """BUG_0019 (root-caused): a colon trigger item parses as a one-key dict under strict YAML;
+    _normalize_frontmatter now coerces it to the 'key: value' string, so validation accepts it."""
 
-    def test_block_list_colon_trigger_is_rejected(self):
+    def test_block_list_colon_trigger_coerced_and_accepted(self):
         passed, errors = validate_skill(_COLON_TRIGGER_SKILL, 'colon-trigger-skill', set())
-        assert not passed
-        msgs = [e for e in errors if 'must be strings' in e and 'Quote' in e]
-        assert msgs, f"expected a 'must be strings ... Quote' error, got: {errors}"
+        assert passed, f"coerced colon trigger must be accepted, got: {errors}"
+        assert not [e for e in errors if 'must be strings' in e]
 
-    def test_validator_non_string_trigger_item_does_not_raise(self):
-        # Exercises the Tier 2 self-match join (validator.py L154) with task_text non-empty.
-        # Pre-fix this raised TypeError inside validate_skill; post-fix it returns a rejection.
+    def test_colon_trigger_coerced_validates_without_crash(self):
+        # Exercises the Tier 2 self-match join (validator.py) with task_text non-empty.
+        # Pre-BUG_0019 this raised TypeError inside validate_skill; post-fix it coerces and passes.
         passed, errors = validate_skill(
             _COLON_TRIGGER_SKILL, 'colon-trigger-skill', set(), task_text='fix the parser to do Y')
-        assert not passed
+        assert passed is True, f"expected pass after coercion, got: {errors}"
 
 
 # ===========================================================================
@@ -620,6 +619,21 @@ class TestMatcherTriggerIndexing:
         matcher.build_index(meta)
         assert 'fix' in matcher._inverted_index
         assert 'parser' in matcher._inverted_index
+
+    def test_build_index_clean_list_str_triggers(self):
+        """§7.4 guard: build_index on metadata whose triggers is list[str] produces the expected
+        inverted index (the normalization contract the bandage deletion relies on)."""
+        matcher = SkillMatcher()
+        meta = [
+            {'name': 'clean-skill', 'description': 'does things', 'triggers': ['alpha', 'beta']},
+        ]
+        matcher.build_index(meta)
+        assert matcher._inverted_index.get('alpha') == ['clean-skill']
+        assert matcher._inverted_index.get('beta') == ['clean-skill']
+
+    def test_skill_frontmatter_text_clean_triggers(self):
+        """§7.4 guard: skill_frontmatter_text on list[str] triggers is the plain 'name desc a b'."""
+        assert skill_frontmatter_text('my-name', 'my desc', ['a', 'b']) == 'my-name my desc a b'
 
 
 # ===========================================================================

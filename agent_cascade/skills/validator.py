@@ -34,7 +34,7 @@ def _frontmatter_failure_reason(skill_content: str) -> str:
     lines = stripped.split('\n')
     yaml_lines = []
     for line in lines[1:]:
-        if line.strip() == '---':
+        if re.fullmatch(r'-{3,}', line.strip()):
             break
         yaml_lines.append(line)
     if not yaml_lines:
@@ -116,17 +116,9 @@ def validate_skill(
     if not triggers or not isinstance(triggers, list) or len(triggers) < 1:
         errors.append("Missing or empty 'triggers' list (requires at least 1 entry)")
     else:
-        # BUG_0019: a block-list item with an unescaped colon parses SUCCESSFULLY into a
-        # one-key dict (``- fix parser: do Y`` -> {'fix parser': 'do Y'}), so safe_load never
-        # raises and the BUG_0018 lenient fallback never sees it. Such an item would then raise
-        # TypeError in ' '.join(triggers) downstream. Reject with an actionable message.
-        non_string_indices = [i for i, t in enumerate(triggers) if not isinstance(t, str)]
-        if non_string_indices:
-            shown = ', '.join(repr(triggers[i]) for i in non_string_indices[:3])
-            errors.append(
-                f"Trigger items must be strings; item(s) at position "
-                f"{', '.join(str(i) for i in non_string_indices[:3])} are not ({shown}). "
-                f"Quote values containing a colon, e.g. \"fix parser: do Y\".")
+        # Regression tripwire: parser._normalize_frontmatter guarantees list[str].
+        # (Not a runtime guard — do NOT reintroduce per-item isinstance checks.)
+        assert all(isinstance(t, str) for t in triggers), f"non-str trigger leaked: {triggers!r}"
 
     # Version format check (soft — warns but allows registration, defaults to 1.0.0 if invalid)
     version = frontmatter.get('version')

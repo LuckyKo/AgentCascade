@@ -103,11 +103,10 @@ class SkillMatcher:
 
             description = meta.get('description', '')
             triggers = meta.get('triggers', [])
-            # BUG_0019 defense-in-depth: disk-loaded skills never pass through validate_skill
-            # (discover -> _register_single), so a block-list item with an unescaped colon can
-            # reach here as a dict. Join used to raise TypeError and abort the whole index build.
-            # Drop non-string items rather than str()-ing them: the repr glyphs ("{'", "': '")
-            # would be compared character-wise by difflib in skill_frontmatter_text.
+            # Root cause (BUG_0019) is fixed at the parser layer: _normalize_frontmatter guarantees
+            # list[str] for parser-fed metadata. The container isinstance check + per-item str filter
+            # remain only as a total-join guard for hand-built fixtures that call build_index directly,
+            # bypassing the parser (a non-str item would otherwise make ' '.join raise).
             if isinstance(triggers, list):
                 trigger_text = ' '.join(t for t in triggers if isinstance(t, str))
             else:

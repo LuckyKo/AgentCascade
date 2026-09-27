@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 # Ensure the project root is on sys.path so imports resolve correctly
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -125,12 +126,12 @@ class TestParseFrontmatter:
         assert fm == {}
         assert body.strip() == content.strip()
 
-    def test_malformed_yaml_returns_empty_dict(self):
-        # Truly malformed YAML: wrong indentation in a list causes ScannerError
+    def test_stray_list_line_skipped_valid_keys_recovered(self):
+        # Strict YAML fails on the stray 'sub' line; the tolerant lenient fallback SKIPS it and
+        # recovers the valid keys instead of bailing to {}.
         content = '---\nname: my-skill\ntriggers:\n- trigger1\nsub\n---\nBody text'
         fm, body = parse_frontmatter(content)
-        # Malformed YAML -> empty dict, full content as body
-        assert fm == {}
+        assert fm == {'name': 'my-skill', 'triggers': ['trigger1']}
 
     def test_empty_content(self):
         fm, body = parse_frontmatter('')
@@ -217,18 +218,143 @@ class TestParseFrontmatter:
         assert result is not None
         assert result['description'] == 'Fix X: do Y'
 
-    def test_lenient_fallback_returns_none_on_garbage_line(self):
-        """BUG_0018 guard (expected to pass pre-fix): a stray non-key line must NOT be
-        partially parsed — the fallback bails and the existing {} contract is kept."""
+    def test_lenient_parse_skips_stray_line_no_bail(self):
+        """Tolerant fallback: a stray non-key line is SKIPPED (no bail), so valid keys are
+        recovered. A fully-garbage block still yields the {} contract via parse_frontmatter."""
         content = '---\nname: my-skill\ntriggers:\n- trigger1\nsub\n---\nBody text'
         fm, body = parse_frontmatter(content)
-        assert fm == {}
+        assert fm == {'name': 'my-skill', 'triggers': ['trigger1']}
+        # Fully-garbage block (no recognizable keys at all) -> {} contract
+        garbage = '---\n\t<garbage with no colon>\n---\nBody text\n'
+        fm2, _ = parse_frontmatter(garbage)
+        assert fm2 == {}
 
     def test_bom_before_opening_delimiter_parses(self):
         """BUG_0018: a UTF-8 BOM before the opening '---' must not defeat delimiter detection."""
         content = '\ufeff---\nname: x\n---\nBody text\n'
         fm, _ = parse_frontmatter(content)
         assert fm['name'] == 'x'
+
+    # --- Tolerant parser: positive / edge cases (Layer 2 + Layer 3) -----------
+
+    def test_colon_in_description_recovered(self):
+        """Unescaped colon in a scalar forces the lenient path; the value must survive intact."""
+        content = ('---\n'
+                   'name: x\n'
+                   'description: This is: x\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['description'] == 'This is: x'
+        assert fm['name'] == 'x'
+
+    def test_four_dash_closer_detected(self):
+        """A 4-dash closing delimiter must be recognized (≥3 dashes), not leaked into yaml_lines."""
+        content = '---\nname: x\n----\nBody text\n'
+        fm, body = parse_frontmatter(content)
+        assert fm == {'name': 'x'}
+        assert 'Body' in body
+
+    def test_inline_list_split(self):
+        """Inline `[a, b]` values become real list[str]."""
+        content = ('---\n'
+                   'name: x\n'
+                   'triggers: [a, b]\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['triggers'] == ['a', 'b']
+        assert all(isinstance(t, str) for t in fm['triggers'])
+
+    def test_block_item_colon_is_string_not_dict_strict_path(self):
+        """Q1 at the STRICT path: a block-list item with an unescaped colon parses as a one-key
+        dict under safe_load; _normalize_frontmatter coerces it to the 'key: value' string."""
+        content = ('---\n'
+                   'name: colon-trigger-skill\n'
+                   'description: A skill whose trigger list contains an unescaped colon item\n'
+                   'triggers:\n'
+                   '  - fix parser: do Y\n'
+                   '  - plain item\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['triggers'] == ['fix parser: do Y', 'plain item']
+        assert all(isinstance(t, str) for t in fm['triggers'])
+
+    def test_partially_quoted_trigger_no_crash_clean_string(self):
+        """A partially-quoted trigger (todo.md:133 incident shape) must not crash and must yield
+        list[str] with no dict-repr glyphs in the matcher text."""
+        content = ('---\n'
+                   'name: x\n'
+                   'description: A skill for testing purposes with enough characters\n'
+                   'triggers:\n'
+                   '  - "not working" but tests pass\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        triggers = fm['triggers']
+        assert isinstance(triggers, list)
+        assert all(isinstance(t, str) for t in triggers), f"non-str trigger leaked: {triggers!r}"
+        from agent_cascade.skills.matcher import skill_frontmatter_text
+        text = skill_frontmatter_text(fm.get('name', ''), fm.get('description', ''), triggers)
+        assert '{' not in text, f"dict repr leaked into matcher text: {text!r}"
+
+    def test_multiline_continuation_value(self):
+        """Lenient continuation fold: an indented line after a scalar is space-joined onto it.
+        The unescaped colon forces the lenient path so the fold is actually exercised."""
+        content = ('---\n'
+                   'name: x\n'
+                   'description: This is: x\n'
+                   '    more text\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['description'] == 'This is: x more text'
+
+    def test_free_form_key_line_ignored_harmlessly(self):
+        """A free-form key-looking line that strict rejects is recovered (or skipped) without
+        harming the valid keys."""
+        content = ('---\n'
+                   'name: x\n'
+                   'description: d\n'
+                   'Note: hand-edited header\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['name'] == 'x'
+        assert fm['description'] == 'd'
+
+    def test_duplicate_keys_last_wins(self):
+        """Duplicate keys: last value wins (both strict and lenient agree)."""
+        content = ('---\n'
+                   'name: a\n'
+                   'name: b\n'
+                   '---\nBody text\n')
+        fm, _ = parse_frontmatter(content)
+        assert fm['name'] == 'b'
+
+    # --- Strict-vs-lenient oracle (consumed keys only) -------------------------
+
+    def test_strict_vs_lenient_oracle_property(self):
+        """Oracle: for well-formed frontmatters, _normalize_frontmatter(strict) and
+        _normalize_frontmatter(lenient) agree on the consumed keys. The colon-injection variant
+        proves the lenient path recovers exactly what strict would have produced when it fails."""
+        from agent_cascade.skills.parser import _lenient_parse, _normalize_frontmatter
+        blocks = [
+            'name: my-skill\ndescription: Does a thing\ntriggers:\n  - trigger1\n  - trigger two',
+            'name: my-skill\ndescription: Does a thing\ntriggers: [a, b]',
+            'name: my-skill\ndescription: Does a thing\ntriggers: bare-string-trigger',
+        ]
+        for block in blocks:
+            strict = yaml.safe_load(block) or {}
+            lenient = _lenient_parse(block.split('\n'))
+            s = _normalize_frontmatter(dict(strict))
+            l = _normalize_frontmatter(dict(lenient))
+            for k in ('name', 'description', 'triggers'):
+                assert s.get(k) == l.get(k), f"divergence on {k!r}: strict={s.get(k)!r} lenient={l.get(k)!r}"
+        # Colon-injection variant: inject an unescaped colon into a scalar (forces strict to raise),
+        # then lenient must recover the same consumed keys strict would have produced.
+        injected = 'name: my-skill\ndescription: This is: x\ntriggers:\n  - trigger1'
+        expected = _normalize_frontmatter({'name': 'my-skill', 'description': 'This is: x',
+                                           'triggers': ['trigger1']})
+        lenient = _lenient_parse(injected.split('\n'))
+        l = _normalize_frontmatter(lenient)
+        for k in ('name', 'description', 'triggers'):
+            assert l.get(k) == expected.get(k), f"colon-injection divergence on {k!r}: {l.get(k)!r}"
 
 
 class TestParseSkillFile:
