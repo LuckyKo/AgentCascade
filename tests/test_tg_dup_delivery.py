@@ -314,6 +314,79 @@ def test_dedup_falls_back_to_message_id_when_update_id_absent():
         f'expected exactly 1 injection when deduping on message_id, got {ac.inject_message.call_count}'
 
 
+def test_dedup_drop_logged_at_warning(caplog):
+    """BUG_0023: a dedup drop must be auditable — logged at WARNING (not DEBUG only).
+
+    Pre-fix the only log on the dedup-hit path was ``logger.debug``, which is
+    disabled in normal operation, so a false-positive drop left zero trace.
+    This test FAILS pre-fix (no WARNING record exists) and passes post-fix.
+    """
+    import agent_cascade.telegram_bridge.bot as bot_mod
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+
+    async def _inject(text, target=None):
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+
+    ac.inject_message.side_effect = _inject
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    async def go():
+        update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text='do it', update_id=9101)
+        await bot_mod.on_message(update, context)
+        update2 = _make_update(user_id=FAKE_ALLOWED_USER_ID, text='do it', update_id=9101)
+        await bot_mod.on_message(update2, context)
+
+    with caplog.at_level(logging.WARNING, logger='agent_cascade_logger'):
+        _run(go())
+
+    drops = [r for r in caplog.records if r.levelno >= logging.WARNING and 'duplicate Telegram event' in r.getMessage()]
+    assert drops, 'expected a WARNING-level log on the dedup-drop path (DEBUG-only is unauditable)'
+
+
+def test_dedup_message_id_namespaced_by_chat():
+    """BUG_0023: the message_id fallback key must be namespaced by chat_id.
+
+    Telegram message_id is unique PER CHAT, not globally. Pre-fix the bare int was
+    stored flat, so two different chats sharing the same numeric message_id would
+    collide and the second message would be dropped as a false "duplicate".
+    Post-fix both messages are processed (two injections). FAILS pre-fix.
+    """
+    import agent_cascade.telegram_bridge.bot as bot_mod
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+
+    async def _inject(text, target=None):
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+
+    ac.inject_message.side_effect = _inject
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    async def go():
+        # Two DIFFERENT chats, same numeric message_id (42) on the fallback path.
+        update_a = _make_update(user_id=FAKE_ALLOWED_USER_ID, text='from A',
+                                chat_id=100, update_id=None, message_id=42)
+        await bot_mod.on_message(update_a, context)
+        update_b = _make_update(user_id=FAKE_ALLOWED_USER_ID, text='from B',
+                                chat_id=200, update_id=None, message_id=42)
+        await bot_mod.on_message(update_b, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+    assert ac.inject_message.call_count == 2, \
+        f'expected both chats to be processed (message_id namespaced by chat), got {ac.inject_message.call_count} injection(s)'
+
+
 # --------------------------------------------------------------------------- #
 # F2. Outbound observability
 # --------------------------------------------------------------------------- #

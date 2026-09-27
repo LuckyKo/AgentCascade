@@ -51,7 +51,10 @@ _SEND_ONE_MAX_ATTEMPTS = 5
 # Inbound idempotency: Telegram update ids already processed by on_message. A
 # redelivered update (PTB long-poll reconnect, sleep-wake, NAT expiry) must not
 # start a second AC run — the per-run push model would deliver the answer N times.
-_SEEN_TG_IDS: set[int] = set()
+# Keys are heterogeneous (BUG_0023): bare ints for globally-unique ``update_id``,
+# ``(chat_id, message_id)`` tuples for the per-chat-scoped ``message_id`` fallback
+# so two different chats cannot collide on the same numeric id.
+_SEEN_TG_IDS: set = set()
 _SEEN_TG_IDS_MAX = 1000
 
 
@@ -262,20 +265,33 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
     # reconnect, sleep-wake, NAT expiry) must not start a second AC run, or the
     # per-run push model delivers the answer N times.
     tg_id = getattr(update, 'update_id', None)
+    key_kind = 'update_id'
     if tg_id is None:
+        # Fallback key: message_id is unique PER CHAT, not globally (BUG_0023),
+        # so namespace it by chat_id to keep it a valid dedup key in multi-user
+        # setups. update_id stays a bare int — it IS globally unique per bot.
         _msg = getattr(update, 'effective_message', None)
         tg_id = getattr(_msg, 'message_id', None) if _msg is not None else None
+        key_kind = 'message_id'
 
     if tg_id is None:
         # No usable key — proceed rather than risk dropping a real message.
         logger.debug('TG update has no update_id/message_id; skipping inbound dedup')
+    elif key_kind == 'message_id':
+        _key = (chat_id, tg_id)
+        if _key in _SEEN_TG_IDS:
+            # WARNING (not DEBUG): a false-positive drop must be auditable from
+            # production logs — the id + chat + key kind say which message vanished.
+            logger.warning('ignoring duplicate Telegram event id=%s (message_id fallback, chat_id=%s)', tg_id, chat_id)
+            return
+        _SEEN_TG_IDS.add(_key)
     else:
         if tg_id in _SEEN_TG_IDS:
-            logger.debug('ignoring duplicate Telegram event id=%s', tg_id)
+            logger.warning('ignoring duplicate Telegram event id=%s (update_id)', tg_id)
             return
         _SEEN_TG_IDS.add(tg_id)
-        if len(_SEEN_TG_IDS) > _SEEN_TG_IDS_MAX:   # Bounded size; clear all on overflow to prevent unbounded growth.
-            _SEEN_TG_IDS.clear()
+    if len(_SEEN_TG_IDS) > _SEEN_TG_IDS_MAX:   # Bounded size; clear all on overflow to prevent unbounded growth.
+        _SEEN_TG_IDS.clear()
 
     # System-command interception (Phase 2): registered slash-commands are handled
     # locally / via AC REST endpoints and answered directly. They NEVER reach the
