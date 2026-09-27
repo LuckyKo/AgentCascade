@@ -52,6 +52,31 @@ if _PROJECT_ROOT not in sys.path:
 
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
+from agent_cascade.runtime_state import state as _runtime_state
+
+# ---------------------------------------------------------------------------
+# BUG_0029 Phase 2 — process-global runtime state isolation (R1)
+# ---------------------------------------------------------------------------
+# runtime_state.state is a process-level singleton. Any test that mutates it must
+# restore it, or the value leaks across tests (fatal under pytest -n auto where many
+# files share one worker process). This autouse FUNCTION fixture snapshots vars(state)
+# before each test and restores it after — per-test isolation, so a leaked mutation in
+# one test can never contaminate its neighbours.
+
+
+@pytest.fixture(autouse=True)
+def _restore_runtime_state():
+    snapshot = dict(vars(_runtime_state))
+    yield
+    for key, value in list(vars(_runtime_state).items()):
+        if key in snapshot:
+            setattr(_runtime_state, key, snapshot[key])
+        else:
+            try:
+                delattr(_runtime_state, key)
+            except AttributeError:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Local LLM Auto-Detection — session-scoped probe at test startup

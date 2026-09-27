@@ -54,12 +54,18 @@ class ApprovalMixin:
     """Approval-related instance methods. Expects self to have __init__-set attributes."""
 
     def set_approval_timeout(self, seconds):
-        """Set the approval timeout duration in seconds (clamped 10s–2h)."""
-        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+        """Set the approval timeout duration in seconds (clamped 10s–2h).
+
+        BUG_0029 Phase 2: delegate to runtime_state.state (single owner of UI-settable
+        state); clamping semantics are preserved verbatim.
+        """
+        from agent_cascade.runtime_state import state as _runtime_state
+        _runtime_state.set_approval_timeout(seconds)
 
     def set_enable_timeout(self, enabled):
         """Enable or disable approval timeout."""
-        self.enable_timeout = bool(enabled)
+        from agent_cascade.runtime_state import state as _runtime_state
+        _runtime_state.set_enable_timeout(enabled)
 
     def set_afk(self, enabled: bool, message: Optional[str] = None) -> None:
         """Set the server-backed AFK flag (shared by WebUI and Telegram bridge).
@@ -67,10 +73,12 @@ class ApprovalMixin:
         ``message`` is optional; when absent the stored afk_message is left untouched
         so a toggle-only caller (e.g. Telegram /afk) cannot clobber a UI-set message.
         Unrelated to the time-based approval timeout (enable_timeout).
+
+        BUG_0029 Phase 2: delegate to runtime_state.state; message-preservation
+        semantics are preserved verbatim.
         """
-        self.afk_enabled = bool(enabled)
-        if message is not None:
-            self.afk_message = str(message)
+        from agent_cascade.runtime_state import state as _runtime_state
+        _runtime_state.set_afk(enabled, message)
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 

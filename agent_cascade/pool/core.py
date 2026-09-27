@@ -13,6 +13,7 @@ from agent_cascade.instance_id import get_instance_id
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
+from agent_cascade.runtime_state import state as _runtime_state
 
 from ..agent_instance import ACTIVE_STATES, AgentInstance, PoolSettings
 from ..async_tools import AsyncToolRegistry
@@ -67,6 +68,19 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
     LoggerManager and IdleManager are separate modules (they have distinct
     lifecycles: file I/O, background threads).
     """
+
+    # BUG_0029 Phase 2: auto_security is a class-level property delegating to the
+    # process-level runtime_state.state singleton (single owner of UI-settable state).
+    @property
+    def auto_security(self) -> bool:
+        return _runtime_state.auto_security
+
+    @auto_security.setter
+    def auto_security(self, value: bool) -> None:
+        # Boot/load-path writes update state WITHOUT persisting — the setter is the
+        # assignment channel, not the toggle API. Persistence belongs to
+        # set_auto_security() (the single writer).
+        _runtime_state._assign_auto_security(bool(value))
 
     def __init__(
         self,
@@ -130,7 +144,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         else:
             self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
         self._settings_save_lock = threading.Lock()  # guards concurrent save operations
-        self.auto_security = True  # BUG_0029: LIVE single source of truth for auto-security mode
+        # BUG_0029 Phase 2: seeds runtime_state.state.auto_security through the class-level
+        # property (assignment channel — no persistence). Must stay BEFORE _load_pool_settings()
+        # so the load path can write through it.
+        self.auto_security = True
         self._loaded_auto_security = None  # persistence shadow (None = no persisted value on disk)
         self._load_pool_settings()  # load persisted values, overriding defaults
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
@@ -437,11 +454,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             logger.debug('Stopped flag cleared — ready for new execution')
 
     def set_auto_security(self, enabled: bool) -> None:
-        """BUG_0029: the single writer for auto-security mode.
+        """BUG_0029 Phase 2: the single writer for auto-security mode.
 
-        Sets the LIVE pool flag (reachable from every thread context via back-refs),
-        updates the persistence shadow, and saves pool settings ONLY when the value
-        actually changed (avoids a redundant disk write on startup re-application).
+        Thin delegate to ``runtime_state.state.set_auto_security`` (the toggle channel),
+        wrapped with change-detection and persistence: saves pool settings ONLY when the
+        value actually changed (avoids a redundant disk write on startup re-application).
         All former writers of ``app.current_auto_security`` (create_app, apply_auto_security,
         the settings-import path) route through this method — so no manual mirror can
         desync anymore.
@@ -449,7 +466,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         new_value = bool(enabled)
         if self.auto_security == new_value:
             return  # no-op: value unchanged (e.g. startup re-applying a persisted value)
-        self.auto_security = new_value
+        _runtime_state.set_auto_security(new_value)
         self._loaded_auto_security = new_value
         try:
             self._save_pool_settings()

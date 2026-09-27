@@ -558,6 +558,148 @@ class TestInstanceConversations:
 
 
 # ===========================================================================
+# BUG_0029 Phase 2 — runtime_state singleton delegation (pool + OM)
+# ===========================================================================
+
+
+def _save_pool_settings_counter():
+    """Return (calls_list, fn) where fn appends to calls_list."""
+    calls = []
+    return calls, lambda: calls.append(1)
+
+
+class TestRuntimeStateDelegation:
+    """BUG_0029 Phase 2: pool.auto_security and the four OM UI fields delegate to the
+    process-level runtime_state.state singleton.
+
+    Every test mutates process-global state → try/finally restore (see also the autouse
+    session fixture in conftest.py that snapshots vars(state)).
+    """
+
+    @staticmethod
+    def _snapshot():
+        from agent_cascade.runtime_state import state
+        return dict(vars(state))
+
+    @staticmethod
+    def _restore(snap):
+        from agent_cascade.runtime_state import state
+        for key, value in list(vars(state).items()):
+            if key in snap:
+                setattr(state, key, snap[key])
+            else:
+                try:
+                    delattr(state, key)
+                except AttributeError:
+                    pass
+
+    def test_state_singleton_is_seeded_from_pool(self, agent_pool):
+        """Constructing an AgentPool seeds state.auto_security (assignment channel)."""
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            assert isinstance(agent_pool.auto_security, bool)
+            # The pool's __init__ seeded the singleton through the property.
+            assert state.auto_security == agent_pool.auto_security
+        finally:
+            self._restore(snap)
+
+    def test_pool_auto_security_property_round_trips(self, agent_pool):
+        """Assigning pool.auto_security updates state (and back), without persisting."""
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            saved_saves = agent_pool._save_pool_settings
+            saves_calls, counting_fn = _save_pool_settings_counter()
+            agent_pool._save_pool_settings = counting_fn
+            try:
+                pool_value = not bool(state.auto_security)
+                agent_pool.auto_security = pool_value
+                assert state.auto_security == pool_value
+                assert agent_pool.auto_security == pool_value  # getter reads state back
+            finally:
+                agent_pool._save_pool_settings = saved_saves
+            assert saves_calls == [], 'assignment channel must not persist'
+        finally:
+            self._restore(snap)
+
+    def test_pool_auto_security_setter_does_not_persist(self, agent_pool):
+        """Guard for the two-channel design: the property setter is assignment-only.
+
+        Fails if the setter is collapsed into the toggle API (set_auto_security).
+        """
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            saved_saves = agent_pool._save_pool_settings
+            saves_calls, counting_fn = _save_pool_settings_counter()
+            agent_pool._save_pool_settings = counting_fn
+            try:
+                state.auto_security = True
+                agent_pool.auto_security = False  # assignment channel
+                assert state.auto_security is False
+            finally:
+                agent_pool._save_pool_settings = saved_saves
+            assert saves_calls == [], (
+                f'pool.auto_security setter must not call _save_pool_settings, '
+                f'got {len(saves_calls)} call(s)'
+            )
+        finally:
+            self._restore(snap)
+
+    def test_pool_set_auto_security_does_persist(self, agent_pool):
+        """The inverse guard: set_auto_security (toggle API) persists on a real change."""
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            saved_saves = agent_pool._save_pool_settings
+            saves_calls, counting_fn = _save_pool_settings_counter()
+            agent_pool._save_pool_settings = counting_fn
+            try:
+                toggle_value = not bool(state.auto_security)
+                state.auto_security = toggle_value  # ensure a real change below
+                agent_pool.set_auto_security(not toggle_value)
+                assert state.auto_security == (not toggle_value)
+                assert saves_calls, 'set_auto_security must persist on a value change'
+            finally:
+                agent_pool._save_pool_settings = saved_saves
+        finally:
+            self._restore(snap)
+
+    def test_om_setters_preserve_clamping(self):
+        """OM approval-timeout setters keep the 10s–2h clamp (delegated to state)."""
+        from agent_cascade.operation_manager import OperationManager
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            om = OperationManager(base_dir='/tmp/fake_om_ws')
+            om.set_approval_timeout(5)
+            assert om.approval_timeout_seconds == 10
+            assert state.approval_timeout_seconds == 10
+            om.set_approval_timeout(99999)
+            assert om.approval_timeout_seconds == 7200
+            assert state.approval_timeout_seconds == 7200
+        finally:
+            self._restore(snap)
+
+    def test_set_afk_none_message_preserves_existing(self):
+        """set_afk(enabled, None) must leave the stored afk_message untouched."""
+        from agent_cascade.operation_manager import OperationManager
+        from agent_cascade.runtime_state import state
+        snap = self._snapshot()
+        try:
+            om = OperationManager(base_dir='/tmp/fake_om_ws')
+            om.set_afk(True, 'brb 5 min')
+            assert state.afk_enabled is True
+            assert state.afk_message == 'brb 5 min'
+            om.set_afk(False)  # toggle-only caller (e.g. Telegram /afk)
+            assert state.afk_enabled is False
+            assert state.afk_message == 'brb 5 min', 'message must be preserved when None'
+        finally:
+            self._restore(snap)
+
+
+# ===========================================================================
 # AFK flag persistence + restart restore (server-backed, shared by WebUI + TG)
 # ===========================================================================
 

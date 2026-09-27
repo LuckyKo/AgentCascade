@@ -60,6 +60,16 @@ class _FakePool:
     def __init__(self, **settings_kw):
         self.settings = _FakeSettings(**settings_kw)
         self.save_calls = 0
+        # BUG_0029 Phase 2: create_app()'s current_auto_security alias routes its setter
+        # through pool.set_auto_security — the fake must expose it (no-op is fine here;
+        # these tests assert on idle-timeout persistence, not the security flag).
+        self.auto_security = True
+        self._loaded_auto_security = None
+
+        def _set_auto_security_stub(enabled):
+            self.auto_security = bool(enabled)
+
+        self.set_auto_security = _set_auto_security_stub
         # Attributes create_app() reads after the startup block (must not raise).
         self.instances = {}
         self.instance_summaries = {}

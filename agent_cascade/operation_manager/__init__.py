@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 # Import mixins
@@ -42,6 +43,42 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
     Maintains the same API as the original monolithic OperationManager for backward compatibility.
     """
 
+    # BUG_0029 Phase 2: UI-settable fields are class-level properties delegating to the
+    # process-level runtime_state.state singleton (single owner of UI-settable state).
+    # Their setters write state directly — no persistence here; apply_afk (ws_handlers.py)
+    # and config_persist.py own the save.
+    @property
+    def enable_timeout(self) -> bool:
+        return _runtime_state.enable_timeout
+
+    @enable_timeout.setter
+    def enable_timeout(self, value: bool) -> None:
+        _runtime_state.enable_timeout = bool(value)
+
+    @property
+    def approval_timeout_seconds(self) -> int:
+        return _runtime_state.approval_timeout_seconds
+
+    @approval_timeout_seconds.setter
+    def approval_timeout_seconds(self, value: int) -> None:
+        _runtime_state.approval_timeout_seconds = max(10, min(int(value), 7200))
+
+    @property
+    def afk_enabled(self) -> bool:
+        return _runtime_state.afk_enabled
+
+    @afk_enabled.setter
+    def afk_enabled(self, value: bool) -> None:
+        _runtime_state.afk_enabled = bool(value)
+
+    @property
+    def afk_message(self) -> str:
+        return _runtime_state.afk_message
+
+    @afk_message.setter
+    def afk_message(self, value: str) -> None:
+        _runtime_state.afk_message = str(value)
+
     def __init__(self, base_dir: str = DEFAULT_WORKSPACE, agent_pool=None):
         self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -69,14 +106,12 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
         # Key: resolved file path string, Value: count of heuristic edits
         self._heuristic_edit_counts: Dict[str, int] = {}
 
-        # User toggleable timeout
-        self.enable_timeout: bool = True
-        self.approval_timeout_seconds: int = 300  # Default 5 minutes (can be overridden from UI)
-
-        # AFK mode: single server-backed source of truth for BOTH the WebUI and the Telegram bridge.
-        # Drives server-side idle auto-reply + auto-reject. Unrelated to enable_timeout above.
-        self.afk_enabled: bool = False
-        self.afk_message: str = ''
+        # User toggleable timeout + AFK mode (BUG_0029 Phase 2): the four UI-settable fields
+        # are class-level properties delegating to runtime_state.state — no instance
+        # assignments here anymore. The state defaults (enable_timeout=True,
+        # approval_timeout_seconds=300, afk_enabled=False, afk_message='') match the former
+        # per-instance defaults; persistence/restore of saved values is owned by
+        # config_persist.py (_apply_pending_config).
 
         import atexit
         atexit.register(self.cleanup_backups)

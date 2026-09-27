@@ -1548,14 +1548,22 @@ class TestAfkServerAutoReject:
         om.afk_enabled = False
         om.enable_timeout = True
         # The wait loop uses `self.approval_timeout_seconds if self.enable_timeout else 3600`.
-        # set_approval_timeout clamps to a 10s floor, so set the attr directly for speed.
-        om.approval_timeout_seconds = 0.2
-        start = time.time()
-        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
-        elapsed = time.time() - start
-        assert ok is False
-        assert reason == 'User is AFK, try another method if possible'
-        assert elapsed < 5  # timed out via the untouched path, not hung
+        # BUG_0029 Phase 2: the field is a class-level property delegating to
+        # runtime_state.state, whose setter clamps to the 10s floor — so patch the
+        # singleton attribute directly (the pre-property equivalent of "set the attr
+        # directly for speed").
+        from agent_cascade.runtime_state import state as _runtime_state
+        saved_timeout = _runtime_state.approval_timeout_seconds
+        try:
+            _runtime_state.approval_timeout_seconds = 0.2
+            start = time.time()
+            ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+            elapsed = time.time() - start
+            assert ok is False
+            assert reason == 'User is AFK, try another method if possible'
+            assert elapsed < 5  # timed out via the untouched path, not hung
+        finally:
+            _runtime_state.approval_timeout_seconds = saved_timeout
 
 
 class _AfkNudgePool:
