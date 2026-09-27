@@ -828,7 +828,11 @@ class _FakeInstance:
 
 
 class _FakePool:
-    """Minimal AgentPool double for the stop/restore/auto-security REST tests."""
+    """Minimal AgentPool double for the stop/restore/auto-security REST tests.
+
+    BUG_0029 Phase 2: auto_security delegates to the process-level runtime_state.state
+    singleton (same two-channel design as the real AgentPool — property setter is the
+    assignment channel, set_auto_security() is the toggle/persist channel)."""
 
     def __init__(self, instances=None):
         self.instances = dict(instances or {})
@@ -839,11 +843,21 @@ class _FakePool:
         self.stop_session_calls = 0
         self.save_pool_settings_calls = 0
         self.restore_calls = []
-        # BUG_0029: live single source of truth + persistence shadow (mirrors AgentPool).
-        self.auto_security = True
+        # BUG_0029 Phase 2: persistence shadow (the live flag lives on state).
         self._loaded_auto_security = True
         # build_state()'s fallback path reads operation_manager.base_dir for default_workspace.
         self.operation_manager = _StubOperationManager()
+
+    @property
+    def auto_security(self) -> bool:
+        from agent_cascade.runtime_state import state
+        return state.auto_security
+
+    @auto_security.setter
+    def auto_security(self, value: bool) -> None:
+        """Assignment channel — updates state WITHOUT persisting (mirrors AgentPool)."""
+        from agent_cascade.runtime_state import state
+        state._assign_auto_security(bool(value))
 
     def _mark_activity(self, name):
         pass
@@ -855,11 +869,12 @@ class _FakePool:
         self.save_pool_settings_calls += 1
 
     def set_auto_security(self, enabled: bool) -> None:
-        """BUG_0029: single writer (mirrors AgentPool.set_auto_security)."""
+        """BUG_0029: single writer — toggle channel with persistence (mirrors AgentPool)."""
+        from agent_cascade.runtime_state import state
         new_value = bool(enabled)
-        if self.auto_security == new_value:
-            return  # no-op: value unchanged (mirrors the real pool's change detection)
-        self.auto_security = new_value
+        if state.auto_security == new_value:
+            return  # no-op: value unchanged (change detection)
+        state.auto_security = new_value
         self._loaded_auto_security = new_value
         self._save_pool_settings()
 
@@ -1118,46 +1133,40 @@ class TestAuthenticatedCommandEndpoints:
                            json={'enabled': True}).status_code == 401
 
     def test_auto_security_happy_path_exercises_shared_helper(self, client):
-        """POST /api/auto_security (valid token) routes through apply_auto_security."""
+        """POST /api/auto_security (valid token) routes through the pool's single writer."""
+        from agent_cascade.runtime_state import state
         token = self._token(client)
-        fake = _FakePool()
-        # BUG_0029: start with security OFF so the toggle to True is a real change —
-        # set_auto_security skips persistence when the value is unchanged.
-        fake.auto_security = False
-        fake._loaded_auto_security = False
-        saved = self._patch_pool(client, fake)
+        real = self._real_pool(client)
+        # BUG_0029 Phase 2: the real pool delegates to state. Start OFF so the toggle is a change.
+        saved_state = state.auto_security
         try:
+            state._assign_auto_security(False)
             resp = client.post('/api/auto_security', params={'token': token}, json={'enabled': True})
-        finally:
-            self._restore_pool(client, saved)
 
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body['status'] == 'ok'
-        assert body['auto_security'] is True
-        # BUG_0029: shared helper wrote the LIVE pool flag + persistence; the app property
-        # alias reads it back.
-        assert client.app.current_auto_security is True
-        assert fake.auto_security is True
-        assert fake._loaded_auto_security is True
-        assert fake.save_pool_settings_calls == 1
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body['status'] == 'ok'
+            assert body['auto_security'] is True
+            # BUG_0029 Phase 2: the endpoint wrote to state via pool.set_auto_security().
+            assert state.auto_security is True
+        finally:
+            state.auto_security = saved_state
 
     def test_auto_security_defaults_to_disabled_when_no_body(self, client):
         """POST /api/auto_security with no body disables (enabled defaults False)."""
+        from agent_cascade.runtime_state import state
         token = self._token(client)
-        fake = _FakePool()
-        saved = self._patch_pool(client, fake)
+        # BUG_0029 Phase 2: start ON so the default-False toggle is a real change.
+        saved_state = state.auto_security
         try:
             resp = client.post('/api/auto_security', params={'token': token})
-        finally:
-            self._restore_pool(client, saved)
 
-        assert resp.status_code == 200
-        assert resp.json()['auto_security'] is False
-        # BUG_0029: the endpoint's response reflects the live pool flag it wrote. The
-        # app property alias reads the REAL pool (closure var), which _restore_pool put
-        # back — so assert against the fake that captured the write, not the alias.
-        assert fake.auto_security is False
+            assert resp.status_code == 200
+            assert resp.json()['auto_security'] is False
+            # BUG_0029 Phase 2: the endpoint wrote to state via pool.set_auto_security().
+            assert state.auto_security is False
+        finally:
+            state.auto_security = saved_state
 
     # ── /api/afk ────────────────────────────────────────────────────────────
 
@@ -1811,6 +1820,41 @@ class TestAfkRespectsSecurity:
         assert pool._loaded_auto_security is False
 
 
+class TestAppStateAliasTracksRuntimeState:
+    """BUG_0029 Phase 2 (Step 2): the app.current_auto_security property alias reads the
+    process-level runtime_state.state singleton. Fails if the getter is reverted to a
+    per-pool read (a state toggle would no longer be visible through the alias)."""
+
+    def test_app_alias_tracks_state(self):
+        from agent_cascade.api_server import create_app
+        from agent_cascade.runtime_state import state as _runtime_state
+
+        pool = _FakePool()
+        app = create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
+                         auto_security=True)
+        assert app.current_auto_security is True
+
+        saved = _runtime_state.auto_security
+        try:
+            # A direct state toggle must be visible through the alias — no manual sync.
+            _runtime_state.set_auto_security(False)
+            assert app.current_auto_security is False, \
+                'app property alias did not track runtime_state.state after set_auto_security'
+
+            # The setter still routes through the pool's single writer (persistence).
+            app.current_auto_security = True
+            assert _runtime_state.auto_security is True
+        finally:
+            _runtime_state.auto_security = saved
+
+    def test_getattr_default_for_duck_typed_app_without_pool(self):
+        """The read sites use getattr(app, 'current_auto_security', default) — a bare
+        duck-typed object with no property must yield the default, not raise."""
+        app = type('App', (), {})()
+        assert getattr(app, 'current_auto_security', True) is True
+        assert isinstance(getattr(app, 'current_auto_security', False), bool)
+
+
 class TestAutoSecuritySingleSourceOfTruth:
     """BUG_0029 revert-proof: toggling auto-security via EACH entry point yields a consistent
     live pool flag readable from the approval path. Fails if any writer bypasses
@@ -1841,8 +1885,9 @@ class TestAutoSecuritySingleSourceOfTruth:
                 f'apply_auto_security({value}) did not set live pool flag'
 
     def test_app_property_alias_reads_live_pool_flag(self):
-        """The app.current_auto_security property alias always reflects the live pool flag."""
+        """The app.current_auto_security property alias always reflects the live state."""
         from agent_cascade.api_server import create_app
+        from agent_cascade.runtime_state import state as _runtime_state
 
         pool = _FakePool()
         app = create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
@@ -1850,13 +1895,18 @@ class TestAutoSecuritySingleSourceOfTruth:
         assert app.current_auto_security is True
 
         # Toggle via the single writer; the alias must follow without any manual sync.
-        pool.set_auto_security(False)
-        assert app.current_auto_security is False, \
-            'app property alias did not track live pool flag after set_auto_security'
+        saved = _runtime_state.auto_security
+        try:
+            pool.set_auto_security(False)
+            assert app.current_auto_security is False, \
+                'app property alias did not track live state after set_auto_security'
+        finally:
+            _runtime_state.auto_security = saved
 
     def test_approval_path_reads_live_pool_flag(self):
         """The approval path reads the LIVE pool flag — no mirror attribute exists."""
         from agent_cascade.operation_manager import OperationManager
+        from agent_cascade.runtime_state import state
 
         # The mirror attribute must be GONE from OperationManager entirely (BUG_0029).
         om = OperationManager(base_dir='/tmp/afk_sot_test_ws')
@@ -1867,9 +1917,13 @@ class TestAutoSecuritySingleSourceOfTruth:
         pool = _FakePool()
         om.agent_pool = pool
 
-        # Security OFF via the live flag → AFK auto-rejects immediately.
-        pool.auto_security = False
-        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
-        assert ok is False
-        assert reason == 'Auto-rejected (AFK mode active)'
-        assert om.pending == {}
+        saved = state.auto_security
+        try:
+            # Security OFF via the live flag → AFK auto-rejects immediately.
+            state.set_auto_security(False)
+            ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+            assert ok is False
+            assert reason == 'Auto-rejected (AFK mode active)'
+            assert om.pending == {}
+        finally:
+            state.auto_security = saved

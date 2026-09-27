@@ -50,6 +50,7 @@ from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.operation_manager import OperationManager
+from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade.log import logger
 
 try:
@@ -405,18 +406,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # (created lazily in security_handler.py) to prevent unlimited parallelism
     # and allow reentrant acquisition for nested security checks.
 
-    # ── BUG_0029: current_auto_security property alias ────────────────────────
-    # The FastAPI `app` object is NOT reachable from every thread context (the
-    # approval/tool-execution threads only hold om.agent_pool), so the live flag lives on
-    # the pool. This per-instance descriptor keeps all existing getattr(app,
-    # 'current_auto_security', ...) read sites and direct assignments working unchanged.
-    # We give THIS app its own lightweight subclass carrying the property — each
-    # create_app() call produces an independent class bound to ITS pool, so multiple
-    # apps in one process never share state (no shared-class mutation).
+    # ── BUG_0029 Phase 2: current_auto_security property alias ────────────────
+    # The live flag lives on the process-level runtime_state.state singleton
+    # (single owner of UI-settable state). This per-instance descriptor keeps all
+    # existing getattr(app, 'current_auto_security', ...) read sites and direct
+    # assignments working unchanged. We give THIS app its own lightweight subclass
+    # carrying the property — each create_app() call produces an independent class,
+    # so multiple apps in one process never share state (no shared-class mutation).
     _auto_sec_pool = agent_pool
 
     def _get_current_auto_security(self):
-        return bool(_auto_sec_pool.auto_security)
+        return bool(_runtime_state.auto_security)
 
     def _set_current_auto_security(self, value):
         _auto_sec_pool.set_auto_security(bool(value))
@@ -431,7 +431,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         _new_cls._auto_security_pool_ref = _auto_sec_pool  # marker: which pool this class serves
         app.__class__ = _new_cls
 
-    # Initialize Auto-Ask Security mode state (routes through the single writer).
+    # Initialize Auto-Ask Security mode state. The value is already the singleton's
+    # value (state.auto_security defaults True and was seeded by the pool), so this
+    # setter call is a no-op — but it keeps the auto_security parameter contract at
+    # create_app() intact (a real change would still route through the single writer).
     app.current_auto_security = auto_security
 
     app.add_middleware(
