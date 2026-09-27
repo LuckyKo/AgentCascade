@@ -66,7 +66,25 @@ from agent_cascade.runtime_state import state as _runtime_state
 
 @pytest.fixture(autouse=True)
 def _restore_runtime_state():
-    snapshot = dict(vars(_runtime_state))
+    """Snapshot and restore process-global runtime state (R1).
+
+    Mutable attributes (sets, dicts) are copied by value so that in-test mutations
+    don't leak. Lock objects are non-copyable and are left as-is — tests must not
+    leave them locked (the security-handler tests use try/finally for this).
+    """
+    import copy
+    _LOCK_TYPES = (type(_runtime_state.security_check_lock),
+                   type(_runtime_state.security_execution_lock))
+    snapshot = {}
+    for key, value in vars(_runtime_state).items():
+        if isinstance(value, _LOCK_TYPES):
+            snapshot[key] = value  # locks: reference only (non-copyable)
+        elif isinstance(value, (set, frozenset)):
+            snapshot[key] = set(value)  # copy the set contents
+        elif isinstance(value, dict):
+            snapshot[key] = dict(value)  # shallow dict copy (values are scalars)
+        else:
+            snapshot[key] = value  # bools, ints, floats, strings: immutable
     yield
     for key, value in list(vars(_runtime_state).items()):
         if key in snapshot:
