@@ -29,6 +29,7 @@ from agent_cascade.llm.qwen_dashscope import initialize_dashscope
 from agent_cascade.llm.schema import ASSISTANT, ContentItem, FunctionCall, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.utils.streaming import StreamStalledError
 from agent_cascade.utils.utils import hash_sha256, save_audio_to_file
 
 
@@ -72,7 +73,9 @@ class QwenVLChatAtDS(BaseFnCallModel):
 
             try:
                 yield from self._stream_generator(response)
-            except RuntimeError as ex:
+            except StreamStalledError as ex:
+                # Catch ONLY the watchdog timeout (BUG_0028); unrelated RuntimeErrors
+                # propagate with their natural type instead of a generic retryable wrap.
                 raise ModelServiceError(exception=ex) from ex
 
         return _do_stream()

@@ -34,6 +34,7 @@ from agent_cascade.llm.base import ModelServiceError, _fire_usage_callback, regi
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
+from agent_cascade.utils.streaming import StreamStalledError
 
 # Thread lock for protecting shared config state (api_base / api_key updates)
 _config_lock = threading.Lock()
@@ -777,8 +778,9 @@ class TextChatAtOAI(BaseFnCallModel):
         except OpenAIError as ex:
             code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
             raise ModelServiceError(exception=ex, code=code if code else None)
-        except RuntimeError as ex:
-            # Catch watch_stream timeouts and wrap as ModelServiceError for retry logic
+        except StreamStalledError as ex:
+            # Catch ONLY the watchdog timeout (BUG_0028); unrelated RuntimeErrors
+            # propagate with their natural type instead of a generic retryable wrap.
             raise ModelServiceError(exception=ex)
         except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped

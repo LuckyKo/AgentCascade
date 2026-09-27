@@ -281,3 +281,30 @@ def test_full_path_watchdog_error_is_retryable(monkeypatch, tight_stream_limits)
         list(llm.chat(messages=[{'role': 'user', 'content': 'hi'}],
                       stream=True, delta_stream=False, extra_generate_cfg={}))
     assert classify_error(exc_info.value) == 'retryable'
+
+
+def test_full_path_non_stall_runtimeerror_not_masked_as_retryable(monkeypatch):
+    """BUG_0028: an unrelated RuntimeError raised inside _chat_stream must propagate with
+    its natural type — NOT be wrapped in a generic retryable ModelServiceError.
+
+    Pre-fix, oai.py's broad ``except RuntimeError`` arm caught ANY RuntimeError in the
+    stream body (not just the watchdog's timeout) and wrapped it as a retryable
+    ModelServiceError — masking real programming errors behind a pointless retry.
+    Post-fix only StreamStalledError is wrapped; this plain RuntimeError propagates
+    unmasked with its original type. FAILS pre-fix (ModelServiceError raised, which is
+    not a RuntimeError subclass and would escape pytest.raises(RuntimeError)).
+    """
+    from agent_cascade.llm.oai import TextChatAtOAI
+
+    llm = TextChatAtOAI({'api_base': 'http://127.0.0.1:9/v1', 'model': 'my-alias'})
+
+    def _boom(**kw):
+        raise RuntimeError('simulated chunk-processing bug')
+
+    llm._chat_complete_create = _boom
+    with pytest.raises(RuntimeError, match='simulated chunk-processing bug') as exc_info:
+        list(llm.chat(messages=[{'role': 'user', 'content': 'hi'}],
+                      stream=True, delta_stream=False, extra_generate_cfg={}))
+    # Must be the ORIGINAL RuntimeError — not a ModelServiceError wrapper.
+    assert type(exc_info.value) is RuntimeError, \
+        f'unrelated RuntimeError was masked as {type(exc_info.value).__name__} (BUG_0028)'

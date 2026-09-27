@@ -18,6 +18,16 @@ class _Err:
         self.exc = exc
 
 
+class StreamStalledError(RuntimeError):
+    """Raised by :func:`watch_stream` when the silence or total-duration guard trips.
+
+    BUG_0028: a dedicated subclass so backends can catch ONLY the watchdog timeout
+    (and classify it retryable) instead of matching on the broad ``RuntimeError``
+    type, which would also wrap unrelated programming errors raised inside
+    stream processing and mask them behind a generic retryable wrapper.
+    """
+
+
 def watch_stream(
     stream: Iterator[T],
     max_silence_seconds: float,
@@ -52,8 +62,9 @@ def watch_stream(
         error_message_prefix: Optional prefix for error messages (e.g., backend name).
 
     Raises:
-        RuntimeError: On silence timeout or total timeout. Caller should wrap in
-            ModelServiceError if needed.
+        StreamStalledError: On silence timeout or total timeout. Caller should wrap in
+            ModelServiceError if needed. (Subclass of RuntimeError for backwards
+            compatibility with existing broad catches — BUG_0028.)
         Any exception raised by the underlying iterator is re-raised unchanged
             (original type preserved) so existing ``except`` arms keep firing.
     """
@@ -85,7 +96,7 @@ def watch_stream(
             kind = 'total' if is_total else 'silence'
             limit = max_total_seconds if is_total else max_silence_seconds
             silence = (now - last_item_time) if last_item_time is not None else (now - stream_start)
-            raise RuntimeError(
+            raise StreamStalledError(
                 f"{prefix}stream_stalled: no data for {silence:.1f}s ({kind} limit={limit:.1f}s)")
         # Dispatch order is load-bearing: _Err BEFORE _SENTINEL. The reader's finally
         # enqueues the sentinel AFTER an error, so checking the sentinel first would

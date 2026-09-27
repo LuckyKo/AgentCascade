@@ -25,6 +25,7 @@ from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
+from agent_cascade.utils.streaming import StreamStalledError
 
 
 @register_llm('qwen_dashscope')
@@ -57,7 +58,9 @@ class QwenChatAtDS(BaseFnCallModel):
         def _wrap_stream(stream_iter):
             try:
                 yield from stream_iter
-            except RuntimeError as ex:
+            except StreamStalledError as ex:
+                # Catch ONLY the watchdog timeout (BUG_0028); unrelated RuntimeErrors
+                # propagate with their natural type instead of a generic retryable wrap.
                 raise ModelServiceError(exception=ex) from ex
 
         if delta_stream:
