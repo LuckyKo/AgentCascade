@@ -776,17 +776,52 @@ class TestOperationControl:
 class _StubOperationManager:
     """Minimal OperationManager double for hermetic approval/AFK tests.
 
-    Mirrors the real setter/getter surface used by the REST endpoints
-    (set_enable_timeout / set_approval_timeout / list_pending_approvals) with the
-    same clamping semantics as operation_manager/approval.py so behaviour matches.
+    BUG_0029 Phase 2 Step 5: afk/timeout fields are class-level properties that
+    delegate to runtime_state.state (matching the real OM). The REST endpoint
+    reads state directly for responses, so the stub must route through state too.
     """
 
+    @property
+    def afk_enabled(self) -> bool:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_enabled
+
+    @afk_enabled.setter
+    def afk_enabled(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.afk_enabled = bool(value)
+
+    @property
+    def afk_message(self) -> str:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_message
+
+    @afk_message.setter
+    def afk_message(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.afk_message = str(value)
+
+    @property
+    def enable_timeout(self) -> bool:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.enable_timeout
+
+    @enable_timeout.setter
+    def enable_timeout(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.enable_timeout = bool(value)
+
+    @property
+    def approval_timeout_seconds(self) -> int:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.approval_timeout_seconds
+
+    @approval_timeout_seconds.setter
+    def approval_timeout_seconds(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.approval_timeout_seconds = max(10, min(int(value), 7200))
+
     def __init__(self, pending=None):
-        self.enable_timeout = True
-        self.approval_timeout_seconds = 300
-        # AFK flag (server-backed) — same semantics as the real OperationManager setter.
-        self.afk_enabled = False
-        self.afk_message = ''
         self._pending = list(pending or [])
         # build_state() reads operation_manager.base_dir (default_workspace) and the
         # extra work folders when exposing pool settings to the frontend.
@@ -795,15 +830,16 @@ class _StubOperationManager:
         self.extra_work_folders_rw: list = []
 
     def set_enable_timeout(self, enabled):
-        self.enable_timeout = bool(enabled)
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_enable_timeout(enabled)
 
     def set_approval_timeout(self, seconds):
-        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_approval_timeout(seconds)
 
     def set_afk(self, enabled, message=None):
-        self.afk_enabled = bool(enabled)
-        if message is not None:
-            self.afk_message = str(message)
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_afk(enabled, message)
 
     def list_pending_approvals(self):
         return [dict(a) for a in self._pending]

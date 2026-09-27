@@ -1486,11 +1486,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         WsMessageHandler.apply_afk(agent_pool, bool(payload.get('enabled', False)), payload.get('message'))
 
+        # BUG_0029 Phase 2 Step 5: read live state for the response (not OM instance)
+        from agent_cascade.runtime_state import state as _runtime_state
         await _broadcast_state()
         return {
             'status': 'ok',
-            'enabled': om.afk_enabled,
-            'message': om.afk_message,
+            'enabled': _runtime_state.afk_enabled,
+            'message': _runtime_state.afk_message,
         }
 
     @app.post('/api/session/restore')

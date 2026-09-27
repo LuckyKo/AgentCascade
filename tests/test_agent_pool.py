@@ -707,15 +707,52 @@ class TestRuntimeStateDelegation:
 class _AfkOmDouble:
     """Real OperationManager-shaped double with the AFK surface set_afk needs.
 
-    Carries every attribute ``_save_pool_settings``/``_apply_pending_config`` read
-    off the OM (work folders, base_dir) so the persistence path runs unmodified.
+    BUG_0029 Phase 2 Step 5: afk/timeout fields are class-level properties that
+    delegate to runtime_state.state (matching the real OM). The save path now
+    reads state directly, so the double must route through state too.
     """
 
+    @property
+    def afk_enabled(self) -> bool:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_enabled
+
+    @afk_enabled.setter
+    def afk_enabled(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.afk_enabled = bool(value)
+
+    @property
+    def afk_message(self) -> str:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_message
+
+    @afk_message.setter
+    def afk_message(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.afk_message = str(value)
+
+    @property
+    def enable_timeout(self) -> bool:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.enable_timeout
+
+    @enable_timeout.setter
+    def enable_timeout(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.enable_timeout = bool(value)
+
+    @property
+    def approval_timeout_seconds(self) -> int:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.approval_timeout_seconds
+
+    @approval_timeout_seconds.setter
+    def approval_timeout_seconds(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        _rs.approval_timeout_seconds = max(10, min(int(value), 7200))
+
     def __init__(self):
-        self.afk_enabled = False
-        self.afk_message = ''
-        self.enable_timeout = True
-        self.approval_timeout_seconds = 300
         self.base_dir = Path('/tmp/afk_persist_ws')
         self.extra_work_folders_ro: list = []
         self.extra_work_folders_rw: list = []
@@ -725,15 +762,16 @@ class _AfkOmDouble:
         self.base_dir = Path(path)
 
     def set_afk(self, enabled, message=None):
-        self.afk_enabled = bool(enabled)
-        if message is not None:
-            self.afk_message = str(message)
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_afk(enabled, message)
 
     def set_enable_timeout(self, enabled):
-        self.enable_timeout = bool(enabled)
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_enable_timeout(enabled)
 
     def set_approval_timeout(self, seconds):
-        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+        from agent_cascade.runtime_state import state as _rs
+        _rs.set_approval_timeout(seconds)
 
 
 def _build_pool_with_afk_om(config_dir: str):
@@ -828,3 +866,63 @@ class TestAfkPersistence:
             assert om.afk_message == ''
         finally:
             _stop_pool(pool)
+
+    def test_afk_state_visible_from_state(self, tmp_path):
+        """BUG_0029 Phase 2 Step 5: AFK fields are readable from runtime_state.state directly."""
+        from agent_cascade.runtime_state import state as _runtime_state
+
+        saved_enabled = _runtime_state.afk_enabled
+        saved_message = _runtime_state.afk_message
+        try:
+            config_dir = str(tmp_path / 'config')
+            (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+            pool, om = _build_pool_with_afk_om(config_dir)
+            try:
+                # Write via OM (which delegates to state)
+                om.afk_enabled = True
+                om.afk_message = 'test msg'
+
+                # Verify the value is visible directly on state
+                assert _runtime_state.afk_enabled is True
+                assert _runtime_state.afk_message == 'test msg'
+
+                # Save and verify JSON has the right values
+                pool._save_pool_settings()
+                import json
+                with open(pool._pool_settings_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                assert data['afk_enabled'] is True
+                assert data['afk_message'] == 'test msg'
+            finally:
+                _stop_pool(pool)
+        finally:
+            _runtime_state.afk_enabled = saved_enabled
+            _runtime_state.afk_message = saved_message
+
+    def test_approval_timeout_persists_through_pool_save(self, tmp_path):
+        """BUG_0029 Phase 2 Step 5: approval timeout written via state persists through pool save."""
+        from agent_cascade.runtime_state import state as _runtime_state
+
+        saved_enable = _runtime_state.enable_timeout
+        saved_timeout = _runtime_state.approval_timeout_seconds
+        try:
+            config_dir = str(tmp_path / 'config')
+            (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+            pool, om = _build_pool_with_afk_om(config_dir)
+            try:
+                # Write via state setter
+                _runtime_state.set_approval_timeout(120)
+                _runtime_state.set_enable_timeout(True)
+
+                # Save and verify JSON
+                pool._save_pool_settings()
+                import json
+                with open(pool._pool_settings_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                assert data['approval_timeout_seconds'] == 120
+                assert data['enable_approval_timeout'] is True
+            finally:
+                _stop_pool(pool)
+        finally:
+            _runtime_state.enable_timeout = saved_enable
+            _runtime_state.approval_timeout_seconds = saved_timeout

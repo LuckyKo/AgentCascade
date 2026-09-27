@@ -54,21 +54,14 @@ class ConfigPersistMixin:
                 # a real bool after __init__, so no shadow check needed.
                 data['auto_security'] = bool(self.auto_security)
 
-                # Add approval timeout settings from operation_manager if available
-                if hasattr(self, 'operation_manager') and self.operation_manager:
-                    om = self.operation_manager
-                    if hasattr(om, 'enable_timeout'):
-                        data['enable_approval_timeout'] = om.enable_timeout
-                    if hasattr(om, 'approval_timeout_seconds'):
-                        data['approval_timeout_seconds'] = om.approval_timeout_seconds
+                # Add approval timeout settings (BUG_0029 Phase 2 Step 5: read from state directly)
+                from agent_cascade.runtime_state import state as _runtime_state
+                data['enable_approval_timeout'] = _runtime_state.enable_timeout
+                data['approval_timeout_seconds'] = _runtime_state.approval_timeout_seconds
 
                 # Add AFK settings (server-backed flag shared by WebUI + Telegram bridge)
-                if hasattr(self, 'operation_manager') and self.operation_manager:
-                    om = self.operation_manager
-                    if hasattr(om, 'afk_enabled'):
-                        data['afk_enabled'] = bool(om.afk_enabled)
-                    if hasattr(om, 'afk_message'):
-                        data['afk_message'] = om.afk_message
+                data['afk_enabled'] = bool(_runtime_state.afk_enabled)
+                data['afk_message'] = _runtime_state.afk_message
 
                 # Add async shell console window toggle
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
