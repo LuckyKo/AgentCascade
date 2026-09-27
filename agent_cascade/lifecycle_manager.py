@@ -12,7 +12,7 @@ import datetime
 import time
 from typing import TYPE_CHECKING, Optional, Tuple
 
-from agent_cascade.agent_instance import AgentInstance, AgentState, _SystemPromptFrozenError
+from agent_cascade.agent_instance import AgentInstance, AgentState, SystemPromptFrozenError
 from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.log import logger
@@ -36,31 +36,30 @@ def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance:
     """
     from agent_cascade.execution_engine import _build_session_metadata
 
-    # Frozen prompt: skip injection (a missing heading on a frozen prompt is
-    # pre-existing degradation, not a bug worth killing a live turn for).
-    # Lock-free bool read is safe here: the flag only transitions False→True once
-    # (at first successful _setup_turn) and this function is a best-effort no-op
-    # guard — a race would at worst cause one redundant injection on the same
-    # turn that freezes, which M1's own guard already prevents.
-    if getattr(instance, '_system_prompt_frozen', False):
-        logger.warning(
-            '[SYS_PROMPT_FROZEN] metadata injection skipped on live %s', instance.instance_name)
-        return
-
     # Defensive guard for empty content
     if not sys_msg.content or not sys_msg.content.strip():
         return
 
-    if '## Session Metadata' not in sys_msg.content:
-        meta_block = _build_session_metadata(pool, instance)
-        if meta_block:
-            content_lines = sys_msg.content.split('\n')
-            # Insert after identity line; skip extra blank/comment lines
-            # (matches execution_engine.py line 943)
-            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith('#') else 1
-            for i, ml in enumerate(meta_block.split('\n')):
-                content_lines.insert(insert_pos + i, ml)
-            sys_msg.content = '\n'.join(content_lines)
+    # Frozen prompt: skip injection (a missing heading on a frozen prompt is
+    # pre-existing degradation, not a bug worth killing a live turn for).
+    # Read under _compression_lock so the check and the write below are one
+    # atomic unit against a concurrent freeze_system_prompt().
+    with instance._compression_lock:
+        if getattr(instance, '_system_prompt_frozen', False):
+            logger.warning(
+                '[SYS_PROMPT_FROZEN] metadata injection skipped on live %s', instance.instance_name)
+            return
+
+        if '## Session Metadata' not in sys_msg.content:
+            meta_block = _build_session_metadata(pool, instance)
+            if meta_block:
+                content_lines = sys_msg.content.split('\n')
+                # Insert after identity line; skip extra blank/comment lines
+                # (matches execution_engine.py line 943)
+                insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith('#') else 1
+                for i, ml in enumerate(meta_block.split('\n')):
+                    content_lines.insert(insert_pos + i, ml)
+                sys_msg.content = '\n'.join(content_lines)
 
 
 class AgentLifecycleManager:
@@ -431,7 +430,7 @@ class AgentLifecycleManager:
                         # content
                         try:
                             instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
-                        except _SystemPromptFrozenError:
+                        except SystemPromptFrozenError:
                             logger.warning(
                                 '[SYS_PROMPT_FROZEN] edit_message_in_place(0) blocked on live %s — '
                                 'system prompt preserved', instance.instance_name)

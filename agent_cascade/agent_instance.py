@@ -67,8 +67,13 @@ class InvalidStateTransition(Exception):
         super().__init__(f"Invalid transition from {current_state.name} to {new_state.name}")
 
 
-class _SystemPromptFrozenError(Exception):
-    """Raised when a mutation targets conversation[0] of a frozen live instance."""
+class SystemPromptFrozenError(Exception):
+    """Raised when a mutation targets conversation[0] of a frozen live instance.
+
+    Public (no underscore) because it is imported across the module boundary by
+    lifecycle_manager.py, which wraps its single index==0 edit call in
+    try/except and logs a [SYS_PROMPT_FROZEN] warning.
+    """
 
 
 # ── Cache Pool Data Structures ────────────────────────────────────────────────
@@ -488,7 +493,7 @@ class AgentInstance:
         """
         with self._compression_lock:
             if index == 0 and self._system_prompt_frozen:
-                raise _SystemPromptFrozenError(
+                raise SystemPromptFrozenError(
                     f'edit_message_in_place(0) on frozen {self.instance_name}')
             # Stamp a completion timestamp on the replacement if it has none —
             # an edited message must not lose its clock. Only stamp when absent so
@@ -521,7 +526,7 @@ class AgentInstance:
         """
         with self._compression_lock:
             if self._system_prompt_frozen:
-                raise _SystemPromptFrozenError(
+                raise SystemPromptFrozenError(
                     f'insert_message_at_head on frozen {self.instance_name}')
             self.conversation.insert(0, message)
             self._last_token_count_conversation_length = -1
@@ -530,7 +535,14 @@ class AgentInstance:
 
     def freeze_system_prompt(self) -> None:
         """Idempotent. Called at the END of the first successful _setup_turn.
-        After this, conversation[0] is immutable for the lifetime of the object."""
+
+        After this, conversation[0] is immutable for the lifetime of the object.
+        The only thaw is reset_conversation(); rebuild_conversation (compression)
+        deliberately does NOT unfreeze.
+
+        Thread Safety: Uses _compression_lock; safe to call concurrently and from
+        within a section that already holds it (RLock).
+        """
         with self._compression_lock:
             if self._system_prompt_frozen or not self.conversation:
                 return

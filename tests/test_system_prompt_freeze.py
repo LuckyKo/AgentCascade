@@ -121,6 +121,31 @@ def _drive_setup_turn(engine, inst):
     return engine._setup_turn(inst)
 
 
+def _freeze_via_first_turn():
+    """Create a fresh instance and freeze it via one real _setup_turn.
+
+    Returns (inst, pool, engine). Shared by every test that needs a frozen
+    instance before exercising a guard or forcing a rebuild.
+    """
+    inst = _make_instance()
+    pool = _make_pool(config_version=0)
+    engine = _make_engine(pool)
+    inst._last_config_version = -1  # force the rebuild path on turn 1
+    _drive_setup_turn(engine, inst)
+    return inst, pool, engine
+
+
+def _mutate_rebuild_inputs(inst, pool):
+    """Mutate every input that would make the M1 block produce different content.
+
+    Used by the forced-rebuild tests (T2, T8, T10b) so each of them proves the
+    freeze blocked a rebuild that WOULD have changed bytes.
+    """
+    inst.system_started_at = '2099-12-31 23:59'  # wildly different timestamp
+    pool._config_version += 1                      # force rebuild
+    pool.settings.cache_pool_enabled = False       # changes resources block
+
+
 # ──────────────────────────────────────────────
 # T1 — freeze_after_first_turn
 # ──────────────────────────────────────────────
@@ -163,21 +188,13 @@ class TestForcedCacheRebuildPreservesBytes:
 
         Pre-fix: no freeze → M1 rewrites the - System: line → content differs.
         """
-        inst = _make_instance()
-        pool = _make_pool(config_version=0)
-        engine = _make_engine(pool)
-
-        # First turn: forces rebuild (config mismatch), normalizes prompt, freezes.
-        inst._last_config_version = -1
-        _drive_setup_turn(engine, inst)
+        inst, pool, engine = _freeze_via_first_turn()
 
         before = inst.conversation[0].content
         before_id = id(inst.conversation[0])
 
         # NOW mutate the inputs that would make M1 produce different content:
-        inst.system_started_at = '2099-12-31 23:59'  # wildly different timestamp
-        pool._config_version += 1                      # force rebuild
-        pool.settings.cache_pool_enabled = False       # changes resources block
+        _mutate_rebuild_inputs(inst, pool)
 
         _drive_setup_turn(engine, inst)
 
@@ -245,7 +262,7 @@ class TestRecallEndToEnd:
 class TestEditMessageInPlaceRaisesWhenFrozen:
 
     def test_edit_message_in_place_raises_when_frozen(self):
-        """T4: edit_message_in_place(0, ...) raises _SystemPromptFrozenError on frozen.
+        """T4: edit_message_in_place(0, ...) raises SystemPromptFrozenError on frozen.
 
         Pre-fix: no such exception exists; the edit succeeds silently.
         """
@@ -259,14 +276,14 @@ class TestEditMessageInPlaceRaisesWhenFrozen:
 
         before = inst.conversation[0].content
 
-        from agent_cascade.agent_instance import _SystemPromptFrozenError
+        from agent_cascade.agent_instance import SystemPromptFrozenError
         try:
             inst.edit_message_in_place(0, Message(role=SYSTEM, content='TAMPERED'))
-        except _SystemPromptFrozenError:
+        except SystemPromptFrozenError:
             pass  # expected
         else:
             raise AssertionError(
-                'edit_message_in_place(0) did not raise _SystemPromptFrozenError')
+                'edit_message_in_place(0) did not raise SystemPromptFrozenError')
 
         assert inst.conversation[0].content == before
 
@@ -279,7 +296,7 @@ class TestEditMessageInPlaceRaisesWhenFrozen:
 class TestInsertMessageAtHeadRaisesWhenFrozen:
 
     def test_insert_message_at_head_raises_when_frozen(self):
-        """T5: insert_message_at_head raises _SystemPromptFrozenError on frozen.
+        """T5: insert_message_at_head raises SystemPromptFrozenError on frozen.
 
         Pre-fix: no such exception; the insert succeeds.
         """
@@ -291,14 +308,14 @@ class TestInsertMessageAtHeadRaisesWhenFrozen:
         inst._last_config_version = -1
         _drive_setup_turn(engine, inst)
 
-        from agent_cascade.agent_instance import _SystemPromptFrozenError
+        from agent_cascade.agent_instance import SystemPromptFrozenError
         try:
             inst.insert_message_at_head(Message(role=SYSTEM, content='NEW SYS'))
-        except _SystemPromptFrozenError:
+        except SystemPromptFrozenError:
             pass  # expected
         else:
             raise AssertionError(
-                'insert_message_at_head did not raise _SystemPromptFrozenError')
+                'insert_message_at_head did not raise SystemPromptFrozenError')
 
         assert len(inst.conversation) == 1
 
@@ -332,8 +349,9 @@ class TestM11MetadataNotInjectedWhenFrozen:
         pool = _make_pool(config_version=0)
         engine = _make_engine(pool)
 
-        # Freeze via first turn (rebuild normalizes the prompt but we start
-        # without metadata — M1 would inject it, so we need to freeze AFTER).
+        # Freeze via first turn (M1 injects the metadata heading during this
+        # rebuild; we strip it again below to simulate a frozen prompt lacking
+        # the heading — the M2/M11 composition state).
         inst._last_config_version = -1
         _drive_setup_turn(engine, inst)
 
@@ -499,11 +517,7 @@ class TestRootVsSubagent:
         _drive_setup_turn(engine, inst)
 
         before = inst.conversation[0].content
-
-        # Force a rebuild with changed inputs.
-        inst.system_started_at = '2099-12-31 23:59'
-        pool._config_version += 1
-        pool.settings.cache_pool_enabled = False
+        _mutate_rebuild_inputs(inst, pool)
 
         _drive_setup_turn(engine, inst)
 

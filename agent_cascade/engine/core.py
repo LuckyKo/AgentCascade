@@ -1380,7 +1380,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         with instance._compression_lock:
             conv = list(instance.conversation)
-            sys_prompt_frozen = instance._system_prompt_frozen
 
         if not conv:
             logger.warning('empty conversation for %s - early exit', inst_name)
@@ -1462,6 +1461,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Calling update_history() with fresh timestamp causes dedup to
                 # fail and create duplicates.
 
+            # Frozen-prompt guard (todo 134): read under _compression_lock at the
+            # point of use. RLock reentrancy is safe — freeze_system_prompt() acquires
+            # the same lock on this thread later in this turn, and no other thread can
+            # flip the flag between this read and the write below (only this thread's
+            # own freeze call at the end of _setup_turn sets it).
+            with instance._compression_lock:
+                sys_prompt_frozen = instance._system_prompt_frozen
             if m0_role == SYSTEM and not sys_prompt_frozen:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):

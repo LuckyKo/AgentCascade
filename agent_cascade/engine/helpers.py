@@ -662,8 +662,9 @@ def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[st
 def _build_session_metadata(pool, instance) -> str:
     """Build the '## Session Metadata' section reflecting current workspace state.
 
-    Used both during initial injection and to refresh the block each turn so that
-    changes to working_dir / extra_paths are reflected immediately.
+    Used for initial injection on the first _setup_turn of a live instance.
+    (todo 134: per-turn refresh into a frozen prompt was removed — the block is
+    built once and then immutable with the rest of conversation[0].)
 
     Reads workspace configuration from the operation_manager (the live source of truth)
     rather than logger metadata, which is never updated when UI settings change.
