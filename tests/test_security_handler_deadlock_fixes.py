@@ -12,6 +12,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 # Must import before patches take effect
+from agent_cascade.runtime_state import state
 from agent_cascade.security_handler import (SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS, SecurityAdvisorHandler,
                                             _get_security_check_lock, _get_security_execution_lock)
 
@@ -121,11 +122,12 @@ class TestReentrantSecurityLock:
         """Verify security_handler.py uses RLock for execution lock (not Semaphore or Lock)."""
         import inspect
 
-        from agent_cascade import security_handler
+        # BUG_0029 Phase 2 Step 4: ResettableRLock moved to runtime_state.py.
+        from agent_cascade import runtime_state
 
-        source = inspect.getsource(security_handler)
+        source = inspect.getsource(runtime_state)
         assert 'RLock()' in source, (
-            'security_handler should use threading.RLock() for reentrant safety'
+            'runtime_state should use threading.RLock() for reentrant safety'
         )
 
     def test_both_security_locks_are_reentrant(self):
@@ -536,14 +538,10 @@ class TestConcurrentSecurityChecks:
         errors = []
 
         def run_check(rid, delay_ms=0):
-            """Simulate _execute_check with timeline tracking."""
+            """Simulate _execute_check with timeline tracking (BUG_0029 Step 4: use state lock)."""
             try:
-                # Ensure execution lock exists
-                if not getattr(app, 'security_execution_lock', None):
-                    app.security_execution_lock = threading.RLock()
-
-                # Acquire with timeout (mimics security_handler behavior)
-                acquired = app.security_execution_lock.acquire(timeout=5)
+                # Acquire with timeout (mimics security_handler behavior via state)
+                acquired = state.security_execution_lock.acquire(timeout=5)
                 if not acquired:
                     errors.append(f"{rid}: failed to acquire lock")
                     return
@@ -559,7 +557,7 @@ class TestConcurrentSecurityChecks:
 
                     results.append(rid)
                 finally:
-                    app.security_execution_lock.release()
+                    state.security_execution_lock.release()
             except Exception as e:
                 errors.append(f"{rid}: {e}")
 
@@ -597,33 +595,28 @@ class TestNestedSecurityCheckReentrancy:
         Simulates the scenario where _execute_check calls itself (via call_agent → new check).
         With a regular Lock/Semaphore this would deadlock; with RLock it succeeds.
         """
-        app = _make_minimal_app()
-
-        if not getattr(app, 'security_execution_lock', None):
-            app.security_execution_lock = threading.RLock()
-
         outer_completed = threading.Event()
         inner_completed = threading.Event()
         deadlock_detected = threading.Event()
 
         def inner_check():
             try:
-                # Inner check tries to acquire the same lock
-                acquired = app.security_execution_lock.acquire(timeout=2)
+                # Inner check tries to acquire the same lock (BUG_0029 Step 4: state)
+                acquired = state.security_execution_lock.acquire(timeout=2)
                 if not acquired:
                     raise RuntimeError('Inner check failed to acquire lock — possible deadlock')
                 try:
                     inner_completed.set()
                     time.sleep(0.05)  # Simulate work
                 finally:
-                    app.security_execution_lock.release()
+                    state.security_execution_lock.release()
             except Exception :
                 outer_completed.set()  # Unblock outer thread
                 raise
 
         def outer_check():
             try:
-                acquired = app.security_execution_lock.acquire(timeout=2)
+                acquired = state.security_execution_lock.acquire(timeout=2)
                 if not acquired:
                     raise RuntimeError('Outer check failed to acquire lock')
                 try:
@@ -632,7 +625,7 @@ class TestNestedSecurityCheckReentrancy:
 
                     outer_completed.set()
                 finally:
-                    app.security_execution_lock.release()
+                    state.security_execution_lock.release()
             except Exception :
                 deadlock_detected.set()
                 raise
@@ -682,14 +675,13 @@ class TestTimerCleanupOnException:
             'agent_name': 'Maine',
         }
 
-        # Hold execution lock in another thread so acquire times out
-        app.security_execution_lock = threading.RLock()
+        # Hold execution lock in another thread so acquire times out (BUG_0029 Step 4: state)
         release_event = threading.Event()
 
         def hold_lock():
-            app.security_execution_lock.acquire()
+            state.security_execution_lock.acquire()
             release_event.wait(timeout=10)
-            app.security_execution_lock.release()
+            state.security_execution_lock.release()
 
         holder = threading.Thread(target=hold_lock, daemon=True)
         holder.start()
@@ -852,14 +844,13 @@ class TestActiveChecksCleanupOnLockTimeout:
             'agent_name': 'Maine',
         }
 
-        # Hold execution lock in another thread so acquire times out (RLock blocks different threads)
-        app.security_execution_lock = threading.RLock()
+        # Hold execution lock in another thread so acquire times out (BUG_0029 Step 4: state)
         release_event = threading.Event()
 
         def hold_lock():
-            app.security_execution_lock.acquire()
+            state.security_execution_lock.acquire()
             release_event.wait(timeout=10)
-            app.security_execution_lock.release()
+            state.security_execution_lock.release()
 
         holder = threading.Thread(target=hold_lock, daemon=True)
         holder.start()
@@ -1075,12 +1066,11 @@ class TestLeakedLockRecoveryEndToEnd:
         }
 
         # Seed the execution lock as a ResettableRLock (as production does) and leak it:
-        # acquire in a thread that dies WITHOUT releasing.
-        app.security_execution_lock = ResettableRLock()
+        # acquire in a thread that dies WITHOUT releasing. (BUG_0029 Step 4: state)
         acquired_flag = threading.Event()
 
         def leak_holder():
-            assert app.security_execution_lock.acquire(timeout=1)
+            assert state.security_execution_lock.acquire(timeout=1)
             acquired_flag.set()
             # Return without release → leaked lock, dead holder.
 
@@ -1090,7 +1080,7 @@ class TestLeakedLockRecoveryEndToEnd:
         leaker.join(timeout=2)
         assert not leaker.is_alive(), 'Leaker thread must be dead (simulating a killed daemon)'
         # Confirm the leak: the internal RLock is held by a now-dead thread.
-        assert not app.security_execution_lock.owner_is_alive, (
+        assert not state.security_execution_lock.owner_is_alive, (
             'After the holder dies, owner_is_alive must be False (leak detected)'
         )
 
@@ -1140,17 +1130,17 @@ class TestLeakedLockRecoveryEndToEnd:
         }
 
         # Seed a ResettableRLock and hold it from a LIVE thread (waits on an event).
-        app.security_execution_lock = ResettableRLock()
+        # BUG_0029 Step 4: use state lock directly.
         acquired_flag = threading.Event()
         release_event = threading.Event()
 
         def live_holder():
-            assert app.security_execution_lock.acquire(timeout=1)
+            assert state.security_execution_lock.acquire(timeout=1)
             acquired_flag.set()
             try:
                 release_event.wait(timeout=10)
             finally:
-                app.security_execution_lock.release()
+                state.security_execution_lock.release()
 
         holder = threading.Thread(target=live_holder, daemon=True)
         holder.start()
@@ -1195,7 +1185,7 @@ class TestLeakedLockRecoveryEndToEnd:
         send_queue = MagicMock()
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
-        app.security_execution_lock = ResettableRLock()
+        # BUG_0029 Step 4: use state lock directly (already a ResettableRLock).
 
         def leak_once(rid):
             """Leak the current lock, then run a check that must recover and proceed."""
@@ -1203,7 +1193,7 @@ class TestLeakedLockRecoveryEndToEnd:
             acquired_flag = threading.Event()
 
             def leaker():
-                assert app.security_execution_lock.acquire(timeout=1)
+                assert state.security_execution_lock.acquire(timeout=1)
                 acquired_flag.set()
 
             t = threading.Thread(target=leaker, daemon=True)

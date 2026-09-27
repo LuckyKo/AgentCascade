@@ -69,142 +69,48 @@ def _get_ws_loop(agent_pool):
 
 
 def _get_security_check_lock(app):
-    """Get (creating if needed) the app-level security prompt lock.
+    """Get the process-level security prompt lock (BUG_0029 Phase 2 Step 4).
+
+    Returns ``state.security_check_lock`` — an RLock constructed once in
+    ``RuntimeState.__init__``. The ``app`` parameter is retained for call-site
+    compatibility but is no longer used as storage.
 
     DEADLOCK FIX: Uses RLock to allow reentrant acquisition. If a Security agent
     triggers another security check, the same thread can acquire this lock again
-    without deadlocking. This replaces the original non-reentrant Lock().
-
-    Also known as security_prompt_lock — protects prompt building phase only.
+    without deadlocking.
     """
-    if not hasattr(app, 'security_check_lock'):
-        app.security_check_lock = threading.RLock()
-    return app.security_check_lock
+    from agent_cascade.runtime_state import state as _runtime_state
+    return _runtime_state.security_check_lock
 
 
-class ResettableRLock:
-    """An RLock wrapper that can recover from a leaked lock.
-
-    The plain ``threading.RLock`` used for the security execution lock is acquired
-    by a daemon thread (``_run_check_worker``). If that thread is killed before it
-    reaches ``exec_lock.release()`` — e.g. session stop, agent dismissal, or an
-    unhandled crash that skips the ``finally`` block — the RLock is leaked forever
-    and every subsequent security check times out on ``acquire(timeout=10s)``.
-
-    Python's RLock cannot be force-released from another thread, so this wrapper
-    tracks the owning thread and, when a new acquirer detects that the previous
-    holder is DEAD (no longer alive), it replaces the internal RLock with a fresh
-    one. This is safe because:
-      - We only reset when ``acquire()`` timed out, i.e. the current thread is NOT
-        the owner, so no live thread holds the lock we are about to discard.
-      - A LIVE holder (another check genuinely running) is never reset — its thread
-        is still alive, so normal timeout semantics apply and the caller raises.
-
-    Reentrancy is preserved: the internal ``threading.RLock`` handles same-thread
-    nested acquisition exactly as before.
-    """
-
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._owner_thread = None  # threading.Thread of the current holder (None if free)
-        self._acquired_at = 0.0  # time.monotonic() when acquired (for staleness logging)
-
-    def acquire(self, timeout=None):
-        """Acquire with optional timeout. Returns True on success, False on timeout.
-
-        ``timeout=None`` means block until acquired (no timeout), matching the
-        native RLock's no-arg behavior. We branch explicitly because passing
-        ``timeout=None`` to the underlying RLock.acquire() raises TypeError.
-        """
-        if timeout is None:
-            acquired = self._lock.acquire()
-        else:
-            acquired = self._lock.acquire(timeout=timeout)
-        if acquired:
-            self._owner_thread = threading.current_thread()
-            self._acquired_at = time.monotonic()
-        return acquired
-
-    def release(self):
-        """Release the lock (normal path — called from the finally block)."""
-        try:
-            self._lock.release()
-        finally:
-            # Clear ownership tracking even if release raised, so a later
-            # force_reset decision is not based on stale owner info.
-            self._owner_thread = None
-
-    def __enter__(self):
-        if not self.acquire():
-            raise RuntimeError('ResettableRLock: timed out acquiring lock')
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release()
-        return False
-
-    @property
-    def owner_is_alive(self) -> bool:
-        """True if the current holder thread is still running.
-
-        A live holder means another check is genuinely in progress — we must NOT
-        steal its lock. A dead holder (or none) means the lock may be leaked.
-
-        Note: reading ``_owner_thread`` and calling ``is_alive()`` is not a single
-        atomic step, but this is safe by construction — a thread that is alive when
-        read can only transition to *dead* afterwards, never the reverse. So the only
-        "wrong" outcome we could observe is treating a just-died holder as alive (we
-        then block/timeout normally and recover on the *next* attempt), which is
-        strictly safer than the opposite error of stealing a live lock.
-        """
-        owner = self._owner_thread
-        return owner is not None and owner.is_alive()
-
-    def force_reset(self, reason: str = '') -> bool:
-        """Force-release a leaked lock by swapping in a fresh RLock.
-
-        DANGEROUS — only call when the previous holder is known to be dead.
-        Returns True if the reset actually swapped the lock (i.e. it was held),
-        False if the lock was already free (nothing to reset).
-        """
-        from agent_cascade.log import logger
-        was_held = self._owner_thread is not None
-        # Swap internals: any future acquire() targets the fresh RLock. The old
-        # RLock object becomes garbage once no live thread references it — which
-        # is guaranteed because we only call this after an acquire timeout (the
-        # current thread was never granted it).
-        self._lock = threading.RLock()
-        self._owner_thread = None
-        self._acquired_at = 0.0
-        if was_held:
-            logger.warning(f"[SECURITY] Execution lock force-reset (leaked by dead holder): {reason}")
-        return was_held
+# BUG_0029 Phase 2 Step 4: ResettableRLock moved to runtime_state.py (single owner).
+# Re-exported here for backward-compatible imports (tests, external consumers).
+from agent_cascade.runtime_state import ResettableRLock  # noqa: E402,F401
 
 
 def _get_security_execution_lock(app):
-    """Get (creating if needed) the app-level security execution lock.
+    """Get the process-level security execution lock (BUG_0029 Phase 2 Step 4).
 
-    DEADLOCK FIX: Uses a ResettableRLock (an RLock wrapper) to allow reentrant
-    acquisition during engine.run() while also recovering from a leaked lock left
-    behind by a killed daemon thread. Protects the execution loop with acquire
-    timeout semantics plus stale-holder detection.
+    Returns ``state.security_execution_lock`` — a ResettableRLock constructed once
+    in ``RuntimeState.__init__``. The ``app`` parameter is retained for call-site
+    compatibility but is no longer used as storage.
+
+    DEADLOCK FIX: Uses a ResettableRLock to allow reentrant acquisition during
+    engine.run() while also recovering from a leaked lock left behind by a killed
+    daemon thread.
     """
-    if not hasattr(app, 'security_execution_lock'):
-        app.security_execution_lock = ResettableRLock()
-    return app.security_execution_lock
+    from agent_cascade.runtime_state import state as _runtime_state
+    return _runtime_state.security_execution_lock
 
 
 def _get_active_checks_state(app):
-    """Get (creating if needed) active checks tracking set + its lock.
+    """Get the process-level active checks tracking set + its lock (BUG_0029 Phase 2 Step 4).
 
     Returns:
-        (active_checks_set, active_checks_lock) tuple.
+        (active_checks_set, active_checks_lock) tuple from ``state``.
     """
-    if not hasattr(app, 'active_security_checks'):
-        app.active_security_checks = set()
-    if not hasattr(app, 'active_security_checks_lock'):
-        app.active_security_checks_lock = threading.Lock()
-    return app.active_security_checks, app.active_security_checks_lock
+    from agent_cascade.runtime_state import state as _runtime_state
+    return _runtime_state._active_checks, _runtime_state._active_checks_lock
 
 
 def _get_auto_security_enabled(app) -> bool:
