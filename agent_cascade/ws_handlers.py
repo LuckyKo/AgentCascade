@@ -824,8 +824,9 @@ class WsMessageHandler:
                 settings_data.update(self.agent_pool.settings.to_dict())
 
             # Add complete effective disabled_tools for each agent template.
-            # Use _ui_disabled_tools as instance_override (same as runtime resolution) so
-            # the export includes both UI toggles AND backend defaults like DEFAULT_COMPRESSOR_DISABLED_TOOLS.
+            # Use _ui_disabled_tools as instance_override (same as runtime resolution); after
+            # Layer 3 removal the export reflects the effective disabled_tools from user config
+            # (UI is the single source of truth) plus the safe baseline for unconfigured agents.
             from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
             with self.agent_pool._ui_disabled_tools_lock:

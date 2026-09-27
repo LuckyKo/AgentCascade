@@ -2,7 +2,7 @@
 name: systematic-debugging
 description: Evidence-based debugging for complex bugs — reproduction before fix, data-flow tracing over mechanism debugging, single-hypothesis isolation, and anti-confirmation-bias checkpoints. Use for non-trivial bugs in multi-layer systems, concurrency, timeouts, deadlocks, or when prior fixes failed.
 source: auto-generated
-version: "1.0.0"
+version: 1.0.1
 triggers:
   - "debug a bug"
   - "root cause analysis"
@@ -14,6 +14,8 @@ triggers:
   - "intermittent failure"
   - "trace the data flow"
   - "reproduce the bug"
+  - "which candidate root cause fired"
+  - "confirm which window from logs"
 ---
 
 ## Core principles (non-negotiable)
@@ -30,6 +32,13 @@ triggers:
 **0 — Triage (5 min).** Read the FULL error message (every word is a clue: "Timed out after Nones" means `timeout` was None). Identify the exact failing component + immediate caller. Get the log window (±5 min). If it was "fixed" before, read the prior fix and why it failed. **Identity check:** in multi-layer systems, list all identity/name concepts (instance, class, session, template) and which flows through each boundary.
 
 **1 — Reproduce (30 min max).** Minimal test/script that triggers the exact failure. If only reproducible in prod logs, identify what differs (timing, state, concurrency, config). Add targeted logging at boundaries if needed. *Checkpoint: can I see it fail? No → still reproducing, don't hypothesize.* Anti-pattern: "let me just try fixing X and see."
+
+**1b — Pin the candidate (when several causes share one symptom).** If triage yields MULTIPLE plausible root-cause windows that all produce the SAME user-visible symptom (e.g. "message accepted but no reply"), do NOT jump to a fix — first confirm WHICH one actually fired using the live log:
+- Derive each candidate's EXACT marker string(s) BEFORE reading logs (the `logger.warning`/`error` text + file:line it would emit). If you delegated research, make the researcher list these markers explicitly.
+- Confirm you're reading the RIGHT log/run: grep for a process-start marker near the reported timestamp (server/uvicorn startup). A rotated or stale log gives false negatives. Note the child/bridge may log in-process to the same console — check the spawn code before assuming a separate file.
+- Grep by timestamp window first, then match markers within it; read the surrounding lines and build a second-by-second sequence (restart → state restore → inject → turn start → marker → crash). The FIRST matching discriminator is your confirmed cause.
+- **Read past the catch-all line.** A generic `except Exception` handler's log line (e.g. `EXCEPTION - <inst>: TypeError ...`) reports WHERE it was caught, not where it happened — with `exc_info=True` the real crash site is on the traceback lines that FOLLOW. The exact crash site often narrows a "design a guard" problem into a one-line fix.
+- If NO discriminator matches, that itself is evidence: re-check you read the right log/run before concluding "can't determine." Report "confirmed which window" (high confidence) and "exact trigger condition" (may still need state inspection) as separate confidences.
 
 **2 — Data-flow trace (the critical phase).** Most bugs live here — the mechanism is fine, the data into it is wrong. For EACH parameter of the failing function, trace backward to its provider. At every boundary crossing (call, thread handoff, queue, registration) verify the value. Look for name/identity mismatches (static vs dynamic, template-time vs runtime). Diff against a WORKING case — the divergence point IS the bug.
 *5 Whys example:*
@@ -57,6 +66,7 @@ Why wrong? → approval registered with static template name, not runtime instan
 | Confirmation grep (searching for evidence that confirms, not disconfirms) | You'll find support for any hypothesis in a large codebase |
 | Context loss (compression blurs similar identifiers: `agent_name` vs `agent_instance_name`) | One-letter difference, days lost |
 | Symptom suppression (clearer error, retries, more capacity) | Underlying bug persists, manifests differently |
+| Reading the catch-all logger line as the crash site | The handler's file:line is where it was CAUGHT; the real bug is on the traceback lines below it |
 
 ## Multi-layer systems
 

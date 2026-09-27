@@ -40,9 +40,10 @@ SKILL_ADVISOR_MAX_TURNS: int = int(
 SKILL_ADVISOR_MAX_CANDIDATES: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_CANDIDATES',
               20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
-# Compressor: all tools are disabled by default (DEFAULT_COMPRESSOR_DISABLED_TOOLS) — it only
-# performs compression internally. A single turn forces no tool calls, guaranteeing a pure
-# one-shot summary. Bump only if the Compressor is ever given tools back.
+# Compressor: its tool restrictions come from UI config (seeded by the one-time class-defaults
+# migration, which disables nearly all of its tools) — it only performs compression internally.
+# A single turn forces no tool calls, guaranteeing a pure one-shot summary. Bump only if the
+# Compressor is ever given tools back.
 COMPRESSOR_AGENT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_COMPRESSOR_AGENT_MAX_TURNS',
                                                 1))  # Turn limit for the system-launched Compressor agent
 MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue attempts per episode before giving up (each attempt consumes one real turn)

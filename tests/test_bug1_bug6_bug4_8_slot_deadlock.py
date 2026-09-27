@@ -308,7 +308,7 @@ class TestBug48SuspensionAwareExit:
         exit_logs = [str(c) for c in log_mock.debug.call_args_list if 'EXIT -' in str(c)]
         assert any('[suspension-preserved]' in s for s in exit_logs)
 
-    def test_normal_exit_still_clears_and_goes_idle(self):
+    def test_early_exit_with_no_suspension_clears_and_goes_idle(self):
         """Regression guard: no suspension → finally drains + clears, IDLE.
         (Early-exit safety drain adds one extra drain call — pre-existing.)"""
         inst = make_instance()
@@ -317,11 +317,11 @@ class TestBug48SuspensionAwareExit:
 
         drive_run_to_exit(engine, inst, pool, suspended=False, outstanding=True)
 
-        assert pool.drain_queue.call_count == 2  # early-exit + finally
-        pool._async_registry.clear_pending.assert_called_once_with('A')
+        assert pool.drain_queue.call_count == 1  # early-exit safety drain is the ONLY drain on this path (double-drain fix)
+        pool._async_registry.clear_pending.assert_not_called()  # skipped with the drain: no LLM call ran, so nothing to clear
         assert inst.state == AgentState.IDLE
 
-    def test_suspended_but_everything_completed_exits_idle(self):
+    def test_early_exit_after_suspension_with_no_outstanding_work(self):
         """Suspension happened earlier but no work remains → cleanup runs, IDLE."""
         inst = make_instance()
         engine, pool = make_engine(inst)
@@ -329,8 +329,8 @@ class TestBug48SuspensionAwareExit:
 
         drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=False)
 
-        assert pool.drain_queue.call_count == 2  # early-exit + finally
-        pool._async_registry.clear_pending.assert_called_once_with('A')
+        assert pool.drain_queue.call_count == 1  # early-exit safety drain is the ONLY drain on this path (double-drain fix)
+        pool._async_registry.clear_pending.assert_not_called()  # skipped with the drain: no LLM call ran, so nothing to clear
         assert inst.state == AgentState.IDLE
         assert inst.sleeping_since is None
 

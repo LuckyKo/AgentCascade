@@ -222,7 +222,7 @@ def run_skill_advisor(
     Follows the SAME rules as the Security advisor (security_handler.py):
     - Agent class ``'Security'`` (same template, same soul/prompt base)
     - Turn limit ``SKILL_ADVISOR_MAX_TURNS`` (explicit; reuses only the Security template/tool-restriction base, not its budget)
-    - Tool restrictions via ``DEFAULT_SECURITY_DISABLED_TOOLS`` + merge helper
+    - Tool restrictions from UI config (seeded by the one-time class-defaults migration)
     - Instance naming ``f'Security_op_{uuid4().hex[:8]}'``
 
     On timeout/error: returns ``verdict="ambiguous"`` so the caller falls back to
