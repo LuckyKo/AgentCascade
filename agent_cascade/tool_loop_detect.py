@@ -343,8 +343,12 @@ def _targets(args_json: str) -> frozenset:
 
 
 #: Timeout patterns — code_interpreter and shell_cmd both produce these on timeout.
+# BUG_0027: code_interpreter now emits honest, kind-aware messages (wall-clock vs
+# silence/IOPub idle). Match the core phrases leniently so minor rewording or the
+# optional "Timeout: " prefix doesn't break TIMEOUT classification again.
 _TIMEOUT_RES = (
-    re.compile(r'Timeout: Code execution exceeded the \d+-second time limit'),
+    re.compile(r'Code execution exceeded the \d+-second(?:\s+wall[- ]clock)?\s+time limit'),
+    re.compile(r'Code execution stalled: the kernel produced no output'),
     re.compile(r'ERROR: Command timed out after \d+ seconds'),
 )
 

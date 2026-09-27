@@ -56,6 +56,15 @@ CODE_EXECUTION_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'
 # for this many seconds, kill and restart the container.
 CONTAINER_WATCHDOG_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))
 
+# IOPub per-message (silence) timeout: max consecutive seconds the kernel may go
+# WITHOUT emitting any IOPub message before we treat it as hung and interrupt.
+# This is INDEPENDENT of CODE_EXECUTION_TIMEOUT (the wall-clock budget). A cell that
+# emits output regularly can run well beyond the wall-clock budget; a silent cell is
+# killed after this many seconds regardless of total elapsed time.
+# BUG_0027: previously hard-capped at min(10, timeout), which misreported a ~10s
+# silence kill as a 120s wall-clock timeout.
+IOPUB_IDLE_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT', '30'))
+
 # Resource limits for Docker containers (configurable via env vars)
 CONTAINER_MEMORY_LIMIT = os.getenv('M6_CODE_INTERPRETER_CONTAINER_MEMORY', '2g')
 CONTAINER_CPU_LIMIT = float(os.getenv('M6_CODE_INTERPRETER_CONTAINER_CPUS', '2.0'))
@@ -1102,9 +1111,22 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
             # Return timeout message along with any partial output collected
             if exec_timeout and isinstance(e, TimeoutError):
-                timeout_msg = f'Timeout: Code execution exceeded the {exec_timeout}-second time limit.'
+                # e.args[0] is the dict raised by _execute_code; it carries 'kind' and 'message'.
+                err = e.args[0] if (e.args and isinstance(e.args[0], dict)) else {}
+                kind = err.get('kind', 'wall_clock')
+                base_msg = err.get('message') or (
+                    f'Timeout: Code execution exceeded the {exec_timeout}-second wall-clock time limit.'
+                    if kind == 'wall_clock' else
+                    f'Code execution stalled: the kernel produced no output and was interrupted.'
+                )
+                timeout_msg = base_msg
                 if partial_result.strip():
                     return f'{timeout_msg}\n\nPartial output:\n{partial_result}'
+                if kind == 'silence':
+                    hint = ('This is a SILENCE limit, not a wall-clock limit — the cell may be doing real '
+                            'work (blocking I/O, sleep, subprocess) with no output. Print a heartbeat at '
+                            'least every few seconds, or increase M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT.')
+                    return f'{timeout_msg} {hint}'
                 return f'{timeout_msg}. Please optimize your code or break it into smaller steps.'
             raise
         except Exception as e:
@@ -1842,7 +1864,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # keeps producing output (e.g. rglob scanning thousands of files). Each
         # individual message still has a per-message timeout to catch kernel hangs.
         start_time = time.time()
-        per_message_timeout = min(10, timeout)  # use 10s per-message, or the overall budget if smaller
+        # Per-message (silence) tolerance: how long the kernel may go quiet before we interrupt.
+        # Capped by the overall wall-clock budget so a small `timeout` still bounds it, but no
+        # longer hard-capped at 10s — see IOPUB_IDLE_TIMEOUT / BUG_0027.
+        per_message_timeout = min(IOPUB_IDLE_TIMEOUT, timeout)
 
         while True:
             # Check if the kernel was killed by the watchdog during execution (thread-safe)
@@ -1861,7 +1886,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if time.time() - start_time > timeout:
                 raise TimeoutError({
                     'partial_output': result,
-                    'message': f'Code execution exceeded the {timeout}-second time limit.'
+                    'kind': 'wall_clock',
+                    'message': f'Code execution exceeded the {timeout}-second wall-clock time limit.'
                 })
 
             text = ''
@@ -1914,15 +1940,21 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 elif msg_type == 'error':
                     text = _escape_ansi('\n'.join(msg['content']['traceback']))
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
-                        text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
+                        # Kernel-side SIGALRM timer (redundant backstop with the host wall-clock
+                        # budget). Same condition as the :1890 raise — keep wording consistent.
+                        text = f'Timeout: Code execution exceeded the {timeout}-second wall-clock time limit.'
                     if text:
                         stderr_buf.append(text)
                         text = ''  # Prevent duplicate output via direct append below
             except queue.Empty:
-                # Raised by get_iopub_msg() when the per-message timeout expires
+                # Raised by get_iopub_msg() when the kernel goes silent for per_message_timeout.
+                # This is a SILENCE timeout, NOT a wall-clock timeout — the cell may be doing real
+                # work (blocking I/O, sleep, subprocess) and simply produced no output. BUG_0027.
                 raise TimeoutError({
                     'partial_output': result,
-                    'message': f'Code execution exceeded the {timeout}-second time limit.'
+                    'kind': 'silence',
+                    'message': (f'Code execution stalled: the kernel produced no output for '
+                                f'{per_message_timeout:.0f}s and was interrupted.')
                 })
             except Exception as e:
                 logger.debug(f"Unexpected IOPub error during execution for kernel {kernel_id}: {e}")

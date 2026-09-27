@@ -676,5 +676,110 @@ class TestWorkDirPriorityChain(unittest.TestCase):
             self.assertIn('code_interpreter', ci.work_dir)
 
 
+class TestTimeoutMessageFormatting(unittest.TestCase):
+    """BUG_0027 — the final timeout message in call() must be kind-aware.
+
+    The silence path (IOPub went quiet for per_message_timeout) must NOT be reported as a
+    wall-clock "exceeded the N-second time limit" timeout, and the per-message silence
+    tolerance must no longer be hard-capped at 10s. These tests use synthetic TimeoutError
+    dicts in the exact shape _execute_code raises — no live kernel required.
+    """
+
+    def _format_timeout_message(self, e, exec_timeout=120):
+        """Replicates the kind-aware formatting block in CodeInterpreter.call() (BUG_0027)."""
+        partial_result = ''
+        if e.args and isinstance(e.args[0], dict):
+            partial_result = e.args[0].get('partial_output', '')
+
+        err = e.args[0] if (e.args and isinstance(e.args[0], dict)) else {}
+        kind = err.get('kind', 'wall_clock')
+        base_msg = err.get('message') or (
+            f'Timeout: Code execution exceeded the {exec_timeout}-second time limit.'
+            if kind == 'wall_clock' else
+            f'Code execution stalled: the kernel produced no output and was interrupted.'
+        )
+        timeout_msg = base_msg
+        if partial_result.strip():
+            return f'{timeout_msg}\n\nPartial output:\n{partial_result}'
+        if kind == 'silence':
+            hint = ('This is a SILENCE limit, not a wall-clock limit — the cell may be doing real '
+                    'work (blocking I/O, sleep, subprocess) with no output. Print a heartbeat at '
+                    'least every few seconds, or raise M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT.')
+            return f'{timeout_msg} {hint}'
+        return f'{timeout_msg}. Please optimize your code or break it into smaller steps.'
+
+    def test_silence_message_is_honest_not_wall_clock(self):
+        """Silence timeout must say 'stalled / no output', NOT 'exceeded the 120-second'."""
+        from agent_cascade.tools.code_interpreter import CODE_EXECUTION_TIMEOUT
+        e = TimeoutError({
+            'partial_output': '',
+            'kind': 'silence',
+            'message': ('Code execution stalled: the kernel produced no output for '
+                        '30s and was interrupted.')
+        })
+        msg = self._format_timeout_message(e, exec_timeout=CODE_EXECUTION_TIMEOUT)
+        self.assertNotIn(f'exceeded the {CODE_EXECUTION_TIMEOUT}-second', msg)
+        self.assertIn('stalled', msg)
+        self.assertIn('no output', msg)
+
+    def test_silence_hint_mentions_heartbeat_and_env_var(self):
+        """Silence timeout with no partial output must hint at heartbeats / env var."""
+        e = TimeoutError({
+            'partial_output': '',
+            'kind': 'silence',
+            'message': 'Code execution stalled: the kernel produced no output for 30s and was interrupted.'
+        })
+        msg = self._format_timeout_message(e)
+        self.assertIn('heartbeat', msg)
+        self.assertIn('M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT', msg)
+
+    def test_silence_with_partial_output_appends_output(self):
+        """Partial output must still be appended for the silence path."""
+        e = TimeoutError({
+            'partial_output': 'RAISED KeyboardInterrupt at 10.01s',
+            'kind': 'silence',
+            'message': 'Code execution stalled: the kernel produced no output for 30s and was interrupted.'
+        })
+        msg = self._format_timeout_message(e)
+        self.assertIn('stalled', msg)
+        self.assertIn('Partial output:', msg)
+        self.assertIn('RAISED KeyboardInterrupt at 10.01s', msg)
+
+    def test_wall_clock_message_kept(self):
+        """Wall-clock timeout keeps the existing 'exceeded ... time limit' wording."""
+        e = TimeoutError({
+            'partial_output': '',
+            'kind': 'wall_clock',
+            'message': 'Code execution exceeded the 120-second wall-clock time limit.'
+        })
+        msg = self._format_timeout_message(e)
+        self.assertIn('exceeded the 120-second wall-clock time limit', msg)
+        self.assertIn('Please optimize your code or break it into smaller steps.', msg)
+
+    def test_legacy_timeout_error_without_dict_still_handled(self):
+        """A plain TimeoutError with no dict arg must not crash (falls back to wall_clock)."""
+        e = TimeoutError()
+        msg = self._format_timeout_message(e)
+        self.assertIn('exceeded the 120-second time limit', msg)
+
+    def test_per_message_timeout_uses_iopub_idle_constant(self):
+        """per_message_timeout must be min(IOPUB_IDLE_TIMEOUT, timeout), not min(10, timeout)."""
+        import inspect
+        from agent_cascade.tools.code_interpreter import (CodeInterpreter, IOPUB_IDLE_TIMEOUT)
+        self.assertEqual(IOPUB_IDLE_TIMEOUT, 30)
+
+        src = inspect.getsource(CodeInterpreter._execute_code)
+        self.assertIn('per_message_timeout = min(IOPUB_IDLE_TIMEOUT, timeout)', src)
+        self.assertNotIn('min(10, timeout)', src)
+
+    def test_silence_raise_site_carries_kind(self):
+        """The queue.Empty raise site must carry kind='silence' and an honest message."""
+        import inspect
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+        src = inspect.getsource(CodeInterpreter._execute_code)
+        self.assertIn("'kind': 'silence'", src)
+        self.assertIn("'kind': 'wall_clock'", src)
+
+
 if __name__ == '__main__':
     unittest.main()

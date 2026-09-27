@@ -633,6 +633,34 @@ class TestOutputNormalization:
         assert 'FAILED tests/test_x.py::test_y' in norm2, \
             'FAILED banner must survive normalization alongside the exit-code line'
 
+    def test_fail_class_timeout_wall_clock_and_silence(self):
+        # BUG_0027 contract: code_interpreter's honest kind-aware timeout messages must
+        # both classify as TIMEOUT for loop detection. These strings are produced by
+        # tools/code_interpreter.py (wall-clock raise site + silence raise site, and the
+        # fallbacks in call()). Pin them here so a future rewording can't silently break
+        # loop detection again.
+        from agent_cascade.tool_loop_detect import _fail_class
+
+        # Wall-clock — current honest format (no "Timeout: " prefix).
+        assert _fail_class('Code execution exceeded the 120-second wall-clock time limit.') == 'TIMEOUT'
+        # Wall-clock — legacy format with the "Timeout: " prefix and no "wall-clock".
+        assert _fail_class('Timeout: Code execution exceeded the 120-second time limit.') == 'TIMEOUT'
+        # Silence (IOPub idle) — current honest format.
+        assert _fail_class(
+            'Code execution stalled: the kernel produced no output for 30s and was interrupted.'
+        ) == 'TIMEOUT'
+        # Silence — fallback wording from call() when the raise dict lacks a message.
+        assert _fail_class(
+            'Code execution stalled: the kernel produced no output and was interrupted.'
+        ) == 'TIMEOUT'
+        # Silence with the appended hint + partial-output wrapper (full real-world shape).
+        assert _fail_class(
+            'Code execution stalled: the kernel produced no output for 30s and was interrupted. '
+            'This is a SILENCE limit, not a wall-clock limit — the cell may be doing real work '
+            '(blocking I/O, sleep, subprocess) with no output. Print a heartbeat at least every '
+            'few seconds, or raise M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT.'
+        ) == 'TIMEOUT'
+
     def test_spillover_lines_normalize_identical(self):
         # Spillover/truncation lines with different paths/char counts → identical after
         # normalization (the path varies per run).
