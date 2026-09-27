@@ -12,7 +12,8 @@ from agent_cascade.compression.result import CompressResult
 from agent_cascade.engine.helpers import _get_active_functions_from_template
 from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
-from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE, COMPRESSION_DEFAULT_FRACTION,
+from agent_cascade.runtime_state import state as _runtime_state
+from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE,
                                     COMPRESSION_MAX_CONSOLIDATION_TOKENS, COMPRESSION_MIN_USAGE_PCT,
                                     DEFAULT_MAX_INPUT_TOKENS)
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
@@ -316,7 +317,7 @@ def _consolidate_markers(
 def compress_context(
         agent_pool,
         target_agent_name: str,  # Which agent's context to compress
-        fraction: float = COMPRESSION_DEFAULT_FRACTION,  # Fraction of active history to discard
+        fraction: float | None = None,  # Fraction of active history to discard (None → live state value)
         mode: str = 'auto',  # "auto" (LLM generates) or "manual" (summary provided)
         summary_text: str | None = None,  # Required when mode == "manual"
         force: bool = False,  # Bypass validation guards (forced compression at >95%)
@@ -350,6 +351,10 @@ def compress_context(
     Returns:
         CompressResult with success status, summary text, and metadata.
     """
+    # ── 0a. Resolve live default (D-2d) ──
+    if fraction is None:
+        fraction = _runtime_state.compression_fraction
+
     # ── 0. Validate fraction range ──
     if not 0.0 <= fraction <= 1.0:
         return CompressResult(

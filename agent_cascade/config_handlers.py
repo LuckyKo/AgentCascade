@@ -147,7 +147,7 @@ POOL_SETTINGS_KEYS = frozenset({
 EXTRA_PERSIST_KEYS = frozenset({
     'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
     'auto_security',  # Auto-Ask security mode toggle state
-    'compression_fraction',  # Compression ratio as percentage (maps to COMPRESSION_DEFAULT_FRACTION)
+    'compression_fraction',  # Compression ratio as percentage (maps to runtime_state.state.compression_fraction)
 })
 
 # ── Registry of config key → handler function ────────────────────────────
@@ -994,15 +994,11 @@ def _handle_compression_context_reserve_tokens(ui_cfg: dict, agent_pool: Optiona
 def _handle_compression_fraction(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Handle compression_fraction setting.
 
-    UI sends a percentage (e.g. 70), we convert to fraction (0.7) and update the module-level
-    COMPRESSION_DEFAULT_FRACTION which is used by both forced and proactive compression.
-    Thread safety: module-level attribute assignment is atomic in CPython; reads are also atomic,
-    so no lock needed for simple float updates.
+    UI sends a percentage (e.g. 70); the single writer on runtime_state.state handles
+    conversion + clamping. BUG_0029 Phase 2 (D-2b/D-2c): no duplicated clamp here.
     """
-    import agent_cascade.settings as settings_mod
-    val = float(ui_cfg['compression_fraction']) / 100.0  # Convert UI percentage to fraction
-    val = min(settings_mod.COMPRESSION_MAX_FRACTION, max(settings_mod.COMPRESSION_MIN_FRACTION, val))
-    settings_mod.COMPRESSION_DEFAULT_FRACTION = val
+    from agent_cascade.runtime_state import state as _runtime_state
+    _runtime_state.set_compression_fraction(float(ui_cfg['compression_fraction']))
 
 
 @register_config_handler('enable_agent_budgeting')

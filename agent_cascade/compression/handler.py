@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.llm.schema import USER, ContentItem, Message
 from agent_cascade.log import logger
-from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION, COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
+from agent_cascade.runtime_state import state as _runtime_state
+from agent_cascade.settings import (COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
                                     TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.tool_utils import (clear_truncation_state, format_truncation_notice, get_and_clear_truncation_hints,
                                       truncate_with_spillover, was_tool_call_truncated)
@@ -839,7 +840,7 @@ class CompressionHandler:
             result = _compress(
                 agent_pool=self.pool,
                 target_agent_name=inst_name,
-                fraction=COMPRESSION_DEFAULT_FRACTION,
+                fraction=_runtime_state.compression_fraction,
                 mode='auto',
                 force=True,
             )
@@ -853,7 +854,7 @@ class CompressionHandler:
                     try:
                         tel.record_compression(
                             inst_name,
-                            fraction=COMPRESSION_DEFAULT_FRACTION,
+                            fraction=_runtime_state.compression_fraction,
                             tokens_before=result.tokens_before,
                             tokens_after=result.tokens_after,
                         )
@@ -943,7 +944,7 @@ class CompressionHandler:
 
         # Fix #7: Validate fraction to prevent extreme values
         fraction = max(COMPRESSION_MIN_FRACTION,
-                       min(COMPRESSION_MAX_FRACTION, args.get('fraction', COMPRESSION_DEFAULT_FRACTION)))
+                       min(COMPRESSION_MAX_FRACTION, args.get('fraction', _runtime_state.compression_fraction)))
         mode = args.get('mode', 'auto')
         summary_text = args.get('summary_text')
         force = args.get('force', False)
@@ -1056,9 +1057,9 @@ class CompressionHandler:
         if '\n/compress' in content:
             return None  # Skip embedded /compress references (e.g., in notifications)
 
-        # Parse fraction from command before modifying content - default uses centralized setting
+        # Parse fraction from command before modifying content - default uses live state value
         parts = content.strip().split()
-        fraction = COMPRESSION_DEFAULT_FRACTION
+        fraction = _runtime_state.compression_fraction
         if len(parts) > 1:
             try:
                 fraction = float(parts[1])

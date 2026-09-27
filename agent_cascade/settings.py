@@ -150,10 +150,13 @@ COMPRESSION_OVERFLOW_TOLERANCE_PCT: float = float(
 COMPRESSION_RECOUNT_THRESHOLD: float = float(
     os.getenv('AGENT_CASCADE_COMPRESSION_RECOUNT_THRESHOLD',
               0.85))  # Force full recount at X fraction of allocated max when cache invalidated
-COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_DEFAULT_FRACTION',
-                                                      0.7))  # Default fraction of history to discard (70%)
+# BUG_0029 Phase 2 (D-2a): immutable env-var seed only — used at import time to initialize
+# runtime_state.state.compression_fraction. The LIVE mutable value lives on the state singleton;
+# this name is NOT a runtime setting and must not be read or mutated by consumers.
+COMPRESSION_DEFAULT_FRACTION_SEED: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_DEFAULT_FRACTION',
+                                                           0.7))  # Default fraction of history to discard (70%)
 COMPRESSION_MIN_USAGE_PCT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MIN_USAGE_PCT',
-                                                   50.0))  # Refuse agent-triggered compression below X% context usage
+                                                    50.0))  # Refuse agent-triggered compression below X% context usage
 COMPRESSION_MIN_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MIN_FRACTION',
                                                   0.1))  # Minimum allowed compression fraction
 COMPRESSION_MAX_FRACTION: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_MAX_FRACTION',

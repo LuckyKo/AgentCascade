@@ -35,7 +35,7 @@ from agent_cascade.operation_manager import clear_current_instance_name, set_cur
 from agent_cascade.retry_policy import RetryPolicy, calculate_backoff, classify_error
 from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS,
                                     AUTO_SKILL_MIN_TURNS, AUTO_SKILL_MODE_NONE, CHARS_PER_TOKEN_ESTIMATE,
-                                    COMPRESSION_DEFAULT_FRACTION, COMPRESSION_RECOUNT_THRESHOLD,
+                                    COMPRESSION_RECOUNT_THRESHOLD,
                                     DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_MAX_TURNS,
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY,
                                     LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_CONTINUE_ATTEMPTS,

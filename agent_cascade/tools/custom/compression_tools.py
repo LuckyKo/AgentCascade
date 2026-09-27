@@ -9,7 +9,7 @@ import logging
 
 from agent_cascade.compression import compress_context, rebuild_working_set
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
+from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade.tools.base import BaseTool, register_tool
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class CompressContext(BaseTool):
     def call(self, params: str, **kwargs) -> str:
         """Thin wrapper — extract params and delegate to compress_context()."""
         params = self._verify_json_format_args(params)
-        fraction = min(params.get('fraction', COMPRESSION_DEFAULT_FRACTION), 1.0)
+        fraction = min(params.get('fraction', _runtime_state.compression_fraction), 1.0)
         mode = params.get('mode', 'auto')
         summary_text = params.get('summary_text')
         force = params.get('force', False)

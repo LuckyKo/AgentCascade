@@ -16,7 +16,7 @@ import so no cycle can form.
 import threading
 import time
 
-from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION, COMPRESSION_MAX_FRACTION,
+from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION_SEED, COMPRESSION_MAX_FRACTION,
                                     COMPRESSION_MIN_FRACTION)
 
 
@@ -148,7 +148,7 @@ class RuntimeState:
         self.auto_security: bool = True
         # Seeded from the env-var default in settings.py; runtime mutations happen
         # exclusively through set_compression_fraction() (Step 3 re-points readers here).
-        self.compression_fraction: float = COMPRESSION_DEFAULT_FRACTION
+        self.compression_fraction: float = COMPRESSION_DEFAULT_FRACTION_SEED
         self.afk_enabled: bool = False
         self.afk_message: str = ''
         self.enable_timeout: bool = True

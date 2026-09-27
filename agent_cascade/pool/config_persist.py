@@ -73,9 +73,9 @@ class ConfigPersistMixin:
                 # Add async shell console window toggle
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
 
-                # Add compression_fraction as percentage (runtime-modifiable module-level setting)
-                from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
-                data['compression_fraction'] = round(COMPRESSION_DEFAULT_FRACTION * 100, 1)
+                # Add compression_fraction as percentage (BUG_0029 Phase 2: read from live state)
+                from agent_cascade.runtime_state import state as _runtime_state
+                data['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
                 # Preserve the one-time class-defaults migration sentinel across saves. This method
                 # rebuilds `data` from settings.to_dict() + live state, which would otherwise drop a
@@ -192,14 +192,12 @@ class ConfigPersistMixin:
             if enable_async_shell_console_window_raw is not None:
                 self._enable_async_shell_console_window = bool(enable_async_shell_console_window_raw)
 
-            # Apply compression_fraction from disk if present (overrides module default)
+            # Apply compression_fraction from disk if present (BUG_0029 Phase 2: single writer)
             compression_fraction_raw = data.pop('compression_fraction', None)
             if compression_fraction_raw is not None:
                 try:
-                    import agent_cascade.settings as settings_mod
-                    val = float(compression_fraction_raw) / 100.0  # Convert percentage to fraction
-                    val = min(settings_mod.COMPRESSION_MAX_FRACTION, max(settings_mod.COMPRESSION_MIN_FRACTION, val))
-                    settings_mod.COMPRESSION_DEFAULT_FRACTION = val
+                    from agent_cascade.runtime_state import state as _runtime_state
+                    _runtime_state.set_compression_fraction(float(compression_fraction_raw))
                     logger.info(f"[PoolSettings] Loaded compression_fraction={compression_fraction_raw}%")
                 except (ValueError, TypeError):
                     logger.warning(f"[PoolSettings] Invalid compression_fraction value, ignoring.")
