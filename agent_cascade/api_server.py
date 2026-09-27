@@ -408,6 +408,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # Initialize Auto-Ask Security mode state
     # Read by _get_auto_security_enabled() in security_handler.py via getattr(app, ...)
     app.current_auto_security = auto_security
+    # Keep the OperationManager's AFK-defer flag in sync so request_user_approval() can decide
+    # whether to skip its at-registration auto-reject while security review is active.
+    _om = getattr(agent_pool, 'operation_manager', None)
+    if _om is not None:
+        _om.afk_defer_to_security = bool(auto_security)
 
     app.add_middleware(
         CORSMiddleware,

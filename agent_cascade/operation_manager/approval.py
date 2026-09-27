@@ -127,9 +127,12 @@ class ApprovalMixin:
             self.pending[request_id] = approval
 
         # ── AFK auto-reject (server-side; replaces the browser's renderApprovals loop) ──
-        # Fires once, at registration, so the rejection is deterministic and race-free:
-        # the request never enters the wait loop and can never be double-resolved.
-        if self.afk_enabled:
+        # Fires once, at registration, so the rejection is deterministic and race-free.
+        # SKIPPED while Auto-Ask Security is active: the pending approval must reach the security
+        # advisor, which vetts it and auto-applies a YES/NO verdict. Only when no automated review
+        # will handle it (security off) does AFK reject immediately so the call never waits on an
+        # absent user.
+        if self.afk_enabled and not self.afk_defer_to_security:
             self.user_reject(request_id, self._afk_reject_reason())
             return False, self._afk_reject_reason()
 

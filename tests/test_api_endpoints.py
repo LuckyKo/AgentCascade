@@ -1457,6 +1457,8 @@ class TestAfkServerAutoReject:
     def test_afk_on_rejects_immediately(self):
         om = self._make_om()
         om.afk_enabled = True
+        # Security review OFF — the at-registration auto-reject only fires in that mode.
+        om.afk_defer_to_security = False
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
         # No afk_message set → the fallback reason string (approval.py _afk_reject_reason).
@@ -1467,6 +1469,7 @@ class TestAfkServerAutoReject:
         """The configured afk_message is surfaced in the reject reason."""
         om = self._make_om()
         om.afk_enabled = True
+        om.afk_defer_to_security = False  # security off → auto-reject path active
         om.afk_message = 'brb 5'
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
@@ -1503,6 +1506,7 @@ class TestAfkServerAutoReject:
     def test_afk_reason_uses_custom_message(self):
         om = self._make_om()
         om.afk_enabled = True
+        om.afk_defer_to_security = False  # security off → auto-reject path active
         om.afk_message = 'ping me later'
         ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
         assert ok is False
@@ -1664,3 +1668,106 @@ class TestAfkRunEndWiring:
         assert 'def _afk_maybe_nudge' in create_app_src
         # And it must NOT exist at module level.
         assert not hasattr(api_server, '_afk_maybe_nudge')
+
+
+class TestAfkRespectsSecurity:
+    """The AFK at-registration auto-reject must defer to Auto-Ask Security review.
+
+    When security is ON, pending approvals are routed to the Security advisor which
+    vets them and auto-applies a YES/NO verdict — AFK must NOT pre-empt that by
+    rejecting at registration. Only when security is OFF does AFK reject immediately.
+    """
+
+    def _make_om(self):
+        from agent_cascade.operation_manager import OperationManager
+        return OperationManager(base_dir='/tmp/afk_sec_test_ws')
+
+    def _drive_pending_and_resolve(self, om, resolver):
+        """Run request_user_approval on a background thread; assert the approval entered
+        ``om.pending`` (i.e., it was NOT immediately rejected) within a short window, then
+        resolve it to unblock the worker. Returns (ok, reason)."""
+        result = {}
+
+        def _worker():
+            ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+            result['ok'], result['reason'] = ok, reason
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        deadline = time.time() + 5
+        while not om.pending and time.time() < deadline:
+            time.sleep(0.01)
+        assert om.pending, 'approval must enter pending (security review gets a chance)'
+        rid = next(iter(om.pending))
+        resolver(rid)
+        t.join(timeout=5)
+        assert not t.is_alive(), 'worker should unblock after resolution'
+        return result.get('ok'), result.get('reason')
+
+    def test_afk_on_security_off_rejects_at_registration(self):
+        """Case 1: AFK on + security off → immediate reject (existing AFK behavior preserved)."""
+        om = self._make_om()
+        om.afk_enabled = True
+        om.afk_defer_to_security = False
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False
+        assert reason == 'Auto-rejected (AFK mode active)'
+        assert om.pending == {}
+
+    def test_afk_on_security_on_does_not_reject_at_registration(self):
+        """Case 2 (the fix): AFK on + security on → approval enters pending so the
+        security advisor can vet it; resolving it proves it was never auto-rejected."""
+        om = self._make_om()
+        om.afk_enabled = True
+        om.afk_defer_to_security = True
+        ok, reason = self._drive_pending_and_resolve(om, lambda rid: om.user_reject(rid, 'test'))
+        assert ok is False
+        assert reason == 'test'  # resolved by our explicit reject, not the AFK auto-reject
+
+    def test_afk_off_security_on_normal_pending(self):
+        """Case 3 (regression guard): AFK off + security on → normal pending path."""
+        om = self._make_om()
+        om.afk_enabled = False
+        om.afk_defer_to_security = True
+        ok, reason = self._drive_pending_and_resolve(om, lambda rid: om.user_approve(rid, 'ok'))
+        assert ok is True
+        assert reason == 'ok'
+
+    def test_create_app_syncs_afk_defer_flag(self):
+        """Case 4: create_app pushes auto_security onto the OperationManager flag (both ways)."""
+        from agent_cascade.api_server import create_app
+        from agent_cascade.operation_manager import OperationManager
+
+        for auto_security, expected in ((False, False), (True, True)):
+            om = OperationManager(base_dir='/tmp/afk_sec_test_ws')
+            pool = _FakePool()
+            pool.operation_manager = om
+            create_app(agents=[], agent_pool=pool, config={'session_name': 'T'},
+                       auto_security=auto_security)
+            assert om.afk_defer_to_security is expected
+
+    def test_apply_auto_security_syncs_afk_defer_flag(self):
+        """Case 5: the runtime toggle keeps the OperationManager flag in sync (both ways)."""
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        class _App:
+            current_auto_security = True
+
+        for enabled, expected in ((False, False), (True, True)):
+            om = _StubOperationManager()
+            pool = _FakePool()
+            pool.operation_manager = om
+            WsMessageHandler.apply_auto_security(_App(), pool, enabled)
+            assert om.afk_defer_to_security is expected
+
+    def test_apply_auto_security_without_om_does_not_crash(self):
+        """Guard: pools without an operation_manager are skipped cleanly."""
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        class _App:
+            current_auto_security = True
+
+        pool = _FakePool()
+        pool.operation_manager = None
+        WsMessageHandler.apply_auto_security(_App(), pool, False)  # must not raise
+        assert pool._loaded_auto_security is False

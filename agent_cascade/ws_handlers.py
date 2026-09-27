@@ -326,6 +326,9 @@ class WsMessageHandler:
         ``agent_pool._loaded_auto_security`` for persistence, and saves pool settings.
         """
         app.current_auto_security = enabled
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is not None:
+            om.afk_defer_to_security = bool(enabled)
         if agent_pool:
             agent_pool._loaded_auto_security = enabled
             # Persist to disk
@@ -932,6 +935,11 @@ class WsMessageHandler:
             if 'auto_security' in settings_json:
                 if hasattr(self.app, 'current_auto_security'):
                     self.app.current_auto_security = bool(settings_json['auto_security'])
+                    # Keep the OperationManager's AFK-defer flag in sync (this is a third writer
+                    # of current_auto_security, alongside create_app and apply_auto_security).
+                    _om = getattr(self.agent_pool, 'operation_manager', None)
+                    if _om is not None:
+                        _om.afk_defer_to_security = bool(settings_json['auto_security'])
                     await self.broadcast_fn({
                         'type': 'info',
                         'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"
