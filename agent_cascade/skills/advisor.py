@@ -49,6 +49,13 @@ _RE_VERDICT = re.compile(r'^\s*\[VERDICT\]\s*(.*)$', re.IGNORECASE | re.MULTILIN
 # The meta-skill that is always injected by the engine — never recommended here.
 _SELF_AUGMENTATION = 'self-augmentation'
 
+# Pre-filter focus threshold: a match set smaller than this FRACTION of the corpus is
+# treated as "focused" (relevant subset → show it); at/above it the scorer is matching
+# too broadly to be useful, so we fall back to a deterministic first-N-by-name slice.
+# Kept module-local (not settings): it is an internal tuning ratio, not user config —
+# SKILL_ADVISOR_MAX_CANDIDATES (the absolute cap) lives in settings.py per house style.
+_PREFILTER_FOCUS_THRESHOLD = 0.5
+
 
 def build_skill_advisor_prompt(
     skill_manager,
@@ -107,7 +114,7 @@ def build_skill_advisor_prompt(
         # self-augmentation is always injected by the engine — it must never occupy a candidate slot.
         matched_names = [n for n, _ in matches if n.lower() != _SELF_AUGMENTATION]
         total = len(entries)  # registered non-self-aug skills (disabled already excluded upstream)
-        if total > SKILL_ADVISOR_MAX_CANDIDATES and matched_names and len(matched_names) < total * 0.5:
+        if total > SKILL_ADVISOR_MAX_CANDIDATES and matched_names and len(matched_names) < total * _PREFILTER_FOCUS_THRESHOLD:
             # Focused match: the scorer found a relevant subset — use it.
             shown_set = set(matched_names[:SKILL_ADVISOR_MAX_CANDIDATES])
             entries = [e for e in entries if e[1] in shown_set]
@@ -125,7 +132,19 @@ def build_skill_advisor_prompt(
                 f"for relevance. If none of the above seem applicable, say [SKILLS] none.\n"
             )
     except Exception as e:  # noqa: BLE001 — filter is an optimization; never block the advisor
-        logger.warning('[SKILL-ADVISOR] skill pre-filter failed (passing all skills): %s', e)
+        logger.warning('[SKILL-ADVISOR] skill pre-filter failed (using name-slice fallback): %s', e)
+
+    # Token-budget invariant (todo 122+123 plan §5): EVERY path — focused, broad, or
+    # exception — must leave the prompt bounded to SKILL_ADVISOR_MAX_CANDIDATES. The
+    # except handler above may leave `entries` untouched (e.g. match_skills raised),
+    # so enforce the cap here unconditionally; it is a no-op when a branch already
+    # truncated, and applies the deterministic first-N-by-name slice otherwise.
+    try:
+        from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
+        if len(entries) > SKILL_ADVISOR_MAX_CANDIDATES:
+            entries = sorted(entries, key=lambda e: e[1])[:SKILL_ADVISOR_MAX_CANDIDATES]
+    except Exception as e:  # noqa: BLE001 — last-resort guard; an unbounded prompt is worse
+        logger.warning('[SKILL-ADVISOR] candidate cap enforcement failed (passing unfiltered list): %s', e)
 
     metadata_lines = [line for _, _, line in entries]
     skills_metadata = '\n'.join(metadata_lines) if metadata_lines else '(none)'

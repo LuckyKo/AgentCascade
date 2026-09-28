@@ -395,16 +395,18 @@ class TestBuildSkillAdvisorPromptFiltering:
         assert len(shown) == 14
 
     def test_fallback_when_match_skills_missing(self):
-        """A manager without match_skills (e.g. base MockSkillManager) → exception path,
-        prompt still bounded (entries unfiltered but the except block logs and continues)."""
+        """A manager without match_skills (e.g. base MockSkillManager) → exception path;
+        the post-try cap guard still bounds the prompt to N candidates (token-budget
+        invariant, todo 122+123 plan §5)."""
         names = self._names(30)
         sm = MockSkillManager(names)  # no match_skills attr
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30  # exception → no filtering applied
+        assert len(skill_lines) == 20  # exception → deterministic first-N-by-name slice
 
     def test_fallback_when_match_skills_raises(self):
-        """A raising match_skills must not break prompt building → exception path."""
+        """A raising match_skills must not break prompt building AND the prompt must stay
+        bounded to N candidates (regression: the except path used to pass ALL skills)."""
         names = self._names(30)
 
         class Broken(FilteringMockSkillManager):
@@ -414,7 +416,7 @@ class TestBuildSkillAdvisorPromptFiltering:
         sm = Broken(names, matches={n: 1.0 for n in names})
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30  # exception → no filtering applied
+        assert len(skill_lines) == 20  # exception → deterministic first-N-by-name slice
 
     def test_n_boundary_exact(self):
         """total == N exactly (20) → NOT filtered (condition is total > N), no note."""
