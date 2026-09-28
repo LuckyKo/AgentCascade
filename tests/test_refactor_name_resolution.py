@@ -84,7 +84,9 @@ def test_build_stream_update_reaches_token_stats_path():
 
         calls = {}
 
-        def sentinel(pool_, name, conv, sr, resp):
+        # `*args` absorbs the trailing `version` argument added by the token-stats
+        # cache-hit fix (build_stream_update_from_pool now passes current_version).
+        def sentinel(pool_, name, conv, sr, resp, *args):
             calls['hit'] = True
             return ({'tokens': 0, 'words': 0}, {'tokens': 0, 'words': 0})
 

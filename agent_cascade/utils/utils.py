@@ -1283,7 +1283,24 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             fc_content = getattr(msg, 'content', '')
             if fc_content and str(fc_content).strip():
                 text = f'{text}\n{fc_content}'
-            return {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
+            # LRU-cached: the wire-format text fully determines the stats, so key on its
+            # MD5 (16 hex chars). Same eviction as the main path below. Without this the
+            # early return skipped the LRU entirely and every assistant tool-call message
+            # was re-tokenized on EVERY get_message_stats call (every stream tick).
+            if not hasattr(get_message_stats, '_msg_stats'):
+                get_message_stats._msg_stats = OrderedDict()
+                get_message_stats._cache_max_size = 512
+            fc_cache: OrderedDict = get_message_stats._msg_stats
+            fc_key = ('fc_wire', hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:16])
+            if fc_key in fc_cache:
+                stats = fc_cache[fc_key]
+                fc_cache.move_to_end(fc_key)
+            else:
+                stats = {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
+                if len(fc_cache) >= get_message_stats._cache_max_size:
+                    fc_cache.popitem(last=False)
+                fc_cache[fc_key] = stats
+            return stats
         msg_obj = msg
         is_dict = False
 

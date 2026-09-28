@@ -81,7 +81,9 @@ def _build_stream_update(pool):
             state_builder._cache_mgr.stream_token_stats.clear()
             state_builder._cache_mgr.stream_versions.clear()
 
-        def sentinel(pool_, name, conv, sr, resp):
+        # `*args` absorbs the trailing `version` argument added by the token-stats
+        # cache-hit fix (build_stream_update_from_pool now passes current_version).
+        def sentinel(pool_, name, conv, sr, resp, *args):
             return ({'tokens': 0, 'words': 0}, {'tokens': 0, 'words': 0})
 
         with patch.object(streaming, '_calc_stream_token_stats', sentinel):

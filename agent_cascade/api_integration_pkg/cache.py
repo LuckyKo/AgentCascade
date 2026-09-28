@@ -67,17 +67,23 @@ class CacheManager:
     def evict_if_full(self, cache_name: str, maxsize: int) -> None:
         """Evict oldest entry if cache exceeds max size (FIFO).
 
-        Handles paired cache eviction for stream_versions/cached_instances.
+        Handles paired cache eviction for stream_versions/cached_instances and
+        stream_token_stats/stream_token_stats_versions.
         """
         with self._lock:
             target = getattr(self, cache_name, {})
 
-            # Determine paired cache (stream_versions <-> cached_instances)
+            # Determine paired cache (stream_versions <-> cached_instances,
+            # stream_token_stats <-> stream_token_stats_versions)
             paired = None
             if cache_name == 'stream_versions':
                 paired = ('cached_instances', self.cached_instances)
             elif cache_name == 'cached_instances':
                 paired = ('stream_versions', self.stream_versions)
+            elif cache_name == 'stream_token_stats':
+                paired = ('stream_token_stats_versions', self.stream_token_stats_versions)
+            elif cache_name == 'stream_token_stats_versions':
+                paired = ('stream_token_stats', self.stream_token_stats)
 
             while len(target) >= maxsize:
                 oldest_key = next(iter(target))
@@ -91,6 +97,9 @@ class CacheManager:
             self.stream_versions.pop(instance_name, None)
             self.cached_instances.pop(instance_name, None)
             self.stream_token_stats.pop(instance_name, None)
+            # Must be evicted alongside stream_token_stats: a dismissed+recreated
+            # instance would otherwise read a STALE version and hit with wrong h_stats.
+            self.stream_token_stats_versions.pop(instance_name, None)
             self.prefix_cache.pop(instance_name, None)
 
 

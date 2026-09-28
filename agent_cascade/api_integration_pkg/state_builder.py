@@ -570,10 +570,13 @@ def build_stream_update_from_pool(
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
     )
 
-    # Thread-safe read of cached token stats and last version via CacheManager
+    # Thread-safe read of cached token stats and last version via CacheManager.
+    # The version lives in the DEDICATED token-stats store: this reader builds a 3-tuple
+    # key (no stream_content_len) while _serialize_instances_incremental stores 4-tuples
+    # in stream_versions — comparing across the two arities was a permanent cache miss.
     with _cache_mgr._lock:
         cached_stats = _cache_mgr.stream_token_stats.get(instance_name)
-        last_version = _cache_mgr.stream_versions.get(instance_name)
+        last_version = _cache_mgr.stream_token_stats_versions.get(instance_name)
 
     if cached_stats is not None and current_version == last_version:
         # Conversation unchanged — reuse the cached STABLE history stats (h_stats).
@@ -592,6 +595,7 @@ def build_stream_update_from_pool(
             conv_snapshot,
             stream_resp_snapshot,
             responses,
+            current_version,
         )
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
