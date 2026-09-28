@@ -562,7 +562,7 @@ def _calc_stream_token_stats(
     conv_snapshot: List[Message],
     stream_resp_snapshot: Optional[List[Message]],
     responses: Optional[List[Message]],
-    version: tuple = None,
+    version: tuple,
 ) -> tuple:
     """Calculate token stats for streaming updates with caching.
 
@@ -571,7 +571,7 @@ def _calc_stream_token_stats(
 
     Args:
         version: The 3-tuple conversation-identity key computed by the caller
-            (state_builder.build_stream_update_from_pool). Stored in the dedicated
+            (state_builder.build_stream_update_from_pool). Always stored in the dedicated
             ``stream_token_stats_versions`` store alongside the stats so the next tick
             can compare it against its own freshly computed key and hit the cache.
             Without this write, the reader's comparison is always a miss (the 3-tuple
@@ -593,8 +593,7 @@ def _calc_stream_token_stats(
     _cache_mgr.evict_if_full('stream_token_stats', _STREAM_TOKEN_STATS_CACHE_MAXSIZE)
     with _cache_mgr._lock:
         _cache_mgr.stream_token_stats[instance_name] = (h_stats, r_stats)
-        if version is not None:
-            _cache_mgr.stream_token_stats_versions[instance_name] = version
+        _cache_mgr.stream_token_stats_versions[instance_name] = version
 
     return h_stats, r_stats
 
