@@ -411,9 +411,9 @@ class TestSkillMatcher:
             },
         ]
         self.matcher.build_index(skills_meta)
-        assert len(self.matcher._inverted_index) > 0
+        assert len(self.matcher._field_index) > 0
         # The regex groups hyphenated words, so the full compound token is indexed
-        assert 'httpx-connection-pooling' in self.matcher._inverted_index
+        assert 'httpx-connection-pooling' in self.matcher._field_index
 
     def test_build_index_ignores_empty_name(self):
         skills_meta = [
@@ -428,7 +428,7 @@ class TestSkillMatcher:
         ]
         self.matcher.build_index(skills_meta)
         # Only good-skill should be in index values
-        for kw, names in self.matcher._inverted_index.items():
+        for kw, names in self.matcher._field_index.items():
             assert '' not in names
 
     def test_build_index_deduplicates_per_skill(self):
@@ -440,13 +440,13 @@ class TestSkillMatcher:
             },
         ]
         self.matcher.build_index(skills_meta)
-        for kw, names in self.matcher._inverted_index.items():
-            # No duplicate entries for the same skill name
+        for kw, names in self.matcher._field_index.items():
+            # No duplicate entries for the same skill name (dict keys are unique)
             assert len(set(names)) == len(names)
 
     def test_build_empty_list(self):
         self.matcher.build_index([])
-        assert len(self.matcher._inverted_index) == 0
+        assert len(self.matcher._field_index) == 0
 
     # -- Matching --
 
@@ -762,8 +762,8 @@ class TestSkillManager:
         # NOTE: tokenization keeps hyphenated names as single tokens (TOKEN_RE), so
         # assert on the full 'alpha-skill'/'beta-skill' tokens, not bare 'alpha'.
         sm.discover([skills_root])
-        assert 'alpha-skill' in sm._matcher._inverted_index, 'initial discovery did not index alpha-skill'
-        assert 'beta-skill' in sm._matcher._inverted_index, 'initial discovery did not index beta-skill'
+        assert 'alpha-skill' in sm._matcher._field_index, 'initial discovery did not index alpha-skill'
+        assert 'beta-skill' in sm._matcher._field_index, 'initial discovery did not index beta-skill'
 
         # Step 2: force the rebuild inside discover() to fail (metadata retrieval blows up).
         with patch.object(SkillManager, 'get_all_metadata',
@@ -771,9 +771,9 @@ class TestSkillManager:
             sm.discover([skills_root])  # must NOT raise — _rebuild_index backstop swallows + warns
 
         # Atomic contract: the previous index must be fully intact after the failed rebuild.
-        assert 'alpha-skill' in sm._matcher._inverted_index, \
+        assert 'alpha-skill' in sm._matcher._field_index, \
             'failed rebuild during discover() emptied/corrupted the previous index (non-atomic)'
-        assert 'beta-skill' in sm._matcher._inverted_index, \
+        assert 'beta-skill' in sm._matcher._field_index, \
             'failed rebuild during discover() emptied/corrupted the previous index (non-atomic)'
 
     # -- Tier 1 Metadata Queries --
@@ -1211,11 +1211,11 @@ class TestEdgeCases:
         """Rebuilding the index should clear previous entries."""
         m = SkillMatcher()
         m.build_index([{'name': 'old-skill', 'description': 'Old description'}])
-        assert 'old' in m._inverted_index
+        assert 'old' in m._field_index
 
         m.build_index([{'name': 'new-skill', 'description': 'New stuff here'}])
-        # Old keyword should be gone if it doesn't appear in new data
-        for kw, names in m._inverted_index.items():
+        # Old skill should be gone from every keyword's field map if it doesn't appear in new data
+        for kw, names in m._field_index.items():
             assert 'old-skill' not in names
 
 
@@ -1397,8 +1397,11 @@ class TestScanSkillsInactiveMatch:
 
         m = hermetic_skill_manager
         root = tmp_path / 'skills'
-        _write_named_skill(root, 'active-zebra',   'zebra quantum fixture', 'zebraquantum')
-        _write_named_skill(root, 'inactive-zebra', 'zebra quantum fixture', 'zebraquantum')
+        # G+C3 min-2 gate: the query must share ≥2 distinct tokens with each skill.
+        # Use 'zebra quantum' (2 tokens) as both description and trigger so a
+        # 'zebra quantum' query matches on name-field + desc-field + trig-field.
+        _write_named_skill(root, 'active-zebra',   'zebra quantum fixture', 'zebra quantum')
+        _write_named_skill(root, 'inactive-zebra', 'zebra quantum fixture', 'zebra quantum')
         m._cache_ttl = 0.0
         m.discover([root])
         ok, _ = m.disable_skill('inactive-zebra')
@@ -1417,7 +1420,7 @@ class TestScanSkillsInactiveMatch:
         yield
 
     def test_inactive_match_appears_and_is_marked(self):
-        out = self.tool.call({'query': 'zebraquantum'})
+        out = self.tool.call({'query': 'zebra quantum'})
         lines = out.splitlines()
         names = [l.split('**')[1] for l in lines if l.startswith('- **')]
         assert 'active-zebra' in names
@@ -1428,29 +1431,29 @@ class TestScanSkillsInactiveMatch:
         assert '(inactive)' not in active_line
 
     def test_active_only_flag_excludes_inactive(self):
-        out = self.tool.call({'query': 'zebraquantum', 'active': True})
+        out = self.tool.call({'query': 'zebra quantum', 'active': True})
         names = [l.split('**')[1] for l in out.splitlines() if l.startswith('- **')]
         assert 'active-zebra' in names
         assert 'inactive-zebra' not in names
 
     def test_match_skills_default_stays_active_only(self):
-        names = [n for n, _ in self.m.match_skills('zebraquantum')]
+        names = [n for n, _ in self.m.match_skills('zebra quantum')]
         assert 'active-zebra' in names
         assert 'inactive-zebra' not in names
 
     def test_match_skills_include_inactive_adds_retired(self):
-        names = [n for n, _ in self.m.match_skills('zebraquantum', include_inactive=True)]
+        names = [n for n, _ in self.m.match_skills('zebra quantum', include_inactive=True)]
         assert 'active-zebra' in names
         assert 'inactive-zebra' in names
 
     def test_auto_mode_load_skill_excludes_inactive(self):
-        names = self.m.resolve_load_skill_names('AUTO', task_text='zebraquantum', context_text='')
+        names = self.m.resolve_load_skill_names('AUTO', task_text='zebra quantum', context_text='')
         assert 'active-zebra' in names
         assert 'inactive-zebra' not in names
 
     def test_advisor_prompt_excludes_inactive(self):
         from agent_cascade.skills.advisor import build_skill_advisor_prompt
-        prompt = build_skill_advisor_prompt(self.m, 'zebraquantum', '', 'coder', 'test')
+        prompt = build_skill_advisor_prompt(self.m, 'zebra quantum', '', 'coder', 'test')
         assert 'active-zebra' in prompt
         assert 'inactive-zebra' not in prompt
 
@@ -1486,8 +1489,8 @@ class TestScanSkillsInactiveMatch:
         assert 'empty query' in fb
 
         # (3) Filter: default match_skills excludes it; include_inactive=True includes it.
-        default_names = [n for n, _ in m.match_skills('zebraquantum')]
-        full_names = [n for n, _ in m.match_skills('zebraquantum', include_inactive=True)]
+        default_names = [n for n, _ in m.match_skills('zebra quantum')]
+        full_names = [n for n, _ in m.match_skills('zebra quantum', include_inactive=True)]
         assert 'active-zebra' not in default_names
         assert 'active-zebra' in full_names
 

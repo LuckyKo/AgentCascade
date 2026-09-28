@@ -34,7 +34,7 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
                                     parse_skill_always_protected)
 
 from .cache_helper import compute_scan_signature
-from .matcher import SkillMatcher
+from .matcher import SkillMatcher, _TOP_K
 from .parser import parse_frontmatter, parse_skill_file
 from .scoring import (CLASS_BAD, CLASS_PROTECTED, CLASS_UNPROVEN, CLASS_USEFUL, CLASS_USELESS,
                       eviction_rank_key, skill_classify, skill_score)
@@ -1388,7 +1388,8 @@ class SkillManager:
         with self._write_lock:
             return list(self._skills_registry.keys())
 
-    def match_skills(self, query: str, include_inactive: bool = False) -> List[Tuple[str, float]]:
+    def match_skills(self, query: str, include_inactive: bool = False,
+                     cap: Optional[int] = None) -> List[Tuple[str, float]]:
         """Public interface for matching skills against a query.
 
         Rebuilds the matcher index if no skills are registered yet (lazy init).
@@ -1402,14 +1403,23 @@ class SkillManager:
                 pre-change behavior: the index is built from the full set, but disabled
                 names are filtered out after scoring, and adding disabled skills to the
                 inverted index never changes any active skill's score.
+            cap: Optional hard limit on the number of results returned (applied AFTER
+                the inactive filter). The G+C3 scorer itself truncates to its top-10;
+                callers that need a wider candidate window for their own rank-based
+                pre-filter (e.g. the skill advisor's 20-candidate cap, which is
+                unsatisfiable from a ≤10 result list) pass ``cap`` so the matcher is
+                asked for an uncapped ranking and this method truncates to the caller's
+                budget instead.
 
         Returns:
             List of (skill_name, relevance_score) tuples sorted by score descending.
         """
         with self._write_lock:
-            if not self._skills_registry and not self._matcher._inverted_index:
+            if not self._skills_registry and not self._matcher._field_index:
                 self._rebuild_index()
-            results = self._matcher.match(query)
+            # cap (advisor path) needs a ranking wider than the scorer's default top-10,
+            # so ask for an uncapped ranking and truncate to `cap` after filtering.
+            results = self._matcher.match(query, k=None if cap is not None else _TOP_K)
             if not include_inactive:
                 # Preserve the historical active-only contract: the full index now also
                 # contains disabled/inactive skills, so drop them. _disabled_names is the
@@ -1419,6 +1429,8 @@ class SkillManager:
                 # each result's lowercased name against it directly (no temp set needed).
                 results = [(name, score) for name, score in results
                            if name.lower() not in self._disabled_names]
+            if cap is not None and cap >= 0:
+                results = results[:cap]
             return results
 
     def get_all_metadata(self, include_active_only: bool = False) -> List[Dict[str, Any]]:

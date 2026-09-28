@@ -104,9 +104,11 @@ class FilteringMockSkillManager(MockSkillManager):
     def _ensure_discovered(self):
         pass  # no-op; advisor wraps this in try/except anyway
 
-    def match_skills(self, query):
+    def match_skills(self, query, include_inactive=False, cap=None):
         scored = [(n, s) for n, s in self._matches.items() if s > 0]
         scored.sort(key=lambda x: (-x[1], x[0]))
+        if cap is not None and cap >= 0:
+            scored = scored[:cap]
         return scored
 
 
@@ -301,53 +303,66 @@ class TestBuildSkillAdvisorPromptFiltering:
         assert len(skill_lines) == 10
         assert 'additional skills exist but were filtered' not in prompt
 
-    def test_no_filter_when_matches_sparse(self):
-        """total (30) > N but only 5 match (< N=20) → fallback to ALL, no note."""
+    def test_fallback_to_deterministic_slice_when_matches_sparse(self):
+        """total (30) > N=20 but only 5 match (< 50% of corpus) → focused subset shown.
+
+        Under the fraction-of-corpus rule (todo 122+123 plan §5), a small match set is
+        treated as FOCUSED, so the advisor shows those 5 matched skills plus an overflow
+        note. The prompt is bounded to ≤N candidates in all paths.
+        """
         names = self._names(30)
         matches = {f"skill-{i:02d}": 1.0 for i in range(5)}  # only 5 confident matches
         sm = FilteringMockSkillManager(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30  # fallback to all
-        assert 'additional skills exist but were filtered' not in prompt
+        assert len(skill_lines) == 5  # focused subset, not the full catalog
+        assert 'additional skills exist but were filtered' in prompt
 
-    def test_no_filter_when_zero_matches(self):
+    def test_fallback_to_deterministic_slice_when_zero_matches(self):
+        """total (30) > N=20 and zero matches → deterministic first-N-by-name slice."""
         names = self._names(30)
         sm = FilteringMockSkillManager(names, matches={})  # empty → zero scores
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30
-        assert 'additional skills exist but were filtered' not in prompt
+        assert len(skill_lines) == 20  # bounded to N, not the full catalog
+        assert 'additional skills exist but were filtered' in prompt
 
     def test_filters_to_top_n_by_score(self):
-        """total (30) > N=20 and 25 match → show exactly 20 (the top-20 by score)."""
+        """total (30) > N=20 and 14 match (< 50% of corpus) → show exactly 14 (focused)."""
         names = self._names(30)
-        # Scores rise with index: skill-24 has the highest, skill-00 the lowest. So the top-20
-        # by score are skill-05..skill-24 and the 5 lowest-scored matched (skill-00..skill-04) drop.
+        matches = {f"skill-{i:02d}": (i + 1) / 14.0 for i in range(14)}
+        sm = FilteringMockSkillManager(names, matches=matches)
+        prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
+        skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
+        shown = {l[2:].split(' ')[0] for l in skill_lines}
+        assert len(shown) == 14  # all matched skills shown (focused subset < N)
+
+    def test_broad_match_falls_back_to_name_slice(self):
+        """total (30) > N=20 and 25 match (≥ 50% of corpus) → deterministic first-N-by-name."""
+        names = self._names(30)
         matches = {f"skill-{i:02d}": (i + 1) / 25.0 for i in range(25)}
         sm = FilteringMockSkillManager(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
         shown = {l[2:].split(' ')[0] for l in skill_lines}
-        assert len(shown) == 20
-        # The 5 dropped skills are the lowest-scored matched ones (skill-00..skill-04).
-        for i in range(0, 5):
-            assert f"skill-{i:02d}" not in shown
-        # All top-20 by score are present.
-        for i in range(5, 25):
+        assert len(shown) == 20  # bounded to N via name-slice fallback
+        # The name-slice picks the first 20 alphabetically: skill-00..skill-19.
+        for i in range(20):
             assert f"skill-{i:02d}" in shown
+        for i in range(20, 30):
+            assert f"skill-{i:02d}" not in shown
 
     def test_overflow_note_count_is_correct(self):
-        """total=30, N=20 → note reports 10 filtered."""
+        """total=30, N=20, 14 match (focused) → note reports 16 filtered."""
         names = self._names(30)
-        matches = {f"skill-{i:02d}": 1.0 for i in range(25)}
+        matches = {f"skill-{i:02d}": 1.0 for i in range(14)}
         sm = FilteringMockSkillManager(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
-        assert 'Note: 10 additional skills exist but were filtered' in prompt
+        assert 'Note: 16 additional skills exist but were filtered' in prompt
         assert '[SKILLS] none' in prompt  # the note's escape-hatch hint
 
     def test_rating_order_preserved_within_filtered_subset(self):
-        """Among the top-N by score, the list is still ordered by rating desc (unrated last)."""
+        """Among the focused subset, the list is still ordered by rating desc (unrated last)."""
 
         class RatedFilteringMock(FilteringMockSkillManager):
             _ratings = {'skill-01': 9.0, 'skill-02': 6.5}  # two rated skills in the matched set
@@ -356,7 +371,7 @@ class TestBuildSkillAdvisorPromptFiltering:
                 return self._ratings.get(name)
 
         names = self._names(30)
-        matches = {f"skill-{i:02d}": 1.0 for i in range(25)}  # all 25 tied on score
+        matches = {f"skill-{i:02d}": 1.0 for i in range(14)}  # all 14 tied on score (< 50%)
         sm = RatedFilteringMock(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
@@ -368,28 +383,28 @@ class TestBuildSkillAdvisorPromptFiltering:
     def test_self_augmentation_never_occupies_candidate_slot(self):
         """self-augmentation may match but must not consume a top-N slot or appear in the list."""
         names = ['self-augmentation'] + self._names(30)
-        # self-aug scores highest; if it weren't stripped, one real skill would be pushed out.
+        # 14 real skills match (< 50% of 31 corpus) → focused subset.
         matches = {'self-augmentation': 1.0}
-        matches.update({f"skill-{i:02d}": (i + 1) / 30.0 for i in range(30)})
+        matches.update({f"skill-{i:02d}": (i + 1) / 14.0 for i in range(14)})
         sm = FilteringMockSkillManager(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
         shown = {l[2:].split(' ')[0] for l in skill_lines}
         assert 'self-augmentation' not in shown
-        # 30 real skills, N=20 → exactly 20 real candidates (not 19).
-        assert len(shown) == 20
+        # 14 real skills matched, self-aug stripped → exactly 14 real candidates.
+        assert len(shown) == 14
 
     def test_fallback_when_match_skills_missing(self):
-        """A manager without match_skills (e.g. base MockSkillManager) → fallback to all, no crash."""
+        """A manager without match_skills (e.g. base MockSkillManager) → exception path,
+        prompt still bounded (entries unfiltered but the except block logs and continues)."""
         names = self._names(30)
         sm = MockSkillManager(names)  # no match_skills attr
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30
-        assert 'additional skills exist but were filtered' not in prompt
+        assert len(skill_lines) == 30  # exception → no filtering applied
 
     def test_fallback_when_match_skills_raises(self):
-        """A raising match_skills must not break prompt building → fallback to all."""
+        """A raising match_skills must not break prompt building → exception path."""
         names = self._names(30)
 
         class Broken(FilteringMockSkillManager):
@@ -399,7 +414,7 @@ class TestBuildSkillAdvisorPromptFiltering:
         sm = Broken(names, matches={n: 1.0 for n in names})
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 30
+        assert len(skill_lines) == 30  # exception → no filtering applied
 
     def test_n_boundary_exact(self):
         """total == N exactly (20) → NOT filtered (condition is total > N), no note."""
@@ -409,6 +424,112 @@ class TestBuildSkillAdvisorPromptFiltering:
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
         assert len(skill_lines) == 20
         assert 'additional skills exist but were filtered' not in prompt
+
+    # ── Regression: advisor pre-filter firing rate (plan §1.5b / todo 122+123) ──
+
+    _POSITIVE_QUERIES = [
+        # Trimmed from benchmarks/skillmatch/eval_harness.py DATASET (positive queries only).
+        # Each query is expected to produce a focused match (< 50% of corpus) on the real
+        # 184-skill corpus, so the pre-filter fires and the prompt stays bounded.
+        ('how do I discover which skills are available before delegating to an agent?', ['self-augmentation']),
+        ('create a new reusable skill from the work I just finished', ['skill-creator', 'self-augmentation']),
+        ('write documentation for what I learned in the .agent_lessons folder', ['project-memory-writing']),
+        ('my benchmark showed a 9x speedup but the cache was already warm', ['benchmark-global-cache-warming-contamination']),
+        ('caching the stable prefix and re-serializing only the growing tail', ['cache-prefix-reuse-optimization']),
+        ('reader and writer build cache keys of different arity so the cache is dead', ['cache-key-arity-mismatch-dead-cache']),
+        ('profile a python service with py-spy and rank the hottest functions', ['parse-pyspy-flamegraph-svg-self-time']),
+        ('a pytest test fails only sometimes, is it a flake or my regression?', ['flake-vs-regression-triage-before-commit']),
+        ('caplog assertions do not capture records when a shared module logger is used', ['caplog-assertions-shared-module-logger']),
+        ('xdist worker crashes with a native access violation on Windows', ['native-crash-dump-pytest-xdist']),
+        ('make retry backoff timing tests deterministic without sleeping', ['deterministic-delay-recording-tests']),
+        ('drain fire-and-forget asyncio tasks the code under test spawned', ['async-fire-and-forget-test-drain']),
+        ('prove a new regression test genuinely fails on pre-fix code', ['regression-test-revert-proof']),
+        ('test a FastAPI endpoint hermetically without calling an LLM', ['fastapi-endpoint-hermetic-test-no-llm']),
+        ('tests are contaminated by module-level global state across runs', ['module-level-state-test-isolation']),
+        ('run pytest reliably in this repo when the addopts force xdist', ['pytest-ini-addopts-xdist-serial-run']),
+        ('a monkeypatched closure variable inside a FastAPI route does not take effect', ['fastapi-closure-var-monkeypatch-in-tests']),
+        ('my production feature never fires even though its unit tests pass', ['feature-not-firing-in-production']),
+        ('a background daemon silently stops working after a lifecycle transition', ['background-worker-killed-by-lifecycle-transition']),
+        ('restart leaves orphaned duplicate child processes behind', ['os-exit-skips-shutdown-cleanup-orphan']),
+        ('the user received the same message three times from the telegram bridge', ['cross-run-delivery-dedup-and-send-observability']),
+        ('delivery silently stopped and there is no success log to prove it', ['silent-drop-forensics-absence-of-success-log']),
+        ('a run-scoped field was never reset so stale data replays on the next run', ['run-scoped-field-reset-only-on-one-entry-path']),
+        ('turns are not appearing in the live UI while the response streams', ['investigate-streaming-gaps']),
+        ('a config setting change does not take effect at runtime', ['runtime-live-config-verification']),
+        ('an off-by-one failure in a test that drives the real engine loop', ['engine-loop-test-offbyone-diagnosis']),
+        ('the streaming consumer names the wrong run-scoped accumulator variable', ['run-accumulator-vs-partial-identifier-bug-class']),
+        ('a bare MagicMock made a production flag read as truthy', ['magicmock-autoattr-truthy-guard']),
+        ('independently verify an implementation plan against the real source before building', ['adversarial-plan-audit-before-build']),
+        ('critique a proposed fix before anyone writes the code', ['review-fix-plan-critical-analysis']),
+        ("triage an independent reviewer's findings before acting on them", ['reviewer-finding-adjudication']),
+        ('verify every file:line anchor in a plan against the live tree', ['plan-anchor-verification']),
+        ('review committed changes for robustness and bloat', ['code-refinement-audit']),
+        ('audit for over-engineering across the whole repository rather than a diff', ['code-refinement-audit']),
+        ('verify that a supposedly behavior-preserving refactor really is', ['differential-equality-verify-refactor']),
+        ('the 3-phase research build polish delegation workflow for codebase tasks', ['orchestrator-dig-build-polish-workflow']),
+        ('a sub-agent ran out of turns and delivered something incomplete', ['subagent-turn-budget-honest-delivery']),
+        ("verify a sub-agent's deliverable before shipping it", ['subagent-deliverable-verification']),
+        ('a design change invalidated several earlier fixes', ['reconcile-superseded-lessons-after-design-change']),
+        ("stage only one hunk of a file that also has another task's uncommitted change", ['partial-hunk-stage-crlf-dirty-tree']),
+        ('a post-commit hook creates a second version-bump commit on top of mine', ['agentcascade-postcommit-version-bump-commit']),
+        ('pre-commit hooks keep rewriting my staged files', ['precommit-hook-commit-retry']),
+        ("a UI action does nothing because a render function's early exit leaves stale state", ['frontend-early-exit-guard-stale-bookkeeping']),
+        ('add a read-only threshold preview endpoint and UI status', ['read-only-threshold-preview-endpoint']),
+        ('a bug report already states a root cause, verify it empirically first', ['empirically-refute-bug-hypothesis-and-execute-own-pseudocode']),
+        ('calibrate a magic similarity threshold in a TF-IDF ranking system', ['retrieval-gate-calibration']),
+        ('design a popularity or usefulness scoring function', ['usefulness-scoring-function-design']),
+        ('critique a reproduction test and benchmark harness for a perf investigation', ['streaming-burst-investigation-review']),
+        ('evidence-based debugging before proposing a fix', ['systematic-debugging']),
+        ('static analysis of a python codebase with AST', ['python-codebase-static-analysis']),
+        ('debug variable shadowing where a parameter is reassigned to a new object', ['python-object-identity-shadowing-debug']),
+        ('ComfyUI model load fails with a shape mismatch', ['comfyui-model-error-triage']),
+        ('the delete_file tool coerces a JSON array of paths into one string', ['delete-file-tool-array-coercion-gotcha']),
+        ('run python-telegram-bot 22.x polling in a daemon thread of an existing loop', ['ptb-22x-inprocess-thread-shutdown']),
+        ('end-to-end encrypted handshake rest client hermetic test', ['hermetic-e2e-crypto-rest-client-test']),
+        ('browsing and debugging a page with devtools', ['chrome-devtools']),
+        ('test isolation when a production state file is volatile', ['verify-test-isolation-volatile-production-file']),
+        ('lock ordering and snapshot consistency under concurrent index rebuilds', ['lock-ordering-snapshot-consistency']),
+    ]
+
+    def test_advisor_prefilter_fires_for_majority_of_positive_queries(self):
+        """Regression (plan §1.5b / todo 122+123): on the real skill corpus, the advisor
+        pre-filter must fire (i.e. NOT fall back to the full catalog) for ≥90% of positive
+        eval queries. This guards against the G+C3 top-10 cap silently disabling the
+        pre-filter and dumping all ~184 skills into the advisor prompt.
+
+        Uses a trimmed subset of the eval dataset (60 queries) with the REAL SkillManager
+        so the scorer runs end-to-end. Deterministic: no network, no LLM calls.
+        """
+        from agent_cascade.skills.manager import SkillManager
+        from pathlib import Path as _Path
+
+        # Locate the real skills directory (same path other tests in this file use).
+        repo_root = _Path(__file__).resolve().parent.parent
+        skills_dir = repo_root / 'agents' / 'global' / 'skills'
+        if not skills_dir.is_dir():
+            pytest.skip('real skills directory not found')
+
+        sm = SkillManager()
+        sm.discover([skills_dir])
+        total = len(sm.get_all_metadata(include_active_only=True))
+        if total <= 20:
+            pytest.skip(f'corpus too small ({total} skills) for pre-filter test')
+
+        fired = 0
+        n_queries = len(self._POSITIVE_QUERIES)
+        for query, _rels in self._POSITIVE_QUERIES:
+            matches = sm.match_skills(query, cap=None)
+            matched_names = [n for n, _ in matches if n.lower() != 'self-augmentation']
+            # Pre-filter fires when the match set is focused (< 50% of corpus).
+            if matched_names and len(matched_names) < total * 0.5:
+                fired += 1
+
+        rate = fired / n_queries
+        assert rate >= 0.90, (
+            f'advisor pre-filter fired on only {fired}/{n_queries} positive queries '
+            f'({rate:.1%}); target ≥90%. The fallback would dump all {total} skills '
+            f'into the advisor prompt (token-budget regression).'
+        )
 
 
 # ===========================================================================

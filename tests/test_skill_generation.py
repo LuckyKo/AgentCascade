@@ -528,9 +528,9 @@ class TestMatcherTriggerIndexing:
             },
         ]
         matcher.build_index(meta)
-        assert 'pytest' in matcher._inverted_index
-        assert 'mock' in matcher._inverted_index
-        assert 'fixture' in matcher._inverted_index
+        assert 'pytest' in matcher._field_index
+        assert 'mock' in matcher._field_index
+        assert 'fixture' in matcher._field_index
 
     def test_trigger_keywords_enable_matching(self):
         matcher = SkillMatcher()
@@ -571,8 +571,8 @@ class TestMatcherTriggerIndexing:
             },
         ]
         matcher.build_index(meta)  # must not raise TypeError pre-fix
-        assert 'plain' in matcher._inverted_index
-        for key in matcher._inverted_index:
+        assert 'plain' in matcher._field_index
+        for key in matcher._field_index:
             assert '{' not in key and "'" not in key and '}' not in key, (
                 f"index key {key!r} looks like str()-coerced dict repr; sanitisation must drop "
                 f"non-string items, not coerce them")
@@ -588,8 +588,8 @@ class TestMatcherTriggerIndexing:
             {'name': 'last-good', 'description': 'www omega', 'triggers': ['omega', 'delta']},
         ]
         matcher.build_index(meta)  # must not raise pre-fix
-        assert 'alpha' in matcher._inverted_index, "first good skill's keywords missing"
-        assert 'omega' in matcher._inverted_index, (
+        assert 'alpha' in matcher._field_index, "first good skill's keywords missing"
+        assert 'omega' in matcher._field_index, (
             "last good skill's keywords missing — index build aborted before completing the loop")
 
     def test_quoted_colon_trigger_still_passes_and_indexes(self):
@@ -617,8 +617,8 @@ class TestMatcherTriggerIndexing:
              'triggers': ['fix parser: do Y']},
         ]
         matcher.build_index(meta)
-        assert 'fix' in matcher._inverted_index
-        assert 'parser' in matcher._inverted_index
+        assert 'fix' in matcher._field_index
+        assert 'parser' in matcher._field_index
 
     def test_build_index_clean_list_str_triggers(self):
         """§7.4 guard: build_index on metadata whose triggers is list[str] produces the expected
@@ -628,8 +628,12 @@ class TestMatcherTriggerIndexing:
             {'name': 'clean-skill', 'description': 'does things', 'triggers': ['alpha', 'beta']},
         ]
         matcher.build_index(meta)
-        assert matcher._inverted_index.get('alpha') == ['clean-skill']
-        assert matcher._inverted_index.get('beta') == ['clean-skill']
+        # G+C3 field index: keyword -> {skill_name: frozenset(fields)}; a trigger-only
+        # match records the 'trig' field.
+        assert set(matcher._field_index.get('alpha', {})) == {'clean-skill'}
+        assert matcher._field_index['alpha']['clean-skill'] == frozenset({'trig'})
+        assert set(matcher._field_index.get('beta', {})) == {'clean-skill'}
+        assert matcher._field_index['beta']['clean-skill'] == frozenset({'trig'})
 
     def test_build_index_atomic_swap_on_failure(self, caplog):
         """BUG_0020: a build failure must leave the PREVIOUS index intact (atomic swap),
@@ -648,7 +652,7 @@ class TestMatcherTriggerIndexing:
         # Seed a known-good previous index.
         matcher.build_index([{'name': 'prev-skill', 'description': 'gamma delta',
                               'triggers': ['gamma', 'delta']}])
-        assert matcher._inverted_index.get('gamma') == ['prev-skill']
+        assert set(matcher._field_index.get('gamma', {})) == {'prev-skill'}
 
         class _ExplodingMeta(dict):
             def get(self, key, default=None):
@@ -663,9 +667,9 @@ class TestMatcherTriggerIndexing:
                 pass  # expected — the backstop in _rebuild_index would catch it there
 
         # Atomic contract: the previous index must be fully intact after the failed build.
-        assert matcher._inverted_index.get('gamma') == ['prev-skill'], \
+        assert set(matcher._field_index.get('gamma', {})) == {'prev-skill'}, \
             'failed build corrupted/replaced the previous index (non-atomic clear-then-fill)'
-        assert 'poison' not in str(matcher._inverted_index), \
+        assert 'poison' not in str(matcher._field_index), \
             'partial data from a failed build leaked into the shared index'
 
     def test_rebuild_index_unexpected_failure_logged_at_warning(self, caplog):
@@ -898,8 +902,8 @@ class TestHotReload:
             task_text='Test hot-reload skill discovery',
         )
 
-        assert name in fresh_manager._matcher._inverted_index
-        assert 'discovery' in fresh_manager._matcher._inverted_index
+        assert name in fresh_manager._matcher._field_index
+        assert 'discovery' in fresh_manager._matcher._field_index
 
     def test_promoted_skill_matchable_via_manager(self, fresh_manager):
         name = f"test-hot-reload-skill-{_uid()}"

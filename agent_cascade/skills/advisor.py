@@ -93,20 +93,33 @@ def build_skill_advisor_prompt(
     entries.sort(key=lambda e: e[0])
 
     # ── Loose keyword pre-filter (coarse rank-and-truncate, NOT a gate) ────────────
-    # Trims to top-N by score only when enough confident matches exist; otherwise falls back
-    # to passing all skills → zero regression risk.
+    # Trims to top-N by score when the scorer returns a focused subset (<50% of corpus);
+    # otherwise falls back to a deterministic first-N-by-name slice so the prompt is
+    # NEVER flooded with the full catalog (token-budget guard, todo 122+123 plan §5).
     overflow_note = ''
     try:
         from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
         query_text = f"{task_text or ''} {context_text or ''}"
-        matches = skill_manager.match_skills(query_text)  # [(name, score)] sorted desc; score > 0 only
+        # The G+C3 scorer truncates to its top-10 by default, which would make any
+        # fixed-count guard unsatisfiable. Ask for an uncapped ranking and let the
+        # advisor decide how many candidates to show based on match focus.
+        matches = skill_manager.match_skills(query_text, cap=None)  # [(name, score)] sorted desc; score > 0 only
         # self-augmentation is always injected by the engine — it must never occupy a candidate slot.
         matched_names = [n for n, _ in matches if n.lower() != _SELF_AUGMENTATION]
         total = len(entries)  # registered non-self-aug skills (disabled already excluded upstream)
-        if total > SKILL_ADVISOR_MAX_CANDIDATES and len(matched_names) >= SKILL_ADVISOR_MAX_CANDIDATES:
-            shown_set = set(matched_names[:SKILL_ADVISOR_MAX_CANDIDATES])  # top-N by score
+        if total > SKILL_ADVISOR_MAX_CANDIDATES and matched_names and len(matched_names) < total * 0.5:
+            # Focused match: the scorer found a relevant subset — use it.
+            shown_set = set(matched_names[:SKILL_ADVISOR_MAX_CANDIDATES])
             entries = [e for e in entries if e[1] in shown_set]
             entries.sort(key=lambda e: e[0])  # keep rating order within the filtered subset
+            overflow_note = (
+                f"Note: {total - len(entries)} additional skills exist but were filtered "
+                f"for relevance. If none of the above seem applicable, say [SKILLS] none.\n"
+            )
+        elif total > SKILL_ADVISOR_MAX_CANDIDATES:
+            # Broad match (or no matches): fall back to a deterministic first-N-by-name
+            # slice so the prompt stays bounded regardless of scorer behavior.
+            entries = sorted(entries, key=lambda e: e[1])[:SKILL_ADVISOR_MAX_CANDIDATES]
             overflow_note = (
                 f"Note: {total - len(entries)} additional skills exist but were filtered "
                 f"for relevance. If none of the above seem applicable, say [SKILLS] none.\n"
