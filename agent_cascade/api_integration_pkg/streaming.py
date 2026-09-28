@@ -566,8 +566,10 @@ def _calc_stream_token_stats(
 ) -> tuple:
     """Calculate token stats for streaming updates with caching.
 
-    Computes h_stats and r_stats from the combined conversation + streaming snapshot,
-    then caches them keyed by instance_name for reuse during active generation.
+    Computes h_stats over conv_snapshot (committed history only) and r_stats over
+    stream_resp_snapshot (the true in-flight partial) ONLY — the two sources are never
+    combined, so committed messages are not double-counted. Results are cached keyed by
+    instance_name for reuse during active generation.
 
     Args:
         version: The 3-tuple conversation-identity key computed by the caller
@@ -607,10 +609,16 @@ def _calc_stream_token_stats_uncached(
     """Pure computation of (h_stats, r_stats) WITHOUT touching the cache.
 
     Fix B: split out from _calc_stream_token_stats so the caller can compute only the
-    cheap streaming partial (r_stats = get_history_stats(responses)) on a per-tick basis
-    while reusing a cached h_stats keyed on stable conversation identity. The inputs and
-    computation here are byte-identical to the original monolithic function, so results
-    are unchanged — this is a pure refactor of where the cache write happens.
+    cheap streaming partial (r_stats = get_history_stats(stream_resp_snapshot)) on a
+    per-tick basis while reusing a cached h_stats keyed on stable conversation identity.
+    The inputs and computation here are byte-identical to the original monolithic
+    function, so results are unchanged — this is a pure refactor of where the cache
+    write happens.
+
+    Note: the ``responses`` parameter is retained for signature stability (call sites
+    pass it positionally; changing arity would ripple through state_builder) but is
+    IGNORED at this site — r_stats always comes from stream_resp_snapshot, the true
+    in-flight partial. See the comment on the r_stats line below.
 
     Returns:
         (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
@@ -623,9 +631,14 @@ def _calc_stream_token_stats_uncached(
     try:
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
-        # r_stats: use responses if provided, else fall back to stream_resp_snapshot
-        _r_src = responses if responses is not None else stream_resp_snapshot
-        r_stats = get_history_stats(_r_src) if _r_src else {'tokens': 0, 'words': 0}
+        # r_stats: ALWAYS over the true in-flight partial. The `responses` argument is
+        # the run-scoped accumulator (engine/core.py:1692, :2412) and would both
+        # re-tokenize the whole run and double-count already-committed messages.
+        r_stats = (
+            get_history_stats(stream_resp_snapshot)
+            if stream_resp_snapshot
+            else {'tokens': 0, 'words': 0}
+        )
     except Exception as e:
         logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}

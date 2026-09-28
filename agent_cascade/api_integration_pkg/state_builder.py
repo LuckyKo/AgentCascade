@@ -582,9 +582,14 @@ def build_stream_update_from_pool(
         # Conversation unchanged — reuse the cached STABLE history stats (h_stats).
         h_stats = cached_stats[0]
         # Recompute ONLY the streaming partial (r_stats) fresh each tick so total_tokens
-        # stays live as the partial grows. This is cheap/O(tail): it only touches the small
-        # in-flight response, never the full conversation.
-        r_stats = _calc_stream_r_stats(responses)
+        # stays live as the partial grows. NOTE: the source is stream_resp_snapshot, NOT
+        # the `responses` argument. `responses` is the RUN-SCOPED accumulator
+        # (engine/core.py:1692, extended at :2412 every turn, cleared only on the
+        # force-compression paths :2321 / compression_exec.py:324) — tokenizing it
+        # re-counts the whole run on every tick and double-counts messages that are
+        # already in conv_snapshot. stream_resp_snapshot is the true in-flight partial,
+        # already snapshotted at :559 under the same lock.
+        r_stats = _calc_stream_r_stats(stream_resp_snapshot)
     else:
         # Lazy import to avoid a module-level circular dependency: streaming.py
         # imports build_stream_update_from_pool from this module (state_builder).
