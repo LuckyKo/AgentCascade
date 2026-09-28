@@ -308,6 +308,8 @@ class _MockLLMHandler(BaseHTTPRequestHandler):
             # substring of any other marker (no shared digit-prefix ambiguity). We emit it
             # as the chunk's first word so the latency correlator can find it exactly.
             gidx = seq * 1000 + i                # unique per turn+step (seq<=999, i<1000)
+            # The `seq*1000 + i` encoding is LOAD-BEARING for turn counting: _measure_turns_by_marker
+            # recovers the mock-request seq via `max(marker_idx) // 1000`, so keep seq < 1000 and i < 1000.
             marker = f"@@MK{gidx}@@"             # delimited -> not a substring of any other
             words = [marker] + [f"w{gidx}_{w}" for w in range(1, TOKENS_PER_CHUNK)]
             emit_t = time.monotonic()  # timestamp the instant we write this chunk to the wire
@@ -892,6 +894,10 @@ def _measure_updates(updates):
     for arrival, ev, _raw_bytes in updates:
         inst = (ev.get('agent_instances') or ev.get('instances') or {}).get(INSTANCE_NAME)
         if not isinstance(inst, dict):
+            # NOTE: this is a *counting* skip, NOT a boundary skip — a non-partial frame
+            # lacking INSTANCE_NAME also fails to close the open turn here. The assertion
+            # no longer depends on this path (see _measure_turns_by_marker / BUG_0030);
+            # _measure_updates output is diagnostic only now.
             continue
         is_partial = bool(inst.get('is_partial'))
         m = _live_assistant_msg(ev)
@@ -996,6 +1002,76 @@ def _measure_latency(updates, emit_log):
         'per_turn': {seq: _stats(lats) for seq, lats in sorted(per_turn.items())},
         'overall': overall,
     }
+
+
+def _measure_turns_by_marker(updates, emit_log):
+    """Segment the WS capture into streaming turns using AUTHORITATIVE mock-LLM
+    request boundaries.
+
+    Every reasoning chunk the mock emits carries a globally unique marker
+    `@@MK{seq*1000+i}@@` (seq = the mock's request counter). A frame's
+    reasoning_content is CUMULATIVE, so turn identity is recovered with a
+    high-water mark on the marker index: a frame whose highest marker belongs to
+    a strictly greater `seq` than the open turn OPENS a new turn.
+
+    This is immune to a lost non-partial commit frame (the is_partial run simply
+    keeps going) but still reports one turn fewer if a turn's reasoning never
+    reaches the socket -- i.e. it still catches a genuinely dropped turn.
+
+    `updates` entries are (arrival_monotonic, event_dict, raw_frame_bytes).
+    Returns a list of metric dicts shaped exactly like `_measure_updates` output.
+    """
+    import re
+    _mk = re.compile(r'@@MK(\d+)@@')
+
+    turns = []            # list of per-turn accumulator dicts
+    cur = None
+    hw_seq = None         # seq of the currently open turn (monotonic; compare, never assume contiguity)
+
+    for arrival, ev, _raw_bytes in updates:
+        m = _live_assistant_msg(ev)
+        rl = (m.get('reasoning_content') or '') if (
+            m and isinstance(m.get('reasoning_content'), str)) else ''
+        cl = (m.get('content') or '') if (
+            m and isinstance(m.get('content'), str)) else ''
+        g = [int(x) for x in _mk.findall(rl)]
+        top_seq = (max(g) // 1000) if g else None
+
+        # A marker from a STRICTLY GREATER seq than the open turn opens a new turn.
+        # The `continue` is inside this branch only: a frame whose newest marker is
+        # higher but belongs to the SAME seq is appended to the open turn below, not
+        # made into a new one -- otherwise this yields one turn per frame.
+        if top_seq is not None and (cur is None or top_seq > hw_seq):
+            if cur is not None:
+                turns.append(cur)          # close the previous turn FIRST
+            cur = {'arrivals': [arrival], 'reasoning_lens': [len(rl)], 'content_lens': [len(cl)]}
+            hw_seq = top_seq
+            continue
+        # no marker, or a marker from the seq already open -> same turn
+        if cur is not None:
+            cur['arrivals'].append(arrival)
+            cur['reasoning_lens'].append(len(rl))
+            cur['content_lens'].append(len(cl))
+
+    if cur is not None:
+        turns.append(cur)
+
+    # Same metric shape as _measure_updates so the caller's assertions are unchanged.
+    metrics = []
+    for i, tr in enumerate(turns):
+        arrivals = tr['arrivals']
+        gaps = [arrivals[j + 1] - arrivals[j] for j in range(len(arrivals) - 1)]
+        metrics.append({
+            'turn': i + 1,
+            'n_updates': len(arrivals),
+            'max_gap': max(gaps) if gaps else 0.0,
+            'reasoning_first': tr['reasoning_lens'][0] if tr['reasoning_lens'] else 0,
+            'reasoning_last': tr['reasoning_lens'][-1] if tr['reasoning_lens'] else 0,
+            'distinct_reasoning': len(set(tr['reasoning_lens'])),
+            'content_first': tr['content_lens'][0] if tr['content_lens'] else 0,
+            'content_last': tr['content_lens'][-1] if tr['content_lens'] else 0,
+        })
+    return metrics
 
 
 def _measure_payload_sizes(updates):
@@ -1290,8 +1366,14 @@ def test_fullstack_streaming(fullstack_server):
     updates = _capture_ws(ws_url, run_ms=capture_ms)
     assert len(updates) > 0, 'No stream_update frames arrived over the live WebSocket'
 
-    metrics = _measure_updates(updates)
-    print(f"\n[fullstack] captured {len(updates)} stream_updates; segmented into {len(metrics)} streaming turn(s)")
+    emit_log = _MockLLMHandler.get_emit_log()          # moved up from the latency section below
+    metrics = _measure_turns_by_marker(updates, emit_log)   # authoritative boundaries
+    # keep the old is_partial segmentation as a printed diagnostic only (it undercounts
+    # whenever the lossy broadcast drops a non-partial commit frame — see BUG_0030)
+    legacy_metrics = _measure_updates(updates)
+    print(f"\n[fullstack] captured {len(updates)} stream_updates; "
+          f"segmented into {len(metrics)} turn(s) by mock-request marker "
+          f"({len(legacy_metrics)} by is_partial transitions — diagnostic only)")
     for m in metrics:
         print(f"  turn {m['turn']}: updates={m['n_updates']} max_gap={m['max_gap']:.3f}s "
               f"reasoning {m['reasoning_first']}->{m['reasoning_last']} (distinct={m['distinct_reasoning']}) "
@@ -1303,19 +1385,21 @@ def test_fullstack_streaming(fullstack_server):
     # accumulates across turns.
     payload = _measure_payload_sizes(updates)
     if payload:
-        print(f"\n[fullstack] Per-turn stream_update payload size (raw WS frame bytes):")
+        # "segment" — these numbers come from the is_partial segmentation, which no longer
+        # aligns with the metrics turn numbers above (see BUG_0030); print-only, no assertions.
+        print(f"\n[fullstack] Per-segment stream_update payload size (raw WS frame bytes):")
         for p in payload:
-            print(f"  turn {p['turn']}: frames={p['n_frames']} "
+            print(f"  segment {p['turn']}: frames={p['n_frames']} "
                   f"min={p['min_bytes']}B median={p['median_bytes']}B max={p['max_bytes']}B")
     else:
-        print('\n[fullstack] Per-turn payload size: (no streaming turns captured)')
+        print('\n[fullstack] Per-segment payload size: (no streaming segments captured)')
 
     # ── 1a-delta. Delta-mode assertions (only when AGENT_CASCADE_STREAM_DELTA=1) ───
     if DELTA_MODE:
         _assert_delta_mode(updates, payload)
 
     # ── 1b. End-to-end latency: mock-generator -> final WS output ───────────────
-    emit_log = _MockLLMHandler.get_emit_log()
+    # (emit_log was fetched above, before turn segmentation — it is shared by both.)
     lat = _measure_latency(updates, emit_log)
     print(f"\n[fullstack] E2E latency (mock emit -> first WS update containing it): "
           f"matched {lat['matched_markers']}/{lat['total_markers']} markers")
