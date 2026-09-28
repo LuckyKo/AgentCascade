@@ -1281,7 +1281,10 @@ class WsMessageHandler:
         # loaded session's own metadata determine its identity.
         instance_name = 'Maine'
         try:
-            with open(path, 'r') as f:
+            # encoding='utf-8': log files are written as UTF-8 JSONL; the platform
+            # default (cp1252 on Windows) crashes on any non-ASCII byte.
+            # errors='replace': a partially-written line must not abort session load.
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 first_line = f.readline().strip()
                 if first_line:
                     first_data = json.loads(first_line)
@@ -1290,7 +1293,7 @@ class WsMessageHandler:
                         extracted = meta.get('instance_name') if isinstance(meta, dict) else None
                         if extracted:
                             instance_name = str(extracted).strip()
-        except (OSError, json.JSONDecodeError, KeyError) as e:
+        except (OSError, json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
             from agent_cascade.log import logger
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
 
