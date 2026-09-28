@@ -22,6 +22,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES  # POLISH rev122 #5: named cap constant
 from agent_cascade.skills.advisor import (SkillAdvisorResult, build_skill_advisor_prompt, parse_advisor_output,
                                           run_skill_advisor)
 
@@ -319,12 +320,12 @@ class TestBuildSkillAdvisorPromptFiltering:
         assert 'additional skills exist but were filtered' in prompt
 
     def test_fallback_to_deterministic_slice_when_zero_matches(self):
-        """total (30) > N=20 and zero matches → deterministic first-N-by-name slice."""
+        """total (30) > N and zero matches → deterministic first-N-by-name slice."""
         names = self._names(30)
         sm = FilteringMockSkillManager(names, matches={})  # empty → zero scores
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 20  # bounded to N, not the full catalog
+        assert len(skill_lines) == SKILL_ADVISOR_MAX_CANDIDATES  # bounded to N, not the full catalog
         assert 'additional skills exist but were filtered' in prompt
 
     def test_filters_to_top_n_by_score(self):
@@ -338,18 +339,18 @@ class TestBuildSkillAdvisorPromptFiltering:
         assert len(shown) == 14  # all matched skills shown (focused subset < N)
 
     def test_broad_match_falls_back_to_name_slice(self):
-        """total (30) > N=20 and 25 match (≥ 50% of corpus) → deterministic first-N-by-name."""
+        """total (30) > N and 25 match (≥ 50% of corpus) → deterministic first-N-by-name."""
         names = self._names(30)
         matches = {f"skill-{i:02d}": (i + 1) / 25.0 for i in range(25)}
         sm = FilteringMockSkillManager(names, matches=matches)
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
         shown = {l[2:].split(' ')[0] for l in skill_lines}
-        assert len(shown) == 20  # bounded to N via name-slice fallback
-        # The name-slice picks the first 20 alphabetically: skill-00..skill-19.
-        for i in range(20):
+        assert len(shown) == SKILL_ADVISOR_MAX_CANDIDATES  # bounded to N via name-slice fallback
+        # The name-slice picks the first N alphabetically.
+        for i in range(SKILL_ADVISOR_MAX_CANDIDATES):
             assert f"skill-{i:02d}" in shown
-        for i in range(20, 30):
+        for i in range(SKILL_ADVISOR_MAX_CANDIDATES, 30):
             assert f"skill-{i:02d}" not in shown
 
     def test_overflow_note_count_is_correct(self):
@@ -402,7 +403,7 @@ class TestBuildSkillAdvisorPromptFiltering:
         sm = MockSkillManager(names)  # no match_skills attr
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 20  # exception → deterministic first-N-by-name slice
+        assert len(skill_lines) == SKILL_ADVISOR_MAX_CANDIDATES  # exception → name-slice fallback
 
     def test_fallback_when_match_skills_raises(self):
         """A raising match_skills must not break prompt building AND the prompt must stay
@@ -416,15 +417,15 @@ class TestBuildSkillAdvisorPromptFiltering:
         sm = Broken(names, matches={n: 1.0 for n in names})
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 20  # exception → deterministic first-N-by-name slice
+        assert len(skill_lines) == SKILL_ADVISOR_MAX_CANDIDATES  # exception → name-slice fallback
 
     def test_n_boundary_exact(self):
-        """total == N exactly (20) → NOT filtered (condition is total > N), no note."""
-        names = self._names(20)
+        """total == N exactly → NOT filtered (condition is total > N), no note."""
+        names = self._names(SKILL_ADVISOR_MAX_CANDIDATES)
         sm = FilteringMockSkillManager(names, matches={n: 1.0 for n in names})
         prompt = build_skill_advisor_prompt(sm, 'task', '', 'coder', 'Maine')
         skill_lines = [l for l in prompt.splitlines() if l.startswith('- ')]
-        assert len(skill_lines) == 20
+        assert len(skill_lines) == SKILL_ADVISOR_MAX_CANDIDATES
         assert 'additional skills exist but were filtered' not in prompt
 
     # ── Regression: advisor pre-filter firing rate (plan §1.5b / todo 122+123) ──

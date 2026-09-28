@@ -3577,7 +3577,13 @@ class TestScanSkillsOutputVolume:
         self.tool = ScanSkills(agent_pool=pool)
 
     def test_query_mode_caps_bullets_at_max_results(self):
-        """More than SKILL_SCAN_MAX_RESULTS matches → exactly that many bullets + a note."""
+        """More than SKILL_SCAN_MAX_RESULTS matches → exactly that many bullets + a note.
+
+        Contract pin (POLISH rev122 #4): the cap lives at module level in
+        scan_skills.py as ``SKILL_SCAN_MAX_RESULTS`` (not settings.py). If it is
+        ever moved to settings, update this import — the test must keep asserting
+        against the live constant, never a hardcoded number.
+        """
         from agent_cascade.tools.custom.scan_skills import SKILL_SCAN_MAX_RESULTS
 
         names = [f'bulk-skill-{i:02d}' for i in range(SKILL_SCAN_MAX_RESULTS + 5)]
@@ -3618,7 +3624,11 @@ class TestScanSkillsOutputVolume:
         assert bullets == []  # no catalog dump
 
     def test_no_query_listing_stays_uncapped(self):
-        """The no-query listing (intentional full view) is NOT subject to the cap."""
+        """The no-query listing (intentional full view) is NOT subject to the cap.
+
+        Contract pin (POLISH rev122 #4): same as ``test_query_mode_caps_bullets_at_max_results`` —
+        import the live constant, never hardcode the number.
+        """
         from agent_cascade.tools.custom.scan_skills import SKILL_SCAN_MAX_RESULTS
 
         names = [f'list-skill-{i:02d}' for i in range(SKILL_SCAN_MAX_RESULTS + 7)]

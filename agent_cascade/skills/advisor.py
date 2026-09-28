@@ -23,6 +23,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES  # POLISH rev122 #2: single top-level import
+
 
 @dataclass
 class SkillAdvisorResult:
@@ -55,6 +57,15 @@ _SELF_AUGMENTATION = 'self-augmentation'
 # Kept module-local (not settings): it is an internal tuning ratio, not user config —
 # SKILL_ADVISOR_MAX_CANDIDATES (the absolute cap) lives in settings.py per house style.
 _PREFILTER_FOCUS_THRESHOLD = 0.5
+
+
+def _name_slice_fallback(entries, n):
+    """Deterministic first-N-by-name slice (POLISH rev122 #3).
+
+    Used both by the broad-match branch and the post-try cap guard so the
+    token-budget invariant holds on EVERY path with identical semantics.
+    """
+    return sorted(entries, key=lambda e: e[1])[:n]
 
 
 def build_skill_advisor_prompt(
@@ -105,7 +116,6 @@ def build_skill_advisor_prompt(
     # NEVER flooded with the full catalog (token-budget guard, todo 122+123 plan §5).
     overflow_note = ''
     try:
-        from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
         query_text = f"{task_text or ''} {context_text or ''}"
         # The G+C3 scorer truncates to its top-10 by default, which would make any
         # fixed-count guard unsatisfiable. Ask for an uncapped ranking and let the
@@ -126,7 +136,7 @@ def build_skill_advisor_prompt(
         elif total > SKILL_ADVISOR_MAX_CANDIDATES:
             # Broad match (or no matches): fall back to a deterministic first-N-by-name
             # slice so the prompt stays bounded regardless of scorer behavior.
-            entries = sorted(entries, key=lambda e: e[1])[:SKILL_ADVISOR_MAX_CANDIDATES]
+            entries = _name_slice_fallback(entries, SKILL_ADVISOR_MAX_CANDIDATES)
             overflow_note = (
                 f"Note: {total - len(entries)} additional skills exist but were filtered "
                 f"for relevance. If none of the above seem applicable, say [SKILLS] none.\n"
@@ -139,12 +149,8 @@ def build_skill_advisor_prompt(
     # except handler above may leave `entries` untouched (e.g. match_skills raised),
     # so enforce the cap here unconditionally; it is a no-op when a branch already
     # truncated, and applies the deterministic first-N-by-name slice otherwise.
-    try:
-        from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
-        if len(entries) > SKILL_ADVISOR_MAX_CANDIDATES:
-            entries = sorted(entries, key=lambda e: e[1])[:SKILL_ADVISOR_MAX_CANDIDATES]
-    except Exception as e:  # noqa: BLE001 — last-resort guard; an unbounded prompt is worse
-        logger.warning('[SKILL-ADVISOR] candidate cap enforcement failed (passing unfiltered list): %s', e)
+    if len(entries) > SKILL_ADVISOR_MAX_CANDIDATES:
+        entries = _name_slice_fallback(entries, SKILL_ADVISOR_MAX_CANDIDATES)
 
     metadata_lines = [line for _, _, line in entries]
     skills_metadata = '\n'.join(metadata_lines) if metadata_lines else '(none)'

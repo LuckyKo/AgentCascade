@@ -19,7 +19,9 @@ _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
 
 # G+C3 scorer knobs (todo 122+123 plan §1.6/§4): field weights, minimum indexed token
 # length, minimum distinct matched terms, and the top-k cap returned by match().
-_FIELD_WEIGHTS: Dict[str, float] = {'name': 3.0, 'desc': 1.0, 'trig': 1.5}
+# Frozen so no caller can mutate the scorer knobs at runtime (POLISH rev122 #1).
+_FIELD_WEIGHTS = frozenset((('name', 3.0), ('desc', 1.0), ('trig', 1.5)))
+_FIELD_WEIGHT_MAP = dict(_FIELD_WEIGHTS)  # derived once for O(1) per-field lookup in match()
 _MIN_TOKEN_LEN = 2
 _MIN_MATCHED_TERMS = 2
 _TOP_K = 10
@@ -205,7 +207,7 @@ class SkillMatcher:
 
         # Normalizer: total IDF mass of the query * max field weight. A skill that
         # matched every query term in its strongest field scores exactly 1.0.
-        wmax = max(_FIELD_WEIGHTS.values())
+        wmax = max(w for _, w in _FIELD_WEIGHTS)
         total = sum(self._idf.get(kw, 0.0) for kw in query_tokens) * wmax
         if total <= 0:
             return []
@@ -220,7 +222,7 @@ class SkillMatcher:
                 continue
             for name, fields in self._field_index[kw].items():
                 scores[name] = scores.get(name, 0.0) + w * max(
-                    _FIELD_WEIGHTS.get(f, 1.0) for f in fields)
+                    _FIELD_WEIGHT_MAP.get(f, 1.0) for f in fields)
                 term_counts[name] = term_counts.get(name, 0) + 1
 
         # Min-2 gate: a single shared word (e.g. "test") must not qualify a skill.
