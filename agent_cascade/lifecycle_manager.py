@@ -169,6 +169,12 @@ class AgentLifecycleManager:
                 inst._auto_skill_proposed = False
                 inst._auto_skill_dirty_stop = False
 
+                # TG-STREAM F4: clear the stream-time push flags too — a reused
+                # instance must not carry its previous run's "already pushed" state forward,
+                # or the first text output / final answer of the new run would be suppressed.
+                inst._tg_first_pushed = False
+                inst._tg_final_pushed_phase = None
+
                 # Remove from old parent's tracking even if new caller is None
                 if old_parent is not None:
                     self.pool._update_child_relationship(old_parent, instance_name, add=False)

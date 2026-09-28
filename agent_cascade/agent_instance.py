@@ -275,7 +275,12 @@ class AgentInstance:
         default=False)  # True when the in-loop trigger fired via the LAST-TURN-TOOL-CALL path — i.e. the run did not end on a clean no-tool answer before reflecting. extract_instance_output returns the LAST reflection message (not the pre-reflection snapshot) when this is set. Reset alongside _auto_skill_proposed/_auto_skill_task_output on instance reuse/recall (lifecycle_manager.py).
     _loaded_skill_names: Optional[List[str]] = field(
         default=None)  # This run's resolved skill names, set in _create_and_run_agent so the in-loop auto-skill trigger can render them in the reflection prompt
-    _tg_pushed: bool = field(default=False)  # True once this run's pre-reflection TG push fired; post-run push skips when set. Reset at each run start (run_agent_thread_unified).
+    # TG-STREAM F4: per-run stream-time push state. Replaces the old _tg_pushed bool
+    # (which structurally could not express "pushed pre, must still push post"). Set only when
+    # notify_user returns True; reset at every run start — main-agent path in
+    # run_agent_unified._reset_run_scoped_tg_state, sub-agent reuse in lifecycle_manager.
+    _tg_first_pushed: bool = field(default=False)  # True once this run's first text output was pushed to TG
+    _tg_final_pushed_phase: Optional[str] = None   # 'pre' or 'post' once that phase's final-answer push succeeded; None = not yet
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(

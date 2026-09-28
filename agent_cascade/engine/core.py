@@ -85,6 +85,127 @@ def _is_explicit_skill_list(load_skill_value) -> bool:
     return False
 
 
+# ── TG-STREAM: stream-time condition-based Telegram pushes ────────────────────────
+# Replaces the reverted end-of-run history-extraction approach: pushes fire at the
+# moment their condition is met in the engine loop, operating ONLY on the turn's
+# committed output (`turn_output` / `response` locals) — no conversation lookback.
+# All helpers are best-effort (never raise into the run loop) and root-gated
+# (parent_instance is None — sub-agents must not push to the phone).
+
+def _tg_stream_text(messages: List[Any]) -> str:
+    """Return the text of the LAST assistant message in `messages` that has real text.
+
+    Walks reversed; skips non-assistant roles and empty/tool-call-only messages.
+    Reads content directly (str, or the ``text`` fields of list parts) — no
+    tool-call fallback, so a function_call turn never yields push text. Returns ''
+    when no assistant-with-text exists.
+    """
+    for msg in reversed(messages or []):
+        role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        if role != ASSISTANT:
+            continue
+        content = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', None)
+        text = ''
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            frags = []
+            for part in content:
+                t = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
+                if isinstance(t, str) and t.strip():
+                    frags.append(t.strip())
+            text = ' '.join(frags).strip()
+        if text:
+            return text
+    return ''
+
+
+def _tg_stream_push(instance: AgentInstance, turn_output: List[Message], pool: Any) -> None:
+    """TG-STREAM F1: push the FIRST text output of a run, at commit time.
+
+    Called from _process_response immediately after turn_output is committed to the
+    conversation. Fires once per run (_tg_first_pushed), only for root instances, and
+    only when the committed turn actually contains assistant text — a tool-call-only
+    first turn does NOT consume the flag (the next text turn still pushes).
+
+    notify_user is non-blocking/thread-safe and returns True only when scheduled onto
+    a live bridge loop; the flag is set ONLY on that success so a down-bridge attempt
+    retries on the next text output. Best-effort: any exception is swallowed.
+    """
+    try:
+        if getattr(instance, 'parent_instance', None) is not None:
+            return  # sub-agent — never push to the phone
+        if getattr(instance, '_tg_first_pushed', False):
+            return  # already delivered this run's first text output
+        text = _tg_stream_text(turn_output)
+        if not text:
+            return  # no assistant text in this turn (e.g. tool-call-only) — wait for one
+        sup = getattr(pool, 'telegram_supervisor', None)
+        if sup is None or not hasattr(sup, 'notify_user'):
+            return  # bridge not attached — silent no-op
+        inst_name = instance.instance_name
+        gen = getattr(pool, '_run_generation', None)
+        ok = sup.notify_user(text, instance_name=inst_name, run_generation=gen)
+        if ok:
+            instance._tg_first_pushed = True
+            logger.debug('[TG-PUSH] first-output push delivered for %s gen=%s (%d chars)',
+                         inst_name, gen, len(text))
+        else:
+            # notify_user False = bridge not live (silent no-op by contract) — flag stays
+            # False so the next text output retries; WARNING per plan §F3.
+            logger.warning('[TG-PUSH] first-output push failed for %s (bridge not live?) gen=%s',
+                           inst_name, gen)
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the run
+        logger.debug('[TG-PUSH] first-output push error for %s: %s',
+                     getattr(instance, 'instance_name', '?'), e)
+
+
+def _tg_push_final(instance: AgentInstance, response: List[Message], pool: Any, phase: str) -> None:
+    """TG-STREAM F2: push the final answer at stream time.
+
+    Called from Phase 5 on genuine completion, with `response` = this run's committed
+    output so far (no history lookback). ``phase`` is 'pre' when the natural end happens
+    before an auto-skill reflection and 'post' after one — keyed on
+    instance._auto_skill_proposed at the call site.
+
+    Dedup via _tg_final_pushed_phase: the 'pre' and 'post' phases are INDEPENDENT — a
+    successful 'pre' push does NOT suppress a later 'post' (the reflection's own final
+    answer is still delivered); each phase only suppresses further attempts of its own
+    kind (a second 'pre' attempt is skipped once either phase has pushed, which matters
+    if another genuine-completion point occurs before the extension fires). A failed
+    attempt leaves the marker unset so the next attempt retries. Best-effort: never raises.
+    """
+    try:
+        if getattr(instance, 'parent_instance', None) is not None:
+            return  # sub-agent — never push to the phone
+        pushed_phase = getattr(instance, '_tg_final_pushed_phase', None)
+        if phase == 'pre' and pushed_phase in ('pre', 'post'):
+            return
+        if phase == 'post' and pushed_phase == 'post':
+            return
+        text = _tg_stream_text(response)
+        if not text:
+            return  # no assistant text committed yet — nothing to push
+        sup = getattr(pool, 'telegram_supervisor', None)
+        if sup is None or not hasattr(sup, 'notify_user'):
+            return  # bridge not attached — silent no-op
+        inst_name = instance.instance_name
+        gen = getattr(pool, '_run_generation', None)
+        ok = sup.notify_user(text, instance_name=inst_name, run_generation=gen)
+        if ok:
+            instance._tg_final_pushed_phase = phase
+            logger.debug('[TG-PUSH] final(%s) push delivered for %s gen=%s (%d chars)',
+                         phase, inst_name, gen, len(text))
+        else:
+            # notify_user False = bridge not live (silent no-op by contract) — marker stays
+            # unset so the next completion path retries; WARNING per plan §F3.
+            logger.warning('[TG-PUSH] final(%s) push failed for %s (bridge not live?) gen=%s',
+                           phase, inst_name, gen)
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the run
+        logger.debug('[TG-PUSH] final(%s) push error for %s: %s',
+                     phase, getattr(instance, 'instance_name', '?'), e)
+
+
 # MAX_TEXT_LENGTH_FOR_REGEX / MIN_OUTPUT_LENGTH now live in helpers.py (their true
 # home — used by the helper functions there); re-imported below alongside helpers.
 # SAMPLING_AND_LIMIT_KEYS lives in llm_call.py (used by _build_merged_cfg).
@@ -1103,62 +1224,41 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # _post_turn_checks breaks on four paths (stop ×2, stall, genuine
                     # completion); only the last may reflect. _is_genuine_completion
                     # excludes stop/stall so a stopped or stalled agent never triggers.
-                    if self._is_genuine_completion(instance, response) and \
-                            self._try_auto_skill_extension(
+                    if self._is_genuine_completion(instance, response):
+                        # TG-STREAM F2: push the final answer NOW, at stream time —
+                        # this no-tool assistant turn IS the natural end, and its committed text
+                        # lives in `response` (no history lookback). Observed BEFORE/independently
+                        # of _try_auto_skill_extension: the old `and` short-circuit only fired when
+                        # reflection qualified, so a run that completed without reflecting never
+                        # pushed. Phase is keyed on instance._auto_skill_proposed — False here means
+                        # 'pre' (this is the pre-extension answer); after the extension fires below,
+                        # the reflection's own final turn reaches this same point with the flag set
+                        # and pushes 'post'. See _tg_push_final for dedup/retry semantics.
+                        _tg_push_final(instance, response, self.pool,
+                                       phase='post' if getattr(instance, '_auto_skill_proposed', False) else 'pre')
+                        if self._try_auto_skill_extension(
                                 instance, messages, llm_messages,
                                 loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
-                        # NEW (tg push model): deliver the committed final answer NOW, before the reflection
-                        # turns run. Root-only (parent_instance is None; same idiom as engine/helpers.py:685 —
-                        # sub-agents must not push to the phone). Best-effort like _maybe_submit_memory_hint
-                        # (never raises/blocks); deduped against the post-run push via instance._tg_pushed.
-                        try:
-                            # getattr (not a bare attribute read) so a minimally-constructed
-                            # instance (e.g. AgentInstance.__new__ in tests, which bypasses the
-                            # dataclass default for parent_instance) degrades to "no push"
-                            # instead of raising AttributeError into the run loop.
-                            if (getattr(instance, 'parent_instance', None) is None
-                                    and not getattr(instance, '_tg_pushed', False)):
-                                from agent_cascade.compression.helpers import extract_instance_output
-                                pre_text = extract_instance_output(
-                                    list(instance.conversation), instance.instance_name,
-                                    pool=self.pool, instance=instance)
-                                if pre_text and pre_text.strip():
-                                    sup = getattr(self.pool, 'telegram_supervisor', None)
-                                    if sup is not None and hasattr(sup, 'notify_user'):
-                                        # notify_user returns True only if the message was scheduled onto a
-                                        # live bridge loop (False = silent no-op: bridge down / not started).
-                                        # Set _tg_pushed ONLY on success so a failed pre-push doesn't suppress
-                                        # the post-run push (which could still deliver if the bridge comes up);
-                                        # otherwise we'd silently drop the final answer for that run.
-                                        # instance_name/run_generation as keywords (tg-dup v3 F3a): getattr keeps a
-                                        # minimally-constructed pool from raising into the run loop.
-                                        if sup.notify_user(pre_text, instance_name=instance.instance_name,
-                                                           run_generation=getattr(self.pool, '_run_generation', None)):
-                                            instance._tg_pushed = True
-                        except Exception as e:  # noqa: BLE001 - best-effort, never break the run
-                            logger.debug('[TG-PUSH] pre-reflection push failed for %s: %s',
-                                         getattr(instance, 'instance_name', '?'), e)
-
-                        # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
-                        # turns for the reflection. Instance-state mutations are shared with the
-                        # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
-                        # reset + yield/continue stay here (run() frame locals).
-                        max_turns = self._grant_auto_skill_extension(instance)
-                        # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
-                        # The reflection is a fresh phase (turns_available counts down from
-                        # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds
-                        # are meaningless and would print misleading "N remaining out of {extended}"
-                        # messages. Suppress them; the final-turn warning (==1) still fires on the
-                        # reflection's last turn.
-                        _suppress_budget_warnings = True
-                        # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
-                        # _consume_turn has already decremented turns_available for the triggering
-                        # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
-                        # budget-exhaustion design fired BEFORE _consume_turn, which is why its
-                        # reset carried a +1; that no longer applies at this call site.
-                        turns_available = AUTO_SKILL_EXTRA_TURNS
-                        yield response
-                        continue                                                   # run the reflection turns
+                            # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
+                            # turns for the reflection. Instance-state mutations are shared with the
+                            # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
+                            # reset + yield/continue stay here (run() frame locals).
+                            max_turns = self._grant_auto_skill_extension(instance)
+                            # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
+                            # The reflection is a fresh phase (turns_available counts down from
+                            # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds
+                            # are meaningless and would print misleading "N remaining out of {extended}"
+                            # messages. Suppress them; the final-turn warning (==1) still fires on the
+                            # reflection's last turn.
+                            _suppress_budget_warnings = True
+                            # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
+                            # _consume_turn has already decremented turns_available for the triggering
+                            # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
+                            # budget-exhaustion design fired BEFORE _consume_turn, which is why its
+                            # reset carried a +1; that no longer applies at this call site.
+                            turns_available = AUTO_SKILL_EXTRA_TURNS
+                            yield response
+                            continue                                               # run the reflection turns
                     break
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
@@ -1252,6 +1352,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             inst_name = instance.instance_name
             suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
             terminated = self._is_terminal_stop(inst_name)
+            # TG-STREAM F3/D3: a terminal stop skips Phase 5 entirely, so the
+            # final-answer push never fires — if the first-output push already went out but no
+            # final one did, say so explicitly (the user got an early update, not the answer).
+            if terminated and getattr(instance, '_tg_first_pushed', False) \
+                    and getattr(instance, '_tg_final_pushed_phase', None) is None:
+                logger.info('[TG-PUSH] run stopped before final push for %s (first-output push sent, '
+                            'final answer not delivered)', inst_name)
             outstanding = self.pool.has_pending(inst_name) or self.pool.has_messages(inst_name)
 
             # BUG-8 FIX: preserve wakeups ONLY when a suspension-driven exit left real
@@ -2306,6 +2413,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Streaming UI Content Update Fix: Clear _streaming_responses in the SAME locked
             # section as the commit above so the two are atomic w.r.t. serialization.
             instance._streaming_responses = []
+
+        # TG-STREAM F1: push the run's FIRST text output at commit time —
+        # the turn is now durably committed, so its assistant text is safe to deliver.
+        # Best-effort (never raises); no-op for sub-agents / tool-call-only turns.
+        _tg_stream_push(instance, turn_output, self.pool)
 
         # FIX: Option B - Merge continue-saved assistant message if present.
         # When Continue is clicked, the last assistant message was popped from

@@ -37,16 +37,18 @@ def _reset_run_scoped_tg_state(instance) -> None:
     """Reset per-run Telegram/auto-skill state on a root instance.
 
     The in-loop auto-skill snapshot is per-instance, but a root run reuses the same
-    instance across every user turn. Without this reset, extract_instance_output()
-    returns the PREVIOUS run's final answer (compression/helpers.py:612-623) and every
-    push ships the same stale text. lifecycle_manager.py:157-163 already does this for
-    the sub-agent reuse path; this is the main-agent equivalent.
+    instance across every user turn. Without this reset, the stream-time TG push flags
+    (TG-STREAM: _tg_first_pushed / _tg_final_pushed_phase) would leak into
+    the next run — the first text output and/or final answer of a fresh run would be
+    silently suppressed. lifecycle_manager.py already does this for the sub-agent reuse
+    path; this is the main-agent equivalent.
 
     ``_auto_skill_proposed`` is one-shot per run (agent_instance.py), so it must be
-    re-armed here too — otherwise the P1 pre-reflection push stays dead for the root
-    agent after its first auto-skill trigger.
+    re-armed here too — otherwise the auto-skill trigger stays dead for the root agent
+    after its first fire.
     """
-    instance._tg_pushed = False
+    instance._tg_first_pushed = False
+    instance._tg_final_pushed_phase = None
     instance._auto_skill_task_output = None
     instance._auto_skill_dirty_stop = False
     instance._auto_skill_proposed = False
@@ -231,41 +233,10 @@ def run_agent_thread_unified(
 
             tick_num += 1
 
-        # NEW (tg push model): push the final answer to the phone once, at natural end of this root run.
-        # Suppressed on an explicit stop; a crash skips this line entirely (exception path). Skipped if the
-        # pre-reflection hook already delivered it (instance._tg_pushed True). Best-effort, never breaks the run.
-        #
-        # TG-DEDUP (2026-09-26): the push is now gated on THIS thread's generation still being current
-        # AND the instance having no queued/async-pending work left. Why: engine.run()'s exit-finally
-        # (engine/core.py ~L1257-1280) drains the message queue WITHOUT appending to the conversation
-        # unless it was a suspension-driven exit — so a phone message that arrives while this run is
-        # finishing (or during the sub-agent slot wait before its own run starts) is silently consumed,
-        # and api_server.py's `session['generating']` guard then blocks /api/message from starting a
-        # second thread for it. Without this gate the push would ship the answer to the PREVIOUS
-        # question while the new one never gets a run — the "same message again" symptom class.
-        # With the gate, the queued message survives in the queue and the next generation's post-run
-        # push delivers its own answer. (The bridge-side waiter still prints its ceiling notice when
-        # it gives up; that is observability, not delivery.)
-        if not is_stopped() and current_generation == pool._run_generation:
-            try:
-                from agent_cascade.compression.helpers import extract_instance_output
-                _ri = pool.get_instance(instance_name)  # re-fetch: the run may have recycled/replaced this instance
-                _outstanding = (pool.has_pending(instance_name) or pool.has_messages(instance_name)) \
-                    if hasattr(pool, 'has_pending') else False
-                if _ri is not None and not getattr(_ri, '_tg_pushed', False) and not _outstanding:
-                    post_text = extract_instance_output(
-                        list(_ri.conversation), instance_name, pool=pool, instance=_ri)
-                    if post_text and post_text.strip():
-                        sup = getattr(pool, 'telegram_supervisor', None)
-                        if sup is not None and hasattr(sup, 'notify_user'):
-                            # notify_user returns True only if the message was scheduled onto a live bridge
-                            # loop (False = silent no-op). Unlike the pre hook there is no dedup flag to set:
-                            # this is the last push of the run. instance_name/run_generation are passed as
-                            # keywords (tg-dup v3 F3a) so the [TG-PUSH] log line can correlate pushes across runs.
-                            sup.notify_user(post_text, instance_name=instance_name,
-                                            run_generation=current_generation)
-            except Exception as e:  # noqa: BLE001 - best-effort, never break the run
-                logger.debug('[TG-PUSH] post-run push failed for %s: %s', instance_name, e)
+        # TG-STREAM F5: the old end-of-run history-extraction push is GONE —
+        # the final answer is now pushed at stream time in engine/core.py Phase 5
+        # (_tg_push_final), which fires the moment the natural-completion turn commits.
+        # No post-run block remains here; surrounding completion logic is untouched.
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(

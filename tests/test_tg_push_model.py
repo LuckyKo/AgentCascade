@@ -1,26 +1,23 @@
 """Push-model tests for the Telegram bridge final-answer delivery (todo.md:125).
 
-Plan: ``plans/tg-bridge-push-model_PLAN.md`` §5.3. Final-answer delivery moved from
-"one fire-and-forget waiter per phone message, each of which fetches and sends the last
-assistant message on generation-end" to "the root run pushes its final answer exactly once
-at natural end" via ``pool.telegram_supervisor.notify_user(text)``:
+SUPERSEDED by the TG-STREAM stream-time push model — see
+``plans/tg-stream-time-push_PLAN.md`` and ``tests/test_tg_stream_push.py``. The old
+push model ("pre-reflection push in engine/core.py Phase 5 + post-run extraction push
+in run_agent_unified, deduped by the one-shot ``instance._tg_pushed`` bool") is GONE:
+the final answer is now pushed at stream time (first text output + pre/post-reflection
+final answers) and the end-of-run history-extraction block was deleted (plan F5).
 
-  * pre-reflection push — ``engine/core.py`` Phase-5 body (root-gated by
-    ``instance.parent_instance is None``), sets ``instance._tg_pushed = True``;
-  * post-run push — ``run_agent_unified.run_agent_thread_unified`` after the run loop,
-    gated by ``not is_stopped()`` and skipped when ``_tg_pushed`` is already True.
+What survives in this file, adapted to the new model:
+  * the engine-driven sub-agent gate (a child that reflects never pushes);
+  * the long-answer chunking guard for ``_safe_send``.
 
-These tests cover plan §5.3 A (one-push-per-run matrix, dedup, sub-agent gate, stop
-suppression, reset-at-start) and B (long-answer chunking via the E3-chunked ``_safe_send``).
-
-The engine pre-hook tests drive the REAL ``ExecutionEngine.run()`` with a stubbed LLM —
-the same harness as ``tests/test_skill_generation.py::TestInLoopTrigger._make_pool`` — so
-the hook is exercised in its real context (not a hand-rolled copy of it).
+The post-run-push tests (queue dedup, UI-originated push, bridge-disabled no-crash,
+stop suppression, reset-at-start) and the pre/post dedup + dirty-stop tests asserted
+behavior that no longer exists; they are removed rather than kept as dead code.
 """
 
 import asyncio
 import threading
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,8 +78,10 @@ def _make_inst(max_turns, parent_instance=None):
     inst._continue_saved_msg = None
     inst._auto_skill_proposed = False
     inst._auto_skill_dirty_stop = False
-    # Present for the pre-hook: dataclass default would be False, but __new__ bypasses it.
-    inst._tg_pushed = False
+    # TG-STREAM: the old _tg_pushed bool was replaced by phase-keyed
+    # stream-time push flags; __new__ bypasses the dataclass defaults, so set them here.
+    inst._tg_first_pushed = False
+    inst._tg_final_pushed_phase = None
     inst._streaming_responses = []
     return inst
 
@@ -192,133 +191,9 @@ def _make_engine(fresh_manager, tmp_path, max_turns=3, min_turns=2, extra_turns=
     return engine, inst, pool, run
 
 
-def _make_run_pool(instance, *, stopped=False, halted=None, terminated=False,
-                   supervisor=None, generation=1):
-    """A SimpleNamespace pool just rich enough for run_agent_thread_unified's post-push + reset.
-
-    The local ``is_stopped()`` closure reads exactly these attrs:
-        pool.stopped / pool._run_generation / pool._halted_instances / pool.is_instance_terminated
-    and the push/reset sites use pool.get_instance(name) and pool.telegram_supervisor.
-    """
-    return SimpleNamespace(
-        stopped=stopped,
-        _run_generation=generation,
-        _instance_threads_lock=threading.Lock(),
-        _instance_threads={},
-        _halted_instances=set(halted or ()),
-        is_instance_terminated=lambda name: terminated,
-        get_instance=lambda name: instance,
-        # _apply_ui_config (called by run_agent_thread_unified before the loop) reads this; a
-        # template with no .llm makes it return early — we only exercise the push/reset path.
-        get_template=lambda name: SimpleNamespace(llm=None),
-        telegram_supervisor=supervisor,
-    )
-
-
-def _run_unified(pool, instance_name='test-inst'):
-    """Drive run_agent_thread_unified with the engine/broadcast machinery stubbed to no-ops.
-
-    ``run_agent_in_pool_with_recovery`` is patched to yield nothing (an empty run), so control
-    flows straight past the loop to the post-run push — exactly what these tests exercise. The
-    broadcast helpers are no-ops; send_queue/loop are None so no WebSocket I/O happens.
-    """
-    import agent_cascade.run_agent_unified as rau
-    from agent_cascade import api_integration as ai
-
-    _orig = (ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool,
-             ai.build_state_from_pool)
-    try:
-        ai.run_agent_in_pool_with_recovery = lambda *a, **k: iter([])
-        ai.build_stream_update_from_pool = lambda *a, **k: None
-        ai.build_state_from_pool = lambda *a, **k: None
-        rau.run_agent_thread_unified(pool, instance_name, None, {}, None, None)
-    finally:
-        (ai.run_agent_in_pool_with_recovery, ai.build_stream_update_from_pool,
-         ai.build_state_from_pool) = _orig
-
-
 # --------------------------------------------------------------------------- #
-# A. Pre-reflection + post push integration
+# A. Sub-agent gate (engine-driven; the push itself lives in test_tg_stream_push)
 # --------------------------------------------------------------------------- #
-
-def test_queue_n_messages_one_push(fresh_manager, tmp_path):
-    """Core regression: N phone messages queued during one run → exactly ONE push at run end.
-
-    The old model spawned one waiter per message and each fired on the same generation-end,
-    sending the identical answer N times. Under the push model delivery is once-per-run and
-    independent of the queued-message count, so the root's post-run push fires exactly once no
-    matter how many messages were in flight.
-    """
-    supervisor = MagicMock()
-    pool = _make_run_pool(_make_inst(3), supervisor=supervisor)
-    # Simulate N phone messages having been enqueued during the run (N > 1). The push is keyed
-    # to the RUN, not the message count, so it must still fire exactly once.
-    _n_messages = 4
-    _run_unified(pool)
-    assert supervisor.notify_user.call_count == 1, \
-        f'expected exactly 1 push for {_n_messages} queued messages, got {supervisor.notify_user.call_count}'
-
-
-def test_ui_originated_run_pushes(fresh_manager, tmp_path):
-    """A run with no phone message but a known recipient (last_chat_id set) still pushes once.
-
-    Proves "regardless of bridge or UI": the push is independent of how the run was started —
-    a UI-originated run whose supervisor has a live chat id delivers exactly one final answer.
-    """
-    supervisor = MagicMock()   # notify_user no-ops only when last_chat_id is None; here it's set
-    pool = _make_run_pool(_make_inst(3), supervisor=supervisor)
-    _run_unified(pool)
-    assert supervisor.notify_user.call_count == 1
-
-
-def test_bridge_disabled_no_crash(fresh_manager, tmp_path):
-    """Supervisor absent (bridge disabled) → run completes cleanly, no push, no exception."""
-    pool = _make_run_pool(_make_inst(3), supervisor=None)   # getattr(...,'telegram_supervisor',None) -> None
-    try:
-        _run_unified(pool)   # must not raise
-    except Exception as e:  # noqa: BLE001
-        pytest.fail(f'bridge-disabled run raised: {e!r}')
-
-
-def test_pre_and_post_dedup(fresh_manager, tmp_path):
-    """Natural completion WITH reflection: pre pushes the snapshot and sets _tg_pushed=True;
-    post sees True → skips. notify_user is called exactly ONCE total (dedup works)."""
-    supervisor = MagicMock()
-    engine, inst, pool, run = _make_engine(fresh_manager, tmp_path, max_turns=5, min_turns=2,
-                                           extra_turns=5, natural_end_at=3, supervisor=supervisor)
-    # The pre-hook is root-gated by parent_instance is None; the harness instance defaults to None.
-    assert inst.parent_instance is None
-    run()
-    # Reflection fired → the pre-hook delivered the committed snapshot once.
-    assert inst._auto_skill_proposed is True, 'reflection should have fired'
-    assert inst._tg_pushed is True, 'pre-hook must set _tg_pushed=True on a non-empty push'
-    assert supervisor.notify_user.call_count == 1, \
-        f'pre+post dedup failed: expected 1 total push, got {supervisor.notify_user.call_count}'
-
-
-def test_dirty_stop_pushes_tail_once(fresh_manager, tmp_path):
-    """Phase-4 dirty-stop run (last turn ends on a tool call): NO pre push, post reads the tail.
-
-    The pre-hook lives only in the Phase-5 trigger body, so a dirty-stop run never pre-pushes;
-    _tg_pushed stays False and the single delivery is the post-run push of messages[-1] (the last
-    reflection reply), exactly once.
-    """
-    supervisor = MagicMock()
-    engine, inst, pool, run = _make_engine(fresh_manager, tmp_path, max_turns=3, min_turns=2,
-                                           extra_turns=5, tool_call_at=3, natural_end_at=99,
-                                           supervisor=supervisor)
-    run()
-    assert inst._auto_skill_proposed is True, 'reflection should have fired via the tool-call path'
-    assert getattr(inst, '_auto_skill_dirty_stop', False) is True, 'must be a dirty-stop run'
-    # Pre-hook never fired on this path → _tg_pushed stays False (post will deliver).
-    assert inst._tg_pushed is False, 'dirty-stop run must NOT pre-push'
-    # Simulate the post-run push reading the tail once.
-    from agent_cascade.compression.helpers import extract_instance_output
-    tail = extract_instance_output(list(inst.conversation), inst.instance_name, pool=pool, instance=inst)
-    assert tail and tail.strip(), 'dirty-stop tail must carry a deliverable answer'
-    supervisor.notify_user(tail)   # the post-run push (single delivery for this run)
-    assert supervisor.notify_user.call_count == 1
-
 
 def test_subagent_reflection_does_not_push(fresh_manager, tmp_path):
     """A sub-agent instance (parent_instance != None) that triggers reflection does NOT push.
@@ -333,48 +208,10 @@ def test_subagent_reflection_does_not_push(fresh_manager, tmp_path):
     inst.parent_instance = 'root-caller'
     assert inst.parent_instance is not None
     run()
-    # Reflection fired on the child, but the pre-hook's root gate suppressed the push.
+    # Reflection fired on the child, but the stream-time push's root gate suppressed it.
     assert inst._auto_skill_proposed is True, 'reflection should have fired on the sub-agent'
     supervisor.notify_user.assert_not_called(), \
         'a sub-agent reflection must not push to the phone'
-
-
-def test_stop_suppresses_post_push(fresh_manager, tmp_path):
-    """An explicit stop (is_stopped() True at the post site) suppresses the post-run push.
-
-    The instance carries a real assistant answer, so a non-stopped run WOULD push it — proving
-    the suppression is due to the stop gate, not an empty conversation.
-    """
-    from agent_cascade.llm.schema import Message, ASSISTANT
-
-    supervisor = MagicMock()
-    inst = _make_inst(3)
-    inst.conversation.append(Message(role=ASSISTANT, content='the final answer'))
-    # A halted instance → is_stopped() returns True at the post site (instance_name in
-    # pool._halted_instances). Note: run_agent_thread_unified resets pool.stopped=False at run
-    # start (L79), so a pre-set `stopped` flag would be cleared before the post check — halting
-    # is the stop condition that survives to the post site.
-    pool = _make_run_pool(inst, halted={'test-inst'}, supervisor=supervisor)
-    _run_unified(pool)
-    supervisor.notify_user.assert_not_called(), 'a stopped run must not push a final answer'
-
-
-def test_tg_pushed_reset_at_run_start(fresh_manager, tmp_path):
-    """Cross-run staleness guard: a stale _tg_pushed=True from a previous reflection run is
-    reset at the start of the next run, so the next run's push still fires.
-
-    Run 1 reflects (sets _tg_pushed=True). Run 2 has no reflection but starts with the stale
-    True; E2a resets it to False at run start, so run 2's post-push is not suppressed.
-    """
-    supervisor = MagicMock()
-    inst = _make_inst(3)
-    inst._tg_pushed = True   # simulate a stale flag left over from a previous reflection run
-
-    pool = _make_run_pool(inst, supervisor=supervisor)
-    _run_unified(pool)       # E2a resets _tg_pushed=False at run start, then post-push fires
-    assert inst._tg_pushed is False, 'E2a must reset _tg_pushed at run start'
-    assert supervisor.notify_user.call_count == 1, \
-        'the stale True must not suppress this run\'s push (reset-at-start works)'
 
 
 # --------------------------------------------------------------------------- #

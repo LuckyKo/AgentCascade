@@ -7,8 +7,9 @@ Revert-proof: every test in this file FAILS on the pre-fix code and passes after
        ``update_id``) must not be injected into AC a second time.
   F2 — outbound observability in the same file: ``_safe_send`` logs a content-free
        ``[TG-PUSH] delivered N chunk(s), M chars`` INFO line on success.
-  F3 — P1 pre-reflection push gate in ``engine/core.py``: the hook must READ
-       ``instance._tg_pushed`` before pushing (previously write-only).
+  F3 — stream-time push dedup in ``engine/core.py``: the TG-STREAM
+        final-answer hook must READ ``instance._tg_final_pushed_phase`` before pushing
+        (the old write-only ``_tg_pushed`` bool no longer exists).
 
 Bridge tests reuse the MagicMock update idiom from ``tests/test_telegram_bridge.py``;
 the engine test reuses the real-ExecutionEngine harness from ``tests/test_tg_push_model.py``.
@@ -230,7 +231,10 @@ def _make_inst(max_turns):
     inst._continue_saved_msg = None
     inst._auto_skill_proposed = False
     inst._auto_skill_dirty_stop = False
-    inst._tg_pushed = False
+    # TG-STREAM: the old _tg_pushed bool was replaced by the phase-keyed
+    # stream-time push flags; __new__ bypasses the dataclass defaults, so set them here.
+    inst._tg_first_pushed = False
+    inst._tg_final_pushed_phase = None
     inst._streaming_responses = []
     return inst
 
@@ -424,29 +428,33 @@ def test_safe_send_logs_delivery(caplog):
 
 
 # --------------------------------------------------------------------------- #
-# F3. P1 pre-reflection push gate reads _tg_pushed
+# F3. Stream-time push dedup (TG-STREAM)
 # --------------------------------------------------------------------------- #
 
-def test_p1_does_not_push_when_tg_pushed_already_set(fresh_manager, tmp_path):
-    """A reused instance carrying a stale _tg_pushed=True must NOT re-push at P1.
+def test_p1_does_not_push_when_final_already_pushed(fresh_manager, tmp_path):
+    """A reused instance carrying a stale _tg_final_pushed_phase='pre' must NOT re-push the FINAL.
 
-    The pre-hook previously only WROTE the flag (on success) and never read it, so an
-    instance whose one-shot reflection guard was reset on reuse (lifecycle_manager)
-    could push the same conversation tail a second time. With F3 the gate reads the
-    flag and suppresses the duplicate — while still running the reflection turns.
+    The TG-STREAM push model replaced the old write-only ``_tg_pushed`` bool with
+    phase-keyed markers (D4). A genuine completion whose final answer was already pushed in
+    an earlier phase of the same run must not push it again — while still running any
+    reflection turns that follow.
+
+    Note: the F1 first-text push is a SEPARATE flag (_tg_first_pushed) and legitimately fires
+    once on this fresh instance's first text turn — the assertion targets only the final-push
+    dedup, i.e. that no 'reply 3' (the natural-end answer) leaves the phone.
     """
     supervisor = MagicMock()
-    # notify_user returns True so that, if the (buggy) pre-hook pushes, it would set
-    # _tg_pushed=True — mirroring test_tg_push_model.test_pre_and_post_dedup's setup.
+    # notify_user returns True so a buggy hook would set the marker and prove the gate read it.
     supervisor.notify_user.return_value = True
 
     engine, inst, pool, run = _make_engine(fresh_manager, tmp_path, max_turns=5, min_turns=2,
                                            extra_turns=5, natural_end_at=3, supervisor=supervisor)
-    assert inst.parent_instance is None          # root — the P1 gate's first condition holds
-    inst._tg_pushed = True                       # stale flag from a previous reflection run
+    assert inst.parent_instance is None          # root — the push gate's first condition holds
+    inst._tg_final_pushed_phase = 'pre'          # stale marker from a previous phase/run
     run()
 
-    # Reflection still fired (F3 suppresses the PUSH, not the reflection itself).
+    # Reflection still fired (the dedup suppresses the PUSH, not the reflection itself).
     assert inst._auto_skill_proposed is True, 'reflection should have fired'
-    supervisor.notify_user.assert_not_called(), \
-        'P1 must not push when _tg_pushed is already True (flag was write-only pre-fix)'
+    final_texts = [c.args[0] for c in supervisor.notify_user.call_args_list if c.args and c.args[0] == 'reply 3']
+    assert not final_texts, \
+        f'stream-time push must not re-push the final answer when _tg_final_pushed_phase is already set: {final_texts}'
