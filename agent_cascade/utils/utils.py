@@ -1214,6 +1214,18 @@ def _tool_calls_wire_json(msg) -> str:
         return ''
 
 
+def _ensure_msg_stats_cache() -> 'OrderedDict':
+    """Return the module-level LRU for message stats, initializing it on first use.
+
+    Shared by every branch of get_message_stats (fc_wire early-return and main path)
+    so the initialization lives in exactly one place.
+    """
+    if not hasattr(get_message_stats, '_msg_stats'):
+        get_message_stats._msg_stats = OrderedDict()
+        get_message_stats._cache_max_size = 512
+    return get_message_stats._msg_stats
+
+
 def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.
@@ -1287,10 +1299,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             # MD5 (16 hex chars). Same eviction as the main path below. Without this the
             # early return skipped the LRU entirely and every assistant tool-call message
             # was re-tokenized on EVERY get_message_stats call (every stream tick).
-            if not hasattr(get_message_stats, '_msg_stats'):
-                get_message_stats._msg_stats = OrderedDict()
-                get_message_stats._cache_max_size = 512
-            fc_cache: OrderedDict = get_message_stats._msg_stats
+            fc_cache: OrderedDict = _ensure_msg_stats_cache()
             fc_key = ('fc_wire', hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:16])
             if fc_key in fc_cache:
                 stats = fc_cache[fc_key]
@@ -1304,12 +1313,8 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         msg_obj = msg
         is_dict = False
 
-    # Initialize LRU Cache for Message object stats (survives across get_message_stats calls)
-    if not hasattr(get_message_stats, '_msg_stats'):
-        get_message_stats._msg_stats = OrderedDict()
-        get_message_stats._cache_max_size = 512
-
-    msg_cache: OrderedDict = get_message_stats._msg_stats
+    # LRU Cache for Message object stats (survives across get_message_stats calls)
+    msg_cache: OrderedDict = _ensure_msg_stats_cache()
     cache_max = get_message_stats._cache_max_size
 
     role = getattr(msg_obj, 'role', '')
