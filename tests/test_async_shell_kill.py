@@ -204,48 +204,56 @@ class TestKillTaskWithRealProcess:
         else:
             cmd = 'sleep 60'
 
-        tool_id, pid, _, completed_early, _ = tracker.launch(
-            agent_name='test_agent',
-            command=cmd,
-            heartbeat_interval=0.5,
-            timeout=3600,
-        )
+        tool_id = None
+        try:
+            tool_id, pid, _, completed_early, _ = tracker.launch(
+                agent_name='test_agent',
+                command=cmd,
+                heartbeat_interval=0.5,
+                timeout=3600,
+            )
 
-        assert not completed_early, 'Command should not complete instantly'
+            assert not completed_early, 'Command should not complete instantly'
 
-        # Wait for process to start and possibly send a heartbeat
-        time.sleep(1.0)
+            # Wait for process to start and possibly send a heartbeat
+            time.sleep(1.0)
 
-        # On Windows, verify the real PID is alive before kill
-        if os.name == 'nt':
-            task = tracker._get_task('test_agent', tool_id)
-            real_pid = task.pid if task else None
-            assert real_pid is not None and real_pid > 0, f"PID not set: {real_pid}"
+            # On Windows, verify the real PID is alive before kill
+            if os.name == 'nt':
+                task = tracker._get_task('test_agent', tool_id)
+                real_pid = task.pid if task else None
+                assert real_pid is not None and real_pid > 0, f"PID not set: {real_pid}"
 
-        # Kill the task
-        result = tracker.kill_task('test_agent', tool_id)
-        assert 'Shell killed' in result, f"Kill failed: {result}"
+            # Kill the task
+            result = tracker.kill_task('test_agent', tool_id)
+            assert 'Shell killed' in result, f"Kill failed: {result}"
 
-        # Verify no more heartbeats after kill
-        hb_before_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
-        time.sleep(1.5)  # Long enough for at least 3 heartbeats if still running
-        hb_after_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
+            # Verify no more heartbeats after kill
+            hb_before_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
+            time.sleep(1.5)  # Long enough for at least 3 heartbeats if still running
+            hb_after_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
 
-        assert hb_after_kill == hb_before_kill, \
-            f"Expected no more heartbeats after kill, but got {hb_after_kill - hb_before_kill}"
+            assert hb_after_kill == hb_before_kill, \
+                f"Expected no more heartbeats after kill, but got {hb_after_kill - hb_before_kill}"
 
-        # Windows-specific: verify process is actually dead via tasklist
-        if os.name == 'nt' and real_pid:
-            time.sleep(0.3)
-            try:
-                proc_info = subprocess.run(
-                    ['tasklist', '/FI', f'PID eq {real_pid}', '/NH'],
-                    capture_output=True, text=True, timeout=5
-                )
-                assert str(real_pid) not in proc_info.stdout.strip(), \
-                    f"Process {real_pid} still running after kill. Output: {proc_info.stdout[:200]}"
-            except subprocess.TimeoutExpired:
-                pytest.skip('tasklist timed out')
+            # Windows-specific: verify process is actually dead via tasklist
+            if os.name == 'nt' and real_pid:
+                time.sleep(0.3)
+                try:
+                    proc_info = subprocess.run(
+                        ['tasklist', '/FI', f'PID eq {real_pid}', '/NH'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    assert str(real_pid) not in proc_info.stdout.strip(), \
+                        f"Process {real_pid} still running after kill. Output: {proc_info.stdout[:200]}"
+                except subprocess.TimeoutExpired:
+                    pytest.skip('tasklist timed out')
+        finally:
+            if tool_id is not None:
+                try:
+                    tracker.kill_task('test_agent', tool_id)
+                except Exception:
+                    pass
 
     def test_kill_returns_only_after_process_dead(self):
         """kill_task blocks until the process is confirmed terminated (Windows)."""
@@ -257,43 +265,51 @@ class TestKillTaskWithRealProcess:
 
         tracker = AsyncShellTracker(pool=pool)
 
-        tool_id, _, _, completed_early, _ = tracker.launch(
-            agent_name='test_agent',
-            command='ping -t 127.0.0.1 >nul 2>&1',
-            heartbeat_interval=-1,
-            timeout=3600,
-        )
-
-        assert not completed_early
-
-        # Wait for tracking thread to set the PID on the task
-        time.sleep(0.5)
-
-        # Get real PID from task (may be available in launch return now, but read from task for certainty)
-        task = tracker._get_task('test_agent', tool_id)
-        pid = task.pid if task else None
-        assert pid is not None and pid > 0, f"PID not set yet: {pid}"
-
-        # Record time before kill
-        start = time.time()
-        result = tracker.kill_task('test_agent', tool_id)
-        time.time() - start
-
-        assert 'Shell killed' in result, f"Kill failed: {result}"
-
-        # Give a brief moment for process table to update
-        time.sleep(0.3)
-
-        # Verify the process is actually dead after kill returns
+        tool_id = None
         try:
-            proc_info = subprocess.run(
-                ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
-                capture_output=True, text=True, timeout=5
+            tool_id, _, _, completed_early, _ = tracker.launch(
+                agent_name='test_agent',
+                command='ping -t 127.0.0.1 >nul 2>&1',
+                heartbeat_interval=-1,
+                timeout=3600,
             )
-            assert str(pid) not in proc_info.stdout.strip(), \
-                f"Process {pid} still running after kill returned. Output: {proc_info.stdout[:200]}"
-        except subprocess.TimeoutExpired:
-            pytest.skip('tasklist timed out')
+
+            assert not completed_early
+
+            # Wait for tracking thread to set the PID on the task
+            time.sleep(0.5)
+
+            # Get real PID from task (may be available in launch return now, but read from task for certainty)
+            task = tracker._get_task('test_agent', tool_id)
+            pid = task.pid if task else None
+            assert pid is not None and pid > 0, f"PID not set yet: {pid}"
+
+            # Record time before kill
+            start = time.time()
+            result = tracker.kill_task('test_agent', tool_id)
+            time.time() - start
+
+            assert 'Shell killed' in result, f"Kill failed: {result}"
+
+            # Give a brief moment for process table to update
+            time.sleep(0.3)
+
+            # Verify the process is actually dead after kill returns
+            try:
+                proc_info = subprocess.run(
+                    ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                    capture_output=True, text=True, timeout=5
+                )
+                assert str(pid) not in proc_info.stdout.strip(), \
+                    f"Process {pid} still running after kill returned. Output: {proc_info.stdout[:200]}"
+            except subprocess.TimeoutExpired:
+                pytest.skip('tasklist timed out')
+        finally:
+            if tool_id is not None:
+                try:
+                    tracker.kill_task('test_agent', tool_id)
+                except Exception:
+                    pass
 
 
 # ============================================================================
@@ -550,6 +566,196 @@ class TestKillSiblingProcesses:
         finally:
             logger.removeHandler(handler)
 
+    def test_kill_second_pass_kills_survivors(self):
+        """Verify _kill_process_tree runs a SECOND taskkill pass for survivors.
+
+        Extends the mocked-survivors pattern: after the first tree-kill, the survivor
+        check reports PIDs 2000/3000 still alive. The tracker must then issue an
+        individual ``taskkill /F /PID`` (NOT /T) for EACH survivor, re-check aliveness,
+        and only warn about PIDs that survived BOTH passes.
+        """
+        if os.name != 'nt':
+            pytest.skip('Windows-only test')
+
+        tracker = AsyncShellTracker(pool=None)
+
+        import io as iomodule
+        import logging
+        log_capture = iomodule.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        handler.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+
+        try:
+            # Record every taskkill invocation so we can assert the second pass.
+            taskkill_calls = []
+            survivor_check_count = [0]
+
+            def mock_subprocess_run(cmd, **kwargs):
+                cmd_str = str(cmd)
+                # First call: PowerShell to get descendants (has ConvertTo-Csv)
+                if 'ConvertTo-Csv' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='"ProcessId","ParentProcessId"\n"1000","4"\n"2000","1000"\n"3000","1000"\n',
+                        stderr=''
+                    )
+                # taskkill calls: first pass uses /T, second pass uses plain /F per PID.
+                elif 'taskkill' in cmd_str:
+                    taskkill_calls.append(cmd)
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                # Survivor check (PowerShell -Filter "ProcessId IN"). The FIRST check
+                # reports 2000/3000 alive (triggers the second pass); the RE-CHECK after
+                # the second pass reports them dead.
+                elif 'ProcessId IN' in cmd_str:
+                    survivor_check_count[0] += 1
+                    if survivor_check_count[0] == 1:
+                        return MagicMock(returncode=0, stdout='2000\n3000\n', stderr='')
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                return MagicMock(returncode=0, stdout='', stderr='')
+
+            proc_mock = MagicMock()
+            proc_mock.pid = 1000
+            proc_mock.poll.return_value = None  # Still running
+
+            with patch('subprocess.run', side_effect=mock_subprocess_run):
+                tracker._kill_process_tree(proc_mock, 'test_agent', 42)
+
+            log_output = log_capture.getvalue()
+
+            # A second-pass taskkill must have been issued for EACH survivor PID.
+            # Each call is a list like ['taskkill', '/F', '/PID', '<pid>'] — the PID
+            # is the LAST element (NOT str(c)[-1], which would be the closing bracket).
+            second_pass = [c for c in taskkill_calls if '/T' not in str(c)]
+            assert len(second_pass) == 2, \
+                f"Expected 2 second-pass taskkill calls, got {len(second_pass)}: {taskkill_calls}"
+            killed_pids = {c[-1] for c in second_pass}
+            assert killed_pids == {'2000', '3000'}, \
+                f"Second pass should target each survivor PID. Got: {second_pass}"
+
+            # Survivors died on the second pass, so NO "orphaned" warning this time.
+            assert 'survived tree kill' not in log_output.lower(), \
+                f"No orphan warning expected when second pass succeeds. Log: {log_output}"
+
+        finally:
+            logger.removeHandler(handler)
+
+    def test_kill_second_pass_warns_if_still_alive(self):
+        """If PIDs survive BOTH passes, the original 'orphaned' warning is still logged."""
+        if os.name != 'nt':
+            pytest.skip('Windows-only test')
+
+        tracker = AsyncShellTracker(pool=None)
+
+        import io as iomodule
+        import logging
+        log_capture = iomodule.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        handler.setLevel(logging.WARNING)
+        logger.addHandler(handler)
+
+        try:
+            taskkill_calls = []
+
+            def mock_subprocess_run(cmd, **kwargs):
+                cmd_str = str(cmd)
+                if 'ConvertTo-Csv' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='"ProcessId","ParentProcessId"\n"1000","4"\n"2000","1000"\n',
+                        stderr=''
+                    )
+                elif 'taskkill' in cmd_str:
+                    taskkill_calls.append(cmd)
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                # Both survivor checks report 2000 still alive (survives both passes).
+                elif 'ProcessId IN' in cmd_str:
+                    return MagicMock(returncode=0, stdout='2000\n', stderr='')
+                return MagicMock(returncode=0, stdout='', stderr='')
+
+            proc_mock = MagicMock()
+            proc_mock.pid = 1000
+            proc_mock.poll.return_value = None  # Still running
+
+            with patch('subprocess.run', side_effect=mock_subprocess_run):
+                tracker._kill_process_tree(proc_mock, 'test_agent', 42)
+
+            log_output = log_capture.getvalue()
+
+            # Second pass was attempted... (PID is the last list element, not str(c)[-1])
+            second_pass = [c for c in taskkill_calls if '/T' not in str(c)]
+            assert any(c[-1] == '2000' for c in second_pass), \
+                f"Expected a second-pass taskkill for PID 2000. Got: {taskkill_calls}"
+            # ...but the survivor survived both passes, so the warning is still logged.
+            assert 'survived tree kill' in log_output.lower(), \
+                f"Expected orphan warning for double-survivor. Log: {log_output}"
+            assert 'orphaned' in log_output.lower(), \
+                f"Warning should mention orphaned. Log: {log_output}"
+
+        finally:
+            logger.removeHandler(handler)
+
+    def test_kill_second_pass_runs_without_descendants(self):
+        """The second pass + survivor check run even when the main process has NO descendants.
+
+        Regression: the escalation was originally gated on ``if descendant_pids:``, so a
+        surviving main process with no captured children never got re-killed or warned about.
+        The survivor check must be unconditional on Windows.
+        """
+        if os.name != 'nt':
+            pytest.skip('Windows-only test')
+
+        tracker = AsyncShellTracker(pool=None)
+
+        import io as iomodule
+        import logging
+        log_capture = iomodule.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        handler.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+
+        try:
+            taskkill_calls = []
+            survivor_check_count = [0]
+
+            def mock_subprocess_run(cmd, **kwargs):
+                cmd_str = str(cmd)
+                # PowerShell descendant query: NO children (only the root 1000 and its parent).
+                if 'ConvertTo-Csv' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='"ProcessId","ParentProcessId"\n"4","0"\n"1000","4"\n',
+                        stderr=''
+                    )
+                elif 'taskkill' in cmd_str:
+                    taskkill_calls.append(cmd)
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                # Survivor check: first reports the MAIN PID 1000 still alive (triggers
+                # second pass); re-check after second pass reports it dead.
+                elif 'ProcessId IN' in cmd_str:
+                    survivor_check_count[0] += 1
+                    if survivor_check_count[0] == 1:
+                        return MagicMock(returncode=0, stdout='1000\n', stderr='')
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                return MagicMock(returncode=0, stdout='', stderr='')
+
+            proc_mock = MagicMock()
+            proc_mock.pid = 1000
+            proc_mock.poll.return_value = None  # Still running
+
+            with patch('subprocess.run', side_effect=mock_subprocess_run):
+                tracker._kill_process_tree(proc_mock, 'test_agent', 42)
+
+            log_output = log_capture.getvalue()
+
+            # A second-pass taskkill for the main PID must have run despite no descendants.
+            second_pass = [c for c in taskkill_calls if '/T' not in str(c)]
+            assert any(c[-1] == '1000' for c in second_pass), \
+                f"Expected a second-pass taskkill for the main PID 1000 (no descendants). Got: {taskkill_calls}"
+
+        finally:
+            logger.removeHandler(handler)
+
     def test_descendant_pid_collection(self):
         """Verify _get_windows_descendant_pids correctly finds child processes."""
         if os.name != 'nt':
@@ -574,11 +780,28 @@ class TestKillSiblingProcesses:
             # The important thing is the method works without errors
 
         finally:
+            # Capture descendants BEFORE terminating so we can also kill the ping
+            # child. `start /B` spawns ping as a SIBLING of cmd (not its child), so
+            # terminating proc alone would orphan it — exactly the bug this suite guards.
+            try:
+                descendant_pids = tracker._get_windows_descendant_pids(proc.pid)
+            except Exception:
+                descendant_pids = []
+
             proc.terminate()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+            # Best-effort kill of any ping descendant (Windows-only, guarded).
+            if os.name == 'nt':
+                for dpid in descendant_pids:
+                    try:
+                        subprocess.run(['taskkill', '/F', '/PID', str(dpid)],
+                                       capture_output=True, timeout=5)
+                    except Exception:
+                        pass
 
 
 # ============================================================================
@@ -768,6 +991,71 @@ class TestKillProcessTreeTaskkillFailure:
 
         finally:
             logger.removeHandler(handler)
+
+
+# ============================================================================
+# atexit safety net (kills all still-running tracked tasks on interpreter exit)
+# ============================================================================
+
+class TestAtexitCleanup:
+
+    def test_atexit_registered_once(self):
+        """The atexit hook is registered exactly once even with multiple trackers.
+
+        Instantiate two trackers and patch atexit.register to count calls — only the
+        FIRST tracker should register (module-level guard flag). Both instances are
+        added to the _ATRACKERS registry so the single hook covers all of them.
+        """
+        from agent_cascade.async_shell_pkg import tracker as tracker_mod
+
+        # Snapshot + reset module state so this test is deterministic regardless
+        # of prior tests (the registry and guard persist across tests in a worker).
+        saved_registered = tracker_mod._ATEXIT_REGISTERED[0]
+        saved_registry = list(tracker_mod._ATRACKERS)
+        tracker_mod._ATEXIT_REGISTERED[0] = False
+        tracker_mod._ATRACKERS.clear()
+        try:
+            with patch('atexit.register') as mock_register:
+                t1 = AsyncShellTracker(pool=None)
+                t2 = AsyncShellTracker(pool=None)
+
+            assert mock_register.call_count == 1, \
+                f"atexit.register should be called exactly once, got {mock_register.call_count}"
+            assert tracker_mod._ATRACKERS == [t1, t2], \
+                'Both tracker instances must be in the atexit registry'
+        finally:
+            tracker_mod._ATEXIT_REGISTERED[0] = saved_registered
+            tracker_mod._ATRACKERS.clear()
+            tracker_mod._ATRACKERS.extend(saved_registry)
+
+    def test_atexit_kill_all_kills_running_tasks(self):
+        """_atexit_kill_all force-kills a live tracked process (cross-platform)."""
+        pool = MagicMock()
+        pool.enqueue_message = lambda agent, msg: None
+        tracker = AsyncShellTracker(pool=pool)
+
+        if os.name == 'nt':
+            proc = subprocess.Popen(['ping', '-t', '127.0.0.1'],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            proc = subprocess.Popen(['sleep', '60'])
+
+        task = _make_running_task(tool_id=7, pid=proc.pid, process=proc)
+        _setup_task(tracker, task)
+
+        try:
+            assert proc.poll() is None, 'Fixture process should be alive before atexit kill'
+            tracker._atexit_kill_all()
+            # Give the OS a brief moment to reap the killed process.
+            time.sleep(0.3)
+            assert proc.poll() is not None, \
+                f"Process {proc.pid} still alive after _atexit_kill_all (poll={proc.poll()})"
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 if __name__ == '__main__':

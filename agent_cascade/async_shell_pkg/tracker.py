@@ -8,6 +8,7 @@ KILL_WAIT_TIMEOUT`` takes effect at call time. All other timing constants are im
 by name (they are never patched by tests).
 """
 
+import atexit
 import csv
 import io
 import os
@@ -73,6 +74,23 @@ def _dead_shell_message(agent_name: str, tool_id: int) -> str:
             f"was already queued). Continue without it.")
 
 
+# Process-wide registry of live tracker instances for the atexit safety net.
+# A single atexit callback (registered once per process) iterates this list so
+# that tasks from EVERY tracker instance are cleaned up — not just the first
+# one created (tests and pool restarts create multiple instances).
+_ATRACKERS: 'list' = []
+_ATEXIT_REGISTERED = [False]  # mutable guard so __init__ flips it without `global`
+
+
+def _atexit_kill_all_trackers():
+    """Single process-wide atexit hook: kill live tasks in every tracker instance."""
+    for tracker in list(_ATRACKERS):
+        try:
+            tracker._atexit_kill_all()
+        except Exception as e:  # atexit must never raise or hang shutdown
+            logger.debug(f"[AsyncShell] atexit cleanup failed for a tracker instance: {e}")
+
+
 class AsyncShellTracker:
     """Manages background shell processes across all agents.
 
@@ -96,6 +114,61 @@ class AsyncShellTracker:
         self._tasks: Dict[str, Dict[int, AsyncShellTask]] = {}
         self._lock = threading.Lock()
         self._pool = pool
+
+        # Register the process-wide atexit safety net ONCE, and track this instance
+        # so tasks from EVERY tracker (tests, pool restarts create multiple) are
+        # cleaned up on shutdown. See _atexit_kill_all_trackers / _atexit_kill_all.
+        if not _ATEXIT_REGISTERED[0]:
+            _ATEXIT_REGISTERED[0] = True
+            atexit.register(_atexit_kill_all_trackers)
+        _ATRACKERS.append(self)
+
+    # ────────────────────────────────────────────────────────────────
+    def _atexit_kill_all(self):
+        """Interpreter-shutdown safety net: kill every still-running tracked task.
+
+        If the owning process (e.g. a pytest-xdist worker) dies without calling
+        kill_task, its child shells are orphaned and loop forever (``ping -t`` is
+        infinite). This hook runs on atexit and force-kills any live OS processes.
+
+        Deliberately simple: plain ``taskkill /F /T`` per task (covers the
+        cmd.exe→child tree, which is the real orphan case). We do NOT use
+        _get_windows_descendant_pids here — PowerShell startup is too slow for an
+        exit hook. Every step is time-bounded (~2s per task, ~5s total) and wrapped
+        in try/except so this can never hang shutdown or raise from atexit.
+        """
+        deadline = time.time() + 5.0  # total budget — atexit must not hang shutdown
+        try:
+            with self._lock:
+                all_tasks = [task for agent in self._tasks.values() for task in agent.values()]
+            for task in all_tasks:
+                if time.time() >= deadline:
+                    logger.debug('[AsyncShell] atexit cleanup budget exhausted; skipping remaining tasks')
+                    break
+                try:
+                    with task._lock:
+                        proc = task.process
+                    if proc is None or isinstance(proc, _PendingSpawn):
+                        continue
+                    if proc.poll() is not None:
+                        continue  # already finished
+                    if ON_WINDOWS:
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                            capture_output=True, timeout=2, text=True,
+                        )
+                    else:
+                        try:
+                            import signal
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except OSError:
+                            proc.kill()
+                    logger.debug(f"[AsyncShell] atexit cleanup killed PID {proc.pid}")
+                except Exception as e:
+                    logger.debug(f"[AsyncShell] atexit cleanup failed for task {task.tool_id}: {e}")
+        except Exception as e:
+            # Never raise from an atexit hook.
+            logger.debug(f"[AsyncShell] atexit kill-all aborted: {e}")
 
     # ────────────────────────────────────────────────────────────────
     def _next_id(self, agent_name: str) -> int:
@@ -996,13 +1069,35 @@ class AsyncShellTracker:
             except Exception as e:
                 logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
 
-            # Verify all captured PIDs are dead; warn about survivors
-            if descendant_pids:
-                time.sleep(0.3)  # Allow process table to update after kill
-                survivors = self._check_windows_pids_alive(all_target_pids)
-                if survivors:
-                    logger.warning(f"[AsyncShell] __kill: {len(survivors)} process(es) survived tree kill "
-                                   f"for tool_id={tool_id}: {survivors}. They will be orphaned.")
+            # Verify all captured PIDs are dead; warn about survivors. Runs unconditionally
+            # (not gated on descendant_pids) so a surviving main process with no descendants
+            # still gets the second-pass kill + orphan warning.
+            time.sleep(0.3)  # Allow process table to update after kill
+            survivors = self._check_windows_pids_alive(all_target_pids)
+            if survivors:
+                # Second pass: individually re-kill each survivor. These are
+                # already-identified leaf processes, so we use plain taskkill /F
+                # (NOT /T) — /T on an orphaned process could reach unrelated
+                # adopted children. Wrapped in try/except so a failure here can
+                # never break the kill path.
+                logger.debug(f"[AsyncShell] Second-pass kill for {len(survivors)} survivor(s): {survivors}")
+                try:
+                    for pid_to_kill in survivors:
+                        try:
+                            subprocess.run(
+                                ['taskkill', '/F', '/PID', str(pid_to_kill)],
+                                capture_output=True, timeout=5, text=True,
+                            )
+                        except Exception as e:
+                            logger.debug(f"[AsyncShell] Second-pass taskkill for PID {pid_to_kill} failed: {e}")
+                    # Re-check once more; only warn about PIDs that survived BOTH passes.
+                    time.sleep(0.3)
+                    still_alive = self._check_windows_pids_alive(survivors)
+                    if still_alive:
+                        logger.warning(f"[AsyncShell] __kill: {len(still_alive)} process(es) survived tree kill "
+                                       f"for tool_id={tool_id}: {still_alive}. They will be orphaned.")
+                except Exception as e:
+                    logger.debug(f"[AsyncShell] Second-pass kill escalation failed for tool_id={tool_id}: {e}")
 
         else:
             try:
