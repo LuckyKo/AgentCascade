@@ -52,6 +52,71 @@ def _reset_run_scoped_tg_state(instance) -> None:
     instance._auto_skill_proposed = False
 
 
+def _tg_post_run_push(instance, instance_name: str, current_generation: int, pool, outstanding: bool) -> None:
+    """P2 post-run push decision (TG-FINAL-ANSWER, 2026-09-28).
+
+    Extracted from run_agent_thread_unified's post-run block so every skip branch is
+    unit-testable in isolation — the per-run reset at run start makes driving the
+    _tg_pushed branch through run_agent_thread_unified itself impossible (a pre-set
+    flag is cleared before the post site).
+
+    Every silent skip branch logs at INFO/WARNING with instance + generation so the
+    next "answer never arrived" report is diagnosable from the log alone. Best-effort:
+    any exception is caught by the caller (never breaks the run).
+    """
+    from agent_cascade.compression.helpers import extract_final_answer_text
+
+    if instance is None:
+        logger.info('[TG-PUSH] post-run push skipped for %s: instance not found (gen=%d)',
+                    instance_name, current_generation)
+        return
+    if getattr(instance, '_tg_pushed', False):
+        logger.info('[TG-PUSH] post-run push skipped for %s: pre-reflection push already delivered (gen=%d)',
+                    instance_name, current_generation)
+        return
+    if outstanding:
+        # B1 signal: a queued message or async tool result survived the run; the
+        # answer is deliberately withheld so the next generation's push can carry it.
+        logger.info('[TG-PUSH] post-run push skipped for %s: outstanding work pending (gen=%d)',
+                    instance_name, current_generation)
+        return
+
+    # extract_final_answer_text (not extract_instance_output): the conversation tail at
+    # post-run time is often NOT the task answer — a turn-limit run ends on the notice
+    # suffix, a tool-heavy run on a FUNCTION-role result, a reflection run on chatter.
+    # The helper walks back to the last assistant-with-text (stripping the notice) and
+    # keeps snapshot precedence for non-dirty auto-skill runs.
+    post_text = extract_final_answer_text(
+        list(instance.conversation), instance_name, pool=pool, instance=instance)
+    if not (post_text and post_text.strip()):
+        logger.warning('[TG-PUSH] post-run push skipped for %s: extracted text empty (gen=%d)',
+                       instance_name, current_generation)
+        return
+    if post_text.startswith('WARNING:') or post_text.startswith('Sub-agent '):
+        # Degenerate fallback from extract_instance_output (no assistant-with-text in the
+        # whole conversation): pushing an internal diagnostic string to the phone is worse
+        # than skipping — log at WARNING with the text so the case is diagnosable.
+        logger.warning('[TG-PUSH] post-run push skipped for %s: extracted text is a '
+                       'degenerate fallback, not an answer (gen=%d): %.120s',
+                       instance_name, current_generation, post_text)
+        return
+
+    sup = getattr(pool, 'telegram_supervisor', None)
+    if sup is None or not hasattr(sup, 'notify_user'):
+        logger.info('[TG-PUSH] post-run push skipped for %s: no telegram supervisor attached (gen=%d)',
+                    instance_name, current_generation)
+        return
+
+    # notify_user returns True only if the message was scheduled onto a live bridge
+    # loop (False = silent no-op). Unlike the pre hook there is no dedup flag to set:
+    # this is the last push of the run. instance_name/run_generation are passed as
+    # keywords (tg-dup v3 F3a) so the [TG-PUSH] log line can correlate pushes across runs.
+    if not sup.notify_user(post_text, instance_name=instance_name,
+                           run_generation=current_generation):
+        logger.warning('[TG-PUSH] notify_user returned False for %s '
+                       '(bridge loop not live?) gen=%d', instance_name, current_generation)
+
+
 def run_agent_thread_unified(
     pool: AgentPool,
     instance_name: str,
@@ -235,35 +300,23 @@ def run_agent_thread_unified(
         # Suppressed on an explicit stop; a crash skips this line entirely (exception path). Skipped if the
         # pre-reflection hook already delivered it (instance._tg_pushed True). Best-effort, never breaks the run.
         #
-        # TG-DEDUP (2026-09-26): the push is now gated on THIS thread's generation still being current
-        # AND the instance having no queued/async-pending work left. Why: engine.run()'s exit-finally
-        # (engine/core.py ~L1257-1280) drains the message queue WITHOUT appending to the conversation
-        # unless it was a suspension-driven exit — so a phone message that arrives while this run is
-        # finishing (or during the sub-agent slot wait before its own run starts) is silently consumed,
-        # and api_server.py's `session['generating']` guard then blocks /api/message from starting a
-        # second thread for it. Without this gate the push would ship the answer to the PREVIOUS
-        # question while the new one never gets a run — the "same message again" symptom class.
-        # With the gate, the queued message survives in the queue and the next generation's post-run
-        # push delivers its own answer. (The bridge-side waiter still prints its ceiling notice when
-        # it gives up; that is observability, not delivery.)
+        # TG-DEDUP (2026-09-26): gated on generation currency AND no queued/async-pending work —
+        # engine.run()'s exit-finally drains the message queue WITHOUT appending to the conversation
+        # unless suspension-driven, so a phone message arriving while this run finishes is silently
+        # consumed and api_server's `session['generating']` guard blocks a second thread for it.
+        # Without the gate the push would ship the answer to the PREVIOUS question while the new one
+        # never gets a run — the "same message again" symptom class. With the gate, the queued message
+        # survives and the next generation's post-run push delivers its own answer.
         if not is_stopped() and current_generation == pool._run_generation:
             try:
-                from agent_cascade.compression.helpers import extract_instance_output
                 _ri = pool.get_instance(instance_name)  # re-fetch: the run may have recycled/replaced this instance
                 _outstanding = (pool.has_pending(instance_name) or pool.has_messages(instance_name)) \
                     if hasattr(pool, 'has_pending') else False
-                if _ri is not None and not getattr(_ri, '_tg_pushed', False) and not _outstanding:
-                    post_text = extract_instance_output(
-                        list(_ri.conversation), instance_name, pool=pool, instance=_ri)
-                    if post_text and post_text.strip():
-                        sup = getattr(pool, 'telegram_supervisor', None)
-                        if sup is not None and hasattr(sup, 'notify_user'):
-                            # notify_user returns True only if the message was scheduled onto a live bridge
-                            # loop (False = silent no-op). Unlike the pre hook there is no dedup flag to set:
-                            # this is the last push of the run. instance_name/run_generation are passed as
-                            # keywords (tg-dup v3 F3a) so the [TG-PUSH] log line can correlate pushes across runs.
-                            sup.notify_user(post_text, instance_name=instance_name,
-                                            run_generation=current_generation)
+                # TG-FINAL-ANSWER (2026-09-28): extracted into a module-level helper so the post-run
+                # push decision (extraction + every skip branch's log line) is unit-testable in
+                # isolation — the per-run reset at run start makes driving it through
+                # run_agent_thread_unified itself impossible for the _tg_pushed branch.
+                _tg_post_run_push(_ri, instance_name, current_generation, pool, _outstanding)
             except Exception as e:  # noqa: BLE001 - best-effort, never break the run
                 logger.debug('[TG-PUSH] post-run push failed for %s: %s', instance_name, e)
 

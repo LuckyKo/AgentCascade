@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Any, List, Tuple
 
-from agent_cascade.llm.schema import FUNCTION, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.utils.utils import extract_text_from_message
 
@@ -665,6 +665,111 @@ def extract_instance_output(
         return f"WARNING: Sub-agent {instance_name} produced no text output in its final message (role={msg_role})."
 
     return result_str
+
+
+# TG-FINAL-ANSWER (2026-09-28): the turn-limit notice suffix appended to the last
+# assistant message by engine/core.py's "Cleanup: Turn limit reached" block. Defined
+# ONCE here and imported at both sites (core.py appends it, extract_final_answer_text
+# strips it) so the two can never drift — it is matched verbatim so the actual answer
+# can be recovered.
+TURN_LIMIT_NOTICE = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
+
+
+def find_last_assistant_text(messages: list[Any]) -> Tuple[Any, str]:
+    """
+    Walk ``messages`` BACKWARDS and return ``(message, text)`` for the last ASSISTANT
+    message that carries real text content, or ``(None, '')`` if none exists.
+
+    Skips FUNCTION-role messages (tool results), USER/SYSTEM messages (including the
+    injected auto-skill reflection prompt), and assistant messages with empty or
+    tool-call-only content. Handles both dict-form and Message-object entries.
+
+    Shared by every site that needs "the last assistant-with-text":
+      * extract_final_answer_text() below (TG push delivery),
+      * engine/core.py's auto-skill snapshot capture (pre-reflection task output),
+      * engine/core.py's turn-limit notice injection (finds the message to mutate).
+
+    Callers decide what to DO with the found text (strip a suffix, snapshot it, or
+    append a notice) — this helper only locates it.
+    """
+    for msg in reversed(messages or []):
+        msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        if msg_role != ASSISTANT:
+            continue  # skip FUNCTION (tool results), USER (incl. reflection prompts), SYSTEM
+        text = extract_text_from_message(msg, add_upload_info=False).strip()
+        if not text:
+            continue  # empty content / tool-call-only assistant message
+        return msg, text
+    return None, ''
+
+
+def extract_final_answer_text(
+        messages: list[Any],
+        instance_name: str,
+        pool=None,  # Optional: AgentPool to resolve actual log path (fallback only)
+        instance=None,  # Optional: AgentInstance (auto-skill snapshot precedence)
+) -> str:
+    """
+    Extract the TASK's final answer text from a conversation for Telegram push delivery.
+
+    Unlike extract_instance_output() (which reads messages[-1] and is correct for
+    sub-agent result reporting), the conversation tail at post-run time is often NOT
+    the task answer: a turn-limit run ends with the notice suffix appended to the last
+    assistant message, a tool-heavy run may end on a FUNCTION-role tool result, and an
+    auto-skill reflection run ends with reflection chatter. This helper walks the
+    conversation BACKWARDS and returns the last ASSISTANT message that carries real
+    text content, skipping FUNCTION-role messages, user/reflection-prompt messages,
+    and empty-content messages.
+
+    Rules (TG-FINAL-ANSWER, 2026-09-28):
+      * Snapshot precedence: if ``instance`` carries a non-dirty
+        ``_auto_skill_task_output`` snapshot, it is returned unchanged — same
+        contract as extract_instance_output(), so P1/P2 keep the pre-reflection
+        answer for natural-completion runs.
+      * Turn-limit notice: if the last assistant-with-text ends with the
+        turn-limit notice suffix, the suffix is stripped but the message's text
+        IS still returned (the answer before the notice is the final answer).
+      * Dirty-stop runs (_auto_skill_dirty_stop True): the snapshot is bypassed
+        and the walk returns the LAST assistant-with-text overall — which on a
+        dirty run is the reflection's final answer. Deliberately NOT trying to
+        walk back past the injected reflection user prompt: that prompt has no
+        stable marker, so "before the last USER message" would be brittle; the
+        reflection's own final text is an acceptable delivery for this path.
+      * Degenerate fallback: if no assistant-with-text exists at all, fall back
+        to extract_instance_output() (its WARNING / termination strings) —
+        preserving the current behavior for those cases.
+
+    Args/Returns: same contract as extract_instance_output() (minus was_terminated —
+    the push paths never terminate a run, so the termination strings are unreachable
+    here and the degenerate fallback uses the default False).
+    """
+    # Snapshot precedence — identical condition to extract_instance_output(): a set,
+    # non-dirty pre-reflection snapshot is authoritative for this run.
+    if instance is not None:
+        snap = getattr(instance, '_auto_skill_task_output', None)
+        dirty = getattr(instance, '_auto_skill_dirty_stop', False)
+        if isinstance(snap, str) and not dirty:
+            return snap
+
+    # Walk backwards for the last ASSISTANT message with real text content (shared
+    # helper — see find_last_assistant_text for the skip rules).
+    _msg, text = find_last_assistant_text(messages)
+    if text:
+        # Strip the turn-limit notice suffix (engine/core.py appends it to this
+        # message's text) but keep the answer itself. If stripping leaves nothing
+        # (a message that was ONLY the notice), fall through to the degenerate
+        # fallback rather than pushing an empty string.
+        if text.endswith(TURN_LIMIT_NOTICE):
+            text = text[:-len(TURN_LIMIT_NOTICE)].rstrip()
+        if text:
+            return text
+
+    # No assistant-with-text anywhere (or only a bare notice) — degenerate case;
+    # preserve the existing behavior (WARNING string) for callers to handle.
+    # instance=None is deliberate: the snapshot was already checked above (and either
+    # absent, dirty, or not a str); passing it through would make extract_instance_output
+    # re-check and potentially return a stale/dirty snapshot instead of the honest tail.
+    return extract_instance_output(messages, instance_name, pool=pool, instance=None)
 
 
 # ── Message Pool Validation (Phase 2 Task M3) ────────────────────────────────────

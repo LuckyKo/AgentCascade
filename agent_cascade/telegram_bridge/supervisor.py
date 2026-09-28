@@ -230,6 +230,14 @@ class TelegramBridgeSupervisor:
             with self._lock:
                 app, loop = self._app, self._loop
             if app is None or loop is None or loop.is_closed():
+                # TG-FINAL-ANSWER (2026-09-28): the False return was previously a silent no-op — the
+                # caller-side WARNING now flags it, and this DEBUG line records WHICH bridge state
+                # caused it (never started / loop not published yet / loop closed).
+                reason = ('app is None' if app is None
+                          else 'loop is None' if loop is None
+                          else 'loop is closed')
+                logger.debug('[TelegramBridge] notify_user no-op: %s (inst=%s gen=%s)',
+                             reason, instance_name, run_generation)
                 return False
 
             async def _do_send(_app=app):

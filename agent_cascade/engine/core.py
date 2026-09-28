@@ -65,6 +65,61 @@ def _extract_instance_output(*args, **kwargs):
     return extract_instance_output(*args, **kwargs)
 
 
+def _tg_pre_reflection_push(instance, pool) -> None:
+    """P1 pre-reflection push decision (TG-FINAL-ANSWER, 2026-09-28).
+
+    Extracted from the Phase-5 block in run() so every skip branch is unit-testable
+    in isolation — driving a full engine run to reach this site requires the auto-skill
+    trigger to fire (budget exhaustion + qualification), which is impractical in a unit test.
+
+    Behavior identical to the inline code it replaced: root-only gate, _tg_pushed dedup,
+    extract_final_answer_text extraction, four skip branches with INFO/WARNING logs, and
+    _tg_pushed set ONLY on successful notify_user (a failed pre-push must not suppress
+    the post-run push). Best-effort: any exception is caught by the caller.
+    """
+    from agent_cascade.compression.helpers import extract_final_answer_text
+
+    # getattr (not a bare attribute read) so a minimally-constructed instance
+    # (e.g. AgentInstance.__new__ in tests, which bypasses the dataclass default for
+    # parent_instance) degrades to "no push" instead of raising AttributeError.
+    if not (getattr(instance, 'parent_instance', None) is None
+            and not getattr(instance, '_tg_pushed', False)):
+        return
+
+    pre_text = extract_final_answer_text(
+        list(instance.conversation), instance.instance_name,
+        pool=pool, instance=instance)
+    if not (pre_text and pre_text.strip()):
+        logger.info('[TG-PUSH] pre-reflection push skipped for %s: extracted text empty (gen=%s)',
+                    getattr(instance, 'instance_name', '?'),
+                    getattr(pool, '_run_generation', None))
+    elif pre_text.startswith('WARNING:') or pre_text.startswith('Sub-agent '):
+        # Degenerate fallback (no assistant-with-text in the conversation): pushing an
+        # internal diagnostic string to the phone is worse than skipping.
+        logger.warning('[TG-PUSH] pre-reflection push skipped for %s: extracted text is a '
+                       'degenerate fallback, not an answer (gen=%s): %.120s',
+                       getattr(instance, 'instance_name', '?'),
+                       getattr(pool, '_run_generation', None), pre_text)
+    else:
+        sup = getattr(pool, 'telegram_supervisor', None)
+        if sup is not None and hasattr(sup, 'notify_user'):
+            # notify_user returns True only if the message was scheduled onto a live
+            # bridge loop (False = silent no-op). Set _tg_pushed ONLY on success so a
+            # failed pre-push doesn't suppress the post-run push.
+            if sup.notify_user(pre_text, instance_name=instance.instance_name,
+                               run_generation=getattr(pool, '_run_generation', None)):
+                instance._tg_pushed = True
+            else:
+                logger.warning('[TG-PUSH] notify_user returned False for %s '
+                               '(bridge loop not live?) gen=%s',
+                               getattr(instance, 'instance_name', '?'),
+                               getattr(pool, '_run_generation', None))
+        else:
+            logger.info('[TG-PUSH] pre-reflection push skipped for %s: no telegram supervisor attached (gen=%s)',
+                        getattr(instance, 'instance_name', '?'),
+                        getattr(pool, '_run_generation', None))
+
+
 def _is_explicit_skill_list(load_skill_value) -> bool:
     """Return True when a per-call load_skill value is an EXPLICIT skill list.
 
@@ -323,34 +378,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # synchronous call, so no re-check is needed here. The lock below is
             # still required for the instance state mutation (task_output).
             with instance._compression_lock:
-                # Find the last ASSISTANT message with text content — same
-                # dict/Message branching as the turn-limit notice in run() — and
-                # extract its text. If none exists, fall back to the current
-                # result on the pre-reflection conversation (may be a FUNCTION-role
-                # warning or "no text output" string; that is the honest state of
-                # this run). Never leave the attribute unset.
-                snapshot = None
-                for msg in reversed(instance.conversation):
-                    msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                    if msg_role != ASSISTANT:
-                        continue
-                    has_text = False
-                    if isinstance(msg, dict):
-                        content = msg.get('content', '')
-                        if isinstance(content, list):
-                            has_text = any(isinstance(item, dict) and item.get('type') == 'text' for item in content)
-                        elif isinstance(content, str):
-                            has_text = bool(content)
-                    else:
-                        content = getattr(msg, 'content', '')
-                        if isinstance(content, list):
-                            has_text = any(isinstance(item, dict) and item.get('type') == 'text' for item in content)
-                        elif isinstance(content, str):
-                            has_text = bool(content)
-                    if has_text:
-                        snapshot = extract_text_from_message(msg, add_upload_info=False)
-                        break
-                if snapshot is None:
+                # Find the last ASSISTANT message with text content (shared walk —
+                # compression.helpers.find_last_assistant_text, same dict/Message
+                # semantics as the turn-limit notice in run()) and extract its text.
+                # If none exists, fall back to the current result on the pre-reflection
+                # conversation (may be a FUNCTION-role warning or "no text output"
+                # string; that is the honest state of this run). Never leave the
+                # attribute unset.
+                from agent_cascade.compression.helpers import find_last_assistant_text
+                _snap_msg, snapshot = find_last_assistant_text(instance.conversation)
+                if not snapshot:
                     snapshot = _extract_instance_output(list(instance.conversation),
                                                         instance.instance_name,
                                                         pool=self.pool)
@@ -1112,29 +1149,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         # sub-agents must not push to the phone). Best-effort like _maybe_submit_memory_hint
                         # (never raises/blocks); deduped against the post-run push via instance._tg_pushed.
                         try:
-                            # getattr (not a bare attribute read) so a minimally-constructed
-                            # instance (e.g. AgentInstance.__new__ in tests, which bypasses the
-                            # dataclass default for parent_instance) degrades to "no push"
-                            # instead of raising AttributeError into the run loop.
-                            if (getattr(instance, 'parent_instance', None) is None
-                                    and not getattr(instance, '_tg_pushed', False)):
-                                from agent_cascade.compression.helpers import extract_instance_output
-                                pre_text = extract_instance_output(
-                                    list(instance.conversation), instance.instance_name,
-                                    pool=self.pool, instance=instance)
-                                if pre_text and pre_text.strip():
-                                    sup = getattr(self.pool, 'telegram_supervisor', None)
-                                    if sup is not None and hasattr(sup, 'notify_user'):
-                                        # notify_user returns True only if the message was scheduled onto a
-                                        # live bridge loop (False = silent no-op: bridge down / not started).
-                                        # Set _tg_pushed ONLY on success so a failed pre-push doesn't suppress
-                                        # the post-run push (which could still deliver if the bridge comes up);
-                                        # otherwise we'd silently drop the final answer for that run.
-                                        # instance_name/run_generation as keywords (tg-dup v3 F3a): getattr keeps a
-                                        # minimally-constructed pool from raising into the run loop.
-                                        if sup.notify_user(pre_text, instance_name=instance.instance_name,
-                                                           run_generation=getattr(self.pool, '_run_generation', None)):
-                                            instance._tg_pushed = True
+                            # TG-FINAL-ANSWER (2026-09-28): same extraction contract as the post-run push —
+                            # snapshot precedence when _auto_skill_task_output is set and not dirty (the
+                            # natural-completion case), backward walk otherwise. extract_instance_output is
+                            # unchanged for its other callers. Extracted into _tg_pre_reflection_push so
+                            # every skip branch is unit-testable in isolation.
+                            _tg_pre_reflection_push(instance, self.pool)
                         except Exception as e:  # noqa: BLE001 - best-effort, never break the run
                             logger.debug('[TG-PUSH] pre-reflection push failed for %s: %s',
                                          getattr(instance, 'instance_name', '?'), e)
@@ -1170,19 +1190,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # instead of appending a new message. This ensures
                 # extract_instance_output()
                 # (which reads messages[-1]) returns the agent's actual output
-                # with the warning.
-                turn_notice = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
+                # with the warning. The notice string is defined ONCE in
+                # compression.helpers (TURN_LIMIT_NOTICE) so the append site here
+                # and the strip site in extract_final_answer_text can never drift.
+                from agent_cascade.compression.helpers import find_last_assistant_text, TURN_LIMIT_NOTICE
+                turn_notice = TURN_LIMIT_NOTICE
                 notice_appended = False
                 if instance.conversation:
-                    # Find the last assistant message with text content and
-                    # append the notice
-                    for msg in reversed(instance.conversation):
-                        msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                        if msg_role != ASSISTANT:
-                            continue
+                    # Find the last assistant message with text content (shared
+                    # walk) and append the notice to it.
+                    notice_msg, _notice_text = find_last_assistant_text(instance.conversation)
+                    if notice_msg is not None:
                         # Try to append to text content
-                        if isinstance(msg, dict):
-                            content = msg.get('content', '')
+                        if isinstance(notice_msg, dict):
+                            content = notice_msg.get('content', '')
                             if isinstance(content, list):
                                 for item in content:
                                     if isinstance(item, dict) and item.get('type') == 'text':
@@ -1190,10 +1211,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                         notice_appended = True
                                         break
                             elif isinstance(content, str):
-                                msg['content'] = content + turn_notice
+                                notice_msg['content'] = content + turn_notice
                                 notice_appended = True
                         else:
-                            content = getattr(msg, 'content', '')
+                            content = getattr(notice_msg, 'content', '')
                             if isinstance(content, list):
                                 for item in content:
                                     if isinstance(item, dict) and item.get('type') == 'text':
@@ -1201,10 +1222,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                         notice_appended = True
                                         break
                             elif isinstance(content, str):
-                                msg.content = content + turn_notice
+                                notice_msg.content = content + turn_notice
                                 notice_appended = True
-                        if notice_appended:
-                            break
                     # Fallback: if no assistant message with text found, append
                     # a new one
                     if not notice_appended:
