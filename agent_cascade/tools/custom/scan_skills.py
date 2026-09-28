@@ -13,6 +13,12 @@ from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
 
+# Max match bullets rendered in query mode. The matcher returns every skill with a
+# non-zero score (hundreds on a broad query — ~45k chars / ~11k tokens per call),
+# which is the cost driver of perceived scan_skills latency. Capping at 10 keeps the
+# ranking contract (top-10 is what any consumer acts on) and cuts output ~92%.
+SKILL_SCAN_MAX_RESULTS = 10
+
 
 def _format_chars(chars: int) -> str:
     """Format a character count as a rounded '~N.Nk chars' display string."""
@@ -133,15 +139,20 @@ class ScanSkills(BaseTool):
         # instead of "No skills matched". active=True keeps matching active-only.
         matches = skill_manager.match_skills(query, include_inactive=not active_only)
         if not matches:
-            return (f"No skills matched the query '{query}'.\n\n"
-                    'Available skills:\n' +
-                    '\n'.join(
-                        f"- **{s['name']}** [{s.get('source', 'system')}]"
-                        f"{' (inactive)' if skill_manager.is_skill_disabled(s['name']) else ''}: "
-                        f"{s.get('description', '')}"
-                        for s in all_skills))
+            # No full-catalog dump here: an out-of-domain query used to print every
+            # registered skill (~45k chars), which is exactly the noise this tool
+            # exists to avoid. Point at the no-query listing instead — one deliberate
+            # call, capped output.
+            return (f"No skills matched the query '{query}'.\n"
+                    'Call scan_skills with an empty query to list all registered skills.')
 
-        # Build response with scores.
+        # Build response with scores. Cap the rendered bullets: the matcher returns
+        # every skill with a non-zero score, and printing hundreds of bullets per call
+        # is the output-volume defect (todo 123). Top-10 preserves the ranking contract.
+        total_matches = len(matches)
+        truncated = total_matches > SKILL_SCAN_MAX_RESULTS
+        matches = matches[:SKILL_SCAN_MAX_RESULTS]
+
         # Resolve display fields from the already-fetched full listing (``all_skills``)
         # rather than the registry, so registry-absent (inactive) matches still show a
         # real description/source/version/chars. ``all_skills`` carries name/description/
@@ -162,4 +173,6 @@ class ScanSkills(BaseTool):
             lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}, "
                          f"rating: {rating_str}, {_format_chars(chars)}){inactive_note}: {desc}")
 
+        if truncated:
+            lines.append(f"(showing top {SKILL_SCAN_MAX_RESULTS} of {total_matches} matches)")
         return '\n'.join(lines)

@@ -1457,12 +1457,21 @@ class SkillManager:
             # default listing is complete. Dedup by lowercase name to avoid the test-fixture
             # case where a disabled skill is manually kept in the registry. Disk reads happen
             # OUTSIDE the registry lock (only the snapshot above is under _write_lock);
-            # _servable_skill_names/_find_servable_skill_path do no locking and read
-            # _disabled_names as a plain set (consistent with scan_skills).
+            # _find_servable_skill_path does no locking and reads _disabled_names as a plain
+            # set (consistent with scan_skills).
+            # Iterate _disabled_names DIRECTLY instead of walking the whole corpus via
+            # _servable_skill_names() first: that walk parsed every SKILL.md on disk (~193 ms)
+            # only to discard everything not disabled — 100% wasted work when the disabled set
+            # is empty (the common case). The per-name _find_servable_skill_path(nm) below is
+            # what actually proves servability, so it subsumes the listing walk.
+            # Known benign superset vs the old loop: if a skill's directory name differs from
+            # its frontmatter name AND _disabled_names is keyed by the DIRECTORY name, the new
+            # loop re-surfaces it while the old one silently dropped it (the old loop only ever
+            # saw frontmatter names). Unreachable in production — every _disabled_names writer
+            # lowercases and keys on the metrics/frontmatter name.
             disabled = {n.lower() for n in self._disabled_names}
-            servable = self._servable_skill_names()  # one-level walk, NO disabled filter
-            for nm in sorted(servable):
-                if nm in present or nm not in disabled:
+            for nm in sorted(disabled):
+                if nm in present:
                     continue
                 path = self._find_servable_skill_path(nm)
                 if path is None:

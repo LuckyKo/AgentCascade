@@ -1479,11 +1479,11 @@ class TestScanSkillsInactiveMatch:
         noq_line = next(l for l in noq.splitlines() if '**active-zebra**' in l)
         assert '(inactive)' in noq_line
 
-        # (2) "No skills matched" fallback also marks it (non-matching query).
+        # (2) "No skills matched" fallback points at the no-query listing instead of
+        # dumping the full catalog (todo 123): the marker agreement is covered by (1).
         fb = self.tool.call({'query': 'zzznomatch'})
         assert fb.startswith('No skills matched')
-        fb_line = next(l for l in fb.splitlines() if '**active-zebra**' in l)
-        assert '(inactive)' in fb_line
+        assert 'empty query' in fb
 
         # (3) Filter: default match_skills excludes it; include_inactive=True includes it.
         default_names = [n for n, _ in m.match_skills('zebraquantum')]
@@ -3545,3 +3545,174 @@ class TestAlwaysProtectedSkills:
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['class_counts'][CLASS_BAD] == 1          # still BAD (not forced PROTECTED)
         assert s['evicted'] == ['regular']                # still evictable
+
+
+# ===========================================================================
+# scan_skills output-volume regression guards (todo 123 — option A)
+# ===========================================================================
+
+
+class TestScanSkillsOutputVolume:
+    """Regression guards for the query-mode output cap and the no-match message.
+
+    The matcher returns EVERY skill with a non-zero score; printing all of them per call
+    was ~45k chars (~11k tokens). Query mode now caps at SKILL_SCAN_MAX_RESULTS bullets
+    and an out-of-domain query gets a short pointer instead of the full catalog dump.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tool(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+
+        manager = SkillManager()
+        manager._metrics_file = tmp_path / 'skills-metrics.json'  # isolate metrics writes
+        pool = MagicMock()
+        pool.skill_manager = manager
+        self.manager = manager
+        self.tool = ScanSkills(agent_pool=pool)
+
+    def test_query_mode_caps_bullets_at_max_results(self):
+        """More than SKILL_SCAN_MAX_RESULTS matches → exactly that many bullets + a note."""
+        from agent_cascade.tools.custom.scan_skills import SKILL_SCAN_MAX_RESULTS
+
+        names = [f'bulk-skill-{i:02d}' for i in range(SKILL_SCAN_MAX_RESULTS + 5)]
+        self.manager.match_skills = lambda q, include_inactive=False: [(n, 0.5) for n in names]
+        # The no-query listing is fetched too; seed a registry so the tool has metadata.
+        for n in names:
+            self.manager._skills_registry[n] = {
+                'name': n, 'description': f'desc {n}', 'source': 'system', 'version': '1.0.0'}
+
+        out = self.tool.call({'query': 'bulk query'})
+        bullets = [l for l in out.splitlines() if l.startswith('- **')]
+        assert len(bullets) == SKILL_SCAN_MAX_RESULTS
+        # Truncation note names the total so callers know more matches exist.
+        assert f'(showing top {SKILL_SCAN_MAX_RESULTS} of {len(names)} matches)' in out
+
+    def test_query_mode_under_cap_has_no_truncation_note(self):
+        self.manager.match_skills = lambda q, include_inactive=False: [('one', 0.9), ('two', 0.4)]
+        for n in ('one', 'two'):
+            self.manager._skills_registry[n] = {
+                'name': n, 'description': f'desc {n}', 'source': 'system', 'version': '1.0.0'}
+
+        out = self.tool.call({'query': 'small query'})
+        bullets = [l for l in out.splitlines() if l.startswith('- **')]
+        assert len(bullets) == 2
+        assert 'showing top' not in out
+
+    def test_out_of_domain_query_does_not_dump_full_catalog(self):
+        """An unmatched query must NOT print the catalog: short message, zero skill bullets."""
+        for i, n in enumerate((f'catalog-skill-{i:02d}' for i in range(40))):
+            self.manager._skills_registry[n] = {
+                'name': n, 'description': f'desc {n}', 'source': 'system', 'version': '1.0.0'}
+        self.manager.match_skills = lambda q, include_inactive=False: []
+
+        out = self.tool.call({'query': 'zzz qqq gibberish nonsense'})
+        assert out.startswith('No skills matched')
+        assert 'empty query' in out
+        bullets = [l for l in out.splitlines() if l.startswith('- **')]
+        assert bullets == []  # no catalog dump
+
+    def test_no_query_listing_stays_uncapped(self):
+        """The no-query listing (intentional full view) is NOT subject to the cap."""
+        from agent_cascade.tools.custom.scan_skills import SKILL_SCAN_MAX_RESULTS
+
+        names = [f'list-skill-{i:02d}' for i in range(SKILL_SCAN_MAX_RESULTS + 7)]
+        for n in names:
+            self.manager._skills_registry[n] = {
+                'name': n, 'description': f'desc {n}', 'source': 'system', 'version': '1.0.0'}
+
+        out = self.tool.call({'query': ''})
+        bullets = [l for l in out.splitlines() if l.startswith('- **')]
+        assert len(bullets) == len(names)  # all of them, rating-sorted
+
+
+# ===========================================================================
+# get_all_metadata disabled re-surface — option P edge cases (todo 123)
+# ===========================================================================
+
+
+class TestGetAllMetadataDisabledResurface:
+    """Option P: the disabled re-surface loop iterates _disabled_names directly instead of
+    walking the whole corpus via _servable_skill_names() first. These pin the plan §1.5b
+    edge-case contract: what gets re-surfaced, and what must stay skipped."""
+
+    def test_disabled_skill_with_servable_file_is_resurfaced(self):
+        """Case 1: disabled + file present + absent from registry → re-surfaced with metadata."""
+        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case1')
+        root = Path(m._pending_dir).parent / 'skills'
+        _write_skill_file(root, 'alpha', version='2.3.4')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        ok, _ = m.disable_skill('alpha')
+        assert ok
+        m._cache_ttl = 0.0
+        m.discover([root])
+        assert 'alpha' not in m.get_skill_names()  # evicted from the registry
+
+        metas = m.get_all_metadata(include_active_only=False)
+        names = [x['name'] for x in metas]
+        assert 'alpha' in names
+        entry = next(x for x in metas if x['name'] == 'alpha')
+        assert entry['version'] == '2.3.4'
+        assert entry['description']  # frontmatter was re-parsed from disk
+
+    def test_disabled_skill_with_deleted_file_is_skipped(self):
+        """Case 2: disabled + SKILL.md DELETED → skipped gracefully, no exception."""
+        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case2')
+        root = Path(m._pending_dir).parent / 'skills'
+        path = _write_skill_file(root, 'beta')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        ok, _ = m.disable_skill('beta')
+        assert ok
+        path.unlink()  # backing file gone; the directory remains
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        metas = m.get_all_metadata(include_active_only=False)  # must not raise
+        assert 'beta' not in [x['name'] for x in metas]
+
+    def test_on_disk_not_disabled_not_resurfaced(self):
+        """Case 3: on disk, NOT disabled, absent from registry → NOT re-surfaced here.
+        Active skills come from the registry branch; the disabled loop must not leak them."""
+        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case3')
+        root = Path(m._pending_dir).parent / 'skills'
+        _write_skill_file(root, 'gamma')
+        # Simulate a registry-absent but undisabled skill: drop it from the registry after
+        # discovery (the disabled loop is the only other surface path — it must not pick it up).
+        m._cache_ttl = 0.0
+        m.discover([root])
+        with m._write_lock:
+            m._skills_registry.pop('gamma', None)
+
+        metas = m.get_all_metadata(include_active_only=False)
+        assert 'gamma' not in [x['name'] for x in metas]
+
+    def test_disabled_name_case_mismatch_still_resurfaced(self):
+        """Case 4: _disabled_names holds a different case → lowercased comparison still matches."""
+        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case4')
+        root = Path(m._pending_dir).parent / 'skills'
+        _write_skill_file(root, 'delta')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        with m._write_lock:
+            m._skills_registry.pop('delta', None)
+        m._disabled_names.add('DeLtA')
+
+        metas = m.get_all_metadata(include_active_only=False)
+        assert 'delta' in [x['name'] for x in metas]
+
+    def test_disabled_and_still_in_registry_not_duplicated(self):
+        """Case 7: disabled AND still in registry → surfaced exactly once (registry branch)."""
+        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case7')
+        root = Path(m._pending_dir).parent / 'skills'
+        _write_skill_file(root, 'epsilon')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        with m._write_lock:
+            m._disabled_names.add('epsilon')  # disable without re-discovery
+
+        metas = m.get_all_metadata(include_active_only=False)
+        assert [x['name'] for x in metas].count('epsilon') == 1
