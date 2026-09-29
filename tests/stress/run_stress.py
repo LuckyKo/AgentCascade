@@ -133,9 +133,9 @@ def main(argv: List[str] | None = None) -> int:
                 summary = run_mutation_phase(root=phase_root, budget_s=budget,
                                              vectors=vectors)
                 elapsed = time.monotonic() - t0
-                print(f'[mutate] {summary['note']}')
-                print(f'[mutate] vectors={len(summary['vectors'])} '
-                      f'findings={len(summary['findings'])} wall={elapsed:.1f}s')
+                print(f"[mutate] {summary['note']}")
+                print(f"[mutate] vectors={len(summary['vectors'])} "
+                      f"findings={len(summary['findings'])} wall={elapsed:.1f}s")
                 for f in summary['findings']:
                     print(f'  FINDING: {json.dumps(f)}')
 

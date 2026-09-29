@@ -363,6 +363,8 @@ def run_proof_phase(root: str = '.', budget_s: float = PROOF_BUDGET_S) -> List[P
 
     td = tempfile.mkdtemp(prefix='stress_proof_A_')
     try:
+        # Deferred: watchdog imports harness at module level; importing here
+        # avoids a circular dependency when proof.py is loaded before harness.
         from .watchdog import ProgressLog as _PL, Watchdog as _WD, StallReport as _SR
 
         log = _PL()

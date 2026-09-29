@@ -44,15 +44,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 # ── Test-process constants (never read by production code) ──────────────
-# QUEUE_WAIT_TIMEOUT must be GREATER than the watchdog's no_progress_s so that a
-# thread stuck in SlotPool.acquire is classified by the watchdog BEFORE the
-# timeout fires. If it were shorter, the acquire_timeout event would reset the
-# idle timer and mask the deadlock as a benign timeout. (validity plan: keep
-# this > NO_PROGRESS_S; see _timing.py)
-QUEUE_WAIT_TIMEOUT = 25.0   # bounded queue wait -> a stall surfaces, not a hang
-MAX_TURNS = 20               # depth cap; generous vs AGENT_MAX_NESTING_DEPTH
-JOIN_TIMEOUT = 30.0
-WAIT_SETTLE = 1.0
+# All timing constants live in _timing.py (env-overridable via STRESS_<NAME>).
+# Invariant: QUEUE_WAIT_TIMEOUT > NO_PROGRESS_S — see _timing.py docstring.
+from ._timing import (  # noqa: E402,F401
+    QUEUE_WAIT_TIMEOUT, MAX_TURNS, JOIN_TIMEOUT, WAIT_SETTLE,
+)
 
 CLASSES = ('stress_a', 'stress_b', 'stress_c')
 DEFAULT_EP = 'ep_stress_a'
