@@ -215,9 +215,18 @@ class Harness:
         # Every patch below therefore goes through a plain closure, which IS a
         # descriptor and therefore receives the real `self`/instance.
 
-        # ── Seam 1: the synchronous child seam (module-level import at :23) ──
+        # ── Seam 1: the synchronous child seam ──
+        # Post-COLL-2 trees (61810c6b+) import run_child_core at module level
+        # (tool_dispatcher.py:23), so patching the tool_dispatcher attribute works.
+        # Baseline tree (d78f2347~1) does a function-local import inside
+        # _run_child_sync, which shadows any module-attribute patch — there we must
+        # patch the source module instead. Both resolve to the same function object.
+        if hasattr(td, 'run_child_core'):
+            seam_module = td
+        else:
+            from agent_cascade import child_runner as seam_module
         self._patches.append(patch.object(
-            td, 'run_child_core',
+            seam_module, 'run_child_core',
             lambda *a, **k: self._fake_run_child_core(*a, **k)))
 
         # ── Seam 2: the async seam (pool/slots.py:88 local import) ──
@@ -742,6 +751,18 @@ class _FakeEngine:
             ExecutionEngine.reacquire_for(self, instance, holder_name, context)
         self._resolve_placeholders = lambda args, instance_name, tool_name: args
         self._cache_tool_args = lambda *a, **k: None
+        # Baseline tree (d78f2347~1) calls engine._release_slot directly in the
+        # sync-child handoff; post-COLL-2 trees route through the dispatcher.
+        # Delegate to the real static helper so both trees exercise production code.
+        from agent_cascade.slot_queue import release_slot_permit
+
+        def _release_slot(slot_holder, holder_name, context='cleanup', action=None):
+            try:
+                release_slot_permit(slot_holder, holder_name, context=context)
+            except Exception:
+                pass  # idempotent — holder may already be released
+
+        self._release_slot = _release_slot
 
     @property
     def compression_handler(self):
