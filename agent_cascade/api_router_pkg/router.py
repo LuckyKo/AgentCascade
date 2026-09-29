@@ -35,7 +35,8 @@ from agent_cascade.retry_policy import POLICY_DEFAULT, RetryPolicy, calculate_ba
 from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, BREAKER_MAX_WINDOW_SECONDS, BREAKER_WINDOW_GROWTH,
                                     ENDPOINT_BLACKLIST_SECONDS, ENDPOINT_COOLDOWN_SECONDS,
                                     ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD, ENDPOINT_FAILURE_CLEANUP_HOURS,
-                                    SANITY_PROBE_ENABLED, SANITY_PROBE_TIMEOUT_SECONDS, SERVER_BUSY_WAIT_CAP_SECONDS)
+                                    REACQUIRE_TIMEOUT, SANITY_PROBE_ENABLED, SANITY_PROBE_TIMEOUT_SECONDS,
+                                    SERVER_BUSY_WAIT_CAP_SECONDS)
 from agent_cascade.slot_queue import release_slot_permit
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
@@ -663,9 +664,11 @@ class APIRouter:
 
         Called by sync_sticky_slot after any old permit has been released (its
         drop-fallback line logged there); if that release had raised we would have
-        re-raised before reaching here. Acquire is OUTSIDE the state lock: the
-        pool's condition may block on waiters (blocking by design — no timeout,
-        no bypass).
+        re-raised before reaching here. Acquire is OUTSIDE the state lock.
+
+        Bounded by REACQUIRE_TIMEOUT (plan §3.4.1): a merely-busy pool must not cost the full
+        QUEUE_WAIT_TIMEOUT on the critical path of an LLM call — on timeout we fall through to
+        endpoint fallback instead of stalling 300s.
         """
         release_cb = self.scheduler.acquire(
             api_base=resolved['api_base'] or desired_key,
@@ -673,6 +676,7 @@ class APIRouter:
             instance_name=inst_name,
             agent_class=agent_class,
             pool=self._pool,
+            timeout=REACQUIRE_TIMEOUT,
         )
 
         # Store the new permit under the state lock. No other thread can grant this

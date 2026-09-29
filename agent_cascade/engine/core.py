@@ -39,7 +39,7 @@ from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_
                                     DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_MAX_TURNS,
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY,
                                     LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_CONTINUE_ATTEMPTS,
-                                    REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
+                                    REACQUIRE_TIMEOUT, REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
                                     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
 from agent_cascade.stream_publisher import StreamPublisher
@@ -52,7 +52,9 @@ from agent_cascade.utils.utils import extract_text_from_message, get_message_sta
 # ── Constants (core) ───────────────────────────────────────────────────────────
 SLEEPING_LOOP_BACKOFF = 0.1  # Seconds to sleep when re-entering loop from SLEEPING state
 _COMPRESSION_WAIT_TIMEOUT = 1.0  # Seconds to wait per iteration when suspended by compression
-REACQUIRE_TIMEOUT = 30.0  # Bounded FAST re-acquire window (post-yield fast path); on timeout the instance re-enters FIFO at tail (unbounded)
+
+# REACQUIRE_TIMEOUT relocated to settings.py (plan §3.4.1) so router.py's sticky-slot sync can
+# share the same bound without a circular import. Imported below with the other settings.
 
 
 def _extract_instance_output(*args, **kwargs):
