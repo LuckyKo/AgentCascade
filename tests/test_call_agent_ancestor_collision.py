@@ -25,18 +25,18 @@ Chain-release table (§4.1):
 No LLM or network. Uses the same mock-pool harness shape as
 test_call_agent_sync_async_selection.py but with explicit `slot_key` /
 `parent_instance` on every instance (plan §5.2 — bare auto-Mocks make the chain
-walk untestable and non-terminating).
+walk untestable and non-terminating). Shared helpers live in slot_test_helpers.
 """
 
 import threading
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_cascade.api_router import APIEndpoint, APIRouter
 from agent_cascade.exceptions import AgentTerminatedError
-from agent_cascade.tool_dispatcher import ToolDispatcher
+
+from tests.slot_test_helpers import create_dispatcher, make_mock_instance, make_mock_pool
 
 SHARED_KEY = '_shared_sequential_slot_'
 
@@ -44,63 +44,6 @@ SHARED_KEY = '_shared_sequential_slot_'
 # ============================================================================
 # Fixtures and helpers
 # ============================================================================
-
-
-def _make_instance(instance_name: str,
-                   agent_class: str = 'coder',
-                   slot_release=None,
-                   slot_key: Optional[str] = None,
-                   parent_instance: Optional[str] = None,
-                   nest_depth: int = 0):
-    """Mock AgentInstance with EXPLICIT slot state (plan §5.2).
-
-    `_slot_key` and `parent_instance` are set explicitly — a bare MagicMock would
-    auto-create them as truthy stubs, defeating both the held-key read and the
-    chain-walk break guard.
-    """
-    inst = MagicMock()
-    inst.instance_name = instance_name
-    inst.agent_class = agent_class
-    inst._state_lock = threading.RLock()
-    inst.state = MagicMock(name=f"{instance_name}_state")
-    inst.state.name = 'RUNNING'
-    inst._slot_release = slot_release
-    inst._slot_key = slot_key
-    inst.parent_instance = parent_instance
-    inst._nest_depth = nest_depth
-    return inst
-
-
-def _make_pool(router: APIRouter, instances):
-    """Mock AgentPool with real router and an explicit instance registry."""
-    pool = MagicMock()
-    pool.api_router = router
-    pool.settings = MagicMock()
-    pool.settings.max_nesting_depth = 10
-    pool.instances = {inst.instance_name: inst for inst in instances}
-    pool.get_instance.side_effect = lambda name: pool.instances.get(name)
-    pool.register_async_call = MagicMock()
-    pool.instance_conversations = {}
-    pool.instance_classes = {}
-
-    def _resolve(name, exclude=None):
-        name = name.strip()
-        for n in pool.instances:
-            if n != exclude and n.lower() == name.lower():
-                return n
-        return name
-
-    pool._resolve_instance_name.side_effect = _resolve
-    return pool
-
-
-def _create_dispatcher(pool, mock_engine=None):
-    """ToolDispatcher with a controllable mocked engine."""
-    if mock_engine is None:
-        mock_engine = MagicMock()
-    dispatcher = ToolDispatcher(pool)
-    dispatcher.set_engine(mock_engine)
-    return dispatcher, mock_engine
 
 
 def _build_router(tmp_path_factory):
@@ -152,12 +95,12 @@ class TestAncestorChainDecision:
 
     def test_async_when_child_pool_disjoint_from_whole_chain(self, router):
         """A(P1) → B(P2) async → C(P3): no chain member holds C's pool → ASYNC (no over-blocking)."""
-        a = _make_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
-        b = _make_instance('B', 'class_b', slot_release=None, parent_instance='A')
+        a = make_mock_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
+        b = make_mock_instance('B', 'class_b', slot_release=None, parent_instance='A')
         router.set_agent_priorities('class_c', ['ep_c'])
 
-        pool = _make_pool(router, [a, b])
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [a, b])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={'instance_name': 'C', 'agent_class': 'class_c', 'task': 't'},
@@ -171,12 +114,12 @@ class TestAncestorChainDecision:
 
     def test_sync_when_child_needs_grandparent_pool(self, router):
         """A(P1) → B(async, no permit) → C(P1): COLL-2 fires on the grandparent → SYNC."""
-        a = _make_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
-        b = _make_instance('B', 'class_b', slot_release=None, parent_instance='A')
+        a = make_mock_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
+        b = make_mock_instance('B', 'class_b', slot_release=None, parent_instance='A')
         router.set_agent_priorities('class_a', ['ep_a'])
 
-        pool = _make_pool(router, [a, b])
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [a, b])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={'instance_name': 'C', 'agent_class': 'class_a', 'task': 't'},
@@ -193,12 +136,12 @@ class TestAncestorChainDecision:
         """Gap 1a regression: child resolves to the caller's HELD key while the chain-head
         re-derivation disagrees → must still be SYNC (held key wins)."""
         # Caller holds 'http://api-a' (cursor rotated away from its chain head 'ep_b').
-        b = _make_instance('B', 'class_b', slot_release=lambda: None, slot_key='http://api-a')
+        b = make_mock_instance('B', 'class_b', slot_release=lambda: None, slot_key='http://api-a')
         router.set_agent_priorities('class_b', ['ep_b'])   # chain head → http://api-b
         router.set_agent_priorities('class_a', ['ep_a'])   # child resolves to held key
 
-        pool = _make_pool(router, [b])
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [b])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={'instance_name': 'C', 'agent_class': 'class_a', 'task': 't'},
@@ -212,13 +155,13 @@ class TestAncestorChainDecision:
 
     def test_no_collision_when_ancestor_holds_no_permit(self, router):
         """Ancestor with _slot_release=None is not a collision source → ASYNC."""
-        a = _make_instance('A', 'class_a', slot_release=None, slot_key=None)
-        b = _make_instance('B', 'class_b', slot_release=lambda: None,
-                           slot_key='http://api-b', parent_instance='A')
+        a = make_mock_instance('A', 'class_a', slot_release=None, slot_key=None)
+        b = make_mock_instance('B', 'class_b', slot_release=lambda: None,
+                               slot_key='http://api-b', parent_instance='A')
         router.set_agent_priorities('class_c', ['ep_c'])
 
-        pool = _make_pool(router, [a, b])
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [a, b])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={'instance_name': 'C', 'agent_class': 'class_c', 'task': 't'},
@@ -232,11 +175,11 @@ class TestAncestorChainDecision:
 
     def test_chain_walk_stops_at_dismissed_ancestor(self, router):
         """parent_instance names a dead (absent) instance → no exception, no phantom collision."""
-        b = _make_instance('B', 'class_b', slot_release=None, parent_instance='GONE')
+        b = make_mock_instance('B', 'class_b', slot_release=None, parent_instance='GONE')
         router.set_agent_priorities('class_c', ['ep_c'])
 
-        pool = _make_pool(router, [b])  # 'GONE' is not in the registry
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [b])  # 'GONE' is not in the registry
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={'instance_name': 'C', 'agent_class': 'class_c', 'task': 't'},
@@ -250,15 +193,15 @@ class TestAncestorChainDecision:
 
     def test_chain_walk_depth_bounded(self, router):
         """A cycle in parent_instance links must terminate at AGENT_MAX_NESTING_DEPTH."""
-        x = _make_instance('X', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
-        y = _make_instance('Y', 'class_b', slot_release=lambda: None, slot_key='http://api-b')
+        x = make_mock_instance('X', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
+        y = make_mock_instance('Y', 'class_b', slot_release=lambda: None, slot_key='http://api-b')
         x.parent_instance = 'Y'  # X ↔ Y cycle
         y.parent_instance = 'X'
 
         router.set_agent_priorities('class_c', ['ep_c'])
 
-        pool = _make_pool(router, [x, y])
-        dispatcher, _ = _create_dispatcher(pool)
+        pool = make_mock_pool(router, [x, y])
+        dispatcher, _ = create_dispatcher(pool)
 
         # Must return (bounded walk), not loop forever.
         result = dispatcher.handle_call_agent(
@@ -281,12 +224,12 @@ def _grandparent_collision_setup(router):
     Returns (a, b, pool, dispatcher, mock_engine). The collision is with the
     GRANDPARENT — the direct caller releases nothing.
     """
-    a = _make_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
-    b = _make_instance('B', 'class_b', slot_release=None, parent_instance='A')
+    a = make_mock_instance('A', 'class_a', slot_release=lambda: None, slot_key='http://api-a')
+    b = make_mock_instance('B', 'class_b', slot_release=None, parent_instance='A')
     router.set_agent_priorities('class_a', ['ep_a'])
 
-    pool = _make_pool(router, [a, b])
-    dispatcher, mock_engine = _create_dispatcher(pool)
+    pool = make_mock_pool(router, [a, b])
+    dispatcher, mock_engine = create_dispatcher(pool)
     return a, b, pool, dispatcher, mock_engine
 
 

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from agent_cascade.child_runner import run_child_core
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
-from agent_cascade.settings import AGENT_MAX_NESTING_DEPTH  # settings.py:203, env-tunable
+from agent_cascade.settings import AGENT_MAX_NESTING_DEPTH
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
@@ -133,10 +133,7 @@ class ToolDispatcher:
         with instance._state_lock:
             if getattr(instance, '_slot_release', None) is None:
                 return None          # no permit held -> not a collision source
-            # hasattr guard: real AgentInstances always define _slot_key (None until
-            # first acquire), but minimal test doubles may not — a bare MagicMock would
-            # otherwise auto-create a truthy stub and poison the set-intersection.
-            key = instance._slot_key if hasattr(instance, '_slot_key') else None
+            key = getattr(instance, '_slot_key', None)
             return key if isinstance(key, str) else None
 
     def _chain_held_slots(self, instance: 'AgentInstance') -> List[Tuple['AgentInstance', str]]:

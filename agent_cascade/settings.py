@@ -225,9 +225,8 @@ DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT: int = int(
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_SLOT_ACQUIRE_TIMEOUT',
                                                    30))  # Timeout in seconds for acquiring endpoint scheduling slots
 
-# Bounded FAST re-acquire window (post-yield fast path); on timeout the instance re-enters
-# FIFO at tail (unbounded). Relocated from engine/core.py so router.py's sticky-slot sync can
-# use the same bound without a circular import (plan §3.4.1). Default 30.0 UNCHANGED.
+# Bounded FAST re-acquire window (post-yield fast path); on timeout the instance
+# re-enters FIFO at tail (unbounded).
 REACQUIRE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_REACQUIRE_TIMEOUT', 30.0))
 
 # Per-endpoint reasoning effort values (UI pulldown → LLM API `reasoning_effort`).

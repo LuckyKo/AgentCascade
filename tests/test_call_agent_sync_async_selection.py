@@ -10,14 +10,13 @@ No LLM or network connections required. Uses isolated APIRouter instances.
 """
 
 import os
-import threading
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from agent_cascade.api_router import APIEndpoint, APIRouter
-from agent_cascade.tool_dispatcher import ToolDispatcher
+
+from tests.slot_test_helpers import create_dispatcher, make_mock_instance, make_mock_pool
 
 # ============================================================================
 # Fixtures and helpers
@@ -83,81 +82,6 @@ def router_with_endpoints(tmp_path_factory):
         yield r
 
 
-def _make_mock_instance(
-    instance_name: str = 'caller1',
-    agent_class: str = 'coder',
-    slot_release: Optional[callable] = None,
-    state='RUNNING',
-    nest_depth: int = 0,
-    slot_key: Optional[str] = None,
-    parent_instance: Optional[str] = None,
-):
-    """Minimal mock AgentInstance with configurable slot state.
-
-    `slot_key` and `parent_instance` MUST be set explicitly (plan §5.2): a bare
-    MagicMock auto-creates them as truthy stubs, which would (a) poison the
-    COLL-2 set-intersection in `_held_slot_key` and (b) make the ancestor chain
-    walk non-terminating. Defaults are None so the no-permit / no-ancestor cases
-    are genuine rather than auto-Mocked.
-    """
-    inst = MagicMock()
-    inst.instance_name = instance_name
-    inst.agent_class = agent_class
-    inst._state_lock = threading.RLock()
-    inst.state = MagicMock(name=f"{instance_name}_state")
-    inst.state.name = state
-    inst._slot_release = slot_release
-    inst._nest_depth = nest_depth
-    inst._slot_key = slot_key
-    inst.parent_instance = parent_instance
-    return inst
-
-
-def _make_mock_pool(router: APIRouter, caller_instance=None, max_nesting_depth=10):
-    """Minimal mock AgentPool with real router for sync/async decision testing."""
-    pool = MagicMock()
-    pool.api_router = router
-    pool.settings = MagicMock()
-    pool.settings.max_nesting_depth = max_nesting_depth
-
-    if caller_instance is not None:
-        pool.get_instance.return_value = caller_instance
-    else:
-        pool.get_instance.return_value = None
-
-    # Track which path was taken
-    pool.register_async_call = MagicMock()
-
-    pool.instance_conversations = {}
-    pool.instance_classes = {}
-
-    # Real dict + case-insensitive resolver (mirrors pool/lifecycle.py) so the
-    # self-call / resurrection identity guards in handle_call_agent work correctly.
-    pool.instances = {}
-    if caller_instance is not None:
-        pool.instances[caller_instance.instance_name] = caller_instance
-
-    def _resolve(name, exclude=None):
-        name = name.strip()
-        for n in pool.instances:
-            if n != exclude and n.lower() == name.lower():
-                return n
-        return name
-
-    pool._resolve_instance_name.side_effect = _resolve
-
-    return pool
-
-
-def _create_dispatcher(pool):
-    """Create ToolDispatcher with mocked engine."""
-    mock_engine = MagicMock()
-    mock_engine._release_slot = MagicMock()
-    dispatcher = ToolDispatcher(pool)
-    dispatcher.set_engine(mock_engine)
-    return dispatcher
-
-
 # ============================================================================
 # Test 1: Sequential child (concurrency=0) forces SYNC path
 # ============================================================================
@@ -173,7 +97,7 @@ class TestSequentialChildForcesSync:
         can use the shared sequential slot at a time, so we must run inline to avoid
         blocking the entire pool.
         """
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='researcher',
             slot_release=None,  # No slot held
@@ -182,8 +106,8 @@ class TestSequentialChildForcesSync:
         router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
         router_with_endpoints.set_agent_priorities('security', ['ep_zero'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -202,7 +126,7 @@ class TestSequentialChildForcesSync:
 
     def test_sync_when_child_concurrency_zero_with_caller_slot(self, router_with_endpoints):
         """Child with concurrency=0 forces SYNC even when caller holds a slot."""
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,  # Holds a slot
@@ -211,8 +135,8 @@ class TestSequentialChildForcesSync:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('security', ['ep_zero'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -239,7 +163,7 @@ class TestUnlimitedChildAlwaysAsync:
 
     def test_async_when_child_unlimited_caller_holds_slot(self, router_with_endpoints):
         """Caller holds a slot but child on unlimited endpoint → ASYNC (no collision)."""
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,  # Holds a slot
@@ -248,8 +172,8 @@ class TestUnlimitedChildAlwaysAsync:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -267,7 +191,7 @@ class TestUnlimitedChildAlwaysAsync:
 
     def test_async_when_child_unlimited_caller_no_slot(self, router_with_endpoints):
         """Caller has no slot, child on unlimited → ASYNC."""
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='researcher',
             slot_release=None,
@@ -276,8 +200,8 @@ class TestUnlimitedChildAlwaysAsync:
         router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
         router_with_endpoints.set_agent_priorities('coder', ['ep_unlimited'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         dispatcher.handle_call_agent(
             args={
@@ -308,14 +232,14 @@ class TestDifferentSlotPoolsAsync:
         the ancestor this test would silently stop guarding the Case-4 (chain-walk) behavior.
         """
         # Grandparent holds the unlimited pool; caller (its child) holds the sequential pool.
-        grandparent = _make_mock_instance(
+        grandparent = make_mock_instance(
             instance_name='grandparent1',
             agent_class='researcher',
             slot_release=lambda: None,
             slot_key='http://unlimited-api',
             parent_instance=None,
         )
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
@@ -327,13 +251,13 @@ class TestDifferentSlotPoolsAsync:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
+        pool = make_mock_pool(router_with_endpoints, [caller])
         # The chain walk resolves ancestors via pool.get_instance(name); register the
         # grandparent explicitly so it is found (the default mock returns the caller for all).
         pool.instances[grandparent.instance_name] = grandparent
         pool.get_instance.side_effect = lambda name: pool.instances.get(name)
 
-        dispatcher = _create_dispatcher(pool)
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -365,14 +289,14 @@ class TestAncestorChainCollision:
         held key and force SYNC.
         """
         # Grandparent holds the sequential pool; caller is its child but holds no permit.
-        grandparent = _make_mock_instance(
+        grandparent = make_mock_instance(
             instance_name='grandparent1',
             agent_class='coder',
             slot_release=lambda: None,
             slot_key='http://sequential-api',
             parent_instance=None,
         )
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='researcher',
             slot_release=None,  # caller holds NO permit
@@ -383,11 +307,11 @@ class TestAncestorChainCollision:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
+        pool = make_mock_pool(router_with_endpoints, [caller])
         pool.instances[grandparent.instance_name] = grandparent
         pool.get_instance.side_effect = lambda name: pool.instances.get(name)
 
-        dispatcher = _create_dispatcher(pool)
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -405,14 +329,14 @@ class TestAncestorChainCollision:
 
     def test_async_when_ancestor_pool_disjoint_from_child(self, router_with_endpoints):
         """Ancestor holds a different pool than the child needs → still ASYNC (no over-blocking)."""
-        grandparent = _make_mock_instance(
+        grandparent = make_mock_instance(
             instance_name='grandparent1',
             agent_class='researcher',
             slot_release=lambda: None,
             slot_key='http://unlimited-api',
             parent_instance=None,
         )
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
@@ -424,11 +348,11 @@ class TestAncestorChainCollision:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
+        pool = make_mock_pool(router_with_endpoints, [caller])
         pool.instances[grandparent.instance_name] = grandparent
         pool.get_instance.side_effect = lambda name: pool.instances.get(name)
 
-        dispatcher = _create_dispatcher(pool)
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -460,7 +384,7 @@ class TestSamePoolCollisionSync:
         (instance._slot_key), so a bare `slot_release` without `_slot_key` would not be seen
         as a collision source (plan §5.2 — explicit slot state, no auto-Mocked truthy stubs).
         """
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
@@ -470,8 +394,8 @@ class TestSamePoolCollisionSync:
         # Both use the same sequential endpoint
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
@@ -498,7 +422,7 @@ class TestEffectiveConcurrencyDecision:
 
     def test_queries_child_effective_concurrency(self, router_with_endpoints):
         """get_effective_concurrency is called for the child agent class during dispatch."""
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
@@ -507,8 +431,8 @@ class TestEffectiveConcurrencyDecision:
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         original_get_eff = router_with_endpoints.get_effective_concurrency
         calls_to_child_class = []
@@ -534,7 +458,7 @@ class TestEffectiveConcurrencyDecision:
 
     def test_guard_only_triggers_for_concurrency_zero(self, router_with_endpoints):
         """Sequential Endpoint Guard only forces sync for conc=0, not conc=1 or higher."""
-        caller = _make_mock_instance(
+        caller = make_mock_instance(
             instance_name='caller1',
             agent_class='researcher',
             slot_release=None,  # No slot held
@@ -544,8 +468,8 @@ class TestEffectiveConcurrencyDecision:
         # Child uses conc=1 endpoint (sequential but NOT zero)
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
 
-        pool = _make_mock_pool(router_with_endpoints, caller)
-        dispatcher = _create_dispatcher(pool)
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        dispatcher, _ = create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
             args={
