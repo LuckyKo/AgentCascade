@@ -428,6 +428,23 @@ def release_slot_permit(
     if release_callback is None:
         return False
 
+    # The sticky slot is being released — any committed endpoint for this instance is no
+    # longer a live connection. Clear the probe fast-path marker so the next acquisition
+    # re-probes instead of skipping against a dead connection. Same contract as
+    # APIRouter._drop_held_permit (router.py): every canonical release point clears it, so a
+    # chain-collision handoff (§3.3) can never leak a stale committed endpoint. The router is
+    # recovered best-effort from the holder's pool back-reference (_pool_ref, set by
+    # AgentPool.create_instance — the same ref terminate() uses for queue cleanup); any
+    # failure just skips the clear, matching the waiters=-1 degradation above.
+    try:
+        _pool_ref = getattr(holder, '_pool_ref', None)
+        _router = getattr(_pool_ref, 'api_router', None) if _pool_ref is not None else None
+        if _router is not None and hasattr(_router, '_instance_committed_endpoint'):
+            with _router._lock:
+                _router._instance_committed_endpoint.pop(holder_name, None)
+    except Exception:
+        pass
+
     try:
         release_callback()
     except Exception as e:

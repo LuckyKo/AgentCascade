@@ -89,8 +89,17 @@ def _make_mock_instance(
     slot_release: Optional[callable] = None,
     state='RUNNING',
     nest_depth: int = 0,
+    slot_key: Optional[str] = None,
+    parent_instance: Optional[str] = None,
 ):
-    """Minimal mock AgentInstance with configurable slot state."""
+    """Minimal mock AgentInstance with configurable slot state.
+
+    `slot_key` and `parent_instance` MUST be set explicitly (plan §5.2): a bare
+    MagicMock auto-creates them as truthy stubs, which would (a) poison the
+    COLL-2 set-intersection in `_held_slot_key` and (b) make the ancestor chain
+    walk non-terminating. Defaults are None so the no-permit / no-ancestor cases
+    are genuine rather than auto-Mocked.
+    """
     inst = MagicMock()
     inst.instance_name = instance_name
     inst.agent_class = agent_class
@@ -99,6 +108,8 @@ def _make_mock_instance(
     inst.state.name = state
     inst._slot_release = slot_release
     inst._nest_depth = nest_depth
+    inst._slot_key = slot_key
+    inst.parent_instance = parent_instance
     return inst
 
 
@@ -290,17 +301,38 @@ class TestDifferentSlotPoolsAsync:
     """When caller and child use different slot pools, ASYNC avoids deadlock."""
 
     def test_async_when_different_endpoints_caller_holds_slot(self, router_with_endpoints):
-        """Caller holds sequential slot, child uses parallel endpoint → ASYNC (different pools)."""
+        """Caller holds sequential slot, child uses parallel endpoint → ASYNC (different pools).
+
+        Extended per plan §5.1 with an ancestor that holds a THIRD pool: the COLL-2 check must
+        walk the whole chain and still find no intersection, so the decision stays ASYNC. Without
+        the ancestor this test would silently stop guarding the Case-4 (chain-walk) behavior.
+        """
+        # Grandparent holds the unlimited pool; caller (its child) holds the sequential pool.
+        grandparent = _make_mock_instance(
+            instance_name='grandparent1',
+            agent_class='researcher',
+            slot_release=lambda: None,
+            slot_key='http://unlimited-api',
+            parent_instance=None,
+        )
         caller = _make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
+            slot_key='http://sequential-api',
+            parent_instance='grandparent1',
         )
 
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
         router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
         router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
 
         pool = _make_mock_pool(router_with_endpoints, caller)
+        # The chain walk resolves ancestors via pool.get_instance(name); register the
+        # grandparent explicitly so it is found (the default mock returns the caller for all).
+        pool.instances[grandparent.instance_name] = grandparent
+        pool.get_instance.side_effect = lambda name: pool.instances.get(name)
+
         dispatcher = _create_dispatcher(pool)
 
         result = dispatcher.handle_call_agent(
@@ -318,6 +350,101 @@ class TestDifferentSlotPoolsAsync:
 
 
 # ============================================================================
+# Test 3b: Ancestor-chain collision (plan §4.3 — TestAncestorChainCollision)
+# ============================================================================
+
+
+class TestAncestorChainCollision:
+    """COLL-2 must inspect the WHOLE ancestor chain, not just the direct caller."""
+
+    def test_sync_when_grandparent_holds_child_pool(self, router_with_endpoints):
+        """Caller holds NO permit; its grandparent holds the pool the child needs → SYNC.
+
+        The direct-caller-only check (old behavior) would see the caller holding nothing and go
+        ASYNC — the exact deadlock the fix removes. The chain walk must find the grandparent's
+        held key and force SYNC.
+        """
+        # Grandparent holds the sequential pool; caller is its child but holds no permit.
+        grandparent = _make_mock_instance(
+            instance_name='grandparent1',
+            agent_class='coder',
+            slot_release=lambda: None,
+            slot_key='http://sequential-api',
+            parent_instance=None,
+        )
+        caller = _make_mock_instance(
+            instance_name='caller1',
+            agent_class='researcher',
+            slot_release=None,  # caller holds NO permit
+            slot_key=None,
+            parent_instance='grandparent1',
+        )
+
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+
+        pool = _make_mock_pool(router_with_endpoints, caller)
+        pool.instances[grandparent.instance_name] = grandparent
+        pool.get_instance.side_effect = lambda name: pool.instances.get(name)
+
+        dispatcher = _create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'coder',  # child needs the same sequential pool grandparent holds
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        pool.register_async_call.assert_not_called()
+        assert 'launched asynchronously' not in result.lower(), \
+            f"Expected sync (grandparent holds child's pool) but got async: {result}"
+
+    def test_async_when_ancestor_pool_disjoint_from_child(self, router_with_endpoints):
+        """Ancestor holds a different pool than the child needs → still ASYNC (no over-blocking)."""
+        grandparent = _make_mock_instance(
+            instance_name='grandparent1',
+            agent_class='researcher',
+            slot_release=lambda: None,
+            slot_key='http://unlimited-api',
+            parent_instance=None,
+        )
+        caller = _make_mock_instance(
+            instance_name='caller1',
+            agent_class='coder',
+            slot_release=lambda: None,
+            slot_key='http://sequential-api',
+            parent_instance='grandparent1',
+        )
+
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
+
+        pool = _make_mock_pool(router_with_endpoints, caller)
+        pool.instances[grandparent.instance_name] = grandparent
+        pool.get_instance.side_effect = lambda name: pool.instances.get(name)
+
+        dispatcher = _create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'reviewer',  # child needs the parallel pool — disjoint from both
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        pool.register_async_call.assert_called(), \
+            f"Expected async (ancestor pools disjoint from child) but took sync. Result: {result}"
+
+
+# ============================================================================
 # Test 4: Same slot pool collision → SYNC required to avoid deadlock
 # ============================================================================
 
@@ -326,11 +453,18 @@ class TestSamePoolCollisionSync:
     """When caller and child share the same limited endpoint, SYNC avoids deadlock."""
 
     def test_sync_when_same_sequential_endpoint(self, router_with_endpoints):
-        """Caller holds sequential slot, child uses same endpoint → SYNC (collision)."""
+        """Caller holds sequential slot, child uses same endpoint → SYNC (collision).
+
+        The caller's held permit must carry the REAL pool key of its endpoint: the COLL-2
+        check intersects the child's resolved slot_key against the chain's HELD keys
+        (instance._slot_key), so a bare `slot_release` without `_slot_key` would not be seen
+        as a collision source (plan §5.2 — explicit slot state, no auto-Mocked truthy stubs).
+        """
         caller = _make_mock_instance(
             instance_name='caller1',
             agent_class='coder',
             slot_release=lambda: None,
+            slot_key='http://sequential-api',  # the real pool key of ep_sequential
         )
 
         # Both use the same sequential endpoint
