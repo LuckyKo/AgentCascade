@@ -947,3 +947,129 @@ def test_notify_restart_complete_no_target_no_raise(tmp_path):
     finally:
         stop_evt.set()
         t.join(timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# notify_user recipient fallback (web-UI runs / post-restart with no inbound TG)
+# ---------------------------------------------------------------------------
+
+def test_notify_user_falls_back_to_allowlist_when_no_last_chat_id(tmp_path, caplog):
+    """Live loop + NO last_chat_id (web-UI run / bridge restart) + allowlist configured
+    -> _safe_send invoked with the FIRST allowlisted id; DEBUG fallback line logged."""
+    import logging
+
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {}   # no last_chat_id this process lifetime
+        sent = []
+
+        async def _fake_send_message(chat_id=None, text=None, **kw):
+            sent.append((chat_id, text))
+
+        fake_app.bot.send_message = _fake_send_message
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        # Keep the patch active while the SCHEDULED coroutine runs (it does its
+        # `from .config import ...` when the bridge loop executes it, after
+        # notify_user returns).
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'), \
+              patch('agent_cascade.telegram_bridge.config._load_allowed_users_raw',
+                    return_value='111, 222'), \
+              patch('agent_cascade.telegram_bridge.config._parse_allowed_users',
+                    side_effect=lambda raw: [int(p) for p in raw.split(',') if p.strip()]):
+            assert sup.notify_user('web ui push') is True
+
+            deadline = time.monotonic() + 5.0
+            while not sent and time.monotonic() < deadline:
+                time.sleep(0.01)
+        assert len(sent) == 1, f'expected one send to the primary allowlisted id, got {sent}'
+        assert sent[0][0] == 111, 'must target the FIRST allowlisted id'
+        fb_lines = [r.getMessage() for r in caplog.records
+                    if 'falling back to allowlisted user' in r.getMessage()]
+        assert fb_lines, f'DEBUG fallback line missing: {[r.getMessage() for r in caplog.records]}'
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_notify_user_prefers_last_chat_id_no_fallback_lookup(tmp_path):
+    """last_chat_id present -> used as before; the allowlist loader is NEVER consulted."""
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {'last_chat_id': 42}
+        sent = []
+
+        async def _fake_send_message(chat_id=None, text=None, **kw):
+            sent.append((chat_id, text))
+
+        fake_app.bot.send_message = _fake_send_message
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        loader_calls = {'n': 0}
+
+        def _raw(*a, **k):
+            loader_calls['n'] += 1
+            return '999'
+
+        # The patch stays active for the whole window: if the hot path ever consulted
+        # it, loader_calls would be non-zero.
+        with patch('agent_cascade.telegram_bridge.config._load_allowed_users_raw', side_effect=_raw):
+            assert sup.notify_user('hello') is True
+
+            deadline = time.monotonic() + 5.0
+            while not sent and time.monotonic() < deadline:
+                time.sleep(0.01)
+        assert len(sent) == 1, f'expected one send, got {sent}'
+        assert sent[0][0] == 42, 'must target last_chat_id when present'
+        assert loader_calls['n'] == 0, \
+            'allowlist loader must NOT be consulted on the hot path when last_chat_id is set'
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_notify_user_no_recipient_warns_and_drops(tmp_path, caplog):
+    """No last_chat_id AND empty allowlist -> _safe_send NOT called and a WARNING is
+    logged (no silent drop)."""
+    import logging
+
+    t, stop_evt, loop = _start_live_loop_thread()
+    try:
+        fake_app = MagicMock()
+        fake_app.bot_data = {}   # no last_chat_id
+        fake_app.bot.send_message = AsyncMock()
+
+        sup = make_supervisor(tmp_path)
+        with sup._lock:
+            sup._app = fake_app
+            sup._loop = loop
+
+        coro_ran = threading.Event()
+
+        def _raw():
+            coro_ran.set()   # signals the moment the coroutine touches the loader
+            return ''
+
+        with caplog.at_level(logging.WARNING, logger='agent_cascade_logger'), \
+              patch('agent_cascade.telegram_bridge.config._load_allowed_users_raw', side_effect=_raw), \
+              patch('agent_cascade.telegram_bridge.config._parse_allowed_users', return_value=[]):
+            assert sup.notify_user('dropped') is True  # scheduled; coro drops with a warning
+
+            assert coro_ran.wait(timeout=5.0), 'scheduled coroutine should have run'
+        fake_app.bot.send_message.assert_not_called()
+        warn_lines = [r.getMessage() for r in caplog.records
+                      if r.levelno >= logging.WARNING and 'no recipient' in r.getMessage()]
+        assert warn_lines, f'WARNING "no recipient" line missing: {[r.getMessage() for r in caplog.records]}'
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)

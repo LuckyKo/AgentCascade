@@ -49,6 +49,7 @@ def _reset_run_scoped_tg_state(instance) -> None:
     """
     instance._tg_first_pushed = False
     instance._tg_final_pushed_phase = None
+    instance._tg_first_pushed_text = None
     instance._auto_skill_task_output = None
     instance._auto_skill_dirty_stop = False
     instance._auto_skill_proposed = False

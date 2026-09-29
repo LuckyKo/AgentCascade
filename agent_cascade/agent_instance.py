@@ -281,6 +281,7 @@ class AgentInstance:
     # run_agent_unified._reset_run_scoped_tg_state, sub-agent reuse in lifecycle_manager.
     _tg_first_pushed: bool = field(default=False)  # True once this run's first text output was pushed to TG
     _tg_final_pushed_phase: Optional[str] = None   # 'pre' or 'post' once that phase's final-answer push succeeded; None = not yet
+    _tg_first_pushed_text: Optional[str] = None  # text of this run's successful F1 push (dup guard vs F2)
 
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(

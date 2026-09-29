@@ -81,8 +81,34 @@ def _make_inst(max_turns, parent_instance=None):
     # TG-STREAM F4: per-run push flags, reset at every run start.
     inst._tg_first_pushed = False
     inst._tg_final_pushed_phase = None
+    inst._tg_first_pushed_text = None
     inst._streaming_responses = []
     return inst
+
+
+def _make_engine_same_final(fresh_manager, tmp_path, *, supervisor=None):
+    """Like _make_engine but turn 1 (text+tool) and the final text turn carry the SAME
+    text ('final answer') — the single-turn-reply shape where F1's pushed text IS the
+    run's final answer (the duplicate class this test suite guards against)."""
+    from agent_cascade.llm.schema import Message, ASSISTANT
+
+    engine, inst, pool, run = _make_engine(
+        fresh_manager, tmp_path, max_turns=2, natural_end_at=1,
+        tool_call_ats={1}, supervisor=supervisor)
+
+    def fake_llm(inst_, msgs):
+        # Turn 1: text+tool. Turn 2 (natural end): the SAME text — first == final.
+        n = engine._call_llm_with_injection.call_count
+        if n == 1:
+            yield None
+            yield Message(role=ASSISTANT, content='final answer',
+                          function_call={'name': 'tool_a', 'arguments': '{}'})
+        else:
+            yield None
+            yield Message(role=ASSISTANT, content='final answer')
+
+    engine._call_llm_with_injection = MagicMock(side_effect=fake_llm)
+    return engine, inst, pool, run
 
 
 def _make_engine(fresh_manager, tmp_path, *, max_turns=3, min_turns=99, extra_turns=5,
@@ -489,3 +515,192 @@ def test_stop_mid_run_no_final_push_info_logged(fresh_manager, tmp_path, caplog)
     d3_lines = [r.getMessage() for r in caplog.records
                 if 'stopped before final push' in r.getMessage()]
     assert d3_lines, f'D3 INFO line missing from logs: {[r.getMessage() for r in caplog.records]}'
+
+
+# --------------------------------------------------------------------------- #
+# 8. F1/F2 dup guard — first text output IS the final answer (pre-fix RED)
+# --------------------------------------------------------------------------- #
+
+def test_dup_guard_single_turn_same_text(fresh_manager, tmp_path, caplog):
+    """The run's FIRST text turn is also its FINAL answer (single-turn reply shape).
+    F1 pushes the text at commit time; Phase 5's final[pre] must NOT push it again —
+    exactly ONE notify_user call total. The suppression consumes the 'pre' marker and
+    logs a DEBUG line. This test FAILS against the pre-fix tree (two identical pushes)."""
+    supervisor = MagicMock()
+    supervisor.notify_user.return_value = True
+    engine, inst, pool, run = _make_engine_same_final(
+        fresh_manager, tmp_path, supervisor=supervisor)
+
+    with caplog.at_level('DEBUG', logger='agent_cascade_logger'):
+        run()
+
+    texts = _pushed_texts(supervisor)
+    assert len(texts) == 1, \
+        f'expected exactly ONE push (F2 pre must be suppressed — F1 already delivered ' \
+        f'this exact text), got {len(texts)}: {texts!r}'
+    assert texts[0] == 'final answer'
+    assert inst._tg_first_pushed is True
+    assert inst._tg_final_pushed_phase == 'pre', \
+        f'suppression must consume the pre-phase marker, got {inst._tg_final_pushed_phase!r}'
+    sup_lines = [r.getMessage() for r in caplog.records if 'final(pre) suppressed' in r.getMessage()]
+    assert sup_lines, f'DEBUG suppression line missing: {[r.getMessage() for r in caplog.records]}'
+
+
+def test_dup_guard_reflection_variant(fresh_manager, tmp_path):
+    """First text == pre-extension final answer, but the reflection answer differs.
+    Exactly 2 pushes: F1 + final[post]. The pre push is suppressed; marker ends at
+    'post' (the reflection's own final answer must NEVER be suppressed)."""
+    supervisor = MagicMock()
+    supervisor.notify_user.return_value = True
+    # natural_end_at={1, 2}: PTC #1 (turn 2) = pre-extension completion → final[pre]
+    # (suppressed: same text as F1). PTC #2 (reflection turn) = genuine completion →
+    # final[post] (delivered — different text).
+    engine, inst, pool, run = _make_engine(
+        fresh_manager, tmp_path, max_turns=3, min_turns=1, extra_turns=5,
+        natural_end_at={1, 2}, tool_call_ats={1}, supervisor=supervisor)
+
+    # Make turn 1 and turn 2 carry the SAME text (F1 == pre-extension final answer);
+    # the reflection turn (turn 3) keeps its distinct 'reply 3' text.
+    from agent_cascade.llm.schema import Message, ASSISTANT
+
+    def fake_llm(inst_, msgs):
+        n = engine._call_llm_with_injection.call_count
+        if n == 1:
+            yield None
+            yield Message(role=ASSISTANT, content='final answer',
+                          function_call={'name': 'tool_a', 'arguments': '{}'})
+        elif n == 2:
+            yield None
+            yield Message(role=ASSISTANT, content='final answer')
+        else:
+            yield None
+            yield Message(role=ASSISTANT, content=f'reply {n}')
+
+    engine._call_llm_with_injection = MagicMock(side_effect=fake_llm)
+
+    _ext_calls = {'n': 0}
+
+    def _try_ext_driver(*a, **k):
+        _ext_calls['n'] += 1
+        if _ext_calls['n'] == 1:
+            inst._auto_skill_proposed = True
+            return True
+        return False
+
+    engine._try_auto_skill_extension = MagicMock(side_effect=_try_ext_driver)
+
+    run()
+
+    assert inst._auto_skill_proposed is True, 'reflection should have fired'
+    texts = _pushed_texts(supervisor)
+    assert len(texts) == 2, \
+        f'expected exactly 2 pushes (F1 + final[post]; pre suppressed), got {len(texts)}: {texts!r}'
+    assert texts[0] == 'final answer', f'first push must be F1 text, got {texts!r}'
+    assert texts[1] == 'reply 3', \
+        f'second push must be the reflection final[post] (never suppressed), got {texts!r}'
+    assert inst._tg_final_pushed_phase == 'post', \
+        f'marker must end at post, got {inst._tg_final_pushed_phase!r}'
+
+
+def test_no_false_suppression_multi_turn(fresh_manager, tmp_path, caplog):
+    """Multi-turn run where first text != final text: BOTH pushes go out (no false
+    suppression), _tg_first_pushed_text is recorded, and no 'suppressed' line is logged."""
+    supervisor = MagicMock()
+    supervisor.notify_user.return_value = True
+    engine, inst, pool, run = _make_engine(
+        fresh_manager, tmp_path, max_turns=2, natural_end_at=1,
+        tool_call_ats={1}, supervisor=supervisor)
+
+    with caplog.at_level('DEBUG', logger='agent_cascade_logger'):
+        run()
+
+    texts = _pushed_texts(supervisor)
+    assert texts == ['reply 1', 'reply 2'], \
+        f'both pushes must be delivered (first != final), got {texts!r}'
+    assert inst._tg_first_pushed_text == 'reply 1', \
+        f'F1 success must record the pushed text, got {inst._tg_first_pushed_text!r}'
+    suppressed = [r.getMessage() for r in caplog.records if 'suppressed' in r.getMessage()]
+    assert not suppressed, f'dup guard must NOT fire when first != final: {suppressed}'
+
+
+def test_f1_failure_edge_no_suppression(fresh_manager, tmp_path):
+    """notify_user returns False on the F1 turn → _tg_first_pushed_text stays None and a
+    later identical final text is NOT suppressed (the guard requires _tg_first_pushed)."""
+    supervisor = MagicMock()
+    # Local counter (NOT a supervisor attribute — getattr on the bare MagicMock would
+    # auto-generate a TRUTHY mock for any unset name, which silently flipped this driver's
+    # first call to success). Same pattern as test_notify_false_retries_on_next_text_turn.
+    _notify_calls = {'n': 0}
+
+    def _notify_driver(text, **kw):
+        # F1 attempt (turn 1) fails; everything after succeeds.
+        _notify_calls['n'] += 1
+        return _notify_calls['n'] > 1
+
+    supervisor.notify_user.side_effect = _notify_driver
+    engine, inst, pool, run = _make_engine_same_final(
+        fresh_manager, tmp_path, supervisor=supervisor)
+
+    run()
+
+    # Turn 1: F1 attempt → False (text NOT recorded — retry semantics). Turn 2: the F1
+    # RETRY succeeds with the current turn's text ('final answer' — identical here by
+    # construction), then final[pre] fires. The guard must not suppress on a FAILED F1;
+    # after the retry succeeds, both pushes carry the same text and the pre push is
+    # suppressed (correct dedup). Exactly 2 notify_user calls total: the failed attempt
+    # + the successful retry.
+    texts = _pushed_texts(supervisor)
+    assert supervisor.notify_user.call_count == 2, \
+        f'expected exactly 2 notify_user calls (failed F1 attempt + successful retry), got {supervisor.notify_user.call_count}'
+    assert len(texts) == 2, \
+        f'expected 2 push attempts (the failed one is not a delivery), got {len(texts)}: {texts!r}'
+    assert texts[0] == 'final answer', f'failed F1 attempt must carry turn-1 text, got {texts!r}'
+    assert texts[1] == 'final answer', f'successful retry must carry the current (turn-2) text, got {texts!r}'
+    assert inst._tg_first_pushed is True, 'F1 retry on turn 2 must succeed and set the flag'
+    assert inst._tg_first_pushed_text == 'final answer', \
+        f'the recorded text must come from the SUCCESSFUL push only, got {inst._tg_first_pushed_text!r}'
+    # The final[pre] attempt is suppressed by the (now valid) guard — marker consumed.
+    assert inst._tg_final_pushed_phase == 'pre', \
+        f'final[pre] must be consumed (suppressed after a successful identical F1), got {inst._tg_final_pushed_phase!r}'
+
+
+def test_reset_paths_clear_first_pushed_text():
+    """_reset_run_scoped_tg_state AND the lifecycle reuse path must clear
+    _tg_first_pushed_text (seeded non-None) alongside the existing two markers."""
+    from agent_cascade.run_agent_unified import _reset_run_scoped_tg_state
+
+    # Path 1: main-agent reset.
+    inst = _make_inst(3)
+    inst._tg_first_pushed_text = 'stale text'
+    _reset_run_scoped_tg_state(inst)
+    assert inst._tg_first_pushed_text is None, \
+        '_reset_run_scoped_tg_state must clear _tg_first_pushed_text'
+
+    # Path 2: sub-agent reuse reset in lifecycle_manager.
+    import threading as _threading
+    from unittest.mock import MagicMock as _MM
+    from agent_cascade.agent_instance import AgentState as _AgentState
+    from agent_cascade.lifecycle_manager import AgentLifecycleManager
+
+    reused = _make_inst(3)
+    reused.state = _AgentState.IDLE
+    reused.parent_instance = 'old-caller'
+    reused._state_lock = _threading.RLock()
+    reused._child_instances = set()
+    reused.last_activity = 0.0
+    reused._nest_depth = 0
+    reused._tg_first_pushed_text = 'stale text'
+
+    pool = _MM()
+    pool.instances = {'w': reused}
+    pool._resolve_instance_name.side_effect = lambda n: n
+    pool._children_lock = _threading.Lock()
+    manager = AgentLifecycleManager.__new__(AgentLifecycleManager)
+    manager.pool = pool
+
+    inst2, is_reuse, _loaded = manager.find_or_create_instance(
+        'test_agent', 'w', caller=None, nest_depth=0)
+
+    assert is_reuse and inst2 is reused, 'the harness must exercise the REUSE path'
+    assert inst2._tg_first_pushed_text is None, \
+        'lifecycle reuse path must reset _tg_first_pushed_text (F4 second reset site)'

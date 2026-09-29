@@ -218,9 +218,12 @@ class TelegramBridgeSupervisor:
         Schedules ``_safe_send`` onto the bridge loop (which owns the PTB bot and
         its event loop). Returns True if the message was scheduled onto the bridge
         loop (bridge is running), False otherwise (silent no-op — callers must not
-        treat False as an error). Note that delivery is not guaranteed if no
-        ``chat_id`` has been seen yet; the coroutine will no-op in that case.
-        Never raises into the caller.
+        treat False as an error). Delivery targets ``last_chat_id`` when present;
+        when absent (e.g. a web-UI run, or a bridge restart with no inbound TG
+        message yet) it falls back to the primary allowlisted user id from
+        config/secrets.json — same fallback as ``notify_restart_complete``. It
+        no-ops (with a WARNING log) only when neither last_chat_id nor an
+        allowlisted id exists. Never raises into the caller.
 
         ``instance_name``/``run_generation`` are optional observability context,
         forwarded to ``_safe_send`` for the [TG-PUSH] log line (tg-dup v3 F3a);
@@ -235,7 +238,18 @@ class TelegramBridgeSupervisor:
             async def _do_send(_app=app):
                 chat_id = _app.bot_data.get('last_chat_id')
                 if chat_id is None:
-                    return
+                    # No inbound TG message seen this process lifetime (e.g. user started the run
+                    # from the web UI, or the bridge restarted). Fall back to the primary allowlisted
+                    # id from config/secrets.json — same fallback as notify_restart_complete.
+                    # `self` is captured by the closure; the instance outlives this coroutine
+                    # (the supervisor owns the bridge loop it is scheduled on).
+                    chat_id = self._resolve_fallback_chat_id()
+                    if chat_id is None:
+                        logger.warning('[TG-PUSH] no recipient (no last_chat_id, empty allowlist) — drop for inst=%s gen=%s',
+                                       instance_name, run_generation)
+                        return
+                    logger.debug('[TG-PUSH] no last_chat_id; falling back to allowlisted user %s (inst=%s gen=%s)',
+                                 chat_id, instance_name, run_generation)
                 await _safe_send(_app.bot, chat_id, message,
                                  instance_name=instance_name, run_generation=run_generation)
 
@@ -244,6 +258,30 @@ class TelegramBridgeSupervisor:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning('[TelegramBridge] notify_user failed (non-fatal): %s', e)
             return False
+
+    def _resolve_fallback_chat_id(self) -> Optional[int]:
+        """Resolve the primary allowlisted Telegram user id from config/secrets.json.
+
+        Shared by ``notify_user`` and ``notify_restart_complete`` as the durable
+        recipient fallback when no inbound message has set ``last_chat_id`` yet.
+        Returns the first allowlisted id, or None (with a WARNING) when the lookup
+        fails or the allowlist is empty — callers decide how to log the drop.
+
+        Instance method (not staticmethod): tests patch it per-instance via
+        ``sup._resolve_fallback_chat_id = ...``; an explicit class-attribute call would
+        bypass such patches. The loaders are imported INSIDE the try (house pattern in
+        this file — both call sites run on the bridge loop, so a module-level import
+        would bind the real functions at import time and defeat config patching).
+        """
+        try:
+            from .config import _load_allowed_users_raw, _parse_allowed_users
+            ids = _parse_allowed_users(_load_allowed_users_raw())
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning('[TG-PUSH] allowlist lookup failed: %s', e)
+            return None
+        if not ids:
+            return None
+        return ids[0]
 
     def notify_restart_complete(self, message: str) -> bool:
         """Send a 'restart complete' notice to the operator's phone.
@@ -278,15 +316,10 @@ class TelegramBridgeSupervisor:
                     # Fresh post-restart process: no message has arrived yet, so
                     # last_chat_id is wiped. Fall back to the primary allowlisted
                     # id from config/secrets.json (the only durable target).
-                    try:
-                        from .config import _load_allowed_users_raw, _parse_allowed_users
-                        ids = _parse_allowed_users(_load_allowed_users_raw())
-                    except Exception as e:  # pragma: no cover - defensive
-                        logger.warning('[TelegramBridge] restart-notice allowlist lookup failed: %s', e)
+                    chat_id = self._resolve_fallback_chat_id()
+                    if chat_id is None:
                         return
-                    if not ids:
-                        return
-                    chat_id = ids[0]
+                    logger.debug('[TG-PUSH] no last_chat_id; falling back to allowlisted user %s', chat_id)
                 await _safe_send(_app.bot, chat_id, message)
 
             asyncio.run_coroutine_threadsafe(_do_send(), loop)

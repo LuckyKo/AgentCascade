@@ -174,6 +174,7 @@ class AgentLifecycleManager:
                 # or the first text output / final answer of the new run would be suppressed.
                 inst._tg_first_pushed = False
                 inst._tg_final_pushed_phase = None
+                inst._tg_first_pushed_text = None
 
                 # Remove from old parent's tracking even if new caller is None
                 if old_parent is not None:

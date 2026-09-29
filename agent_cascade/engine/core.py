@@ -148,6 +148,7 @@ def _tg_stream_push(instance: AgentInstance, turn_output: List[Message], pool: A
         ok = sup.notify_user(text, instance_name=inst_name, run_generation=gen)
         if ok:
             instance._tg_first_pushed = True
+            instance._tg_first_pushed_text = text  # recorded for the F2 pre-phase dup guard
             logger.debug('[TG-PUSH] first-output push delivered for %s gen=%s (%d chars)',
                          inst_name, gen, len(text))
         else:
@@ -186,11 +187,20 @@ def _tg_push_final(instance: AgentInstance, response: List[Message], pool: Any, 
         text = _tg_stream_text(response)
         if not text:
             return  # no assistant text committed yet — nothing to push
+        inst_name = instance.instance_name
+        gen = getattr(pool, '_run_generation', None)
+        if phase == 'pre' and getattr(instance, '_tg_first_pushed', False) \
+                and text == getattr(instance, '_tg_first_pushed_text', None):
+            # The run's first text output WAS its final answer — F1 already delivered this exact
+            # text at commit time. Pushing it again would be a verbatim duplicate on Telegram.
+            # Consume the pre-phase marker so no later retry re-pushes it either.
+            instance._tg_final_pushed_phase = 'pre'
+            logger.debug('[TG-PUSH] final(pre) suppressed for %s gen=%s: identical to first-output push (%d chars)',
+                         inst_name, gen, len(text))
+            return
         sup = getattr(pool, 'telegram_supervisor', None)
         if sup is None or not hasattr(sup, 'notify_user'):
             return  # bridge not attached — silent no-op
-        inst_name = instance.instance_name
-        gen = getattr(pool, '_run_generation', None)
         ok = sup.notify_user(text, instance_name=inst_name, run_generation=gen)
         if ok:
             instance._tg_final_pushed_phase = phase
