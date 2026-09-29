@@ -31,25 +31,13 @@ os.environ['AGENT_CASCADE_LOOP_TWO_PHASE_ENABLED'] = '1'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import importlib.util as _util
-
-# Load settings first so that relative imports in inner_loop_detect resolve.
-_settings_spec = _util.spec_from_file_location(
-    'settings',
-    PROJECT_ROOT / 'agent_cascade' / 'settings.py',
-)
-_settings_mod = _util.module_from_spec(_settings_spec)
-sys.modules['agent_cascade.settings'] = _settings_mod
-_settings_spec.loader.exec_module(_settings_mod)
-InnerLoopSettings = _settings_mod.InnerLoopSettings
-
-_spec = _util.spec_from_file_location(
-    'inner_loop_detect',
-    PROJECT_ROOT / 'agent_cascade' / 'inner_loop_detect.py',
-)
-_mod = _util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-InnerLoopDetector = _mod.InnerLoopDetector
+# Normal package imports. agent_cascade/__init__.py is lightweight (lazy
+# imports via __getattr__), so this does not pull in heavy dependencies, and
+# — unlike the old importlib hack — it does NOT replace
+# sys.modules['agent_cascade.settings'], which would pollute other tests in
+# the same pytest process.
+from agent_cascade.inner_loop_detect import InnerLoopDetector
+from agent_cascade.settings import InnerLoopSettings
 
 import pytest
 

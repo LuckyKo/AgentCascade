@@ -1473,15 +1473,35 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """
         inst_name = instance.instance_name
 
-        # Restore KV state ONLY if this instance currently holds a concurrency slot,
-        # and target the endpoint it actually holds — never the stale
-        # _last_endpoint_config (which may point at a shared conc=0 autoloader we no
-        # longer own; loading there would auto-evict a live sibling's resident model).
-        # The FIFO guarantees single-holder for conc=0, so restoring while holding the
-        # slot can never evict another agent. A missed restore is far better than a
-        # wrongful eviction — any resolution failure skips the restore.
+        # Restore KV state ONLY when BOTH conditions hold:
+        #   1. This instance currently HOLDS a concurrency slot (eviction safety — the
+        #      FIFO guarantees single-holder for conc=0, so restoring while holding the
+        #      slot can never evict another agent). We target the endpoint it actually
+        #      holds, never the stale _last_endpoint_config (which may point at a shared
+        #      conc=0 autoloader we no longer own; loading there would auto-evict a live
+        #      sibling's resident model).
+        #   2. A saved state label is pending (_state_label set) — i.e. an actual agent
+        #      dispatch happened (sync or async) and a save ran, leaving a save file to
+        #      consume. restore_instance_state() clears _state_label on success/failure,
+        #      so it is set only between "save occurred" and "restore consumed it".
+        #
+        # The label gate is what stops us reloading on EVERY turn: without it, the slot
+        # gate alone fires on every fresh user-message turn (run() re-acquires the slot
+        # before _setup_turn), doing a 3.1GB disk read and — worse — a state/load that
+        # destroys the warm KV cache, forcing an 85K-token full reprocess (~74s). On a
+        # natural turn with no dispatch, _state_label is None → we skip the restore and
+        # the slot's KV cache stays warm. Any resolution failure also skips the restore
+        # (a missed restore is far better than a wrongful eviction).
+        with instance._state_lock:
+            has_saved_state = instance._state_label is not None
         if instance._slot_release is None:
             logger.debug('[STATE_RESTORE_SKIP] %s holds no slot — skipping state restore', inst_name)
+            # Defense-in-depth: a label set without a held slot cannot be restored this turn.
+            # Clear it so it does not leak and re-trigger an expensive state/load next turn.
+            self._clear_orphaned_state_label(instance, inst_name)
+        elif not has_saved_state:
+            logger.debug('[STATE_RESTORE_SKIP] %s has no saved state to restore (no dispatch this turn) — '
+                         'keeping warm KV cache', inst_name)
         else:
             self._restore_held_slot_state(instance, inst_name)
 
@@ -1825,13 +1845,35 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             held_cfg = self._resolve_held_endpoint(instance)
             if not held_cfg:
                 logger.debug('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
+                # Clear the orphaned label so it does NOT re-trigger an expensive
+                # state/load on every subsequent turn (a leaked _state_label would keep
+                # firing the 3.1GB restore attempt while resolution stays broken). Mirrors
+                # the "clear orphaned label" pattern in tool_dispatcher._run_child_sync.
+                self._clear_orphaned_state_label(instance, inst_name)
                 return False
             from agent_cascade.state_ops import restore_instance_state
             return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
         except Exception as e:
             # Never evict on a resolution error — skip the restore.
             logger.debug('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
+            self._clear_orphaned_state_label(instance, inst_name)
             return False
+
+    @staticmethod
+    def _clear_orphaned_state_label(instance: AgentInstance, inst_name: str) -> None:
+        """Clear a pending _state_label that could not be consumed by a restore.
+
+        Used when endpoint resolution fails before restore_instance_state() runs — in that
+        case the label would otherwise leak and re-trigger an expensive state/load on every
+        later turn. Best-effort: never raises.
+        """
+        try:
+            with instance._state_lock:
+                if instance._state_label is not None:
+                    instance._state_label = None
+                    logger.debug('Cleared orphaned state label for %s (restore skipped)', inst_name)
+        except Exception as e:
+            logger.debug('Failed to clear state label for %s: %s', inst_name, e)
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
         """Check if we should skip the LLM call due to stop conditions.
@@ -2907,10 +2949,25 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # the callback outside it (the pool's condition may block on waiters).
                 # The drop-sleep line is emitted only when a live permit was held.
                 if instance._slot_release is not None:
-                    # Save KV cache BEFORE releasing slot so context persists while
-                    # other agents may use the same conc=0 pool during sleep.
-                    from agent_cascade.state_ops import save_instance_state
-                    save_instance_state(instance)
+                    # Save KV state ONLY when there is actually pending work to wait on —
+                    # i.e. an async agent was dispatched THIS turn and we're sleeping for it.
+                    # At this point the parent still holds its slot (released just below), so
+                    # saving targets the HELD endpoint (eviction-safe: FIFO guarantees
+                    # single-holder for conc=0). This save sets _state_label, which is what
+                    # lets the sleep-wakeup restore (_handle_sleeping_state) reload our KV
+                    # cache when the async child returns.
+                    #
+                    # The has_pending() gate is what stops us writing 3.1GB on EVERY turn:
+                    # on a natural turn end with no dispatch, pool.has_pending() is False,
+                    # so we skip the save, _state_label stays unset, and both _setup_turn
+                    # and the sleep-wakeup path skip their restore — the warm KV cache is
+                    # preserved (no 85K-token reprocess). We do NOT gate on "dispatched THIS
+                    # turn" via a flag because pool.has_pending() is exactly that signal for
+                    # the async case (a pending call_agent == an agent we dispatched and are
+                    # waiting on).
+                    if self.pool.has_pending(instance.instance_name):
+                        from agent_cascade.state_ops import save_instance_state
+                        save_instance_state(instance)
 
                     from agent_cascade.slot_queue import release_slot_permit
                     _sleep_pool = None

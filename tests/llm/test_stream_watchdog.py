@@ -231,10 +231,17 @@ class _StallingResp:
 
 @pytest.fixture
 def tight_stream_limits(monkeypatch):
-    """Patch the settings module (oai.py:566 imports these INSIDE _chat_stream)."""
-    from agent_cascade import settings
-    monkeypatch.setattr(settings, 'STREAM_MAX_SILENCE_SECONDS', 1.0)
-    monkeypatch.setattr(settings, 'STREAM_MAX_TOTAL_SECONDS', 3.0)
+    """Patch the settings module object that oai.py:566's late import resolves to.
+
+    oai.py does `from agent_cascade.settings import ...` INSIDE _chat_stream, which
+    resolves via sys.modules['agent_cascade.settings'] — NOT the package attribute.
+    In the full suite these can diverge (re-import / sys.modules manipulation), so
+    patch the exact module object in sys.modules to guarantee correct targeting.
+    """
+    import sys
+    settings_mod = sys.modules['agent_cascade.settings']
+    monkeypatch.setattr(settings_mod, 'STREAM_MAX_SILENCE_SECONDS', 1.0)
+    monkeypatch.setattr(settings_mod, 'STREAM_MAX_TOTAL_SECONDS', 3.0)
 
 
 def test_full_path_stall_after_chunk_fails_fast(monkeypatch, tight_stream_limits):

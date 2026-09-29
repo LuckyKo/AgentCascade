@@ -96,6 +96,17 @@ def watch_stream(
             kind = 'total' if is_total else 'silence'
             limit = max_total_seconds if is_total else max_silence_seconds
             silence = (now - last_item_time) if last_item_time is not None else (now - stream_start)
+            # Drain any pending error BEFORE raising the stall: the reader may have put an
+            # _Err into the queue moments before the timeout fired (e.g. a transport error
+            # arriving at the same instant the watchdog budget expired). Without this, the
+            # original exception is silently lost and the caller sees a generic retryable
+            # stream_stalled instead of the real cause.
+            try:
+                pending = q.get_nowait()
+                if isinstance(pending, _Err):
+                    raise pending.exc
+            except queue.Empty:
+                pass
             raise StreamStalledError(
                 f"{prefix}stream_stalled: no data for {silence:.1f}s ({kind} limit={limit:.1f}s)")
         # Dispatch order is load-bearing: _Err BEFORE _SENTINEL. The reader's finally
