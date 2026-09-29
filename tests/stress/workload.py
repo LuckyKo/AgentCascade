@@ -4,6 +4,17 @@ An `AgentSpec` describes one agent instance's scheduled action script. The
 harness (`harness.py`) interprets the script against the REAL SlotPool /
 ToolDispatcher; nothing here touches production objects, so it stays readable
 and diffable against the plan's scenario table.
+
+Validity-plan changes:
+  * `Scenario.permit_release_disabled_for` (F-5 switch) — names whose
+    harness-side permit release is suppressed so the production zombie state
+    can be exercised without touching production code.
+  * `Scenario.start_jitter_ms` / `barrier_start` (plan §3.1/§3.2) — staggered
+    or barrier-synchronized root starts for collision-prone shapes.
+  * Hold tiers: `_hold_ms()` picks from (1, 50, 500, 2000) ms weighted toward
+    the short end (plan §3.3).
+  * `build_long_hold` — new scenario with a deliberately long holder so waiter
+    age deterministically crosses STARVATION_AGE_S (expected: STARVATION).
 """
 
 from __future__ import annotations
@@ -58,6 +69,12 @@ class Scenario:
     is_child: bool = False         # not a root agent; spawned by a parent
     budget_s: float = 60.0
     no_progress_s: float = 10.0
+    # F-5 (validity plan §3.4): names whose harness-side permit release is
+    # suppressed, reproducing the production zombie-permit state.
+    permit_release_disabled_for: set = field(default_factory=set)
+    # Plan §3.1/§3.2: start shaping for collision-prone shapes.
+    start_jitter_ms: tuple = (0.0, 0.0)   # (lo, hi) per-root stagger in ms
+    barrier_start: bool = False           # all roots wait on a barrier
 
     def agent(self, name: str) -> AgentSpec:
         for a in self.agents:
@@ -82,6 +99,11 @@ def _rand_sleep(rng: random.Random, lo: int = 1, hi: int = 25) -> int:
     return rng.randint(lo, hi)
 
 
+def _hold_ms(rng: random.Random) -> int:
+    """Plan §3.3 hold tiers: (1, 50, 500, 2000) ms, weighted toward the short end."""
+    return rng.choices((1, 50, 500, 2000), weights=(60, 25, 10, 5))[0]
+
+
 def build_deep_chain(rng: random.Random,
                      root_cls: str,
                      leaf_cls: str,
@@ -93,22 +115,24 @@ def build_deep_chain(rng: random.Random,
     `roots` independent chains run concurrently on the SAME sequential shared
     pool, so a caller's permit must be released (COLL-2) before its child
     acquires, and re-acquired after — while a rival chain is already queued.
+    Barrier start (plan §3.2): all roots enter the queue at the same instant.
     """
     agents: List[AgentSpec] = []
     for c in range(roots):
         levels = [f'{chain}{c}_c{i}' for i in range(depth)]
         for i, name in enumerate(levels):
             cls = root_cls if i == 0 else leaf_cls
-            script: List[Action] = [Action(LLM, sleep_ms=_rand_sleep(rng))]
+            script: List[Action] = [Action(LLM, sleep_ms=_hold_ms(rng))]
             if i + 1 < depth:
                 script.append(Action(SPAWN, target=levels[i + 1], sleep_ms=_rand_sleep(rng, 1, 10)))
-                script.append(Action(LLM, sleep_ms=_rand_sleep(rng)))
+                script.append(Action(LLM, sleep_ms=_hold_ms(rng)))
             else:
                 script.append(Action(LLM, sleep_ms=_rand_sleep(rng, 1, 10)))
             agents.append(AgentSpec(name=name, agent_class=cls, script=script,
                                     parent=levels[i - 1] if i else None))
     return Scenario(name='deep_conc0', agents=agents, seed=rng.randint(0, 2**31 - 1),
-                    notes=f'{roots} concurrent linear chains, depth={depth}')
+                    notes=f'{roots} concurrent linear chains, depth={depth}',
+                    barrier_start=True)
 
 
 def build_soak(rng: random.Random, n_agents: int, endpoint_id: str = 'stress_a') -> Scenario:
@@ -132,20 +156,20 @@ def build_soak(rng: random.Random, n_agents: int, endpoint_id: str = 'stress_a')
                                      sleep_ms=_rand_sleep(rng, 1, 8)))
                 spawns += 1
             elif kind == TOOL:
-                script.append(Action(TOOL, tool_name='read_file', sleep_ms=_rand_sleep(rng, 1, 8)))
+                script.append(Action(TOOL, tool_name='read_file', sleep_ms=_hold_ms(rng)))
             elif kind == STICKY_SYNC:
                 script.append(Action(STICKY_SYNC, sleep_ms=_rand_sleep(rng, 1, 8)))
             elif kind == SLEEP:
                 script.append(Action(SLEEP, sleep_ms=_rand_sleep(rng, 1, 8)))
             else:
-                script.append(Action(LLM, sleep_ms=_rand_sleep(rng, 1, 20)))
+                script.append(Action(LLM, sleep_ms=_hold_ms(rng)))
         if not script:
             script = [Action(LLM, sleep_ms=_rand_sleep(rng))]
         agents.append(AgentSpec(name=name, agent_class=endpoint_id, script=script))
     for c in range(n_children):
         agents.append(AgentSpec(
             name=f'soak_c{c}', agent_class='stress_b',
-            script=[Action(LLM, sleep_ms=_rand_sleep(rng, 1, 15)),
+            script=[Action(LLM, sleep_ms=_hold_ms(rng)),
                     Action(TOOL, tool_name='read_file', sleep_ms=_rand_sleep(rng, 1, 8))],
             is_child=True))
     return Scenario(name='soak', agents=agents, seed=rng.randint(0, 2**31 - 1),
@@ -156,17 +180,18 @@ def build_dismiss_storm(rng: random.Random, n_pairs: int) -> Scenario:
     """(c) dismiss_storm — spawn then dismiss; repeat-name reuse.
 
     Expected to surface the KNOWN-OPEN bug: dismiss/terminate does not release
-    the slot permit, so a reused name finds the pool leaked.
+    the slot permit, so a reused name finds the pool leaked. Seed idx 0 is the
+    ZOMBIE-designated seed (run_matrix sets permit_release_disabled_for={'c0'}).
     """
     agents: List[AgentSpec] = []
     for i in range(n_pairs):
         parent = f'p{i}'
         child = f'c{i}'
-        child_script = [Action(LLM, sleep_ms=_rand_sleep(rng, 5, 20))]
+        child_script = [Action(LLM, sleep_ms=_hold_ms(rng))]
         parent_script = [
             Action(SPAWN, target=child, sleep_ms=_rand_sleep(rng, 1, 8)),
             Action(DISMISS_REPEAT, target=child, sleep_ms=_rand_sleep(rng, 1, 8)),
-            Action(LLM, sleep_ms=_rand_sleep(rng, 1, 15)),
+            Action(LLM, sleep_ms=_hold_ms(rng)),
         ]
         if i % 3 == 0:
             parent_script.append(Action(SPAWN, target=child, sleep_ms=_rand_sleep(rng, 1, 8)))
@@ -187,13 +212,13 @@ def build_async_fanout(rng: random.Random, n_children: int) -> Scenario:
     script: List[Action] = []
     for i in range(n_children):
         script.append(Action(SPAWN_ASYNC, target=f'fan_{i}', sleep_ms=_rand_sleep(rng, 1, 8)))
-    script.append(Action(LLM, sleep_ms=_rand_sleep(rng, 20, 60)))
+    script.append(Action(LLM, sleep_ms=_hold_ms(rng)))
     script.append(Action(TOOL, tool_name='read_file', sleep_ms=_rand_sleep(rng, 1, 10)))
     agents = [AgentSpec(name=parent, agent_class='stress_a', script=script)]
     for i in range(n_children):
         agents.append(AgentSpec(
             name=f'fan_{i}', agent_class='stress_b',
-            script=[Action(LLM, sleep_ms=_rand_sleep(rng, 5, 30)),
+            script=[Action(LLM, sleep_ms=_hold_ms(rng)),
                     Action(TOOL, tool_name='read_file', sleep_ms=_rand_sleep(rng, 1, 10))],
             parent=parent, is_child=True))
     return Scenario(name='async_fanout', agents=agents, seed=rng.randint(0, 2**31 - 1),
@@ -208,7 +233,7 @@ def build_sticky_churn(rng: random.Random, n_agents: int) -> Scenario:
         script = [Action(STICKY_SYNC, sleep_ms=_rand_sleep(rng, 1, 10))]
         if i + 1 < n_agents:
             script.append(Action(SPAWN, target=f'sticky_{i + 1}', sleep_ms=_rand_sleep(rng, 1, 6)))
-        script.append(Action(LLM, sleep_ms=_rand_sleep(rng, 1, 15)))
+        script.append(Action(LLM, sleep_ms=_hold_ms(rng)))
         agents.append(AgentSpec(name=name, agent_class='stress_a', script=script))
     return Scenario(name='sticky_churn', agents=agents, seed=rng.randint(0, 2**31 - 1),
                     notes=f'{n_agents} agents forcing sticky sync')
@@ -218,13 +243,14 @@ def build_grandparent_dismiss(rng: random.Random, depth: int = 3) -> Scenario:
     """(e) grandparent_dismiss — root dismisses a mid-chain node.
 
     COLL-2 held a grandparent permit when the middle link was dismissed.
+    Barrier start (plan §3.2): the chain enters the queue at one instant.
     """
     levels = [f'gp_c{i}' for i in range(depth)]
     root_script = [
         Action(SPAWN, target=levels[0], sleep_ms=_rand_sleep(rng, 1, 8)),
         Action(DISMISS_GRANDPARENT, target=levels[1] if depth > 1 else levels[0],
                sleep_ms=_rand_sleep(rng, 1, 8)),
-        Action(LLM, sleep_ms=_rand_sleep(rng, 10, 30)),
+        Action(LLM, sleep_ms=_hold_ms(rng)),
     ]
     agents = [AgentSpec(name='gp_root', agent_class='stress_a', script=root_script)]
     for i, name in enumerate(levels):
@@ -232,8 +258,31 @@ def build_grandparent_dismiss(rng: random.Random, depth: int = 3) -> Scenario:
         script = [Action(LLM, sleep_ms=_rand_sleep(rng, 1, 8))]
         if nxt:
             script.append(Action(SPAWN, target=nxt, sleep_ms=_rand_sleep(rng, 1, 8)))
-        script.append(Action(LLM, sleep_ms=_rand_sleep(rng, 1, 10)))
+        script.append(Action(LLM, sleep_ms=_hold_ms(rng)))
         agents.append(AgentSpec(name=name, agent_class='stress_b', script=script,
                                 parent=levels[i - 1] if i else 'gp_root'))
     return Scenario(name='grandparent_dismiss', agents=agents,
-                    seed=rng.randint(0, 2**31 - 1), notes=f'chain depth={depth}')
+                    seed=rng.randint(0, 2**31 - 1), notes=f'chain depth={depth}',
+                    barrier_start=True)
+
+
+def build_long_hold(rng: random.Random, holder_ms: int = 4000, n_waiters: int = 3) -> Scenario:
+    """New (validity plan §3.5): one long holder + N short waiters on one pool.
+
+    The holder keeps its permit for `holder_ms` (default 4s), which is longer
+    than STARVATION_AGE_S (default 2.0s). The waiters enqueue at t≈0 and are
+    granted only after the holder exits — so max waiter age deterministically
+    crosses the starvation threshold. Expected classification: STARVATION.
+    """
+    agents: List[AgentSpec] = [
+        AgentSpec(name='lh_holder', agent_class='stress_a',
+                  script=[Action(LLM, sleep_ms=holder_ms),
+                          Action(TOOL, tool_name='read_file', sleep_ms=5)]),
+    ]
+    for i in range(n_waiters):
+        agents.append(AgentSpec(
+            name=f'lh_w{i}', agent_class='stress_b',
+            script=[Action(LLM, sleep_ms=_rand_sleep(rng, 1, 10)),
+                    Action(TOOL, tool_name='read_file', sleep_ms=1)]))
+    return Scenario(name='long_hold', agents=agents, seed=rng.randint(0, 2**31 - 1),
+                    notes=f'holder {holder_ms}ms + {n_waiters} waiters; expected STARVATION')

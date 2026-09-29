@@ -285,6 +285,14 @@ class Watchdog:
         if over_budget and not no_progress:
             # Budget blown but progress still flowing → perf finding, not liveness.
             classification = 'TIMEOUT'
+        elif self._max_waiter_age > self.waiter_starve_s:
+            # F-3 fix: a waiter older than the starvation threshold → STARVATION.
+            # This is a FAIRNESS failure (the system is making progress, but one
+            # waiter has been starved past the threshold). It does NOT require a
+            # zombie holder — that's a separate (stronger) condition for ZOMBIE.
+            # Previously unreachable: no STARVATION branch existed and the
+            # post-hoc check ran on a broken age signal (F-1).
+            classification = 'STARVATION'
         elif self.all_alive():
             # All workers are done (no live threads). A stall with no live
             # workers is not a deadlock — something died or the scenario ended

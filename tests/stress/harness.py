@@ -17,6 +17,20 @@ Fidelity checklist for `_fake_turn` vs ExecutionEngine.run():
   3. scripted action dispatch through the REAL `execute_tool`
   4. canonical release via `release_slot_permit`
   5. `finally` marks the worker thread complete
+
+Validity-plan additions (tests/stress only):
+  * F-1: `_waiter_tickets()` helper — SlotPool._waiters is an OrderedDict keyed
+    by ticket id; iterating it yields ints, not tickets. Both collection sites
+    now go through the one helper so they cannot drift again.
+  * F-4: async workers set `async_body:<name>` (lifetime marker) instead of a
+    flag the DEADLOCK predicate counts; only `acquire:`/`reacquire:` flags mean
+    "blocked on a slot wait".
+  * F-5: `permit_release_disabled_for` — names in this set skip the harness's
+    own release at turn-exit/teardown but are still dismissed, reproducing the
+    production zombie-permit state (dismiss/terminate leak) without touching
+    production code. The real dismiss path's defensive release is bypassed by
+    nullifying `_slot_release` first (idempotent capture-nullify semantics).
+  * F-7: no PEP-701 nested same-quote f-strings (portable to 3.11).
 """
 
 from __future__ import annotations
@@ -30,17 +44,32 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 # ── Test-process constants (never read by production code) ──────────────
-# QUEUE_WAIT_TIMEOUT must be GREATER than the watchdog's no_progress_s (10s) so
-# that a thread stuck in SlotPool.acquire is classified by the watchdog BEFORE
-# the timeout fires. If it were shorter, the acquire_timeout event would reset
-# the idle timer and mask the deadlock as a benign timeout.
-QUEUE_WAIT_TIMEOUT = 30.0   # bounded queue wait -> a stall surfaces, not a hang
+# QUEUE_WAIT_TIMEOUT must be GREATER than the watchdog's no_progress_s so that a
+# thread stuck in SlotPool.acquire is classified by the watchdog BEFORE the
+# timeout fires. If it were shorter, the acquire_timeout event would reset the
+# idle timer and mask the deadlock as a benign timeout. (validity plan: keep
+# this > NO_PROGRESS_S; see _timing.py)
+QUEUE_WAIT_TIMEOUT = 25.0   # bounded queue wait -> a stall surfaces, not a hang
 MAX_TURNS = 20               # depth cap; generous vs AGENT_MAX_NESTING_DEPTH
 JOIN_TIMEOUT = 30.0
 WAIT_SETTLE = 1.0
 
 CLASSES = ('stress_a', 'stress_b', 'stress_c')
 DEFAULT_EP = 'ep_stress_a'
+
+
+def _waiter_tickets(pool) -> List[Any]:
+    """The QueueTicket VALUES of a SlotPool's waiter queue (F-1 fix).
+
+    ``SlotPool._waiters`` is an ``OrderedDict[int, QueueTicket]`` — iterating
+    the mapping yields ticket ids (ints), not tickets. Both collection sites
+    (max_waiter_age / collect) use this helper so they cannot drift again.
+    """
+    waiters = getattr(pool, '_waiters', None) or {}
+    try:
+        return list(waiters.values())
+    except AttributeError:  # pragma: no cover - defensive
+        return []
 
 
 # ── Instrumentation state ───────────────────────────────────────────────
@@ -51,6 +80,11 @@ class Flags:
     Set immediately around SlotPool.acquire and
     ToolDispatcher._reacquire_caller_slot in a try/finally so it clears even on
     the exception path (a failed acquire is a return, not a hang).
+
+    F-4: async workers additionally set `async_body:<name>` for their whole
+    lifetime — that flag is an identity marker, NOT a "blocked" signal. The
+    DEADLOCK predicate must count only values starting with `acquire:` or
+    `reacquire:` (see scenarios.run_scenario blocked_flags filter).
     """
 
     def __init__(self) -> None:
@@ -151,6 +185,11 @@ class Harness:
         self.engine = None
         self.dispatcher = None
 
+        # F-5 switch: names whose harness-side release is suppressed so the
+        # production zombie-permit state (dismiss without release) can occur.
+        self.permit_release_disabled_for: set = set(
+            getattr(scenario, 'permit_release_disabled_for', ()) or ())
+
     # ── progress helpers ──
     def rec(self, kind: str, agent: str, pool: str = '', detail: str = '') -> None:
         self.log.record(kind, agent, pool, detail)
@@ -198,6 +237,8 @@ class Harness:
         self.engine = _FakeEngine(self.pool)
         self.dispatcher = ToolDispatcher(self.pool)
         self.dispatcher.set_engine(self.engine)
+        # _FakeEngine.tool_dispatcher property resolves through this back-ref.
+        self.pool._stress_dispatcher = self.dispatcher
 
         self._apply_patches()
 
@@ -335,7 +376,7 @@ class Harness:
         return ok
 
     def _register_async_call(self, instance_name, function_id=None, agent_class=None,
-                            child_instance_name=None, args=None, caller=None, nest_depth=0):
+                             child_instance_name=None, args=None, caller=None, nest_depth=0):
         """Replacement for SlotsMixin.register_async_call.
 
         The real implementation calls `run_child_core` via a FUNCTION-SCOPE
@@ -352,7 +393,9 @@ class Harness:
         script = spec.script
 
         def _worker() -> None:
-            self.flags.set(f'async_worker:{target}')
+            # F-4: lifetime marker only — NOT a "blocked" flag. The DEADLOCK
+            # predicate counts acquire:/reacquire: values exclusively.
+            self.flags.set(f'async_body:{target}')
             try:
                 self._run_child_body(instance_name, target,
                                      agent_class or CLASSES[0], caller, nest_depth, script)
@@ -436,10 +479,34 @@ class Harness:
 
     def _teardown_instance(self, inst) -> None:
         name = inst.instance_name
-        self._release_held(inst, context='turn-exit', action='drop-exit')
+        if name in self.permit_release_disabled_for:
+            # F-5 exposure: suppress the harness's defensive release (and the
+            # production dismiss path's release, via capture-nullify) so the
+            # permit stays in pool._running after the instance is gone — the
+            # zombie state the production dismiss/terminate leak produces.
+            self._suppress_release(inst)
+            self.rec('release_suppressed', name, detail='F-5 switch')
+        else:
+            self._release_held(inst, context='turn-exit', action='drop-exit')
         try:
             self.pool.dismiss_instance(name)
         except Exception:  # noqa: BLE001
+            pass
+
+    def _suppress_release(self, inst) -> None:
+        """Nullify the instance's permit callback WITHOUT releasing it.
+
+        Uses the production capture-nullify semantics (under `_state_lock`), so
+        the later `dismiss_instance` release finds no live callback and is a
+        no-op — exactly like the real leak where the old thread never releases.
+        The pool entry in `_running` stays; that IS the zombie state.
+        """
+        try:
+            with inst._state_lock:
+                if getattr(inst, '_slot_release', None) is not None:
+                    inst._slot_release = None
+                    inst._slot_key = None
+        except Exception:  # noqa: BLE001 - best effort; the turn-exit path also skips
             pass
 
     def _release_held(self, inst, context: str, action: str = 'drop-exit') -> None:
@@ -478,8 +545,11 @@ class Harness:
         except Exception as exc:  # noqa: BLE001
             self._fail(f'turn[{name}]', exc)
         finally:
-            # 4. canonical release
-            self._release_held(inst, context='turn-exit', action='drop-exit')
+            # 4. canonical release (skipped for F-5-switched names)
+            if name in self.permit_release_disabled_for:
+                self.rec('release_suppressed', name, detail='turn-exit')
+            else:
+                self._release_held(inst, context='turn-exit', action='drop-exit')
             self.rec('turn_end', name)
             self.engine._current_agent = None
 
@@ -603,13 +673,38 @@ class Harness:
         return result
 
     def _launch_roots(self) -> None:
-        for spec in self.scenario.roots():
+        """Launch root threads with optional stagger (validity plan §3.1/§3.2).
+
+        `start_jitter_ms=(lo, hi)` sleeps a per-root uniform offset before the
+        turn starts; `barrier_start` makes all roots wait on a barrier so they
+        enter the queue at the same instant (collision-prone shapes). Both are
+        bounded: the barrier has a timeout and falls through to a normal start.
+        """
+        specs = self.scenario.roots()
+        jitter = getattr(self.scenario, 'start_jitter_ms', (0.0, 0.0)) or (0.0, 0.0)
+        use_barrier = bool(getattr(self.scenario, 'barrier_start', False)) and len(specs) >= 2
+        # Barrier with N parties: all roots wait on it (no coordinator party —
+        # the main thread must NOT block here, or _join_all can't proceed).
+        self._root_barrier = threading.Barrier(len(specs), timeout=10.0) if use_barrier else None
+
+        for spec in specs:
             th = threading.Thread(target=self._root_worker, args=(spec,),
                                   name=f'root-{spec.name}', daemon=True)
             self.threads[spec.name] = th
             th.start()
 
     def _root_worker(self, spec) -> None:
+        jitter = getattr(self.scenario, 'start_jitter_ms', (0.0, 0.0)) or (0.0, 0.0)
+        lo, hi = float(jitter[0]), float(jitter[1])
+        if hi > 0:
+            time.sleep(self.rng.uniform(lo, hi) / 1000.0)
+        # Barrier start (plan §3.2): all roots wait here until every root has
+        # reached this point, so they enter the queue at the same instant.
+        if getattr(self.scenario, 'barrier_start', False) and self._root_barrier is not None:
+            try:
+                self._root_barrier.wait(timeout=10.0)
+            except threading.BrokenBarrierError:
+                pass  # fall through — a missed barrier must never hang the run
         inst = self._make_instance(spec.name, spec.agent_class, None, 0)
         try:
             self._fake_turn(inst, spec.script, 0)
@@ -620,18 +715,38 @@ class Harness:
             self._teardown_instance(inst)
 
     def _join_all(self) -> None:
+        """Wait for all workers to finish, or until the scenario budget expires.
+
+        CRITICAL: when the deadline passes with threads still alive, we must
+        NOT return immediately — that would let run_scenario teardown() stop
+        the watchdog and lose the stall classification. Instead we sleep in
+        small increments (keeping the process alive) so the watchdog can fire
+        on its no_progress_s window and record the stall report.
+        """
         deadline = time.monotonic() + self.scenario.budget_s
         pending = list(self.threads.values()) + list(self.async_children)
         while pending and time.monotonic() < deadline:
             pending = [t for t in pending if t.is_alive()]
             for t in pending:
                 t.join(timeout=0.05)
+
         alive = [t for t in pending if t.is_alive()]
         if alive:
             self._errors.append(f'{len(alive)} worker thread(s) still alive at drain: '
                                 + ','.join(t.name for t in alive))
-        # Let waiters/permits settle so a late grant is attributed, not lost.
-        time.sleep(WAIT_SETTLE)
+            # Keep the process alive so the watchdog can classify the stall.
+            # The watchdog fires on no_progress_s (default 3s); we sleep in
+            # 0.25s ticks up to a hard cap of (no_progress_s + 5s) to allow
+            # for the watchdog's TICK interval plus margin.
+            import tests.stress._timing as _t
+            keepalive_s = _t.NO_PROGRESS_S + 5.0
+            ka_deadline = time.monotonic() + keepalive_s
+            while any(t.is_alive() for t in alive) and time.monotonic() < ka_deadline:
+                time.sleep(0.25)
+        else:
+            # All workers done — let waiters/permits settle so a late grant is
+            # attributed, not lost.
+            time.sleep(WAIT_SETTLE)
 
     # ── collection for the watchdog ──
     def live_worker_count(self) -> int:
@@ -652,34 +767,47 @@ class Harness:
         oldest = 0.0
         now = time.monotonic()
         for pool in self._sched_pools():
-            for ticket in list(getattr(pool, '_waiters', []) or []):
+            for ticket in _waiter_tickets(pool):  # F-1 fix: .values(), not keys
                 created = getattr(ticket, 'created_at', None)
                 if created is not None:
                     oldest = max(oldest, now - created)
         return oldest
 
     def zombie_holders(self) -> List[str]:
-        """Permits held in _running for instances that no longer exist."""
+        """Permits held in _running for instances that no longer exist.
+
+        A "zombie" is a pool entry whose instance has been dismissed/removed
+        from the pool but whose permit was never released. This is the state
+        produced by the known dismiss/terminate leak (F-5).
+
+        NOTE: instances that are still in self.pool.instances (even if IDLE)
+        are NOT zombies — they may be mid-teardown or about to be re-used.
+        """
         out: List[str] = []
         for pool in self._sched_pools():
             for name in list(getattr(pool, '_running', {}) or {}):
                 if self.pool.instances.get(name) is None:
-                    out.append(f'{getattr(pool, 'key', '?')}:{name}')
+                    out.append('{}:{}'.format(getattr(pool, 'key', '?'), name))  # F-7 fix
         return out
 
     def _sched_pools(self):
-        sched = getattr(self.router, '_sched', None)
+        """Get all SlotPool objects from the EndpointScheduler.
+
+        The scheduler is `router.scheduler` (not `router._sched`). Pools are
+        in `scheduler._pools` keyed by slot_key.
+        """
+        sched = getattr(self.router, 'scheduler', None)
         pools = getattr(sched, '_pools', None) if sched is not None else None
         return list((pools or {}).values())
 
     def thread_stacks(self) -> Dict[int, str]:
         import sys
+        import traceback as _tb
+        frames = sys._current_frames()
         out: Dict[int, str] = {}
         for t in list(self.threads.values()) + list(self.async_children):
-            if t.is_alive() and t.ident in sys._current_frames():
-                frames = sys._current_frames()
-                out[t.ident] = ''.join(
-                    __import__('traceback').format_stack(frames[t.ident])[-2:]).strip()
+            if t.is_alive() and t.ident in frames:
+                out[t.ident] = ''.join(_tb.format_stack(frames[t.ident])[-2:]).strip()
         return out
 
     def collect(self) -> dict:
@@ -690,7 +818,7 @@ class Harness:
             waiters = []
             oldest = 0.0
             now = time.monotonic()
-            for ticket in list(getattr(pool, '_waiters', []) or []):
+            for ticket in _waiter_tickets(pool):  # F-1 fix: .values(), not keys
                 age = now - getattr(ticket, 'created_at', now)
                 oldest = max(oldest, age)
                 waiters.append({'holder': getattr(ticket, 'instance_name', '?'),
