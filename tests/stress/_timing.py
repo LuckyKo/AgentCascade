@@ -38,3 +38,6 @@ PHASE_BUDGET_S = _f('PHASE_BUDGET_S', 120.0)         # per-phase budget default
 # ── Proof-phase hold durations (structural defects need no long waits) ──
 PROOF_HOLD_MS = _f('PROOF_HOLD_MS', 4000.0)          # zombie/starvation holder hold
 PROOF_WAITER_HOLD_S = _f('PROOF_WAITER_HOLD_S', 8.0)  # keep waiter alive past threshold
+
+# ── Barrier timeout (reviewer finding 5: was hardcoded 10.0 in harness.py) ──
+BARRIER_TIMEOUT = _f('BARRIER_TIMEOUT', 5.0)         # seconds; barrier fall-through

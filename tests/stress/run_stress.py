@@ -45,6 +45,10 @@ def main(argv: List[str] | None = None) -> int:
                     help='run only this scenario name (default: the full matrix)')
     ap.add_argument('--seeds', type=int, default=None,
                     help='seeds per scenario (default: the plan\'s per-scenario count)')
+    ap.add_argument('--repro-key', default=None,
+                    help='reproduce a specific workload by its key (format: phase:name:idx). '
+                         'Takes precedence over --only and --seeds. '
+                         'Printed by repro_cmd() in stall reports.')
     ap.add_argument('--budget', type=float, default=None,
                     help='wall-clock budget in seconds for the whole phase '
                          '(default: 120 from _timing.PHASE_BUDGET_S)')
@@ -145,7 +149,8 @@ def main(argv: List[str] | None = None) -> int:
                 t0 = time.monotonic()
                 verdict = run_matrix(phase, phase_root, only=args.only, seeds=args.seeds,
                                      budget_s=budget,
-                                     on_result=lambda r: _emit(r, sink))
+                                     on_result=lambda r: _emit(r, sink),
+                                     repro_key=args.repro_key)
                 elapsed = time.monotonic() - t0
                 print(verdict.summary())
                 print(f'[{phase}] wall time: {elapsed:.1f}s')

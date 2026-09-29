@@ -165,6 +165,7 @@ class Harness:
         self.rng = random.Random(scenario.seed)
 
         self.flags = Flags()
+        self._zombie_exempt: frozenset = frozenset()  # names excluded from zombie_holders (proof-phase phantoms)
         self.threads: Dict[str, threading.Thread] = {}
         self.thread_done: Dict[int, bool] = {}
         self.async_children: List[threading.Thread] = []
@@ -239,6 +240,11 @@ class Harness:
         self.dispatcher.set_engine(self.engine)
         # _FakeEngine.tool_dispatcher property resolves through this back-ref.
         self.pool._stress_dispatcher = self.dispatcher
+
+        # Re-capture originals if import-time capture failed (baseline tree).
+        global _orig_acquire, _orig_release, _orig_reacquire
+        if _orig_acquire is None:
+            _capture_originals()
 
         self._apply_patches()
 
@@ -685,7 +691,8 @@ class Harness:
         use_barrier = bool(getattr(self.scenario, 'barrier_start', False)) and len(specs) >= 2
         # Barrier with N parties: all roots wait on it (no coordinator party —
         # the main thread must NOT block here, or _join_all can't proceed).
-        self._root_barrier = threading.Barrier(len(specs), timeout=10.0) if use_barrier else None
+        from . import _timing as _t
+        self._root_barrier = threading.Barrier(len(specs), timeout=_t.BARRIER_TIMEOUT) if use_barrier else None
 
         for spec in specs:
             th = threading.Thread(target=self._root_worker, args=(spec,),
@@ -701,8 +708,9 @@ class Harness:
         # Barrier start (plan §3.2): all roots wait here until every root has
         # reached this point, so they enter the queue at the same instant.
         if getattr(self.scenario, 'barrier_start', False) and self._root_barrier is not None:
+            from . import _timing as _t
             try:
-                self._root_barrier.wait(timeout=10.0)
+                self._root_barrier.wait(timeout=_t.BARRIER_TIMEOUT)
             except threading.BrokenBarrierError:
                 pass  # fall through — a missed barrier must never hang the run
         inst = self._make_instance(spec.name, spec.agent_class, None, 0)
@@ -782,10 +790,15 @@ class Harness:
 
         NOTE: instances that are still in self.pool.instances (even if IDLE)
         are NOT zombies — they may be mid-teardown or about to be re-used.
+        Also, names registered in _zombie_exempt (e.g. proof-phase phantom
+        holders that use synthetic names) are never reported as zombies.
         """
         out: List[str] = []
+        exempt = getattr(self, '_zombie_exempt', frozenset())
         for pool in self._sched_pools():
             for name in list(getattr(pool, '_running', {}) or {}):
+                if name in exempt:
+                    continue
                 if self.pool.instances.get(name) is None:
                     out.append('{}:{}'.format(getattr(pool, 'key', '?'), name))  # F-7 fix
         return out
@@ -914,12 +927,27 @@ _orig_reacquire = None
 
 
 def _capture_originals() -> None:
+    """Capture original method references. Called at import time; on failure
+    (e.g., baseline worktree with different module layout) the values stay None
+    and Harness.setup() will re-capture them lazily.
+
+    Reviewer finding 6: guard against import crashes on the baseline tree.
+    """
     global _orig_acquire, _orig_release, _orig_reacquire
-    from agent_cascade.slot_queue import SlotPool
-    from agent_cascade.tool_dispatcher import ToolDispatcher
-    _orig_acquire = SlotPool.acquire
-    _orig_release = SlotPool.release
-    _orig_reacquire = ToolDispatcher._reacquire_caller_slot
+    try:
+        from agent_cascade.slot_queue import SlotPool
+        from agent_cascade.tool_dispatcher import ToolDispatcher
+        _orig_acquire = SlotPool.acquire
+        _orig_release = SlotPool.release
+        _orig_reacquire = ToolDispatcher._reacquire_caller_slot
+    except ImportError as exc:
+        # Baseline worktree may have a different module layout. The values stay
+        # None; Harness.setup() will re-capture them when it imports the modules.
+        import warnings
+        warnings.warn(
+            f'_capture_originals: {exc} — originals will be captured in Harness.setup()',
+            stacklevel=2,
+        )
 
 
 _capture_originals()

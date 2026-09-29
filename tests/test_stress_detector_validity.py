@@ -240,54 +240,129 @@ def test_f7_no_pep701_nested_fstrings():
 
     Python 3.12+ allows f"outer {f'inner'}" but it breaks on 3.11.
     The baseline worktree may run on 3.11, so we avoid this pattern.
+
+    Reviewer finding 8: use AST to explicitly flag JoinedStr nodes containing
+    nested FormattedValue with same-quote nesting (not just syntax parse).
     """
     import ast
     harness_path = os.path.join(_REPO_ROOT, 'tests', 'stress', 'harness.py')
     with open(harness_path, 'r', encoding='utf-8') as f:
         source = f.read()
 
-    # PEP 701 allows reusing the same quote inside an f-string expression.
-    # A simple heuristic: look for f"..." or f'...' that contain the same
-    # quote character in a nested expression. This is a conservative check —
-    # it may miss some cases but won't false-positive on valid code.
-    import re
-    # Match f-strings with double quotes containing another double-quoted string
-    pattern_dq = re.compile(r'f"(?:[^"\\]|\\.)*"')
-    # This is a rough check — for production use, parse with ast and look for
-    # JoinedStr nodes containing FormattedValue with the same quote.
-    # For now, just verify the file parses (syntax error would catch the worst cases).
+    # First: verify the file parses at all.
     try:
-        ast.parse(source)
+        tree = ast.parse(source)
     except SyntaxError as e:
         pytest.fail(f'harness.py has a syntax error (possibly PEP-701 on <3.12): {e}')
+
+    # Second: AST walk for PEP-701 nested same-quote f-strings.
+    # A JoinedStr is an f-string. If any of its FormattedValue children
+    # contains another JoinedStr (a nested f-string), that's PEP-701 territory.
+    # On Python < 3.12, the inner f-string MUST use a different quote than
+    # the outer one. We flag ANY nested JoinedStr inside a FormattedValue.
+
+    violations = []
+
+    class _Pep701Checker(ast.NodeVisitor):
+        def __init__(self):
+            self._in_fstring = 0
+
+        def visit_JoinedStr(self, node):
+            # This is an f-string. Check its children for nested f-strings.
+            for value in node.values:
+                if isinstance(value, ast.FormattedValue):
+                    inner = value.value
+                    # If the FormattedValue's expression contains another JoinedStr,
+                    # that's a nested f-string (PEP-701 pattern).
+                    self._check_nested(inner, node.lineno)
+            self.generic_visit(node)
+
+        def _check_nested(self, expr, outer_line):
+            for child in ast.walk(expr):
+                if isinstance(child, ast.JoinedStr) and child is not expr:
+                    violations.append(
+                        f'line {outer_line}: nested f-string (PEP-701) inside FormattedValue')
+                    return  # one violation per outer f-string is enough
+
+    _Pep701Checker().visit(tree)
+
+    if violations:
+        pytest.fail('PEP-701 nested f-strings found in harness.py:\n' + '\n'.join(violations))
 
 
 # ── Integration: full detector proof on a real pool ─────────────────────
 
 def test_integration_zombie_detection():
-    """End-to-end: suppress release for one name → zombie_holders() finds it."""
-    from tests.stress.harness import Harness
-    from tests.stress.workload import Scenario, AgentSpec, Action
-    from tests.stress.scenarios import run_scenario
+    """End-to-end: GUARANTEED zombie via phantom injection → detector must fire.
 
-    # Build a minimal scenario: one parent spawns child 'c0', then dismisses.
-    # The F-5 switch suppresses the release for 'c0'.
-    rng = random.Random(42)
+    Reviewer finding 4: the old test accepted 'NONE' in the expected set, which
+    meant a blind detector (one that never fires) would PASS. Now we use the
+    proof phase's _inject_phantom_zombie to GUARANTEE the zombie state, and
+    assert a specific detection classification. A broken detector must FAIL.
+    """
+    from tests.stress.harness import Harness
     from tests.stress.workload import build_dismiss_storm
+    from tests.stress.scenarios import run_scenario
+    from tests.stress.proof import _inject_phantom_zombie
+    from tests.stress.watchdog import ProgressLog, Watchdog, StallReport
+
+    rng = random.Random(42)
     scenario = build_dismiss_storm(rng, 1)
     scenario.seed = 9999
     scenario.permit_release_disabled_for = {'c0'}
     scenario.budget_s = 15.0
 
     with tempfile.TemporaryDirectory(prefix='stress_int_') as td:
-        result, stalls = run_scenario(scenario, td, _REPO_ROOT, 'test')
+        log = ProgressLog()
+        harness = Harness(scenario, log, td, root=_REPO_ROOT, phase='test')
+        seen: list = []
 
-    # The zombie state should be detectable. The classification may be ZOMBIE,
-    # DEADLOCK, or NONE (if the permit was released by the production dismiss
-    # path before our suppression took effect). What matters is that the
-    # detector CAN see the zombie if it exists.
-    assert result.classification in ('NONE', 'ZOMBIE', 'DEADLOCK', 'STARVATION', 'TIMEOUT'), \
-        f'unexpected classification: {result.line()}'
+        def _blocked_flags():
+            return {tid: f'{what}@{tid}'
+                    for tid, what in harness.flags.registry.items()
+                    if what.startswith(('acquire:', 'reacquire:'))}
+
+        wd = Watchdog(
+            log=log, budget_s=scenario.budget_s,
+            no_progress_s=3.0, waiter_starve_s=2.0,
+            scenario=scenario.name, seed=scenario.seed, phase='test',
+            seed_repro='test', on_stall=seen.append, collect=harness.collect,
+            blocked_flags=_blocked_flags,
+            all_alive=harness.all_workers_done,
+            thread_stacks=harness.thread_stacks,
+        )
+
+        harness.setup()
+        # GUARANTEED zombie: inject a phantom SlotHolder into pool._running.
+        # Use pool_key=None to inject into the first available pool.
+        injected = _inject_phantom_zombie(harness)
+        assert injected, 'phantom injection failed — cannot test zombie detection'
+
+        wd.start()
+        harness._launch_roots()
+        harness._join_all()
+        wd.stop()
+
+        # Check for zombie BEFORE teardown (teardown may clean up)
+        zombies = harness.zombie_holders()
+        max_age = harness.max_waiter_age()
+
+        if seen:
+            classification = seen[0].classification
+        elif zombies:
+            # Run completed but zombie persists → STARVATION (waiters aged
+            # while the phantom held the permit).
+            classification = 'STARVATION'
+        else:
+            classification = 'NONE'
+
+        harness.teardown()
+
+    # CRITICAL: NONE means the detector missed the guaranteed zombie. FAIL.
+    assert classification in ('ZOMBIE', 'DEADLOCK', 'STARVATION'), (
+        f'zombie detection FAILED: classification={classification} but a phantom '
+        f'zombie was GUARANTEED in pool._running. A broken detector returns NONE. '
+        f'repro: scenario=dismiss_storm seed=9999')
 
 
 def test_integration_starvation_detection():

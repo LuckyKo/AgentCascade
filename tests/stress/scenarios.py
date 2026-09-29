@@ -199,16 +199,55 @@ def run_matrix(phase: str,
                seeds: Optional[int] = None,
                budget_s: float = _timing.PHASE_BUDGET_S,
                tmp_factory: Optional[Callable[[str], str]] = None,
-               on_result: Optional[Callable[[Result], None]] = None) -> Verdict:
+               on_result: Optional[Callable[[Result], None]] = None,
+               repro_key: Optional[str] = None) -> Verdict:
     """Run the scenario matrix for one phase under a wall-clock budget.
 
     A budget overrun skips the REMAINDER of the current phase and labels the
     verdict provisional — it never silently truncates a phase.
+
+    `repro_key` (F-2 reviewer fix): if set, run ONLY the workload identified
+    by that key (format: 'phase:name:idx'). This reconstructs the exact RNG
+    stream for a specific scenario instance, making repro_cmd() truly
+    reproducible. Takes precedence over `only` and `seeds`.
     """
     import tempfile
 
     verdict = Verdict(phase=phase, budget_s=budget_s)
     started = time.monotonic()
+
+    # F-2: --repro-key takes precedence — run exactly one workload.
+    if repro_key is not None:
+        parts = repro_key.split(':')
+        if len(parts) != 3:
+            verdict.note = f'invalid repro_key format: {repro_key!r} (expected phase:name:idx)'
+            return verdict
+        r_phase, r_name, r_idx_str = parts
+        try:
+            r_idx = int(r_idx_str)
+        except ValueError:
+            verdict.note = f'invalid repro_key idx: {r_idx_str!r}'
+            return verdict
+        spec = next((s for s in SCENARIOS if s.name == r_name), None)
+        if spec is None:
+            verdict.note = f'repro_key references unknown scenario: {r_name!r}'
+            return verdict
+        rng = random.Random(f'{phase}:{spec.name}:{r_idx}')
+        scenario = spec.build(rng, r_idx)
+        scenario.seed = stable_seed(phase, spec.name, r_idx)
+        scenario.set_repro_key(phase, r_idx)
+        if spec.name == 'dismiss_storm' and r_idx == 0:
+            scenario.permit_release_disabled_for = {'c0'}
+        tmp_dir = (tmp_factory(spec.name) if tmp_factory
+                   else tempfile.mkdtemp(prefix=f'stress_{phase}_{spec.name}_{r_idx}_'))
+        result, stalls = run_scenario(scenario, tmp_dir, root, phase)
+        verdict.results.append(result)
+        verdict.stalls.extend(stalls)
+        if on_result is not None:
+            on_result(result)
+        verdict.elapsed = time.monotonic() - started
+        return verdict
+
     specs = [s for s in SCENARIOS if only is None or s.name == only]
 
     for spec in specs:
@@ -220,11 +259,10 @@ def run_matrix(phase: str,
                 return verdict
             rng = random.Random(f'{phase}:{spec.name}:{idx}')   # deterministic workload
             scenario = spec.build(rng, idx)
-            if seeds is not None:
-                # F-2 fix: stable digest instead of salted hash(). The rng above
-                # already fully determines the workload; this value is what
-                # `repro_cmd` prints and must be reproducible across processes.
-                scenario.seed = stable_seed(phase, spec.name, idx)
+            # F-2 fix: stable digest + repro_key. The rng above already fully
+            # determines the workload; repro_key is what repro_cmd prints.
+            scenario.seed = stable_seed(phase, spec.name, idx)
+            scenario.set_repro_key(phase, idx)
 
             # F-5 exposure (validity plan §3.4): exactly one designated seed per
             # phase runs dismiss_storm with the release-suppression switch so

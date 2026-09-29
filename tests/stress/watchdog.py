@@ -294,11 +294,6 @@ class Watchdog:
             # post-hoc check ran on a broken age signal (F-1).
             classification = 'STARVATION'
         elif self.all_alive():
-            # All workers are done (no live threads). A stall with no live
-            # workers is not a deadlock — something died or the scenario ended
-            # abnormally. Classify as UNEXPLAINED so it is never silently passed.
-            classification = 'UNEXPLAINED'
-        else:
             # Some workers are still alive → potential DEADLOCK or ZOMBIE.
             # Note: sync children run in caller threads and are NOT counted in
             # live_worker_count, so the flag count can exceed it. We require at
@@ -313,6 +308,11 @@ class Watchdog:
                 classification = 'ZOMBIE'
             else:
                 classification = 'UNEXPLAINED'
+        else:
+            # All workers are done (no live threads). A stall with no live
+            # workers is not a deadlock — something died or the scenario ended
+            # abnormally. Classify as UNEXPLAINED so it is never silently passed.
+            classification = 'UNEXPLAINED'
 
         report = StallReport(
             seed=self.seed,

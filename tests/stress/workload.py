@@ -88,9 +88,30 @@ class Scenario:
     def by_name(self) -> Dict[str, AgentSpec]:
         return {a.name: a for a in self.agents}
 
+    @property
+    def repro_key(self) -> str:
+        """F-2 fix (reviewer): deterministic workload identity.
+
+        `repro_key` is the stable identifier that `--repro-key` uses to
+        reconstruct the EXACT workload (same RNG stream, same scenario).
+        Format: '{phase}:{name}:{idx}' — derived from the same inputs as
+        stable_seed(), so it's reproducible across processes.
+        """
+        return getattr(self, '_repro_key', f'{self.name}:0')
+
+    def set_repro_key(self, phase: str, idx: int) -> None:
+        self._repro_key = f'{phase}:{self.name}:{idx}'
+
     def repro_cmd(self, phase: str = 'post', root: str = '.') -> str:
+        """Print the exact command to reproduce this workload.
+
+        Uses --repro-key (not --seeds) so the workload identity is explicit
+        and unambiguous. `--seeds N` means "run N iterations"; `--repro-key`
+        means "run THIS specific workload."
+        """
+        key = self.repro_key
         return (f'python -m tests.stress.run_stress --root {root} --phases {phase} '
-                f'--only {self.name} --seeds {self.seed}')
+                f'--repro-key {key}')
 
 
 # ── Script builders (mirror the plan's scenario table) ──────────────────
