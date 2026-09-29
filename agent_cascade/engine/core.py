@@ -932,6 +932,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Fix 1.
                 inst_name = instance.instance_name
                 queued = self.pool.drain_queue(inst_name)
+                drained_count = 0
                 for item in queued:
                     msg = self._make_user_message(item)
                     # Handle both string and list (multimodal) content types
@@ -942,6 +943,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         continue
                     try:
                         self._append_and_log(instance, msg)
+                        drained_count += 1
                     except Exception as e:
                         logger.error(f"Failed to append queued message for {inst_name}: {e}")
 
@@ -956,16 +958,31 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         _check_tail(inst_name, conv, log_inst.log_path, context='early_exit')
                     except Exception:
                         pass  # Non-critical check
-                logger.debug('early exit - %s (_setup_turn returned empty)', instance.instance_name)
-                # Telemetry: record turn end for early exit (non-blocking)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_turn_end(inst_name)
-                    except Exception:
-                        pass
-                early_exit = True  # Queued messages were drained above; the exit
-                                   # finally must NOT drain again (double-drain race).
-                return  # Manual command handled or error
+
+                # ── First-message-after-boot fix ──────────────────────────────
+                # If we drained real user messages into an empty conversation,
+                # re-run _setup_turn so the LLM actually sees them this turn.
+                # Without this, the early exit consumed the message and returned
+                # without any LLM call — the user had to send a second message.
+                if drained_count > 0:
+                    logger.info(
+                        '[EARLY_EXIT_REENTRY] %s: drained %d msg(s) into empty conversation, re-entering turn',
+                        inst_name, drained_count,
+                    )
+                    messages, llm_messages, response = self._setup_turn(instance)
+
+                if not messages:
+                    # No re-entry (or re-entry still empty) — original early exit.
+                    logger.debug('early exit - %s (_setup_turn returned empty)', instance.instance_name)
+                    # Telemetry: record turn end for early exit (non-blocking)
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_turn_end(inst_name)
+                        except Exception:
+                            pass
+                    early_exit = True  # Queued messages were drained above; the exit
+                                       # finally must NOT drain again (double-drain race).
+                    return  # Manual command handled or error
 
             max_turns = instance.max_turns or DEFAULT_MAX_TURNS
             turns_available = max_turns
