@@ -924,10 +924,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             if not messages:
                 # Safety: drain any queued user messages before exiting, so
                 # they aren't lost.
-                # Note: Using pool.add_message() here is safe because the
-                # engine returns immediately
-                # after this block (line 676), so cached lists are never used
-                # again for this instance.
+                # Safe to append directly: on the re-entry path below we
+                # re-run _setup_turn, which rebuilds from instance.conversation
+                # under the compression lock and therefore sees these; on the
+                # true early-exit path the turn is abandoned and the cached
+                # lists are never used again.
                 # This prevents reintroducing the silent cache rebuild bug from
                 # Fix 1.
                 inst_name = instance.instance_name
@@ -959,11 +960,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     except Exception:
                         pass  # Non-critical check
 
-                # ── First-message-after-boot fix ──────────────────────────────
+                # ── Empty-conversation re-entry (defense-in-depth) ────────────
                 # If we drained real user messages into an empty conversation,
                 # re-run _setup_turn so the LLM actually sees them this turn.
                 # Without this, the early exit consumed the message and returned
                 # without any LLM call — the user had to send a second message.
+                # Upstream cause: run_agent_unified.py does not seed a system
+                # message when none is available, so the conversation can be
+                # empty on the first turn. Do not remove this as redundant —
+                # it is the safety net for any empty-conversation early exit.
                 if drained_count > 0:
                     logger.info(
                         '[EARLY_EXIT_REENTRY] %s: drained %d msg(s) into empty conversation, re-entering turn',
@@ -973,7 +978,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
                 if not messages:
                     # No re-entry (or re-entry still empty) — original early exit.
-                    logger.debug('early exit - %s (_setup_turn returned empty)', instance.instance_name)
+                    logger.debug('early exit - %s (_setup_turn returned empty)', inst_name)
                     # Telemetry: record turn end for early exit (non-blocking)
                     if (tel := self._telemetry()) is not None:
                         try:
@@ -1496,7 +1501,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         otherwise rebuild from pool. The LLM API handles prefix caching automatically.
 
         Returns:
-            Tuple of (messages, llm_messages, response) or (None, None, None) on error.
+            Tuple of (messages, llm_messages, response), or (None, None, None)
+            on error or when the conversation is empty (the early-exit path).
         """
         inst_name = instance.instance_name
 
