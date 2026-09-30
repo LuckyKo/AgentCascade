@@ -87,3 +87,19 @@ def create_dispatcher(pool, mock_engine=None):
     dispatcher = ToolDispatcher(pool)
     dispatcher.set_engine(mock_engine)
     return dispatcher, mock_engine
+
+
+def app_logger_names():
+    """Return the list of app logger names to target with caplog.
+
+    The app logger is `agent_cascade_logger` (suffixed `.{instance_id}` when an
+    instance id is set), plus the `agent_cascade` module logger as a fallback.
+    See [[app-logger-no-basicconfig-slot-logger-blindness]] for why targeting
+    `agent_cascade.slot_queue` would capture nothing.
+    """
+    from agent_cascade.instance_id import get_instance_id
+    _id = get_instance_id() or ''
+    names = ['agent_cascade_logger', 'agent_cascade']
+    if _id:
+        names.append(f'agent_cascade_logger.{_id}')
+    return names

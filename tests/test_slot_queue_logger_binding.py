@@ -11,20 +11,12 @@ import pytest
 
 from agent_cascade.slot_queue import SlotPool
 
-
-def _app_logger_names():
-    """Return the list of app logger names to target with caplog."""
-    from agent_cascade.instance_id import get_instance_id
-    _id = get_instance_id() or ''
-    names = ['agent_cascade_logger', 'agent_cascade']
-    if _id:
-        names.append(f'agent_cascade_logger.{_id}')
-    return names
+from tests.slot_test_helpers import app_logger_names
 
 
 def test_slot_debug_reaches_app_logger(caplog):
     """SlotPool enqueue/grant DEBUG lines must be captured on the app logger."""
-    for name in _app_logger_names():
+    for name in app_logger_names():
         caplog.set_level(logging.DEBUG, logger=name)
 
     pool = SlotPool(key='test_bind', capacity=1)
