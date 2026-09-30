@@ -692,46 +692,39 @@ class APIRouter:
 
     def _drop_held_permit(self, instance: 'AgentInstance', inst_name: str, old_key: str,
                           release_cb_old: Callable[[], None], origin: str) -> None:
-        """Release a held sticky permit (capture-and-nullify under the state lock).
+        """Release a held sticky permit (nullify-after-success, LEAK #6).
 
         Used by both sync_sticky_slot drop paths (stay-slotless and cross-pool swap).
         The caller captured ``release_cb_old`` while reading the instance's held state, but
         that read may be stale by the time we get here — a concurrent side-call (e.g. caption /
         image_gen on the shared conc=0 slot) or a lifecycle release could have already dropped
-        it. So this is IDEMPOTENT and mirrors the canonical ``slot_queue.release_slot_permit``
-        pattern:
+        it. So this is IDEMPOTENT:
 
-          1. Under ``instance._state_lock``: re-check that THIS exact callback is still held. If
-             so, nullify ``_slot_release``/``_slot_key`` (a concurrent release becomes a no-op)
-             AND clear the committed-endpoint probe fast-path marker — the connection this
-             permit gated is about to die, so the next acquisition must re-probe rather than
-             skip against a dead endpoint. If the callback is already gone, return without
-             releasing or clearing (nothing was held).
+          1. Under ``instance._state_lock``: re-check that THIS exact callback is still held;
+             if not, return without releasing or clearing (nothing was held).
           2. Invoke the captured callback OUTSIDE the state lock — the pool's condition may block
              on waiters, so holding the state lock across it would deadlock.
+          3. On success ONLY: re-acquire the lock and nullify ``_slot_release``/``_slot_key`` +
+             clear the committed-endpoint probe fast-path marker, guarded by a second identity
+             re-check (the callback could have been replaced by a concurrent acquire in the
+             meantime). The connection this permit gated is dead, so the next acquisition must
+             re-probe rather than skip against a dead endpoint.
 
         ``self._lock`` is taken INSIDE ``instance._state_lock`` here (consistent with the global
         self._lock → instance._state_lock order used by pre_validate / success paths). This method
         MUST be called WITHOUT already holding ``instance._state_lock`` — sync_sticky_slot releases
         it before calling here for exactly that reason.
 
-        If the release callback raises, the state was already nullified (matching the canonical
-        pattern); re-raising still prevents the caller from proceeding ungated (plan §3.9).
+        Nullify-after-success (LEAK #6): if the callback raises, `_slot_release`/`_slot_key` and
+        the committed-endpoint marker are left in place so a later release point (dismiss /
+        stop_session / the run-finally) can retry the same callback; re-raising still prevents
+        the caller from proceeding ungated (plan §3.9). The identity re-check in step 3 is
+        mandatory — without it we could nullify a permit that a concurrent path just re-acquired.
         """
         with instance._state_lock:
             if instance._slot_release is not release_cb_old:
                 # A concurrent drop/release already cleared this permit — nothing to do.
                 return False
-            instance._slot_release = None
-            instance._slot_key = None
-            # The sticky slot is being released — any committed endpoint for this instance is no
-            # longer a live connection. Clear the probe fast-path marker so the next acquisition
-            # re-probes instead of skipping against a dead connection. inst_name is always populated
-            # by sync_sticky_slot (via `or 'unknown'`), but guard anyway: the dict key must match the
-            # exact instance_name used when the marker was set.
-            if inst_name:
-                with self._lock:
-                    self._instance_committed_endpoint.pop(inst_name, None)
 
         try:
             release_cb_old()
@@ -742,7 +735,23 @@ class APIRouter:
                 f"release_error={e}",
                 exc_info=True,
             )
-            raise
+            raise  # permit left in place — a later release point can retry it
+
+        # Success only: nullify state + clear the marker, guarded by an identity
+        # re-check (the callback could have been replaced by a concurrent acquire).
+        with instance._state_lock:
+            if instance._slot_release is release_cb_old:
+                instance._slot_release = None
+                instance._slot_key = None
+                # The sticky slot is being released — any committed endpoint for this
+                # instance is no longer a live connection. Clear the probe fast-path
+                # marker so the next acquisition re-probes instead of skipping against
+                # a dead connection. inst_name is always populated by sync_sticky_slot
+                # (via `or 'unknown'`), but guard anyway: the dict key must match the
+                # exact instance_name used when the marker was set.
+                if inst_name:
+                    with self._lock:
+                        self._instance_committed_endpoint.pop(inst_name, None)
 
         logger.debug(f"[SLOTPOOL] instance={inst_name} pool={old_key} "
                      f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}" +

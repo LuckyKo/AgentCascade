@@ -616,9 +616,10 @@ class TestLeak5UnifiedRunnerClosesGenerator:
         from agent_cascade import run_agent_unified as rau
 
         # The runner does a FUNCTION-SCOPE import from .api_integration — patch the
-        # source module (same seam the stress harness uses). Everything the loop body
+        # RE-EXPORT seam (agent_cascade.api_integration.run_agent_in_pool_with_recovery),
+        # which is the name actually resolved at call time. Everything the loop body
         # touches is stubbed so only the generator-lifecycle code under test runs.
-        import agent_cascade.api_integration_pkg.runner as runner_mod
+        import agent_cascade.api_integration as ai_pkg
 
         inst = _make_instance(pool, 'leak5a', 'coder')
         inst.conversation = [object()]  # non-empty → create_main_agent_instance skipped
@@ -632,7 +633,7 @@ class TestLeak5UnifiedRunnerClosesGenerator:
         loop = asyncio.new_event_loop()
         send_queue = asyncio.Queue()
 
-        with patch.object(runner_mod, 'run_agent_in_pool_with_recovery',
+        with patch.object(ai_pkg, 'run_agent_in_pool_with_recovery',
                           side_effect=lambda **kw: _CloseSpy(_gen_with_tick_flag())), \
              patch.object(rau, '_reset_run_scoped_tg_state'), \
              patch('agent_cascade.api_integration_pkg.state_builder._apply_ui_config'), \
@@ -741,9 +742,9 @@ class TestLeak6DropHeldPermitRetryable:
 
         records, handler, targets = _capture_logs()
         try:
+            # Signature (router.py): (instance, inst_name, old_key, release_cb_old, origin).
             with pytest.raises(RuntimeError, match='drop-callback-failure'):
-                router._drop_held_permit(inst, 'leak6a', boom, SHARED_KEY,
-                                         inst_name='leak6a')
+                router._drop_held_permit(inst, 'leak6a', SHARED_KEY, boom, 'test')
         finally:
             _restore_logs(handler, targets)
 

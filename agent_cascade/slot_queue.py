@@ -391,6 +391,7 @@ def release_slot_permit(
     action: Optional[str] = None,
     context: Optional[str] = None,
     pool: Optional['SlotPool'] = None,
+    strict: bool = False,
 ) -> bool:
     """Atomically capture and release a slot permit held by ``holder``.
 
@@ -427,6 +428,10 @@ def release_slot_permit(
             When None, the pool is recovered from the release callback's
             closure cells (SlotPool._make_release_cb closes over the pool) as a
             best-effort fallback; any failure yields waiters=-1.
+        strict: When True, a failing release callback re-raises instead of being
+            absorbed. The [SLOT_RELEASE_ERROR] ERROR is still logged first. Do NOT
+            use this on lifecycle paths whose finally block must guarantee cleanup —
+            there an absorbed (logged) failure is strictly safer than a hang.
 
     Returns:
         True if a live permit was captured and released, False if nothing was
@@ -475,10 +480,14 @@ def release_slot_permit(
     try:
         release_callback()
     except Exception as e:
+        # The [SLOT_RELEASE_ERROR] ERROR is logged unconditionally — it is the
+        # discoverability mechanism and must not become conditional on `strict`.
         logger.error(
             f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
             exc_info=True,
         )
+        if strict:
+            raise
 
     if action:
         _waiters = -1

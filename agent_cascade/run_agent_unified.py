@@ -160,79 +160,93 @@ def run_agent_thread_unified(
         if _tg_instance is not None:
             _reset_run_scoped_tg_state(_tg_instance)
 
-        for turn_output_raw in run_agent_in_pool_with_recovery(
-                pool=pool,
-                instance_name=instance_name,
-                max_auto_retries=max_auto_retries,
-                auto_rollback_enabled=auto_rollback_enabled,
-        ):
+        _run_gen = run_agent_in_pool_with_recovery(
+            pool=pool,
+            instance_name=instance_name,
+            max_auto_retries=max_auto_retries,
+            auto_rollback_enabled=auto_rollback_enabled,
+        )
+        try:
+            for turn_output_raw in _run_gen:
+                # Unpack (turn_output, is_streaming) signal from engine.run()
+                if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
+                    turn_output, is_streaming_tick = turn_output_raw
+                else:
+                    turn_output, is_streaming_tick = turn_output_raw, False
 
-            # Unpack (turn_output, is_streaming) signal from engine.run()
-            if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
-                turn_output, is_streaming_tick = turn_output_raw
-            else:
-                turn_output, is_streaming_tick = turn_output_raw, False
+                # PROBE: capture the moment the engine yielded this tick (for yield→enqueue timing).
+                t_yield = time.monotonic()
 
-            # PROBE: capture the moment the engine yielded this tick (for yield→enqueue timing).
-            t_yield = time.monotonic()
+                # FIX TODO #41: Check all stop conditions including per-instance halt and termination
+                if is_stopped():
+                    break
 
-            # FIX TODO #41: Check all stop conditions including per-instance halt and termination
-            if is_stopped():
-                break
+                now = time.monotonic()
 
-            now = time.monotonic()
+                # Check if the last message is a tool call or function result
+                has_tool_event = False
+                streaming_text = None
+                if turn_output:
+                    last_msg = turn_output[-1]
+                    msg_role = (last_msg.get(ROLE, '') if isinstance(last_msg, dict) else getattr(last_msg, 'role', ''))
+                    msg_fc = last_msg.get('function_call') if isinstance(last_msg, dict) else getattr(
+                        last_msg, 'function_call', None)
+                    has_tool_event = bool(msg_fc) or msg_role == FUNCTION
 
-            # Check if the last message is a tool call or function result
-            has_tool_event = False
-            streaming_text = None
-            if turn_output:
-                last_msg = turn_output[-1]
-                msg_role = (last_msg.get(ROLE, '') if isinstance(last_msg, dict) else getattr(last_msg, 'role', ''))
-                msg_fc = last_msg.get('function_call') if isinstance(last_msg, dict) else getattr(
-                    last_msg, 'function_call', None)
-                has_tool_event = bool(msg_fc) or msg_role == FUNCTION
+                    # Extract streaming text for activity banner (including reasoning/tools)
+                    if msg_role == ASSISTANT:
+                        content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(
+                            last_msg, 'content', '')
+                        reasoning = last_msg.get('reasoning_content', '') if isinstance(last_msg, dict) else getattr(
+                            last_msg, 'reasoning_content', '')
 
-                # Extract streaming text for activity banner (including reasoning/tools)
-                if msg_role == ASSISTANT:
-                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(
-                        last_msg, 'content', '')
-                    reasoning = last_msg.get('reasoning_content', '') if isinstance(last_msg, dict) else getattr(
-                        last_msg, 'reasoning_content', '')
+                        if msg_fc:
+                            # Show tool call arguments in activity banner for "live" feel
+                            fc_name = msg_fc.get('name', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'name', '')
+                            fc_args = msg_fc.get('arguments', '') if isinstance(msg_fc, dict) else getattr(
+                                msg_fc, 'arguments', '')
+                            streaming_text = f"Tool {fc_name}({str(fc_args)[:100]}...)"
+                        elif reasoning:
+                            # Show thinking process
+                            streaming_text = str(reasoning)
+                        else:
+                            streaming_text = str(content)  # noqa: F841  (reserved for activity banner)
+                    elif msg_role == FUNCTION:
+                        # Tool result (FUNCTION role): show which tool completed + brief preview
+                        from agent_cascade.utils.utils import format_tool_result_preview, msg_field
+                        tool_name = msg_field(last_msg, 'name', '')
+                        content = msg_field(last_msg, 'content', '')
+                        format_tool_result_preview(tool_name, content, max_len=120)
 
-                    if msg_fc:
-                        # Show tool call arguments in activity banner for "live" feel
-                        fc_name = msg_fc.get('name', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'name', '')
-                        fc_args = msg_fc.get('arguments', '') if isinstance(msg_fc, dict) else getattr(
-                            msg_fc, 'arguments', '')
-                        streaming_text = f"Tool {fc_name}({str(fc_args)[:100]}...)"
-                    elif reasoning:
-                        # Show thinking process
-                        streaming_text = str(reasoning)
-                    else:
-                        streaming_text = str(content)  # noqa: F841  (reserved for activity banner)
-                elif msg_role == FUNCTION:
-                    # Tool result (FUNCTION role): show which tool completed + brief preview
-                    from agent_cascade.utils.utils import format_tool_result_preview, msg_field
-                    tool_name = msg_field(last_msg, 'name', '')
-                    content = msg_field(last_msg, 'content', '')
-                    format_tool_result_preview(tool_name, content, max_len=120)
+                # ── WebSocket broadcast (shared helper handles all throttling) ──
+                # Tool events are signaled via is_streaming_tick=True so the helper
+                # bypasses its internal throttle immediately.
+                last_send, exec_state['last_resp_len'] = broadcast_stream_update(
+                    pool=pool,
+                    instance_name=instance_name,
+                    turn_output=turn_output,
+                    is_streaming_tick=is_streaming_tick or has_tool_event,
+                    tick_num=tick_num,
+                    now_sec=now,
+                    last_send=last_send,
+                    last_resp_len=exec_state['last_resp_len'],
+                    yield_time=t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
+                )
 
-            # ── WebSocket broadcast (shared helper handles all throttling) ──
-            # Tool events are signaled via is_streaming_tick=True so the helper
-            # bypasses its internal throttle immediately.
-            last_send, exec_state['last_resp_len'] = broadcast_stream_update(
-                pool=pool,
-                instance_name=instance_name,
-                turn_output=turn_output,
-                is_streaming_tick=is_streaming_tick or has_tool_event,
-                tick_num=tick_num,
-                now_sec=now,
-                last_send=last_send,
-                last_resp_len=exec_state['last_resp_len'],
-                yield_time=t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
-            )
-
-            tick_num += 1
+                tick_num += 1
+        finally:
+            # Deterministic generator cleanup: close() forces the suspended engine.run()
+            # generator to unwind its exit finally (core.py:1433 → _release_slot), so the
+            # permit is returned even when the loop was abandoned by a break, an
+            # exception, or a stop. Matches core.py:3839-3841, advisor_runner.py:208-214
+            # and compression/agent_invoker.py:427-431, which all close explicitly for
+            # this reason. Under CPython the refcount would usually close it anyway —
+            # but only by accident, and not on the except/re-raise paths at :260-263.
+            try:
+                if hasattr(_run_gen, 'close'):
+                    _run_gen.close()
+            except RuntimeError:
+                pass  # Already closed/exhausted
 
         # TG-STREAM F5: the old end-of-run history-extraction push is GONE —
         # the final answer is now pushed at stream time in engine/core.py Phase 5
@@ -240,22 +254,27 @@ def run_agent_thread_unified(
         # No post-run block remains here; surrounding completion logic is untouched.
 
         # ── Final state broadcast ────────────────────────────────────────
-        final_state = build_state_from_pool(
-            pool=pool,
-            instance_name=instance_name,
-            generating=False,
-        )
-        if final_state is not None:
-            # Match old api_server behavior: type='done' + instance_halted field
-            halted = pool.is_instance_halted(instance_name)
-            asyncio.run_coroutine_threadsafe(
-                send_queue.put({
-                    'type': 'done',
-                    **final_state,
-                    'instance_halted': halted,
-                }),
-                loop,
+        try:
+            final_state = build_state_from_pool(
+                pool=pool,
+                instance_name=instance_name,
+                generating=False,
             )
+            if final_state is not None:
+                # Match old api_server behavior: type='done' + instance_halted field
+                halted = pool.is_instance_halted(instance_name)
+                asyncio.run_coroutine_threadsafe(
+                    send_queue.put({
+                        'type': 'done',
+                        **final_state,
+                        'instance_halted': halted,
+                    }),
+                    loop,
+                )
+        except Exception as e:
+            # Non-critical: the run already finished; a failed final broadcast must not
+            # prevent the generator from being closed (the inner finally above handles it).
+            logger.debug(f"Final state broadcast failed (non-critical): {e}")
 
     except (KeyboardInterrupt, SystemExit):
         # Never swallow user interrupts or explicit exits
