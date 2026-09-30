@@ -20,10 +20,8 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.agent_instance import AgentInstance
 
-from agent_cascade.child_runner import run_child_core
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
-from agent_cascade.settings import AGENT_MAX_NESTING_DEPTH
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
@@ -119,75 +117,6 @@ class ToolDispatcher:
 
         is_sequential = (concurrency == 0)
         return '_shared_sequential_slot_' if is_sequential else api_base
-
-    def _held_slot_key(self, instance: 'AgentInstance') -> Optional[str]:
-        """Authoritative pool key of the permit this instance currently holds.
-
-        Prefers instance._slot_key (written by core.py:342 from the
-        cursor-aware get_effective_slot_info) over re-deriving from the chain
-        head, which is what _compute_slot_key does and which is WRONG on a
-        rotated chain.
-        """
-        if instance is None:
-            return None
-        with instance._state_lock:
-            if getattr(instance, '_slot_release', None) is None:
-                return None          # no permit held -> not a collision source
-            key = getattr(instance, '_slot_key', None)
-            return key if isinstance(key, str) else None
-
-    def _chain_held_slots(self, instance: 'AgentInstance') -> List[Tuple['AgentInstance', str]]:
-        """[(instance, pool_key), ...] for `instance` and each live ancestor that
-        currently holds a permit, NEAREST FIRST.
-
-        Nearest-first ordering is what makes the release in §3.3 correct: the first
-        entry whose key equals the child's key is the innermost permit that must be
-        yielded, and the ordering is also the reacquire order (reversed in §3.3).
-        """
-        chain: List[Tuple['AgentInstance', str]] = []
-        current = instance
-        for _ in range(AGENT_MAX_NESTING_DEPTH):   # depth-bounded; prevents parent cycles
-            key = self._held_slot_key(current)
-            if key:
-                chain.append((current, key))
-            parent_name = getattr(current, 'parent_instance', None)
-            if not isinstance(parent_name, str):
-                break                    # chain end — OR a bare MagicMock (see note)
-            parent = self.pool.get_instance(parent_name)
-            if parent is None:
-                break                    # dismissed/terminated ancestor -> no permit
-            current = parent
-        return chain
-
-    def _release_chain_collision(self,
-                                 chain: List[Tuple['AgentInstance', str]],
-                                 caller_slot_holder: 'AgentInstance',
-                                 pool_key: str) -> List[Tuple['AgentInstance', str]]:
-        """Release the nearest NON-caller chain member whose key == `pool_key`.
-
-        `chain` is the list produced by _chain_held_slots (§3.2b), nearest-first.
-        Returns the entries actually released so the `finally` can restore exactly
-        those, in reverse. Empty list when no non-caller holds `pool_key`.
-
-        The direct caller is skipped — _run_child_sync already handles its permit.
-        """
-        released: List[Tuple['AgentInstance', str]] = []
-        for inst, key in chain:
-            if inst is caller_slot_holder:
-                continue                              # direct caller: handled separately
-            if key != pool_key:
-                continue
-            # Release via the canonical path ONLY — never the raw callback.
-            # release_slot_permit captures+nullifies under _state_lock, then
-            # invokes the callback outside it (slot_queue.py:370-383).
-            from agent_cascade.slot_queue import release_slot_permit
-            release_slot_permit(inst,
-                                inst.instance_name,
-                                action='drop-handoff',
-                                context='ancestor chain handoff')
-            released.append((inst, inst.instance_name))
-            break                                     # nearest matching ancestor only
-        return released
 
     # ── Main Tool Execution Entry Point ──────────────────────────────────────
 
@@ -416,10 +345,6 @@ class ToolDispatcher:
         # Get child's slot info (resolved against the child's own endpoint pool)
         child_slot_info = router.get_agent_slot_info(agent_class) if router else None
 
-        # COLL-2 chain walk result — computed once below and threaded into _run_child_sync so the
-        # release reuses this exact walk (no TOCTOU window). None on paths where no walk is needed.
-        chain: Optional[List[Tuple['AgentInstance', str]]] = None
-
         # Case 1: Child needs no slot (conc=-1) → always ASYNC, caller_holds_slot forced False
         if not child_slot_info or not child_slot_info.get('needs_slot'):
             caller_holds_slot = False
@@ -438,22 +363,25 @@ class ToolDispatcher:
 
                 # Case 3: Caller holds no slot → ASYNC is safe (handled by else branch below)
 
-                if child_slot_info and child_slot_info.get('needs_slot'):
+                if caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                    # Case 4/5: Caller holds a slot. Check for pool collision.
+                    caller_slot_key = self._compute_slot_key(caller_slot_holder.agent_class)
+
                     child_slot_key = child_slot_info['slot_key']
-                    # COLL-2: check the WHOLE ancestor chain, not just the direct caller.
-                    # ONE walk, reused verbatim by the release in §3.3 (no TOCTOU window).
-                    chain = self._chain_held_slots(caller_slot_holder)
-                    if child_slot_key in {k for _, k in chain}:
-                        caller_holds_slot = True
-                        logger.debug('[CALL_AGENT_DEBUG] COLL-2 ancestor pool collision: '
-                                     'child_key=%s chain=%s -> SYNC',
-                                     child_slot_key, [k for _, k in chain])
+
+                    # Case 5: Same slot pool → collision → SYNC
+                    if caller_slot_key == child_slot_key:
+                        caller_holds_slot = True  # Keep sync path (collision detected)
                     else:
+                        # Case 4: Different slot pools → no collision → ASYNC is safe
                         caller_holds_slot = False
 
+                # Sync/async decision: depends ONLY on whether the DIRECT caller holds a
+                # slot and the child needs the SAME slot pool. An A→B(async)→C scenario is
+                # handled by C simply waiting in the FIFO queue (bounded wait + timeout).
+
         if caller_holds_slot:
-            return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name,
-                                        child_depth, chain, child_slot_info['slot_key'])
+            return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
         else:
             return self._run_child_async(caller_name, function_id, agent_class, instance_name, args, child_depth)
 
@@ -573,9 +501,7 @@ class ToolDispatcher:
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
 
     def _run_child_sync(self, agent_class: str, instance_name: str, args: Any, caller_slot_holder: 'AgentInstance',
-                        caller_name: str, child_depth: int,
-                        chain: Optional[List[Tuple['AgentInstance', str]]] = None,
-                        child_slot_key: Optional[str] = None) -> str:
+                        caller_name: str, child_depth: int) -> str:
         """Run child agent synchronously (caller holds slot).
 
         Thin wrapper around child_runner.run_child_core() that handles
@@ -588,39 +514,24 @@ class ToolDispatcher:
         4. Returns result_string from step 2
 
         Args:
-            agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth,
-            chain (the §3.2b walk result, reused verbatim by the release), child_slot_key
+            agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth
 
         Returns:
             Result string from child agent
         """
+        from agent_cascade.child_runner import run_child_core
+
         sync_path_start = time.monotonic()
 
-        # Only reacquire what was actually released (COLL-2 grandparent case: caller may hold nothing).
-        caller_released = (
-            caller_slot_holder is not None
-            and getattr(caller_slot_holder, '_slot_release', None) is not None
-        )
-
-        # Release caller's slot so the child can acquire it inside engine.run().
-        # Canonical path ONLY (release_slot_permit): capture-nullify under _state_lock, then
-        # invoke the callback outside it — never the raw callback (breaks double-release
-        # idempotency and skips committed-endpoint marker clearing).
-        if caller_released:
+        # Release caller's slot so the child can acquire it inside engine.run()
+        if caller_slot_holder and hasattr(caller_slot_holder,
+                                          '_slot_release') and caller_slot_holder._slot_release is not None:
             logger.debug(
                 f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'")
             # Structured drop-handoff event (sticky slot plan change #10): parent yields its
             # slot so the sync child can acquire at FIFO tail; parent re-acquires at tail after.
-            from agent_cascade.slot_queue import release_slot_permit
-            release_slot_permit(caller_slot_holder, caller_name, action='drop-handoff', context='sync child')
+            self.engine._release_slot(caller_slot_holder, caller_name, 'sync child', action='drop-handoff')
             logger.debug(f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire")
-
-        # COLL-2: if the collision is with a NON-direct ancestor (e.g. grandparent), release
-        # its permit too — otherwise the child still queues behind it and the circular wait persists.
-        # No caller_released guard here — deliberate (see plan §3.3): the one case where the
-        # caller holds nothing is exactly the case that needs this release. Unguarded call is a
-        # no-op when chain is None or no non-caller holds child_slot_key.
-        extra = self._release_chain_collision(chain or [], caller_slot_holder, child_slot_key) if child_slot_key else []
 
         try:
             # Unified core execution — handles loop detection, status checks, formatting
@@ -661,41 +572,35 @@ class ToolDispatcher:
             return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
 
         finally:
-            # Only reacquire what was actually released — reacquiring a permit the caller never
-            # yielded would leak a second hold (COLL-2 grandparent case).
-            if caller_released:
-                logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
-                if not self._reacquire_caller_slot(caller_slot_holder, caller_name, 'sync child'):
-                    logger.warning(
-                        f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
-                        f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
-                    # Clear saved state label to prevent orphaned state accumulation.
-                    # restore_instance_state() normally clears this on success/failure, but we skipped it here.
-                    try:
-                        with caller_slot_holder._state_lock:
-                            if caller_slot_holder._state_label is not None:
-                                caller_slot_holder._state_label = None
-                                logger.debug('Cleared orphaned state label for %s (re-acquire failed)', caller_name)
-                    except Exception as e:
-                        logger.debug('Failed to clear state label for %s: %s', caller_name, e)
-                else:
-                    # Restore parent's state ONLY AFTER re-acquiring the slot.
-                    # This avoids evicting another agent's model while they're still running
-                    # on the same conc=0 pool (e.g., B's child D using same model as A).
-                    try:
-                        from agent_cascade.state_ops import restore_instance_state
-                        restored = restore_instance_state(caller_slot_holder)
-                        if restored:
-                            logger.debug('Restored caller KV state for %s', caller_name)
-                    except Exception as e:
-                        logger.debug('Failed to restore caller state for %s: %s', caller_name, e)
+            # FIX 3: Always re-acquire caller's slot, even on early exit due to stop
+            logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
+            if not self._reacquire_caller_slot(caller_slot_holder, caller_name, 'sync child'):
+                logger.warning(
+                    f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
+                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
+                # Clear saved state label to prevent orphaned state accumulation.
+                # restore_instance_state() normally clears this on success/failure, but we skipped it here.
+                try:
+                    with caller_slot_holder._state_lock:
+                        if caller_slot_holder._state_label is not None:
+                            caller_slot_holder._state_label = None
+                            logger.debug('Cleared orphaned state label for %s (re-acquire failed)', caller_name)
+                except Exception as e:
+                    logger.debug('Failed to clear state label for %s: %s', caller_name, e)
+            else:
+                # Restore parent's state ONLY AFTER re-acquiring the slot.
+                # This avoids evicting another agent's model while they're still running
+                # on the same conc=0 pool (e.g., B's child D using same model as A).
+                try:
+                    from agent_cascade.state_ops import restore_instance_state
+                    restored = restore_instance_state(caller_slot_holder)
+                    if restored:
+                        logger.debug('Restored caller KV state for %s', caller_name)
+                except Exception as e:
+                    logger.debug('Failed to restore caller state for %s: %s', caller_name, e)
 
-                    logger.debug(f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
-                                 f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
-
-            # Restore the chain permits released above, nearest-first in reverse.
-            for inst, nm in reversed(extra or ()):
-                self._reacquire_caller_slot(inst, nm, 'ancestor chain')
+                logger.debug(f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
+                             f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
 
     def _run_child_async(self, caller_name: str, function_id: Optional[str], agent_class: str, instance_name: str,
                          args: dict, child_depth: int) -> str:

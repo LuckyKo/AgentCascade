@@ -227,9 +227,11 @@ class TestDifferentSlotPoolsAsync:
     def test_async_when_different_endpoints_caller_holds_slot(self, router_with_endpoints):
         """Caller holds sequential slot, child uses parallel endpoint → ASYNC (different pools).
 
-        Extended per plan §5.1 with an ancestor that holds a THIRD pool: the COLL-2 check must
-        walk the whole chain and still find no intersection, so the decision stays ASYNC. Without
-        the ancestor this test would silently stop guarding the Case-4 (chain-walk) behavior.
+        The sync/async decision depends only on the DIRECT caller's held permit vs. the child's
+        target pool (COLL-2 chain-walk was reverted — see plans/slot-revert-and-leakfix_PLAN.md
+        step 9). The grandparent below holds a disjoint third pool and is registered so the
+        mock resolver finds it; since the caller's own sequential pool is disjoint from the
+        child's parallel pool, the decision stays ASYNC.
         """
         # Grandparent holds the unlimited pool; caller (its child) holds the sequential pool.
         grandparent = make_mock_instance(
@@ -271,101 +273,6 @@ class TestDifferentSlotPoolsAsync:
 
         pool.register_async_call.assert_called(), \
             f"Expected async (different pools) but took sync. Result: {result}"
-
-
-# ============================================================================
-# Test 3b: Ancestor-chain collision (plan §4.3 — TestAncestorChainCollision)
-# ============================================================================
-
-
-class TestAncestorChainCollision:
-    """COLL-2 must inspect the WHOLE ancestor chain, not just the direct caller."""
-
-    def test_sync_when_grandparent_holds_child_pool(self, router_with_endpoints):
-        """Caller holds NO permit; its grandparent holds the pool the child needs → SYNC.
-
-        The direct-caller-only check (old behavior) would see the caller holding nothing and go
-        ASYNC — the exact deadlock the fix removes. The chain walk must find the grandparent's
-        held key and force SYNC.
-        """
-        # Grandparent holds the sequential pool; caller is its child but holds no permit.
-        grandparent = make_mock_instance(
-            instance_name='grandparent1',
-            agent_class='coder',
-            slot_release=lambda: None,
-            slot_key='http://sequential-api',
-            parent_instance=None,
-        )
-        caller = make_mock_instance(
-            instance_name='caller1',
-            agent_class='researcher',
-            slot_release=None,  # caller holds NO permit
-            slot_key=None,
-            parent_instance='grandparent1',
-        )
-
-        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
-        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
-
-        pool = make_mock_pool(router_with_endpoints, [caller])
-        pool.instances[grandparent.instance_name] = grandparent
-        pool.get_instance.side_effect = lambda name: pool.instances.get(name)
-
-        dispatcher, _ = create_dispatcher(pool)
-
-        result = dispatcher.handle_call_agent(
-            args={
-                'instance_name': 'child1',
-                'agent_class': 'coder',  # child needs the same sequential pool grandparent holds
-                'task': 'test'
-            },
-            messages=[],
-            instance=caller,
-        )
-
-        pool.register_async_call.assert_not_called()
-        assert 'launched asynchronously' not in result.lower(), \
-            f"Expected sync (grandparent holds child's pool) but got async: {result}"
-
-    def test_async_when_ancestor_pool_disjoint_from_child(self, router_with_endpoints):
-        """Ancestor holds a different pool than the child needs → still ASYNC (no over-blocking)."""
-        grandparent = make_mock_instance(
-            instance_name='grandparent1',
-            agent_class='researcher',
-            slot_release=lambda: None,
-            slot_key='http://unlimited-api',
-            parent_instance=None,
-        )
-        caller = make_mock_instance(
-            instance_name='caller1',
-            agent_class='coder',
-            slot_release=lambda: None,
-            slot_key='http://sequential-api',
-            parent_instance='grandparent1',
-        )
-
-        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
-        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
-        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
-
-        pool = make_mock_pool(router_with_endpoints, [caller])
-        pool.instances[grandparent.instance_name] = grandparent
-        pool.get_instance.side_effect = lambda name: pool.instances.get(name)
-
-        dispatcher, _ = create_dispatcher(pool)
-
-        result = dispatcher.handle_call_agent(
-            args={
-                'instance_name': 'child1',
-                'agent_class': 'reviewer',  # child needs the parallel pool — disjoint from both
-                'task': 'test'
-            },
-            messages=[],
-            instance=caller,
-        )
-
-        pool.register_async_call.assert_called(), \
-            f"Expected async (ancestor pools disjoint from child) but took sync. Result: {result}"
 
 
 # ============================================================================

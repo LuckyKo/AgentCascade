@@ -31,9 +31,9 @@ def make_mock_instance(
     """Mock AgentInstance with EXPLICIT slot state (plan §5.2).
 
     `slot_key` and `parent_instance` are set explicitly (defaulting to None): a bare
-    MagicMock would auto-create them as truthy stubs, which would (a) poison the
-    COLL-2 set-intersection in `_held_slot_key` and (b) make the ancestor chain walk
-    non-terminating.
+    MagicMock would auto-create them as truthy stubs, which would poison the sync/async
+    pool-intersection check in the dispatcher (it reads the direct caller's `_slot_key`)
+    and mislead any parent-chain traversal.
     """
     inst = MagicMock()
     inst.instance_name = instance_name
