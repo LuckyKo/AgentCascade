@@ -160,10 +160,16 @@ def leak_harness(tmp_path, request):
 # ── Shared helpers ───────────────────────────────────────────────────────────
 
 def _acquire_shared(router, name, timeout=5.0):
-    """Acquire the shared conc=0 slot for `name`; returns the release callback."""
+    """Acquire the shared conc=0 slot for `name`; returns the release callback.
+
+    Wires the holder-context resolver (plan §3.3 option a) exactly as the real
+    production path does: the AgentPool is threaded through so the FIFO head-stall
+    alarm can resolve the holder's live activity for its streaming-suppression check.
+    """
     return router.scheduler.acquire(
         api_base=SEQ_BASE, concurrency_limit=0,
-        instance_name=name, agent_class='coder', timeout=timeout)
+        instance_name=name, agent_class='coder', timeout=timeout,
+        pool=router._pool)
 
 
 def _hold(inst, rel, key=SHARED_KEY):
@@ -184,8 +190,14 @@ def _release_permit(inst):
     cb()
 
 
-def _queue_waiter(router, name, timeout=15.0):
-    """Start a blocked FIFO waiter thread on the shared slot; returns (thread, granted_event)."""
+def _queue_waiter(router, name, timeout=15.0, instance_resolver=None):
+    """Start a blocked FIFO waiter thread on the shared slot; returns (thread, granted_event).
+
+    Threads the AgentPool through for holder-context resolution (plan §3.3 option a),
+    exactly as the production path does. An explicit ``instance_resolver`` (used by V22
+    to spy on lock ownership) always wins over the pool fallback — SlotPool.acquire
+    only falls back to ``pool.get_instance`` when no resolver was passed.
+    """
     granted = threading.Event()
     queued = threading.Event()
 
@@ -194,7 +206,8 @@ def _queue_waiter(router, name, timeout=15.0):
             queued.set()  # we are about to block in the FIFO queue (holder holds the slot)
             router.scheduler.acquire(
                 api_base=SEQ_BASE, concurrency_limit=0,
-                instance_name=name, agent_class='coder', timeout=timeout)
+                instance_name=name, agent_class='coder', timeout=timeout,
+                pool=router._pool, instance_resolver=instance_resolver)
             granted.set()
         except Exception:
             pass
@@ -763,3 +776,262 @@ class TestLeak6DropHeldPermitRetryable:
         with shared._cond:
             assert 'leak6a' not in shared._running, \
                 f"pool must be empty after dismiss: {list(shared._running)}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V10–V12 / V22 — FIFO head-stall alarm (plan §3, §5.1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _alarm_thresholds():
+    """Patched threshold constants per plan §5.1 (real clock, no seam)."""
+    return (
+        patch('agent_cascade.slot_queue.SLOT_HEAD_STALL_WARN_S', 0.2),
+        patch('agent_cascade.slot_queue.SLOT_HEAD_STALL_ALARM_S', 0.6),
+        patch('agent_cascade.slot_queue.SLOT_HEAD_STALL_REPEAT_S', 10.0),
+        patch('agent_cascade.slot_queue.SLOT_HEAD_STALL_ACTIVE_S', 0.3),
+    )
+
+
+def _wait_for_log(records, needle, timeout=8.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _find(records, needle):
+            return True
+        time.sleep(0.01)
+    return bool(_find(records, needle))
+
+
+def _wait_for_level(records, needle, level, timeout=8.0):
+    """Wait for a record containing `needle` at exactly `level`."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for r in records:
+            if needle in (r.getMessage() if hasattr(r, 'getMessage') else str(r)) \
+                    and r.levelno == level:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+class TestHeadStallAlarm:
+    def test_head_stall_warns_at_30s(self, leak_harness):
+        """V10a: the head waiter gets a WARN with holder context at the (patched) 30s mark."""
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm1a', 'coder')
+        rel = _acquire_shared(router, 'alarm1a')
+        _hold(inst, rel)
+
+        records, handler, targets = _capture_logs()
+        t_b, granted_b = None, None
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                t_b, granted_b = _queue_waiter(router, 'alarm1b', timeout=4.0)
+                assert _wait_for_level(records, 'SLOT_HEAD_STALL_WARN', logging.WARNING), \
+                    'head-stall WARN never fired for the head waiter'
+                warn = _find(records, 'SLOT_HEAD_STALL_WARN')[0]
+                msg = warn.getMessage()
+                # Holder context fields must be present (resolver wired via pool path).
+                assert 'holder=alarm1a' in msg, f'missing holder name: {msg}'
+                assert 'state=' in msg and 'llm_active=' in msg and 'streaming=' in msg, \
+                    f'missing holder context fields: {msg}'
+        finally:
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+    def test_head_stall_alarms_at_90s(self, leak_harness):
+        """V10b: a quiet holder trips the ERROR alarm at the (patched) 90s mark."""
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm2a', 'coder')
+        rel = _acquire_shared(router, 'alarm2a')
+        _hold(inst, rel)
+
+        records, handler, targets = _capture_logs()
+        t_b, granted_b = None, None
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                t_b, granted_b = _queue_waiter(router, 'alarm2b', timeout=4.0)
+                assert _wait_for_level(records, 'SLOT_HEAD_STALL]', logging.ERROR), \
+                    'head-stall ERROR alarm never fired for a quiet holder'
+                alarm = [r for r in records if 'SLOT_HEAD_STALL]' in r.getMessage()
+                         and r.levelno == logging.ERROR][0]
+                msg = alarm.getMessage()
+                assert 'ACTION: manual — diagnostic only, no auto-preemption' in msg, \
+                    f'missing explicit non-action clause: {msg}'
+        finally:
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+    def test_head_stall_suppressed_while_holder_streaming(self, leak_harness):
+        """V11a: a fresh `_last_llm_activity` suppresses the ERROR even at long waiter age.
+
+        The holder is stamped 'active' with a live chunk-stamp thread; the waiter
+        outlives the alarm threshold by far. No ERROR may fire while streaming.
+        (Companion half of V11 — see test_head_stall_alarms_when_streaming_stops.)
+        """
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm3a', 'coder')
+        rel = _acquire_shared(router, 'alarm3a')
+        _hold(inst, rel)
+
+        stop_stamp = threading.Event()
+
+        from agent_cascade.engine.core import ExecutionEngine
+
+        def stamp_chunks():
+            # Simulate a healthy stream: refresh activity every 50ms.
+            while not stop_stamp.is_set():
+                ExecutionEngine._stamp_llm_activity(inst, 'chunk')
+                time.sleep(0.05)
+
+        stamp_thread = threading.Thread(target=stamp_chunks, daemon=True)
+        with inst._state_lock:
+            inst._llm_call_active = True
+            inst._last_llm_activity = time.monotonic()
+        stamp_thread.start()
+
+        records, handler, targets = _capture_logs()
+        t_b, granted_b = None, None
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                # Waiter outlives ALARM_S (0.6s) by a wide margin while the holder
+                # keeps stamping — the ERROR must stay suppressed the whole time.
+                t_b, granted_b = _queue_waiter(router, 'alarm3b', timeout=2.5)
+                assert _wait_for_level(records, 'SLOT_HEAD_STALL_WARN', logging.WARNING), \
+                    'WARN must fire even while streaming (it is never suppressed)'
+                time.sleep(1.0)  # well past ALARM_S with fresh activity
+        finally:
+            stop_stamp.set()
+            stamp_thread.join(timeout=2)
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+        assert not [r for r in records if 'SLOT_HEAD_STALL]' in (r.getMessage() if hasattr(r, 'getMessage') else str(r))
+                    and r.levelno == logging.ERROR], \
+            'ERROR alarm fired while the holder was actively streaming — suppression broken'
+
+    def test_head_stall_alarms_when_streaming_stops(self, leak_harness):
+        """V11b: once `_last_llm_activity` ages past ACTIVE_S, the ERROR fires.
+
+        Companion half of V11: same waiter/holder shape as the suppression test,
+        but the holder goes quiet — the alarm must fire at ALARM_S.
+        """
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm4a', 'coder')
+        rel = _acquire_shared(router, 'alarm4a')
+        _hold(inst, rel)
+
+        # Holder was streaming but went quiet: active flag set, timestamp stale.
+        with inst._state_lock:
+            inst._llm_call_active = True
+            inst._last_llm_activity = time.monotonic() - 5.0  # far past ACTIVE_S (0.3s)
+
+        records, handler, targets = _capture_logs()
+        t_b, granted_b = None, None
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                t_b, granted_b = _queue_waiter(router, 'alarm4b', timeout=4.0)
+                assert _wait_for_level(records, 'SLOT_HEAD_STALL]', logging.ERROR), \
+                    'ERROR alarm never fired after streaming stopped'
+        finally:
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+    def test_head_stall_does_not_preempt(self, leak_harness):
+        """V12: the alarm is diagnostic only — after it fires, the holder still holds
+        and the waiter is still queued (no preemption, no forced release)."""
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm5a', 'coder')
+        rel = _acquire_shared(router, 'alarm5a')
+        _hold(inst, rel)
+
+        records, handler, targets = _capture_logs()
+        t_b, granted_b = None, None
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                t_b, granted_b = _queue_waiter(router, 'alarm5b', timeout=4.0)
+                assert _wait_for_level(records, 'SLOT_HEAD_STALL]', logging.ERROR), \
+                    'ERROR alarm never fired'
+                # After the alarm: holder's permit is still held, waiter still queued.
+                with shared._cond:
+                    assert 'alarm5a' in shared._running, \
+                        'V12: the alarm preempted the holder — it must be diagnostic only'
+                    assert any(t.instance_name == 'alarm5b' for t in shared._waiters.values()), \
+                        'V12: the waiter was dropped from the queue by the alarm'
+                assert not granted_b.is_set(), \
+                    'V12: the waiter was granted while the holder still holds — preemption?'
+        finally:
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+    def test_alarm_branch_reacquires_cond(self, leak_harness):
+        """V22: the resolver is called with pool._cond NOT owned, and the waiter is
+        still granted correctly afterwards (guards R9 — the load-bearing release/acquire)."""
+        h = leak_harness
+        router, pool, shared = h['router'], h['pool'], h['shared']
+
+        inst = _make_instance(pool, 'alarm6a', 'coder')
+        rel = _acquire_shared(router, 'alarm6a')
+        _hold(inst, rel)
+
+        cond_owned_at_resolve = []
+
+        def spy_resolver(name):
+            # CPython 3.x internal — acceptable in a test (plan §5.1 V22).
+            try:
+                cond_owned_at_resolve.append(shared._cond._is_owned())
+            except Exception:
+                cond_owned_at_resolve.append(None)
+            return pool.get_instance(name)
+
+        records, handler, targets = _capture_logs()
+        try:
+            with _alarm_thresholds()[0], _alarm_thresholds()[1], \
+                 _alarm_thresholds()[2], _alarm_thresholds()[3]:
+                # Route the waiter through the real scheduler path (as every other
+                # alarm test does) but pass the spy resolver explicitly — it overrides
+                # the pool fallback in SlotPool.acquire, so we observe lock ownership.
+                t_b, granted_b = _queue_waiter(router, 'alarm6b', timeout=4.0,
+                                               instance_resolver=spy_resolver)
+                # The wait loop ticks at 1s cadence (WARN_S patched to 0.2), so give it
+                # >1 tick for the head-stall branch — and thus the lock-free resolver
+                # call — to run at least once.
+                assert _wait_for_log(records, 'SLOT_HEAD_STALL_WARN', timeout=4.0), \
+                    'V22: head-stall WARN never fired — alarm branch did not run'
+        finally:
+            _restore_logs(handler, targets)
+            if t_b is not None:
+                t_b.join(timeout=5)
+            _release_permit(inst)
+
+        assert cond_owned_at_resolve, 'resolver was never called — alarm branch did not run'
+        assert all(v is False for v in cond_owned_at_resolve), \
+            f"V22: resolver observed pool._cond owned ({cond_owned_at_resolve}) — lock-order inversion"
+
+
+# Note: V10–V12 / V22 are new behavior (no pre-fix state) — they pin the
+# threshold/suppression/lock-discipline contract of the head-stall alarm.

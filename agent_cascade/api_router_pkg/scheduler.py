@@ -7,7 +7,7 @@ Re-exports the timeout constants it reads as module globals so tests can patch t
 import logging
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.settings import ENDPOINT_SLOT_ACQUIRE_TIMEOUT
@@ -79,6 +79,7 @@ class EndpointScheduler:
         agent_class: str = 'unknown',
         pool=None,
         timeout: Optional[float] = None,
+        instance_resolver: Optional[Callable[[str], Any]] = None,
         **kwargs,
     ) -> Optional[Callable[[], None]]:
         """
@@ -94,6 +95,9 @@ class EndpointScheduler:
             agent_class: Class of the agent instance (for tracking)
             pool: Optional AgentPool reference for termination checks during blocking acquire
             timeout: Optional override for wait timeout in seconds
+            instance_resolver: Optional name→AgentInstance resolver forwarded to
+                SlotPool.acquire for the FIFO head-stall alarm context (plan §3.3).
+                Default None → the alarm degrades to a context-free line.
 
         Returns:
             A callable that releases the slot when called, or None if no scheduling needed.
@@ -131,6 +135,8 @@ class EndpointScheduler:
                 instance_name=instance_name,
                 agent_class=agent_class,
                 timeout=effective_timeout,
+                pool=pool,
+                instance_resolver=instance_resolver,
             )
 
             logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "

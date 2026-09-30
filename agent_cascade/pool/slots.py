@@ -47,9 +47,13 @@ class SlotsMixin:
             )
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
-            # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking
+            # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking.
+            # `pool` is forwarded to SlotPool.acquire (plan §3.3 option a) so the
+            # FIFO head-stall alarm can resolve holder state/activity context via
+            # pool.get_instance; every other call site passes None and degrades
+            # gracefully to a context-free line.
             return router.scheduler.acquire(
-                api_base, concurrency_limit, instance_name, agent_class, pool=self
+                api_base, concurrency_limit, instance_name, agent_class, pool=self,
             )
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")

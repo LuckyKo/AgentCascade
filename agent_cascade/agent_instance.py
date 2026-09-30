@@ -247,6 +247,14 @@ class AgentInstance:
     _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
     _last_waiting_debug_log: float = field(default=0.0)  # Last time waiting debug message was logged (throttle)
 
+    # LLM activity tracking (FIFO head-stall alarm, plan §3.2): written by the
+    # engine's LLM-call generator (start/end + per-chunk stamp). The pool reads
+    # them getattr-guarded from the wait loop with _cond released — they are a
+    # liveness signal for "is the holder actually making progress?", not part of
+    # the state machine.
+    _last_llm_activity: float = field(default=0.0)  # time.monotonic() of last LLM stream chunk (or LLM call start)
+    _llm_call_active: bool = field(default=False)  # True between LLM call start and end
+
     # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)
     restricted_shell: bool = False  # Set True in _create_system_agent; shell_cmd hard-rejects non-read-only commands (no user approval for system agents)

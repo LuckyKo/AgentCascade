@@ -36,6 +36,21 @@ if TYPE_CHECKING:
 QUEUE_WAIT_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_SLOT_QUEUE_TIMEOUT', 300))
 """Default timeout for waiting in the slot queue. Configurable via AGENT_CASCADE_SLOT_QUEUE_TIMEOUT."""
 
+# ── FIFO head-stall alarm thresholds (plan §3.3) ──────────────────────────────
+# Read by NAME at use time inside SlotPool.acquire / _holder_activity_context —
+# do NOT hoist into function defaults or copy elsewhere: that would freeze the
+# value at import time and silently defeat test patching (plan §5.1, M5).
+SLOT_HEAD_STALL_WARN_S: float = float(os.getenv('AGENT_CASCADE_SLOT_HEAD_STALL_WARN_S', 30.0))
+"""Head-only WARNING escalation threshold (existing per-waiter warn is 15s)."""
+SLOT_HEAD_STALL_ALARM_S: float = float(os.getenv('AGENT_CASCADE_SLOT_HEAD_STALL_ALARM_S', 90.0))
+"""ERROR alarm threshold — only meaningful when the holder is NOT actively streaming."""
+SLOT_HEAD_STALL_REPEAT_S: float = float(os.getenv('AGENT_CASCADE_SLOT_HEAD_STALL_REPEAT_S', 300.0))
+"""Re-fire throttle for the ERROR alarm (one per interval while the stall persists)."""
+SLOT_HEAD_STALL_ACTIVE_S: float = float(os.getenv('AGENT_CASCADE_SLOT_HEAD_STALL_ACTIVE_S', 45.0))
+"""'Holder is quiet for this long' threshold — the ONLY suppression predicate (§3.2.1):
+a holder that stamped an LLM call start or a stream chunk within this window suppresses
+the ERROR alarm indefinitely; the 30s WARN is never suppressed."""
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Exceptions
 # ──────────────────────────────────────────────────────────────────────────────
@@ -146,6 +161,7 @@ class SlotPool:
                 instance_name: str,
                 agent_class: str,
                 timeout: Optional[float] = None,
+                pool=None,
                 **kwargs) -> Callable[[], None]:
         """Acquire a slot permit from this pool, waiting in FIFO order if necessary.
 
@@ -156,12 +172,28 @@ class SlotPool:
            - On wakeup, double-check cancelled flag.
            - Only head waiter proceeds; non-head re-waits immediately.
         3. Returns a release callback bound to the granted SlotHolder.
+
+        Args:
+            pool: Optional AgentPool reference (plan §3.3 option a). The FIFO
+                head-stall alarm uses ``pool.get_instance`` as its holder-context
+                resolver; when omitted, it falls back to an ``instance_resolver``
+                kwarg if one was passed, and finally degrades to a context-free
+                line (the alarm must NEVER be gated on the resolver).
         """
         if self.capacity == float('inf'):
             return lambda: None
 
         if timeout is None:
             timeout = QUEUE_WAIT_TIMEOUT
+
+        # Holder-context resolver for the head-stall alarm (plan §3.3 option a):
+        # an explicit `instance_resolver` kwarg always wins; only fall back to the
+        # owning AgentPool when none was passed. (Clobbering an explicit resolver
+        # with pool.get_instance made the V22 spy — and any caller-supplied resolver
+        # on a scheduler-routed acquire — silently invisible.)
+        instance_resolver = kwargs.pop('instance_resolver', None)
+        if instance_resolver is None and pool is not None and hasattr(pool, 'get_instance'):
+            instance_resolver = pool.get_instance
 
         with self._cond:
             # Fast path: capacity available
@@ -195,9 +227,56 @@ class SlotPool:
 
             deadline = ticket.deadline
             last_wait_warn = ticket.created_at
+            # FIFO head-stall escalation state — plain locals, NOT pool state (§3.3.1):
+            # the lock-free resolution phase writes them safely, and this keeps the
+            # change confined to one method (no QueueTicket migration).
+            head_warned = False
+            # The REPEAT_S throttle must only gate *subsequent* alarms; the first
+            # ERROR is allowed as soon as age >= ALARM_S. Initializing to created_at
+            # made (now - last_head_alarm) start at 0, so due_alarm stayed False for
+            # the whole ALARM_S..REPEAT_S window — the first alarm was unreachable
+            # unless the waiter outlived REPEAT_S (plan §3.2: fire at ALARM_S).
+            last_head_alarm = ticket.created_at - SLOT_HEAD_STALL_REPEAT_S
 
             while not ticket.cancelled.is_set():
                 now_mono = time.monotonic()
+
+                # ── FIFO HEAD-STALL escalation (diagnostic only) ────────────────
+                # Two-phase by design: cheap threshold detection under _cond,
+                # expensive instance resolution with _cond RELEASED. The explicit
+                # release()/acquire() pair below is LOAD-BEARING — do not refactor
+                # it into a try/finally around the loop or a helper called from
+                # inside the `with` block (both silently reintroduce the lock-order
+                # inversion). Legal because _cond wraps an RLock and this loop body
+                # holds it at recursion depth exactly 1 (the `with` below plus the
+                # reacquisition inside wait_for). See plan §3.3.1.
+                if _is_head(self, ticket.ticket_id):
+                    age = now_mono - ticket.created_at
+                    due_warn = (not head_warned) and (age >= SLOT_HEAD_STALL_WARN_S)
+                    due_alarm = ((age >= SLOT_HEAD_STALL_ALARM_S) and
+                                 (now_mono - last_head_alarm) >= SLOT_HEAD_STALL_REPEAT_S)
+                    if due_warn or due_alarm:
+                        self._cond.release()  # legal: _cond is RLock-backed
+                        try:
+                            ctx = _holder_activity_context(self, now_mono, resolver=instance_resolver)
+                            if due_warn:
+                                logger.warning(_head_stall_msg(self, ticket, age, ctx, level='WARN'))
+                                head_warned = True
+                            # §3.2.1: streaming suppresses the ERROR for ANY waiter age.
+                            # No `age < WARN_S*3` clause — that was unreachable.
+                            if due_alarm and not ctx['streaming']:
+                                logger.error(_head_stall_msg(self, ticket, age, ctx, level='ALARM'))
+                                last_head_alarm = now_mono
+                        except Exception:
+                            # A diagnostic must never break the wait loop or leak the
+                            # ticket. Degrade to a context-free alarm.
+                            logger.error(f"[SLOT_HEAD_STALL] context resolution failed on "
+                                         f"'{self.key}' head='{ticket.instance_name}' "
+                                         f"age={age:.0f}s — emitting without holder context",
+                                         exc_info=True)
+                        finally:
+                            self._cond.acquire()  # MUST run on every path
+
                 if now_mono - last_wait_warn >= 15.0:
                     elapsed = now_mono - ticket.created_at
                     logger.warning(f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
@@ -510,6 +589,81 @@ def release_slot_permit(
         logger.debug(f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
                      f"action={action} waiters={_waiters}")
     return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIFO head-stall alarm context helpers (plan §3.3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _holder_activity_context(pool: 'SlotPool', now_mono: float,
+                             resolver: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
+    """Resolve holder state/activity context for the head-stall alarm.
+
+    MUST be called with pool._cond RELEASED — it reaches out to AgentInstance
+    objects whose _state_lock is contended by the very run-loops that are
+    supposed to be releasing permits (lock-order inversion, plan §3.3.1).
+
+    Returns a dict with: holder_name, holder_class, holder_state, held_s,
+    last_activity_age_s, llm_active, streaming, context_available.
+
+    ``streaming`` is the ONLY suppression predicate (§3.2.1): the holder stamped
+    an LLM call start or a stream chunk within SLOT_HEAD_STALL_ACTIVE_S. Read by
+    name at use time so tests can patch it (plan §5.1, M5).
+    """
+    ctx: Dict[str, Any] = {
+        'holder_name': '?',
+        'holder_class': '?',
+        'holder_state': '?',
+        'held_s': -1.0,
+        'last_activity_age_s': -1.0,
+        'llm_active': False,
+        'streaming': False,
+        'context_available': resolver is not None,
+    }
+    holders = list(pool._running.values())
+    if not holders:
+        return ctx
+
+    holder = holders[0]  # conc=1 pools have exactly one; first holder otherwise
+    ctx['holder_name'] = holder.instance_name
+    ctx['held_s'] = now_mono - holder.granted_at
+
+    inst = None
+    if resolver is not None:
+        try:
+            inst = resolver(holder.instance_name)
+        except Exception:
+            inst = None  # a broken resolver degrades, it never breaks the wait loop
+
+    if inst is not None:
+        ctx['holder_state'] = getattr(getattr(inst, 'state', None), 'name', '?') or '?'
+        last_activity = getattr(inst, '_last_llm_activity', 0.0)
+        if last_activity > 0:
+            ctx['last_activity_age_s'] = now_mono - last_activity
+        ctx['llm_active'] = bool(getattr(inst, '_llm_call_active', False))
+        # §3.2.1: streaming = an LLM call is in flight AND it stamped activity
+        # (call start or chunk) within the ACTIVE_S window. A long prefill with
+        # zero output ages out of this on purpose — see plan §3.2.1.
+        ctx['streaming'] = (ctx['llm_active'] and last_activity > 0 and
+                            (now_mono - last_activity) <= SLOT_HEAD_STALL_ACTIVE_S)
+    return ctx
+
+
+def _head_stall_msg(pool: 'SlotPool', ticket: 'QueueTicket', age: float,
+                    ctx: Dict[str, Any], level: str) -> str:
+    """Format the single-line key=value head-stall log message (plan §3.3)."""
+    holders = list(pool._running.values())
+    prefix = '[SLOT_HEAD_STALL_WARN]' if level == 'WARN' else '[SLOT_HEAD_STALL]'
+    tail = '' if level == 'WARN' else (' ACTION: manual — diagnostic only, no auto-preemption')
+    context_tag = '' if ctx['context_available'] else ' context=unavailable'
+    return (f"{prefix} pool={pool.key} head={ticket.instance_name} ({ticket.agent_class}) "
+            f"age={age:.0f}s position={len(pool._waiters)} "
+            f"holder={ctx['holder_name']} state={ctx['holder_state']} "
+            f"held={ctx['held_s']:.0f}s last_activity={ctx['last_activity_age_s']:.0f}s "
+            f"llm_active={str(ctx['llm_active']).lower()} streaming={str(ctx['streaming']).lower()}"
+            f"{context_tag} running={len(pool._running)}/{pool.capacity} "
+            f"holders={[h.instance_name for h in holders]}{tail}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

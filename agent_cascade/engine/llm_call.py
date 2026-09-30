@@ -587,6 +587,10 @@ class LLMCallMixin:
                     for output in gen:
                         # Watchdog check on each consumed output
                         _now = time.monotonic()
+                        # FIFO head-stall alarm (plan §3.2 write site B): stamp the
+                        # holder's last-LLM-activity timestamp. Zero added cost — the
+                        # watchdog already takes this timestamp every iteration.
+                        self._stamp_llm_activity(instance, 'chunk')
                         # Silence check only after first output; slow reasoning models may take >120s to produce first token
                         if not _engine_first_output and _engine_last_output_time is not None:
                             if (_now - _engine_last_output_time) > _engine_max_silence:

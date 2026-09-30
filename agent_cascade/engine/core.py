@@ -2228,6 +2228,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         Lightweight wrapper to reduce inline noise in retry logic.
         Failures are silently swallowed — telemetry must never break LLM calls.
 
+        Also stamps the instance's LLM-activity fields ('start'/'end') that the
+        FIFO head-stall alarm reads (plan §3.2 write site A). The per-chunk stamp
+        (write site B) lives in the streaming watchdog block, where the timestamp
+        is already being taken.
+
         Args:
             inst_name: Agent instance name
             event_type: One of 'start', 'end', 'first_token'
@@ -2246,6 +2251,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     tel.record_llm_first_token(inst_name, **kwargs)
         except Exception:
             pass
+        # LLM-activity stamp (plan §3.2): covers prefill (start) and completion
+        # (end) for every retry attempt — the same boundaries telemetry uses.
+        if event_type in ('start', 'end'):
+            inst = self.pool.get_instance(inst_name)
+            if inst is not None:
+                self._stamp_llm_activity(inst, event_type)
 
     def _normalize_turn_output(self, turn_output: List[Message]) -> None:
         """Normalize messages in-place (Gemma tags, thinking blocks).
@@ -2857,6 +2868,39 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                        f"permit; released it instead of orphaning it. "
                        f"An upstream release point was skipped.")
         return True
+
+    @staticmethod
+    def _stamp_llm_activity(instance: Any, event_type: str) -> None:
+        """Stamp the holder's LLM-activity fields (FIFO head-stall alarm, plan §3.2).
+
+        Called from the LLM-call generator at every ``_record_telemetry_event``
+        boundary ('start'/'end') and per-chunk inside the streaming watchdog
+        block. The signal is diagnostic-only: it tells the pool's wait loop
+        whether the slot holder is actively producing output, so a stalled
+        FIFO head can be distinguished from a legitimately long turn.
+
+        Every write is getattr-guarded so test doubles without the fields keep
+        working (same defensive pattern as slot_queue.py / core.py stale-permit
+        sites). Failures are silently swallowed — this must never break an LLM call.
+        """
+        try:
+            if not hasattr(instance, '_state_lock'):
+                return
+            with instance._state_lock:
+                now = time.monotonic()
+                if event_type == 'start':
+                    instance._llm_call_active = True
+                    instance._last_llm_activity = now
+                elif event_type == 'end':
+                    # The "last activity" of a finished call is its end time.
+                    instance._llm_call_active = False
+                    instance._last_llm_activity = now
+                elif event_type == 'chunk':
+                    # Write site B: every streamed chunk refreshes the timestamp;
+                    # the active flag is untouched (set by 'start', cleared by 'end').
+                    instance._last_llm_activity = now
+        except Exception:
+            pass
 
     def reacquire_for(self, instance: Any, holder_name: str, context: str = 'reacquire') -> bool:
         """Re-acquire a concurrency slot for an agent after yielding it to a child.
