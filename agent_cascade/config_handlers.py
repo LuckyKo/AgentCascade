@@ -85,6 +85,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
+    'memory_hint_skill_threshold',
     # Skill invalidation (adaptive count-cap) — persisted via pool_settings.json.
     'skill_auto_invalidate_enabled',
     'skill_active_target_k',
@@ -743,6 +744,22 @@ def _handle_memory_hint_skill_suggestions(ui_cfg: dict, agent_pool: Optional[Any
     """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         agent_pool.llm_cfg['memory_hint_skill_suggestions'] = bool(ui_cfg.get('memory_hint_skill_suggestions', True))
+
+
+@register_config_handler('memory_hint_skill_threshold')
+def _handle_memory_hint_skill_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Raise-only override floor for the SKILL sub-pipeline (BUG_0041).
+
+    Deliberately separate from ``memory_hint_threshold`` (memory cosine scale) —
+    reusing one setting across two score measures is precisely the bug class
+    BUG_0041 is about. Clamped to [0, 1.0]. 0 = pure adaptive behavior.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = float(ui_cfg.get('memory_hint_skill_threshold', 0.0))
+        except (TypeError, ValueError):
+            val = 0.0
+        agent_pool.llm_cfg['memory_hint_skill_threshold'] = min(max(0.0, val), 1.0)
 
 
 # ── Skill invalidation handlers (adaptive count-cap, plan §7) ───────────────

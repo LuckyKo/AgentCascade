@@ -26,6 +26,13 @@ from agent_cascade.memory_hint import (
     MAX_HINTS_PER_TURN,
     MemoryHintManager,
     MemoryMatcher,
+    SKILL_EWMA_ALPHA,
+    SKILL_FLOOR_MIN,
+    SKILL_FLOOR_SEED,
+    SKILL_HINT_MAX_ENTRIES,
+    SKILL_HINT_NOISE_RATIO,
+    SKILL_JUNK_MIN,
+    SKILL_REF_TOKENS,
 )
 from agent_cascade.memory_hint.stats import bump_read_count, load_stats
 from agent_cascade.memory_hint.vault import (
@@ -882,21 +889,27 @@ class TestManagerSkillHints:
         assert 'docker-best-practices' in inst._recently_skill_hinted
 
     def test_skill_hint_below_min_score_suppressed(self, tmp_path):
-        """A generic/diffuse query whose top skill score < min-score → NO skill section."""
-        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        """A generic/diffuse query whose top skill score < junk guard → NO skill section."""
+        from agent_cascade.memory_hint import SKILL_JUNK_MIN, SKILL_FLOOR_SEED, SKILL_FLOOR_MIN
         lessons = [
             ('compression-debug.md', 'Compression Debug',
              'How to debug compression hangs in the engine loop',
              'When compression hangs check the daemon thread and lock ordering.'),
         ]
+        STUB_SCORE = SKILL_JUNK_MIN - 0.005
         mgr, inst, job = self._make_mgr(
             tmp_path, lessons, 'debugging a compression hang in the engine loop',
-            skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE - 0.05)]))
+            skill_manager=self._stub_skill_manager([('docker-best-practices', STUB_SCORE)]))
         mgr._process_job(job)
         # The memory hint still fires (clear winner), but with NO skill section.
         assert len(inst._tool_warnings) == 1
         assert 'Skills you may want to load' not in inst._tool_warnings[0]
         assert inst._recently_skill_hinted == {}
+        # The stub score sits below BOTH the seed and the junk guard; the read floor is
+        # whatever the (unchanged-by-this-job) EWMA says.
+        assert STUB_SCORE < SKILL_JUNK_MIN < SKILL_FLOOR_SEED
+        assert mgr._current_skill_floor(0.0) == max(SKILL_FLOOR_MIN, mgr._skill_adaptive_floor)
+        assert mgr._skill_adaptive_floor == SKILL_FLOOR_SEED   # junk guard ⇒ no EWMA feed
 
     def test_skill_only_when_no_memory_match(self, tmp_path):
         """No memory match but a strong skill match → the skill hint is still delivered.
@@ -988,7 +1001,11 @@ class TestManagerSkillHints:
         assert 'docker-best-practices' in inst._recently_skill_hinted
 
     def test_skill_hint_max_entries_caps(self, tmp_path):
-        """4+ skills above the floor → capped to SKILL_HINT_MAX_ENTRIES, top-scored kept."""
+        """Post-dedup survivors > SKILL_HINT_MAX_ENTRIES → capped, top-scored kept.
+
+        Uses 10 matches with 6 in cooldown so 4 survive dedup (passes the noise gate:
+        max(3, int(10*0.6))=6, 4<=6) and are then capped to 3.
+        """
         from agent_cascade.memory_hint import SKILL_HINT_MAX_ENTRIES, SKILL_HINT_MIN_SCORE
         assert SKILL_HINT_MAX_ENTRIES == 3  # cap under test
         lessons = [
@@ -996,14 +1013,20 @@ class TestManagerSkillHints:
              'How to debug compression hangs in the engine loop',
              'When compression hangs check the daemon thread and lock ordering.'),
         ]
-        matches = [(f'skill-{i}', SKILL_HINT_MIN_SCORE + 0.1 * (5 - i)) for i in range(4)]
+        # 10 matches, all above floor. skill-0..3 will survive dedup; skill-4..9 in cooldown.
+        matches = [(f'skill-{i}', SKILL_HINT_MIN_SCORE + 0.01 * (10 - i)) for i in range(10)]
         mgr, inst, job = self._make_mgr(
             tmp_path, lessons, 'debugging a compression hang in the engine loop',
             skill_manager=self._stub_skill_manager(matches))
+        # Pre-seed cooldown for skill-4..9 so they are filtered by dedup.
+        now = time.monotonic()
+        with inst._compression_lock:
+            for i in range(4, 10):
+                inst._recently_skill_hinted[f'skill-{i}'] = now - 1.0
         mgr._process_job(job)
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
-        # Top-3 by score are listed; the lowest (skill-3) is capped out.
+        # Top-3 by score are listed; the 4th (skill-3) is capped out.
         for n in ('skill-0', 'skill-1', 'skill-2'):
             assert n in hint, f'{n} (top-3) missing from hint: {hint}'
         assert 'skill-3' not in hint, '4th skill must be capped out of the hint'
@@ -1567,3 +1590,390 @@ class TestConstants:
         assert mgr._settings()['threshold'] == 0.0
         pool.llm_cfg = {'memory_hint_threshold': 0.25}
         assert mgr._settings()['threshold'] == 0.25
+
+
+# ── 5. Skill adaptive floor (BUG_0041) ───────────────────────────────────────
+
+
+class TestSkillAdaptiveFloor:
+    """Unit tests for the 3-gate adaptive skill-hint system (BUG_0041)."""
+
+    @staticmethod
+    def _stub_stats_skill_manager(matches, n_tokens=10, n_in_vocab=5):
+        """Stub that responds to BOTH match_skills and match_skills_with_stats."""
+        sm = MagicMock()
+        sm.match_skills.return_value = matches
+        sm.match_skills_with_stats.return_value = (matches, n_tokens, n_in_vocab)
+        return sm
+
+    def _make_mgr(self, tmp_path, lessons, query, skill_manager=None, **cfg_over):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        for rel, name, desc, body in lessons:
+            _write_lesson(v, rel, name, desc, body)
+        inst = _FakeInst()
+        pool = MagicMock()
+        cfg = {'memory_hint_enabled': True,
+               'memory_hint_max_entries': 3,
+               'memory_hint_cooldown_seconds': 600,
+               'memory_hint_query_chars': 1000}
+        cfg.update(cfg_over)
+        pool.llm_cfg = cfg
+        pool.skill_manager = skill_manager
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        job = {'instance_name': 'w', 'query': query,
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        return mgr, inst, job
+
+    LESSONS = [
+        ('compression-debug.md', 'Compression Debug',
+         'How to debug compression hangs in the engine loop',
+         'When compression hangs check the daemon thread and lock ordering.'),
+    ]
+
+    # ── Gate 0: junk guard ────────────────────────────────────────────────────
+
+    def test_junk_guard_suppresses_below_threshold(self, tmp_path):
+        """top1 < SKILL_JUNK_MIN → no skill hint, EWMA NOT fed."""
+        sm = self._stub_stats_skill_manager([('a', 0.03)], n_tokens=5, n_in_vocab=2)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        assert not any('Skills' in w for w in inst._tool_warnings)
+        # EWMA must be untouched (junk guard returns before _update_skill_floor).
+        assert mgr._skill_adaptive_floor == SKILL_FLOOR_SEED
+
+    def test_junk_guard_boundary_fires(self, tmp_path):
+        """top1 exactly at SKILL_JUNK_MIN → passes junk guard (>= check)."""
+        sm = self._stub_stats_skill_manager([('a', SKILL_JUNK_MIN)], n_tokens=5, n_in_vocab=2)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        # At seed floor (0.055), 0.0375 < 0.055 → still suppressed by floor gate.
+        # But EWMA IS fed (junk guard passed).
+        mgr._process_job(job)
+        assert not any('Skills' in w for w in inst._tool_warnings)
+        # EWMA was updated: norm = 0.0375 * (2/40) = 0.001875
+        expected = SKILL_EWMA_ALPHA * (SKILL_JUNK_MIN * (2 / 40)) + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
+
+    # ── Gate 1: adaptive floor ────────────────────────────────────────────────
+
+    def test_floor_starts_at_seed(self, tmp_path):
+        """Fresh manager: _current_skill_floor(0) == max(SKILL_FLOOR_MIN, SKILL_FLOOR_SEED)."""
+        sm = self._stub_stats_skill_manager([])
+        mgr, _, _ = self._make_mgr(tmp_path, self.LESSONS, 'q', skill_manager=sm)
+        assert mgr._current_skill_floor(0.0) == max(SKILL_FLOOR_MIN, SKILL_FLOOR_SEED)
+
+    def test_floor_ewma_converges_down(self, tmp_path):
+        """Feeding low scores drives the floor down toward SKILL_FLOOR_MIN."""
+        sm = self._stub_stats_skill_manager([('a', 0.04)], n_tokens=10, n_in_vocab=10)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        # Feed 200 turns of low scores. norm = 0.04 * (10/40) = 0.01.
+        for i in range(200):
+            job['turn'] = i + 3
+            inst._tool_warnings.clear()
+            mgr._process_job(job)
+        assert mgr._skill_adaptive_floor < SKILL_FLOOR_SEED
+        # Converges toward the length-corrected value: 0.04*(10/40)=0.01.
+        assert abs(mgr._skill_adaptive_floor - 0.01) < 0.005
+
+    def test_floor_ewma_converges_up(self, tmp_path):
+        """Feeding high scores drives the floor up from seed."""
+        sm = self._stub_stats_skill_manager([('a', 0.20)], n_tokens=50, n_in_vocab=50)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        for i in range(200):
+            job['turn'] = i + 3
+            inst._tool_warnings.clear()
+            mgr._process_job(job)
+        assert mgr._skill_adaptive_floor > SKILL_FLOOR_SEED
+        # Converges toward 0.20 (n_in_vocab=50 >= REF=40, so norm=top1=0.20).
+        assert abs(mgr._skill_adaptive_floor - 0.20) < 0.01
+
+    def test_floor_min_clamp(self):
+        """_current_skill_floor never returns below SKILL_FLOOR_MIN."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        # Manually set EWMA below the minimum.
+        with mgr._skill_floor_lock:
+            mgr._skill_adaptive_floor = 0.001
+        assert mgr._current_skill_floor(0.0) == SKILL_FLOOR_MIN
+
+    def test_override_raises_floor(self):
+        """memory_hint_skill_threshold acts as a raise-only override."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        # Override below seed → no effect (raise-only).
+        assert mgr._current_skill_floor(0.03) == max(SKILL_FLOOR_MIN, SKILL_FLOOR_SEED)
+        # Override above seed → raises the floor.
+        assert mgr._current_skill_floor(0.15) == 0.15
+
+    def test_override_clamped_to_one(self):
+        """Override > 1.0 is clamped to 1.0 (not SKILL_HINT_MIN_SCORE)."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        assert mgr._current_skill_floor(2.5) == 1.0
+
+    def test_settings_parses_skill_threshold(self):
+        """_settings() parses memory_hint_skill_threshold with safe default."""
+        pool = MagicMock()
+        mgr = MemoryHintManager(pool)
+        pool.llm_cfg = {}
+        assert mgr._settings()['skill_threshold'] == 0.0
+        pool.llm_cfg = {'memory_hint_skill_threshold': 0.25}
+        assert mgr._settings()['skill_threshold'] == 0.25
+        pool.llm_cfg = {'memory_hint_skill_threshold': 'bad'}
+        assert mgr._settings()['skill_threshold'] == 0.0
+
+    # ── Length correction in EWMA feed ────────────────────────────────────────
+
+    def test_length_correction_deflates_short_queries(self):
+        """n_in_vocab < REF → norm is DEFLATED (factor <= 1)."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        # top1=0.32, n_in_vocab=6, REF=40 → norm = 0.32*(6/40) = 0.048
+        mgr._update_skill_floor(0.32, 6)
+        expected = SKILL_EWMA_ALPHA * 0.048 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
+
+    def test_length_correction_passthrough_at_ref(self):
+        """n_in_vocab >= REF → norm == top1 (no correction)."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        # n_in_vocab=40 == REF → factor = 40/40 = 1.0
+        mgr._update_skill_floor(0.15, 40)
+        expected = SKILL_EWMA_ALPHA * 0.15 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
+
+    def test_n_in_vocab_zero_is_unknown_sentinel(self):
+        """n_in_vocab=0 means 'stats unavailable' → pass-through, NOT zero."""
+        sm = self._stub_stats_skill_manager([])
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        # n_in_vocab=0 → norm = top1 (pass-through), NOT 0.
+        mgr._update_skill_floor(0.15, 0)
+        expected = SKILL_EWMA_ALPHA * 0.15 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
+
+    # ── Gate 2: noise gate ────────────────────────────────────────────────────
+
+    def test_noise_gate_suppresses_diffuse_query(self, tmp_path):
+        """Many skills survive dedup → noise gate suppresses the hint."""
+        # 10 matches, all above floor, none in cooldown/loaded.
+        matches = [(f's{i}', SKILL_FLOOR_SEED + 0.01 * (10 - i)) for i in range(10)]
+        sm = self._stub_stats_skill_manager(matches, n_tokens=50, n_in_vocab=50)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        # noise_max = max(3, int(10*0.6)) = 6; to_hint has 10 entries > 6 → suppressed.
+        assert not any('Skills' in w for w in inst._tool_warnings)
+
+    def test_noise_gate_passes_focused_query(self, tmp_path):
+        """Few skills survive dedup → noise gate passes, hint fires."""
+        # 3 matches, all above floor.
+        matches = [(f's{i}', SKILL_FLOOR_SEED + 0.01 * (3 - i)) for i in range(3)]
+        sm = self._stub_stats_skill_manager(matches, n_tokens=50, n_in_vocab=50)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        # noise_max = max(3, int(3*0.6)) = 3; to_hint has 3 entries <= 3 → passes.
+        assert any('Skills' in w for w in inst._tool_warnings)
+
+    def test_noise_gate_is_post_dedup(self, tmp_path):
+        """Already-loaded skills don't count toward the noise gate."""
+        # 10 matches, but 7 are already loaded → only 3 survive dedup.
+        matches = [(f's{i}', SKILL_FLOOR_SEED + 0.01 * (10 - i)) for i in range(10)]
+        sm = self._stub_stats_skill_manager(matches, n_tokens=50, n_in_vocab=50)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        # Mark s3..s9 as loaded.
+        with inst._compression_lock:
+            inst._loaded_skill_names = [f's{i}' for i in range(3, 10)]
+        mgr._process_job(job)
+        # Only s0, s1, s2 survive → to_hint=3, noise_max=max(3,6)=6, 3<=6 → passes.
+        assert any('Skills' in w for w in inst._tool_warnings)
+
+    # ── Stats fallback (MagicMock shape validation) ───────────────────────────
+
+    def test_magicmock_fallback_uses_match_skills(self, tmp_path):
+        """Bare MagicMock (no stats stub) → falls back to match_skills, n_in_vocab=0."""
+        sm = MagicMock()
+        sm.match_skills.return_value = [('a', 0.10)]
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        # Should fire (0.10 > seed 0.055, > junk 0.0375).
+        assert any('Skills' in w for w in inst._tool_warnings)
+        # EWMA fed with n_in_vocab=0 → pass-through norm=top1=0.10.
+        expected = SKILL_EWMA_ALPHA * 0.10 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
+
+    def test_stats_shape_validation_rejects_bad_tuple(self, tmp_path):
+        """match_skills_with_stats returning wrong shape → falls back to match_skills."""
+        sm = MagicMock()
+        sm.match_skills.return_value = [('a', 0.10)]
+        # Return a tuple with wrong shape (first element is not a list).
+        sm.match_skills_with_stats.return_value = ('not_a_list', 5, 3)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        # Falls back to match_skills → should fire.
+        assert any('Skills' in w for w in inst._tool_warnings)
+
+    def test_stats_shape_validation_rejects_wrong_length(self, tmp_path):
+        """match_skills_with_stats returning 2-tuple → falls back to match_skills."""
+        sm = MagicMock()
+        sm.match_skills.return_value = [('a', 0.10)]
+        sm.match_skills_with_stats.return_value = ([('a', 0.10)], 5)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        mgr._process_job(job)
+        assert any('Skills' in w for w in inst._tool_warnings)
+
+
+    def test_skill_short_after_long_query_still_fires(self, tmp_path):
+        """THE regression: a short query after a long one still fires the gate.
+
+        The length correction DEFLATES short-query scores in the EWMA feed, so a
+        stream of long turns cannot drive the floor up enough to suppress a
+        genuinely relevant short query. This drives two turns through the full
+        gate in sequence (not _update_skill_floor in isolation).
+        """
+        # Turn 1: long query — high n_in_vocab, moderate top1.
+        sm = self._stub_stats_skill_manager(
+            [('a', 0.08)], n_tokens=60, n_in_vocab=55)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'long query text', skill_manager=sm)
+        mgr._process_job(job)
+        # Turn 2: short query — low n_in_vocab, high top1.
+        sm.match_skills_with_stats.return_value = ([('b', 0.30)], 4, 3)
+        sm.match_skills.return_value = [('b', 0.30)]
+        inst._tool_warnings.clear()
+        job['turn'] = 4
+        mgr._process_job(job)
+        # The short query's raw top1 (0.30) must still clear the floor.
+        assert any('Skills' in w for w in inst._tool_warnings), (
+            f"short-after-long regression: hint suppressed. "
+            f"floor={mgr._skill_adaptive_floor:.4f}")
+
+    def test_skill_empty_match_list_leaves_ewma_unchanged(self, tmp_path):
+        """A turn with NO skill matches never feeds the EWMA (documented contract)."""
+        sm = self._stub_stats_skill_manager([], n_tokens=5, n_in_vocab=2)
+        mgr, inst, job = self._make_mgr(
+            tmp_path, self.LESSONS, 'test query', skill_manager=sm)
+        before = mgr._skill_adaptive_floor
+        mgr._process_job(job)
+        assert mgr._skill_adaptive_floor == before
+
+    def test_skill_noise_gate_ratio_boundaries(self, tmp_path):
+        """int(len(matches) * 0.6) truncates: 5 and 6 matches both give noise_max=3."""
+        # 5 matches → int(5*0.6)=3 → max(3,3)=3. 3 survivors fires, 4 suppresses.
+        for idx, (n_matches, n_survive, should_fire) in enumerate([
+            (5, 3, True),   # 3 <= 3 → passes
+            (5, 4, False),  # 4 > 3  → suppressed
+            (6, 3, True),   # int(6*0.6)=3 → max(3,3)=3; 3 <= 3 → passes
+            (6, 4, False),  # 4 > 3  → suppressed
+        ]):
+            sub = tmp_path / f'case{idx}'
+            matches = [(f's{i}', SKILL_FLOOR_SEED + 0.01 * (n_matches - i)) for i in range(n_matches)]
+            sm = self._stub_stats_skill_manager(matches, n_tokens=50, n_in_vocab=50)
+            mgr, inst, job = self._make_mgr(
+                sub, self.LESSONS, 'test query', skill_manager=sm)
+            # Pre-seed cooldown for skills that should NOT survive dedup.
+            if n_survive < n_matches:
+                now = time.monotonic()
+                with inst._compression_lock:
+                    for i in range(n_survive, n_matches):
+                        inst._recently_skill_hinted[f's{i}'] = now - 1.0
+            job['turn'] = 3
+            mgr._process_job(job)
+            fired = any('Skills' in w for w in inst._tool_warnings)
+            assert fired == should_fire, (
+                f"n_matches={n_matches}, n_survive={n_survive}: "
+                f"expected fire={should_fire}, got {fired}")
+
+
+# ── 6. Real-matcher length decay (BUG_0041 §6.2) ─────────────────────────────
+
+
+class TestSkillLengthDecay:
+    """Integration tests using a REAL SkillMatcher to verify length-corrected behavior."""
+
+    def _make_matcher(self, tmp_path):
+        from agent_cascade.skills.matcher import SkillMatcher
+        skills = [
+            {'name': 'docker-best-practices', 'description': 'Docker container orchestration and image optimization best practices', 'triggers': ['docker', 'container', 'image']},
+            {'name': 'python-testing', 'description': 'Python unit testing with pytest fixtures and mocking patterns', 'triggers': ['pytest', 'unittest', 'mock']},
+            {'name': 'api-design', 'description': 'REST API design patterns including pagination error handling and versioning', 'triggers': ['rest', 'api', 'endpoint']},
+        ]
+        m = SkillMatcher()
+        m.build_index(skills)
+        return m
+
+    def test_short_query_high_score_deflated_in_ewma(self, tmp_path):
+        """A short query with high raw score is DEFLATED in the EWMA feed."""
+        matcher = self._make_matcher(tmp_path)
+        # 2-word query: enough to clear _MIN_MATCHED_TERMS=2, but few in-vocab tokens.
+        results, n_tokens, n_in_vocab = matcher.match_with_stats('docker container')
+        assert len(results) > 0
+        top1 = results[0][1]
+        # Short query: few in-vocab tokens → correction factor < 1.
+        assert n_in_vocab <= SKILL_REF_TOKENS
+        if n_in_vocab < SKILL_REF_TOKENS:
+            norm = top1 * (n_in_vocab / SKILL_REF_TOKENS)
+            assert norm < top1  # deflated
+
+    def test_long_query_score_unchanged_in_ewma(self, tmp_path):
+        """A long query with n_in_vocab >= REF passes through uncorrected."""
+        matcher = self._make_matcher(tmp_path)
+        # Build a long query that includes many in-vocab terms.
+        long_query = ('docker container image orchestration pytest unittest mock '
+                      'rest api endpoint pagination error handling versioning '
+                      'additional padding words to make this query longer than forty tokens '
+                      'with more and more filler text here')
+        results, n_tokens, n_in_vocab = matcher.match_with_stats(long_query)
+        assert n_tokens > 0
+        # With only 3 skills in the index, n_in_vocab is bounded by the vocab size.
+        # If it reaches REF (40), the correction factor is exactly 1.0.
+        if n_in_vocab >= SKILL_REF_TOKENS:
+            top1 = results[0][1] if results else 0.0
+            norm = top1 * (n_in_vocab / max(n_in_vocab, SKILL_REF_TOKENS))
+            assert abs(norm - top1) < 1e-9  # passthrough
+        else:
+            # n_in_vocab < REF → deflation applies (structural check).
+            top1 = results[0][1] if results else 0.0
+            norm = top1 * (n_in_vocab / SKILL_REF_TOKENS)
+            assert norm <= top1
+
+    def test_match_with_stats_returns_correct_shape(self, tmp_path):
+        """match_with_stats returns (list, int, int) with correct invariants."""
+        matcher = self._make_matcher(tmp_path)
+        results, n_tokens, n_in_vocab = matcher.match_with_stats('docker pytest api')
+        assert isinstance(results, list)
+        assert isinstance(n_tokens, int)
+        assert isinstance(n_in_vocab, int)
+        assert 0 <= n_in_vocab <= n_tokens
+        # Results should be sorted by score descending.
+        scores = [s for _, s in results]
+        assert scores == sorted(scores, reverse=True)

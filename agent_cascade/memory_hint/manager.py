@@ -12,7 +12,9 @@ The gate is a self-calibrating *specificity* check, not a fixed threshold:
 more than ``MAX_HINTS_PER_TURN`` docs at/above the floor → skip (noise). The
 floor is an EWMA of per-turn top-1 scores (bounded below by ``FLOOR_MIN``);
 the ``memory_hint_threshold`` setting is an optional override that can only
-RAISE the floor (0 = pure adaptive behavior).
+RAISE the floor (0 = pure adaptive behavior). The skill sub-pipeline has its OWN
+independently calibrated floor (``SKILL_FLOOR_*``); it never reads or writes the
+memory cosine floor.
 
 The main loop never blocks: ``submit()`` is a non-blocking put of a small dict.
 All matching + I/O happens in the background thread. Any exception anywhere in
@@ -81,9 +83,61 @@ EWMA_ALPHA = 0.05
 
 # ── Skill-hint gate (feature: skills-in-memory-hints) ───────────────────────
 # INDEPENDENT of the memory cosine floor (plan §D1): skill scores are
-# keyword-fraction (0..1), a different scale than TF-IDF cosine — never mix them.
-SKILL_HINT_MIN_SCORE = SKILL_MATCH_THRESHOLD      # 0.15 — data-derived floor (plan §D2)
+# coverage-normalized IDF (a different scale than TF-IDF cosine) — never mix them,
+# and never reuse GAP / FLOOR_* / _floor_lock from the memory pipeline above.
+#
+# BUG_0041: a FIXED floor is structurally incompatible with the G+C3 scorer. That
+# scorer's denominator is the query's IN-VOCABULARY IDF MASS
+# (matcher.py: `total = sum(self._idf.get(kw, 0.0) for kw in query_tokens) * wmax`),
+# so the score decays as more in-vocab terms enter the query while a constant floor
+# does not move. Measured against the real 222-skill corpus:
+#   33 chars → 0.317, 127 → 0.141, 488 → 0.081, 1000 → 0.066
+# — only small-in-vocab-mass queries cleared 0.15, so the gate almost never fired on
+# real agent turns.
+#
+# WORKAROUND (not the root-cause fix): mirror the memory pipeline's self-calibrating
+# EWMA floor, but (a) feed it a LENGTH-CORRECTED score so the EWMA does not merely
+# average over the bimodal length distribution, (b) use a RELATIVE noise gate evaluated
+# AFTER cooldown/loaded dedup, and (c) keep an ABSOLUTE junk guard so no amount of floor
+# decay can admit the junk band. The root cause is the length-dependent denominator in
+# matcher.py (`score / total`, where total = in-vocab IDF mass). Fixing that would change
+# match() for every caller (scan_skills, AUTO-mode call_agent, skill advisor), so this
+# instead bounds the symptom in the hint gate. Future work: normalize the denominator
+# and retire SKILL_REF_TOKENS / SKILL_FLOOR_* entirely.
+#
+# SKILL_HINT_MIN_SCORE is retained for BACKWARDS COMPAT ONLY (existing exports +
+# test_skill_gate_constants_reuse_settings). It is NOT the gate any more and must not
+# be read as one. The env var SKILL_MATCH_THRESHOLD reaches only this constant (AUTO
+# mode and existing exports) — it does NOT influence the hint gate's adaptive behavior.
+SKILL_HINT_MIN_SCORE = SKILL_MATCH_THRESHOLD      # 0.15 — nominal AUTO-mode score; NOT the gate
 SKILL_HINT_MAX_ENTRIES = MAX_AUTO_SKILLS_PER_CALL # 3    — max skills listed (plan §D3)
+
+# Skill adaptive-floor constants (BUG_0041). TUNED for the G+C3 scale — these are
+# NOT the memory cosine constants and must never be shared with them.
+#
+# SKILL_FLOOR_SEED is THE tuned constant, not a placeholder. The floor is in-memory
+# only (never persisted) and converges in ~20 turns, but most agent sessions are
+# SHORTER than that — so for the whole life of a typical session the operating point
+# is the seed. It is validated by a SEED-ONLY replay (verification V1), because no
+# amount of EWMA convergence rescues a bad seed.
+SKILL_FLOOR_SEED = 0.055   # operating point for sessions that never converge
+SKILL_FLOOR_MIN = 0.035    # hard lower bound (applied at read time only)
+SKILL_EWMA_ALPHA = 0.05    # per-turn learning rate: floor ← α·norm + (1−α)·floor
+# SKILL_REF_TOKENS: the in-vocab token count at which the length correction reaches
+# 1.0. See _update_skill_floor docstring for the full length-correction rationale.
+SKILL_REF_TOKENS = 40
+# SKILL_HINT_NOISE_RATIO: fraction of matched skills that may survive dedup before
+# the query is judged generic. Relative, not absolute, because `matches` is capped at
+# _TOP_K = 10 (matcher.py:238) — an absolute cap silently re-suppresses high-in-vocab
+# queries, which is the very class this fix enables. Final threshold is
+# max(SKILL_HINT_MAX_ENTRIES, len(matches) * SKILL_HINT_NOISE_RATIO).
+SKILL_HINT_NOISE_RATIO = 0.6
+# SKILL_JUNK_MIN: ABSOLUTE, non-adaptive guard on top1. The adaptive floor can decay
+# toward the junk band (matcher.match() returns up to 10 results for any query sharing
+# ≥2 in-vocab terms — _MIN_MATCHED_TERMS = 2), and cooldown is per-skill-name, so a
+# rotating junk suggestion set is fully compatible with a 0.035 floor + 600 s cooldown.
+# This one comparison bounds the worst case regardless of EWMA state.
+SKILL_JUNK_MIN = 0.0375   # pinned literal; was derived from SKILL_HINT_MIN_SCORE * 0.25
 
 
 class MemoryHintManager:
@@ -114,6 +168,13 @@ class MemoryHintManager:
         # threads even though the production worker is single-threaded.
         self._adaptive_floor = FLOOR_SEED
         self._floor_lock = threading.Lock()
+
+        # Adaptive SKILL signal floor (BUG_0041). SEPARATE state + lock from the
+        # memory cosine floor above: the two pipelines score on different measures
+        # (TF-IDF cosine vs coverage-normalized in-vocab IDF) and must never share a
+        # threshold. In-memory only (re-seeds per process), exactly like the memory floor.
+        self._skill_adaptive_floor = SKILL_FLOOR_SEED
+        self._skill_floor_lock = threading.Lock()
 
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
@@ -286,6 +347,14 @@ class MemoryHintManager:
         # ON by default; a user who finds skill spam can silence just the skill part
         # without disabling memory hints entirely.
         skill_suggestions = bool(cfg.get('memory_hint_skill_suggestions', True))
+        # ``memory_hint_skill_threshold``: raise-only OVERRIDE floor for the SKILL
+        # sub-pipeline. Deliberately SEPARATE from ``memory_hint_threshold`` (memory
+        # cosine scale) — reusing one setting across two score measures is precisely
+        # the bug class BUG_0041 is about. 0 / absent = pure adaptive.
+        try:
+            skill_threshold = float(cfg.get('memory_hint_skill_threshold', 0.0))
+        except (TypeError, ValueError):
+            skill_threshold = 0.0
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
             'threshold': threshold,
@@ -293,6 +362,7 @@ class MemoryHintManager:
             'cooldown_seconds': cooldown,
             'query_chars': query_chars,
             'skill_suggestions': skill_suggestions,
+            'skill_threshold': skill_threshold,
         }
 
     def _current_floor(self, override: float) -> float:
@@ -320,6 +390,72 @@ class MemoryHintManager:
         """
         with self._floor_lock:
             self._adaptive_floor = EWMA_ALPHA * top1 + (1.0 - EWMA_ALPHA) * self._adaptive_floor
+
+    def _current_skill_floor(self, override: float) -> float:
+        """Effective SKILL signal floor for this turn (BUG_0041).
+
+        The adaptive EWMA floor, optionally raised by ``memory_hint_skill_threshold``.
+        Raise-only, same contract as :meth:`_current_floor`. ``SKILL_FLOOR_MIN`` is
+        applied HERE, in exactly one place (the read path); the seed is already
+        >= SKILL_FLOOR_MIN so this single clamp covers every case. Completely
+        independent of the memory cosine floor (different measure, different lock).
+        """
+        with self._skill_floor_lock:
+            floor = max(SKILL_FLOOR_MIN, self._skill_adaptive_floor)
+        if override > 0.0:
+            # Clamp to 1.0 (the scorer's own ceiling) and NOT to
+            # SKILL_HINT_MIN_SCORE: capping at 0.15 — the very value that never fires
+            # on real queries — would make the only user-facing "too many hints" knob
+            # unable to reach the range where it matters. 1.0 also keeps this gate
+            # decoupled from the env-configurable SKILL_MATCH_THRESHOLD. Mirrors
+            # _handle_memory_hint_threshold (config_handlers.py:700).
+            floor = max(floor, min(override, 1.0))
+        return floor
+
+    def _update_skill_floor(self, top1: float, n_in_vocab: int) -> None:
+        """Feed one processed turn's top-1 SKILL score into the skill EWMA (unbounded).
+
+        Called on EVERY job that produced skill matches (fire or skip) so the floor
+        tracks the corpus's own score distribution regardless of gate outcome. Jobs
+        with NO matches never reach this method, so they cannot pull the floor down
+        (the memory pipeline's equivalent contract, mirrored).
+
+        The score is LENGTH-CORRECTED before averaging (review finding 2). Raw ``top1``
+        is bimodal — ~0.32 at small in-vocab mass, ~0.07 at large — and an EWMA of a
+        bimodal stream converges to a weighted MEAN, which re-suppresses one class
+        permanently. Correcting for the mass dependence first makes the EWMA track a
+        comparable signal:
+
+            norm = top1 * (n_in_vocab / max(n_in_vocab, SKILL_REF_TOKENS))
+
+        The factor ``n / max(n, REF)`` is ALWAYS ``<= 1``, so this **DEFLATES** rather
+        than boosts: short queries (high scores caused by a tiny in-vocab denominator)
+        are pulled DOWN toward the long-query scale; at or above ``REF`` the feed passes
+        through at its true value. Example: ``top1=0.32, n_in_vocab=6, REF=40`` →
+        ``norm = 0.048``, not 0.32. The long class passes through UNCHANGED — the
+        correction moves the converged floor only ~3% (0.0717 → 0.0698 at a
+        15%/85% short/long mix), and that is still above the measured 0.066 long-query
+        top, so convergence can stop the long class from firing. KNOWN-OPEN ITEM:
+        if post-deployment monitoring confirms the long class is suppressed,
+        ``SKILL_FLOOR_MIN`` must come down below 0.066 (the measured long-query top).
+
+        ``n_in_vocab <= 0`` means "stats unavailable" (the fallback path in
+        :meth:`_match_skills_for_hint`), NOT "zero in-vocab tokens" — zero is a
+        legitimate value inside this formula, so an explicit branch treats unknown as
+        pass-through rather than computing ``norm = top1 * (0/REF) = 0.0``, which would
+        drive the floor to its hard bound in ~20 turns and silently disable calibration.
+
+        No ``SKILL_FLOOR_MIN`` clamp here — :meth:`_current_skill_floor` bounds it at
+        read time, in exactly one place. In-memory only, no persistence by design.
+        """
+        if n_in_vocab > 0:
+            norm = top1 * (n_in_vocab / max(n_in_vocab, SKILL_REF_TOKENS))
+        else:
+            norm = top1          # stats unavailable (fallback path) → no correction
+        with self._skill_floor_lock:
+            self._skill_adaptive_floor = (
+                SKILL_EWMA_ALPHA * norm + (1.0 - SKILL_EWMA_ALPHA) * self._skill_adaptive_floor
+            )
 
     # ── Worker loop ──────────────────────────────────────────────────────────
 
@@ -523,10 +659,12 @@ class MemoryHintManager:
         """Skill sub-pipeline: an INDEPENDENT gate over ``SkillManager.match_skills``.
 
         Returns the skill names to suggest (score-descending, capped), or ``[]``. The
-        gate is deliberately simpler than the memory one — a min-score floor plus a
-        max-count cap (plan §D2/§D3) — because skill scores are keyword-fraction on a
-        different scale and multiple relevant skills are legitimate. A failure here can
-        never break the memory path (plan §D6).
+        gate is a self-calibrating **absolute junk guard + adaptive floor** (BUG_0041),
+        then the unchanged cooldown/loaded dedup, then a **relative noise gate**
+        evaluated on the post-dedup survivors, then the entry cap. There is *no*
+        specificity-gap requirement — multiple relevant skills are legitimate. All
+        floor state is independent of the memory pipeline (different measure, different
+        lock). A failure here can never break the memory path (plan §D6).
         """
         name = job['instance_name']
         if not settings['skill_suggestions']:          # master sub-toggle (plan §D7)
@@ -534,8 +672,29 @@ class MemoryHintManager:
         sm = getattr(self._pool, 'skill_manager', None)
         if sm is None or not hasattr(sm, 'match_skills'):   # missing manager (defensive / tests)
             return []
+        # Prefer the stats-returning variant so the length-corrected EWMA feed and the
+        # DEBUG line can see the in-vocab token count (review findings 1 and 2).
+        #
+        # The stats method is validated by RESULT SHAPE, not by `callable()`: a bare
+        # MagicMock auto-creates any attribute, so `callable(...)` is True and the 3-tuple
+        # unpack raises ValueError — which the surrounding `except Exception` (plan §D6)
+        # would swallow, silently returning [] and killing the hint in EVERY test that
+        # uses the existing `_stub_skill_manager`. `isinstance(out[0], list)` is the real
+        # discriminator, and the `if not matches` fallthrough degrades to the plain call
+        # rather than swallowing the turn.
+        #
+        # On that fallback path n_in_vocab = 0 means "stats unavailable" — the correction
+        # is then SKIPPED inside _update_skill_floor (norm = top1, pass-through), NOT
+        # zeroed (which would pin the floor to SKILL_FLOOR_MIN).
+        matches, n_tokens, n_in_vocab = [], 0, 0
         try:
-            matches = sm.match_skills(job['query'])     # [(name, score)] desc; keyword-fraction 0..1
+            raw = getattr(sm, 'match_skills_with_stats', None)
+            if callable(raw):
+                out = raw(job['query'])
+                if isinstance(out, tuple) and len(out) == 3 and isinstance(out[0], list):
+                    matches, n_tokens, n_in_vocab = out
+            if not matches:
+                matches = sm.match_skills(job['query'])     # [(name, score)] desc
         except Exception as e:                          # plan §D6 — never break the memory path
             logger.debug('[MEMORY_HINT] %s: skill match failed: %s', name, e)
             return []
@@ -547,9 +706,28 @@ class MemoryHintManager:
         if not matches:
             return []
 
-        strong = [(n, s) for n, s in matches if s >= SKILL_HINT_MIN_SCORE]   # plan §D2 floor
-        if not strong:                                   # generic/noise query → no skill spam
-            logger.debug('[MEMORY_HINT] %s: skills all below min_score=%.2f → skip', name, SKILL_HINT_MIN_SCORE)
+        # ── Gate 0: ABSOLUTE junk guard (BUG_0041) ───────────────────────────
+        # Non-adaptive: bounds the worst case no matter what the EWMA has learned.
+        top1 = matches[0][1]                            # match() returns score-descending
+        if top1 < SKILL_JUNK_MIN:
+            logger.debug('[MEMORY_HINT] %s: skill gate top1=%.4f junk_min=%.4f '
+                         'tokens=%d in_vocab=%d → skip(junk)', name, top1,
+                         SKILL_JUNK_MIN, n_tokens, n_in_vocab)
+            return []
+
+        # ── Adaptive floor, fed a LENGTH-CORRECTED score (BUG_0041) ──────────
+        floor = self._current_skill_floor(settings.get('skill_threshold', 0.0))
+        # Feed on EVERY matched job that clears the junk guard (fire or skip) so the
+        # floor tracks the corpus's own score distribution regardless of gate outcome.
+        self._update_skill_floor(top1, n_in_vocab)
+
+        if top1 < floor:
+            logger.debug('[MEMORY_HINT] %s: skill gate top1=%.4f floor=%.4f tokens=%d '
+                         'in_vocab=%d → skip(floor)', name, top1, floor, n_tokens, n_in_vocab)
+            return []
+
+        strong = [(n, s) for n, s in matches if s >= floor]
+        if not strong:
             return []
 
         now = time.monotonic(); cooldown = settings['cooldown_seconds']      # reuse memory cooldown (§D4)
@@ -572,6 +750,23 @@ class MemoryHintManager:
         if not to_hint:
             logger.debug('[MEMORY_HINT] %s: all %d skill(s) filtered (loaded=%s, cooldown=%s)',
                          name, len(strong), skipped_loaded or '-', skipped_cd or '-')
+            return []
+
+        # ── Gate 2: RELATIVE noise gate, evaluated POST-dedup (BUG_0041) ───────
+        # A diffuse/generic query lifts many skills over the low floor at once.
+        # Listing them is spam, not a hint. Two properties matter:
+        #   * RELATIVE, because `matches` is capped at _TOP_K = 10 (matcher.py:238) —
+        #     an absolute count would re-suppress exactly the high-in-vocab queries
+        #     this fix enables, and would break if _TOP_K or a cap= call changed.
+        #   * POST-dedup (on to_hint, not on strong), because skills already loaded or
+        #     in cooldown were never going to be shown — counting them suppresses a
+        #     perfectly good hint for no reason.
+        noise_max = max(SKILL_HINT_MAX_ENTRIES, int(len(matches) * SKILL_HINT_NOISE_RATIO))
+        if len(to_hint) > noise_max:
+            logger.debug('[MEMORY_HINT] %s: skill gate top1=%.4f floor=%.4f tokens=%d '
+                         'in_vocab=%d → skip(noise) %d/%d after dedup (max=%d)',
+                         name, top1, floor, n_tokens, n_in_vocab, len(to_hint),
+                         len(matches), noise_max)
             return []
 
         max_entries = SKILL_HINT_MAX_ENTRIES            # plan §D3 cap (after dedup/cooldown)

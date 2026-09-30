@@ -169,6 +169,7 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'memory_hint_query_chars',
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
+        'memory_hint_skill_threshold',
     # Skill invalidation (adaptive count-cap) — propagated so tool-level reads see them.
     'skill_auto_invalidate_enabled',
     'skill_active_target_k',

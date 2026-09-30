@@ -1188,12 +1188,19 @@ These were **tuned empirically** from a labeled replay of real agent queries thr
 
 ### 9.5 The Skill Gate (Independent)
 
-The skill sub-pipeline is deliberately simpler than the memory one: a **min-score floor + max-count cap** over `SkillManager.match_skills`. It has *no* specificity-gap requirement, because suggesting 2–3 relevant skills on a diffuse query is legitimate.
+The skill sub-pipeline uses a **three-gate adaptive system** (BUG_0041 fix) over `SkillManager.match_skills_with_stats`. It is completely independent of the memory cosine floor — separate EWMA state, separate lock, separate constants. It has *no* specificity-gap requirement, because suggesting 2–3 relevant skills on a diffuse query is legitimate.
 
-- **Floor:** `SKILL_HINT_MIN_SCORE` = `settings.SKILL_MATCH_THRESHOLD` (0.15). This reuses the same source of truth as AUTO skill loading, so the hint suggests exactly the skills AUTO mode would load. The 0.15 value is data-derived: measured generic/diffuse queries top out around 0.13–0.14 (0% false-fires at 0.15), while strong-specific queries fire ~43%.
+**Gate 0 — Absolute junk guard:** `top1 < SKILL_JUNK_MIN` (0.0375) → skip. Non-adaptive; bounds the worst case regardless of EWMA state.
+
+**Gate 1 — Adaptive EWMA floor:** The floor is an EWMA of per-turn *length-corrected* top-1 scores (`top1 × n_in_vocab / max(n_in_vocab, SKILL_REF_TOKENS)`), seeded at `SKILL_FLOOR_SEED` (0.055) and bounded below by `SKILL_FLOOR_MIN` (0.035). The `memory_hint_skill_threshold` setting is a **raise-only override** (clamped to [0, 1.0]); `0` = pure adaptive behavior.
+
+**Gate 2 — Relative noise gate (post-dedup):** After cooldown/loaded dedup, if more than `max(SKILL_HINT_MAX_ENTRIES, int(len(matches) × SKILL_HINT_NOISE_RATIO))` skills survive → skip as generic. Evaluated on the post-dedup list so already-loaded/cooldown skills don't suppress a valid hint.
+
 - **Cap:** `SKILL_HINT_MAX_ENTRIES` = `settings.MAX_AUTO_SKILLS_PER_CALL` (3), applied after dedup/cooldown in score-descending order.
 - **Dedup:** skips skills already in the instance's `_loaded_skill_names` (read under `_compression_lock`).
 - **Cooldown:** per-instance `_recently_skill_hinted` map, reusing `memory_hint_cooldown_seconds`.
+
+> **Note:** `SKILL_HINT_MIN_SCORE` (= 0.15) is retained as a nominal AUTO-mode score for backwards compatibility and as the junk-guard reference (`SKILL_JUNK_MIN = SKILL_HINT_MIN_SCORE × 0.25`). It is **not** the hint gate anymore.
 
 ### 9.6 Dedup, Cooldown & Per-Instance State
 
@@ -1250,6 +1257,7 @@ Each vault keeps an mtime map so `rescan()` rebuilds only changed files and drop
 | `memory_hint_query_chars` | `1000` | How many leading chars of a turn's text/reasoning form the query. |
 | `memory_hint_cooldown_seconds` | `600` | Cooldown before the same memory/skill may be re-hinted to an instance. |
 | `memory_hint_skill_suggestions` | `True` | Sub-toggle under `memory_hint_enabled`: independently enable/disable skill suggestions within hints. (Config-only in v1; no dedicated UI checkbox.) |
+| `memory_hint_skill_threshold` | `0.0` | Raise-only override floor for the skill sub-pipeline (BUG_0041). Clamped to [0, 1.0]. `0` = pure adaptive behavior. Deliberately separate from `memory_hint_threshold` (different score measure). |
 
 The gate internals (`GAP`, `FLOOR_*`, `EWMA_ALPHA`, `MAX_HINTS_PER_TURN`, `SKILL_HINT_MIN_SCORE`, `SKILL_HINT_MAX_ENTRIES`) are **module constants**, not user settings — matching the design philosophy of exposing only high-level knobs. Settings are read live each cycle from `pool.llm_cfg` with defensive fallbacks so a bad persisted value can never crash the worker.
 

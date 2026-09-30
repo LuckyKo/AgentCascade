@@ -240,3 +240,41 @@ class SkillMatcher:
         logger.debug("[SKILLS] Match query '%s' → %d results (top=%s)", query[:80], len(results),
                      results[0][0] if results else 'none')
         return results
+
+    def match_with_stats(self, query: str,
+                         k: Optional[int] = None
+                         ) -> Tuple[List[Tuple[str, float]], int, int]:
+        """Match like :meth:`match`, additionally reporting query token statistics.
+
+        Purely additive diagnostic wrapper (BUG_0041): returns exactly what ``match()``
+        would return, plus the two counts the memory-hint gate needs to (a) length-correct
+        its adaptive floor and (b) tell a length-driven non-fire apart from a genuine
+        no-signal non-fire in its DEBUG log.
+
+        ``match()`` is deliberately left byte-identical — it is shared with the
+        ``scan_skills`` tool, AUTO-mode ``call_agent`` and the skill advisor, and its
+        callers must not observe any change.
+
+        Args:
+            query: The task text or context to match against.
+            k: Optional result cap, identical semantics to :meth:`match`.
+
+        Returns:
+            ``(results, n_tokens, n_in_vocab)`` where ``results`` is exactly
+            :meth:`match`'s return value; ``n_tokens`` is the number of DISTINCT
+            tokenized query terms (``_TOKEN_RE``, lowercased — repetition is free
+            because the scorer uses a set), and ``n_in_vocab`` is how many of those
+            appear in the skill index (i.e. contribute non-zero ``_idf``).
+
+            ``n_in_vocab`` is the quantity that actually drives the G+C3 score decay,
+            NOT query length: out-of-vocabulary terms contribute ``0.0`` to the
+            denominator and padding a query with them does not change any score.
+        """
+        results = self.match(query, k=k)
+        tokens = set(_TOKEN_RE.findall((query or '').lower()))
+        n_tokens = len(tokens)
+        n_in_vocab = sum(1 for kw in tokens if self._idf.get(kw, 0.0) > 0.0)
+        logger.debug('[SKILLS] match_with_stats tokens=%d in_vocab=%d results=%d top=%s',
+                     n_tokens, n_in_vocab, len(results),
+                     results[0][0] if results else 'none')
+        return results, n_tokens, n_in_vocab

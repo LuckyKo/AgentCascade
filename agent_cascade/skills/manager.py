@@ -1307,8 +1307,7 @@ class SkillManager:
                     existing_priority,
                 )
                 return
-            logger.debug("[SKILLS] Replacing skill '%s' with higher priority (%d > %d)", name, priority,
-                         existing_priority)
+            # logger.debug("[SKILLS] Replacing skill '%s' with higher priority (%d > %d)", name, priority, existing_priority)
 
         # Store parsed data in registry (Tier 1: frontmatter only; body is lazy-loaded)
         version = parsed.get('version', '1.0.0')  # Already normalized by parser
@@ -1432,6 +1431,28 @@ class SkillManager:
             if cap is not None and cap >= 0:
                 results = results[:cap]
             return results
+
+        def match_skills_with_stats(self, query: str, include_inactive: bool = False,
+                                    cap: Optional[int] = None
+                                    ) -> Tuple[List[Tuple[str, float]], int, int]:
+            """Public passthrough for :meth:`SkillMatcher.match_with_stats`.
+
+            Additive (BUG_0041). Returns ``(results, n_tokens, n_in_vocab)`` where
+            ``results`` is byte-identical to ``match_skills(query, include_inactive,
+            cap)`` — the same lazy-index-init, the same active-only filter, the same
+            ordering and cap. The extra counts let the memory-hint gate length-correct
+            its adaptive floor; ``match_skills`` is left untouched so ``scan_skills``
+            and AUTO-mode callers observe no change at all.
+
+            Callers that do not need the counts keep using ``match_skills``.
+            """
+            results = self.match_skills(query, include_inactive=include_inactive, cap=cap)
+            # This runs the scorer twice per hinted turn (once via match_skills,
+            # once via match_with_stats). The cost is accepted because the in-vocab
+            # count must come from the matcher's tokenizer/index. Callers that do
+            # not need counts use match_skills.
+            _, n_tokens, n_in_vocab = self._matcher.match_with_stats(query)
+            return results, n_tokens, n_in_vocab
 
     def get_all_metadata(self, include_active_only: bool = False) -> List[Dict[str, Any]]:
         """Return Tier 1 metadata for the scan_skills tool.

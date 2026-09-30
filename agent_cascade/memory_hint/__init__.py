@@ -19,8 +19,15 @@ from .manager import (
     HINT_ENTRY_MAX_CHARS,
     JOB_TTL_SECONDS,
     MAX_HINTS_PER_TURN,
+    SKILL_EWMA_ALPHA,
+    SKILL_FLOOR_MIN,
+    SKILL_FLOOR_SEED,
     SKILL_HINT_MAX_ENTRIES,
+    # Nominal AUTO-mode score retained for backwards compatibility — NOT the hint gate.
     SKILL_HINT_MIN_SCORE,
+    SKILL_HINT_NOISE_RATIO,
+    SKILL_JUNK_MIN,
+    SKILL_REF_TOKENS,
 )
 from .matcher import MemoryMatcher
 from .vault import VaultIndex, discover_vaults, parse_frontmatter, identity_text, is_under_vault
@@ -36,8 +43,14 @@ __all__ = [
     'HINT_ENTRY_MAX_CHARS',
     'JOB_TTL_SECONDS',
     'MAX_HINTS_PER_TURN',
+    'SKILL_EWMA_ALPHA',
+    'SKILL_FLOOR_MIN',
+    'SKILL_FLOOR_SEED',
     'SKILL_HINT_MAX_ENTRIES',
     'SKILL_HINT_MIN_SCORE',
+    'SKILL_HINT_NOISE_RATIO',
+    'SKILL_JUNK_MIN',
+    'SKILL_REF_TOKENS',
     'MemoryMatcher',
     'VaultIndex',
     'discover_vaults',
