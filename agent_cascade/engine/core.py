@@ -2253,8 +2253,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             pass
         # LLM-activity stamp (plan §3.2): covers prefill (start) and completion
         # (end) for every retry attempt — the same boundaries telemetry uses.
+        # Best-effort: test doubles may use a pool stub without get_instance, so
+        # guard it exactly like the telemetry block above (must never break the call).
         if event_type in ('start', 'end'):
-            inst = self.pool.get_instance(inst_name)
+            try:
+                inst = self.pool.get_instance(inst_name)
+            except AttributeError:
+                inst = None
             if inst is not None:
                 self._stamp_llm_activity(inst, event_type)
 
