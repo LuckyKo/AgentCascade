@@ -159,7 +159,7 @@ class SlotPool:
     """
 
     __slots__ = ('key', 'capacity', '_waiters', '_running', '_cond', '_seq_counter',
-                 '_acquisition_counter', '_orphan_overwrites')
+                 '_acquisition_counter', '_orphan_overwrites', '_inflight')
 
     def __init__(self, key: str, capacity: int):
         self.key = key
@@ -167,6 +167,10 @@ class SlotPool:
 
         self._waiters: OrderedDict[int, QueueTicket] = OrderedDict()
         self._running: Dict[str, SlotHolder] = {}
+        # D-5 single-flight gate: instance_name → Event (set when that
+        # instance's in-flight acquire() returns or raises). Only spans the
+        # blocking window; sequential acquires are unaffected.
+        self._inflight: Dict[str, threading.Event] = {}
 
         self._cond = threading.Condition(threading.RLock())
         self._seq_counter = itertools.count()
@@ -214,136 +218,189 @@ class SlotPool:
         if instance_resolver is None and pool is not None and hasattr(pool, 'get_instance'):
             instance_resolver = pool.get_instance
 
-        with self._cond:
-            # Fast path: capacity available
-            if len(self._running) < self.capacity:
-                holder = _grant(self, instance_name, agent_class)
-                return _make_release_cb(self, holder)
+        # ── D-5 Single-flight gate: one in-flight blocking acquire per (pool, instance).
+        # Register under the SAME _cond acquisition as the probe so no failure window
+        # exists between read and write. The entry is cleared in `finally` on every
+        # exit path (grant, timeout, cancellation, raise), so sequential acquires by
+        # the same instance are unaffected.
+        while True:
+            with self._cond:
+                my_event = self._inflight.get(instance_name)
+                first = my_event is None
+                if first:
+                    my_event = threading.Event()
+                    self._inflight[instance_name] = my_event
 
-            # Slow path: enqueue as waiter
-            ticket = QueueTicket(
-                seq=next(self._seq_counter),
-                agent_name=instance_name,
-                instance_name=instance_name,
-                agent_class=agent_class,
-                slot_key=self.key,
-                created_at=time.monotonic(),
-                deadline=time.monotonic() + timeout,
-            )
-
-            self._waiters[ticket.ticket_id] = ticket
-
-            # BUG-11: once-per-enqueue lifecycle trace (never per-tick — logged
-            # BEFORE the poll loop starts).
-            logger.debug(f"[SLOTPOOL] Queued on '{self.key}': agent={instance_name} ({agent_class}) "
-                         f"ticket={ticket.ticket_id} position={len(self._waiters)} "
-                         f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
-                         f"timeout={timeout:.0f}s")
-            logger.warning(f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
-                           f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
-                           f"running={len(self._running)}/{self.capacity}, "
-                           f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)")
-
-            deadline = ticket.deadline
-            last_wait_warn = ticket.created_at
-            # FIFO head-stall escalation state — plain locals, NOT pool state (§3.3.1):
-            # the lock-free resolution phase writes them safely, and this keeps the
-            # change confined to one method (no QueueTicket migration).
-            head_warned = False
-            # The REPEAT_S throttle must only gate *subsequent* alarms; the first
-            # ERROR is allowed as soon as age >= ALARM_S. Initializing to created_at
-            # made (now - last_head_alarm) start at 0, so due_alarm stayed False for
-            # the whole ALARM_S..REPEAT_S window — the first alarm was unreachable
-            # unless the waiter outlived REPEAT_S (plan §3.2: fire at ALARM_S).
-            last_head_alarm = ticket.created_at - SLOT_HEAD_STALL_REPEAT_S
-
-            while not ticket.cancelled.is_set():
-                now_mono = time.monotonic()
-
-                # ── FIFO HEAD-STALL escalation (diagnostic only) ────────────────
-                # Two-phase by design: cheap threshold detection under _cond,
-                # expensive instance resolution with _cond RELEASED. The explicit
-                # release()/acquire() pair below is LOAD-BEARING — do not refactor
-                # it into a try/finally around the loop or a helper called from
-                # inside the `with` block (both silently reintroduce the lock-order
-                # inversion). Legal because _cond wraps an RLock and this loop body
-                # holds it at recursion depth exactly 1 (the `with` below plus the
-                # reacquisition inside wait_for). See plan §3.3.1.
-                if _is_head(self, ticket.ticket_id):
-                    age = now_mono - ticket.created_at
-                    due_warn = (not head_warned) and (age >= SLOT_HEAD_STALL_WARN_S)
-                    due_alarm = ((age >= SLOT_HEAD_STALL_ALARM_S) and
-                                 (now_mono - last_head_alarm) >= SLOT_HEAD_STALL_REPEAT_S)
-                    if due_warn or due_alarm:
-                        self._cond.release()  # legal: _cond is RLock-backed
-                        try:
-                            ctx = _holder_activity_context(self, now_mono, resolver=instance_resolver)
-                            if due_warn:
-                                logger.warning(_head_stall_msg(self, ticket, age, ctx, level='WARN'))
-                                head_warned = True
-                            # §3.2.1: streaming suppresses the ERROR for ANY waiter age.
-                            # No `age < WARN_S*3` clause — that was unreachable.
-                            if due_alarm and not ctx['streaming']:
-                                logger.error(_head_stall_msg(self, ticket, age, ctx, level='ALARM'))
-                                last_head_alarm = now_mono
-                        except Exception:
-                            # A diagnostic must never break the wait loop or leak the
-                            # ticket. Degrade to a context-free alarm.
-                            logger.error(f"[SLOT_HEAD_STALL] context resolution failed on "
-                                         f"'{self.key}' head='{ticket.instance_name}' "
-                                         f"age={age:.0f}s — emitting without holder context",
-                                         exc_info=True)
-                        finally:
-                            self._cond.acquire()  # MUST run on every path
-
-                if now_mono - last_wait_warn >= 15.0:
-                    elapsed = now_mono - ticket.created_at
-                    logger.warning(f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
-                                   f"after {elapsed:.0f}s (waiters={len(self._waiters)}, "
-                                   f"running={len(self._running)}/{self.capacity}, "
-                                   f"holders={[h.instance_name for h in self._running.values()]})")
-                    last_wait_warn = now_mono
-
-                remaining = deadline - now_mono
-
-                if remaining <= 0:
-                    _remove_ticket(self, ticket)
-                    _log_acquire_timeout(self, ticket)
-                    raise SlotQueueTimeout(ticket)
-
-                # Wait until predicate is true: capacity free + we are head.
-                granted = self._cond.wait_for(lambda:
-                                              (_is_head(self, ticket.ticket_id) and len(self._running) < self.capacity),
-                                              timeout=min(remaining, 1.0))
-
-                if not granted:
+            try:
+                if not first:
+                    # Another thread is already blocking on this pool for this instance.
+                    # Do NOT enqueue a second ticket — wait for the primary to finish.
+                    logger.warning(
+                        f"[SLOTPOOL] DUPLICATE-ACQUIRE suppressed on '{self.key}': "
+                        f"agent={instance_name} — an acquire is already in flight; not enqueueing a 2nd ticket")
+                    dup_deadline = time.monotonic() + timeout
+                    while not my_event.is_set():
+                        if time.monotonic() >= dup_deadline:
+                            raise SlotQueueTimeout(QueueTicket(
+                                seq=-1, agent_name=instance_name, instance_name=instance_name,
+                                agent_class=agent_class, slot_key=self.key,
+                                created_at=time.monotonic(), deadline=dup_deadline))
+                        my_event.wait(timeout=1.0)
+                    # Primary finished — re-check whether the pool is now free for us.
+                    with self._cond:
+                        if len(self._running) < self.capacity:
+                            holder = _grant(self, instance_name, agent_class)
+                            return _make_release_cb(self, holder)
+                    # Pool still busy: loop back and queue normally (we no longer
+                    # hold the in-flight slot, so a new primary may claim it).
+                    first = True
+                    with self._cond:
+                        if instance_name not in self._inflight:
+                            my_event = threading.Event()
+                            self._inflight[instance_name] = my_event
+                            continue
+                    # Someone re-registered while we were re-checking: wait for them.
                     continue
 
-                if ticket.cancelled.is_set():
-                    # BUG-11: lifecycle trace for the silent SlotCancelled abort.
+                with self._cond:
+                    # Fast path: capacity available
+                    if len(self._running) < self.capacity:
+                        holder = _grant(self, instance_name, agent_class)
+                        return _make_release_cb(self, holder)
+
+                    # Slow path: enqueue as waiter
+                    ticket = QueueTicket(
+                        seq=next(self._seq_counter),
+                        agent_name=instance_name,
+                        instance_name=instance_name,
+                        agent_class=agent_class,
+                        slot_key=self.key,
+                        created_at=time.monotonic(),
+                        deadline=time.monotonic() + timeout,
+                    )
+
+                    self._waiters[ticket.ticket_id] = ticket
+
+                    # BUG-11: once-per-enqueue lifecycle trace (never per-tick — logged
+                    # BEFORE the poll loop starts).
+                    logger.debug(f"[SLOTPOOL] Queued on '{self.key}': agent={instance_name} ({agent_class}) "
+                                 f"ticket={ticket.ticket_id} position={len(self._waiters)} "
+                                 f"waiters={len(self._waiters)} holders={[h.instance_name for h in self._running.values()]} "
+                                 f"timeout={timeout:.0f}s")
+                    logger.warning(f"[SLOTPOOL] Slot contention on '{self.key}': agent='{instance_name}' ({agent_class}) "
+                                   f"queued (position={len(self._waiters)}, waiters={len(self._waiters)}, "
+                                   f"running={len(self._running)}/{self.capacity}, "
+                                   f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)")
+
+                    deadline = ticket.deadline
+                    last_wait_warn = ticket.created_at
+                    # FIFO head-stall escalation state — plain locals, NOT pool state (§3.3.1):
+                    # the lock-free resolution phase writes them safely, and this keeps the
+                    # change confined to one method (no QueueTicket migration).
+                    head_warned = False
+                    # The REPEAT_S throttle must only gate *subsequent* alarms; the first
+                    # ERROR is allowed as soon as age >= ALARM_S. Initializing to created_at
+                    # made (now - last_head_alarm) start at 0, so due_alarm stayed False for
+                    # the whole ALARM_S..REPEAT_S window — the first alarm was unreachable
+                    # unless the waiter outlived REPEAT_S (plan §3.2: fire at ALARM_S).
+                    last_head_alarm = ticket.created_at - SLOT_HEAD_STALL_REPEAT_S
+
+                    while not ticket.cancelled.is_set():
+                        now_mono = time.monotonic()
+
+                        # ── FIFO HEAD-STALL escalation (diagnostic only) ────────────────
+                        # Two-phase by design: cheap threshold detection under _cond,
+                        # expensive instance resolution with _cond RELEASED. The explicit
+                        # release()/acquire() pair below is LOAD-BEARING — do not refactor
+                        # it into a try/finally around the loop or a helper called from
+                        # inside the `with` block (both silently reintroduce the lock-order
+                        # inversion). Legal because _cond wraps an RLock and this loop body
+                        # holds it at recursion depth exactly 1 (the `with` below plus the
+                        # reacquisition inside wait_for). See plan §3.3.1.
+                        if _is_head(self, ticket.ticket_id):
+                            age = now_mono - ticket.created_at
+                            due_warn = (not head_warned) and (age >= SLOT_HEAD_STALL_WARN_S)
+                            due_alarm = ((age >= SLOT_HEAD_STALL_ALARM_S) and
+                                         (now_mono - last_head_alarm) >= SLOT_HEAD_STALL_REPEAT_S)
+                            if due_warn or due_alarm:
+                                self._cond.release()  # legal: _cond is RLock-backed
+                                try:
+                                    ctx = _holder_activity_context(self, now_mono, resolver=instance_resolver)
+                                    if due_warn:
+                                        logger.warning(_head_stall_msg(self, ticket, age, ctx, level='WARN'))
+                                        head_warned = True
+                                    # §3.2.1: streaming suppresses the ERROR for ANY waiter age.
+                                    # No `age < WARN_S*3` clause — that was unreachable.
+                                    if due_alarm and not ctx['streaming']:
+                                        logger.error(_head_stall_msg(self, ticket, age, ctx, level='ALARM'))
+                                        last_head_alarm = now_mono
+                                except Exception:
+                                    # A diagnostic must never break the wait loop or leak the
+                                    # ticket. Degrade to a context-free alarm.
+                                    logger.error(f"[SLOT_HEAD_STALL] context resolution failed on "
+                                                 f"'{self.key}' head='{ticket.instance_name}' "
+                                                 f"age={age:.0f}s — emitting without holder context",
+                                                 exc_info=True)
+                                finally:
+                                    self._cond.acquire()  # MUST run on every path
+
+                        if now_mono - last_wait_warn >= 15.0:
+                            elapsed = now_mono - ticket.created_at
+                            logger.warning(f"[SLOTPOOL] Agent '{instance_name}' still waiting for slot on '{self.key}' "
+                                           f"after {elapsed:.0f}s (waiters={len(self._waiters)}, "
+                                           f"running={len(self._running)}/{self.capacity}, "
+                                           f"holders={[h.instance_name for h in self._running.values()]})")
+                            last_wait_warn = now_mono
+
+                        remaining = deadline - now_mono
+
+                        if remaining <= 0:
+                            _remove_ticket(self, ticket)
+                            _log_acquire_timeout(self, ticket)
+                            raise SlotQueueTimeout(ticket)
+
+                        # Wait until predicate is true: capacity free + we are head.
+                        granted = self._cond.wait_for(lambda:
+                                                      (_is_head(self, ticket.ticket_id) and len(self._running) < self.capacity),
+                                                      timeout=min(remaining, 1.0))
+
+                        if not granted:
+                            continue
+
+                        if ticket.cancelled.is_set():
+                            # BUG-11: lifecycle trace for the silent SlotCancelled abort.
+                            logger.debug(f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
+                                         f"agent={ticket.instance_name} ticket={ticket.ticket_id}")
+                            _remove_ticket(self, ticket)
+                            raise SlotCancelled(ticket)
+
+                        if _is_head(self, ticket.ticket_id):
+                            self._waiters.pop(ticket.ticket_id)
+                            holder = _grant(self, instance_name, agent_class, ticket=ticket)
+                            ticket.granted.set()
+                            wait_dur = time.monotonic() - ticket.created_at
+                            if wait_dur >= 1.0:
+                                logger.info(f"[SLOTPOOL] Agent '{instance_name}' acquired slot on '{self.key}' "
+                                            f"after {wait_dur:.1f}s wait in queue.")
+                            return _make_release_cb(self, holder)
+
+                        continue
+
+                    # BUG-11: lifecycle trace for cancellation detected outside the
+                    # wait loop (ticket.cancelled set between iterations).
                     logger.debug(f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
                                  f"agent={ticket.instance_name} ticket={ticket.ticket_id}")
                     _remove_ticket(self, ticket)
                     raise SlotCancelled(ticket)
-
-                if _is_head(self, ticket.ticket_id):
-                    self._waiters.pop(ticket.ticket_id)
-                    holder = _grant(self, instance_name, agent_class, ticket=ticket)
-                    ticket.granted.set()
-                    wait_dur = time.monotonic() - ticket.created_at
-                    if wait_dur >= 1.0:
-                        logger.info(f"[SLOTPOOL] Agent '{instance_name}' acquired slot on '{self.key}' "
-                                    f"after {wait_dur:.1f}s wait in queue.")
-                    return _make_release_cb(self, holder)
-
-                continue
-
-            # BUG-11: lifecycle trace for cancellation detected outside the
-            # wait loop (ticket.cancelled set between iterations).
-            logger.debug(f"[SLOTPOOL] Cancelled while waiting on '{self.key}': "
-                         f"agent={ticket.instance_name} ticket={ticket.ticket_id}")
-            _remove_ticket(self, ticket)
-            raise SlotCancelled(ticket)
+            finally:
+                # D-5: clear the in-flight entry on EVERY exit path (grant, timeout,
+                # cancellation, raise). The Event is set so any duplicate waiter
+                # blocked on it can proceed.
+                with self._cond:
+                    ev = self._inflight.get(instance_name)
+                    if ev is my_event:
+                        del self._inflight[instance_name]
+                my_event.set()
 
     def release(self, holder: SlotHolder) -> None:
         """Release a slot permit held by the given holder."""
