@@ -105,24 +105,23 @@ class _CapturingStream:
         # Type guard: ensure msg is a string (handles non-string writes gracefully)
         msg = str(msg)
         with self._lock:
+            logged = False
             if msg and msg.strip():
                 level = logging.INFO if self._stream_type == 'stdout' else logging.WARNING
                 try:
                     logger.log(level, msg.rstrip('\n\r'))
+                    logged = True
                 except Exception:
-                    # Fallback to original stream if logging fails (avoids recursion)
-                    try:
-                        self._original.write(f"[LOGGING FAILED] {msg}")
-                        self._original.flush()
-                    except Exception:
-                        pass
-            # Also write to the original stream so it still appears on screen
-            try:
-                self._original.write(msg)
-                self._original.flush()
-            except (OSError, ValueError):
-                # Broken pipe, closed stream, etc. — acceptable failures during I/O
-                pass
+                    logged = False
+            # The logging tree (console handler + rotating file handler) is the
+            # ONLY sink. Writing to the original stream as well double-emitted
+            # every WARNING+ record. Only bypass it when logging itself failed.
+            if not logged and msg and msg.strip():
+                try:
+                    self._original.write(msg)
+                    self._original.flush()
+                except (OSError, ValueError):
+                    pass
 
     def flush(self):
         try:

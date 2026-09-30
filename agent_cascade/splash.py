@@ -99,11 +99,12 @@ def _build_banner(rows):
 def _terminal_stream():
     """Return the real terminal stream to write the banner to, or None.
 
-    After ``init_logging()`` runs, ``sys.stdout`` is a capturing stream that BOTH logs
-    (with a timestamp prefix) AND echoes to the original stdout — so a multi-line banner
-    would appear twice on screen. To avoid that, we write directly to the underlying real
-    stream (``agent_cascade.log._original_stdout``) when it's available. Falls back to
-    ``sys.stdout`` (pre-logging or if the log module wasn't imported).
+    After ``init_logging()`` runs, ``sys.stdout`` is a capturing stream that routes
+    writes through the logging tree (D-8: single sink; raw echo only on logging failure).
+    The banner is intentionally written directly to the underlying real stream
+    (``agent_cascade.log._original_stdout``) so it appears on screen without a log
+    timestamp prefix. Falls back to ``sys.stdout`` (pre-logging or if the log module
+    wasn't imported).
     """
     try:
         from agent_cascade import log as _log_mod
