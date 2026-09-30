@@ -1016,7 +1016,15 @@ class LLMCallMixin:
                                         if estimated <= next_limit * 0.95:  # 5% safety margin
                                             # Payload fits — inject notification and resume agent
                                             from agent_cascade.compression.handler import CompressionHandler
-                                            max_tokens = instance._allocated_max_input_tokens or next_limit or 0
+                                            # Denominator priority: next_limit (the endpoint we are about to
+                                            # resume against, and the same number the 95% gate above used) must
+                                            # win over instance._allocated_max_input_tokens — that attribute is a
+                                            # per-call cache of the PREVIOUS request's budget, possibly a different
+                                            # endpoint's entirely. Deliberately NOT routed through
+                                            # measure_context_usage: its denominator is endpoint-relative by
+                                            # construction, and _get_effective_limit would report the CURRENT
+                                            # endpoint's limit, contradicting the 95% gate printed above.
+                                            max_tokens = next_limit or instance._allocated_max_input_tokens or 0
                                             notif_msg = Message(role=USER,
                                                                 content=CompressionHandler._format_compression_feedback(
                                                                     'fallback', 0, estimated, max_tokens))

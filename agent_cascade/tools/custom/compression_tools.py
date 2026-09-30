@@ -151,13 +151,25 @@ class CompressContext(BaseTool):
             if dry_run:
                 return result.summary_text
 
-            from agent_cascade.compression.handler import CompressionHandler
-            max_tokens = 0
+            from agent_cascade.compression.handler import (CompressionHandler, _authoritative_usage)
+            # Authoritative post-compression readout (same math as the min-usage guard and the
+            # engine's forced-path warning). The pool was mutated by compress_context() above, so
+            # get_conversation() returns the post-mutation conversation. Wrapped in try/except:
+            # this tool must return a string — a readout failure degrades to the old fallback,
+            # never raises.
             target_inst = self.agent_pool.get_instance(agent_name)
             if target_inst is not None:
-                max_tokens = getattr(target_inst, '_allocated_max_input_tokens', 0) or 0
+                try:
+                    tokens_after, max_tokens = _authoritative_usage(
+                        self.agent_pool, target_inst, self.agent_pool.get_conversation(agent_name),
+                        result.tokens_after, getattr(target_inst, '_allocated_max_input_tokens', 0) or 0)
+                except Exception as e:
+                    logger.debug(f"post-compression usage unavailable for '{agent_name}': {e}")
+                    tokens_after, max_tokens = result.tokens_after, 0
+            else:
+                tokens_after, max_tokens = result.tokens_after, 0
             comp_type = 'manual' if mode == 'manual' else 'auto'
             return CompressionHandler._format_compression_feedback(comp_type, result.messages_discarded,
-                                                                   result.tokens_after, max_tokens)
+                                                                   tokens_after, max_tokens)
         else:
             return f"ERROR: {result.error}"

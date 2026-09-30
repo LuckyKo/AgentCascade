@@ -45,6 +45,25 @@ def _invalidate_token_cache(instance):
     instance._last_token_count_conversation_length = -1
 
 
+def _authoritative_usage(pool, instance, conv, fallback_tokens, fallback_max) -> tuple[int, int]:
+    """(numerator, denominator) for a post-compression readout, fail-soft.
+
+    Delegates to compression.core.measure_context_usage, which is the same math the
+    min-usage guard and the engine's forced-path warning use. Never raises: on failure
+    returns the caller's pre-compression estimate so the feedback still renders.
+    """
+    from agent_cascade.compression.core import measure_context_usage
+    try:
+        pair = measure_context_usage(pool, instance.instance_name, conv)
+    except Exception as e:
+        logger.debug(f"authoritative post-compression usage unavailable for "
+                     f"'{instance.instance_name}': {e}")
+        pair = None
+    if pair is None or pair[0] <= 0:
+        return fallback_tokens, fallback_max
+    return pair
+
+
 # ── CompressionHandler Class ─────────────────────────────────────────────────
 
 
@@ -874,11 +893,15 @@ class CompressionHandler:
                     # ── Inject compression feedback into last message (in-tool-response pattern) ──
                     # Appending to the last message's content avoids creating a separate USER message
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
-                    max_tokens = instance._allocated_max_input_tokens or 0
-                    notification_text = self._format_compression_feedback('forced', result.messages_discarded,
-                                                                          result.tokens_after, max_tokens)
-
                     self._sync_logger_after_compression(inst_name, instance.agent_class, 'forced compression', instance)
+
+                    # Authoritative post-compression readout: count AFTER the logger sync and BEFORE
+                    # the notification is appended, so the number excludes the notification itself.
+                    # `conv` was re-fetched above (post-mutation snapshot); reuse it.
+                    tokens_after, max_tokens = _authoritative_usage(
+                        self.pool, instance, conv, result.tokens_after, instance._allocated_max_input_tokens or 0)
+                    notification_text = self._format_compression_feedback('forced', result.messages_discarded,
+                                                                          tokens_after, max_tokens)
 
                     # Validate BEFORE appending notification to avoid false recovery from notif role alternation
                     conv = self.pool.get_conversation(inst_name)
@@ -1008,8 +1031,13 @@ class CompressionHandler:
                 # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
                 self.engine.stream_publisher.push_periodic_update(instance.parent_instance or instance.instance_name)
 
-            max_tokens = instance._allocated_max_input_tokens or 0
-            return self._format_compression_feedback('manual', result.messages_discarded, result.tokens_after,
+            # Authoritative post-compression readout (same math as the min-usage guard and
+            # the forced-path warning). `conv` is bound above when non-empty; fall back to a
+            # fresh fetch only in the empty case, where the pair degrades to the fallback.
+            conv_for_count = conv if 'conv' in locals() and conv else self.pool.get_conversation(target_agent_name)
+            tokens_after, max_tokens = _authoritative_usage(
+                self.pool, instance, conv_for_count, result.tokens_after, instance._allocated_max_input_tokens or 0)
+            return self._format_compression_feedback('manual', result.messages_discarded, tokens_after,
                                                      max_tokens)
         else:
             return f"Compression failed: {result.error}"
@@ -1172,10 +1200,16 @@ class CompressionHandler:
 
             _invalidate_token_cache(instance)
 
-            # Unified feedback notification
-            est_tokens = int(sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR) if conv else 0
-            notification_text = self._format_compression_feedback('manual', 0, est_tokens,
-                                                                  instance._allocated_max_input_tokens or 0)
+            # Unified feedback notification.
+            # Authoritative readout (real tokenizer over the full post-mutation conversation)
+            # replaces the old char-4 heuristic — so /compress now reports a LARGER, accurate
+            # number than before (the correction, not a regression). Re-fetch at the point of
+            # use: _recover_or_halt above may have replaced the pool contents. Count is taken
+            # BEFORE the notification is appended, so it excludes the notification itself.
+            conv_for_count = self.pool.get_conversation(inst_name)
+            tokens_after, max_tokens = _authoritative_usage(
+                self.pool, instance, conv_for_count, 0, instance._allocated_max_input_tokens or 0)
+            notification_text = self._format_compression_feedback('manual', 0, tokens_after, max_tokens)
             notif_msg = Message(role=USER, content=notification_text)
             self.engine._append_and_log(instance, notif_msg)
             if response is not None:

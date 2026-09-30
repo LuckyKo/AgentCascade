@@ -42,22 +42,44 @@ def _compression_failure(error: str, mode: str) -> CompressResult:
 def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | None:
     """Estimate context usage percentage for the min-usage guard.
 
-    Pure computation (no LLM call, no pool mutation). Mirrors BOTH sides of the
-    engine's forced-path math so the guard's numerator and denominator match what
-    ``_count_history_tokens`` / ``_get_effective_limit`` use:
+    Delegates to :func:`measure_context_usage` (same math as the engine's forced-path
+    ``_count_history_tokens`` / ``_get_effective_limit`` pair) so the guard and the
+    post-compression feedback readouts cannot drift apart.
+
+    Returns:
+        Usage as a percentage (0-100+), or None on any failure (fail-open).
+    """
+    pair = measure_context_usage(agent_pool, target_agent_name, history)
+    if pair is None:
+        return None
+    current_tokens, effective_limit = pair
+    if effective_limit <= 0:
+        return None
+    return current_tokens / effective_limit * 100
+
+
+def measure_context_usage(agent_pool, target_agent_name: str, history) -> tuple[int, int] | None:
+    """Authoritative (numerator, denominator) for a post-compression usage readout.
+
+    Same math as ``_estimate_usage_pct``, but returns the raw pair instead of a ratio so
+    the feedback formatter can render "X/Y tokens (Z% used)" with X and Y agreeing:
 
       * Numerator: message tokens (``get_message_stats``) PLUS tool-schema tokens
         (``estimate_functions_tokens`` over the instance's active functions), exactly
         as ``engine/core.py::_count_history_tokens(..., functions=...)`` counts them.
       * Denominator: effective limit = max input tokens minus the compression reserve,
-        floored to max if that would go <= 0.
+        floored to max if that would go <= 0 — mirroring
+        ``engine/core.py::_get_effective_limit`` so the displayed percentage agrees with
+        the trigger that actually fires.
 
-    Tool-schema counting is fail-soft: if resolving active functions or estimating
-    their tokens fails for any reason, we fall back to the message-only count rather
-    than aborting — a schema-counting bug must never block compression.
+    Pure computation (no LLM call, no pool mutation). Tool-schema counting is fail-soft:
+    if resolving active functions or estimating their tokens fails for any reason, we fall
+    back to the message-only count rather than aborting — a schema-counting bug must never
+    block compression.
 
     Returns:
-        Usage as a percentage (0-100+), or None on any failure (fail-open).
+        ``(current_tokens, effective_limit)`` or None on any failure (fail-soft: a readout
+        must never break the compression path it is reporting on).
     """
     try:
         instance = agent_pool.instances.get(target_agent_name)
@@ -76,7 +98,7 @@ def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | 
                 active_functions = _get_active_functions_from_template(template, instance, pool=agent_pool)
                 current_tokens += estimate_functions_tokens(active_functions)
         except Exception as e:
-            logger.debug(f"min-usage guard: tool-schema token count skipped for '{target_agent_name}': {e}")
+            logger.debug(f"post-compression usage: tool-schema token count skipped for '{target_agent_name}': {e}")
 
         # Resolve max input tokens, falling back to the settings default.
         # Imported locally (not at module level): api_integration_pkg.tokens triggers the
@@ -94,9 +116,9 @@ def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | 
         if effective_limit <= 0:
             effective_limit = max_tokens
 
-        return current_tokens / effective_limit * 100
+        return current_tokens, effective_limit
     except Exception as e:
-        logger.warning(f"min-usage guard: failed to estimate usage for '{target_agent_name}': {e}")
+        logger.warning(f"post-compression usage: failed to measure context usage for '{target_agent_name}': {e}")
         return None
 
 
