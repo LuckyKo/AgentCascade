@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from agent_cascade.operation_manager.approval_provenance import APPROVER_REASON_LABEL
 from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── list_dir filter helpers ──────────────────────────────────────────────
@@ -148,6 +149,16 @@ class FilterContext:
 
 class FileOpsMixin:
     """File operation methods. Expects self to have __init__-set attributes."""
+
+    @staticmethod
+    def _approver_reason_line(approver_reason: str) -> str:
+        """BUG_0039: the approver-supplied reason appended to approval result messages.
+
+        Kept in one place so all five emitter sites (write/edit/re_indent/copy/move)
+        stay byte-identical; the label itself lives in APPROVER_REASON_LABEL, which is
+        also what tool_loop_detect._SECURITY_JUST_RE matches — a single source of truth.
+        """
+        return f"\n{APPROVER_REASON_LABEL} {approver_reason}"
 
     # ─── Backup cleanup (registered via atexit in __init__) ──────────────
 
@@ -857,7 +868,7 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
             if approver_reason:
-                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
+                msg += self._approver_reason_line(approver_reason)
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
@@ -1346,7 +1357,7 @@ class FileOpsMixin:
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
             if approver_reason:
-                res_msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
+                res_msg += self._approver_reason_line(approver_reason)
 
             # Unified diff snippet in code block (no redundant ---/+++ headers, both point to same file)
             if diff_content:
@@ -1720,7 +1731,7 @@ class FileOpsMixin:
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
             if approver_reason:
-                res_msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
+                res_msg += self._approver_reason_line(approver_reason)
 
             # Sanity warning for large uniform indent shifts (high changed_count relative to range)
             if uniform_shift_info and total_in_range > 0:
@@ -2208,7 +2219,7 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
             if approver_reason:
-                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
+                msg += self._approver_reason_line(approver_reason)
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
@@ -2289,7 +2300,7 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
             if approver_reason:
-                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
+                msg += self._approver_reason_line(approver_reason)
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
