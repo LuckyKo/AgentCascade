@@ -2258,7 +2258,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if event_type in ('start', 'end'):
             try:
                 inst = self.pool.get_instance(inst_name)
-            except AttributeError:
+            except Exception:
+                # Diagnostic path — must never break LLM calls (same principle as the
+                # telemetry block above); test doubles may stub the pool without it.
                 inst = None
             if inst is not None:
                 self._stamp_llm_activity(inst, event_type)

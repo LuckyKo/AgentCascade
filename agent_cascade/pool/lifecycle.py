@@ -257,32 +257,14 @@ class LifecycleMixin:
             inst.terminate()
 
             # ── Sticky slot release on terminate (BUG_0034) ──────────────────────
-            # Same reasoning as the dismiss-path release (see the block further down
-            # in dismiss_instance): the run()-finally release at core.py:1433 may be
-            # arbitrarily delayed — the thread can be mid-HTTP, mid-tool, or blocked
-            # at the FIFO tail. terminate_for_agent only CANCELS WAITERS (it never
-            # touches pool._running), so a terminated-but-not-dismissed holder keeps
-            # its pool entry until its own thread unwinds. Release it HERE.
-            # Idempotent: capture-and-nullify under _state_lock, and SlotPool.release
-            # is a no-op on acquisition_id mismatch, so a later thread release is safe.
+            # The run()-finally release at core.py:1433 may be arbitrarily delayed —
+            # the thread can be mid-HTTP, mid-tool, or blocked at the FIFO tail.
+            # terminate_for_agent only CANCELS WAITERS (it never touches pool._running),
+            # so a terminated-but-not-dismissed holder keeps its pool entry until its
+            # own thread unwinds. Release it HERE (see helper docstring for semantics).
             if inst and hasattr(inst, '_state_lock'):
-                try:
-                    from agent_cascade.slot_queue import release_slot_permit
-                    _term_pool = None
-                    try:
-                        _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
-                        if _sched is not None:
-                            _held_key = getattr(inst, '_slot_key', None)
-                            _term_pool = _sched._pools.get(_held_key) if _held_key else None
-                    except Exception:
-                        pass
-                    release_slot_permit(inst, instance_name,
-                                        action='drop-terminate',
-                                        context='on terminate',
-                                        pool=_term_pool)
-                except Exception as e:
-                    # Non-critical: the thread's own run()-finally release still covers it.
-                    logger.warning(f"Slot release on terminate failed for '{instance_name}' (non-critical): {e}")
+                self._release_slot_on_lifecycle_event(
+                    inst, instance_name, action='drop-terminate', context='on terminate')
 
             if is_active:
                 # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
@@ -322,6 +304,31 @@ class LifecycleMixin:
                     self.message_queues[instance_name].clear()
                 except Exception as e:
                     logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
+
+    def _release_slot_on_lifecycle_event(self, inst, instance_name: str, action: str, context: str) -> None:
+        """Release the instance's held sticky-slot permit on a lifecycle event
+        (terminate/dismiss). Shared by terminate_instance and dismiss_instance —
+        the run()-finally release at core.py may be arbitrarily delayed (mid-HTTP,
+        mid-tool, or blocked at the FIFO tail), so the permit is released HERE.
+
+        Idempotent: capture-and-nullify under _state_lock inside release_slot_permit;
+        SlotPool.release() is a no-op on acquisition_id mismatch, so the thread's
+        own later release stays safe. Non-critical: any failure is logged and
+        swallowed — the thread's run()-finally release still covers it.
+        """
+        try:
+            from agent_cascade.slot_queue import release_slot_permit
+            _pool = None
+            try:
+                _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                if _sched is not None:
+                    _held_key = getattr(inst, '_slot_key', None)
+                    _pool = _sched._pools.get(_held_key) if _held_key else None
+            except Exception:
+                pass
+            release_slot_permit(inst, instance_name, action=action, context=context, pool=_pool)
+        except Exception as e:
+            logger.warning(f"Slot release {context} failed for '{instance_name}' (non-critical): {e}")
 
     def _clear_state_label(self, inst) -> None:
         """Clear the state label and cached endpoint config on an instance to avoid stale references.
@@ -416,31 +423,10 @@ class LifecycleMixin:
         # The old thread may still hold the shared sequential slot (mid-LLM-call, mid-tool,
         # or queued at FIFO tail after a yield) and its run()-finally release could be
         # arbitrarily delayed past the 2s join below. Release the held permit NOW, at the
-        # dismiss site: idempotent capture-and-nullify under _state_lock (exact pattern of
-        # engine._release_slot / stop_session). The old thread's later release is a no-op
-        # (nullified callback; SlotPool.release() is also idempotent via acquisition_id).
+        # dismiss site (see helper docstring for idempotency semantics).
         if inst and hasattr(inst, '_state_lock'):
-            try:
-                # Shared capture-nullify-release-log helper (slot_queue.release_slot_permit):
-                # same idempotent semantics as before — release under the state lock,
-                # [SLOTPOOL] drop-dismiss line only when a live permit was held.
-                from agent_cascade.slot_queue import release_slot_permit
-                _dismiss_pool = None
-                try:
-                    _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
-                    if _sched is not None:
-                        _held_key = getattr(inst, '_slot_key', None)
-                        _dismiss_pool = _sched._pools.get(_held_key) if _held_key else None
-                except Exception:
-                    pass
-                release_slot_permit(inst,
-                                    instance_name,
-                                    action='drop-dismiss',
-                                    context='on dismiss',
-                                    pool=_dismiss_pool)
-            except Exception as e:
-                # Non-critical: the old thread's own run()-finally release still covers it.
-                logger.warning(f"Slot release on dismiss failed for '{instance_name}' (non-critical): {e}")
+            self._release_slot_on_lifecycle_event(
+                inst, instance_name, action='drop-dismiss', context='on dismiss')
 
         # Clear state label before removing from pool (terminate already clears it if active).
         if inst:

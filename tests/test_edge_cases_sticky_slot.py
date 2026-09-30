@@ -32,7 +32,6 @@ import os as _os
 
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"edgecase_{_os.getpid()}")
 
-import inspect  # noqa: F401  (kept for parity with the reference suite; used by static guards)
 import logging
 import threading
 import time
