@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 import io
 import json
 
+import jsonschema
 import requests
 from PIL import Image
 
@@ -605,7 +606,10 @@ class ViewImage(BaseTool, PathResolutionMixin):
         from agent_cascade.llm.schema import ContentItem
         from agent_cascade.tools.custom import screen_capture
 
-        params = self._verify_json_format_args(params)
+        try:
+            params = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         path = params['path']
         crop_region_str = params.get('crop_region')  # optional "x,y,w,h"
 
@@ -962,7 +966,10 @@ class WriteFile(BaseTool, PathResolutionMixin):
                 )
 
         # --- Standard JSON Path ---
-        params_json = self._verify_json_format_args(params)
+        try:
+            params_json = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         path = params_json.get('path')
         content = params_json.get('content', '')
         justification = params_json.get('justification', '')
@@ -1044,7 +1051,10 @@ class EditFile(BaseTool, PathResolutionMixin):
         except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             pass
 
-        params_json = self._verify_json_format_args(params)
+        try:
+            params_json = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         path = params_json.get('path')
         old_content = params_json.get('old_content')
         new_content = params_json.get('new_content')
@@ -1169,7 +1179,15 @@ class ListDir(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
 
     def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
+        try:
+            params = self._verify_json_format_args(params)
+        except (ValueError, jsonschema.ValidationError) as e:
+            # BUG_0038: 'type' validators escape base.py's friendly conversion
+            # (base.py:195 bare raise), so format the message here — never leak
+            # the raw ValidationError dump ("Failed validating ... in schema").
+            if isinstance(e, jsonschema.ValidationError):
+                e = ValueError(f"invalid parameter(s) for tool '{self.name}': {e.message}")
+            return f"ERROR: {e}"
         path = params.get('path', '.')
         recursive = params.get('recursive', False)
         max_depth = params.get('max_depth', -1)
@@ -1285,7 +1303,10 @@ class Grep(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
 
     def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
+        try:
+            params = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         pattern = params['pattern']
         path = params.get('path', '.')
         include = params.get('include', '*')
@@ -1418,7 +1439,15 @@ class DeleteFile(BaseTool):
         params, err = self._normalize_path(params)
         if err:
             return err
-        params = self._verify_json_format_args(params)
+        try:
+            params = self._verify_json_format_args(params)
+        except (ValueError, jsonschema.ValidationError) as e:
+            # BUG_0038: 'type' validators escape base.py's friendly conversion
+            # (base.py:195 bare raise), so format the message here — never leak
+            # the raw ValidationError dump ("Failed validating ... in schema").
+            if isinstance(e, jsonschema.ValidationError):
+                e = ValueError(f"invalid parameter(s) for tool '{self.name}': {e.message}")
+            return f"ERROR: {e}"
         # After _normalize_path, 'path' is either absent (list input → hidden
         # 'paths') or a plain string. No 'required' in the schema on purpose:
         # list inputs legitimately omit it, so presence is checked here instead.
@@ -1529,7 +1558,10 @@ class ReIndent(BaseTool):
         self.agent_name = kwargs.get('agent_name')
 
     def call(self, params: str, **kwargs) -> str:
-        params_json = self._verify_json_format_args(params)
+        try:
+            params_json = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
         path = params_json.get('path')
         lines = params_json.get('lines')
         indent = params_json.get('indent')
