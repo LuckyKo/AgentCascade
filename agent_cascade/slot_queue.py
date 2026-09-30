@@ -196,6 +196,19 @@ class SlotPool:
            - Only head waiter proceeds; non-head re-waits immediately.
         3. Returns a release callback bound to the granted SlotHolder.
 
+        D-5 single-flight gate: at most ONE in-flight blocking acquire per
+        (pool, instance). A concurrent duplicate does NOT enqueue a second
+        ticket; it waits on the primary's Event and re-checks capacity when the
+        primary exits. The probe, registration, capacity check and waiter
+        registration all happen under ONE acquisition of _cond — no code that
+        can raise sits between the inflight read and the write (a failure in
+        that window would leave an entry nothing clears, wedging the instance).
+
+        A duplicate blocked on the primary's Event is interruptible like a queued
+        waiter: each 1s tick checks whether every ticket for the instance has been
+        removed/cancelled (terminate_for_agent / cancel_all), and raises
+        SlotCancelled so the caller's lifecycle cleanup completes promptly.
+
         Args:
             pool: Optional AgentPool reference (plan §3.3 option a). The FIFO
                 head-stall alarm uses ``pool.get_instance`` as its holder-context
@@ -219,33 +232,55 @@ class SlotPool:
             instance_resolver = pool.get_instance
 
         # ── D-5 Single-flight gate: one in-flight blocking acquire per (pool, instance).
-        # Register under the SAME _cond acquisition as the probe so no failure window
-        # exists between read and write. The entry is cleared in `finally` on every
-        # exit path (grant, timeout, cancellation, raise), so sequential acquires by
-        # the same instance are unaffected.
+        # Probe → mark → capacity check → waiter registration all happen under ONE
+        # acquisition of _cond so no failure window exists between the inflight read
+        # and the write. The entry is cleared in `finally` on every exit path (grant,
+        # timeout, cancellation, raise), so sequential acquires by the same instance
+        # are unaffected. A concurrent duplicate does NOT enqueue a second ticket —
+        # it waits for the primary to finish, then re-checks capacity; if still busy
+        # it loops back and enqueues normally as a fresh primary.
         while True:
-            with self._cond:
-                my_event = self._inflight.get(instance_name)
-                first = my_event is None
-                if first:
-                    my_event = threading.Event()
-                    self._inflight[instance_name] = my_event
-
+            owned = False
             try:
+                # ── Probe → mark → fast-path capacity check: ONE _cond acquisition.
+                # Nothing that can raise sits between the inflight read and the write.
+                with self._cond:
+                    my_event = self._inflight.get(instance_name)
+                    first = my_event is None
+                    if first:
+                        my_event = threading.Event()
+                        self._inflight[instance_name] = my_event
+                        owned = True
+
+                        # Fast path: capacity available (same lock scope as the mark).
+                        if len(self._running) < self.capacity:
+                            holder = _grant(self, instance_name, agent_class)
+                            return _make_release_cb(self, holder)
+                    else:
+                        # Another thread is already blocking on this pool for this
+                        # instance. Do NOT enqueue a second ticket — wait for the
+                        # primary to finish (outside the lock; see below).
+                        logger.warning(
+                            f"[SLOTPOOL] DUPLICATE-ACQUIRE suppressed on '{self.key}': "
+                            f"agent={instance_name} — an acquire is already in flight; not enqueueing a 2nd ticket")
+
                 if not first:
-                    # Another thread is already blocking on this pool for this instance.
-                    # Do NOT enqueue a second ticket — wait for the primary to finish.
-                    logger.warning(
-                        f"[SLOTPOOL] DUPLICATE-ACQUIRE suppressed on '{self.key}': "
-                        f"agent={instance_name} — an acquire is already in flight; not enqueueing a 2nd ticket")
                     dup_deadline = time.monotonic() + timeout
                     while not my_event.is_set():
+                        # Interruptible on the same signal as a queued waiter:
+                        # terminate_for_agent / cancel_all remove our ticket from
+                        # _waiters, which wakes us within one 1s tick.
+                        if _ticket_cancelled(self, instance_name):
+                            raise SlotCancelled(QueueTicket(
+                                seq=-1, agent_name=instance_name, instance_name=instance_name,
+                                agent_class=agent_class, slot_key=self.key,
+                                created_at=time.monotonic(), deadline=dup_deadline))
                         if time.monotonic() >= dup_deadline:
                             raise SlotQueueTimeout(QueueTicket(
                                 seq=-1, agent_name=instance_name, instance_name=instance_name,
                                 agent_class=agent_class, slot_key=self.key,
                                 created_at=time.monotonic(), deadline=dup_deadline))
-                        my_event.wait(timeout=1.0)
+                        my_event.wait(timeout=1.0)        # 1s tick, same cadence as the wait loop
                     # Primary finished — re-check whether the pool is now free for us.
                     with self._cond:
                         if len(self._running) < self.capacity:
@@ -258,17 +293,15 @@ class SlotPool:
                         if instance_name not in self._inflight:
                             my_event = threading.Event()
                             self._inflight[instance_name] = my_event
+                            owned = True
                             continue
                     # Someone re-registered while we were re-checking: wait for them.
                     continue
 
+                # Slow path: enqueue as waiter. The pool was full at probe time, so
+                # the ticket is registered under the SAME _cond scope that will hold
+                # it across the wait loop (wait_for requires the lock).
                 with self._cond:
-                    # Fast path: capacity available
-                    if len(self._running) < self.capacity:
-                        holder = _grant(self, instance_name, agent_class)
-                        return _make_release_cb(self, holder)
-
-                    # Slow path: enqueue as waiter
                     ticket = QueueTicket(
                         seq=next(self._seq_counter),
                         agent_name=instance_name,
@@ -394,13 +427,15 @@ class SlotPool:
                     raise SlotCancelled(ticket)
             finally:
                 # D-5: clear the in-flight entry on EVERY exit path (grant, timeout,
-                # cancellation, raise). The Event is set so any duplicate waiter
-                # blocked on it can proceed.
-                with self._cond:
-                    ev = self._inflight.get(instance_name)
-                    if ev is my_event:
-                        del self._inflight[instance_name]
-                my_event.set()
+                # cancellation, raise). Only the OWNER of the entry may clear it and
+                # set its Event — a duplicate that loops back via `continue` must
+                # neither evict the primary's entry nor wake its waiters early.
+                if owned:
+                    with self._cond:
+                        ev = self._inflight.get(instance_name)
+                        if ev is my_event:
+                            del self._inflight[instance_name]
+                    my_event.set()
 
     def release(self, holder: SlotHolder) -> None:
         """Release a slot permit held by the given holder."""
@@ -806,6 +841,23 @@ def _is_head(pool: SlotPool, ticket_id: int) -> bool:
     if not pool._waiters:
         return False
     return next(iter(pool._waiters)) == ticket_id
+
+
+def _ticket_cancelled(pool: SlotPool, instance_name: str) -> bool:
+    """True if this instance has NO live ticket on this pool.
+
+    Used by the D-5 duplicate waiter (which holds no ticket of its own while
+    blocked on the primary's Event): once terminate_for_agent / cancel_all removes
+    every ticket for the instance, the duplicate must abort instead of sitting
+    until its timeout. Called with _cond RELEASED — it snapshots under the lock
+    and checks the flags outside it (same pattern as the wait loop's 1s tick).
+    """
+    with pool._cond:
+        # A live ticket is one that is still queued AND not cancelled. The primary's
+        # wait loop removes its own ticket on cancel/timeout, so "no live ticket"
+        # means the whole acquire chain for this instance has been torn down.
+        tickets = [t for t in pool._waiters.values() if t.instance_name == instance_name]
+    return not any(not t.cancelled.is_set() for t in tickets)
 
 
 def _log_acquire_timeout(pool: SlotPool, ticket: QueueTicket) -> None:
