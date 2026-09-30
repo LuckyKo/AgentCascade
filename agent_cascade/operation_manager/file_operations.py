@@ -827,9 +827,9 @@ class FileOpsMixin:
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
+            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
-            justification = ''
+            approver_reason = ''
 
         try:
             resolved = self._resolve_path(path, mode='rw')
@@ -856,6 +856,8 @@ class FileOpsMixin:
 
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            if approver_reason:
+                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
@@ -1253,9 +1255,9 @@ class FileOpsMixin:
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
+            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
-            justification = ''
+            approver_reason = ''
 
         try:
             resolved = self._resolve_path(path, mode='rw')
@@ -1343,6 +1345,8 @@ class FileOpsMixin:
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+            if approver_reason:
+                res_msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
 
             # Unified diff snippet in code block (no redundant ---/+++ headers, both point to same file)
             if diff_content:
@@ -1580,9 +1584,9 @@ class FileOpsMixin:
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
+            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
-            justification = ''
+            approver_reason = ''
 
         try:
             resolved = self._resolve_path(path, mode='rw')
@@ -1715,6 +1719,8 @@ class FileOpsMixin:
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+            if approver_reason:
+                res_msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
 
             # Sanity warning for large uniform indent shifts (high changed_count relative to range)
             if uniform_shift_info and total_in_range > 0:
@@ -2151,9 +2157,9 @@ class FileOpsMixin:
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
+            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
-            justification = ''
+            approver_reason = ''
 
         try:
             dest_path = self._resolve_path(destination, mode='rw')
@@ -2201,6 +2207,8 @@ class FileOpsMixin:
 
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            if approver_reason:
+                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
@@ -2235,9 +2243,9 @@ class FileOpsMixin:
             )
             if not approved:
                 return f"REJECTED: {reason}"
-            justification = reason
+            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
-            justification = ''
+            approver_reason = ''
 
         try:
             dest_path = self._resolve_path(destination, mode='rw')
@@ -2280,6 +2288,8 @@ class FileOpsMixin:
 
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            if approver_reason:
+                msg += f"\nAuto-Approval Reason (approver-supplied, not caller-authored): {approver_reason}"
 
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'

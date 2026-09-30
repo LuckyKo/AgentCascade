@@ -633,6 +633,34 @@ class TestOutputNormalization:
         assert 'FAILED tests/test_x.py::test_y' in norm2, \
             'FAILED banner must survive normalization alongside the exit-code line'
 
+    def test_approver_reason_line_stripped_by_normalization(self):
+        # BUG_0039: the approver-supplied "Auto-Approval Reason (...)" line is regenerated on
+        # every approval (like Security Justification), so it must be stripped by the same
+        # block-stripping rule — otherwise it survives as a varying line and weakens Layer 1.
+        from agent_cascade.tool_loop_detect import _normalize_output
+
+        out = ('OK: Edited src/x.py\n'
+               'Security Justification: caller prose\n'
+               'Auto-Approval Reason (approver-supplied, not caller-authored): advisor verdict variant 7\n'
+               'STDOUT: real output line')
+        norm = _normalize_output(out)
+        assert 'Security Justification' not in norm
+        assert 'Auto-Approval Reason' not in norm, \
+            'approver-reason label line must be stripped by normalization'
+        assert 'advisor verdict variant 7' not in norm
+        # Genuine content must survive.
+        assert 'real output line' in norm
+
+    def test_approver_reason_like_line_without_exact_label_survives(self):
+        # Negative case: a line merely resembling the label (different prefix) is genuine
+        # output and must NOT be stripped by the exact-label alternation.
+        from agent_cascade.tool_loop_detect import _normalize_output
+
+        out = 'OK: done\nAuto-Approval Reason: some other wording'
+        norm = _normalize_output(out)
+        assert 'Auto-Approval Reason: some other wording' in norm, \
+            'non-exact label must survive normalization (no over-normalization)'
+
     def test_fail_class_timeout_wall_clock_and_silence(self):
         # BUG_0027 contract: code_interpreter's honest kind-aware timeout messages must
         # both classify as TIMEOUT for loop detection. These strings are produced by

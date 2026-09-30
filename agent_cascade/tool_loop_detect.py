@@ -183,9 +183,11 @@ _ELAPSED_MARKER_RE = re.compile(r'\s*\(elapsed \d+(?:\.\d+)?s\)')
 _COMPLETED_IN_RE = re.compile(r'Completed in \d+(?:\.\d+)? s \(')
 
 #: "Security Justification: <prose>" block — regenerated every call, no loop signal; the whole paragraph is dropped. Continuation lines are consumed ONLY while they do not look like a section marker (STDOUT/STDERR/Output:) or a pytest FAILED banner — swallowing one would destroy Layer 2's TESTFAIL class.
+#: BUG_0039: the approver-supplied "Auto-Approval Reason (...)" line is regenerated on every approval too — strip it with the same rule so it cannot survive normalization as a varying line and weaken Layer 1 loop detection. The label always appears as a single line (message assembly emits one f-string), so the alternation matches the label line only.
 _SECURITY_JUST_RE = re.compile(
     r'(?m)^Security Justification:[^\n]*'
     r'(?:\n(?!\s*$)(?!(?:STDOUT|STDERR|Output):)(?!FAILED\s)[^\n]*)*'
+    r'|^Auto-Approval Reason \(approver-supplied, not caller-authored\):[^\n]*'
 )
 
 #: Spillover/truncation notices — char count and saved path vary per run.
