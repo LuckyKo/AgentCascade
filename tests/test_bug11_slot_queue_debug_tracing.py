@@ -3,7 +3,8 @@ Unit tests for BUG-11 fix — DEBUG tracing of the slot-queue lifecycle.
 
 Spec: reports/fix_plans/BUG-11_slot_queue_debug_tracing.md
 
-Covers (all via caplog on the agent_cascade.slot_queue logger):
+Covers (all via caplog on the app logger names — agent_cascade_logger /
+agent_cascade — since D-2 reroutes slot_queue through the late-binding proxy):
 - Enqueue log: once per enqueue, carries agent, ticket, position, waiters, holders.
 - Grant (queued): ticket + waited fields; Grant (fast path): "(fast-path)", no ticket.
 - Release: held=<duration> ≥ actual sleep delta.
@@ -26,9 +27,12 @@ from agent_cascade.slot_queue import (
 
 @pytest.fixture()
 def slot_log(caplog):
-    """Capture DEBUG+ records from the slot_queue module logger."""
+    """Capture DEBUG+ records from the app logger (D-2: slot_queue now logs via proxy)."""
     import logging
-    caplog.set_level(logging.DEBUG, logger='agent_cascade.slot_queue')
+    from agent_cascade.instance_id import get_instance_id
+    _id = get_instance_id() or ''
+    for _n in ('agent_cascade_logger', f'agent_cascade_logger.{_id}', 'agent_cascade'):
+        caplog.set_level(logging.DEBUG, logger=_n)
     return caplog
 
 
@@ -302,7 +306,10 @@ class TestBug11NoSpamAndRegression:
             except TimeoutError:
                 timed_out.set()
 
-        caplog_at_warn.set_level(logging.DEBUG, logger='agent_cascade.slot_queue')
+        from agent_cascade.instance_id import get_instance_id as _gid
+        _id = _gid() or ''
+        for _n in ('agent_cascade_logger', f'agent_cascade_logger.{_id}', 'agent_cascade'):
+            caplog_at_warn.set_level(logging.DEBUG, logger=_n)
         t = threading.Thread(target=waiter)
         t.start()
         t.join(timeout=10)

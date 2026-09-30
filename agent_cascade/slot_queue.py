@@ -16,7 +16,6 @@ Key design decisions:
 from __future__ import annotations
 
 import itertools
-import logging
 import os
 import threading
 import time
@@ -24,7 +23,27 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger.
+
+    The app's handlers live on the top-level 'agent_cascade_logger'
+    (log.py:setup_logger), and init_logging() REBINDS the log module's
+    `logger` global to it. A module-level `from agent_cascade.log import
+    logger` executed at import time binds the pre-init, handler-less
+    object; `logging.getLogger(__name__)` never reaches the app tree at
+    all. This proxy resolves the current `log.logger` on every attribute
+    access, so slot forensics are emitted from whichever logger is live —
+    before and after init_logging().
+    """
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance  # noqa: F401  (type-checking only)

@@ -303,23 +303,37 @@ class Harness:
         _sched.QUEUE_WAIT_TIMEOUT = QUEUE_WAIT_TIMEOUT
 
     def _quiet_agent_cascade_logging(self) -> None:
-        """Drop the agent_cascade logger to CRITICAL for the duration.
+        """Drop the agent_cascade loggers to CRITICAL for the duration.
 
         Slot contention is logged at WARNING on every queue event; the harness
         records the same information in the ProgressLog and prints it in the
         stall dump, so leaving it on buries a real finding in thousands of
         expected-contention lines.
+
+        D-2: slot_queue now logs through agent_cascade_logger (late-binding
+        proxy), so we must quiet that logger too — plus the instance-suffixed
+        variant if an instance id is set.
         """
         import logging
-        lg = logging.getLogger('agent_cascade')
-        self._saved_log_level = lg.level
-        lg.setLevel(logging.CRITICAL)
+        from agent_cascade.instance_id import get_instance_id
+
+        _id = get_instance_id() or ''
+        names = ['agent_cascade', 'agent_cascade_logger']
+        if _id:
+            names.append(f'agent_cascade_logger.{_id}')
+        self._saved_log_levels = {}
+        for name in names:
+            lg = logging.getLogger(name)
+            self._saved_log_levels[name] = lg.level
+            lg.setLevel(logging.CRITICAL)
 
     def _restore_logging(self) -> None:
         import logging
-        if getattr(self, '_saved_log_level', None) is not None:
-            logging.getLogger('agent_cascade').setLevel(self._saved_log_level)
-            self._saved_log_level = None
+        saved = getattr(self, '_saved_log_levels', None)
+        if saved is not None:
+            for name, level in saved.items():
+                logging.getLogger(name).setLevel(level)
+            self._saved_log_levels = None
 
     def teardown(self) -> None:
         self._restore_logging()
