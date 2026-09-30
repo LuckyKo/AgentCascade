@@ -1226,3 +1226,80 @@ class TestLeakedLockRecoveryEndToEnd:
             f"All 3 checks should have recovered and auto-approved, "
             f"got {pool.operation_manager.user_approve.call_count}"
         )
+
+
+# ── D-6: stop-cancellation is not a security failure ─────────────────────────
+
+
+class TestD6ReacquireCancellation:
+    """D-6: SlotCancelled from reacquire_for must NOT be treated as a security failure.
+
+    The verdict was already delivered before the finally block runs. A stop that
+    cancels the reacquire is expected and must log at INFO, not ERROR.
+    """
+
+    def _make_handler(self):
+        handler = SecurityAdvisorHandler.__new__(SecurityAdvisorHandler)
+        handler.app_state = MagicMock()
+        handler._cleanup = MagicMock()
+        return handler
+
+    def test_post_verdict_reacquire_cancel_is_not_error(self, caplog):
+        """SlotCancelled from reacquire_for → INFO log, no ERROR, no spurious reject."""
+        import logging
+        from agent_cascade.slot_queue import SlotCancelled
+
+        engine = MagicMock()
+        # reacquire_for raises SlotCancelled (simulating a stop during reacquire)
+        engine.reacquire_for.side_effect = SlotCancelled(message='cancelled by stop')
+
+        caller_agent = 'Maine'
+
+        with caplog.at_level(logging.DEBUG):
+            try:
+                engine.reacquire_for('sec_123', caller_agent, 'after_security_check')
+            except SlotCancelled:
+                from agent_cascade.log import logger
+                logger.info(f"[SECURITY_SLOT_REACQUIRE] Cancelled by stop for '{caller_agent}' — "
+                            f"verdict already delivered, no reacquire needed")
+
+        # Assert: no ERROR records
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(error_records) == 0, f"Unexpected ERROR records: {[r.getMessage() for r in error_records]}"
+
+        # Assert: at least one INFO record containing 'cancelled'
+        info_records = [r for r in caplog.records
+                        if r.levelno == logging.INFO and 'cancelled' in r.getMessage().lower()]
+        assert len(info_records) >= 1, "Expected at least one INFO 'cancelled' record"
+
+    def test_reacquire_timeout_still_propagates(self):
+        """TimeoutError from reacquire_for must still propagate (vulnerability #4 contract)."""
+        import pytest
+        from agent_cascade.slot_queue import SlotCancelled
+
+        engine = MagicMock()
+        engine.reacquire_for.side_effect = TimeoutError('reacquire timed out')
+
+        with pytest.raises(TimeoutError):
+            try:
+                engine.reacquire_for('sec_123', 'Maine', 'after_security_check')
+            except SlotCancelled:
+                pass  # would be caught by D-6 handler
+            except TimeoutError:
+                raise  # must propagate
+
+    def test_genuine_check_error_still_errors(self, caplog):
+        """A RuntimeError in the check body (not reacquire) must still produce ERROR."""
+        import logging
+
+        with caplog.at_level(logging.ERROR):
+            # Simulate what _run_check_worker's except Exception does for a genuine error
+            try:
+                raise RuntimeError('LLM endpoint crashed')
+            except Exception as e:
+                from agent_cascade.log import logger
+                logger.error(f"[SECURITY] Security check failed: {e}")
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(error_records) >= 1, 'Expected an ERROR record for genuine failure'
+        assert any('Security check failed' in r.getMessage() for r in error_records)

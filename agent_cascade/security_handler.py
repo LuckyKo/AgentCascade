@@ -299,6 +299,7 @@ class SecurityAdvisorHandler:
         from agent_cascade.api_integration import broadcast_stream_update
         from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.log import logger
+        from agent_cascade.slot_queue import SlotCancelled
 
         sec_state_key = None
         sec_instance = None
@@ -615,7 +616,20 @@ class SecurityAdvisorHandler:
             # ── Slot reacquire: restore caller's slot if we yielded it ──
             if _yielded_slot and caller_inst_sec:
                 logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
-                engine.reacquire_for(caller_inst_sec, caller_agent, 'after_security_check')
+                try:
+                    engine.reacquire_for(caller_inst_sec, caller_agent, 'after_security_check')
+                except SlotCancelled:
+                    # A stop/dismiss cancelled the reacquire. This is EXPECTED, not a
+                    # failure: the verdict was already delivered by _handle_result
+                    # (user_approve/user_reject) before this finally was entered. Do not
+                    # let it propagate — doing so made a successful APPROVED check report
+                    # "Security check failed" at ERROR. (D-6)
+                    logger.info(f"[SECURITY_SLOT_REACQUIRE] Cancelled by stop for '{caller_agent}' — "
+                                f"verdict already delivered, no reacquire needed")
+                except TimeoutError:
+                    # Unchanged sanction: hard reacquire failures propagate (see
+                    # .agent_lessons/api-scheduling-architecture.md vulnerability #4).
+                    raise
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key)
