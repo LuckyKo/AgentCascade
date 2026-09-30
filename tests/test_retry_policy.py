@@ -444,3 +444,29 @@ class TestPolicyFromSettings:
         assert policy.base_delay == 0.5
         assert policy.max_delay == 4.0
         assert policy.endpoint_max_retries == 2
+
+
+# ── D-7: Terminal exceptions are always fatal (typed short-circuit) ───────────
+
+
+class TestTerminalExceptionClassification:
+    """SlotCancelled and AgentTerminatedError must classify as 'fatal'
+    regardless of their message text (proves typed check precedes string match)."""
+
+    def test_classify_slot_cancelled_is_fatal(self):
+        from agent_cascade.slot_queue import SlotCancelled
+        # Message contains 'timeout' which would normally be retryable
+        err = SlotCancelled(message='Slot queue timeout for ticket 1 (agent=Maine)')
+        assert classify_error(err) == 'fatal'
+
+    def test_classify_slot_cancelled_with_terminated_text_is_fatal(self):
+        from agent_cascade.slot_queue import SlotCancelled
+        # Message contains 'terminated' which could match a fatal pattern,
+        # but the typed check must fire first
+        err = SlotCancelled(message='agent terminated during slot wait')
+        assert classify_error(err) == 'fatal'
+
+    def test_classify_agent_terminated_is_fatal(self):
+        from agent_cascade.exceptions import AgentTerminatedError
+        err = AgentTerminatedError('Instance dismissed by user')
+        assert classify_error(err) == 'fatal'

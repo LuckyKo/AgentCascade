@@ -1184,6 +1184,18 @@ class LLMCallMixin:
                     if error_type == 'fatal':
                         # Telemetry: record LLM call end for fatal error (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+                        # D-7 wording guard: a terminal stop (SlotCancelled /
+                        # AgentTerminatedError) is not an LLM failure — break
+                        # silently without yielding a SYSTEM ERROR line.
+                        try:
+                            _is_stop = self._is_terminal_stop(inst_name)
+                        except AttributeError:
+                            _is_stop = False
+                        if _is_stop:
+                            logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
+                                        f"is a terminal stop — no SYSTEM ERROR emitted")
+                            error_already_yielded = True
+                            break
                         error_msg = str(e).split('\n')[0] if e else 'Unknown error'
                         logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
                                        f"error: {summarize_exhaustion(e)}")
@@ -1222,6 +1234,17 @@ class LLMCallMixin:
                             role=ASSISTANT,
                             content=(
                                 f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
+                        error_already_yielded = True
+                        break
+                    # D-7: re-check stop before sleeping — a stop that did not
+                    # close the generator would otherwise sleep and retry.
+                    try:
+                        _terminal = self._is_terminal_stop(inst_name)
+                    except AttributeError:
+                        _terminal = False   # test doubles may lack pool
+                    if _terminal:
+                        logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
+                                    f"(error was: {summarize_exhaustion(e)})")
                         error_already_yielded = True
                         break
                     time.sleep(min(backoff, _remaining))

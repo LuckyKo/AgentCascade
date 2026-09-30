@@ -92,6 +92,15 @@ def classify_error(error: Exception) -> str:
         'retryable' — transient, safe to retry (network, timeout, 5xx)
         'unknown' — default to retryable for safety on uncategorized errors
     """
+    # Control-flow terminations are never retryable, regardless of their
+    # message text. SlotCancelled is raised by SlotPool only after
+    # ticket.cancelled.is_set() (slot_queue.py) — a deliberate stop, not a fault.
+    # AgentTerminatedError propagates the termination signal through call stacks.
+    from agent_cascade.slot_queue import SlotCancelled
+    from agent_cascade.exceptions import AgentTerminatedError
+    if isinstance(error, (SlotCancelled, AgentTerminatedError)):
+        return 'fatal'
+
     error_str = str(error).lower()
 
     # Explicitly non-retryable patterns (billing, auth, config)
