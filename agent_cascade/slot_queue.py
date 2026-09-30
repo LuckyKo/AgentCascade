@@ -124,7 +124,8 @@ class SlotPool:
     the single threading.Condition (_cond).
     """
 
-    __slots__ = ('key', 'capacity', '_waiters', '_running', '_cond', '_seq_counter', '_acquisition_counter')
+    __slots__ = ('key', 'capacity', '_waiters', '_running', '_cond', '_seq_counter',
+                 '_acquisition_counter', '_orphan_overwrites')
 
     def __init__(self, key: str, capacity: int):
         self.key = key
@@ -136,6 +137,10 @@ class SlotPool:
         self._cond = threading.Condition(threading.RLock())
         self._seq_counter = itertools.count()
         self._acquisition_counter = itertools.count()
+        # LEAK #4: count of permits orphaned by a same-instance double-acquire
+        # (grant overwriting an existing holder) or the matching stale release.
+        # Machine-checkable signal for the regression tests and status dumps.
+        self._orphan_overwrites = 0
 
     def acquire(self,
                 instance_name: str,
@@ -246,8 +251,19 @@ class SlotPool:
         """Release a slot permit held by the given holder."""
         with self._cond:
             existing = self._running.get(holder.instance_name)
-            if existing is None or existing.acquisition_id != holder.acquisition_id:
-                return  # Stale/idempotent release — stays silent (BUG-11)
+            if existing is None:
+                logger.debug(f"[SLOTPOOL] Stale release on '{self.key}': agent={holder.instance_name} "
+                             f"acquisition={holder.acquisition_id} — no current holder "
+                             f"(already released; idempotent no-op).")
+                return
+            if existing.acquisition_id != holder.acquisition_id:
+                logger.warning(f"[SLOTPOOL] STALE RELEASE on '{self.key}': agent={holder.instance_name} "
+                               f"presented acquisition={holder.acquisition_id} but "
+                               f"acquisition={existing.acquisition_id} is current "
+                               f"(held {time.monotonic() - existing.granted_at:.1f}s). "
+                               f"Ignoring — this is the DOUBLE-ACQUIRE signature (LEAK #4).")
+                self._orphan_overwrites += 1
+                return
 
             del self._running[holder.instance_name]
 
@@ -331,6 +347,8 @@ class SlotPool:
                     len(self._running),
                 'waiting_count':
                     len(self._waiters),
+                'orphan_overwrites':
+                    self._orphan_overwrites,
                 'waiters': [{
                     'ticket_id': t.ticket_id,
                     'seq': t.seq,
@@ -490,6 +508,22 @@ def _grant(pool: SlotPool, instance_name: str, agent_class: str, ticket: Optiona
         acquisition_id=acquisition_id,
         granted_at=time.monotonic(),
     )
+    # BUG-11 / LEAK #4: pool._running is keyed by instance_name ONLY. A second
+    # acquire by the same instance silently overwrites the first SlotHolder,
+    # orphaning the first acquisition_id so its later release hits the stale
+    # branch in release() and becomes a no-op. That destroys the very
+    # holders=[...] diagnostic used to find these bugs, and across two pools it
+    # is a real capacity leak. Detect and shout; do NOT raise here (a raise
+    # inside acquire() would abort a legitimate flow and leave the caller with
+    # no permit at all). Fix the upstream overwrite instead.
+    existing = pool._running.get(instance_name)
+    if existing is not None:
+        logger.error(f"[SLOTPOOL] DOUBLE-ACQUIRE on '{pool.key}': agent={instance_name} "
+                     f"already holds acquisition={existing.acquisition_id} "
+                     f"(granted {time.monotonic() - existing.granted_at:.1f}s ago); "
+                     f"overwriting with acquisition={acquisition_id}. The prior permit is "
+                     f"ORPHANED — find the upstream nullify-without-release.")
+        pool._orphan_overwrites += 1
     pool._running[instance_name] = holder
 
     # BUG-11: once-per-grant lifecycle trace.

@@ -328,6 +328,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return
 
         try:
+            # LEAK #2: this helper is re-entered by the sleep-wakeup paths
+            # (after_message_wakeup / after_stable_drain) which can run while the
+            # instance still holds a permit. Capture-and-release any prior live
+            # permit BEFORE acquiring; a plain assignment here silently orphans
+            # the old SlotHolder in pool._running (keyed by instance_name) and
+            # logs nothing.
+            self._discard_stale_permit(instance, instance.instance_name,
+                                       context=f'slot re-acquire ({context})', action='drop-stale-reacquire')
             instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
             # Store slot key for diagnostics. Cursor-aware resolution (sticky slot
             # plan change #6): the key must match the endpoint pool that
@@ -852,16 +860,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # `try:` skips that finally entirely and leaves the instance stuck in
         # RUNNING state — the next engine.run() entry then trips the L1 race guard.
 
-        # Sticky slot plan change #7 (defensive, no behavior change): a non-None
-        # _slot_release here means a previous run leaked its permit without going
-        # through a release point — the stale-clear below would orphan it and pin
-        # the pool forever. Log loudly so the leak is findable; keep the clear as-is.
-        if getattr(instance, '_slot_release', None) is not None:
-            logger.warning(f"[SLOT_LEAK_GUARD] run() entry for '{instance.instance_name}' found a "
-                           f"non-None _slot_release (stale permit from key={getattr(instance, '_slot_key', None)}). "
-                           f"Clearing without releasing — a release point was skipped upstream.")
-        instance._slot_release = None  # Initialize for proper cleanup in finally block
-        instance._slot_key = None  # Clear stale slot key from previous run (if any)
+        # Sticky slot plan change #7: a non-None _slot_release at run() entry means a
+        # previous run leaked its permit without going through a release point. The
+        # original implementation CLEARED it without releasing, which converted a
+        # recoverable leak into a PERMANENT zombie holder (the SlotHolder stays in
+        # pool._running, keyed by instance_name — only a release carrying the matching
+        # acquisition_id can remove it, and that callback was just discarded).
+        # Correct behavior: release it, then continue. The helper logs a loud
+        # [SLOT_STALE_PERMIT] WARNING when it actually found one — reaching here is
+        # always an upstream bug and must stay greppable.
+        self._discard_stale_permit(instance, instance.instance_name,
+                                   context='run() entry stale permit', action='drop-stale-guard')
         instance._compression_suspended_at = 0.0  # Reset per-run suspension marker (BUG-4/8 exit-finally)
 
         try:
@@ -2820,6 +2829,35 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         from agent_cascade.slot_queue import release_slot_permit
         release_slot_permit(slot_holder, holder_name, action=action, context=context)
 
+    @staticmethod
+    def _discard_stale_permit(holder: Any, holder_name: str, context: str, action: str) -> bool:
+        """Release any live permit held by `holder`, or do nothing.
+
+        THE INVARIANT: no production path may make a live permit invisible
+        without returning it to the pool.
+
+        NO PRE-CHECK. This helper deliberately does NOT test
+        `_slot_release is not None` before delegating. Any such test is a
+        TOCTOU race: a concurrent acquire between the test and the release
+        would have its fresh permit cleared-without-released, i.e. it would
+        *manufacture* the very zombie holder this helper exists to prevent.
+        `release_slot_permit` already performs the check-and-capture
+        atomically under `holder._state_lock` (slot_queue.py) and returns
+        False idempotently when nothing is held, so the delegate's return
+        value is the authoritative answer to "was a live permit found?" —
+        with no separate unsynchronized read anywhere.
+
+        Returns True if a live permit was found and released (a bug upstream),
+        False if nothing was held (the overwhelmingly common case).
+        """
+        from agent_cascade.slot_queue import release_slot_permit
+        if not release_slot_permit(holder, holder_name, action=action, context=context):
+            return False
+        logger.warning(f"[SLOT_STALE_PERMIT] {context} for '{holder_name}' found a live "
+                       f"permit; released it instead of orphaning it. "
+                       f"An upstream release point was skipped.")
+        return True
+
     def reacquire_for(self, instance: Any, holder_name: str, context: str = 'reacquire') -> bool:
         """Re-acquire a concurrency slot for an agent after yielding it to a child.
 
@@ -2865,10 +2903,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         else:
             slot_info = router.get_agent_slot_info(instance.agent_class)
         if not slot_info or not slot_info.get('needs_slot'):
-            # Unlimited endpoint — no slot to hold. Clear any stale state and done.
-            with instance._state_lock:
-                instance._slot_release = None
-                instance._slot_key = None
+            # Unlimited endpoint — no slot to hold. Release any live permit instead of
+            # discarding it: a nullify-without-release here orphans the SlotHolder in
+            # pool._running exactly like LEAK #1, except with no warning at all.
+            self._discard_stale_permit(instance, holder_name,
+                                       context=f'{context} (unlimited endpoint)', action='drop-stale-unlimited')
             return True
 
         api_base = slot_info['api_base']
@@ -2905,10 +2944,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}'")
                 return True
             else:
-                # Unlimited — acquire returned None, no callback needed.
-                with instance._state_lock:
-                    instance._slot_release = None
-                    instance._slot_key = None
+                # Unlimited — acquire returned None, no callback needed. Any permit the
+                # caller was still holding is stale by definition; release, don't discard.
+                self._discard_stale_permit(instance, holder_name,
+                                           context=f'{context} (acquire returned None)',
+                                           action='drop-stale-unlimited')
                 return True
         except SlotCancelled:
             # Terminated mid-wait — propagate the clean abort (caller handles).
@@ -2957,10 +2997,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}' "
                          f"after unbounded FIFO wait")
             return True
-        # Unlimited — acquire returned None, no callback needed.
-        with instance._state_lock:
-            instance._slot_release = None
-            instance._slot_key = None
+        # Unlimited — acquire returned None, no callback needed. Any permit the
+        # caller was still holding is stale by definition; release, don't discard.
+        self._discard_stale_permit(instance, holder_name,
+                                   context=f'{context} (acquire returned None)',
+                                   action='drop-stale-unlimited')
         return True
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
@@ -3029,6 +3070,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 # Log warning when transition is skipped to help identify bugs
                 # where _transition_to_sleeping is called on agents not in RUNNING state.
                 # This indicates a logic bug in the caller — the agent should be in RUNNING state before attempting to sleep it.
+                # NOTE (LEAK #2): if the instance still holds a permit here, it is NOT
+                # released at this site — any later re-acquire through
+                # _acquire_slot_with_logging will capture-and-release it with a
+                # [SLOT_STALE_PERMIT] WARNING. Correlate the two lines when triaging.
                 logger.warning(f"_transition_to_sleeping skipped for {instance.instance_name}: "
                                f"current state={instance.state.name} (expected RUNNING)")
 
