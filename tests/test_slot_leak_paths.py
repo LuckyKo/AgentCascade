@@ -473,10 +473,15 @@ class TestLeak3TerminateReleasesPermit:
         finally:
             t_b.join(timeout=5)
 
-        # The released count must be real: (cancelled_tickets, released) == (0, 1).
+        # The released count must be real: a holder present at call time is removed
+        # by identity and reported as released=1. Here the permit was ALREADY freed
+        # by terminate_instance's own release block (that IS the fix), so the
+        # follow-up call correctly reports (0, 0) — idempotency, not a leak. The
+        # holder-present case is covered by test_terminate_for_agent_returns_real_count.
         cancelled, released = shared.terminate_for_agent('leak3a')
-        assert cancelled == 0 and released == 1, \
-            f"BUG_0034: terminate_for_agent returned ({cancelled}, {released}), expected (0, 1)"
+        assert cancelled == 0 and released == 0, \
+            f"BUG_0034: terminate_for_agent after an already-released permit " \
+            f"returned ({cancelled}, {released}), expected (0, 0)"
 
     def test_terminate_for_agent_returns_real_count(self, leak_harness):
         """`SlotPool.terminate_for_agent` reports the permit drop truthfully.

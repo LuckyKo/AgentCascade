@@ -417,21 +417,25 @@ class EndpointScheduler:
             agent_name: Name of the agent to terminate from queues.
 
         Returns:
-            Tuple of (tickets_cancelled, 0) for backward-compat with callers.
+            Tuple of (tickets_cancelled, permits_released).
         """
         tickets = 0
+        released = 0
 
         for pool in self._pools.values():
-            # Cancel all waiting tickets for this agent.
+            # Cancel all waiting tickets for this agent. Nesting pool.terminate_for_agent
+            # under pool._cond is safe: the Condition wraps an RLock (slot_queue.py), so
+            # the inner `with self._cond:` re-enters without deadlock.
             with pool._cond:
                 to_remove = [tid for tid, t in pool._waiters.items() if t.instance_name == agent_name]
                 for tid in to_remove:
                     pool._waiters[tid].cancelled.set()
                     pool._waiters.pop(tid)
                     tickets += 1
+                released += pool.terminate_for_agent(agent_name)[1]
                 pool._cond.notify_all()
 
-        if tickets > 0:
-            logger.info(f"[TERMINATION] Cleaned up {agent_name}: {tickets} ticket(s)")
+        if tickets > 0 or released > 0:
+            logger.info(f"[TERMINATION] Cleaned up {agent_name}: {tickets} ticket(s), {released} permit(s) released")
 
-        return (tickets, 0)
+        return (tickets, released)

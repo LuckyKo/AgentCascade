@@ -319,7 +319,7 @@ class SlotPool:
             return False
 
     def terminate_for_agent(self, agent_name: str) -> Tuple[int, int]:
-        """Full cleanup for a terminated agent: cancel tickets."""
+        """Full cleanup for a terminated agent: cancel waiters AND drop any held permit."""
         with self._cond:
             cancelled_ids = [tid for tid, t in self._waiters.items() if t.instance_name == agent_name]
             for tid in cancelled_ids:
@@ -332,7 +332,21 @@ class SlotPool:
                              f"tickets={cancelled_ids}")
                 self._cond.notify_all()
 
-            return len(cancelled_ids), 0
+            # BUG_0034: was a hardcoded 0 — the released count was never computed.
+            # The holder entry is removed by identity so we can report it truthfully
+            # without firing the caller's callback (terminate_for_agent must not
+            # invoke a release closure it does not own).
+            released = 0
+            holder = self._running.get(agent_name)
+            if holder is not None:
+                del self._running[agent_name]
+                released = 1
+                held = time.monotonic() - holder.granted_at
+                logger.debug(f"[SLOTPOOL] Terminated holder on '{self.key}': agent={agent_name} "
+                             f"acquisition={holder.acquisition_id} held={held:.1f}s")
+                self._cond.notify_all()
+
+            return len(cancelled_ids), released
 
     def get_status(self) -> Dict:
         """Return current pool status for diagnostics."""

@@ -256,6 +256,34 @@ class LifecycleMixin:
             # clears streaming responses and volatile state. Idempotent so safe even if called twice.
             inst.terminate()
 
+            # ── Sticky slot release on terminate (BUG_0034) ──────────────────────
+            # Same reasoning as the dismiss-path release (see the block further down
+            # in dismiss_instance): the run()-finally release at core.py:1433 may be
+            # arbitrarily delayed — the thread can be mid-HTTP, mid-tool, or blocked
+            # at the FIFO tail. terminate_for_agent only CANCELS WAITERS (it never
+            # touches pool._running), so a terminated-but-not-dismissed holder keeps
+            # its pool entry until its own thread unwinds. Release it HERE.
+            # Idempotent: capture-and-nullify under _state_lock, and SlotPool.release
+            # is a no-op on acquisition_id mismatch, so a later thread release is safe.
+            if inst and hasattr(inst, '_state_lock'):
+                try:
+                    from agent_cascade.slot_queue import release_slot_permit
+                    _term_pool = None
+                    try:
+                        _sched = getattr(self, 'api_router', None) and self.api_router.scheduler
+                        if _sched is not None:
+                            _held_key = getattr(inst, '_slot_key', None)
+                            _term_pool = _sched._pools.get(_held_key) if _held_key else None
+                    except Exception:
+                        pass
+                    release_slot_permit(inst, instance_name,
+                                        action='drop-terminate',
+                                        context='on terminate',
+                                        pool=_term_pool)
+                except Exception as e:
+                    # Non-critical: the thread's own run()-finally release still covers it.
+                    logger.warning(f"Slot release on terminate failed for '{instance_name}' (non-critical): {e}")
+
             if is_active:
                 # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
                 if set_global_stopped:
