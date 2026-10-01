@@ -259,6 +259,21 @@ def pytest_configure(config):
         print('\n[conftest] No local LLM server detected — integration tests will be skipped')
 
 
+def pytest_sessionstart(session):
+    """BUG_0036: install the EBADF-tolerant terminal sink.
+
+    MUST run at sessionstart, NOT configure: at pytest_configure time the
+    terminal reporter does not exist yet (verified by live probe under -n 2 —
+    tr=N/tw=N at configure, tr=Y/tw=Y with a real file at sessionstart, in both
+    controller and workers). Installing earlier meant the defensive
+    ``if real is not None`` guard always skipped, so the proxy was never applied
+    and worker-side EBADF crashes (workers DO have tty+colorama StreamWrapper
+    sinks) kept firing. See tests/_ebadf_sink.py.
+    """
+    from tests._ebadf_sink import install_tolerant_terminal_sink
+    install_tolerant_terminal_sink(session.config)
+
+
 def _enable_worker_faulthandler() -> None:
     """Enable faulthandler in every xdist worker so a native crash (segfault / fatal
     Python error) writes a real stack dump to a per-worker log file.
