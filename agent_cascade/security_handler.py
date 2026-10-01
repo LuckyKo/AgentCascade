@@ -810,16 +810,17 @@ class SecurityAdvisorHandler:
         if self.agent_pool:
             self.agent_pool.halt_instance(target)
 
-        reject_msg = ('SECURITY ADVISOR TIMEOUT: The security check took too long to complete. '
-                      'This may indicate an overly complex request or insufficient justification. '
-                      'Please resubmit the request with a clearer, more specific justification '
-                      'to help the security advisor reach a verdict faster.')
+        reject_msg = ('SECURITY ADVISOR TIMEOUT: The security check did not reach a verdict within its time limit. '
+                      'This is usually transient (the advisor was slow on this turn) and does NOT mean the request '
+                      'is unsafe or that your justification was wrong. Simply RETRY the same request — it often '
+                      'passes on the next attempt. If timeouts keep recurring, a clearer, more specific '
+                      'justification can help the advisor decide faster.')
         self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
         # Notify UI about the timeout
         response_text = f"[TIMEOUT] Security check exceeded {timeout_seconds:.0f}s limit after {elapsed:.0f}s."
         if not auto_apply:
-            response_text += ' Please resubmit with clearer justification if needed.'
+            response_text += ' This is usually transient — retry the same request.'
 
         loop = _get_ws_loop(self.agent_pool)
         if loop:
