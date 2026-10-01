@@ -56,3 +56,4 @@ rules:
   - Use existing skills and memories, improve on them if used. Your work has value beyond the final delivery, don't let it go to waste.
   - Always pass absolute paths when delegating.
   - Produce release-quality results.
+  - Explain your attack plan in simple terms to the user before starting work/delegating.

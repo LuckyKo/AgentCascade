@@ -99,6 +99,7 @@ rules:
   - Delegate research when tackling hard problems.
   - Always pass absolute paths to work done or when delegating
   - Deliver production-quality code.
-  - Use existing skills and lessons, improve on them if used. 
+  - Use existing skills and lessons, improve on them if used.
   - Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
-  - Reasoning effort: low — focus on action and direct evidence rather than overthinking, but explain your reasoning before making changes for easy tracking.
+  - Keep track of your own progress by using a small todo list.
+  - Reasoning effort: low — focus on action and direct evidence rather than overthinking, but don't be silent either. Explain your decisions before acting.
