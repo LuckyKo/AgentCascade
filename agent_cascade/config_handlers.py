@@ -12,16 +12,12 @@ from collections import deque as Deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
+from agent_cascade.constants import LLM_CONFIG_KEYS, MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting,
                                     parse_skill_always_protected)
 
-# ── LLM config key set (defined locally to avoid circular import with api_server) ────
-LLM_CONFIG_KEYS = frozenset({
-    'model', 'api_base', 'api_key', 'temperature', 'max_tokens', 'max_input_tokens', 'max_output_tokens', 'top_p',
-    'frequency_penalty', 'presence_penalty', 'stop', 'timeout', 'model_type'
-})
+# LLM_CONFIG_KEYS is imported from agent_cascade.constants (single source of truth, BUG_0012).
 
 # ── PoolSettings keys — used by ws_handlers.py to trigger centralized save ────
 # Includes ALL non-cosmetic settings that should persist to pool_settings.json.

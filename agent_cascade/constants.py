@@ -151,6 +151,16 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
 # Configuration Keys (tuples for use in membership tests)
 # ────────────────────────────────────────────────────────────────────────────
 
+# LLM config keys for update_config optimization (defense-in-depth).
+# Single source of truth — imported by both api_server.py and config_handlers.py.
+# (Previously duplicated in each module to avoid a circular import; constants.py is
+# a leaf module with no agent_cascade imports, so it is safe for both to import.)
+LLM_CONFIG_KEYS: frozenset[str] = frozenset({
+    'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
+    'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
+    'presence_penalty', 'stop', 'timeout', 'model_type'
+})
+
 # Config keys that should be broadcast from pool.llm_cfg to all agents.
 # Used by api_integration.py to propagate tool char limits and image settings.
 POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (

@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from agent_cascade.constants import LLM_CONFIG_KEYS
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
 from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
@@ -68,12 +69,7 @@ from agent_cascade.path_security import _get_allowed_file_roots, _is_path_allowe
 # Protects session state mutations (generation_id, generating, stop_requested).
 session_lock = threading.Lock()
 
-# LLM config keys for update_config optimization (defense-in-depth)
-LLM_CONFIG_KEYS = frozenset({
-    'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
-    'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
-    'presence_penalty', 'stop', 'timeout', 'model_type'
-})
+# LLM_CONFIG_KEYS is imported from agent_cascade.constants (single source of truth, BUG_0012).
 
 # Per-client WebSocket send timeout (seconds). Bounds each client's send in
 # broadcast() so one slow/wedged client (e.g. a backgrounded tab or a full TCP
@@ -1921,7 +1917,7 @@ if __name__ == '__main__':
                         help='Seconds of inactivity before auto-dismissing an idle agent (default: 1600). '
                              'Also settable via AGENT_CASCADE_IDLE_TIMEOUT env var.')
     parser.add_argument('--system-agent-idle-timeout', type=float, default=None,
-                        help='Idle timeout for system agents (Compressor/Security) (default: 60). 0=off. '
+                        help='Idle timeout for system agents (Compressor/Security) (default: 300). 0=off. '
                              'Also settable via AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT env var.')
     parser.add_argument('--idle-check-interval', type=float, default=None,
                         help='Seconds between idle-check sweeps (default: 60). '
@@ -1972,7 +1968,7 @@ if __name__ == '__main__':
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
     idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT', 1600.0))
-    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT', 60.0))
+    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT', 300.0))
     idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))
 
     # Create OperationManager for blocking user approvals on mutating operations
