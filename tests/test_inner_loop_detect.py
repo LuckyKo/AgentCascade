@@ -26,27 +26,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import importlib.util
-
 import pytest
 
-# Import settings first so that relative imports in inner_loop_detect resolve.
-_settings_spec = importlib.util.spec_from_file_location(
-    'settings',
-    str(Path(__file__).resolve().parent.parent / 'agent_cascade' / 'settings.py'),
-)
-_settings_mod = importlib.util.module_from_spec(_settings_spec)
-sys.modules['agent_cascade.settings'] = _settings_mod  # make relative import work
-_settings_spec.loader.exec_module(_settings_mod)
+# Normal package imports. agent_cascade/__init__.py is lightweight (lazy imports
+# via __getattr__), and inner_loop_detect.py uses absolute imports, so the old
+# spec_from_file_location hack was unnecessary — worse, re-executing settings.py
+# and rebinding sys.modules['agent_cascade.settings'] split module identity and
+# made oai.py's late import read unpatched 180s/900s defaults, hanging
+# tests/llm/test_stream_watchdog.py. See
+# .agent_lessons/test-sys-modules-pollution-breaks-late-import-patch.md
+from agent_cascade.inner_loop_detect import InnerLoopDetector
+from agent_cascade.settings import InnerLoopSettings
 
-# Import directly from the module file to avoid pulling in the entire agent_cascade package.
-_spec = importlib.util.spec_from_file_location(
-    'inner_loop_detect',
-    str(Path(__file__).resolve().parent.parent / 'agent_cascade' / 'inner_loop_detect.py'),
-)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-InnerLoopDetector = _mod.InnerLoopDetector
 
 # Shared test filler used across multiple test classes.
 _FILLER = ' '.join(f"Word{i} has properties that are interesting for analysis." for i in range(1, 20)) + '.'

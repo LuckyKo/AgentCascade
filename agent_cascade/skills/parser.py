@@ -73,6 +73,37 @@ def _split_inline_list(raw: str) -> List[str]:
     return [_strip_quotes(p.strip()) for p in parts]
 
 
+def strict_frontmatter_check(skill_content: str) -> Tuple[bool, str]:
+    """Probe whether the frontmatter block parses under STRICT yaml.safe_load.
+
+    Extracts the first ``---``…``---`` block and attempts a strict parse. Returns:
+    - ``(True, '')`` when strict parse succeeds, or when no frontmatter block is present
+      (absence is not a parse failure — callers that need to detect absence should check
+      the content themselves).
+    - ``(False, reason)`` when strict parse fails — ``reason`` is the one-line YAMLError
+      message (newlines replaced with spaces, matching validator.py's historical format).
+
+    This is a public utility shared by validator.py and propose_skill.py so the
+    extraction + probe logic lives in exactly one place.
+    """
+    stripped = skill_content.strip()
+    if not stripped.startswith('---'):
+        return (True, '')
+    lines = stripped.split('\n')
+    yaml_lines: List[str] = []
+    for line in lines[1:]:
+        if re.fullmatch(r'-{3,}', line.strip()):
+            break
+        yaml_lines.append(line)
+    if not yaml_lines:
+        return (True, '')
+    try:
+        yaml.safe_load('\n'.join(yaml_lines))
+        return (True, '')
+    except yaml.YAMLError as e:
+        return (False, str(e).replace('\n', ' '))
+
+
 def _lenient_parse(yaml_lines: List[str]) -> Dict[str, Any]:
     """Tolerant line-based `key: value` parse (Layer 2 fallback).
 

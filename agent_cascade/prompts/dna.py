@@ -430,13 +430,12 @@ TOOL_METADATA = {
             'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
             '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
             '**Execution mode:** auto/sync/async — see execution_mode param. '
-            'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with __status/__kill/__ctrl_c via that tool_id (do not poll more than ~2 times without new info).\n\n'
-            '**Windows note:** unquoted `;` is translated to `&` (cmd.exe has no `;` separator) so `A; B` runs both commands. Quote a literal `;` to keep it as data.\n\n'
-            'Special commands (no justification required): __help (list auto-approved commands), __status, __kill, __ctrl_c, __heartbeat=N.\n'
+            'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with special commands via that tool_id.\n\n'
+            'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N.\n'
         ),
         'parameters': {
             'command':
-                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
+                'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __wait (waits to next heartbeat + output),  __status (immediate status check), __heartbeat=N (set new heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification':
                 'Why you need to execute this command.',
             'cwd':

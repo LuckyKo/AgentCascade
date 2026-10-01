@@ -8,14 +8,12 @@ Tier 2 (Self-Match): Dry-run match against the generating task text.
 import re
 from typing import List, Tuple
 
-import yaml
-
 from agent_cascade.log import logger
 from agent_cascade.settings import (AUTO_SKILL_MAX_SIZE_KB, AUTO_SKILL_PROMOTION_THRESHOLD, MIN_DESCRIPTION_LENGTH,
                                     MIN_SKILL_BODY_LENGTH)
 
 from .common import SEMVER_RE as _SEMVER_RE
-from .parser import parse_frontmatter
+from .parser import parse_frontmatter, strict_frontmatter_check
 
 # Snake-case pattern: starts with lowercase letter, allows lowercase digits, underscore, hyphen
 _SNAKE_CASE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
@@ -25,25 +23,11 @@ def _frontmatter_failure_reason(skill_content: str) -> str:
     """Return the underlying YAML error message for a failed frontmatter parse (or '').
 
     ``parse_frontmatter`` swallows the YAMLError (logs it, returns ``{}``), so re-probe here:
-    extract the first ``---``…``---`` block and try ``yaml.safe_load`` to surface an actionable
+    delegate to :func:`strict_frontmatter_check` in parser.py to surface an actionable
     reason (e.g. unescaped colon in a value) for the validator error message.
     """
-    stripped = skill_content.strip()
-    if not stripped.startswith('---'):
-        return ''
-    lines = stripped.split('\n')
-    yaml_lines = []
-    for line in lines[1:]:
-        if re.fullmatch(r'-{3,}', line.strip()):
-            break
-        yaml_lines.append(line)
-    if not yaml_lines:
-        return ''
-    try:
-        yaml.safe_load('\n'.join(yaml_lines))
-        return ''
-    except yaml.YAMLError as e:
-        return str(e).replace('\n', ' ')
+    ok, reason = strict_frontmatter_check(skill_content)
+    return '' if ok else reason
 
 
 # Prompt injection patterns (borrowed from Hermes)

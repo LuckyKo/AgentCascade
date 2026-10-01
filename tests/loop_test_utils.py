@@ -18,25 +18,15 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import importlib.util as _util
+# Normal package imports. The old spec_from_file_location hack re-executed
+# settings.py and rebound sys.modules['agent_cascade.settings'], splitting module
+# identity so oai.py's late import read unpatched 180s/900s defaults and made
+# tests/llm/test_stream_watchdog.py hang. agent_cascade/__init__.py is lazy and
+# inner_loop_detect.py uses absolute imports, so the hack was unnecessary.
+# See .agent_lessons/test-sys-modules-pollution-breaks-late-import-patch.md
+from agent_cascade.inner_loop_detect import InnerLoopDetector
+from agent_cascade.settings import InnerLoopSettings
 
-_settings_spec = _util.spec_from_file_location(
-    'settings',
-    PROJECT_ROOT / 'agent_cascade' / 'settings.py',
-)
-_settings_mod = _util.module_from_spec(_settings_spec)
-sys.modules['agent_cascade.settings'] = _settings_mod
-_settings_spec.loader.exec_module(_settings_mod)
-
-_spec = _util.spec_from_file_location(
-    'inner_loop_detect',
-    PROJECT_ROOT / 'agent_cascade' / 'inner_loop_detect.py',
-)
-_mod = _util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-
-InnerLoopDetector = _mod.InnerLoopDetector
-InnerLoopSettings = _settings_mod.InnerLoopSettings
 
 # ---------------------------------------------------------------------------
 # Log discovery

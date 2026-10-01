@@ -11,7 +11,7 @@ import logging
 import re
 
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
-from agent_cascade.skills.parser import normalize_version, parse_frontmatter
+from agent_cascade.skills.parser import normalize_version, parse_frontmatter, strict_frontmatter_check
 from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
@@ -145,12 +145,23 @@ class ProposeSkill(BaseTool):
         justification = parsed.get('justification')
 
         if not justification:
-            return "'justification' is required to create or update a skill"
+            return "ERROR: 'justification' is required to create or update a skill"
 
         # Validate rating early when supplied alongside content.
         content_rating, err = _coerce_rating(rating_value)
         if err:
             return err
+
+        # ── Strict-YAML frontmatter probe (advisory only) ─────────────────────
+        # parse_frontmatter silently falls back to a lenient parser when strict YAML fails,
+        # so the agent is told "registered successfully" without ever learning its frontmatter
+        # is malformed. Re-probe here via the shared strict_frontmatter_check helper and
+        # surface a NON-BLOCKING warning in the success string (soft-gate pattern).
+        try:
+            strict_ok, strict_reason = strict_frontmatter_check(skill_content)
+        except (AttributeError, TypeError) as e:  # pragma: no cover - defensive; probe must not break propose
+            logger.debug('[PROPOSE-SKILL] strict YAML probe failed (%s); skipping warning', type(e).__name__)
+            strict_ok, strict_reason = True, ''
 
         # The `name` argument is authoritative. Match the frontmatter block ONCE, parse its
         # scalar fields, determine whether this is an update and compute the effective version
@@ -365,8 +376,17 @@ class ProposeSkill(BaseTool):
                     skill_manager.record_rating(proposed_name, content_rating)
                 except ValueError as e:
                     logger.warning('[PROPOSE-SKILL] Failed to record rating for %s: %s', proposed_name, e)
+            # Non-blocking advisory: the frontmatter required the lenient fallback, so tell the
+            # agent its YAML is malformed and how to fix it. Registration already succeeded —
+            # this only surfaces in the success string (soft-gate pattern).
+            yaml_warn = ''
+            if not strict_ok:
+                yaml_warn = (f"\n\n⚠️ YAML WARNING: your frontmatter did NOT parse under strict "
+                             f"YAML ({strict_reason}). It was recovered via the tolerant fallback, but "
+                             f"quote any value containing special characters (e.g. colons) as a single "
+                             f"double-quoted string to keep it clean.")
             verb = 'updated' if is_update else 'registered'
-            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version}).{reenabled_note}"
+            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version}).{reenabled_note}{yaml_warn}"
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             action = 'update' if is_update else 'register'

@@ -2596,6 +2596,140 @@ class TestProposeSkillRatingModes:
         assert entries[0]['file_path'] == str(cand_file)
 
 
+class TestProposeSkillYamlStrictWarning:
+    """Non-blocking YAML strict-parse warning in propose_skill success string.
+
+    When the submitted SKILL.md frontmatter fails STRICT yaml.safe_load (and is recovered
+    via the lenient fallback), the tool must surface a '⚠️ YAML WARNING' advisory in its
+    success return so the agent learns its YAML is malformed. Registration still proceeds —
+    the warning is advisory only (soft-gate pattern). See:
+    .agent_lessons/skill-frontmatter-partial-quoting-defect.md
+    .agent_lessons/parse-frontmatter-unescaped-colon-defect.md
+    """
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def test_valid_frontmatter_no_warning(self, fresh_manager):
+        """Clean YAML frontmatter → success string must NOT contain 'YAML WARNING'."""
+        m = self.manager
+        name = f"test-yaml-clean-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='A clean frontmatter skill with no special chars',
+                                      triggers=['yaml', 'clean'],
+                                      generated_from_task='clean yaml test')
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert 'YAML WARNING' not in result
+
+    def test_unquoted_colon_mid_value_triggers_warning(self, fresh_manager):
+        """The exact 'Also:' case — unquoted colon mid-value in description.
+
+        Verified: yaml.safe_load raises YAMLError ('mapping values are not allowed here')
+        on this input, so the lenient fallback path is exercised and the warning fires.
+        Registration still succeeds (non-blocking).
+        """
+        m = self.manager
+        name = f"test-yaml-colon-{_uid()}"
+        # Exact defect shape: unquoted colon mid-value in description (the 'Also:' case)
+        content = (
+            '---\n'
+            f"name: {name}\n"
+            'description: This is a skill that does X. Also: never substitute Y for Z in this workflow\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - yaml\n'
+            '  - colon\n'
+            f"generated_by: coder\n"
+            f"generated_from_task: unquoted colon mid-value test\n"
+            '---\n\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
+            '1. Step one\n2. Step two\n3. Step three\n'
+        )
+        # Guard: confirm strict parse actually fails on this input (test validity check).
+        import yaml as _yaml
+        fm_block = content.split('---')[1]
+        with pytest.raises(_yaml.YAMLError):
+            _yaml.safe_load(fm_block)
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        # Registration still succeeds (non-blocking advisory).
+        assert 'registered successfully' in result
+        # The warning IS present.
+        assert 'YAML WARNING' in result
+        # The reason references the actual YAML error.
+        assert 'mapping values are not allowed here' in result
+
+    def test_rating_only_path_unaffected(self, fresh_manager):
+        """Rating-only mode must not invoke the strict probe (no content → no warning possible)."""
+        m = self.manager
+        name = f"test-yaml-rate-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Rating-only path target skill body text',
+                                      triggers=['rating', 'only'],
+                                      generated_from_task='rating only yaml test')
+        assert m.register_skill_from_content(content, task_text='rating only yaml test')[0]
+
+        tool, pool = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'rating': 7.5}))
+        assert 'Recorded rating' in result
+        assert 'YAML WARNING' not in result
+        # Rating-only must NOT request approval (existing behavior preserved).
+        pool.operation_manager.request_user_approval.assert_not_called()
+
+    def test_rejection_path_unaffected(self, fresh_manager):
+        """A rejected proposal (similarity gate) returns REJECTED — no YAML warning appended."""
+        m = self.manager
+        import json as _json
+        # Register a skill first so the similarity gate has something to collide with.
+        base_name = f"test-yaml-reject-{_uid()}"
+        content = _make_skill_content(name=base_name,
+                                      description='A collision target skill for rejection testing',
+                                      triggers=['collision', 'target'],
+                                      generated_from_task='collision target test')
+        assert m.register_skill_from_content(content, task_text='collision target test')[0]
+
+        # Propose a near-identical skill (only last char of name differs) with malformed YAML —
+        # the similarity gate should reject BEFORE the warning is ever relevant.
+        bad_name = base_name[:-1] + ('a' if base_name[-1] != 'a' else 'b')
+        assert bad_name != base_name
+        bad_content = (
+            '---\n'
+            f"name: {bad_name}\n"
+            'description: A collision target skill for rejection testing\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - collision\n'
+            '  - target\n'
+            'generated_by: coder\n'
+            'generated_from_task: collision target test\n'
+            '---\n\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
+            '1. Step one\n2. Step two\n3. Step three\n'
+        )
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': bad_name, 'skill_content': bad_content, 'justification': 'j'}))
+        assert 'REJECTED' in result, f"Expected proposal to be rejected by similarity gate, got: {result!r}"
+        assert 'YAML WARNING' not in result, 'YAML warning should not appear in rejection response'
+
+
 class TestProposeSkillSimilarityGate:
     """Hard-reject similarity gate in propose_skill (frontmatter-text dedup)."""
 
