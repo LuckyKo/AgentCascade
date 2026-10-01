@@ -18,12 +18,6 @@ from typing import Any, Dict, Optional
 # from compression/agent_invoker.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import describe_pool_holders, yield_caller_slot
 
-# Process-level claim registry for Security instance reuse (BUG_0029 Phase 3). The claim is
-# taken by ExecutionEngine._acquire_reusable_system_agent and released in this handler's
-# finally (after _cleanup) so it covers the whole run. security_reuse has no project deps,
-# so importing it here cannot create a circular import.
-import agent_cascade.security_reuse as security_reuse
-
 # ── Deadlock protection constants ───────────────────────────────────────────
 # NOTE: The system-launched Security advisor is bounded by a turn budget
 # (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
@@ -309,9 +303,6 @@ class SecurityAdvisorHandler:
 
         sec_state_key = None
         sec_instance = None
-        reuse_name = None  # MUST be pre-bound: assigned inside the try below, but the finally
-                           # dereferences it (release_claim) — if prompt build / ExecutionEngine raise
-                           # first, an unbound local would raise UnboundLocalError and mask the real error.
         sec_warning_timer = None  # Track for cleanup in finally block
         sec_first_yield_timer = None  # Last-resort guard against a hung generator (FIX 1)
         _yielded_slot = False  # True if we released the caller's slot → must reacquire in finally
@@ -321,8 +312,7 @@ class SecurityAdvisorHandler:
 
         # Fix 6 — Import outside lock block to avoid holding lock during import resolution
         from agent_cascade.constants import NON_LLM_KEYS
-        from agent_cascade.settings import (SECURITY_AGENT_MAX_TURNS, SECURITY_REUSE_ENABLED,
-                                            SECURITY_REUSE_APPROVAL_NAME)
+        from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
 
         try:
             # ── Build prompt inside lock to prevent race conditions ────────
@@ -343,37 +333,20 @@ class SecurityAdvisorHandler:
                     workspace_info=workspace_info,
                 )
 
-                # Create engine INSIDE the lock (prevents lifecycle collisions)
-                engine = ExecutionEngine(self.agent_pool)
+                # Unique instance name per request_id to prevent state corruption
+                sec_state_key = f'Security_{rid}'  # e.g., 'Security_op_091f048b'
 
-                # BUG_0029 Phase 3 (Security instance reuse): prefer a warm, fixed-name Security
-                # instance so the LLM prompt prefix stays byte-identical across checks and hits
-                # the server-side KV cache. The claim + eligibility predicate live in the engine;
-                # on any miss (no warm instance / ineligible / claim held) we fall back to today's
-                # untouched per-rid fresh-spawn path. sec_state_key tracks the ACTUAL instance
-                # name so _handle_timeout/_cleanup target the right object (not a string guess).
-                reuse_name = None if not SECURITY_REUSE_ENABLED else SECURITY_REUSE_APPROVAL_NAME
-                # caller=caller_agent attributes this check to the true caller for logging/telemetry
-                # and drives the yield/reacquire slot pattern below. (Security resolves its OWN
-                # endpoint pool — no caller inheritance.) The fallback name is the legacy per-rid one,
-                # byte-for-byte as before; sec_state_key tracks the ACTUAL instance name so
-                # _handle_timeout/_cleanup target the right object (not a string guess).
-                sec_instance, sec_was_reused = security_reuse.acquire_security_agent(
-                    engine=engine,
+                # Create engine and instance INSIDE the lock (prevents lifecycle collisions)
+                engine = ExecutionEngine(self.agent_pool)
+                # caller=caller_agent attributes this check to the true caller for
+                # logging/telemetry and drives the yield/reacquire slot pattern below.
+                # (Security resolves its OWN endpoint pool — no caller inheritance.)
+                sec_instance = engine._create_system_agent(
                     agent_class='Security',
-                    reuse_name=reuse_name,
-                    fallback_name=f'Security_{rid}',  # e.g., 'Security_op_091f048b'
+                    instance_name=sec_state_key,
                     task=prompt,
                     caller=caller_agent,
-                    rid=rid,
                 )
-                sec_state_key = reuse_name if sec_was_reused else f'Security_{rid}'
-
-                if sec_was_reused:
-                    # Q4 (plan §7.3): a log-line separator in the shared warm Security log file so
-                    # each check's output is visually delimited across runs. Log-only — it does NOT
-                    # insert anything into the conversation (the system prefix must stay byte-identical).
-                    logger.info('[SECURITY_REUSE] --- new check rid=%s ---', rid)
 
                 # Primary bound: turn budget (see top-of-file NOTE for the full design).
                 sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS
@@ -621,9 +594,6 @@ class SecurityAdvisorHandler:
             # Clean up active_checks entry even if sec_state_key was never created
             with checks_lock:
                 active_checks.discard(rid)
-            # NOTE (Security instance reuse): the claim is NOT released here. This handler and the
-            # outer finally below are siblings under the SAME try (try@324 / except RuntimeError /
-            # finally), so the finally runs even when we re-raise — it releases the claim there.
             raise
 
         finally:
@@ -662,12 +632,7 @@ class SecurityAdvisorHandler:
                     raise
 
             # ── Cleanup: always remove instance state and release tracking ──
-            self._cleanup(sec_state_key, rid=rid)
-
-            # BUG_0029 Phase 3 (Security instance reuse): release the claim so the next check can
-            # take it. release_claim no-ops on a None/empty name AND on a mismatched rid, so this is
-            # safe on every path — including fresh-spawn fallback where reuse_name is None.
-            security_reuse.release_claim(reuse_name, rid)
+            self._cleanup(sec_state_key)
 
     # ── Slot diagnostics helper ────────────────────────────────────────────
     def _describe_pool_holders(self, caller_agent: str) -> str:
@@ -789,26 +754,22 @@ class SecurityAdvisorHandler:
         """
 
         if timeout_reached:
-            self._handle_timeout(rid, auto_apply, elapsed_at_timeout, timeout_seconds, sec_state_key)
+            self._handle_timeout(rid, auto_apply, elapsed_at_timeout, timeout_seconds)
         elif is_yes or is_no:
             self._handle_verdict(rid, auto_apply, is_yes, is_no, justification, parsing_response, loop)
         else:
             self._handle_ambiguous(rid, auto_apply, parsing_response, loop)
 
-    def _handle_timeout(self, rid: str, auto_apply: bool, elapsed: float, timeout_seconds: float,
-                        sec_instance_name: Optional[str] = None) -> None:
+    def _handle_timeout(self, rid: str, auto_apply: bool, elapsed: float, timeout_seconds: float) -> None:
         """Handle security check timeout — reject and notify UI."""
         from agent_cascade.log import logger
 
         logger.info(f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. "
                     f"Auto-rejecting to prevent AFK rejection cascade.")
 
-        # Halt the security advisor instance (best-effort). Use the ACTUAL instance name — with
-        # reuse it is the fixed warm name, not a per-rid guess; fall back to the legacy pattern
-        # only if the caller didn't supply one.
-        target = sec_instance_name or f'Security_{rid}'
+        # Halt the security advisor instance (best-effort)
         if self.agent_pool:
-            self.agent_pool.halt_instance(target)
+            self.agent_pool.halt_instance(f'Security_{rid}')
 
         reject_msg = ('SECURITY ADVISOR TIMEOUT: The security check took too long to complete. '
                       'This may indicate an overly complex request or insufficient justification. '
@@ -933,7 +894,7 @@ class SecurityAdvisorHandler:
                 )
 
     # ── Cleanup ───────────────────────────────────────────────────────────
-    def _cleanup(self, sec_state_key: Optional[str], rid: Optional[str] = None) -> None:
+    def _cleanup(self, sec_state_key: Optional[str]) -> None:
         """Clean up security advisor instance state."""
         from agent_cascade.log import logger
 
@@ -950,11 +911,10 @@ class SecurityAdvisorHandler:
         except Exception as e:
             logger.debug(f"Active stack removal failed for {sec_state_key} (non-critical): {e}")
 
-        # Release active check tracking. Use the explicit rid when supplied — with instance reuse
-        # sec_state_key is a FIXED name, so string-surgery to recover the rid would be wrong.
-        released_rid = rid if rid is not None else sec_state_key.replace('Security_', '', 1)
+        # Release active check tracking
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
-        if released_rid:
+        if sec_state_key:
             with checks_lock:
+                released_rid = sec_state_key.replace('Security_', '', 1)
                 active_checks.discard(released_rid)
             logger.debug(f"[SECURITY] Released active check for {released_rid}")

@@ -17,10 +17,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-# Process-level claim registry for Security instance reuse (BUG_0029 Phase 3). The claim is
-# taken by ExecutionEngine._acquire_reusable_system_agent and released in this runner's finally.
-import agent_cascade.security_reuse as security_reuse
-
 # Pre-compiled: matches a [VERDICT] line in the advisor's structured output.
 # Used for early-exit so the engine stops as soon as the verdict is produced,
 # preventing the LLM from continuing to execute tool calls after its answer.
@@ -77,25 +73,15 @@ def run_lightweight_advisor(
     from agent_cascade.constants import NON_LLM_KEYS
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.log import logger
-    from agent_cascade.settings import (SECURITY_AGENT_MAX_TURNS, SECURITY_REUSE_ENABLED,
-                                        SECURITY_REUSE_SKILL_ADVISOR_NAME)
+    from agent_cascade.settings import SECURITY_AGENT_MAX_TURNS
 
     result = AdvisorResult()
     start_time = time.perf_counter()
 
     engine: Optional[ExecutionEngine] = None
+    instance = None
     first_yield_timer: Optional[threading.Timer] = None
     first_yield_event = threading.Event()
-
-    # BUG_0029 Phase 3 (Security instance reuse): a local rid token identifies this call's claim
-    # (the per-rid instance_name is only known on the fresh-spawn fallback path). The runner always
-    # acquires via acquire_security_agent (warm-reuse or fresh-spawn) before any use of `instance` /
-    # `reuse_name`, and the finally releases the claim — release_claim no-ops when reuse_name is None.
-    # NOTE: reuse_name MUST be initialized here (pre-try), NOT only inside the try below — if
-    # ExecutionEngine(pool) raises, the finally still runs and dereferences reuse_name; an unbound
-    # local would raise UnboundLocalError and MASK the real error.
-    adv_rid = f'adv_{time.monotonic_ns()}'
-    reuse_name: Optional[str] = None
 
     def _first_yield_timeout_trigger():
         logger.warning(
@@ -109,21 +95,13 @@ def run_lightweight_advisor(
         # ── 1. Fresh engine per call (NOT shared) ────────────────────────────
         engine = ExecutionEngine(pool)
 
-        # ── 2. Acquire the advisor instance: warm-reuse first, fresh-spawn fallback ──────
-        # Shared two-branch logic (see security_reuse.acquire_security_agent). The fallback name is
-        # the legacy per-call instance_name, byte-for-byte as before.
-        reuse_name = None if not SECURITY_REUSE_ENABLED else SECURITY_REUSE_SKILL_ADVISOR_NAME
-        instance, _was_reused = security_reuse.acquire_security_agent(
-            engine=engine,
+        # ── 2. Create the advisor instance (always fresh) ────────────────────
+        instance = engine._create_system_agent(
             agent_class=agent_class,
-            reuse_name=reuse_name,
-            fallback_name=instance_name,
+            instance_name=instance_name,
             task=task,
             caller=caller,
-            rid=adv_rid,
         )
-        if _was_reused:
-            logger.info('[SECURITY_REUSE] advisor reusing warm %s (rid=%s)', reuse_name, adv_rid)
 
         # ── 3. Turn budget ───────────────────────────────────────────────────
         if max_turns is None:
@@ -271,11 +249,6 @@ def run_lightweight_advisor(
 
         # ── 10. Cleanup: mark inactive + remove from active stack ────────────
         _cleanup_advisor_instance(pool, instance_name)
-
-        # BUG_0029 Phase 3 (Security instance reuse): release the claim so the next advisor call
-        # can take it. release_claim no-ops on a None/empty name AND on a mismatched rid, so this is
-        # safe on every path — including fresh-spawn fallback where reuse_name is None.
-        security_reuse.release_claim(reuse_name, adv_rid)
 
     return result
 
