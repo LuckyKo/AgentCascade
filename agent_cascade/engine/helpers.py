@@ -17,6 +17,7 @@ from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
+from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 from agent_cascade.utils.utils import msg_field, msg_set
 
 # ── Constants (shared engine constants; true home is this module) ──────────────
@@ -659,6 +660,32 @@ def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[st
     return os.path.basename(str(log_path))
 
 
+def _get_own_log_path(pool: Any, name: str, agent_class: str) -> str:
+    """Return this instance's own log path, or ``'N/A'`` on any failure (never raises).
+
+    Shared by :func:`_build_session_metadata` (M1) and :func:`_with_run_identity`. The
+    inline ``getattr(pool.get_logger(...), 'log_path', ...)`` expression was duplicated at the
+    old helpers.py:721-722 site; this helper kills the try/except and is the single source of
+    truth for "the instance's own log path".
+    """
+    try:
+        log_inst = pool.get_logger(name, agent_class)
+        return getattr(log_inst, 'log_path', 'N/A')
+    except Exception:  # noqa: BLE001 — a missing logger must never break metadata/identity build
+        return 'N/A'
+
+
+def _with_run_identity(pool: Any, task_msg: Message, instance_name: str, caller: str) -> Message:
+    """Relocate run-identity from the (suppressed) system prompt into conversation[1]
+    for Security. The system prompt must stay byte-identical across checks for KV-cache
+    prefix reuse, but Security's soul grants it "read caller's logs directly"
+    (Security_soul.md:121) — so the run identity moves here instead of being deleted."""
+    sup_log = _get_supervisor_log_filename(pool, caller) or 'N/A'
+    own_log = _get_own_log_path(pool, instance_name, 'Security')   # Security's own log path (never raises)
+    block = (f"\n\n## Run Identity\n- Supervisor log: {sup_log}\n- Your log Path: {own_log}")
+    return Message(role=task_msg.role, content=task_msg.content + block)
+
+
 def _build_session_metadata(pool, instance) -> str:
     """Build the '## Session Metadata' section reflecting current workspace state.
 
@@ -679,68 +706,113 @@ def _build_session_metadata(pool, instance) -> str:
     """
     inst_name = instance.instance_name
 
+    # V2 metadata fix: for stable system-agent classes the per-run identity lines (Supervisor
+    # name+log filename, own log path) are NOT emitted into conversation[0] so it stays
+    # byte-identical across checks (KV-cache prefix). Security gets them relocated into its task
+    # message; Compressor gets none. See STABLE_SYSTEM_PROMPT_CLASSES (shared_init.py).
+    stable = instance.agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES
+
     meta_lines = ['## Session Metadata']
 
-    # Root agent only knows its supervisor is the user; sub-agents get their
-    # caller as supervisor
-    if instance.parent_instance is None:
-        meta_lines.append('- Supervisor: User')
-    else:
-        supervisor = instance.parent_instance
-        log_filename = _get_supervisor_log_filename(pool, supervisor)
-        if log_filename:
-            meta_lines.append(f"- Supervisor: {supervisor} ({log_filename})")
+    # M1 (V2 metadata fix): the run-identity lines — the Supervisor block, the own-log-path
+    # lookup that feeds it, and the '- Your log Path:' append — are emitted ONLY for non-stable
+    # classes. They live in ONE unified `if not stable:` region below so a future edit cannot
+    # reintroduce one volatile line via a second guard. For stable classes (Security/Compressor)
+    # conversation[0] stays byte-identical across checks, which is the whole point of reuse.
+    # The System / Working Dir / Extra Paths lines and the trailer are emitted for ALL classes.
+    # Line order for non-stable classes matches the pre-V2 layout exactly:
+    #   ## Session Metadata → Supervisor → System → Working Dir → Extra Paths → Your log Path → trailer
+
+    if not stable:
+        # Root agent only knows its supervisor is the user; sub-agents get their caller as supervisor.
+        if instance.parent_instance is None:
+            meta_lines.append('- Supervisor: User')
         else:
-            meta_lines.append(f"- Supervisor: {supervisor}")
+            supervisor = instance.parent_instance
+            log_filename = _get_supervisor_log_filename(pool, supervisor)
+            if log_filename:
+                meta_lines.append(f"- Supervisor: {supervisor} ({log_filename})")
+            else:
+                meta_lines.append(f"- Supervisor: {supervisor}")
 
-    # System line: product + version + per-instance startup time (stable across turns)
-    ts = getattr(instance, 'system_started_at', None)
-    if not isinstance(ts, str) or not ts:
-        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    meta_lines.append(f"- System: AgentCascade v{AC_VERSION} — {ts}")
+        # System line: product + version + per-instance startup time (stable across turns).
+        ts = getattr(instance, 'system_started_at', None)
+        if not isinstance(ts, str) or not ts:
+            ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        meta_lines.append(f"- System: AgentCascade v{AC_VERSION} — {ts}")
 
-    # Get workspace config from operation_manager (live source of truth),
-    # falling back to logger metadata
-    working_dir = 'Unknown'
-    extra_ro: list[str] = []
-    extra_rw: list[str] = []
-    log_path = 'N/A'
+        # Get workspace config from operation_manager (live source of truth), falling back to
+        # logger metadata. The get_logger() lookup that only feeds log_path is INSIDE this guard —
+        # for a stable class it would be pure dead work whose result is discarded.
+        working_dir = 'Unknown'
+        extra_ro: list[str] = []
+        extra_rw: list[str] = []
+        # Pre-initialised so the log-path line below degrades to 'N/A' (rather than raising
+        # NameError) if pool.get_logger() fails before assigning it.
+        log_path = 'N/A'
 
-    try:
-        # Prefer operation_manager — it reflects UI config changes in real-time
-        om = getattr(pool, 'operation_manager', None)
-        if om is not None:
-            working_dir = str(getattr(om, 'base_dir', 'Unknown'))
-            # Sort paths for deterministic output (KV cache prefix across retries)
-            extra_ro = sorted([str(p) for p in getattr(om, 'extra_work_folders_ro', [])])
-            extra_rw = sorted([str(p) for p in getattr(om, 'extra_work_folders_rw', [])])
-
-        # Get logger instance (needed for log_path; also used as fallback for
-        # workspace config)
         try:
-            log_inst = pool.get_logger(inst_name, instance.agent_class)
-            log_path = getattr(log_inst, 'log_path', 'Unknown')
+            om = getattr(pool, 'operation_manager', None)
+            if om is not None:
+                working_dir = str(getattr(om, 'base_dir', 'Unknown'))
+                # Sort paths for deterministic output (KV cache prefix across retries)
+                extra_ro = sorted([str(p) for p in getattr(om, 'extra_work_folders_ro', [])])
+                extra_rw = sorted([str(p) for p in getattr(om, 'extra_work_folders_rw', [])])
 
-            # Fallback: if operation_manager unavailable, read from logger
-            # metadata (may be stale)
-            if om is None:
-                working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
-                extra_ro = sorted(log_inst.data['metadata'].get('extra_paths_ro', []))
-                extra_rw = sorted(log_inst.data['metadata'].get('extra_paths_rw', []))
+            # Get logger instance (needed for log_path; also used as fallback for workspace config
+            # when operation_manager is unavailable).
+            try:
+                log_inst = pool.get_logger(inst_name, instance.agent_class)
+                log_path = getattr(log_inst, 'log_path', 'Unknown')
 
-        except (AttributeError, KeyError) as e:
-            logger.debug('Logger metadata access failed for %s: %s', inst_name, e)
+                # Fallback: if operation_manager unavailable, read from logger metadata (may be stale)
+                if om is None:
+                    working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
+                    extra_ro = sorted(log_inst.data['metadata'].get('extra_paths_ro', []))
+                    extra_rw = sorted(log_inst.data['metadata'].get('extra_paths_rw', []))
 
-    except Exception as e:
-        logger.debug('Session metadata build failed: %s', e)
-        working_dir = os.getcwd() if hasattr(os, 'getcwd') else 'Unknown'
+            except (AttributeError, KeyError) as e:
+                logger.debug('Logger metadata access failed for %s: %s', inst_name, e)
 
-    meta_lines.append(f"- Working Dir: {working_dir}")
-    if extra_ro:
-        meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
-    if extra_rw:
-        meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
-    meta_lines.append(f"- Your log Path: {log_path}")
+        except Exception as e:
+            logger.debug('Session metadata build failed: %s', e)
+            working_dir = os.getcwd() if hasattr(os, 'getcwd') else 'Unknown'
+
+        meta_lines.append(f"- Working Dir: {working_dir}")
+        if extra_ro:
+            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+        if extra_rw:
+            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+        # The per-run identity line must stay out of conversation[0] for stable classes.
+        meta_lines.append(f"- Your log Path: {log_path}")
+
+    else:
+        # Stable class: no Supervisor / own-log-path lines, but System + Working Dir + Extra Paths
+        # still emit (from the live operation_manager). No logger lookup — dead work for a stable class.
+        ts = getattr(instance, 'system_started_at', None)
+        if not isinstance(ts, str) or not ts:
+            ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        meta_lines.append(f"- System: AgentCascade v{AC_VERSION} — {ts}")
+
+        working_dir = 'Unknown'
+        extra_ro: list[str] = []
+        extra_rw: list[str] = []
+        try:
+            om = getattr(pool, 'operation_manager', None)
+            if om is not None:
+                working_dir = str(getattr(om, 'base_dir', 'Unknown'))
+                extra_ro = sorted([str(p) for p in getattr(om, 'extra_work_folders_ro', [])])
+                extra_rw = sorted([str(p) for p in getattr(om, 'extra_work_folders_rw', [])])
+        except Exception as e:
+            logger.debug('Session metadata build failed (stable): %s', e)
+            working_dir = os.getcwd() if hasattr(os, 'getcwd') else 'Unknown'
+
+        meta_lines.append(f"- Working Dir: {working_dir}")
+        if extra_ro:
+            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+        if extra_rw:
+            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+
     meta_lines.append('Use your logs to recall details from turns that were compressed.')
 
     return '\n'.join(meta_lines)

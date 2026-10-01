@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from agent_cascade.log import logger
+from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
 from ..agent_instance import AgentState
 
@@ -76,7 +77,7 @@ class IdleManager:
     @staticmethod
     def _is_system_agent(agent_class: str) -> bool:
         """Check if agent class is a system-invoked type (Compressor, Security)."""
-        return agent_class.lower() in ('security', 'compressor')
+        return agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES
 
     def _checker_loop(self):
         """Background loop that periodically checks for and dismisses idle agents."""

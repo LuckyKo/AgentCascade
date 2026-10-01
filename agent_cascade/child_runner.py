@@ -7,6 +7,7 @@ and api_integration.py (root agent recovery). See DESIGN_REWRITE.md §4.3.
 
 from agent_cascade.compression.helpers import extract_instance_output
 from agent_cascade.log import logger
+from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
 
 class ChildAgentFailedError(Exception):
@@ -63,7 +64,7 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
 
 def _determine_force_fresh(agent_class: str) -> bool:
     """Return True for 'security' and 'compressor' classes that need fresh state."""
-    return agent_class.lower() in ('security', 'compressor')
+    return agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES
 
 
 # ── Core runner function ────────────────────────────────────────────────────

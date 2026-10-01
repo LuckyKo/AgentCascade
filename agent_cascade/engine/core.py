@@ -228,9 +228,14 @@ from agent_cascade.engine.helpers import (MAX_TEXT_LENGTH_FOR_REGEX, MIN_OUTPUT_
                                           _extract_tool_calls_from_text, _inject_skills_to_system_message,
                                           _is_incomplete_state, _normalize_gemma_thought_tags,
                                           _merge_loaded_skill_names, _normalize_thinking_blocks,
-                                          _replace_resources_block, _replace_section)
+                                          _replace_resources_block, _replace_section, _with_run_identity)
 from agent_cascade.engine.llm_call import LLMCallMixin
 from agent_cascade.engine.tool_execution import ToolExecMixin
+
+# Security instance reuse (BUG_0029 Phase 3): minimum idle gap before a warm instance's last
+# LLM activity is considered quiescent enough to reset. Guards against a generator abandoned by
+# `break` without close() still mid-flight (plan §3.4 item 5 / R1).
+_REUSE_IDLE_EPSILON = 5.0
 
 
 class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
@@ -4089,17 +4094,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # for consistency)
         sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
-        # Build task message directly — no image scanning for system-invoked agents.
-        # build_task_message() scans caller's conversation for images referenced in
-        # task text; system tasks don't reference caller images so this would be
-        # wasteful and could accidentally match substrings. Construct plain task message.
-        caller_prefix = f"This is a message from {caller}."
-        if context:
-            context_text = f"{caller_prefix}\n{context}"
-        else:
-            context_text = caller_prefix
-        formatted_task = f'Context: {context_text}\n\nTask: {task}\n\nPlease help with this task.'
-        task_msg = Message(role=USER, content=formatted_task)
+        # Build the task message via the shared lifecycle builder (H1 — no image scanning; it
+        # does not forward caller images). For Security only, relocate the run-identity that is
+        # suppressed from the system prompt into conversation[1] as a "## Run Identity" block so
+        # its soul's "read caller's logs directly" capability is preserved (V2 metadata fix).
+        task_msg = self.pool.lifecycle.build_task_message({'task': task, 'context': context}, caller)
+        if inst.agent_class == 'Security':
+            task_msg = _with_run_identity(self.pool, task_msg, instance_name, caller)
 
         # Initialize conversation using lifecycle manager (pass actual is_reuse
         # value)
@@ -4131,6 +4132,211 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         inst.restricted_shell = True
 
         return inst
+
+    def _acquire_reusable_system_agent(self,
+                                       agent_class: str,
+                                       instance_name: str,
+                                       task: str,
+                                       caller: str,
+                                       rid: str = '',
+                                       context: str = '') -> Optional[tuple]:
+        """Acquire a *warm* system agent for reuse, resetting its conversation to [system].
+
+        BUG_0029 Phase 3 (Security instance reuse). Instead of spawning a fresh
+        ``Security_<rid>`` per check (which makes the LLM prompt prefix cold every time), this
+        reuses one long-lived warm instance under a FIXED name so the system message stays
+        byte-identical and hits the server-side KV cache. The conversation is reset to
+        ``[system]`` + the new task; ``conversation[0]`` is kept as the SAME object (never
+        rebuilt) so the serialized prefix is unchanged.
+
+        This method:
+          * Takes a process-level claim on ``instance_name`` FIRST (security_reuse.try_claim).
+            If another check already owns it, returns None — the caller falls back to the
+            untouched legacy ``_create_system_agent`` path.
+          * Runs the full eligibility predicate (plan §3.4) with read-only checks BEFORE any
+            mutation. If ANY fails → returns None (fresh-spawn fallback). Never raises.
+          * On success, under a NON-BLOCKING ``inst._compression_lock``, keeps
+            ``conversation[0]`` as the same object, calls ``rebuild_conversation([sys_msg])``
+            and applies every manual reset from plan §6 (the CRITICAL callout: rebuild does NOT
+            reset _tool_warnings / _cache_notifications / memory-hint / auto-skill / stream-push
+            flags — those are assigned explicitly). Keeps ``_system_prompt_frozen=True`` (does
+            NOT call ``reset_conversation()``).
+
+        Returns:
+            ``(inst, True)`` on a successful reuse, or ``None`` when there is no warm instance
+            or it is ineligible. Claim ownership hand-off: on SUCCESS the claim is left HELD —
+            the caller's ``finally`` releases it (after ``_cleanup()``) so it covers the whole
+            run. On every FAILURE / early-return / exception path the claim is released HERE
+            (via a finally), otherwise the name would be wedged for the process lifetime and
+            reuse would silently stop after the first eligibility miss.
+
+        Note: deliberately does NOT reach into ``lifecycle_manager`` (find_or_create_instance /
+        initialize_conversation). When no warm instance exists it simply returns None so the
+        caller takes the untouched legacy path — this keeps existing lifecycle mocks working.
+        """
+        from agent_cascade.security_reuse import try_claim, release_claim
+
+        # Gate 1 — claim. The single atomic safety property: exactly one owner at a time.
+        # If another check owns this name we must NOT touch its instance → fall back.
+        if not try_claim(instance_name, rid):
+            return None
+
+        # We now OWN the claim. Ownership hand-off rule:
+        #   * SUCCESS path  → do NOT release here; the caller's finally releases it AFTER the run
+        #     so the claim covers the whole LLM call (a concurrent check must not reuse mid-run).
+        #   * EVERY failure / early-return / exception path → release HERE, or the name is wedged
+        #     for the process lifetime and reuse silently stops after the first eligibility miss.
+        # _success_returned flips True only on the success return; the finally below releases on
+        # every other exit (early returns AND exceptions), because a `finally` still runs when a
+        # `return` is hit inside the try body.
+        _success_returned = False
+        try:
+            pool = self.pool
+
+            # Gate 2 — a warm instance of the right class must exist under this fixed name.
+            inst = pool.instances.get(instance_name) if getattr(pool, 'instances', None) else None
+            if inst is None or inst.agent_class != agent_class:
+                return None
+
+            # ── Eligibility predicate (plan §3.4) — all read-only, BEFORE any mutation ────────
+            # 3. State must be IDLE. Not TERMINATED (terminal in the transition matrix) and not
+            #    RUNNING/SLEEPING/COMPLETING — engine.run() would raise at the L1 guard otherwise.
+            with inst._state_lock:
+                if inst.state != AgentState.IDLE:
+                    return None
+
+            # 4. No leaked endpoint permit (todo.md:158 permit-leak program).
+            if inst._slot_release is not None or inst._slot_key is not None:
+                return None
+
+            # 5. No live LLM call, and the last activity is older than a small epsilon — guards
+            #    against a generator abandoned by `break` without close() still mid-flight.
+            if inst._llm_call_active:
+                return None
+            _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
+            if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:
+                return None
+
+            # 6. Not genuinely halted (compression-halt / manual stop).
+            if getattr(pool, 'is_instance_halted', None) is not None and pool.is_instance_halted(instance_name):
+                return None
+
+            # 7. Not terminated (pool-level set or per-instance flag).
+            if getattr(pool, 'is_instance_terminated', None) is not None and pool.is_instance_terminated(instance_name):
+                return None
+            if inst.is_terminated:
+                return None
+
+            # 8. Conversation present and starting with a SYSTEM message (the prefix we keep).
+            conv = inst.conversation
+            if not conv or getattr(conv[0], 'role', None) != SYSTEM:
+                return None
+
+            # 8b. The system prompt must already be FROZEN. An unfrozen instance would re-run the
+            #     _setup_turn M1 rewrite on its next turn and inject volatile run-identity lines,
+            #     silently killing the byte-identical prefix — so it must fall back to a fresh spawn.
+            if inst._system_prompt_frozen is not True:
+                return None
+
+            # 9. No pending queued messages for this instance.
+            mq = getattr(pool, 'message_queues', None)
+            if mq and mq.get(instance_name):
+                return None
+
+            # 11. Not currently on the active stack (a live run would be mid-conversation).
+            with pool._execution._state_lock:
+                if any(n == instance_name for n, _d in pool._execution.active_stack):
+                    return None
+
+            # 10. Compression lock must be acquirable WITHOUT blocking — a live compressor or
+            #     rollback holding it means the instance is not quiescent (plan R3). Non-blocking
+            #     acquire guarantees we never stall here (test asserts < 0.5s wall time).
+            if not inst._compression_lock.acquire(blocking=False):
+                return None
+
+            try:
+                # ── Reset to [system] — keep conversation[0] as the SAME object (the cache win) ──
+                # Take the reference FIRST: reset_conversation() clears the list, so we must hold
+                # sys_msg before it. rebuild_conversation([sys_msg]) then re-sets conversation =
+                # [sys_msg] with the SAME Message object → byte-identical serialized prefix.
+                sys_msg = inst.conversation[0]
+                # H2: use reset_conversation() for the BULK of the per-run resets (turn, tool
+                # warnings, cache notifications, memory-hint block + conversation.clear()). Its only
+                # side effect we must undo is _system_prompt_frozen=False, which we re-set to True
+                # immediately after. _compression_lock is an RLock, so this nests safely under the
+                # non-blocking acquire we already hold.
+                inst.reset_conversation()
+                inst.rebuild_conversation([sys_msg])
+                # THE one field reset_conversation() clears that must be restored: freezing makes
+                # the _setup_turn M1 rewrite (core.py:1642) skip, so conversation[0] is never
+                # re-stamped with volatile run-identity on a reused turn.
+                inst._system_prompt_frozen = True
+
+                # ── DELTA resets — fields reset_conversation() does NOT touch (plan §7) ────────
+                inst.compression_summary = None
+                inst.latest_marker_index = -1
+                inst.max_turns = None  # caller re-sets immediately after (SECURITY_AGENT_MAX_TURNS)
+                inst._generate_cfg_override = None  # caller re-sets immediately after (UI cfg)
+                inst._turn_consumed = False
+                inst._loop_rollback_count = 0
+                inst._compression_suspended_at = 0.0
+                inst._suppress_loop_detection_next_turn = False
+                inst.is_terminated = False
+                inst.sleeping_since = None
+                inst._continue_saved_msg = None
+                # CRITICAL (R5): a stale _state_label makes _setup_turn do a state/load that
+                # destroys the warm KV cache. Clear it + the endpoint config snapshot.
+                inst._state_label = None
+                inst._last_endpoint_config = None
+                # Auto-skill per-run block (agent_instance.py:276-283).
+                inst._auto_skill_task_output = None
+                inst._auto_skill_proposed = False
+                inst._auto_skill_dirty_stop = False
+                # Stream-push flags (agent_instance.py:290-292) — a reused instance must not carry
+                # its previous run's "already pushed" state forward.
+                inst._tg_first_pushed = False
+                inst._tg_final_pushed_phase = None
+                inst._tg_first_pushed_text = None
+
+                # ── H3: child relationship + ownership re-pointing (shared with find_or_create) ──
+                self.pool.lifecycle._prepare_instance_for_reuse(inst, caller, nest_depth=0)
+                # acquire-specific (NOT in the shared helper): a reused Security instance must run
+                # its read-only shell checks without prompting. The lifecycle reuse branch does not
+                # set this, so it is applied here to preserve v1's acquire behaviour exactly.
+                inst.restricted_shell = True
+
+            finally:
+                # We acquired the compression lock non-blocking above; always release it here.
+                inst._compression_lock.release()
+
+            # ── Append the new task message (outside the compression-lock block) ──────────────
+            # H1: same shared builder as the fresh path + Security-only run-identity relocation, so
+            # a fresh and a reused Security instance get an identical conversation[1] shape.
+            task_msg = self.pool.lifecycle.build_task_message({'task': task, 'context': context}, caller)
+            if inst.agent_class == 'Security':
+                task_msg = _with_run_identity(self.pool, task_msg, instance_name, caller)
+            inst.append_message(task_msg)
+
+            # ── UI / stream bookkeeping (mirrors _create_system_agent) ────────────────────────
+            pool.active_stack_append(instance_name, 0)
+            self._update_webui_state(instance_name, agent_class, inst, inst.conversation, final_resp=[], is_initial=True)
+            self.stream_publisher.push_initial_state(inst, caller)
+
+            logger.info('[SECURITY_REUSE] reusing warm %s (rid=%s, caller=%s)', instance_name, rid, caller)
+            _success_returned = True  # hand the claim to the caller's finally — do NOT release here
+            return (inst, True)
+
+        except Exception as e:  # noqa: BLE001 — reuse is best-effort; NEVER let it break the check
+            logger.warning('[SECURITY_REUSE] acquire failed for %s (rid=%s): %s — falling back to fresh spawn',
+                           instance_name, rid, e)
+            return None
+
+        finally:
+            # Release the claim on EVERY non-success exit. A `finally` runs even when a `return`
+            # is hit inside the try body, so this covers all early-return eligibility misses AND
+            # the except-Exception path. On success we leave it held for the caller's finally.
+            if not _success_returned:
+                release_claim(instance_name, rid)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  WebUI State Update Helpers (Issue Y2: Extract duplicated logic)

@@ -14,6 +14,14 @@ from pathlib import Path
 from agent_cascade.log import logger
 from agent_cascade.telemetry import TelemetryCollector
 
+# Single source of truth for "system agents with a stable, reusable conversation[0]". For these
+# classes the per-run identity lines (Supervisor+log filename, own log path) are NOT emitted into
+# the system prompt. Security additionally receives the same data relocated into its task message;
+# Compressor receives none. Canonical set is lowercase; each consumer normalizes with .lower() so
+# exact-case and lower-case agent_class values behave identically (replaces the case-inconsistent
+# copies that lived in child_runner.py and pool/idle_manager.py).
+STABLE_SYSTEM_PROMPT_CLASSES = frozenset({'security', 'compressor'})
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  1. Workspace detection & directory creation
 # ──────────────────────────────────────────────────────────────────────────────

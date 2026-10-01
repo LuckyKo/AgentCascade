@@ -502,6 +502,12 @@ def _make_minimal_pool():
     pool.instance_state = {}
     pool._execution = MagicMock()
     pool._execution._state_lock = threading.Lock()
+    # V2 (H1): _create_system_agent now builds its task message via lifecycle.build_task_message
+    # and, for Security, _with_run_identity. Tests that drive the REAL ExecutionEngine (i.e. do not
+    # patch it) must therefore give the pool a real lifecycle manager — otherwise build_task_message
+    # returns a MagicMock stand-in that fails pydantic validation in append_message.
+    from agent_cascade.lifecycle_manager import AgentLifecycleManager
+    pool.lifecycle = AgentLifecycleManager(pool)
     return pool
 
 

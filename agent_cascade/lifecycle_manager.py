@@ -104,6 +104,51 @@ class AgentLifecycleManager:
         """
         self._engine = engine
 
+    def _prepare_instance_for_reuse(self, inst, caller, nest_depth: int) -> None:
+        """Re-point a reused instance's ownership + clear its per-run child/skill/stream state.
+
+        H3 (Security/Compressor instance reuse v2): this block was duplicated verbatim between the
+        sub-agent reuse branch of :meth:`find_or_create_instance` and
+        ``ExecutionEngine._acquire_reusable_system_agent`` — 9 fields including the same
+        old-parent-capture-BEFORE-overwrite subtlety (flagged CRITICAL). Extracted here so both
+        paths stay in lockstep. Thread-safety mirrors the original: _children_lock for reading the
+        old parent, _state_lock for mutating instance state, and _update_child_relationship to drop
+        the stale link from the previous caller's children set.
+        """
+        # Update _nest_depth to reflect current call chain depth (Fix)
+        inst._nest_depth = nest_depth
+
+        # MAJOR FIX: Reset last_activity when reusing instance so idle timer starts from reuse event
+        inst.last_activity = time.monotonic()
+
+        # Clear old child tracking — reused instances start fresh with no children.
+        # Track old parent for cleanup, then update to new caller (thread-safe).
+        # Use _children_lock for pool.children and _state_lock for instance state.
+        with self.pool._children_lock:
+            old_parent = inst.parent_instance
+        with inst._state_lock:
+            inst.parent_instance = caller
+            inst._child_instances.clear()
+
+        # Clear stale auto-skill state from the previous run. The snapshot
+        # (_auto_skill_task_output) shadows the new task's answer in
+        # extract_instance_output(), and the one-shot flag would permanently
+        # disable skill reflection for this instance on all future recalls.
+        inst._auto_skill_task_output = None
+        inst._auto_skill_proposed = False
+        inst._auto_skill_dirty_stop = False
+
+        # TG-STREAM F4: clear the stream-time push flags too — a reused
+        # instance must not carry its previous run's "already pushed" state forward,
+        # or the first text output / final answer of the new run would be suppressed.
+        inst._tg_first_pushed = False
+        inst._tg_final_pushed_phase = None
+        inst._tg_first_pushed_text = None
+
+        # Remove from old parent's tracking even if new caller is None
+        if old_parent is not None:
+            self.pool._update_child_relationship(old_parent, inst.instance_name, add=False)
+
     def find_or_create_instance(self,
                                 agent_class: str,
                                 instance_name: str,
@@ -152,33 +197,10 @@ class AgentLifecycleManager:
                 # timer starts from reuse event
                 inst.last_activity = now
 
-                # Clear old child tracking — reused instances start fresh with no children
-                # Track old parent for cleanup, then update to new caller (thread-safe).
-                # Use _children_lock for pool.children and _state_lock for instance state.
-                with self.pool._children_lock:
-                    old_parent = inst.parent_instance
-                with inst._state_lock:
-                    inst.parent_instance = caller
-                    inst._child_instances.clear()
-
-                # Clear stale auto-skill state from the previous run. The snapshot
-                # (_auto_skill_task_output) shadows the new task's answer in
-                # extract_instance_output(), and the one-shot flag would permanently
-                # disable skill reflection for this instance on all future recalls.
-                inst._auto_skill_task_output = None
-                inst._auto_skill_proposed = False
-                inst._auto_skill_dirty_stop = False
-
-                # TG-STREAM F4: clear the stream-time push flags too — a reused
-                # instance must not carry its previous run's "already pushed" state forward,
-                # or the first text output / final answer of the new run would be suppressed.
-                inst._tg_first_pushed = False
-                inst._tg_final_pushed_phase = None
-                inst._tg_first_pushed_text = None
-
-                # Remove from old parent's tracking even if new caller is None
-                if old_parent is not None:
-                    self.pool._update_child_relationship(old_parent, instance_name, add=False)
+                # H3: re-point ownership + clear per-run child/skill/stream state via the shared
+                # helper (also used by ExecutionEngine._acquire_reusable_system_agent) so the two
+                # reuse paths cannot drift.
+                self._prepare_instance_for_reuse(inst, caller, nest_depth=nest_depth)
 
                 logger.debug(f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
                              f"Conversation history will be preserved and extended.")
