@@ -648,6 +648,17 @@ def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[st
 
     Returns None if any step fails; never raises exceptions.
     """
+    log_path = _get_supervisor_log_path(pool, supervisor_name)
+    return os.path.basename(log_path) if log_path else None
+
+
+def _get_supervisor_log_path(pool: Any, supervisor_name: str) -> Optional[str]:
+    """Get the FULL log path for a supervisor instance by name.
+
+    Returns None if any step fails; never raises exceptions. Used by the Security
+    run-identity block (which needs the absolute path so it can read the caller's logs
+    directly); :func:`_get_supervisor_log_filename` derives the bare filename from this.
+    """
     loggers = getattr(pool, 'instance_loggers', None)
     if not loggers:
         return None
@@ -657,33 +668,40 @@ def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[st
     log_path = getattr(logger_inst, 'log_path', None)
     if not log_path:
         return None
-    return os.path.basename(str(log_path))
+    return str(log_path)
 
 
-def _get_own_log_path(pool: Any, name: str, agent_class: str) -> str:
-    """Return this instance's own log path, or ``'N/A'`` on any failure (never raises).
+def _with_run_identity(pool: Any, task_msg: Message, caller: str) -> Message:
+    """Inline the supervisor's FULL log path into the Context line for Security.
 
-    Shared by :func:`_build_session_metadata` (M1) and :func:`_with_run_identity`. The
-    inline ``getattr(pool.get_logger(...), 'log_path', ...)`` expression was duplicated at the
-    old helpers.py:721-722 site; this helper kills the try/except and is the single source of
-    truth for "the instance's own log path".
+    (Replaces the v2 "## Run Identity" appended block.) The system prompt must stay
+    byte-identical across checks for KV-cache prefix reuse, but Security's soul grants it
+    "read caller's logs directly" (Security_soul.md:121) — so the path is carried in
+    conversation[1] instead.
+
+    The transformation is a REWRITE of the ``Context: ...`` prefix, not an append: the
+    message length is unchanged, so conversation[1] keeps the same shape for a fresh and a
+    reused instance. Only the supervisor's FULL log path is inlined; Security is short and
+    non-compressive, so its own log path is still omitted entirely.
     """
-    try:
-        log_inst = pool.get_logger(name, agent_class)
-        return getattr(log_inst, 'log_path', 'N/A')
-    except Exception:  # noqa: BLE001 — a missing logger must never break metadata/identity build
-        return 'N/A'
+    sup_log = _get_supervisor_log_path(pool, caller) or 'N/A'
+    content = task_msg.content
 
-
-def _with_run_identity(pool: Any, task_msg: Message, instance_name: str, caller: str) -> Message:
-    """Relocate run-identity from the (suppressed) system prompt into conversation[1]
-    for Security. The system prompt must stay byte-identical across checks for KV-cache
-    prefix reuse, but Security's soul grants it "read caller's logs directly"
-    (Security_soul.md:121) — so the run identity moves here instead of being deleted."""
-    sup_log = _get_supervisor_log_filename(pool, caller) or 'N/A'
-    own_log = _get_own_log_path(pool, instance_name, 'Security')   # Security's own log path (never raises)
-    block = (f"\n\n## Run Identity\n- Supervisor log: {sup_log}\n- Your log Path: {own_log}")
-    return Message(role=task_msg.role, content=task_msg.content + block)
+    # Anchor on the EXACT sentence build_task_message emits (lifecycle_manager.py:329-335).
+    # We know `caller`, so we can match the full sentence including its terminator instead of
+    # scanning for a period. This is period-landing-proof: a caller name containing '.'
+    # (e.g. 'John.Doe') can never cause a mid-name insertion, because we only match the
+    # literal 'This is a message from John.Doe.' — the dot we land on is unambiguously the
+    # sentence terminator.
+    sentence = f'This is a message from {caller}.'
+    idx = content.find(sentence)
+    if idx == -1:
+        # Defensive: never mangle a message we don't recognise (best-effort, mirrors the
+        # 'N/A' fallback above). Leave the content untouched.
+        return task_msg
+    cut = idx + len(sentence)
+    rebuilt = content[:cut] + f' (log path {sup_log})' + content[cut:]
+    return Message(role=task_msg.role, content=rebuilt)
 
 
 def _build_session_metadata(pool, instance) -> str:

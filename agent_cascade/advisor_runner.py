@@ -96,6 +96,11 @@ def run_lightweight_advisor(
     # local would raise UnboundLocalError and MASK the real error.
     adv_rid = f'adv_{time.monotonic_ns()}'
     reuse_name: Optional[str] = None
+    # BUG_0029 Phase 3 bootstrap fix: the ACTUAL instance name (fixed reuse name on a reuse/seed hit,
+    # per-call fallback name on a miss). MUST be pre-bound like reuse_name — the finally below
+    # dereferences it for _cleanup_advisor_instance; an unbound local would raise UnboundLocalError
+    # and mask the real error if ExecutionEngine(pool) raises first.
+    actual_name: Optional[str] = None
 
     def _first_yield_timeout_trigger():
         logger.warning(
@@ -113,7 +118,11 @@ def run_lightweight_advisor(
         # Shared two-branch logic (see security_reuse.acquire_security_agent). The fallback name is
         # the legacy per-call instance_name, byte-for-byte as before.
         reuse_name = None if not SECURITY_REUSE_ENABLED else SECURITY_REUSE_SKILL_ADVISOR_NAME
-        instance, _was_reused = security_reuse.acquire_security_agent(
+        # BUG_0029 Phase 3: acquire_security_agent now returns a 3-TUPLE
+        # (instance, is_reuse, actual_name). `actual_name` is the REAL instance name — the
+        # fixed reuse name on a reuse/seed hit, the per-call fallback name on a miss. The
+        # `finally` cleanup below must target it, or it cleans up a name that was never used.
+        instance, _was_reused, actual_name = security_reuse.acquire_security_agent(
             engine=engine,
             agent_class=agent_class,
             reuse_name=reuse_name,
@@ -238,7 +247,7 @@ def run_lightweight_advisor(
         # ── 7. Extract output ────────────────────────────────────────────────
         if not result.was_timeout:
             from agent_cascade.compression.helpers import extract_instance_output
-            result.output_text = extract_instance_output(instance.conversation, instance_name) or ''
+            result.output_text = extract_instance_output(instance.conversation, actual_name) or ''
 
     except Exception as e:  # noqa: BLE001 — advisor must never crash the caller
         result.was_error = True
@@ -254,7 +263,7 @@ def run_lightweight_advisor(
             if tel is not None:
                 try:
                     tel.record_agent_instance_call(
-                        instance_name,
+                        actual_name,
                         agent_class,
                         caller,
                         latency_ms=latency_ms,
@@ -270,7 +279,10 @@ def run_lightweight_advisor(
                 pass
 
         # ── 10. Cleanup: mark inactive + remove from active stack ────────────
-        _cleanup_advisor_instance(pool, instance_name)
+        # BUG_0029 Phase 3 bootstrap fix: clean up the ACTUAL instance name (the fixed reuse name on
+        # a reuse/seed hit), not the per-call fallback name — otherwise the real warm instance is left
+        # active and on the active stack, wedging Gate 11 so advisor reuse stays dead.
+        _cleanup_advisor_instance(pool, actual_name)
 
         # BUG_0029 Phase 3 (Security instance reuse): release the claim so the next advisor call
         # can take it. release_claim no-ops on a None/empty name AND on a mismatched rid, so this is

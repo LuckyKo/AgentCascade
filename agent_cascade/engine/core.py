@@ -4095,12 +4095,16 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
         # Build the task message via the shared lifecycle builder (H1 — no image scanning; it
-        # does not forward caller images). For Security only, relocate the run-identity that is
-        # suppressed from the system prompt into conversation[1] as a "## Run Identity" block so
-        # its soul's "read caller's logs directly" capability is preserved (V2 metadata fix).
-        task_msg = self.pool.lifecycle.build_task_message({'task': task, 'context': context}, caller)
+        # does not forward caller images). For Security only, inline the supervisor's full log path
+        # into the Context line (see _with_run_identity) so its soul's "read caller's logs directly"
+        # capability is preserved (V2 metadata fix).
+        # NOTE: build_task_message lives on the ENGINE's lifecycle manager (self.lifecycle, set in
+        # __init__), NOT on the pool — a real AgentPool has no `lifecycle` attribute. (An earlier
+        # v2 draft called self.pool.lifecycle here and crashed at runtime on a real shell_cmd
+        # security check; test fixtures masked it by stubbing pool.lifecycle.)
+        task_msg = self.lifecycle.build_task_message({'task': task, 'context': context}, caller)
         if inst.agent_class == 'Security':
-            task_msg = _with_run_identity(self.pool, task_msg, instance_name, caller)
+            task_msg = _with_run_identity(self.pool, task_msg, caller)
 
         # Initialize conversation using lifecycle manager (pass actual is_reuse
         # value)
@@ -4139,7 +4143,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                        task: str,
                                        caller: str,
                                        rid: str = '',
-                                       context: str = '') -> Optional[tuple]:
+                                        context: str = '') -> Optional[Tuple[Any, bool, str]]:
         """Acquire a *warm* system agent for reuse, resetting its conversation to [system].
 
         BUG_0029 Phase 3 (Security instance reuse). Instead of spawning a fresh
@@ -4162,19 +4166,29 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             flags — those are assigned explicitly). Keeps ``_system_prompt_frozen=True`` (does
             NOT call ``reset_conversation()``).
 
-        Returns:
-            ``(inst, True)`` on a successful reuse, or ``None`` when there is no warm instance
-            or it is ineligible. Claim ownership hand-off: on SUCCESS the claim is left HELD —
-            the caller's ``finally`` releases it (after ``_cleanup()``) so it covers the whole
-            run. On every FAILURE / early-return / exception path the claim is released HERE
-            (via a finally), otherwise the name would be wedged for the process lifetime and
-            reuse would silently stop after the first eligibility miss.
+        Returns ``(inst, is_reuse, name)``:
+          * ``(inst, True, instance_name)``  — reused an existing warm instance
+          * ``(inst, False, instance_name)`` — SEEDED: no instance existed under ``instance_name``,
+            so one was created under that fixed name (the caller still runs it this check; the NEXT
+            check can reuse it)
+          * ``None`` — an existing instance was found but is INELIGIBLE, or the claim is held, or an
+            exception occurred. The caller falls back to a fresh per-rid spawn and MUST NOT clobber
+            the existing instance.
 
-        Note: deliberately does NOT reach into ``lifecycle_manager`` (find_or_create_instance /
-        initialize_conversation). When no warm instance exists it simply returns None so the
-        caller takes the untouched legacy path — this keeps existing lifecycle mocks working.
+        Claim ownership hand-off: on SUCCESS (reuse OR seed) the claim is left HELD — the caller's
+        ``finally`` releases it (after ``_cleanup()``) so it covers the whole run. On every FAILURE /
+        early-return / exception path the claim is released HERE (via a finally), otherwise the name
+        would be wedged for the process lifetime and reuse would silently stop after the first
+        eligibility miss.
+
+        Note: the seed branch (BUG_0029 Phase 3 bootstrap fix) creates the warm instance under the
+        FIXED name when the slot is empty, so the NEXT check can reuse it — this restores the
+        create-or-reuse contract. It deliberately does NOT reach into ``lifecycle_manager`` for the
+        REUSE path (no find_or_create_instance / initialize_conversation there); only the seed branch
+        calls ``_create_system_agent``.
         """
         from agent_cascade.security_reuse import try_claim, release_claim
+        from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
         # Gate 1 — claim. The single atomic safety property: exactly one owner at a time.
         # If another check owns this name we must NOT touch its instance → fall back.
@@ -4195,8 +4209,43 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             # Gate 2 — a warm instance of the right class must exist under this fixed name.
             inst = pool.instances.get(instance_name) if getattr(pool, 'instances', None) else None
-            if inst is None or inst.agent_class != agent_class:
+            if inst is not None and inst.agent_class != agent_class:
+                # A DIFFERENT class owns this name — do NOT clobber it; treat as ineligible.
                 return None
+
+            if inst is None:
+                # ── SEED-ON-MISS (the create-or-reuse contract the v2 BUILD dropped) ──────────
+                # The slot under the fixed name is provably empty: we HOLD the claim for this
+                # name (the `try_claim` above succeeded and is not reentrant), so no other
+                # check can be seeding it concurrently. Create here, under the FIXED name, so the
+                # NEXT check can reuse it. is_reuse=False because this check reused nothing — the
+                # caller must not treat it as a cache hit.
+                #
+                # Clean by construction: the instance was JUST built by _create_system_agent, so
+                # every field the reuse path normally clears is already at its dataclass default
+                # (_auto_skill_task_output=None, _auto_skill_proposed=False,
+                # _auto_skill_dirty_stop=False, _tg_first_pushed=False,
+                # _tg_final_pushed_phase=None, _tg_final_pushed_text=None,
+                # compression_summary=None, _state_label=None, _last_endpoint_config=None).
+                # Hence NO reset block runs here — do not "helpfully" add one.
+                try:
+                    inst = self._create_system_agent(
+                        agent_class=agent_class, instance_name=instance_name,
+                        task=task, caller=caller)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning('[SECURITY_REUSE] seed failed for %s (rid=%s): %s '
+                                   '— falling back to fresh spawn', instance_name, rid, e)
+                    return None            # the finally below releases the claim
+
+                # Freeze now, or the NEXT check fails Gate 8b and the seed is wasted. Non-stable
+                # classes keep the normal end-of-_setup_turn freeze lifecycle. `inst` was just built
+                # by _create_system_agent(agent_class=agent_class, …) above, so use the param directly.
+                if agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES:
+                    inst._system_prompt_frozen = True
+
+                # Hand the claim to the caller's finally, exactly as the reuse path does.
+                _success_returned = True
+                return (inst, False, instance_name)
 
             # ── Eligibility predicate (plan §3.4) — all read-only, BEFORE any mutation ────────
             # 3. State must be IDLE. Not TERMINATED (terminal in the transition matrix) and not
@@ -4312,9 +4361,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # ── Append the new task message (outside the compression-lock block) ──────────────
             # H1: same shared builder as the fresh path + Security-only run-identity relocation, so
             # a fresh and a reused Security instance get an identical conversation[1] shape.
-            task_msg = self.pool.lifecycle.build_task_message({'task': task, 'context': context}, caller)
+            # build_task_message is on the engine's lifecycle (self.lifecycle), not the pool — see
+            # the matching NOTE in _create_system_agent above.
+            task_msg = self.lifecycle.build_task_message({'task': task, 'context': context}, caller)
             if inst.agent_class == 'Security':
-                task_msg = _with_run_identity(self.pool, task_msg, instance_name, caller)
+                task_msg = _with_run_identity(self.pool, task_msg, caller)
             inst.append_message(task_msg)
 
             # ── UI / stream bookkeeping (mirrors _create_system_agent) ────────────────────────
@@ -4324,7 +4375,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             logger.info('[SECURITY_REUSE] reusing warm %s (rid=%s, caller=%s)', instance_name, rid, caller)
             _success_returned = True  # hand the claim to the caller's finally — do NOT release here
-            return (inst, True)
+            return (inst, True, instance_name)
 
         except Exception as e:  # noqa: BLE001 — reuse is best-effort; NEVER let it break the check
             logger.warning('[SECURITY_REUSE] acquire failed for %s (rid=%s): %s — falling back to fresh spawn',

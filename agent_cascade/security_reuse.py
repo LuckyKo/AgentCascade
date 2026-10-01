@@ -93,21 +93,24 @@ def _clear_all() -> None:
 
 
 def acquire_security_agent(engine, agent_class: str, reuse_name: Optional[str],
-                           fallback_name: str, task: str, caller: str, rid: str) -> Tuple[Any, bool]:
+                           fallback_name: str, task: str, caller: str,
+                           rid: str) -> Tuple[Any, bool, str]:
     """Two-branch Security-instance acquire shared by the approval + skill-advisor paths.
 
     Tries to warm-reuse a fixed-name instance via ``engine._acquire_reusable_system_agent`` and
     falls back to a fresh per-check spawn via ``engine._create_system_agent`` when that misses.
-    Returns ``(instance, was_reused)``.
+    Returns ``(instance, was_reused, actual_name)`` where ``actual_name`` is the REAL instance name
+    (the fixed reuse name on a reuse/seed hit, the per-call fallback name on a miss).
 
     This exists so the two call sites (security_handler.py / advisor_runner.py) do NOT each carry
     their own copy of the branch logic — which had already drifted. It is dependency-light: it only
     calls engine methods and never touches the claim registry directly (the engine owns that).
     Reuse is best-effort: any exception from the acquire path falls back to a fresh spawn.
 
-    A valid reuse hit is a 2-tuple ``(instance, True)``. Anything else — ``None`` on a real miss, or
-    an auto-spec MagicMock from tests that mock ``ExecutionEngine`` without stubbing this method —
-    means "no reuse" and falls back. That shape guard is what keeps un-stubbed mocks working.
+    The shape guard accepts only the real engine's 3-tuple; anything else (incl. an auto-spec
+    MagicMock from tests that mock ExecutionEngine without stubbing this method) is truthy but NOT
+    our tuple → no reuse, fall back to a fresh spawn:
+      * ``len==3`` → real engine ``(instance, is_reuse, name)``; a falsy name falls back to reuse_name.
     """
     if reuse_name:
         try:
@@ -117,8 +120,11 @@ def acquire_security_agent(engine, agent_class: str, reuse_name: Optional[str],
             from agent_cascade.log import logger
             logger.warning('[SECURITY_REUSE] acquire raised %s — falling back to fresh spawn', _e)
             got = None
-        if isinstance(got, tuple) and len(got) == 2:
-            return got[0], True
+
+        # Shape guard. Only the real 3-tuple is a hit (see docstring).
+        if isinstance(got, tuple) and len(got) == 3 and got[0] is not None:
+            return got[0], bool(got[1]), (got[2] or reuse_name)
+
     instance = engine._create_system_agent(
         agent_class=agent_class, instance_name=fallback_name, task=task, caller=caller)
-    return instance, False
+    return instance, False, fallback_name

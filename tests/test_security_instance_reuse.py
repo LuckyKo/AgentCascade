@@ -30,6 +30,7 @@ from agent_cascade.security_reuse import (  # noqa: E402
     try_claim, release_claim, claim_holder, _clear_all)
 from agent_cascade.agent_instance import AgentInstance, AgentState  # noqa: E402
 from agent_cascade.llm.schema import Message, SYSTEM, USER  # noqa: E402
+from agent_cascade.engine.helpers import _with_run_identity  # noqa: E402
 
 REUSE_NAME = 'Security_reuse_approval'
 
@@ -51,10 +52,14 @@ def _make_warm_instance(name=REUSE_NAME):
     return inst
 
 
-def _make_pool(inst):
-    """Minimal fake AgentPool exposing exactly what _acquire_reusable_system_agent touches."""
+def _make_pool(inst=None):
+    """Minimal fake AgentPool exposing exactly what _acquire_reusable_system_agent touches.
+
+    Pass an instance to pre-seed ``pool.instances`` under its name (the reuse-hit path); pass None
+    for a REAL empty dict (the seed-on-miss path — a MagicMock auto-attr .get() would return truthy
+    and short-circuit Gate 2)."""
     pool = MagicMock()
-    pool.instances = {inst.instance_name: inst}
+    pool.instances = {inst.instance_name: inst} if inst else {}
     pool.message_queues = {}
     exec_obj = MagicMock()
     exec_obj._state_lock = threading.RLock()
@@ -125,8 +130,9 @@ class TestEligibilityPredicate:
         engine = _make_engine(_make_pool(inst))
         got = _acquire(engine)
         assert got is not None, 'a clean warm instance must be reusable'
-        result_inst, was_reused = got
+        result_inst, was_reused, name = got
         assert result_inst is inst and was_reused is True
+        assert name == REUSE_NAME
 
     def test_running_state_falls_back(self):
         inst = _make_warm_instance()
@@ -233,11 +239,18 @@ class TestEligibilityPredicate:
         assert got is None, 'a lock-held instance must fall back to fresh spawn'
         assert elapsed < 0.5, f'acquire must return promptly (non-blocking), took {elapsed:.3f}s'
 
-    def test_no_warm_instance_falls_back(self):
+    def test_no_warm_instance_seeds(self):
+        """BUG_0029 Phase 3: an empty slot now SEEDS (create-or-reuse), it no longer returns None.
+        The old premise ("no warm instance → fall back to fresh spawn") is exactly the bootstrap gap
+        this fix closes — the fixed name is created here so the NEXT check can reuse it."""
         pool = MagicMock()
-        pool.instances = {}  # nothing under the reuse name
+        pool.instances = {}  # nothing under the reuse name → the seed branch must fire
         engine = _make_engine(pool)
-        assert _acquire(engine) is None
+        got = _acquire(engine)
+        assert isinstance(got, tuple) and len(got) == 3, f'expected a seed 3-tuple, got {got!r}'
+        _, is_reuse, name = got
+        assert is_reuse is False, 'a seed must not be reported as a cache hit'
+        assert name == REUSE_NAME, 'the seed must create under the FIXED reuse name'
 
     def test_wrong_agent_class_falls_back(self):
         inst = _make_warm_instance()
@@ -280,14 +293,19 @@ class TestClaimReleasedOnFailure:
         return got
 
     def test_no_warm_instance_releases_claim(self):
+        """BUG_0029 Phase 3: an empty slot now SEEDS, and a SUCCESSFUL seed holds the claim (so the
+        naive "got is None" assertion no longer holds). The no-leak intent is preserved by making the
+        seed FAIL — _create_system_agent raises → acquire returns None AND the finally releases the
+        claim. That is exactly the regression this class guards."""
         pool = MagicMock()
-        pool.instances = {}  # nothing under the reuse name → early return at Gate 2
+        pool.instances = {}  # nothing under the reuse name → the seed branch fires
         _clear_all()
         engine = _make_engine(pool)
+        engine._create_system_agent = MagicMock(side_effect=RuntimeError('boom: seed failed'))
         got = engine._acquire_reusable_system_agent(
             agent_class='Security', instance_name=REUSE_NAME, task='x', caller='Maine', rid='r1')
-        assert got is None
-        assert claim_holder(REUSE_NAME) is None, 'no warm instance → claim must be released'
+        assert got is None, 'a failed seed must fall back (None), not hand off a broken instance'
+        assert claim_holder(REUSE_NAME) is None, 'seed failure → claim must be released (no leak)'
 
     def test_wrong_agent_class_releases_claim(self):
         inst = _make_warm_instance()
@@ -399,6 +417,125 @@ class TestClaimReleasedOnFailure:
         # We do NOT release here — the caller's finally owns it. So the holder must still be us.
         assert claim_holder(REUSE_NAME) == 'r-fail', (
             'a successful reuse must leave the claim held for the caller to release in its finally')
+
+
+# ── B3. Bootstrap fix: seed-on-miss + create-or-reuse contract (plan §5.1) ────
+# THE behavioral proof that the v2 BUILD's dead feature is restored: an empty slot under the fixed
+# reuse name now SEEDS, and the NEXT check REUSES the same object. The `_seed` stand-in registers the
+# instance in pool.instances exactly as find_or_create_instance really does.
+
+
+def _seeded_engine(pool):
+    """A real engine whose _create_system_agent is a FAITHFUL stand-in: it builds an eligible
+    instance AND registers it in pool.instances (what find_or_create_instance really does)."""
+    engine = _make_engine(pool)
+
+    def _seed(**kw):
+        inst = _make_warm_instance(kw['instance_name'])
+        pool.instances[kw['instance_name']] = inst
+        return inst
+
+    engine._create_system_agent = MagicMock(side_effect=_seed)
+    return engine
+
+
+class TestBootstrapSeedOnMiss:
+    """plan §5.1 — the decisive behavioral tests (these FAIL on the shipped BUILD)."""
+
+    def test_first_check_seeds_then_second_reuses(self):
+        """THE bootstrap regression test: check #1 seeds under the fixed name; check #2 reuses the
+        SAME object with no new spawn. Fails before the fix (the warm name is never created)."""
+        pool = _make_pool()
+        engine = _seeded_engine(pool)
+        _clear_all()
+
+        # Check #1 — nothing under the fixed name → must SEED
+        g1 = _acquire(engine, rid='r1')
+        assert g1 is not None
+        inst1, is_reuse1, name1 = g1
+        assert is_reuse1 is False, 'a seed must not be reported as a cache hit'
+        assert name1 == REUSE_NAME
+        assert pool.instances[REUSE_NAME] is inst1
+        assert engine._create_system_agent.call_count == 1
+        assert engine._create_system_agent.call_args.kwargs['instance_name'] == REUSE_NAME
+        assert claim_holder(REUSE_NAME) == 'r1'  # held for the caller's finally
+
+        release_claim(REUSE_NAME, 'r1')  # simulate the caller's finally
+
+        # Check #2 — the seeded instance exists and is eligible → must REUSE the SAME object
+        g2 = _acquire(engine, rid='r2')
+        inst2, is_reuse2, name2 = g2
+        assert is_reuse2 is True
+        assert name2 == REUSE_NAME
+        assert inst2 is inst1  # same object, not a re-create
+        assert engine._create_system_agent.call_count == 1  # NO new spawn on #2
+
+    def test_ineligible_existing_instance_falls_back_and_is_not_clobbered(self):
+        """An existing-but-ineligible (unfrozen) instance must NOT be seeded-over or replaced."""
+        inst = _make_warm_instance(REUSE_NAME)
+        inst._system_prompt_frozen = False  # ineligible at Gate 8b
+        pool = _make_pool(inst)
+        engine = _seeded_engine(pool)
+        got = _acquire(engine, rid='r1')
+        assert got is None, 'an ineligible instance must fall back, not seed'
+        assert pool.instances[REUSE_NAME] is inst, 'the existing instance must be left untouched'
+        engine._create_system_agent.assert_not_called()
+
+    def test_seed_freezes_prompt_for_stable_class(self):
+        """The seed must freeze a stable-class system prompt at creation time, or the NEXT check
+        fails Gate 8b and the seed is wasted (plan §2 finding)."""
+        pool = _make_pool()
+        engine = _seeded_engine(pool)
+        g1 = _acquire(engine, rid='r1')
+        inst1, _, _name = g1
+        assert inst1._system_prompt_frozen is True
+
+    def test_system_prompt_byte_identical_seed_then_reuse(self):
+        """conversation[0] must be byte-identical between the seeded instance and the reused one.
+
+        Capture the content BEFORE check #2's acquire so a future reset-block regression that mutates
+        conversation[0] in place is caught (asserting inst1 vs inst2 alone is tautological — they are
+        the same object)."""
+        pool = _make_pool()
+        engine = _seeded_engine(pool)
+        g1 = _acquire(engine, rid='r1')
+        inst1, _, _ = g1
+        conv0_before = inst1.conversation[0].content  # capture BEFORE the reuse acquire
+        release_claim(REUSE_NAME, 'r1')
+        g2 = _acquire(engine, rid='r2')
+        inst2, _, _ = g2
+        assert inst2 is inst1  # same object reused (sanity)
+        assert inst2.conversation[0].content == conv0_before, (
+            'a reuse must not mutate conversation[0] — the KV-cache prefix must stay byte-identical')
+
+    def test_advisor_cleanup_targets_actual_name_on_reuse(self):
+        """Step-4 regression: the advisor's finally must clean up the ACTUAL instance name (the fixed
+        reuse name on a hit), not the per-call fallback name — otherwise the real warm instance is
+        left active and on the stack, wedging Gate 11 so advisor reuse stays dead."""
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME as ADV_NAME
+        pool = _make_integration_pool()
+        warm = _make_warm_instance(ADV_NAME)
+
+        engine_instance = MagicMock()
+        # Real 3-tuple: a REUSE hit under the fixed advisor name.
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, ADV_NAME)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        from agent_cascade.advisor_runner import run_lightweight_advisor
+        cleanup_spy = MagicMock()
+        with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+             patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy):
+            result = run_lightweight_advisor(
+                pool=pool, agent_class='Security', instance_name='Security_op_fallback1234',
+                task='advise me', caller='Maine')
+
+        assert result.ok is True
+        # THE assertion: cleanup targeted the fixed reuse name, not the per-call fallback name.
+        # _cleanup_advisor_instance(pool, name) → args[0]=pool, args[1]=name.
+        assert cleanup_spy.call_count == 1
+        cleaned_name = cleanup_spy.call_args.args[1]
+        assert cleaned_name == ADV_NAME, (
+            f'advisor must clean up the ACTUAL instance name ({ADV_NAME!r}), got {cleaned_name!r}')
 
 
 # ── C. The reset itself ───────────────────────────────────────────────────────
@@ -588,7 +725,7 @@ class TestSecurityHandlerIntegration:
 
         engine_instance = MagicMock()
         # First call: reuse succeeds. Second call (same warm instance): also reuse.
-        engine_instance._acquire_reusable_system_agent.side_effect = lambda **kw: (warm, True)
+        engine_instance._acquire_reusable_system_agent.side_effect = lambda **kw: (warm, True, REUSE_NAME)
         engine_instance.run.return_value = iter([(' [YES] safe', False)])
 
         with patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', True):
@@ -638,7 +775,7 @@ class TestSecurityHandlerIntegration:
             raise RuntimeError('simulated LLM crash')
 
         engine_instance = MagicMock()
-        engine_instance._acquire_reusable_system_agent.return_value = (warm, True)
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, REUSE_NAME)
         engine_instance.run.side_effect = _boom
 
         # The mocked acquire does NOT run the real try_claim, so we claim manually with the SAME
@@ -692,7 +829,7 @@ class TestAdvisorRunnerIntegration:
         warm = _make_warm_instance(SECURITY_REUSE_SKILL_ADVISOR_NAME)
 
         engine_instance = MagicMock()
-        engine_instance._acquire_reusable_system_agent.return_value = (warm, True)
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, SECURITY_REUSE_SKILL_ADVISOR_NAME)
         engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
 
         with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)):
@@ -760,7 +897,7 @@ class TestAdvisorRunnerIntegration:
             raise RuntimeError('crash')
 
         engine_instance = MagicMock()
-        engine_instance._acquire_reusable_system_agent.return_value = (warm, True)
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, SECURITY_REUSE_SKILL_ADVISOR_NAME)
         engine_instance.run.side_effect = _boom
 
         _clear_all()
@@ -857,7 +994,8 @@ class TestConcurrency:
                 errors.append(f'{rid}: {e}')
             release_barrier.wait()  # hold the claim until the other thread has also tried to acquire
             # Model the caller's finally: whoever won holds the claim across its run, then releases.
-            if isinstance(results.get(rid), tuple) and len(results[rid]) == 2:
+            # BUG_0029 Phase 3: a winner is now a 3-tuple (inst, is_reuse, name), not a 2-tuple.
+            if isinstance(results.get(rid), tuple) and len(results[rid]) == 3:
                 release_claim(REUSE_NAME, rid)
 
         _clear_all()
@@ -868,13 +1006,13 @@ class TestConcurrency:
 
         assert not errors, f'unexpected errors: {errors}'
         a, b = results.get('rA'), results.get('rB')
-        # Exactly one winner (a 2-tuple), exactly one loser (None).
-        winners = [r for r in (a, b) if isinstance(r, tuple) and len(r) == 2]
+        # Exactly one winner (a 3-tuple), exactly one loser (None).
+        winners = [r for r in (a, b) if isinstance(r, tuple) and len(r) == 3]
         losers = [r for r in (a, b) if r is None]
         assert len(winners) == 1, f'expected exactly one winner, got {len(winners)}: a={a!r} b={b!r}'
         assert len(losers) == 1, f'expected exactly one loser (None), got {len(losers)}: a={a!r} b={b!r}'
         # The winner must be the SAME warm object (reuse, not a fresh spawn).
-        win_inst, was_reused = winners[0]
+        win_inst, was_reused, win_name = winners[0]
         assert was_reused is True
         assert win_inst is inst, 'the winning acquire must return the shared warm instance'
         # After both threads release, no claim may leak.
@@ -1032,8 +1170,8 @@ def run_security_check(caller='Maine', rid='op_aaa'):
     _clear_all()
     got = engine._acquire_reusable_system_agent(
         agent_class='Security', instance_name=REUSE_NAME, task=f'check {rid}', caller=caller, rid=rid)
-    assert isinstance(got, tuple) and len(got) == 2, f'acquire must return (inst, True), got {got!r}'
-    inst_out, was_reused = got
+    assert isinstance(got, tuple) and len(got) == 3, f'acquire must return (inst, True, name), got {got!r}'
+    inst_out, was_reused, _name = got
     # Model the caller's finally: release so a subsequent check can reuse the same warm object.
     release_claim(REUSE_NAME, rid)
     return inst_out, was_reused
@@ -1147,21 +1285,33 @@ class TestT2SuppressionCorrectness:
 
 
 class TestT3RelocationCorrectness:
-    """plan §8 T3 — the relocated ## Run Identity lives in conversation[1] for Security only."""
+    """plan §8 T3 — the run identity is an inline "(log path …)" on the Context line in conversation[1], for Security only."""
 
     def test_security_task_message_contains_run_identity(self):
+        """BUG_0029 Phase 3: the run identity is now an INLINE "(log path …)" on the Context line,
+        replacing the v2 appended "## Run Identity" block. The supervisor's FULL log path is still
+        carried in conversation[1]; Security's own log path is still omitted."""
         inst = _make_warm_instance(REUSE_NAME)
         pool = _make_pool(inst)
+        # Give the caller a REAL, stable log path so we can assert on its exact bytes (a MagicMock
+        # auto-attr would yield a per-process memory-address repr).
+        sup_log = 'N:/work/WD/AgentWorkspace/logs/orchestrator_Maine_20261001.jsonl'
+        pool.instance_loggers.get.return_value.log_path = sup_log
         engine = _make_engine(pool)
         got = _acquire(engine, task='check', caller='Maine')
         assert got is not None
         task_msg = inst.conversation[1]
-        assert '## Run Identity' in task_msg.content
-        # The relocated block names the supervisor (caller) and carries an own-log-path line.
-        assert '- Supervisor log:' in task_msg.content
-        assert '- Your log Path:' in task_msg.content
-        # It must NOT have leaked into conversation[0].
-        assert '## Run Identity' not in inst.conversation[0].content
+        # The v2 appended block is GONE.
+        assert '## Run Identity' not in task_msg.content
+        # The inline rewrite carries the supervisor's FULL log path, anchored right after the
+        # "This is a message from Maine." sentence (the exact build_task_message shape).
+        assert '(log path ' in task_msg.content
+        assert sup_log in task_msg.content
+        assert task_msg.content.startswith('Context: This is a message from Maine. (log path ')
+        # Security is short/non-compressive — it never reads back its own history, so the self
+        # log-path line is still omitted entirely (in both conversation[0] and conversation[1]).
+        assert '- Your log Path:' not in task_msg.content
+        assert '- Your log Path:' not in inst.conversation[0].content
 
     def test_compressor_task_message_has_no_run_identity(self):
         """Compressor gets NO relocation — the call site gates _with_run_identity on Security only.
@@ -1202,14 +1352,106 @@ class TestT3RelocationCorrectness:
         assert '## Run Identity' not in inst.conversation[0].content
 
 
+# ── T3b. Inline-context rewrite (BUG_0029 Phase 3, plan §5.2) ────────────────
+# The v2 appended "## Run Identity" block is replaced by an inline "(log path …)" on the Context
+# line, anchored on the EXACT sentence build_task_message emits. These tests exercise _with_run_identity
+# directly (the pure builder), so they are deterministic and independent of the acquire path.
+
+
+def _ri_pool(log_path):
+    """A minimal pool whose supervisor log path resolves to a known string."""
+    pool = MagicMock()
+    pool.instance_loggers.get.return_value.log_path = log_path
+    return pool
+
+
+class TestT3InlineContextRewrite:
+    """plan §5.2 — the inline "(log path …)" rewrite, not an appended block."""
+
+    def test_security_context_line_carries_full_log_path(self):
+        sup_log = 'N:/work/WD/AgentWorkspace/logs/orchestrator_Maine_20261001.jsonl'
+        pool = _ri_pool(sup_log)
+        msg = Message(role=USER, content=(
+            'Context: This is a message from Maine.\n\nTask: do a thing\n\nPlease help with this task.'))
+        out = _with_run_identity(pool, msg, caller='Maine')
+        assert '(log path ' in out.content
+        assert sup_log in out.content  # FULL path, not a basename
+        assert '## Run Identity' not in out.content  # block is GONE
+        assert out.content.startswith('Context: This is a message from Maine. (log path ')
+
+    def test_with_run_identity_marker_missing_returns_unchanged(self):
+        """Unrecognised content → returned unchanged, never mangled (best-effort)."""
+        pool = _ri_pool('N:/logs/some.jsonl')
+        msg = Message(role=USER, content='Context: something else entirely\n\nTask: t')
+        out = _with_run_identity(pool, msg, caller='Maine')
+        assert out.content == msg.content  # byte-identical, no insertion
+
+    def test_with_run_identity_handles_dotted_caller_name(self):
+        """Regression for the v1 period-landing bug: 'John.Doe' must insert AFTER 'John.Doe.', not
+        after 'John.' (which produced '...from John. (log path …)Doe.')."""
+        caller = 'John.Doe'
+        sup_log = 'N:/logs/orchestrator_2026.jsonl'
+        pool = _ri_pool(sup_log)
+        raw = 'Context: This is a message from John.Doe.\n\nTask: t\n\nPlease help with this task.'
+        out = _with_run_identity(pool, Message(role=USER, content=raw), caller=caller)
+        assert out.content == (
+            f'Context: This is a message from John.Doe. (log path {sup_log})\n\nTask: t\n\n'
+            'Please help with this task.')
+
+    def test_with_run_identity_non_empty_context_shape(self):
+        """Both build_task_message shapes must get the inline path (lifecycle_manager.py:330-331)."""
+        sup_log = 'N:/logs/orchestrator_2026.jsonl'
+        pool = _ri_pool(sup_log)
+        raw = ('Context: This is a message from Maine.\nExtra tool args here.\n\nTask: t\n\n'
+               'Please help with this task.')
+        out = _with_run_identity(pool, Message(role=USER, content=raw), caller='Maine')
+        assert out.content.startswith('Context: This is a message from Maine. (log path ')
+        # The context body join is preserved verbatim.
+        assert '\nExtra tool args here.\n\nTask: t' in out.content
+        assert '## Run Identity' not in out.content
+
+    def test_compressor_task_message_has_no_log_path(self):
+        """Compressor never routes through _with_run_identity → its task text has no '(log path'.
+        Drive the REAL fresh-spawn path for a Compressor and assert the inline path is absent."""
+        from agent_cascade.agent_instance import AgentInstance
+        sup_log = 'N:/logs/orchestrator_2026.jsonl'
+        seed = AgentInstance(instance_name='Compressor', agent_class='Compressor',
+                             conversation=[], created_at=time.monotonic(), last_activity=time.monotonic(),
+                             latest_marker_index=-1)
+        pool = _make_pool(seed)
+        pool.instance_loggers.get.return_value.log_path = sup_log
+        pool._resolve_instance_name.side_effect = lambda n: n
+        engine = _make_engine(pool)
+
+        inst = engine._create_system_agent(
+            agent_class='Compressor', instance_name='Compressor', task='compress this log', caller='Maine')
+        assert inst is not None and inst.agent_class == 'Compressor'
+        assert '(log path ' not in inst.conversation[1].content, (
+            "Compressor's task message must NOT carry the Security-only inline log path")
+
+    def test_build_task_message_generic_output_unchanged(self):
+        """The generic builder is byte-unaffected: build_task_message still yields the exact old string
+        for a non-Security caller (no '(log path' injected here — that's _with_run_identity's job)."""
+        from agent_cascade.lifecycle_manager import AgentLifecycleManager
+        pool = MagicMock()
+        lifecycle = AgentLifecycleManager(pool)
+        msg = lifecycle.build_task_message(
+            {'task': 'do a thing', 'context': ''}, caller='Maine')
+        assert msg.content == (
+            'Context: This is a message from Maine.\n\nTask: do a thing\n\nPlease help with this task.')
+        assert '(log path ' not in msg.content
+
+
 class TestT4ParserIsolation:
-    """plan §8 T4 — the relocated block must not break verdict parsing or .format() paths."""
+    """plan §8 T4 — a leading "## Run Identity" block must not break verdict parsing or .format() paths."""
 
     def test_verdict_parse_ignores_run_identity_block(self):
-        """A task body containing the relocated block still yields a parseable [VERDICT]."""
+        """A task body containing a (synthetic legacy) "## Run Identity" block still yields a parseable [VERDICT]."""
         from agent_cascade.advisor_runner import _VERDICT_RE
-        final = ('## Run Identity\n- Supervisor log: orch.jsonl\n'
-                 '- Your log Path: /logs/sec.jsonl\n\n[VERDICT] APPROVE')
+        # Synthetic block mirrors the current shape: a single "<caller>'s log file:" line with a
+        # full path (the self log-path line was removed for Security). Verdict parsing must still
+        # find [VERDICT] when this block precedes it.
+        final = ('## Run Identity\n- Maine\'s log file: /logs/orch.jsonl\n\n[VERDICT] APPROVE')
         m = _VERDICT_RE.search(final)
         assert m is not None, 'verdict regex must still match when the run-identity block precedes it'
         assert m.group(1).upper() == 'APPROVE'
@@ -1305,30 +1547,35 @@ class TestT6BootstrapGapRegression:
     """plan §8 T6 — bootstrap-gap bugfixes: seed-only-into-empty-slot, claim-gated create-or-reuse,
     3-tuple return unpacking."""
 
-    def test_acquire_returns_two_tuple(self):
+    def test_acquire_returns_three_tuple(self):
+        """BUG_0029 Phase 3: acquire returns a 3-tuple (inst, is_reuse, name) so the real instance
+        name can be threaded to the caller's cleanup/telemetry (the v2 2-tuple could not)."""
         inst = _make_warm_instance()
         got = _acquire(_make_engine(_make_pool(inst)))
-        assert isinstance(got, tuple) and len(got) == 2
-        result_inst, was_reused = got
+        assert isinstance(got, tuple) and len(got) == 3, f'expected a 3-tuple, got {got!r}'
+        result_inst, was_reused, name = got
         assert result_inst is inst and was_reused is True
+        assert name == REUSE_NAME
 
     def test_acquire_security_agent_two_branch(self):
-        """acquire_security_agent: reuse hit → (inst, True); miss → fresh spawn, False."""
+        """acquire_security_agent: reuse hit → (inst, True, name); miss → fresh spawn, (inst, False, fallback)."""
         from agent_cascade.security_reuse import acquire_security_agent
         warm = _make_warm_instance(REUSE_NAME)
         engine = MagicMock()
-        # Reuse hit.
-        engine._acquire_reusable_system_agent.return_value = (warm, True)
-        inst, reused = acquire_security_agent(
+        # Reuse hit: a real 3-tuple. The name is the fixed reuse name the caller passed in.
+        engine._acquire_reusable_system_agent.return_value = (warm, True, REUSE_NAME)
+        inst, reused, name = acquire_security_agent(
             engine, 'Security', REUSE_NAME, f'Security_{REUSE_NAME}', 't', 'Maine', 'r1')
         assert inst is warm and reused is True
+        assert name == REUSE_NAME
         # Reuse miss → fresh spawn.
         fresh = MagicMock()
         engine._acquire_reusable_system_agent.return_value = None
         engine._create_system_agent.return_value = fresh
-        inst2, reused2 = acquire_security_agent(
+        inst2, reused2, name2 = acquire_security_agent(
             engine, 'Security', REUSE_NAME, f'Security_{REUSE_NAME}', 't', 'Maine', 'r1')
         assert inst2 is fresh and reused2 is False
+        assert name2 == f'Security_{REUSE_NAME}'
         engine._create_system_agent.assert_called_once()
 
     def test_acquire_security_agent_ignores_magicmock(self):
@@ -1338,9 +1585,10 @@ class TestT6BootstrapGapRegression:
         engine = MagicMock()
         engine._acquire_reusable_system_agent.return_value = MagicMock()  # auto-spec stand-in
         engine._create_system_agent.return_value = fresh
-        inst, reused = acquire_security_agent(
+        inst, reused, name = acquire_security_agent(
             engine, 'Security', REUSE_NAME, f'Security_{REUSE_NAME}', 't', 'Maine', 'r1')
         assert inst is fresh and reused is False
+        assert name == f'Security_{REUSE_NAME}'
 
 
 class TestT7KillSwitch:
@@ -1362,6 +1610,97 @@ class TestT7KillSwitch:
         engine_instance._acquire_reusable_system_agent.assert_not_called()
         call_kwargs = engine_instance._create_system_agent.call_args.kwargs
         assert call_kwargs['instance_name'] == f'Security_rid_kill'
+
+
+# ── E2E: real ExecutionEngine, real acquire logic (plan §5.3a) ────────────────
+
+
+def _make_pool_empty():
+    """A fake pool with a REAL empty instances dict, plus everything _execute_check and
+    _acquire_reusable_system_agent both touch. Extends _make_integration_pool (handler-side needs)
+    with _make_pool's real-engine wiring. `pool.instances = {}` is the load-bearing line — a MagicMock
+    auto-attr .get() returns truthy and would short-circuit Gate 2."""
+    pool = _make_integration_pool()
+    pool.instances = {}  # REAL empty dict, NOT a MagicMock attribute
+    pool.message_queues = {}
+    pool._execution = MagicMock()
+    pool._execution._state_lock = threading.RLock()  # RLock, not Lock (Gate 11)
+    pool._execution.active_stack = []
+    pool.is_instance_halted.return_value = False
+    pool.is_instance_terminated.return_value = False
+    from agent_cascade.lifecycle_manager import AgentLifecycleManager
+    pool.lifecycle = AgentLifecycleManager(pool)  # real builder → real Message objects
+    return pool
+
+
+class TestReuseEndToEnd:
+    """THE decisive e2e proof (plan §5.3a): two sequential shell_cmd checks, REAL engine.
+    Check #1 SEEDS Security_reuse_approval via the real seed branch; check #2 REUSES the same object.
+    Patches the FACTORY (ExecutionEngine(self.agent_pool)), NOT _acquire_reusable_system_agent — that
+    is what keeps the acquire logic real."""
+
+    def _one_check(self, handler, pool, engine, rid):
+        ap = _make_ap(rid)
+        with patch('agent_cascade.execution_engine.ExecutionEngine',
+                   MagicMock(return_value=engine)), \
+             patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', True):
+            handler._execute_check(
+                ap=ap, sec_inst=None, rid=rid, auto_apply=True, instance_name='Maine',
+                caller_agent='Maine', prompt_template='Test {tool_name}',
+                timeout_seconds=3600, warning_seconds=2400)
+
+    def test_two_shell_cmd_checks_seed_then_reuse(self):
+        from agent_cascade.security_reuse import _clear_all, claim_holder
+        _clear_all()
+
+        pool = _make_pool_empty()
+        handler = _make_handler(pool)
+        engine = _make_engine(pool)  # REAL ExecutionEngine
+
+        # Leaf stub #1: the create leaf. A real _create_system_agent would need an LLM/slots/WebUI;
+        # we replace only this, and make it FAITHFUL by registering the instance in pool.instances —
+        # which is what find_or_create_instance really does. Without the registration,
+        # check #2 would see an empty slot and miss the very reuse we are proving.
+        def _fake_create(**kw):
+            name = kw['instance_name']
+            inst = _make_warm_instance(name)
+            inst.restricted_shell = True  # _create_system_agent sets this for system agents
+            pool.instances[name] = inst
+            return inst
+        engine._create_system_agent = MagicMock(side_effect=_fake_create)
+
+        # Leaf stubs #2 + #3: run the agent / slot bookkeeping, no live LLM. Fresh iterator per call
+        # so check #2 cannot hit an exhausted generator.
+        engine.run = MagicMock(side_effect=lambda *a, **k: iter([(' [YES] safe', False)]))
+        engine.reacquire_for = MagicMock(return_value=True)
+        engine._telemetry = MagicMock(return_value=None)
+
+        # Check #1: pool.instances is EMPTY → the real acquire must take the SEED branch.
+        self._one_check(handler, pool, engine, 'op_rid_A')
+
+        assert engine._create_system_agent.call_count == 1, 'check #1 must seed exactly once'
+        assert engine._create_system_agent.call_args.kwargs['instance_name'] == REUSE_NAME, (
+            'the seed must create under the FIXED reuse name, not a per-rid name')
+        seeded = pool.instances[REUSE_NAME]
+        # _cleanup must not remove the seeded instance — it survives for check #2.
+        assert seeded is not None and seeded.instance_name == REUSE_NAME
+        assert not any(k.startswith('Security_op_') for k in pool.instances), (
+            f'check #1 leaked a per-rid instance: {sorted(pool.instances)}')
+
+        # Check #2: the real acquire must find REUSE_NAME, pass eligibility, and REUSE it.
+        self._one_check(handler, pool, engine, 'op_rid_B')
+
+        assert engine._create_system_agent.call_count == 1, (
+            'check #2 must NOT create anything — the seed is not being reused')
+        assert pool.instances[REUSE_NAME] is seeded, 'check #2 must reuse the SAME object'
+        # THE assertion: engine.run was handed the same instance object both times.
+        ran = [c.args[0] for c in engine.run.call_args_list]
+        assert len(ran) == 2 and ran[0] is seeded and ran[1] is seeded, (
+            f'check #2 did not run the seeded instance: {ran}')
+        # No per-rid key appeared on check #2 (and none at all).
+        assert not any(k.startswith('Security_op_') for k in pool.instances), (
+            f'per-rid spawn detected: {sorted(pool.instances)}')
+        assert claim_holder(REUSE_NAME) is None, 'the finally must release the claim between checks'
 
 
 if __name__ == '__main__':

@@ -358,7 +358,7 @@ class SecurityAdvisorHandler:
                 # endpoint pool — no caller inheritance.) The fallback name is the legacy per-rid one,
                 # byte-for-byte as before; sec_state_key tracks the ACTUAL instance name so
                 # _handle_timeout/_cleanup target the right object (not a string guess).
-                sec_instance, sec_was_reused = security_reuse.acquire_security_agent(
+                sec_instance, sec_was_reused, sec_instance_name = security_reuse.acquire_security_agent(
                     engine=engine,
                     agent_class='Security',
                     reuse_name=reuse_name,
@@ -367,7 +367,7 @@ class SecurityAdvisorHandler:
                     caller=caller_agent,
                     rid=rid,
                 )
-                sec_state_key = reuse_name if sec_was_reused else f'Security_{rid}'
+                sec_state_key = sec_instance_name
 
                 if sec_was_reused:
                     # Q4 (plan §7.3): a log-line separator in the shared warm Security log file so
