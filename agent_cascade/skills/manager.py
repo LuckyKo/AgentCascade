@@ -353,6 +353,11 @@ class SkillManager:
                         continue
                     try:
                         parsed = parse_skill_file(skill_file)
+                    except OSError as e:
+                        # BUG_0033: transient I/O errors (e.g. Windows xdist "Bad file descriptor")
+                        # are not actionable — log at DEBUG to avoid polluting CI output.
+                        logger.debug('[SKILLS] Metrics prune: I/O error reading %s: %s', skill_file, e)
+                        continue
                     except Exception as e:  # noqa: BLE001 — one bad file must not abort the scan
                         logger.warning('[SKILLS] Metrics prune: failed to parse %s: %s', skill_file, e)
                         continue
