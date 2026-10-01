@@ -234,17 +234,28 @@ class PathSecurityMixin:
 
             # If not found in base_dir, try extra work folders (RW then RO)
             if not resolved.exists():
+                # BUG_0031: For new-file writes, the full path doesn't exist anywhere yet,
+                # so the exists() check below always fails. Instead, check whether the
+                # PARENT DIRECTORY exists in an extra folder — if it does, prefer that
+                # over base_dir (the agent's active context is likely that extra repo).
                 for extra in self.extra_work_folders_rw:
-                    candidate = (extra / clean_path).resolve()
-                    if candidate.exists():
-                        resolved = candidate
+                    candidate_parent = (extra / clean_path).parent
+                    if candidate_parent.exists():
+                        resolved = (extra / clean_path).resolve()
                         break
                 else:
-                    for extra in self.extra_work_folders_ro:
+                    # Fall back to the original behavior: check if the full path exists
+                    for extra in self.extra_work_folders_rw:
                         candidate = (extra / clean_path).resolve()
                         if candidate.exists():
                             resolved = candidate
                             break
+                    else:
+                        for extra in self.extra_work_folders_ro:
+                            candidate = (extra / clean_path).resolve()
+                            if candidate.exists():
+                                resolved = candidate
+                                break
 
         # 1. Base directory is always RW (and thus RO) — no warning needed
         if self._path_is_contained(resolved, self.base_dir):
