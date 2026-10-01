@@ -39,7 +39,21 @@ SKILL_ADVISOR_MAX_TURNS: int = int(
 # corpus grows well past ~100 and token budget demands a tighter cap.
 SKILL_ADVISOR_MAX_CANDIDATES: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_CANDIDATES',
-              20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
+                20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
+
+# ── Security agent instance reuse (BUG_0029 Phase 3) ───────────────────────────
+# Reuse a single warm Security instance across security checks so the LLM prompt prefix
+# stays byte-identical and hits the server-side KV cache, instead of spawning a fresh
+# Security_<rid> per check. Default ON; flip AGENT_CASCADE_SECURITY_REUSE=0 to reproduce
+# today's fresh-spawn-per-check behavior exactly (the mandatory env kill-switch).
+SECURITY_REUSE_ENABLED: bool = os.getenv('AGENT_CASCADE_SECURITY_REUSE',
+                                         '1').strip().lower() not in ('0', 'false', 'off', 'no')
+# Fixed instance name for the shell_cmd / tool-approval path (security_handler.py). A fixed
+# name is REQUIRED for the cache win — a per-rid name changes the prompt bytes every check.
+SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPROVAL_NAME', 'Security_reuse_approval')
+# Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
+# from the approval name: that path holds no lock, so it must not share one warm object.
+SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_reuse_skilladvisor')
 # Compressor: its tool restrictions come from UI config (seeded by the one-time class-defaults
 # migration, which disables nearly all of its tools) — it only performs compression internally.
 # A single turn forces no tool calls, guaranteeing a pure one-shot summary. Bump only if the
