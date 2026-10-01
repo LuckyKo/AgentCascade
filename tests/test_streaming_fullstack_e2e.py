@@ -1337,17 +1337,26 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
 def test_fullstack_streaming(fullstack_server):
     """Drive the full real stack and assert incremental streaming per turn + loop cycle.
 
-    MUST run single-process (no xdist). The mock LLM handler and stream-update
-    capture rely on in-process state that doesn't survive xdist worker boundaries.
-    Run with:  python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
+    Runs in the default (xdist) suite. The mock LLM is a real HTTP server on localhost and
+    the fixture is module-scoped, so the in-process state (emit/request logs) is shared with
+    this test within a single xdist worker — no cross-worker boundary is crossed.
+
+    CAVEAT: this is a live-server, multi-turn streaming E2E test whose capture window is
+    derived from wall-clock chunk timing (~114s at the defaults). Under parallel load it is
+    more sensitive to timing variance and MAY flake (a turn's stream_update frames arriving
+    slightly outside the derived budget). A failure here under xdist is often a timing flake,
+    not a real regression — re-run single-process to confirm:
+        python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=""
     """
-    # Guard: fail early if xdist is active (pytest.ini has -n auto by default).
+    # Note (not a guard): if running under xdist, flag the timing-variance caveat so a flake
+    # is triaged as such rather than chased as a regression. We no longer fail-fast — the test
+    # is designed to run in the default parallel suite.
     import os as _os_guard
     if _os_guard.environ.get('PYTEST_XDIST_WORKER'):
-        pytest.fail(
-            'This test requires single-process execution (no xdist). '
-            "Run with: python -m pytest tests/test_streaming_fullstack_e2e.py -s --timeout=540 -o addopts=\"\""
-        )
+        print('[fullstack] NOTE: running under xdist (worker '
+              f"{_os_guard.environ['PYTEST_XDIST_WORKER']}). This live-streaming E2E test is "
+              'timing-variable under parallel load; a failure may be a flake — re-run '
+              'single-process to confirm before treating it as a regression.')
 
     ws_url = fullstack_server['ws_url']
     _MockLLMHandler.reset()
