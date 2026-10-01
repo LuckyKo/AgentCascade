@@ -170,6 +170,7 @@ def test_simple_pattern():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -207,6 +208,7 @@ def test_case_sensitive_pattern():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -230,6 +232,7 @@ def test_hidden_directory():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -258,6 +261,7 @@ def test_include_filter():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -287,6 +291,7 @@ def test_exclude_filter():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -297,24 +302,31 @@ def test_exclude_filter():
 
 
 def test_special_regex_characters():
-    """Test: Pattern with parentheses 'def hello_world():' should be handled as regex."""
-    print("\n--- Test: Special regex characters 'def hello_world():' ---")
+    """Test: Escaped metacharacters r'def hello_world\\(\\):' match the literal line 'def hello_world():'.
+
+    The grep tool is documented as regex, so parentheses must be escaped to match literally.
+    An unescaped '()' is an empty capture group (equivalent to 'def hello_world:'), which
+    legitimately matches nothing — so we escape the parens and colon to genuinely exercise
+    metacharacter handling.
+    """
+    print("\n--- Test: Special regex characters r'def hello_world\\(\\):' ---")
     fixture = TestFixture()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
 
-        tool_output = om.grep(pattern='def hello_world():', path='.')
+        tool_output = om.grep(pattern=r'def hello_world\(\):', path='.')
         assert 'main.py' in tool_output, \
-            f"Should find main.py with 'def hello_world():'; output: {tool_output[:300]}"
+            f"Should find main.py with escaped pattern r'def hello_world\\(\\):'; output: {tool_output[:300]}"
 
-        print(f"  Tool found main.py with regex pattern including parens")
+        print(f"  Tool found main.py with escaped metacharacter pattern")
         print('  [PASS]')
     except Exception as e:
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -341,6 +353,7 @@ def test_empty_directory():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -365,6 +378,7 @@ def test_non_existent_path():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -389,6 +403,7 @@ def test_invalid_regex():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -413,6 +428,7 @@ def test_context_lines():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -441,6 +457,7 @@ def test_smart_case_behavior():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -471,6 +488,108 @@ def test_ignore_vcs_false():
         print(f"  [FAIL] {e}")
         import traceback
         traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
+    finally:
+        fixture.teardown()
+
+
+def test_rg_cmd_no_bare_replace_flag():
+    """Regression (BUG_0042): the ripgrep command must NOT contain a bare '-r' flag.
+
+    In ripgrep, -r/--replace <text> substitutes <text> for each match, so a bare '-r'
+    swallows the NEXT argument ('--no-heading') and sets every match's JSON
+    submatches[].replacement.text to the literal '--no-heading'. Harmless today only
+    because the consumer reads lines.text, but it is a latent landmine.
+
+    We exercise the rg branch of _try_subprocess_grep by forcing tool availability and
+    mocking subprocess.run to capture the exact cmd list passed to it (the command is
+    built inline in the method, so capturing via the mock keeps this a minimal change).
+    """
+    print('\n--- Test: ripgrep cmd has no bare -r flag (BUG_0042) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager import grep as grep_module
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+
+        # Minimal stand-in exposing only what the rg branch touches (no __init__ needed).
+        host = GrepMixin()
+
+        captured = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            captured['cmd'] = list(cmd)
+            # returncode 1 == "no matches" for ripgrep; empty stdout is fine.
+            class _R:
+                returncode = 1
+                stdout = ''
+                stderr = ''
+            return _R()
+
+        with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+             mock.patch('subprocess.run', side_effect=fake_run):
+            GrepMixin._try_subprocess_grep(
+                host,
+                pattern='hello',
+                path=root,
+                include='*',
+                char_limit=1000,
+                timeout=5.0,
+                agent_name='test',
+            )
+
+        cmd = captured['cmd']
+        assert cmd[0] == 'rg', f"expected rg branch; got: {cmd}"
+        # A bare '-r' must NOT be present (it would consume the next flag as a replace string).
+        assert '-r' not in cmd, \
+            f"BUG_0042 regression: ripgrep cmd contains a bare '-r' flag that swallows the next arg; cmd={cmd}"
+        # The intended flag must still be present and no longer swallowed.
+        assert '--no-heading' in cmd, f"--no-heading missing from rg cmd; cmd={cmd}"
+
+        print(f"  rg cmd (first 8): {cmd[:8]}")
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
+    finally:
+        fixture.teardown()
+
+
+def test_include_glob_does_not_reinclude_git():
+    """Regression: a user include glob (e.g. '**/*.py') must NOT re-include files inside .git/
+    when ignore_vcs=True (the default). This guards the ripgrep "last match wins" --glob ordering:
+    the '!.git/' exclusion is appended last so it always wins over any include glob.
+    """
+    print('\n--- Test: include glob does not re-include .git/ ---')
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+        # Add a .py file inside .git/ that matches the include glob '**/*.py'.
+        (Path(root) / '.git').mkdir(exist_ok=True)
+        (Path(root) / '.git' / 'config.py').write_text('def git_helper():\n    pass\n')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        # include='**/*.py' would match .git/config.py if the .git exclusion were overridden.
+        tool_output = om.grep(pattern='def ', path='.', include='**/*.py', ignore_vcs=True)
+        assert 'main.py' in tool_output, \
+            f"Should find main.py with include='**/*.py'; output: {tool_output[:300]}"
+        assert 'config.py' not in tool_output, \
+            f".git/config.py must NOT be re-included by include glob; output: {tool_output[:300]}"
+
+        print(f"  include='**/*.py' found main.py but correctly excluded .git/config.py")
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise  # re-raise so main()'s try/except counts this as a failure (not silently passed)
     finally:
         fixture.teardown()
 
@@ -496,6 +615,9 @@ def main():
         ('Context lines', test_context_lines),
         ('Smart case behavior', test_smart_case_behavior),
         ('ignore_vcs=False', test_ignore_vcs_false),
+        # Regression tests
+        ('rg cmd: no bare -r flag (BUG_0042)', test_rg_cmd_no_bare_replace_flag),
+        ('Include glob does not re-include .git/', test_include_glob_does_not_reinclude_git),
     ]
 
     passed = 0

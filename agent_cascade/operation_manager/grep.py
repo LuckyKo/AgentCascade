@@ -165,16 +165,23 @@ class GrepMixin:
             if _rg_available:
                 cmd = [
                     'rg',
-                    '-r',
                     '--no-heading',
                     '-n',
                     '--json',
                     '--color',
                     'never',
                     '--no-mmap',
+                    # Search hidden files/dirs (default rg skips dotfiles) so results match the
+                    # Python fallback, which walks .hidden/ etc. via os.walk. Always applied.
+                    '--hidden',
                 ]
 
-                if not ignore_vcs:
+                is_vcs_search = not ignore_vcs
+                if is_vcs_search:
+                    # ignore_vcs=False means "search everything" (per dna.py contract), including
+                    # .git. --no-ignore disables rg's built-in ignores; combined with --hidden this
+                    # lets rg descend into .git, matching the Python fallback which does not prune
+                    # skip_dirs when ignore_vcs=False.
                     cmd.extend(['--no-ignore'])
 
                 if context > 0:
@@ -189,9 +196,20 @@ class GrepMixin:
                 if include and include != '*':
                     cmd.extend(['--glob', include])
 
-                # Built-in ignores handle .git/node_modules/__pycache__. Only add user-specified excludes.
+                # User-specified excludes (basename or path globs).
                 if exclude:
                     cmd.extend(['--glob', f'!{exclude}'])
+
+                if not is_vcs_search:
+                    # --hidden overrides ripgrep's implicit .git skip, so re-exclude .git to keep
+                    # the documented .git exclusion guarantee (matches the Python fallback, which
+                    # prunes .git from its os.walk when ignore_vcs=True). Added LAST because rg uses
+                    # "last match wins" for --glob: this guarantees .git stays excluded even if a
+                    # user include glob (e.g. **/*.py) would otherwise re-match files inside .git.
+                    # NOTE: use '!.git/' (directory form), NOT '!.git/**' — on ripgrep 15.1.0 the
+                    # '!.git/**' glob does not exclude .git, while '!.git/' reliably excludes both
+                    # top-level and nested .git files (verified on Windows + POSIX).
+                    cmd.extend(['--glob', '!.git/'])
 
                 cmd.extend(['-e', pattern])
             else:
