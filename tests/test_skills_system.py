@@ -3927,8 +3927,6 @@ class TestScanSkillsPerfFix:
 
     def test_dir_name_vs_frontmatter_name_resolution(self, tmp_path):
         """A skill whose dir name != frontmatter name resolves by BOTH keys."""
-        import agent_cascade.skills.manager as mgr_mod  # noqa: F401 (path consistency)
-
         root_a, root_b = self._build_corpus(tmp_path)
         m = make_hermetic_skill_manager(tmp_path)
         m._disabled_names = set()
