@@ -239,12 +239,14 @@ class AgentLifecycleManager:
             if caller is not None and caller != instance_name:
                 self.pool._update_child_relationship(caller, instance_name, add=True)
         else:
-            # Reuse path: update per-instance child tracking for new caller (thread-safe via helper)
+            # Reuse path: update per-instance child tracking for the new caller.
+            # NOTE: the "remove from old parent" step is intentionally NOT done here — it is
+            # already handled inside _prepare_instance_for_reuse() (which captures old_parent
+            # under _children_lock before re-pointing ownership and drops the stale link). A
+            # duplicate removal was left behind after that H3 extraction and referenced an
+            # out-of-scope `old_parent` (NameError); it has been removed. Only the add-to-new
+            # parent remains, which the helper dedupes.
             if caller is not None and caller != instance_name:
-                # Remove from old parent's tracking if caller changed
-                if old_parent is not None and old_parent != caller:
-                    self.pool._update_child_relationship(old_parent, instance_name, add=False)
-                # Add to new parent's tracking (helper handles deduplication)
                 self.pool._update_child_relationship(caller, instance_name, add=True)
 
         # BUG FIX (Bug 2): Load session from log_file if provided

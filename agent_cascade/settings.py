@@ -50,7 +50,7 @@ SECURITY_REUSE_ENABLED: bool = os.getenv('AGENT_CASCADE_SECURITY_REUSE',
                                          '1').strip().lower() not in ('0', 'false', 'off', 'no')
 # Fixed instance name for the shell_cmd / tool-approval path (security_handler.py). A fixed
 # name is REQUIRED for the cache win — a per-rid name changes the prompt bytes every check.
-SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPROVAL_NAME', 'Security_reuse_approval')
+SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPROVAL_NAME', 'Security_guard')
 # Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
 # from the approval name: that path holds no lock, so it must not share one warm object.
 SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_reuse_skilladvisor')
@@ -194,7 +194,7 @@ COMPRESSION_AGENT_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_AG
 AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT',
                                             1600.0))  # Auto-dismiss regular agents after X seconds inactivity
 SYSTEM_AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT',
-                                                   60.0))  # Auto-dismiss Compressor/Security after X seconds inactivity
+                                                    300.0))  # Auto-dismiss Compressor/Security after X seconds inactivity (5 min)
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 # ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md §5.3) ──

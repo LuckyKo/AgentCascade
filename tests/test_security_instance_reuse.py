@@ -32,7 +32,7 @@ from agent_cascade.agent_instance import AgentInstance, AgentState  # noqa: E402
 from agent_cascade.llm.schema import Message, SYSTEM, USER  # noqa: E402
 from agent_cascade.engine.helpers import _with_run_identity  # noqa: E402
 
-REUSE_NAME = 'Security_reuse_approval'
+REUSE_NAME = 'Security_guard'
 
 
 # ── Fixtures / helpers ────────────────────────────────────────────────────────
@@ -67,13 +67,9 @@ def _make_pool(inst=None):
     pool._execution = exec_obj
     pool.is_instance_halted.return_value = False
     pool.is_instance_terminated.return_value = False
-    # V2 (H1): the reuse path now builds its task message via lifecycle.build_task_message and,
-    # for Security, _with_run_identity. Both are pure Message builders that only read a few pool
-    # attributes (instance_loggers / get_logger) defensively, so a REAL LifecycleManager bound to
-    # this fake pool is the correct wiring — it returns real Message objects instead of MagicMock
-    # stand-ins (which would fail pydantic validation in append_message).
-    from agent_cascade.lifecycle_manager import AgentLifecycleManager
-    pool.lifecycle = AgentLifecycleManager(pool)
+    # NOTE: this fake pool deliberately does NOT expose a `.lifecycle` attribute — a REAL AgentPool
+    # has none (the AgentLifecycleManager lives on the ENGINE, not the pool). The reuse path must
+    # therefore reach it via engine.lifecycle; stubbing pool.lifecycle here would mask that bug.
     return pool
 
 
@@ -536,6 +532,168 @@ class TestBootstrapSeedOnMiss:
         cleaned_name = cleanup_spy.call_args.args[1]
         assert cleaned_name == ADV_NAME, (
             f'advisor must clean up the ACTUAL instance name ({ADV_NAME!r}), got {cleaned_name!r}')
+
+
+# ── B4. Regression: reuse must NOT depend on a pool.lifecycle attribute ──────
+# A real AgentPool has NO `.lifecycle` attribute — the AgentLifecycleManager lives on the ENGINE
+# (self.lifecycle, set in ExecutionEngine.__init__). An earlier draft of _acquire_reusable_system_agent
+# called self.pool.lifecycle._prepare_instance_for_reuse(...), which raised AttributeError that the
+# method's own best-effort except swallowed → every check fell back to a fresh spawn. The test
+# fixture masked it by stubbing pool.lifecycle; this test asserts the fixture never re-adds it and
+# that reuse still succeeds against a realistic (lifecycle-free) pool.
+
+
+class TestNoPoolLifecycleAttributeRequired:
+    def test_reuse_does_not_require_pool_lifecycle_attribute(self):
+        """Regression guard for core.py's self.pool.lifecycle._prepare_instance_for_reuse bug.
+
+        A real AgentPool has NO `.lifecycle` attribute (the AgentLifecycleManager lives on the
+        ENGINE). We build a REALISTIC pool — a plain object exposing only the attributes the reuse
+        path actually reads, and NOTHING else — so it genuinely lacks `.lifecycle`. A MagicMock would
+        auto-create the attribute on access and mask the bug (exactly what the old fixture did), so
+        we deliberately avoid it here. Seeding via one acquire then re-acquiring must return the SAME
+        warm object with a byte-identical conversation[0] prefix, proving the reuse path reaches the
+        lifecycle manager through engine.lifecycle. On pre-fix code this fails: acquire #2 raises
+        AttributeError at self.pool.lifecycle._prepare_instance_for_reuse, which the method's
+        best-effort except swallows → it returns None (fresh spawn)."""
+        from types import SimpleNamespace
+
+        inst = _make_warm_instance()
+        sys_before = inst.conversation[0]
+
+        # A realistic pool: only the attributes _acquire_reusable_system_agent actually reads.
+        # NO `.lifecycle` — a real AgentPool never has one (it lives on the engine).
+        pool = SimpleNamespace(
+            instances={inst.instance_name: inst},
+            message_queues={},
+            is_instance_halted=lambda name: False,
+            is_instance_terminated=lambda name: False,
+            _execution=SimpleNamespace(_state_lock=threading.RLock(), active_stack=[]),
+            active_stack_append=lambda name, depth=0: None,
+            # Real-pool attributes the reuse mutation block touches (via engine.lifecycle):
+            # _children_lock guards reading the old parent; _update_child_relationship drops the
+            # stale link. A real AgentPool has BOTH — and still no `.lifecycle`.
+            _children_lock=threading.RLock(),
+            _update_child_relationship=lambda parent, name, add=True: None,
+        )
+
+        # THE guard: the pool must genuinely lack the attribute the buggy code asked for. (On a
+        # MagicMock this would be vacuous — auto-attrs make hasattr() always True.)
+        assert not hasattr(pool, 'lifecycle'), (
+            'the pool must NOT expose .lifecycle — a real AgentPool has none; '
+            'a pool that does means this test no longer models production')
+
+        engine = _make_engine(pool)
+        _clear_all()
+
+        # Seed / first acquire: returns the warm instance under the fixed reuse name.
+        g1 = _acquire(engine, rid='r-seed')
+        assert g1 is not None, 'the first acquire must succeed against a lifecycle-free pool'
+        inst1, _is_reuse1, name1 = g1
+        assert inst1 is inst and name1 == REUSE_NAME
+        release_claim(REUSE_NAME, 'r-seed')  # model the caller's finally
+
+        # Second acquire: must REUSE the same object (not fall back to a fresh spawn).
+        g2 = _acquire(engine, rid='r-reuse')
+        assert g2 is not None, (
+            'the second acquire must reuse the warm instance — a None here means the '
+            'pool.lifecycle AttributeError was swallowed and it fell back to a fresh spawn')
+        inst2, is_reuse2, name2 = g2
+        assert is_reuse2 is True
+        assert name2 == REUSE_NAME
+        assert inst2 is inst1, 'the reused instance must be the SAME object, not a re-create'
+        # Byte-identical KV-cache prefix: conversation[0] is the identical Message object.
+        assert inst2.conversation[0] is sys_before
+        assert inst2.conversation[0].content == sys_before.content
+
+
+# ── B5. Epsilon gate (_REUSE_IDLE_EPSILON) — REAL gate, no mocking of acquire ─
+# BUG_0029 Phase 3: _REUSE_IDLE_EPSILON was lowered 5.0 → 1.0 in core.py to SHRINK the "too recent"
+# blocking band so a warm Security instance is reusable sooner after its last LLM call settles.
+# Gate 5b semantics (core.py ~4284): reuse is BLOCKED while `age < epsilon` (instance recently
+# active — give it a moment to settle) and ALLOWED once `age >= epsilon` (idle long enough).
+# These tests drive the REAL ExecutionEngine._acquire_reusable_system_agent (NOT mocked) and stamp
+# _last_llm_activity with a fixed delta, then assert the gate's decision. Gaps are expressed
+# RELATIVE to the constant (imported from core.py, never hardcoded) so the test stays correct if
+# epsilon is tuned again:
+#   * gap = epsilon * 0.3 / 0.9  → still inside the blocking band (age < epsilon) → MUST fall back
+#   * gap = epsilon * 2.0        → settled (age >= epsilon)                       → MUST reuse
+
+
+def _make_realistic_pool(inst):
+    """A plain-object pool exposing ONLY what _acquire_reusable_system_agent's SUCCESS path reads.
+
+    Deliberately NOT a MagicMock: auto-attrs would mask a regression that reaches for an attribute
+    the real AgentPool lacks (see TestNoPoolLifecycleAttributeRequired). Includes the mutation-block
+    hooks (active_stack_append, _children_lock, _update_child_relationship) so the full reuse path —
+    past Gate 5b all the way to the return — runs against something realistic.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        instances={inst.instance_name: inst},
+        message_queues={},
+        is_instance_halted=lambda name: False,
+        is_instance_terminated=lambda name: False,
+        _execution=SimpleNamespace(_state_lock=threading.RLock(), active_stack=[]),
+        active_stack_append=lambda name, depth=0: None,
+        _children_lock=threading.RLock(),
+        _update_child_relationship=lambda parent, name, add=True: None,
+    )
+
+
+def _acquire_with_llm_age(inst, age_s):
+    """Stamp _last_llm_activity to `age_s` seconds ago and drive the REAL acquire once.
+
+    Returns whatever _acquire_reusable_system_agent returned (a 3-tuple on reuse/seed, None on
+    fallback). The claim is released afterwards only if a successful hand-off occurred, mirroring
+    the caller's finally so the registry never wedges between tests.
+    """
+    inst._last_llm_activity = time.monotonic() - age_s
+    engine = _make_engine(_make_realistic_pool(inst))
+    got = _acquire(engine, rid='r-eps')
+    if got is not None:
+        release_claim(REUSE_NAME, 'r-eps')  # model the caller's finally after a successful hand-off
+    return got
+
+
+class TestEpsilonGateReal:
+    """The REAL Gate 5b (_REUSE_IDLE_EPSILON) exercised end-to-end — no mocking of acquire."""
+
+    def test_recent_activity_within_epsilon_falls_back(self):
+        """A recently-active instance (age = 0.3 * epsilon, inside the blocking band) must FALL BACK
+        to fresh spawn. This is the "too recent" guard still working — a disabled/bypassed gate would
+        wrongly reuse here."""
+        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        inst = _make_warm_instance()
+        got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 0.3)
+        assert got is None, (
+            f'a gap of {_REUSE_IDLE_EPSILON * 0.3:.3f}s (< epsilon={_REUSE_IDLE_EPSILON}) must fall '
+            'back — Gate 5b blocks a recently-active instance; a non-None here means the guard is gone')
+
+    def test_recent_activity_near_epsilon_boundary_falls_back(self):
+        """A gap just under epsilon (0.9 * epsilon) is STILL inside the blocking band → must FALL BACK.
+        Pins the boundary direction: the gate only releases reuse at age >= epsilon, not earlier."""
+        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        inst = _make_warm_instance()
+        got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 0.9)
+        assert got is None, (
+            f'a gap of {_REUSE_IDLE_EPSILON * 0.9:.3f}s (< epsilon={_REUSE_IDLE_EPSILON}) must still '
+            'fall back — the boundary is age >= epsilon, not a smaller cutoff')
+
+    def test_settled_instance_beyond_epsilon_reuses(self):
+        """A settled instance (age = 2.0 * epsilon, past the blocking band) must REUSE the SAME warm
+        object with is_reuse=True. This is the regression guard: if epsilon were reverted to a larger
+        value or an async-teardown regression kept stamping _last_llm_activity too recently, this would
+        fall back instead of reusing."""
+        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        inst = _make_warm_instance()
+        got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 2.0)
+        assert got is not None, (
+            f'a gap of {_REUSE_IDLE_EPSILON * 2.0:.3f}s (>= epsilon={_REUSE_IDLE_EPSILON}) must reuse '
+            'the warm instance — a None here means Gate 5b is over-blocking a settled instance')
+        result_inst, was_reused, name = got
+        assert result_inst is inst and was_reused is True
+        assert name == REUSE_NAME
 
 
 # ── C. The reset itself ───────────────────────────────────────────────────────
@@ -1635,7 +1793,7 @@ def _make_pool_empty():
 
 class TestReuseEndToEnd:
     """THE decisive e2e proof (plan §5.3a): two sequential shell_cmd checks, REAL engine.
-    Check #1 SEEDS Security_reuse_approval via the real seed branch; check #2 REUSES the same object.
+    Check #1 SEEDS Security_reuse via the real seed branch; check #2 REUSES the same object.
     Patches the FACTORY (ExecutionEngine(self.agent_pool)), NOT _acquire_reusable_system_agent — that
     is what keeps the acquire logic real."""
 

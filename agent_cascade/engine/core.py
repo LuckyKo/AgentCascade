@@ -232,10 +232,13 @@ from agent_cascade.engine.helpers import (MAX_TEXT_LENGTH_FOR_REGEX, MIN_OUTPUT_
 from agent_cascade.engine.llm_call import LLMCallMixin
 from agent_cascade.engine.tool_execution import ToolExecMixin
 
-# Security instance reuse (BUG_0029 Phase 3): minimum idle gap before a warm instance's last
-# LLM activity is considered quiescent enough to reset. Guards against a generator abandoned by
-# `break` without close() still mid-flight (plan §3.4 item 5 / R1).
-_REUSE_IDLE_EPSILON = 5.0
+# Security instance reuse (BUG_0029 Phase 3): min settle gap before warm instance reset.
+# Performance-only heuristic, NOT a correctness guard — an in-flight call is caught by Gate 5a
+# (`_llm_call_active`), which is cleared synchronously at the 'end' stamp before any slot handoff.
+# This margin just keeps back-to-back serialized checks from touching the instance in the instant
+# after its last activity; real inter-check gaps run ~0.2-1s, so 0.2s lets them reuse while leaving
+# a small tail buffer. (plan §3.4 item 5 / R1.)
+_REUSE_IDLE_EPSILON = 0.2
 
 
 class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
@@ -4248,59 +4251,88 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return (inst, False, instance_name)
 
             # ── Eligibility predicate (plan §3.4) — all read-only, BEFORE any mutation ────────
+            # TEMP DIAGNOSTIC (todo.md:148 reuse not firing in prod): log exactly which gate fails
+            # so we can see the real blocker. REMOVE once root cause is confirmed.
+            def _gate_fail(gate: str, detail: str = '') -> None:
+                logger.warning(
+                    '[SECURITY_REUSE_DIAG] %s INELIGIBLE at GATE %s (rid=%s) state=%s '
+                    'slot_key=%r slot_release=%r llm_active=%s last_llm_age=%.3fs '
+                    'frozen=%s terminated=%s conv_len=%d conv0_role=%r detail=%s',
+                    instance_name, gate, rid, getattr(inst, 'state', '?'),
+                    getattr(inst, '_slot_key', None), getattr(inst, '_slot_release', None),
+                    getattr(inst, '_llm_call_active', None),
+                    (time.monotonic() - (getattr(inst, '_last_llm_activity', 0.0) or 0.0)),
+                    getattr(inst, '_system_prompt_frozen', None),
+                    getattr(inst, 'is_terminated', None),
+                    len(getattr(inst, 'conversation', []) or []),
+                    getattr((getattr(inst, 'conversation', []) or [None])[0], 'role', None) if (getattr(inst, 'conversation', []) or []) else None,
+                    detail)
+
             # 3. State must be IDLE. Not TERMINATED (terminal in the transition matrix) and not
             #    RUNNING/SLEEPING/COMPLETING — engine.run() would raise at the L1 guard otherwise.
             with inst._state_lock:
                 if inst.state != AgentState.IDLE:
+                    _gate_fail('3-state-not-idle', f'state={inst.state}')
                     return None
 
             # 4. No leaked endpoint permit (todo.md:158 permit-leak program).
             if inst._slot_release is not None or inst._slot_key is not None:
+                _gate_fail('4-leaked-slot-permit', f'slot_key={inst._slot_key!r} slot_release={inst._slot_release!r}')
                 return None
 
             # 5. No live LLM call, and the last activity is older than a small epsilon — guards
             #    against a generator abandoned by `break` without close() still mid-flight.
             if inst._llm_call_active:
+                _gate_fail('5-llm-call-active')
                 return None
             _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
             if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:
+                _gate_fail('5-llm-too-recent', f'age={time.monotonic() - _last_llm:.3f}s eps={_REUSE_IDLE_EPSILON}')
                 return None
 
             # 6. Not genuinely halted (compression-halt / manual stop).
             if getattr(pool, 'is_instance_halted', None) is not None and pool.is_instance_halted(instance_name):
+                _gate_fail('6-halted')
                 return None
 
             # 7. Not terminated (pool-level set or per-instance flag).
             if getattr(pool, 'is_instance_terminated', None) is not None and pool.is_instance_terminated(instance_name):
+                _gate_fail('7-terminated-pool')
                 return None
             if inst.is_terminated:
+                _gate_fail('7-terminated-flag')
                 return None
 
             # 8. Conversation present and starting with a SYSTEM message (the prefix we keep).
             conv = inst.conversation
             if not conv or getattr(conv[0], 'role', None) != SYSTEM:
+                _gate_fail('8-no-system-prefix', f'conv_len={len(conv)}')
                 return None
 
             # 8b. The system prompt must already be FROZEN. An unfrozen instance would re-run the
             #     _setup_turn M1 rewrite on its next turn and inject volatile run-identity lines,
             #     silently killing the byte-identical prefix — so it must fall back to a fresh spawn.
             if inst._system_prompt_frozen is not True:
+                _gate_fail('8b-prompt-not-frozen', f'frozen={inst._system_prompt_frozen!r}')
                 return None
 
             # 9. No pending queued messages for this instance.
             mq = getattr(pool, 'message_queues', None)
             if mq and mq.get(instance_name):
+                _gate_fail('9-pending-messages', f'queued={len(mq.get(instance_name))}')
                 return None
 
             # 11. Not currently on the active stack (a live run would be mid-conversation).
             with pool._execution._state_lock:
                 if any(n == instance_name for n, _d in pool._execution.active_stack):
+                    _gate_fail('11-on-active-stack')
                     return None
 
             # 10. Compression lock must be acquirable WITHOUT blocking — a live compressor or
             #     rollback holding it means the instance is not quiescent (plan R3). Non-blocking
             #     acquire guarantees we never stall here (test asserts < 0.5s wall time).
             if not inst._compression_lock.acquire(blocking=False):
+                _gate_fail('10-compression-lock-held')
                 return None
 
             try:
@@ -4348,7 +4380,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 inst._tg_first_pushed_text = None
 
                 # ── H3: child relationship + ownership re-pointing (shared with find_or_create) ──
-                self.pool.lifecycle._prepare_instance_for_reuse(inst, caller, nest_depth=0)
+                # NOTE: _prepare_instance_for_reuse lives on the ENGINE's lifecycle manager
+                # (self.lifecycle, set in __init__), NOT on the pool — a real AgentPool has no
+                # `lifecycle` attribute. An earlier draft called self.pool.lifecycle here; the
+                # AttributeError was swallowed by this method's best-effort except below, so every
+                # check fell back to a fresh spawn while the reset above it had already run. Same
+                # bug class as the build_task_message call sites fixed in _create_and_run_agent
+                # and _create_system_agent.
+                self.lifecycle._prepare_instance_for_reuse(inst, caller, nest_depth=0)
                 # acquire-specific (NOT in the shared helper): a reused Security instance must run
                 # its read-only shell checks without prompting. The lifecycle reuse branch does not
                 # set this, so it is applied here to preserve v1's acquire behaviour exactly.
