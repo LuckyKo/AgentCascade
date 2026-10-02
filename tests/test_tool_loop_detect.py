@@ -839,6 +839,49 @@ class TestPreLlmChecksIntegration:
         assert inst._fuzzy_warn_armed is False
         assert inst._fuzzy_escalation_armed is False
 
+    def _fuzzy_reason(self):
+        # Same synthetic pattern the integration tests drive through _pre_llm_checks.
+        # detect_tool_loop returns (reason, pop_count); only the reason string is
+        # interpolated into the warning message.
+        return detect_tool_loop(self._tool_loop_msgs())[0]
+
+    def test_fuzzy_warning_drawn_from_pool(self):
+        from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
+        reason = self._fuzzy_reason()
+        assert reason, 'fixture must still trigger the fuzzy detector'
+
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
+
+        content = engine._append_and_log.call_args.args[1].content or ''
+        assert content in [e.format(reason=reason) for e in FUZZY_LOOP_FEEDBACK_MESSAGES], \
+            'injected fuzzy warning must be a pool entry formatted with the detector reason'
+
+    def test_fuzzy_pool_shape(self):
+        from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
+        assert len(FUZZY_LOOP_FEEDBACK_MESSAGES) > 1, 'pool must be multi-entry'
+        assert len(set(FUZZY_LOOP_FEEDBACK_MESSAGES)) == len(FUZZY_LOOP_FEEDBACK_MESSAGES), \
+            'pool entries must be distinct'
+        for entry in FUZZY_LOOP_FEEDBACK_MESSAGES:
+            assert entry.startswith('[SYSTEM WARNING: Possible repeating action]'), \
+                'every entry keeps the stable prefix'
+            assert entry.count('{reason}') == 1, 'every entry interpolates reason exactly once'
+            entry.format(reason='probe')  # raises if any stray brace slipped into the wording
+
+    def test_fuzzy_warning_selected_via_random_choice(self):
+        from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
+        pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
+        engine = self._make_engine(pool)
+        inst = self._make_fake_instance()
+        with patch('agent_cascade.engine.llm_call.random.choice',
+                   return_value=FUZZY_LOOP_FEEDBACK_MESSAGES[1]) as mock_choice:
+            engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
+        mock_choice.assert_called_once_with(FUZZY_LOOP_FEEDBACK_MESSAGES)
+        content = engine._append_and_log.call_args.args[1].content or ''
+        assert content == FUZZY_LOOP_FEEDBACK_MESSAGES[1].format(reason=self._fuzzy_reason())
+
     def test_throttle_second_trigger_same_run_suppressed(self):
         # Second trigger in the same run (1 turn later) → suppressed, no second message.
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
@@ -1178,3 +1221,10 @@ class TestPreLlmChecksIntegration:
         engine._inline_rollback_and_hint.assert_called_once()
         pool.terminate_instance.assert_called_once()
         assert pool.terminate_instance.call_args.kwargs.get('set_global_stopped') is False
+
+
+def test_fuzzy_warning_template_removed():
+    """The single-string template is dead code once the pool exists."""
+    import agent_cascade.engine.llm_call as lc
+    assert not hasattr(lc, '_FUZZY_WARNING_TEMPLATE'), \
+        '_FUZZY_WARNING_TEMPLATE must be deleted once the pool exists'

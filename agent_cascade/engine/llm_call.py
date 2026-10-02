@@ -14,6 +14,7 @@ home module.
 
 from __future__ import annotations
 
+import random
 import sys
 import time
 import traceback
@@ -27,6 +28,7 @@ from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected
 from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 from agent_cascade.log import logger
+from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
 from agent_cascade.retry_policy import RetryPolicy, calculate_backoff, classify_error
 from agent_cascade.settings import (LLM_CALL_DEADLINE_SECONDS, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
                                     TOKEN_ESTIMATE_CHAR_DIVISOR)
@@ -44,13 +46,6 @@ FUZZY_WARNING_COOLDOWN_TURNS = 3
 #: still matching this many LLM turns after the warning escalates to full
 #: rollback (the nudge demonstrably failed).
 FUZZY_ESCALATION_TURNS = 2
-
-#: Final wording for the Tier-2 advisory USER message (plan §4.2 — accepted as final).
-_FUZZY_WARNING_TEMPLATE = ('[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool '
-                           'action without progress — {reason}. This is a warning only; your history was NOT '
-                           "modified. Change strategy: if you are polling an async shell that reports \"No running "
-                           "shell found\", treat it as terminal (the run has ended) and act on the last real output; "
-                           'otherwise verify preconditions or use a different tool/approach before retrying.')
 
 # ── Streaming UI update throttle (burst-aware) ───────────────────────────────
 #: Time floor between _streaming_responses refreshes. Time alone fails during GPU
@@ -359,14 +354,15 @@ class LLMCallMixin:
                         # Escalation state unchanged; return False → proceed to LLM call.
                         return False
 
-                    # Inject the advisory USER message (warning-first)
+                    # Inject the advisory USER message (warning-first). The wording is drawn
+                    # randomly from FUZZY_LOOP_FEEDBACK_MESSAGES so repeated nudges vary.
                     # Same pattern as the turn-limit warnings in engine/core.py:
                     # _append_and_log_to_llm appends to conversation + JSONL log and
                     # mirrors into llm_messages exactly once (identity-checked against
                     # _cached_llm_messages). NOT appended to the local `messages` list —
                     # the loop-detection view may omit it, which keeps our own warning
                     # outside Tier-1's window on the next check.
-                    warn_msg = Message(role=USER, content=_FUZZY_WARNING_TEMPLATE.format(reason=reason))
+                    warn_msg = Message(role=USER, content=random.choice(FUZZY_LOOP_FEEDBACK_MESSAGES).format(reason=reason))
                     self._append_and_log_to_llm(instance, warn_msg, llm_messages)
 
                     instance._fuzzy_warn_armed = False

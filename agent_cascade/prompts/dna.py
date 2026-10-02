@@ -94,6 +94,36 @@ LOOP_FEEDBACK_MESSAGES: List[str] = [
     '[SYSTEM]: Repetition loop broken via rollback. Your recent actions are gone from context. Before continuing, briefly re-read the task and any notes or plan you\'ve written. Identify what you were trying to do and what\'s still outstanding. Then proceed with a fresh approach to that specific sub-task.',
 ]
 
+# Tier-2 (fuzzy) loop detection: injected as a USER message BEFORE any LLM call.
+# WARNING ONLY — nothing is rolled back and the history is NOT modified, so unlike
+# LOOP_FEEDBACK_MESSAGES above the agent can still see its own repetition. The message
+# therefore only needs to prompt a strategy change, not re-orient the agent.
+# Randomly selected per occurrence; every entry keeps the same stable prefix and carries
+# a {reason} placeholder filled by tool_loop_detect's diagnostic string.
+FUZZY_LOOP_FEEDBACK_MESSAGES: List[str] = [
+    '[SYSTEM WARNING: Possible repeating action] You appear to be repeating the same tool '
+    'action without progress — {reason}. This is a warning only; your history was NOT '
+    'modified. Change strategy: if you are polling an async shell that reports "No running '
+    'shell found", treat it as terminal (the run has ended) and act on the last real output; '
+    'otherwise verify preconditions or use a different tool/approach before retrying.',
+
+    '[SYSTEM WARNING: Possible repeating action] Repetition detected: {reason}. Nothing has been '
+    'removed from your history — this is advice, not a rollback. Do not issue the same call again. '
+    'Decide what a success signal from this tool would look like, check whether that signal is '
+    'actually obtainable, and if it is not, switch tools or change the approach entirely.',
+
+    '[SYSTEM WARNING: Possible repeating action] Pattern noticed — {reason}. Your history is intact; '
+    'you are seeing this because the same action keeps failing. Stop retrying blindly and diagnose '
+    'WHY it fails: read the actual error or output, name the specific precondition that is not met, '
+    'and fix that root cause before making another attempt — repeating the identical call will not '
+    'change the result.',
+
+    '[SYSTEM WARNING: Possible repeating action] Advisory — {reason}. No history was modified and no '
+    'turn was consumed, so you are free to change course. Explicitly name, in one line, what you are '
+    'trying to achieve with this tool; then either make the single change needed to make the next '
+    'call different, or abandon this tool for this subtask and use an alternative.',
+]
+
 # --- Memory Compression ---
 COMPRESSION_MARKER = '--- CONTEXT COMPRESSED'
 COMPRESSION_END_MARKER = '--- END SUMMARY ---'  # Marker compressor must append; validated on output
