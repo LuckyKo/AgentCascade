@@ -49,41 +49,26 @@ def is_compression_marker(msg: Any) -> bool:
             '<context_summary>' in content)
 
 
-# Prefixes that identify system-injected USER messages — none of which carry task intent.
-# Detection is prefix-based because Message carries no provenance metadata (llm/schema.py).
-# A genuine supervisor task that happens to *begin* with one of these would be skipped; that
-# is acceptable (supervisors do not write bracket-tagged openers) and is logged at DEBUG below.
-_NON_TASK_PREFIXES = (
-    '--- CONTEXT COMPRESSED',          # markers (defensive; is_compression_marker also runs)
-    '[SYSTEM]',
-    '[SYSTEM WARNING',
-    '[SYSTEM ERROR',
-    '[COMPRESSION]',
-    '[BACKGROUND TOOL RESULT',
-    '[TOOL',
-    '[Agent ',
-    '⟨shell_cmd',
-)
+# Prefix identifying agent-to-agent task messages (lifecycle_manager.py:329,335).
+# Format: "Context: This is a message from {caller}.\n{context}\n\nTask: {task}\n\nPlease help with this task."
+# Supervisors can use the same prefix on their own tasks if they want them preserved in compression markers.
+_TASK_PREFIX = 'Context: This is a message from'
 
 
 def is_supervisor_task_message(msg: Any) -> bool:
-    """True if msg is a USER-role message authored by the supervisor (a real task / re-task).
+    """True if msg is a USER-role task message carrying the agent-to-agent task prefix.
 
-    Excludes every system-injected USER message (compression feedback, loop warnings,
-    turn-budget warnings, async tool results) — none of which carry task intent and whose
-    prefixes are enumerated in _NON_TASK_PREFIXES. Detection is prefix-based because Message
-    carries no provenance metadata (llm/schema.py:146-182).
-
-    NOTE (follow-up): the *correct* fix would be to stamp ``extra={'origin': 'supervisor'}`` at
-    every supervisor-ingress path (drain_queue, Telegram/WS bridges, lifecycle task build) and
-    key off that. That is out of scope here — it touches many ingress paths and is not
-    back-compatible with existing JSONL sessions. See todo.md:143 follow-up.
+    Matches messages starting with ``Context: This is a message from`` — the prefix added by
+    ``lifecycle_manager._build_task_message()`` for call_agent tasks (lifecycle_manager.py:329).
+    Supervisors may use the same prefix on their own tasks to opt in to compression-marker
+    preservation. All other USER messages (system notifications, loop warnings, async tool
+    results, plain supervisor chatter) are excluded by default.
 
     Args:
         msg: A Message object or dict.
 
     Returns:
-        True if the message looks like a genuine supervisor task; False otherwise.
+        True if the message is a tagged task; False otherwise.
     """
     if get_message_role(msg) != USER:
         return False
@@ -92,11 +77,7 @@ def is_supervisor_task_message(msg: Any) -> bool:
     content = extract_text_from_message(msg, add_upload_info=False)
     if not isinstance(content, str) or not content.strip():
         return False
-    stripped = content.lstrip()
-    if stripped.startswith(_NON_TASK_PREFIXES):
-        logger.debug(f"Skipping supervisor-task candidate with system prefix: {stripped[:60]!r}")
-        return False
-    return True
+    return content.lstrip().startswith(_TASK_PREFIX)
 
 
 def extract_last_supervisor_task(messages: Any) -> str | None:

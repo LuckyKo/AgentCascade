@@ -54,10 +54,20 @@ def _is_marker(msg) -> bool:
 
 
 class TestIsSupervisorTaskMessage:
-    """Prefix-based classification of genuine supervisor tasks vs system-injected USER msgs."""
+    """Positive-match on the agent-to-agent task prefix (lifecycle_manager.py:329)."""
 
-    def test_plain_supervisor_text(self):
-        assert is_supervisor_task_message(_make_msg(USER, 'Please refactor the parser module.')) is True
+    def test_agent_to_agent_task_is_matched(self):
+        msg = _make_msg(USER, 'Context: This is a message from Maine.\n\nTask: Fix the parser.\n\nPlease help with this task.')
+        assert is_supervisor_task_message(msg) is True
+
+    def test_supervisor_opt_in_with_same_prefix(self):
+        # Supervisors can use the same prefix to opt in to marker preservation.
+        msg = _make_msg(USER, 'Context: This is a message from user.\nDo the thing.')
+        assert is_supervisor_task_message(msg) is True
+
+    def test_plain_text_without_prefix_is_not_a_task(self):
+        # Plain supervisor chatter without the prefix is NOT preserved.
+        assert is_supervisor_task_message(_make_msg(USER, 'Please refactor the parser module.')) is False
 
     @pytest.mark.parametrize('content', [
         '[COMPRESSION] Compressed 12 messages.',
@@ -78,16 +88,20 @@ class TestIsSupervisorTaskMessage:
 
     @pytest.mark.parametrize('role', [ASSISTANT, 'system', FUNCTION])
     def test_non_user_roles(self, role):
-        assert is_supervisor_task_message(_make_msg(role, 'Please do the thing.')) is False
+        assert is_supervisor_task_message(_make_msg(role, 'Context: This is a message from X.\nTask: do it.')) is False
 
     @pytest.mark.parametrize('content', ['', '   ', '\n\t'])
     def test_empty_or_whitespace_content(self, content):
         assert is_supervisor_task_message(_make_msg(USER, content)) is False
 
-    def test_list_content_with_text_is_a_task(self):
-        # Multimodal (list) content that flattens to text still counts as a task.
-        msg = _make_msg(USER, [{'text': 'Please implement feature X.'}])
+    def test_list_content_with_task_prefix_is_a_task(self):
+        # Multimodal (list) content that flattens to text with the prefix still matches.
+        msg = _make_msg(USER, [{'text': 'Context: This is a message from Maine.\nTask: implement feature X.'}])
         assert is_supervisor_task_message(msg) is True
+
+    def test_list_content_without_prefix_is_not_a_task(self):
+        msg = _make_msg(USER, [{'text': 'Please implement feature X.'}])
+        assert is_supervisor_task_message(msg) is False
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -96,27 +110,35 @@ class TestIsSupervisorTaskMessage:
 
 
 class TestExtractLastSupervisorTask:
+    def _task(self, caller: str, body: str) -> Message:
+        """Build a realistic agent-to-agent task message."""
+        return _make_msg(USER, f'Context: This is a message from {caller}.\n\nTask: {body}\n\nPlease help with this task.')
+
     def test_returns_last_of_several(self):
         msgs = [
-            _make_msg(USER, 'first task'),
+            self._task('Maine', 'first task'),
             _make_msg(ASSISTANT, 'reply'),
             _make_msg(USER, '[SYSTEM]: warning noise'),
-            _make_msg(USER, 'second task'),  # last genuine one
+            self._task('worker1', 'second task'),  # last tagged one
         ]
-        assert extract_last_supervisor_task(msgs) == 'second task'
+        assert extract_last_supervisor_task(msgs) is not None
+        assert 'second task' in extract_last_supervisor_task(msgs)
 
     def test_none_when_no_tasks(self):
-        msgs = [_make_msg(USER, '[COMPRESSION] x'), _make_msg(ASSISTANT, 'y')]
+        msgs = [_make_msg(USER, '[COMPRESSION] x'), _make_msg(ASSISTANT, 'y'), _make_msg(USER, 'plain chatter')]
         assert extract_last_supervisor_task(msgs) is None
 
     def test_stops_at_first_qualifying_scanning_backwards(self):
-        # The most recent genuine task wins; earlier ones are ignored.
+        # The most recent tagged task wins; earlier ones are ignored.
         msgs = [
-            _make_msg(USER, 'oldest task'),
+            self._task('Maine', 'oldest task'),
             _make_msg(ASSISTANT, 'a'),
-            _make_msg(USER, 'newest task'),
+            self._task('worker1', 'newest task'),
         ]
-        assert extract_last_supervisor_task(msgs) == 'newest task'
+        result = extract_last_supervisor_task(msgs)
+        assert result is not None
+        assert 'newest task' in result
+        assert 'oldest task' not in result
 
     def test_empty_window(self):
         assert extract_last_supervisor_task([]) is None
@@ -332,7 +354,7 @@ class TestCompressContextLastTask:
         history = [_make_msg(SYSTEM, 'sys')]
         history.append(_make_msg(USER, 'Original prompt.'))  # U0 (excluded from window)
         # The re-task — placed EARLY so it is definitely inside the discard window.
-        history.append(_make_msg(USER, 'REDO: now use a different approach for the parser.'))
+        history.append(_make_msg(USER, 'Context: This is a message from Maine.\n\nTask: REDO: now use a different approach for the parser.\n\nPlease help with this task.'))
         # Pad with many non-task messages AFTER it so the 2-tail keep zone never reaches back to
         # the re-task. The last genuine task in active_set[:discard] is then the REDO line.
         for i in range(10):
@@ -345,6 +367,9 @@ class TestCompressContextLastTask:
         c = _content(result.marker_message)
         assert '<last_supervisor_task>' in c
         assert 'REDO: now use a different approach for the parser.' in c
+
+    def _task_msg(self, body: str) -> Message:
+        return _make_msg(USER, f'Context: This is a message from Maine.\n\nTask: {body}\n\nPlease help with this task.')
 
     def test_second_compression_no_growth(self):
         """Test 13: a second compression does NOT duplicate or inherit the prior marker's task.
@@ -359,7 +384,7 @@ class TestCompressContextLastTask:
         # First compression: task early in the window → marker carries a block.
         history = [_make_msg(SYSTEM, 'sys')]
         history.append(_make_msg(USER, 'Original prompt.'))  # U0
-        history.append(_make_msg(USER, 'first window task'))
+        history.append(self._task_msg('first window task'))
         for i in range(8):
             history.append(_make_msg(USER, f'[SYSTEM]: note {i}'))
             history.append(_make_msg('assistant', f'reply {i} ' * 5))
@@ -375,7 +400,7 @@ class TestCompressContextLastTask:
         # NOTE: get_conversation() returns a COPY — append via the pool's write path so it
         # actually persists to the instance. Pad generously so the discard boundary is well past
         # the task (compute_discard_count keeps a 2-message tail).
-        new_window = [_make_msg(USER, 'second window task')]
+        new_window = [self._task_msg('second window task')]
         for i in range(12):
             new_window.append(_make_msg(USER, f'[SYSTEM]: new note {i}'))
             new_window.append(_make_msg('assistant', f'new reply {i} ' * 5))
@@ -397,7 +422,7 @@ class TestCompressContextLastTask:
         # First compression with a task EARLY in the window → marker carries a block.
         history = [_make_msg(SYSTEM, 'sys')]
         history.append(_make_msg(USER, 'Original prompt.'))
-        history.append(_make_msg(USER, 'first window task'))
+        history.append(self._task_msg('first window task'))
         for i in range(8):
             history.append(_make_msg(USER, f'[SYSTEM]: note {i}'))
             history.append(_make_msg('assistant', f'reply {i} ' * 5))
