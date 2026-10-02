@@ -4251,88 +4251,60 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return (inst, False, instance_name)
 
             # ── Eligibility predicate (plan §3.4) — all read-only, BEFORE any mutation ────────
-            # TEMP DIAGNOSTIC (todo.md:148 reuse not firing in prod): log exactly which gate fails
-            # so we can see the real blocker. REMOVE once root cause is confirmed.
-            def _gate_fail(gate: str, detail: str = '') -> None:
-                logger.warning(
-                    '[SECURITY_REUSE_DIAG] %s INELIGIBLE at GATE %s (rid=%s) state=%s '
-                    'slot_key=%r slot_release=%r llm_active=%s last_llm_age=%.3fs '
-                    'frozen=%s terminated=%s conv_len=%d conv0_role=%r detail=%s',
-                    instance_name, gate, rid, getattr(inst, 'state', '?'),
-                    getattr(inst, '_slot_key', None), getattr(inst, '_slot_release', None),
-                    getattr(inst, '_llm_call_active', None),
-                    (time.monotonic() - (getattr(inst, '_last_llm_activity', 0.0) or 0.0)),
-                    getattr(inst, '_system_prompt_frozen', None),
-                    getattr(inst, 'is_terminated', None),
-                    len(getattr(inst, 'conversation', []) or []),
-                    getattr((getattr(inst, 'conversation', []) or [None])[0], 'role', None) if (getattr(inst, 'conversation', []) or []) else None,
-                    detail)
 
             # 3. State must be IDLE. Not TERMINATED (terminal in the transition matrix) and not
             #    RUNNING/SLEEPING/COMPLETING — engine.run() would raise at the L1 guard otherwise.
             with inst._state_lock:
                 if inst.state != AgentState.IDLE:
-                    _gate_fail('3-state-not-idle', f'state={inst.state}')
                     return None
 
             # 4. No leaked endpoint permit (todo.md:158 permit-leak program).
             if inst._slot_release is not None or inst._slot_key is not None:
-                _gate_fail('4-leaked-slot-permit', f'slot_key={inst._slot_key!r} slot_release={inst._slot_release!r}')
                 return None
 
             # 5. No live LLM call, and the last activity is older than a small epsilon — guards
             #    against a generator abandoned by `break` without close() still mid-flight.
             if inst._llm_call_active:
-                _gate_fail('5-llm-call-active')
                 return None
             _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
             if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:
-                _gate_fail('5-llm-too-recent', f'age={time.monotonic() - _last_llm:.3f}s eps={_REUSE_IDLE_EPSILON}')
                 return None
 
             # 6. Not genuinely halted (compression-halt / manual stop).
             if getattr(pool, 'is_instance_halted', None) is not None and pool.is_instance_halted(instance_name):
-                _gate_fail('6-halted')
                 return None
 
             # 7. Not terminated (pool-level set or per-instance flag).
             if getattr(pool, 'is_instance_terminated', None) is not None and pool.is_instance_terminated(instance_name):
-                _gate_fail('7-terminated-pool')
                 return None
             if inst.is_terminated:
-                _gate_fail('7-terminated-flag')
                 return None
 
             # 8. Conversation present and starting with a SYSTEM message (the prefix we keep).
             conv = inst.conversation
             if not conv or getattr(conv[0], 'role', None) != SYSTEM:
-                _gate_fail('8-no-system-prefix', f'conv_len={len(conv)}')
                 return None
 
             # 8b. The system prompt must already be FROZEN. An unfrozen instance would re-run the
             #     _setup_turn M1 rewrite on its next turn and inject volatile run-identity lines,
             #     silently killing the byte-identical prefix — so it must fall back to a fresh spawn.
             if inst._system_prompt_frozen is not True:
-                _gate_fail('8b-prompt-not-frozen', f'frozen={inst._system_prompt_frozen!r}')
                 return None
 
             # 9. No pending queued messages for this instance.
             mq = getattr(pool, 'message_queues', None)
             if mq and mq.get(instance_name):
-                _gate_fail('9-pending-messages', f'queued={len(mq.get(instance_name))}')
                 return None
 
             # 11. Not currently on the active stack (a live run would be mid-conversation).
             with pool._execution._state_lock:
                 if any(n == instance_name for n, _d in pool._execution.active_stack):
-                    _gate_fail('11-on-active-stack')
                     return None
 
             # 10. Compression lock must be acquirable WITHOUT blocking — a live compressor or
             #     rollback holding it means the instance is not quiescent (plan R3). Non-blocking
             #     acquire guarantees we never stall here (test asserts < 0.5s wall time).
             if not inst._compression_lock.acquire(blocking=False):
-                _gate_fail('10-compression-lock-held')
                 return None
 
             try:
