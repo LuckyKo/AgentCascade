@@ -2166,6 +2166,232 @@ class TestScanSkillsIncludeDisabled:
 
 
 # ===========================================================================
+# 8c. scan_skills preview — full raw SKILL.md text by name (todo 140)
+# ===========================================================================
+
+def _write_skill_file_custom_body(root: Path, name: str, body: str, version: str = '2.3.4',
+                                  source: str = 'user') -> Path:
+    """Write a SKILL.md with an EXPLICIT frontmatter (version/source) and a custom body.
+
+    Unlike :func:`_write_skill_file` (fixed ``# Body``), this lets the test pin the exact raw
+    file content so preview output can be asserted byte-for-byte, and inject triple-backtick
+    fences to exercise the fence-widening logic.
+    """
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / 'SKILL.md'
+    path.write_text(
+        f'---\nname: {name}\ndescription: preview fixture for {name}\n'
+        f'version: "{version}"\nsource: {source}\ntriggers:\n  - test\n---\n{body}\n',
+        encoding='utf-8')
+    return path
+
+
+class TestScanSkillsPreview:
+    """todo 140 — scan_skills previews the full raw SKILL.md text (frontmatter + body) in a
+    code block, for anchoring when editing an existing skill. Read-only: no load-count bump."""
+
+    def _scan(self, manager, params):
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+        pool = SimpleNamespace(skill_manager=manager)
+        return ScanSkills(agent_pool=pool).call(params)
+
+    def test_tool_schema_exposes_preview_param(self):
+        """The live tool schema (class .parameters → .function) must expose `preview` so the
+        LLM can call it. This is the real schema path (base.py .function), NOT dna.py's
+        TOOL_METADATA (which scan_skills does not read)."""
+        from agent_cascade.tools.custom.scan_skills import ScanSkills
+        props = ScanSkills.parameters['properties']
+        assert 'preview' in props, 'the `preview` param must be visible to the LLM'
+        assert props['preview']['type'] == 'string'
+        # And it round-trips through the function-info schema the engine hands to the model.
+        fn = ScanSkills(agent_pool=None).function
+        assert 'preview' in fn['parameters']['properties']
+
+    def test_preview_by_explicit_param_returns_full_raw_text(
+            self, hermetic_skill_manager, tmp_path):
+        """Explicit `preview` param → full raw file (frontmatter + body) in a code block."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'alpha', '# Alpha Body\nSome instructions here.')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'preview': 'alpha'})
+        # Header carries name + version + source (from the registry entry).
+        assert out.startswith('## Skill Preview: alpha')
+        assert 'v2.3.4' in out.splitlines()[0]
+        assert 'user' in out.splitlines()[0]
+        # Full RAW text is present — frontmatter AND body, not just the body.
+        assert 'name: alpha' in out          # frontmatter survives (load_full_instructions strips it)
+        assert '# Alpha Body' in out         # body present
+        # Wrapped in a fenced code block.
+        assert '```markdown' in out
+
+    def test_preview_by_single_word_query_matching_name(
+            self, hermetic_skill_manager, tmp_path):
+        """A single-word query that exactly matches a registered name → preview (not match list)."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'bravo', '# Bravo Body\n')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'query': 'bravo'})
+        assert out.startswith('## Skill Preview: bravo')
+        assert 'name: bravo' in out
+        # It must NOT be the match-results rendering.
+        assert 'Skills Matching Query' not in out
+
+    def test_preview_by_single_word_query_is_case_insensitive(
+            self, hermetic_skill_manager, tmp_path):
+        """Case-insensitive name match on the single-word query path."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'charlie', '# Charlie Body\n')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'query': 'Charlie'})
+        assert out.startswith('## Skill Preview: charlie')
+
+    def test_preview_unknown_skill_returns_error_no_crash(
+            self, hermetic_skill_manager, tmp_path):
+        """Unknown name → clean error message, no exception."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'alpha', '# Alpha\n')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'preview': 'does-not-exist'})
+        assert 'not found or not loadable' in out
+
+    def test_preview_does_not_inflate_load_count(
+            self, hermetic_skill_manager, tmp_path):
+        """Preview must NOT increment total_loads (count_load=False semantics)."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'delta', '# Delta\n')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        before = m.get_metrics('delta').get('total_loads', 0)
+        self._scan(m, {'preview': 'delta'})
+        after = m.get_metrics('delta').get('total_loads', 0)
+        assert after == before, f'preview inflated load count: {before} -> {after}'
+
+    def test_multi_word_query_still_returns_match_results(
+            self, hermetic_skill_manager, tmp_path):
+        """A multi-word query is NOT treated as a preview — it still goes to the matcher."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_named_skill(root, 'quantum-zebra', 'zebra quantum fixture', 'zebra quantum')
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'query': 'zebra quantum'})
+        # Match-results rendering, not a preview header.
+        assert 'Skills Matching Query' in out
+        assert '## Skill Preview' not in out
+
+    def test_preview_fence_widening_for_triple_backtick_body(
+            self, hermetic_skill_manager, tmp_path):
+        """A body containing ``` must be wrapped in a longer (4-backtick) fence."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        fenced_body = ('# Fenced\n'
+                       'Here is code:\n'
+                       '```\nprint("hi")\n```\n')
+        _write_skill_file_custom_body(root, 'fenced', fenced_body)
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'preview': 'fenced'})
+        assert out.startswith('## Skill Preview: fenced')
+        # The fence must be widened to ```` so the inner ``` doesn't close the block early.
+        assert '````markdown' in out
+        # The raw triple-backtick content is preserved verbatim inside.
+        assert 'print("hi")' in out
+
+    def test_preview_fence_widening_for_four_backtick_body(
+            self, hermetic_skill_manager, tmp_path):
+        """A body containing a 4-backtick run needs a 5-backtick fence — a fixed ```` would
+        close the block early on the inner ```` (the reviewer-flagged edge case)."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        four_body = ('# Four\n'
+                     'Outer fence:\n'
+                     '````\nsome code\n````\n')
+        _write_skill_file_custom_body(root, 'fourbt', four_body)
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'preview': 'fourbt'})
+        assert out.startswith('## Skill Preview: fourbt')
+        # The fence must be widened to FIVE backticks (max run in body is 4 → fence = 5).
+        assert '`````markdown' in out
+        # The raw 4-backtick content is preserved verbatim inside.
+        assert 'some code' in out
+
+    def test_preview_evicted_skill_via_servable_path(
+            self, hermetic_skill_manager, tmp_path):
+        """A disabled/evicted skill (absent from registry) is still previewable via the
+        servable-disk index (_find_servable_skill_path) — preview deliberately skips the
+        disabled gate so an editing anchor can see retired skill content."""
+        m = _evict_disabled(_reenable_manager(hermetic_skill_manager, tmp_path), tmp_path, 'rr-a')
+        assert 'rr-a' not in m._skills_registry   # precondition: genuinely evicted from registry
+
+        out = self._scan(m, {'preview': 'rr-a'})
+        assert out.startswith('## Skill Preview: rr-a')
+        # Full raw text still resolvable from the servable disk path.
+        assert 'name: rr-a' in out
+
+    def test_preview_non_utf8_file_returns_error_no_crash(self, hermetic_skill_manager, tmp_path):
+        """A backing SKILL.md with invalid UTF-8 bytes returns an error message, not an
+        exception — the decode must be caught in _preview_skill's read path.
+
+        We bypass discover() on purpose: it crashes on non-UTF-8 (tracked separately as
+        BUG_0047), and call() always runs _ensure_discovered() first, so an on-disk bad file
+        would abort discovery before preview ever reads it. Instead we prime the cache with a
+        valid skill, then point its registry entry at a file that is written AFTER discovery —
+        so _ensure_discovered() cache-hits (no re-scan) and only preview's read path sees the
+        invalid bytes."""
+        m = hermetic_skill_manager
+        root = tmp_path / 'skills'
+        _write_skill_file_custom_body(root, 'good', '# Good\n')
+        m._cache_ttl = 60.0          # generous TTL so the later call() cache-hits
+        m.discover([root])
+
+        # Redirect the registry entry to a not-yet-existing path (mtime unchanged → no re-scan).
+        with m._write_lock:
+            m._skills_registry['good']['file_path'] = str(root / 'good' / 'SKILL.md.bak')
+
+        # Now plant invalid UTF-8 at that path. 0xFF is not valid UTF-8.
+        (root / 'good' / 'SKILL.md.bak').write_bytes(b'---\nname: good\n---\n\xff\xfe binary')
+
+        out = self._scan(m, {'preview': 'good'})
+        assert 'not found or not loadable' in out
+
+    def test_preview_empty_body_skill_returns_valid_block(self, tmp_path):
+        """A SKILL.md with only frontmatter (no body) still returns a valid fenced block."""
+        root = tmp_path / 'skills'
+        (root / 'empty-body').mkdir(parents=True)
+        (root / 'empty-body' / 'SKILL.md').write_text(
+            '---\nname: empty-body\ndescription: test\n---\n', encoding='utf-8')
+
+        m = make_hermetic_skill_manager(tmp_path)
+        m._cache_ttl = 0.0
+        m.discover([root])
+
+        out = self._scan(m, {'preview': 'empty-body'})
+        assert out.startswith('## Skill Preview: empty-body')
+        # Has a code fence and the frontmatter survives in the raw text.
+        assert '```markdown' in out
+        assert 'name: empty-body' in out
+
+
+# ===========================================================================
 # 9. Skill Invalidation Phase 2 — adaptive count-cap rebalance pass
 # ===========================================================================
 

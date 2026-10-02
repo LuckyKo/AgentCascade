@@ -6,6 +6,8 @@ This is the primary way orchestrators decide which skills to load via call_agent
 """
 
 import logging
+import re
+from pathlib import Path
 
 from agent_cascade.skills.manager import rating_sort_key
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -50,6 +52,14 @@ class ScanSkills(BaseTool):
                     'skills, each marked with an " (inactive)" suffix.'
                 ),
             },
+            'preview': {
+                'type':
+                    'string',
+                'description':
+                    ('Skill name to preview. When provided, returns the full raw text of that skill\'s '
+                     'SKILL.md file in a code block — useful for anchoring when updating an existing '
+                     'skill. Overrides query/listing behavior.'),
+            },
         },
         'required': [],
     }
@@ -71,6 +81,7 @@ class ScanSkills(BaseTool):
         parsed = parse_tool_params(params)
         query = parsed.get('query', '')
         active_only = parsed.get('active', False)
+        preview_name = parsed.get('preview', '')
 
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
@@ -79,6 +90,21 @@ class ScanSkills(BaseTool):
 
         # Trigger a fresh discovery (cache-respecting) so new skills appear
         skill_manager._ensure_discovered()
+
+        # Preview mode (purely additive — short-circuits before listing/matching):
+        #   1. explicit `preview` param → resolve as a skill name; or
+        #   2. no preview param, but the query is a single token that EXACTLY matches a
+        #      registered skill name (case-insensitive) → treat it as a preview too. This
+        #      catches the natural "agent types the skill name" case without ever touching
+        #      multi-word queries (those still go to the matcher below).
+        if isinstance(preview_name, str) and preview_name.strip():
+            return self._preview_skill(skill_manager, preview_name.strip())
+        # Single-word query that exactly matches a registered name (case-insensitive).
+        # get_skill_names() returns exact-case keys, so compare against their lowercase set.
+        if not preview_name:
+            q = query.strip()
+            if q and ' ' not in q and q.lower() in {n.lower() for n in skill_manager.get_skill_names()}:
+                return self._preview_skill(skill_manager, q)
 
         # Data path: the DEFAULT listing includes disabled/inactive skills (each marked " (inactive)"
         # below); active=True restricts to the active registry only. In production disabled skills are
@@ -176,3 +202,91 @@ class ScanSkills(BaseTool):
         if truncated:
             lines.append(f"(showing top {SKILL_SCAN_MAX_RESULTS} of {total_matches} matches)")
         return '\n'.join(lines)
+
+    def _preview_skill(self, skill_manager, name: str) -> str:
+        """Return the full raw SKILL.md text for ``name`` in a fenced code block.
+
+        Preview is a READ-ONLY anchor for editing an existing skill: it returns the
+        complete file (frontmatter + body), NOT just the body that
+        ``load_full_instructions`` yields, and it does NOT increment any load metric
+        (``count_load=False`` semantics) — previewing must not inflate usage stats.
+
+        Path resolution mirrors ``load_full_instructions``: exact registry key first,
+        then a case-insensitive fallback, then the servable-disk index for evicted/inactive
+        skills (``_find_servable_skill_path``). The path is read from the registry at call
+        time — never cached — because registration can relocate ``file_path`` to a promoted
+        production file.
+
+        DELIBERATE GATE SKIP: unlike ``load_full_instructions``, preview does NOT consult
+        ``_disabled_names`` or platform compatibility, so it will surface the raw text of a
+        disabled or platform-incompatible skill. That is intentional for an editing anchor —
+        you need to see what's there to change it — but it means preview is not a substitute
+        for the load path and must never be used to "load" a disabled skill's instructions.
+        """
+        from agent_cascade.skills.parser import parse_skill_file
+
+        # Resolve the backing SKILL.md path. All shared-state reads (registry + servable
+        # index) happen under _write_lock so they are atomic; the file read itself stays
+        # OUTSIDE the lock (it's I/O and touches no shared state). _find_servable_skill_path
+        # acquires no lock of its own (pure dict read), so nesting it here is safe.
+        # Also capture the canonical registry key so a case-variant input ("Charlie") previews
+        # under its real name ("charlie") — an editing anchor should show the actual skill name.
+        file_path = None
+        version = source = None
+        display_name = name
+        with skill_manager._write_lock:
+            reg = skill_manager._skills_registry.get(name)
+            if reg is None:
+                lower = name.lower()
+                for key, entry in skill_manager._skills_registry.items():
+                    if key.lower() == lower:
+                        reg = entry
+                        break
+            if reg is not None:
+                file_path = reg.get('file_path')
+                version = reg.get('version')
+                source = reg.get('source')
+                display_name = reg.get('name', name)
+            # Servable-disk fallback for evicted/inactive skills (absent from the registry).
+            if file_path is None:
+                sp = skill_manager._find_servable_skill_path(name)
+                if sp is not None:
+                    file_path = str(sp)
+
+        # Metadata for a servable-fallback skill isn't in the registry, so parse it from disk.
+        # Best-effort (a binary/unreadable file just leaves version/source unset); the raw read
+        # below re-opens the same path and is what actually decides loadability.
+        if file_path is not None and reg is None:
+            try:
+                parsed = parse_skill_file(Path(file_path))
+                version = parsed.get('version')
+                source = (parsed.get('frontmatter') or {}).get('source')
+            except (FileNotFoundError, OSError, UnicodeDecodeError):
+                pass
+
+        if not file_path:
+            return f"Skill '{display_name}' not found or not loadable."
+
+        try:
+            content = Path(file_path).read_text(encoding='utf-8')
+        except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+            logger.debug('[SKILLS] preview: failed to read %s: %s', file_path, e)
+            return f"Skill '{display_name}' not found or not loadable."
+
+        # Fence widening: the raw markdown may itself contain backtick runs, so size the
+        # fence one longer than the longest run of backticks inside the content (min 3) to
+        # keep the code block well-formed. A body with ``` needs ````; a body with ````
+        # needs ````` — a fixed 4-backtick fence would close early on the latter.
+        max_run = max((len(m.group()) for m in re.finditer(r'`+', content)), default=0)
+        fence = '`' * max(3, max_run + 1)
+
+        meta = ''
+        if version or source:
+            parts = []
+            if version:
+                parts.append(f'v{version}')
+            if source:
+                parts.append(source)
+            meta = f" ({', '.join(parts)})"
+        return (f"## Skill Preview: {display_name}{meta}\n\n"
+                f"{fence}markdown\n{content}\n{fence}")
