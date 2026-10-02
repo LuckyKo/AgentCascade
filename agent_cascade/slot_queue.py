@@ -575,6 +575,12 @@ class SlotPool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _get_router_from_holder(holder: Any):
+    """Best-effort recovery of the APIRouter from a slot holder (may be None)."""
+    pool_ref = getattr(holder, '_pool_ref', None)
+    return getattr(pool_ref, 'api_router', None) if pool_ref is not None else None
+
+
 def release_slot_permit(
     holder: Any,
     holder_name: str,
@@ -655,12 +661,31 @@ def release_slot_permit(
     if release_callback is None:
         return False
 
+    # Record the endpoint this holder was using, so an unassigned agent resolving next
+    # (e.g. a spawned Security check) can prefer it over the racy global marker.
+    # BEST-EFFORT scope: this is a GLOBAL "last released by anyone" record, not per-caller.
+    # It guarantees capability matching in the common single-caller case (one shell command
+    # -> one security check). Under heavy parallel fan-out, a mismatched allocation is possible
+    # if another agent releases between this holder's release and the check's resolution; that
+    # is an accepted, rare edge case (user sign-off 2026-10-02). Never worse than the racy global.
+    # CRITICAL ordering: this read MUST run BEFORE the committed-map pop in the block below —
+    # once popped, _instance_committed_endpoint[holder_name] is gone and we'd record nothing.
+    # Guarded by its own try/except so a failure here never breaks the release path.
+    try:
+        _router = _get_router_from_holder(holder)
+        if _router is not None and hasattr(_router, '_instance_committed_endpoint'):
+            with _router._lock:
+                _committed = _router._instance_committed_endpoint.get(holder_name)
+                if _committed is not None:
+                    _router._last_released_endpoint = _committed
+    except Exception:
+        pass
+
     # Clear the committed-endpoint probe marker so the next acquisition re-probes
     # instead of skipping against a dead connection — same contract as
     # APIRouter._drop_held_permit; recovered best-effort via holder._pool_ref.
     try:
-        _pool_ref = getattr(holder, '_pool_ref', None)
-        _router = getattr(_pool_ref, 'api_router', None) if _pool_ref is not None else None
+        _router = _get_router_from_holder(holder)
         if _router is not None and hasattr(_router, '_instance_committed_endpoint'):
             with _router._lock:
                 _router._instance_committed_endpoint.pop(holder_name, None)

@@ -25,7 +25,7 @@ import pytest
 
 from agent_cascade.api_router import APIEndpoint
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
-from agent_cascade.slot_queue import SlotHolder
+from agent_cascade.slot_queue import SlotHolder, release_slot_permit
 from agent_cascade.llm.base import ModelServiceError
 from agent_cascade.settings import ENDPOINT_BLACKLIST_SECONDS  # noqa: F401  (re-exported for tests)
 from agent_cascade.settings import ENDPOINT_COOLDOWN_SECONDS
@@ -741,3 +741,202 @@ class TestCapacityAwareLastActiveFallback:
         # First-match-wins: the FIRST endpoint ('a', max_input_tokens=100) is chosen, not 'b' (999).
         assert chain[0]['max_input_tokens'] == 100, \
             f"expected first-match-wins (max_input_tokens=100), got {chain[0]['max_input_tokens']}"
+
+
+# ============================================================================
+# Tier 1.5 "last-released ENDPOINT" preference (capability matching)
+#
+# The racy global _last_active_endpoint marker can be overwritten by another agent
+# between a caller's release and the spawned Security check's resolution, sending the
+# guard to an endpoint NOT capable of what the caller was doing. Fix: record the
+# just-released holder's committed ENDPOINT in release_slot_permit (single funnel) and
+# let Tier 1.5 lead with it for unassigned agents. We populate REAL SlotPools via
+# router.scheduler._get_or_create_pool(...) + insert real SlotHolder objects — we do NOT
+# patch count_active (that would skip the endpoint→pool mapping, the part most likely wrong).
+# ============================================================================
+
+
+class _ReleaseHolder:
+    """Minimal release_slot_permit holder wired to a real pool's api_router.
+
+    Mirrors AgentInstance's surface for the release path: a state lock, a live
+    _slot_release callback (the scheduler's release cb), and a _pool_ref whose
+    .api_router is the router under test. The committed map is populated on that
+    router directly (same write shape as call_with_fallback success at router.py:2149).
+    """
+
+    def __init__(self, router, pool):
+        import threading
+        self._state_lock = threading.Lock()
+        self._slot_release = None  # set by caller after scheduler.acquire()
+        self._slot_key = pool.key if pool is not None else None
+        self._pool_ref = _PoolRef(router)
+
+
+class _PoolRef:
+    """Stand-in for the pool object that release_slot_permit reads .api_router from."""
+
+    def __init__(self, router):
+        self.api_router = router
+
+
+def _release_and_record(router, holder_name, api_base, concurrency_limit, model):
+    """Acquire a slot on (api_base, conc), commit the endpoint, then release.
+
+    Returns (pool, released_ok). The committed-map entry is written under the lock exactly
+    as call_with_fallback's success path does; release_slot_permit then records it into
+    router._last_released_endpoint BEFORE popping the committed map.
+    """
+    pool = router.scheduler._get_or_create_pool(api_base, concurrency_limit)
+    rel = router.scheduler.acquire(
+        api_base, concurrency_limit, instance_name=holder_name, agent_class='coder')
+    with router._lock:
+        router._instance_committed_endpoint[holder_name] = (normalize_api_base(api_base), model)
+    h = _ReleaseHolder(router, pool)
+    if rel is not None:
+        h._slot_release = rel
+    ok = release_slot_permit(h, holder_name, action='drop-handoff', pool=pool)
+    return pool, ok
+
+
+class TestLastReleasedEndpointPreference:
+
+    def test_prefers_last_released_over_racy_global(self, router):
+        """The exact user scenario: caller commits A; another agent overwrites the GLOBAL
+        marker to B; caller releases (records A); unassigned Security resolves → chain[0] is A.
+
+        Without the fix, Tier 1.5 would read the racy global (B) and hand out B's model.
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+
+        # Caller commits A (success path).
+        pool_a, ok = _release_and_record(router, 'caller1', 'http://a-api', 1, 'model-a')
+        assert ok is True
+        # Another agent succeeds on B → overwrites the racy GLOBAL marker.
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://b-api'), 'model-b')
+
+        # Release recorded A into _last_released_endpoint (BEFORE the committed pop).
+        assert router._last_released_endpoint == (normalize_api_base('http://a-api'), 'model-a'), \
+            f"release should have recorded A, got {router._last_released_endpoint}"
+
+        chain = router.get_endpoint_chain('security', instance_name='sec1')
+        # Chain head must be A's model, NOT the racy global B.
+        assert chain[0]['model'] == 'model-a', \
+            f"expected last-released A at head, got {[(c['model'], c['api_base']) for c in chain]}"
+        assert chain[0]['api_base'] == 'http://a-api'
+
+    def test_conc0_collapse_still_prefers_endpoint(self, router):
+        """A and B both conc=0 (shared pool). Same as above; assert chain[0] model == A's model.
+
+        Proves capability survives the conc=0 collapse — endpoint identity (model) is what we
+        record, not slot/pool identity (which collapses to _shared_sequential_slot_). This is the
+        repro's key finding: chain[0] differs (model-a vs model-b) even under shared-pool collapse.
+        """
+        base = 'http://shared-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', base, model='model-b', concurrency_limit=0)
+
+        # Caller commits A (conc=0 → shared sequential pool).
+        pool_a, ok = _release_and_record(router, 'caller1', base, 0, 'model-a')
+        assert ok is True
+        assert pool_a.key == '_shared_sequential_slot_'
+        # Another agent succeeds on B → overwrites the racy GLOBAL marker.
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-b')
+
+        chain = router.get_endpoint_chain('security', instance_name='sec1')
+        # Even though both share one pool, the ENDPOINT identity (model-a) must win.
+        assert chain[0]['model'] == 'model-a', \
+            f"expected A's model to survive conc=0 collapse, got {[(c['model'], c['api_base']) for c in chain]}"
+
+    def test_falls_through_when_last_released_saturated(self, router):
+        """A saturated at resolve time → unassigned resolves to a free endpoint via first-fit.
+
+        Never B, never worse than baseline: the existing capacity-aware first-fit routes away
+        from the saturated last-released endpoint automatically (no extra code).
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+
+        # Caller commits A and releases (records A).
+        pool_a, ok = _release_and_record(router, 'caller1', 'http://a-api', 1, 'model-a')
+        assert ok is True
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://b-api'), 'model-b')
+        assert router._last_released_endpoint == (normalize_api_base('http://a-api'), 'model-a')
+
+        # Saturate A's pool (capacity 1) → last-released endpoint is full.
+        _occupy_pool(router, 'http://a-api', 1, n_holders=1)
+
+        chain = router.get_endpoint_chain('security', instance_name='sec1')
+        bases = [c['api_base'] for c in chain]
+        # Must route to the free endpoint B (first-fit), not the saturated A.
+        assert bases[0] == 'http://b-api', \
+            f"expected first-fit escape to free B, got {[(c['model'], c['api_base']) for c in chain]}"
+
+    def test_cold_start_uses_global_marker(self, router):
+        """_last_released_endpoint is None (no release yet) → behavior identical to the current
+        global-marker path. No regression on cold start."""
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+
+        # No release has happened → field stays None.
+        assert router._last_released_endpoint is None
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        chain = router.get_endpoint_chain('security', instance_name='sec1')
+        bases = [c['api_base'] for c in chain]
+        # Global-marker path: head is last-active A.
+        assert bases[0] == 'http://a-api', \
+            f"expected global-marker A at head on cold start, got {[(c['model'], c['api_base']) for c in chain]}"
+
+    def test_release_funnel_records_committed_endpoint_before_pop(self, router):
+        """Release-funnel unit test: release_slot_permit records the holder's committed endpoint
+        into _last_released_endpoint, and does so BEFORE the committed-map pop.
+
+        The ordering is pinned by asserting BOTH that the field is set AND that the committed map
+        was subsequently cleared (popped) — if the read ran after the pop it would record nothing
+        and the field would stay None.
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+
+        pool_a, ok = _release_and_record(router, 'caller1', 'http://a-api', 1, 'model-a')
+        assert ok is True
+        expected = (normalize_api_base('http://a-api'), 'model-a')
+        # The field was recorded from the committed map.
+        assert router._last_released_endpoint == expected, \
+            f"expected {expected}, got {router._last_released_endpoint}"
+        # ...and the committed-map entry was popped (the read happened BEFORE this pop).
+        with router._lock:
+            assert 'caller1' not in router._instance_committed_endpoint, \
+                'committed map should be cleared after release'
+
+    def test_release_no_committed_entry_leaves_field_unchanged(self, router):
+        """Edge case: caller had no successful call (committed map empty) → guarded read finds None
+        → field stays as-is (previous value or None). No crash.
+
+        The holder acquires a slot but NEVER commits an endpoint (no successful call), so the
+        committed map has no entry for it. release_slot_permit's guarded read finds None and must
+        leave _last_released_endpoint untouched rather than clobbering it with None.
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+
+        # Seed a previous value so we can prove it is NOT clobbered.
+        with router._lock:
+            router._last_released_endpoint = (normalize_api_base('http://b-api'), 'model-b')
+
+        pool_a = router.scheduler._get_or_create_pool('http://a-api', 1)
+        rel = router.scheduler.acquire(
+            'http://a-api', 1, instance_name='caller1', agent_class='coder')
+        # NOTE: no _instance_committed_endpoint write — the caller never succeeded.
+        h = _ReleaseHolder(router, pool_a)
+        if rel is not None:
+            h._slot_release = rel
+        ok = release_slot_permit(h, 'caller1', action='drop-handoff', pool=pool_a)
+        assert ok is True
+
+        # Field unchanged — the empty committed read recorded nothing (did NOT set to None).
+        assert router._last_released_endpoint == (normalize_api_base('http://b-api'), 'model-b')

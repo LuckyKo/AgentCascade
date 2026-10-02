@@ -171,6 +171,18 @@ class APIRouter:
         # self._lock (simple assignment inside the existing lock block — no compound RMW).
         self._last_active_endpoint: Optional[Tuple[str, str]] = None
 
+        # Last-released ENDPOINT preference (Tier 1.5 capability matching). Records the
+        # (normalized_base, model) of the endpoint the most recently RELEASED holder was
+        # committed to — i.e. what it actually succeeded on. Written in release_slot_permit
+        # (the single release funnel) and read ONLY in Tier 1.5 for UNASSIGNED agents, where it
+        # takes precedence over the racy global _last_active_endpoint. Same tuple shape as
+        # _instance_committed_endpoint / _last_active_endpoint, so downstream matching is
+        # unchanged. In-memory only — NOT cleared by from_dict (same
+        # reasoning as _last_active_endpoint: after a reload a stale key simply fails to match
+        # any enabled endpoint and degrades gracefully). Guarded by self._lock; written under it
+        # in release_slot_permit, read inside get_endpoint_chain's existing lock scope.
+        self._last_released_endpoint: Optional[Tuple[str, str]] = None
+
         # Persistence path — env var takes precedence for test isolation
         if os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR'):
             self._config_dir = Path(os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'])
@@ -947,7 +959,10 @@ class APIRouter:
             # slot (first-fit). If none is free we keep last-active anyway — never worse than
             # today's behaviour. The healthy path (last-active pool has room) is byte-identical.
             if not endpoint_configs:
-                _la_key = self._last_active_endpoint
+                # Prefer the just-released holder's endpoint (capability matching) over the
+                # racy global marker. Plain attribute read — safe inside this existing lock
+                # scope; do NOT add a nested lock. count_active() below stays lock-free.
+                _la_key = self._last_released_endpoint or self._last_active_endpoint
                 if _la_key is not None:
                     _la_base, _la_model = _la_key
                     # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
