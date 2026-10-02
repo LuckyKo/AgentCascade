@@ -84,8 +84,10 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
         content = _get(msg, 'content')
         if role == USER and content.startswith(COMPRESSION_MARKER):
             marker_count += 1
-            # Check marker has a closing summary tag
-            if '<context_summary>' in content and not content.strip().endswith('</context_summary>'):
+            # Check marker has a closing summary tag. Containment (not endswith): markers may
+            # carry a trailing <last_supervisor_task> block after </context_summary> (todo.md:143),
+            # so the closing tag is no longer guaranteed to be at the very end of the content.
+            if '<context_summary>' in content and '</context_summary>' not in content:
                 compression_logger.warning(
                     f"[MSG POOL VALIDATION] Malformed compression marker at index {i} for '{agent_name}' "
                     f"(missing closing </context_summary>)")

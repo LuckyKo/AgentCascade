@@ -5,9 +5,10 @@ import time
 
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.compression.helpers import (_parse_marker_timestamps, _refine_tool_call_boundary,
-                                               build_consolidation_marker_message, build_marker_message,
-                                               compute_discard_count, extract_summary_from_marker, get_message_role,
-                                               select_markers_for_consolidation)
+                                                build_consolidation_marker_message, build_marker_message,
+                                                compute_discard_count, extract_last_supervisor_task,
+                                                extract_last_task_from_marker, extract_summary_from_marker, get_message_role,
+                                                select_markers_for_consolidation)
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.engine.helpers import _get_active_functions_from_template
 from agent_cascade.llm.schema import FUNCTION, USER, Message
@@ -283,11 +284,26 @@ def _consolidate_markers(
             # timestamp" as the latest L1, breaking the intended span. L1 markers use
             # positional timestamps (first/last message of their compressed chunk), so each
             # L1 header reflects its own chunk's time range independently.
+            # Carry the preserved supervisor task forward into the L2 marker (todo.md:143).
+            # extract_summary_from_marker returns only the summary body, so without this the L2
+            # marker would silently drop the task. Walk the markers being consolidated from
+            # newest to oldest and keep the first one that carries a <last_supervisor_task> —
+            # the newest is the most recent instruction; older ones are superseded. Failure
+            # direction is safe: if no marker has one, last_task stays None and no section is
+            # emitted (loss, not unbounded growth).
+            l2_last_task = None
+            for idx in reversed(current_consolidate_indices):
+                carried = extract_last_task_from_marker(current_history[idx])
+                if carried:
+                    l2_last_task = carried
+                    break
+
             new_marker = build_consolidation_marker_message(
                 consolidated_summary,
                 len(summaries_to_consolidate),
                 first_ts=l2_first_ts,
                 last_ts=l2_last_ts,
+                last_task=l2_last_task,
             )
 
             # Stamp the L2 marker's completion ts at creation time. Like L1 markers it is
@@ -746,11 +762,22 @@ def compress_context(
         logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
         first_ts, last_ts = None, None
 
+    # ── 8b. Extract the last supervisor task from the DISCARDED window (todo.md:143) ──
+    # NOTE: scans active_set[:target_discard_count], NOT target_messages. On a first
+    # compression target_messages prepends U0 (the original first user message, core.py step 6)
+    # purely so the Compressor can see the initial prompt — but U0 is permanently excluded from
+    # active_set and is NOT being discarded (it survives the trim untouched at index 1). Scanning
+    # target_messages here would both be wrong (U0 stays in the pool verbatim) and duplicate the
+    # first message inside the marker — exactly what todo.md:143 warns against. When U0 is the
+    # only task, this yields None and no section is emitted, which is correct.
+    last_task = extract_last_supervisor_task(active_set[:target_discard_count])
+
     marker_message = build_marker_message(
         generated_summary,
         first_ts=first_ts,
         last_ts=last_ts,
         n_messages=len(target_messages),
+        last_task=last_task,
     )
 
     # Stamp the marker's completion ts at creation time. The marker is inserted via direct

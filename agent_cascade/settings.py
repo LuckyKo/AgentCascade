@@ -190,6 +190,11 @@ COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv('AGENT_CASCADE_COMPRES
 # Compression agent invocation timeout (5 minutes for large compression/consolidation tasks)
 COMPRESSION_AGENT_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_AGENT_TIMEOUT', 300.0))
 
+# Hard cap on the <last_supervisor_task> block appended to a compression marker (todo.md:143).
+# Bounds marker growth and its tokens_after accounting; tasks over this are truncated with an
+# explicit "[truncated]" suffix so the agent knows the text is partial.
+COMPRESSION_MAX_LAST_TASK_CHARS: int = int(os.getenv('AGENT_CASCADE_COMPRESSION_MAX_LAST_TASK_CHARS', 4000))
+
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT',
                                             1600.0))  # Auto-dismiss regular agents after X seconds inactivity

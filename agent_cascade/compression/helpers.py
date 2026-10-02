@@ -7,6 +7,7 @@ from typing import Any, List, Tuple
 
 from agent_cascade.llm.schema import FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
+from agent_cascade.settings import COMPRESSION_MAX_LAST_TASK_CHARS
 from agent_cascade.utils.utils import extract_text_from_message
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,15 @@ logger = logging.getLogger(__name__)
 # Anchored on the arrow pattern only — no surrounding parens required, so it matches both L1
 # and L2 formats. Groups: (1) start datetime, (2) end datetime.
 _MARKER_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d{2} \d{2}:\d{2})')
+
+# Trailing block appended to a compression marker carrying the verbatim text of the last
+# genuine supervisor task found in the discarded window (todo.md:143). Rendered AFTER
+# </context_summary> — never inside it — because every summary consumer
+# (extract_summary_from_marker, the existing_summary compounding path, the _CONTEXT_SUMMARY_RE
+# UI cache) takes the first <context_summary>..</context_summary> pair and would otherwise
+# ingest the raw task as summary text. Raw only: no framing sentence, per the supervisor's
+# decision to keep system-flavoured prose out of the supervisor's own message.
+LAST_TASK_SECTION = '\n\n<last_supervisor_task>\n{task}\n</last_supervisor_task>'
 
 
 def is_compression_marker(msg: Any) -> bool:
@@ -37,6 +47,76 @@ def is_compression_marker(msg: Any) -> bool:
     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
     return (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER) and
             '<context_summary>' in content)
+
+
+# Prefixes that identify system-injected USER messages — none of which carry task intent.
+# Detection is prefix-based because Message carries no provenance metadata (llm/schema.py).
+# A genuine supervisor task that happens to *begin* with one of these would be skipped; that
+# is acceptable (supervisors do not write bracket-tagged openers) and is logged at DEBUG below.
+_NON_TASK_PREFIXES = (
+    '--- CONTEXT COMPRESSED',          # markers (defensive; is_compression_marker also runs)
+    '[SYSTEM]',
+    '[SYSTEM WARNING',
+    '[SYSTEM ERROR',
+    '[COMPRESSION]',
+    '[BACKGROUND TOOL RESULT',
+    '[TOOL',
+    '[Agent ',
+    '⟨shell_cmd',
+)
+
+
+def is_supervisor_task_message(msg: Any) -> bool:
+    """True if msg is a USER-role message authored by the supervisor (a real task / re-task).
+
+    Excludes every system-injected USER message (compression feedback, loop warnings,
+    turn-budget warnings, async tool results) — none of which carry task intent and whose
+    prefixes are enumerated in _NON_TASK_PREFIXES. Detection is prefix-based because Message
+    carries no provenance metadata (llm/schema.py:146-182).
+
+    NOTE (follow-up): the *correct* fix would be to stamp ``extra={'origin': 'supervisor'}`` at
+    every supervisor-ingress path (drain_queue, Telegram/WS bridges, lifecycle task build) and
+    key off that. That is out of scope here — it touches many ingress paths and is not
+    back-compatible with existing JSONL sessions. See todo.md:143 follow-up.
+
+    Args:
+        msg: A Message object or dict.
+
+    Returns:
+        True if the message looks like a genuine supervisor task; False otherwise.
+    """
+    if get_message_role(msg) != USER:
+        return False
+    if is_compression_marker(msg):
+        return False
+    content = extract_text_from_message(msg, add_upload_info=False)
+    if not isinstance(content, str) or not content.strip():
+        return False
+    stripped = content.lstrip()
+    if stripped.startswith(_NON_TASK_PREFIXES):
+        logger.debug(f"Skipping supervisor-task candidate with system prefix: {stripped[:60]!r}")
+        return False
+    return True
+
+
+def extract_last_supervisor_task(messages) -> str | None:
+    """Return the verbatim text of the last genuine supervisor task in ``messages``.
+
+    Scans from the end (most recent first) and returns the first message that passes
+    ``is_supervisor_task_message``. Returns None if there is no qualifying message — e.g. when
+    the discarded window holds only system-injected USER messages, or on a first compression
+    where U0 (the only task) sits outside the active set.
+
+    Args:
+        messages: Iterable of Message objects or dicts to scan (typically the discarded window).
+
+    Returns:
+        The stripped text of the last genuine supervisor task, or None if there is none.
+    """
+    for msg in reversed(list(messages)):
+        if is_supervisor_task_message(msg):
+            return extract_text_from_message(msg, add_upload_info=False).strip() or None
+    return None
 
 
 def select_markers_for_consolidation(marker_indices: List[int]) -> Tuple[List[int], int]:
@@ -144,6 +224,34 @@ def extract_summary_from_marker(msg: Any) -> str | None:
         if '<context_summary>' in content and '</context_summary>' in content:
             summary_text = content.split('<context_summary>', 1)[1].split('</context_summary>', 1)[0].strip()
             return summary_text if summary_text else None
+    except Exception:
+        pass
+    return None
+
+
+def extract_last_task_from_marker(msg: Any) -> str | None:
+    """Extract the <last_supervisor_task> text from a compression marker message.
+
+    Companion to ``extract_summary_from_marker``: that one returns only the
+    <context_summary> body, so L2 consolidation (which feeds summaries back to the compressor)
+    would otherwise drop the preserved task entirely. This reads the trailing
+    <last_supervisor_task> block appended by ``build_marker_message`` /
+    ``build_consolidation_marker_message`` (todo.md:143).
+
+    Args:
+        msg: A Message object or dict that is a compression marker.
+
+    Returns:
+        The extracted last-task text, or None if the marker has no such block (legacy markers)
+        or parsing fails.
+    """
+    try:
+        content = extract_text_from_message(msg, add_upload_info=False)
+        if not isinstance(content, str):
+            return None
+        if '<last_supervisor_task>' in content and '</last_supervisor_task>' in content:
+            task_text = content.split('<last_supervisor_task>', 1)[1].split('</last_supervisor_task>', 1)[0].strip()
+            return task_text if task_text else None
     except Exception:
         pass
     return None
@@ -439,7 +547,8 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
     return f"{start_str} → {end_str}, {dur_str}"
 
 
-def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0):
+def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0,
+                         last_task: str | None = None):
     """
     Wrap a raw summary in the COMPRESSION_BASELINE_TEMPLATE to create a marker message.
 
@@ -453,6 +562,16 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
         first_ts: Earliest completion timestamp (unix seconds) in the compressed window.
         last_ts: Latest completion timestamp (unix seconds) in the compressed window.
         n_messages: Number of messages compressed (used for the no-timestamp fallback).
+        last_task: Verbatim text of the last genuine supervisor task found in the DISCARDED
+            window (todo.md:143), or None. When truthy, a <last_supervisor_task> block is
+            appended AFTER </context_summary> — never inside it, because every summary consumer
+            (extract_summary_from_marker, the existing_summary compounding path, the
+            _CONTEXT_SUMMARY_RE UI cache) takes the first <context_summary>..</context_summary>
+            pair and would otherwise ingest the raw task as summary text. Text over
+            COMPRESSION_MAX_LAST_TASK_CHARS is truncated with a "[truncated]" suffix so the
+            closing tag always stays intact for parsers. NOTE: editing a marker via the UI
+            (ws_handlers) replaces the whole message, which destroys this block — accepted
+            degradation; the block is best-effort, not load-bearing.
 
     Returns:
         A Message object (USER role) with the formatted compression marker.
@@ -463,6 +582,12 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
         header=header,
         summary=summary_text,
     )
+    if last_task:
+        task = last_task.strip()
+        # Truncate BEFORE appending so the closing tag always survives (todo.md:143).
+        if len(task) > COMPRESSION_MAX_LAST_TASK_CHARS:
+            task = task[:COMPRESSION_MAX_LAST_TASK_CHARS] + '\n…[truncated]'
+        content += LAST_TASK_SECTION.format(task=task)
     return Message(role=USER, content=str(content))
 
 
@@ -471,6 +596,7 @@ def build_consolidation_marker_message(
     num_summaries_consolidated: int,
     first_ts: float | None = None,
     last_ts: float | None = None,
+    last_task: str | None = None,
 ) -> Message:
     """Build a L2 consolidation marker message.
 
@@ -484,6 +610,11 @@ def build_consolidation_marker_message(
         num_summaries_consolidated: Number of lower-level summaries merged into this one.
         first_ts: Earliest timestamp (unix seconds) across the consolidated markers, if known.
         last_ts: Latest timestamp (unix seconds) across the consolidated markers, if known.
+        last_task: Verbatim text of the newest preserved supervisor task carried forward from
+            the markers being consolidated (todo.md:143), or None. Appended AFTER
+            </context_summary> exactly as in build_marker_message; extract_summary_from_marker
+            returns only the summary body, so without this carry-forward an L2 marker would drop
+            the task entirely.
 
     Returns:
         A Message object (USER role) with the formatted consolidation marker.
@@ -497,6 +628,12 @@ def build_consolidation_marker_message(
         header=header,
         summary=summary_text,
     )
+    if last_task:
+        task = last_task.strip()
+        # Truncate BEFORE appending so the closing tag always survives (todo.md:143).
+        if len(task) > COMPRESSION_MAX_LAST_TASK_CHARS:
+            task = task[:COMPRESSION_MAX_LAST_TASK_CHARS] + '\n…[truncated]'
+        content += LAST_TASK_SECTION.format(task=task)
     return Message(role=USER, content=str(content))
 
 
