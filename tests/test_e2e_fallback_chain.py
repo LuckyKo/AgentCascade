@@ -25,6 +25,7 @@ import pytest
 
 from agent_cascade.api_router import APIEndpoint
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
+from agent_cascade.slot_queue import SlotHolder
 from agent_cascade.llm.base import ModelServiceError
 from agent_cascade.settings import ENDPOINT_BLACKLIST_SECONDS  # noqa: F401  (re-exported for tests)
 from agent_cascade.settings import ENDPOINT_COOLDOWN_SECONDS
@@ -559,3 +560,184 @@ class TestLastActiveEndpointFallback:
 
         # Last-active endpoint IS injected even without an instance name.
         assert [c['api_base'] for c in chain] == ['http://c-api', 'http://default-api']
+
+
+# ============================================================================
+# L147 — Capacity-aware Tier 1.5 (liveness fix)
+#
+# When an unassigned agent's last-active endpoint pool is at full concurrency,
+# the router must route to a free-capacity endpoint instead of handing out the
+# saturated one (which would stall for QUEUE_WAIT_TIMEOUT under conc=0 collapse).
+# If NO endpoint has room it keeps last-active anyway (never worse than today).
+#
+# We populate REAL SlotPools via router.scheduler._get_or_create_pool(...) so the
+# true endpoint→pool key derivation is exercised — including the conc=0 collapse
+# to '_shared_sequential_slot_'. count_active() reads len(pool._running); we insert
+# real SlotHolder objects (keyed by instance_name) to occupy slots.
+# ============================================================================
+
+
+def _occupy_pool(router, api_base, concurrency_limit, n_holders=1):
+    """Populate the REAL pool that (api_base, concurrency_limit) maps to with n holders.
+
+    Returns the pool so tests can assert on its key / occupancy directly.
+    """
+    pool = router.scheduler._get_or_create_pool(api_base, concurrency_limit)
+    for i in range(n_holders):
+        holder = SlotHolder(
+            agent_name='busy-agent',
+            instance_name=f'busy-{i}',
+            acquisition_id=i + 1,
+        )
+        pool._running[f'busy-{i}'] = holder
+    return pool
+
+
+class TestCapacityAwareLastActiveFallback:
+
+    def test_t1_last_active_full_routes_to_free_endpoint(self, router):
+        """T1: last-active pool FULL, another endpoint free → chain head is the free one.
+
+        Last in chain is still the Tier-4 default (unchanged).
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        # Occupy pool 'a' (capacity 1) → saturated. Pool 'b' stays empty.
+        _occupy_pool(router, 'http://a-api', 1, n_holders=1)
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://b-api', f"expected free endpoint b at head, got {bases}"
+        assert bases[-1] == 'http://default-api'
+
+    def test_t2_all_pools_full_falls_back_to_last_active(self, router):
+        """T2: ALL pools full → keep last-active (no-regression guarantee)."""
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        # Occupy BOTH pools → no free endpoint exists.
+        _occupy_pool(router, 'http://a-api', 1, n_holders=1)
+        _occupy_pool(router, 'http://b-api', 1, n_holders=1)
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://a-api', f"expected last-active a kept when all full, got {bases}"
+        assert bases[-1] == 'http://default-api'
+
+    def test_t3_last_active_not_full_unchanged(self, router):
+        """T3: last-active pool NOT full → chain head is last-active (healthy path)."""
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        # Occupy only pool 'b' → last-active 'a' still has room.
+        _occupy_pool(router, 'http://b-api', 1, n_holders=1)
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://a-api', f"expected last-active a at head (not full), got {bases}"
+
+    def test_t4_conc0_collapse_routes_away_from_shared_pool(self, router):
+        """T4 (the L147 condition): two endpoints, different models, SAME base, both conc=0.
+
+        Both collapse into the single '_shared_sequential_slot_' pool (capacity 1). Occupy it
+        via the real factory and assert the unassigned agent is routed AWAY from that shared
+        pool. Companion assertion pins the finding: count_active(base, 0) is non-zero for BOTH
+        endpoints (they share one pool), so a per-endpoint occupancy check would have failed.
+        """
+        base = 'http://shared-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', base, model='model-b', concurrency_limit=0)
+        # A third endpoint on a DIFFERENT base with free capacity — the escape hatch.
+        _add_endpoint(router, 'c', 'http://free-api', model='model-c', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        # Occupy the shared sequential pool (both a and b land here).
+        shared_pool = _occupy_pool(router, base, 0, n_holders=1)
+        assert shared_pool.key == '_shared_sequential_slot_'
+
+        # Companion assertion (pins the §2.2 finding): BOTH conc=0 endpoints map to the SAME
+        # occupied shared pool — count_active(base, 0) is non-zero for each model's base. This is
+        # why a naive per-endpoint occupancy check would have failed to see the saturation: the
+        # collapse to '_shared_sequential_slot_' makes one holder saturate every conc=0 endpoint.
+        assert router.scheduler.count_active(base, 0) > 0, \
+            'count_active(base,0) must be non-zero (shared pool occupied)'
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        # Must route away from the saturated shared base → head is the free endpoint.
+        assert bases[0] == 'http://free-api', f"expected escape to free endpoint, got {bases}"
+        # The chosen cfg must NOT be either conc=0 model on the shared base.
+        assert chain[0]['model'] == 'model-c'
+
+    def test_t5_conc_minus1_last_active_never_saturated(self, router):
+        """T5: last-active endpoint conc=-1 (unlimited) → never saturated → chain head = last-active."""
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=-1)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        # Even if we occupy the other pool, unlimited last-active is never full.
+        _occupy_pool(router, 'http://b-api', 1, n_holders=1)
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://a-api', f"expected unlimited last-active kept at head, got {bases}"
+
+    def test_t6_absent_pool_reads_as_free(self, router):
+        """T6: last-active on an endpoint whose pool was never created → reads as free → chain head = last-active.
+
+        Guards the scheduler.py `pool else 0` branch (absent pool → count_active returns 0).
+        """
+        # conc=1 but we NEVER call _get_or_create_pool / acquire, so the pool is absent.
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+
+        # Sanity: the pool truly is absent → count_active reads 0.
+        assert router.scheduler.count_active('http://a-api', 1) == 0
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://a-api', f"expected absent-pool last-active kept at head, got {bases}"
+
+    def test_t7_first_match_wins_for_duplicate_last_active_key(self, router):
+        """T7: two enabled endpoints share the SAME (api_base, model) but differ in config.
+
+        The pre-change code did `break` on the FIRST match; the capacity-aware rewrite must
+        preserve first-match-wins for _la_ep so the healthy path stays byte-identical. If it
+        instead kept scanning and took the LAST match, a duplicate-key endpoint with different
+        max_input_tokens would silently change which config is handed out.
+
+        Setup: endpoints 'a' (max_input_tokens=100) and 'b' (max_input_tokens=999) both serve
+        model-d @ http://d-api with conc=-1 (never saturated). last-active = that shared key.
+        The fixture default general_limit is 0, so no substitution happens and the endpoint's
+        TRUE max_input_tokens is what reaches the chain → first-match-wins must yield 100.
+        """
+        _add_endpoint(router, 'a', 'http://d-api', model='model-d', concurrency_limit=-1)
+        _add_endpoint(router, 'b', 'http://d-api', model='model-d', concurrency_limit=-1)
+        # Give each a distinct max_input_tokens so we can tell them apart in the chain.
+        with router._lock:
+            for e in router.endpoints.values():
+                if e.name == 'a':
+                    e.max_input_tokens = 100
+                elif e.name == 'b':
+                    e.max_input_tokens = 999
+
+        # last-active points at the shared (base, model) key; neither pool is saturated.
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base('http://d-api'), 'model-d')
+
+        chain = router.get_endpoint_chain('security', instance_name='worker1')
+        bases = [c['api_base'] for c in chain]
+        assert bases[0] == 'http://d-api'
+        # First-match-wins: the FIRST endpoint ('a', max_input_tokens=100) is chosen, not 'b' (999).
+        assert chain[0]['max_input_tokens'] == 100, \
+            f"expected first-match-wins (max_input_tokens=100), got {chain[0]['max_input_tokens']}"

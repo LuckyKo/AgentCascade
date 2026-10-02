@@ -935,6 +935,17 @@ class APIRouter:
             # remains the last resort. Read-only w.r.t. _last_active_endpoint — no writes.
             # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
             # per-instance probe fast-path gate (skip re-probing a live connection).
+            #
+            # CAPACITY-AWARE (L147 liveness fix): this tier used to be capacity-BLIND — it
+            # handed an unassigned agent the last-used endpoint without checking whether that
+            # endpoint's pool is at full concurrency. Under conc=0 every such endpoint collapses
+            # into ONE global capacity-1 pool ('_shared_sequential_slot_', scheduler.py:62-63),
+            # so a long-running parallel agent holding it starved an unassigned child (e.g. a
+            # spawned Security agent) for the full QUEUE_WAIT_TIMEOUT (300s) even when other
+            # endpoints had free pools. Now, before handing out last-active, we check whether
+            # ITS pool is saturated; if so we prefer the FIRST enabled endpoint with ≥1 free
+            # slot (first-fit). If none is free we keep last-active anyway — never worse than
+            # today's behaviour. The healthy path (last-active pool has room) is byte-identical.
             if not endpoint_configs:
                 _la_key = self._last_active_endpoint
                 if _la_key is not None:
@@ -946,19 +957,85 @@ class APIRouter:
                         _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _la_base and
                                    _default_cfg.get('model') == _la_model)
                     if not _is_default:
+                        # ── Capacity-aware Tier 1.5 (L147, first-fit variant) ─────────────
+                        # Single pass over self.endpoints.values():
+                        #   • remember the enabled endpoint matching last-active as _la_ep
+                        #   • independently remember the FIRST enabled endpoint with ≥1 free
+                        #     slot as _free_ep (the fallback candidate).
+                        # An endpoint is "free" when conc==-1 (unlimited), or count_active <
+                        # capacity. We only compute occupancy where it matters (deciding if
+                        # last-active is saturated, and finding a free endpoint) — no ranking
+                        # headroom math, so every name referenced in a log line below is bound.
+                        _la_ep = None
+                        _free_ep = None
                         for ep in self.endpoints.values():
-                            if normalize_api_base(ep.api_base) == _la_base and ep.model == _la_model and ep.enabled:
-                                cfg = copy.deepcopy(ep.to_llm_cfg())
-                                ep_limit = ep.max_input_tokens
-                                if ep_limit <= 0 and general_limit > 0:
-                                    cfg['max_input_tokens'] = general_limit
+                            if not ep.enabled:
+                                continue
+                            if _la_ep is None and normalize_api_base(ep.api_base) == _la_base and ep.model == _la_model:
+                                _la_ep = ep  # first-match-wins (matches pre-change behavior); keep scanning for a free endpoint
+                                continue
+                            if _free_ep is None:
+                                _conc = ep.concurrency_limit
+                                if _conc == -1:
+                                    _free_ep = ep  # unlimited — always has room
+                                else:
+                                    _cap = _conc if _conc > 0 else 1  # mirrors scheduler.py:65 (0→1)
+                                    # LOCK-SAFETY: self._lock is a NON-reentrant threading.Lock.
+                                    # count_active() takes no lock and never re-enters the router,
+                                    # so this is safe TODAY — but any future change that makes it
+                                    # consult router state, or wrapping this block in a nested
+                                    # `with self._lock:`, will SELF-DEADLOCK. Keep it lock-free.
+                                    _active = self.scheduler.count_active(ep.api_base, _conc)
+                                    if _active < _cap:
+                                        _free_ep = ep
 
-                                # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
-                                endpoint_configs.append(cfg)
+                        # Decide which endpoint to hand out.
+                        _chosen_ep = None
+                        _used_free = False
+                        if _la_ep is not None:
+                            _conc = _la_ep.concurrency_limit
+                            if _conc == -1:
+                                _saturated = False  # unlimited — never full
+                            else:
+                                _cap = _conc if _conc > 0 else 1
+                                # LOCK-SAFETY: same non-reentrant-Lock constraint as above; the
+                                # occupancy read is advisory/point-in-time (NOT a reservation) —
+                                # another thread may fill the pool before the agent's acquire().
+                                _active = self.scheduler.count_active(_la_ep.api_base, _conc)
+                                _saturated = (_active >= _cap)
+                            if _saturated and _free_ep is not None:
+                                # Last-active pool is full but another endpoint has room → route there.
+                                logger.info(
+                                    f"[APIRouter] Tier 1.5: last-active '{_la_model}' @ {_la_base} "
+                                    f"pool is saturated ({_active}/{_cap}); routing unassigned "
+                                    f"{agent_type}/{instance_name} to free-capacity endpoint "
+                                    f"'{_free_ep.model}' @ {_free_ep.api_base}"
+                                )
+                                _chosen_ep = _free_ep
+                                _used_free = True
+                            else:
+                                # Not saturated, or no free endpoint → keep last-active (today's behaviour).
+                                _chosen_ep = _la_ep
+
+                        if _chosen_ep is not None:
+                            cfg = copy.deepcopy(_chosen_ep.to_llm_cfg())
+                            ep_limit = _chosen_ep.max_input_tokens
+                            if ep_limit <= 0 and general_limit > 0:
+                                cfg['max_input_tokens'] = general_limit
+
+                            # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
+                            endpoint_configs.append(cfg)
+                            if _used_free:
+                                logger.debug(
+                                    f"[APIRouter] {agent_type}/{instance_name}: using capacity-preferred "
+                                    f"endpoint '{_chosen_ep.model}' @ {_chosen_ep.api_base} (last-active saturated)"
+                                )
+                            else:
                                 logger.debug(
                                     f"[APIRouter] {agent_type}/{instance_name}: using last-active endpoint '{_la_model}' @ {_la_base}"
                                 )
-                                break
+                        # _chosen_ep is None → stale key (no enabled match) → append nothing,
+                        # degrade to Tier 3/4 as today.
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
             if not endpoint_configs and self._last_successful_endpoint_cfg is not None:
