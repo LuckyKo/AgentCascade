@@ -99,7 +99,7 @@ def is_supervisor_task_message(msg: Any) -> bool:
     return True
 
 
-def extract_last_supervisor_task(messages) -> str | None:
+def extract_last_supervisor_task(messages: Any) -> str | None:
     """Return the verbatim text of the last genuine supervisor task in ``messages``.
 
     Scans from the end (most recent first) and returns the first message that passes
@@ -547,6 +547,21 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
     return f"{start_str} → {end_str}, {dur_str}"
 
 
+def _append_last_task_section(content: str, last_task: str | None) -> str:
+    """Append the ``<last_supervisor_task>`` block to a marker body (todo.md:143).
+
+    Shared by :func:`build_marker_message` and :func:`build_consolidation_marker_message`.
+    Truncates before appending so the closing tag always survives. Returns *content*
+    unchanged when *last_task* is falsy.
+    """
+    if not last_task:
+        return content
+    task = last_task.strip()
+    if len(task) > COMPRESSION_MAX_LAST_TASK_CHARS:
+        task = task[:COMPRESSION_MAX_LAST_TASK_CHARS] + '\n…[truncated]'
+    return content + LAST_TASK_SECTION.format(task=task)
+
+
 def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0,
                          last_task: str | None = None):
     """
@@ -582,12 +597,7 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
         header=header,
         summary=summary_text,
     )
-    if last_task:
-        task = last_task.strip()
-        # Truncate BEFORE appending so the closing tag always survives (todo.md:143).
-        if len(task) > COMPRESSION_MAX_LAST_TASK_CHARS:
-            task = task[:COMPRESSION_MAX_LAST_TASK_CHARS] + '\n…[truncated]'
-        content += LAST_TASK_SECTION.format(task=task)
+    content = _append_last_task_section(content, last_task)
     return Message(role=USER, content=str(content))
 
 
@@ -628,12 +638,7 @@ def build_consolidation_marker_message(
         header=header,
         summary=summary_text,
     )
-    if last_task:
-        task = last_task.strip()
-        # Truncate BEFORE appending so the closing tag always survives (todo.md:143).
-        if len(task) > COMPRESSION_MAX_LAST_TASK_CHARS:
-            task = task[:COMPRESSION_MAX_LAST_TASK_CHARS] + '\n…[truncated]'
-        content += LAST_TASK_SECTION.format(task=task)
+    content = _append_last_task_section(content, last_task)
     return Message(role=USER, content=str(content))
 
 

@@ -218,6 +218,8 @@ class TestBuildConsolidationMarkerMessage:
         assert '<last_supervisor_task>' in c
         assert 'carried task' in c
         assert c.count('</context_summary>') == 1
+        # Placement: the task block must come AFTER the summary closing tag.
+        assert c.index('</context_summary>') < c.index('<last_supervisor_task>')
 
     def test_none_unchanged(self):
         m = build_consolidation_marker_message('cons summary', 3)
