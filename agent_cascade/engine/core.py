@@ -3020,22 +3020,25 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             pass
 
         # Sticky slot plan change #5b (user decision 3 / §3.9 Gap A): there is NO
-        # slotless degraded state. The 30s fast window above only bounds the
-        # post-yield fast path; on timeout the instance re-enters the FIFO at the
-        # TAIL for its resolved effective slot and blocks until granted — unbounded,
-        # by design (no timeouts, no bypass, no preemption). The old
+        # slotless degraded state. The fast window above only bounds the post-yield
+        # fast path; on timeout the instance re-enters the FIFO at the TAIL for its
+        # resolved effective slot and blocks until granted — no bypass, no preemption.
+        # NOTE: passing timeout=None here is NOT truly unbounded — EndpointScheduler.acquire
+        # (scheduler.py) resolves None to QUEUE_WAIT_TIMEOUT (default 300s), so this re-acquire
+        # still gives up after ~QUEUE_WAIT_TIMEOUT and raises TimeoutError. The intent is simply
+        # "wait the full queue window, not the short fast path", not "block forever". The old
         # [SLOT_REACQUIRE_FAILED] "degrade to async-only" path is deleted: it left a
         # conc=0 agent ungated, reintroducing the trashing window this project closes.
         logger.info(f"[SLOTPOOL] instance={holder_name} pool={slot_info.get('slot_key')} "
                     f"action=acquire-queued waiters=-1 (post-yield fast re-acquire timed out after "
-                    f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, unbounded by design)")
+                    f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, bounded by QUEUE_WAIT_TIMEOUT)")
         try:
             release_cb = router.scheduler.acquire(
                 api_base=api_base,
                 concurrency_limit=concurrency_limit,
                 instance_name=holder_name,
                 agent_class=instance.agent_class,
-                timeout=None,  # unbounded — blocks at FIFO tail by design
+                timeout=None,  # wait the full queue window (QUEUE_WAIT_TIMEOUT), not the short fast path
             )
         except SlotCancelled:
             raise

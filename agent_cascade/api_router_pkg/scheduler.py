@@ -126,7 +126,12 @@ class EndpointScheduler:
         if sched_pool is None:
             return None
 
-        # Use QUEUE_WAIT_TIMEOUT (300s) as primary; ENDPOINT_SLOT_ACQUIRE_TIMEOUT as fallback for backward compat.
+        # Resolve the queue-wait timeout when the caller didn't pass one explicitly.
+        # QUEUE_WAIT_TIMEOUT (default 300s, AGENT_CASCADE_SLOT_QUEUE_TIMEOUT) is the PRIMARY
+        # value and always wins under normal config. ENDPOINT_SLOT_ACQUIRE_TIMEOUT (default 30s)
+        # is only reachable if QUEUE_WAIT_TIMEOUT is set to 0 (falsy) — i.e. it is a legacy
+        # backward-compat escape hatch, NOT a way to cap acquires at 30s while the queue timeout
+        # stays at its default. Do not rely on ENDPOINT_SLOT_ACQUIRE_TIMEOUT alone to shorten waits.
         effective_timeout = timeout if timeout is not None else (QUEUE_WAIT_TIMEOUT or ENDPOINT_SLOT_ACQUIRE_TIMEOUT)
 
         try:
