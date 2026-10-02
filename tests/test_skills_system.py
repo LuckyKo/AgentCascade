@@ -3729,3 +3729,246 @@ class TestGetAllMetadataDisabledResurface:
 
         metas = m.get_all_metadata(include_active_only=False)
         assert [x['name'] for x in metas].count('epsilon') == 1
+
+
+# ===========================================================================
+# scan_skills perf fix — revert-proof regression guard (todo L149)
+# ===========================================================================
+
+def _write_skill_file_with_name(root: Path, dir_name: str, fm_name: str) -> Path:
+    """Write a SKILL.md whose directory name may differ from its frontmatter ``name``.
+
+    Mirrors :func:`_write_skill_file` but lets the two names diverge — needed to pin the
+    first-wins / dir-vs-frontmatter keying of the servable index (scan_skills perf fix).
+    """
+    skill_dir = root / dir_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / 'SKILL.md'
+    path.write_text(
+        f'---\nname: {fm_name}\ndescription: perf-fixture {dir_name}\n'
+        f'version: "1.0.0"\ntriggers:\n  - test\n---\n# Body {dir_name}\n',
+        encoding='utf-8')
+    return path
+
+
+def _reference_all_metadata(skill_paths, disabled_names):
+    """Independent reference implementation of get_all_metadata(include_active_only=False).
+
+    Mirrors the manager's two branches exactly so a divergent output proves a semantic
+    regression (the byte-identity oracle for the perf fix):
+
+    1. ACTIVE REGISTRY branch — every servable skill NOT in disabled_names, in scan order,
+       with source/version/chars taken from the frontmatter/parsed body (matches how
+       _register_single stores them; a missing 'source' key stays '' like the real registry).
+    2. DISABLED RE-SURFACE branch — for each disabled name present in the servable index and
+       not already surfaced, append an entry whose 'name' is the lowercased disabled key and
+       whose source defaults to 'system' (the old per-name re-parse path's exact shape).
+
+    Both branches build a first-wins {lower_name: (path, parsed)} map keyed on BOTH frontmatter
+    name and directory name — identical to discover()'s servable-index construction.
+    """
+    index = {}
+    active_entries = []  # (name_key, parsed) in scan order, for the registry branch
+    for root in skill_paths:
+        if not root.exists():
+            continue
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for skill_dir in entries:
+            if not skill_dir.is_dir():
+                continue
+            skill_file = skill_dir / 'SKILL.md'
+            if not skill_file.exists():
+                continue
+            try:
+                parsed = parse_skill_file(skill_file)
+            except (FileNotFoundError, OSError):
+                continue
+            fm = parsed.get('frontmatter', {})
+            name = fm.get('name') or skill_dir.name  # registry key (matches _register_single)
+            fm_name = str(fm.get('name') or '').strip()
+            if fm_name:
+                index.setdefault(fm_name.lower(), (skill_file, parsed))
+            index.setdefault(skill_dir.name.lower(), (skill_file, parsed))
+            if str(name).lower() not in {n.lower() for n in disabled_names}:
+                active_entries.append((str(name), parsed))
+
+    result = []
+    present = set()
+    # Branch 1: active registry skills (source '' when the frontmatter omits it, like _register_single).
+    for name, parsed in active_entries:
+        fm = parsed.get('frontmatter', {})
+        result.append({
+            'name': name,
+            'description': fm.get('description', ''),
+            'triggers': fm.get('triggers', []),
+            'source': fm.get('source', ''),
+            'version': parsed.get('version', '1.0.0'),
+            'chars': len(parsed.get('body', '')),
+        })
+        present.add(name.lower())
+    # Branch 2: disabled re-surface (source defaults to 'system' — the old loop's exact shape).
+    for nm in sorted({n.lower() for n in disabled_names}):
+        if nm in present:
+            continue
+        hit = index.get(nm)
+        if hit is None:
+            continue
+        _path, parsed = hit
+        fm = parsed.get('frontmatter', {})
+        result.append({
+            'name': nm,
+            'description': fm.get('description', ''),
+            'triggers': fm.get('triggers', []),
+            'source': fm.get('source', 'system'),
+            'version': parsed.get('version', '1.0.0'),
+            'chars': len(parsed.get('body', '')),
+        })
+    return result
+
+
+class TestScanSkillsPerfFix:
+    """Revert-proof guard for the scan_skills 20s fix (todo L149).
+
+    The fix replaced the O(|disabled| x |corpus|) re-parse walk in
+    _find_servable_skill_path / get_all_metadata with a servable index built once per
+    discover(). These tests pin two things WITHOUT any timing assertion:
+
+    1. Call-count guard — parse_skill_file is called ~once per file (not per disabled name).
+       A revert to the quadratic walk blows through ``n_calls <= 2 * n_files`` by ~5x.
+    2. Differential golden — the manager's get_all_metadata(include_active_only=False) output
+       is byte-identical to an independent reference implementation, so any semantic drift
+       (wrong keying, wrong dedup, wrong name casing, lost first-wins order) fails here.
+    """
+
+    def _build_corpus(self, tmp_path):
+        """~40 skill dirs across two roots with the edge cases the fix must handle."""
+        root_a = tmp_path / 'root_a'
+        root_b = tmp_path / 'root_b'
+        for r in (root_a, root_b):
+            r.mkdir(parents=True)
+
+        # 18 skills per root (36) + cross-root duplicate pair (2) + dir/frontmatter rename (1)
+        # + one extra root_b filler (1) = 40 SKILL.md files total.
+        for i in range(18):
+            _write_skill_file_with_name(root_a, f'alpha{i:02d}', f'alpha{i:02d}')
+            _write_skill_file_with_name(root_b, f'beta{i:02d}', f'beta{i:02d}')
+        # Cross-root duplicate: SAME frontmatter name in both roots. root_a is scanned first,
+        # so the index must resolve 'shared-skill' to root_a's file (first-wins).
+        _write_skill_file_with_name(root_a, 'shared-skill', 'shared-skill')
+        _write_skill_file_with_name(root_b, 'shared-skill', 'shared-skill')
+        # dir-name != frontmatter name: the index must key on BOTH so either resolves it.
+        _write_skill_file_with_name(root_a, 'dir-renamed-dir', 'renamed-frontmatter')
+        _write_skill_file_with_name(root_b, 'gamma-extra', 'gamma-extra')  # 40th file (root_b filler)
+        return root_a, root_b
+
+    def test_parse_call_count_and_differential_golden(self, tmp_path):
+        """Call-count guard + differential golden + first-wins ordering (revert-proof core)."""
+        import agent_cascade.skills.manager as mgr_mod
+
+        root_a, root_b = self._build_corpus(tmp_path)
+        # Every SKILL.md file in the corpus (for the call-count bounds).
+        n_files = sum(1 for p in list(root_a.rglob('SKILL.md')) + list(root_b.rglob('SKILL.md')))
+        assert n_files == 40, f"fixture must have exactly 40 SKILL.md files, got {n_files}"
+
+        m = make_hermetic_skill_manager(tmp_path)
+        # ~10 disabled names: a mix of active-root and cross-root skills.
+        disabled_names = [f'alpha{i:02d}' for i in range(5)] + ['beta00', 'beta01',
+                                                                'shared-skill', 'renamed-frontmatter']
+        m._disabled_names = set(disabled_names)
+
+        # Count parse_skill_file calls through the manager module's own binding (the code path).
+        real_parse = mgr_mod.parse_skill_file
+        counter = {'n': 0}
+
+        def counting_parse(path):
+            counter['n'] += 1
+            return real_parse(path)
+
+        m._cache_ttl = 0.0
+        with patch.object(mgr_mod, 'parse_skill_file', counting_parse):
+            m.discover([root_a, root_b])
+            n_after_discover = counter['n']
+            # The perf fix parses each file exactly once during discovery (the index is a
+            # byproduct). A quadratic re-parse inside get_all_metadata would add ~|disabled|
+            # full-corpus walks on top of this.
+            assert n_after_discover == n_files, \
+                f"discover() must parse each file once: {n_after_discover} != {n_files}"
+
+            metas1 = m.get_all_metadata(include_active_only=False)
+            n_after_first = counter['n']
+            metas2 = m.get_all_metadata(include_active_only=False)
+            n_after_second = counter['n']
+
+        # Call-count guard: the whole sequence must stay O(n_files), not O(|disabled|*n_files).
+        assert n_after_second <= 2 * n_files, \
+            (f"quadratic re-parse regression: {n_after_second} parse calls "
+             f"(<= {2 * n_files} expected; a per-name walk would be ~{n_files * len(disabled_names)})")
+        # Guard against a "cheat" that skips discovery entirely (index never built).
+        assert n_after_second >= n_files, \
+            f"discovery must still parse the corpus: {n_after_second} < {n_files}"
+
+        # The two get_all_metadata calls do NO additional parsing (index reuse / cache).
+        assert n_after_first == n_after_discover, '1st get_all_metadata must not re-parse'
+        assert n_after_second == n_after_first, '2nd get_all_metadata must not re-parse'
+
+        # Differential golden: byte-identical to the independent reference implementation.
+        expected = _reference_all_metadata([root_a, root_b], disabled_names)
+        assert metas1 == expected, \
+            f"get_all_metadata diverged from reference:\n{metas1}\n!=\n{expected}"
+
+        # First-wins ordering: the cross-root duplicate resolves to root_a's file.
+        shared_path = m._find_servable_skill_path('shared-skill')
+        assert shared_path is not None, 'cross-root duplicate must be resolvable'
+        assert str(shared_path).startswith(str(root_a)), \
+            f"'shared-skill' must resolve to root_a (scanned first), got {shared_path}"
+
+    def test_dir_name_vs_frontmatter_name_resolution(self, tmp_path):
+        """A skill whose dir name != frontmatter name resolves by BOTH keys."""
+        import agent_cascade.skills.manager as mgr_mod  # noqa: F401 (path consistency)
+
+        root_a, root_b = self._build_corpus(tmp_path)
+        m = make_hermetic_skill_manager(tmp_path)
+        m._disabled_names = set()
+        m._cache_ttl = 0.0
+        m.discover([root_a, root_b])
+
+        # Resolvable by frontmatter name...
+        by_fm = m._find_servable_skill_path('renamed-frontmatter')
+        assert by_fm is not None and str(by_fm).endswith('dir-renamed-dir' + os.sep + 'SKILL.md')
+        # ...and by directory name (both keys are indexed).
+        by_dir = m._find_servable_skill_path('dir-renamed-dir')
+        assert by_dir == by_fm
+
+    def test_disabled_resurface_after_status_flip_no_rediscovery(self, tmp_path):
+        """Disabling a skill WITHOUT re-discovering still re-surfaces it (live _disabled_names).
+
+        Pins the freshness contract: get_all_metadata derives its disabled list from the live
+        _disabled_names + the servable index, so a status flip that invalidates the cache (but
+        does not re-scan) must not drop a just-disabled skill from the listing. This is exactly
+        the case that broke when the resurface list was snapshotted at discovery time.
+        """
+        root_a = tmp_path / 'root_a'
+        root_a.mkdir(parents=True)
+        for name in ('flip-a', 'flip-b'):
+            _write_skill_file_with_name(root_a, name, name)
+
+        m = make_hermetic_skill_manager(tmp_path)
+        m._disabled_names = set()
+        m._cache_ttl = 0.0
+        m.discover([root_a])
+
+        # Disable 'flip-a' via the public API (adds to _disabled_names + invalidates cache),
+        # then drop it from the registry WITHOUT re-discovering — mimicking a mid-flow flip.
+        ok, _msg = m.disable_skill('flip-a')
+        assert ok
+        with m._write_lock:
+            m._skills_registry.pop('flip-a', None)
+
+        metas = m.get_all_metadata(include_active_only=False)
+        names = [x['name'] for x in metas]
+        assert 'flip-a' in names, 'just-disabled skill must still re-surface without re-discovery'
+        # 'flip-b' stays active (registry branch); no duplicate.
+        assert names.count('flip-a') == 1

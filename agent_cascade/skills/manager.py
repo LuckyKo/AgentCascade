@@ -225,6 +225,11 @@ class SkillManager:
         self._cache_ttl: float = SKILL_CACHE_TTL_SECONDS  # from settings
         self._disabled_names: set = set(SKILLS_DISABLED)
         self._skill_paths: List[Path] = []  # stored for _ensure_discovered()
+        # Servable name index, built once per discovery pass as a byproduct of the parse loop.
+        # Keyed case-insensitively on both frontmatter name and directory name (first-wins).
+        # It is a derived cache: NOT reset by invalidate_cache() (a status flip alone leaves it
+        # valid); discover() rebuilds it whenever the scan signature changes. See discover().
+        self._servable_index: Dict[str, Tuple[Path, dict]] = {}  # lower_name -> (SKILL.md Path, parsed)
 
         # Metrics infrastructure (batched activation tracking)
         self._metrics_file = Path('agents/global/skills-metrics.json')
@@ -424,45 +429,28 @@ class SkillManager:
         return names
 
     def _find_servable_skill_path(self, name: str) -> Optional[Path]:
-        """Resolve a skill's SKILL.md path from the servable corpus (one-level disk walk).
+        """Resolve a skill's SKILL.md path from the servable corpus (index lookup).
 
         Companion to :meth:`_servable_skill_names` (which returns *names only*): this
         returns the actual ``<root>/<subdir>/SKILL.md`` path for a given name, so a
-        registry-absent (soft-evicted) skill can still be loaded on demand. Matches
-        ``discover()``'s scan depth — one level deep per root — and is case-insensitive
-        against both the frontmatter ``name`` and the directory name.
+        registry-absent (soft-evicted) skill can still be loaded on demand. Resolves from
+        ``_servable_index`` — built once during ``discover()`` and keyed case-insensitively
+        on both the frontmatter ``name`` and the directory name — instead of re-walking the
+        disk per call (the old O(|corpus|) parse-per-name walk is gone).
 
         Only fires for names NOT in the active registry; it does not consult
         ``_disabled_names`` (that is what makes an evicted skill resolvable) and does
-        not touch the registry. Returns None when no servable backing file exists.
+        not touch the registry. Returns None when no servable backing file exists, or when
+        discovery has not run yet (empty index — see the cold-process guard below).
         """
-        target = str(name).lower()
-        for root in self._skill_paths:
-            if not root.exists():
-                continue
-            try:
-                entries = list(root.iterdir())
-            except OSError as e:
-                logger.warning('[SKILLS] Servable-path scan error on %s: %s', root, e)
-                continue
-            for skill_dir in entries:
-                if not skill_dir.is_dir():
-                    continue
-                skill_file = skill_dir / 'SKILL.md'
-                if not skill_file.exists():
-                    continue
-                try:
-                    parsed = parse_skill_file(skill_file)
-                except (FileNotFoundError, OSError):
-                    # Unparseable file — fall back to the directory name only.
-                    if skill_dir.name.lower() == target:
-                        return skill_file
-                    continue
-                frontmatter = parsed.get('frontmatter', {})
-                fm_name = str(frontmatter.get('name') or '').lower()
-                if fm_name == target or skill_dir.name.lower() == target:
-                    return skill_file
-        return None
+        # Cold-process guard: mirrors _ensure_discovered's own "no paths configured" guard.
+        # Both callers (get_all_metadata re-surface, load_full_instructions soft-eviction)
+        # only reach this after discover() has populated the index, so an empty index here
+        # means no corpus is configured — return None rather than a stale/empty lookup.
+        if not self._skill_paths:
+            return None
+        hit = self._servable_index.get(str(name).lower())
+        return hit[0] if hit else None
 
     def _migrate_metrics_to_v13(self) -> None:
         """One-time port of the metrics store from schema 1.2 to 1.3 (idempotent).
@@ -535,6 +523,12 @@ class SkillManager:
                         }
                 # Invariant (D-E): every status=inactive entry must be excluded from
                 # discovery this process — sync _disabled_names with the final state.
+                # NOTE: this mutation does NOT call invalidate_cache(). That is safe
+                # because _servable_index is a superset of every on-disk skill (built
+                # during discover() before the disabled filter), and compute_scan_signature
+                # already folds _disabled_names into the signature — so any later persisted
+                # status flip forces a rebuild. Only a pure in-memory add relies on index
+                # liveness, which get_all_metadata handles by reading live _disabled_names.
                 for name, entry in self._metrics.items():
                     if isinstance(entry, dict) and entry.get('status') == 'inactive':
                         self._disabled_names.add(str(name).lower())
@@ -1157,6 +1151,11 @@ class SkillManager:
         with self._write_lock:
             self._cache_signature = None
             self._cache_timestamp = 0.0
+            # NOTE: _servable_index is deliberately NOT reset here. It is a derived cache
+            # rebuilt by discover() whenever the scan signature (which folds in
+            # _disabled_names) changes, so a status flip alone leaves it valid — and clearing
+            # it would break mid-flow callers that re-enable a skill (invalidate_cache) and
+            # then resolve it again before the next discovery.
 
     def _ensure_discovered(self) -> None:
         """Trigger discovery if cache expired or paths changed (cache-respecting).
@@ -1197,6 +1196,11 @@ class SkillManager:
         collected: list = []
         found_count = 0
         skipped_count = 0
+        # Servable name index built as a byproduct of the parse loop below — keyed on both
+        # the frontmatter name and the directory name (case-insensitive), first-wins. Built
+        # locally and swapped in atomically after the loop so a mid-loop failure leaves the
+        # previous index intact (same discipline as the registry swap in Phase 2).
+        servable_index: Dict[str, Tuple[Path, dict]] = {}
 
         for root in skill_paths:
             if not root.exists():
@@ -1224,6 +1228,15 @@ class SkillManager:
                     frontmatter = parsed.get('frontmatter', {})
                     name = frontmatter.get('name', skill_dir.name)
 
+                    # Index EVERY servable skill (disabled and platform-incompatible alike)
+                    # BEFORE the disabled/platform checks below — _find_servable_skill_path
+                    # deliberately does not consult those, so a disabled or platform-skipped
+                    # skill must still be resolvable. setdefault keeps first-wins ordering.
+                    fm_name = str(frontmatter.get('name') or '').strip()
+                    if fm_name:  # never key on an empty frontmatter name
+                        servable_index.setdefault(fm_name.lower(), (skill_file, parsed))
+                    servable_index.setdefault(skill_dir.name.lower(), (skill_file, parsed))
+
                     if name.lower() in self._disabled_names:
                         # logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
                         skipped_count += 1
@@ -1239,6 +1252,12 @@ class SkillManager:
                     found_count += 1
             except OSError as e:
                 logger.warning('[SKILLS] Error scanning %s: %s', root, e)
+
+        # Swap in the servable index atomically (built locally above; a mid-loop failure left
+        # the previous index intact). get_all_metadata derives its disabled re-surface list
+        # from this index + the live _disabled_names at call time, so it stays correct across
+        # status flips without needing its own snapshot.
+        self._servable_index = servable_index
 
         # Phase 2: Clear stale registry + register + rebuild atomically under lock.
         # NOTE (BUG_0020): do NOT clear the matcher index here — _rebuild_index ->
@@ -1492,32 +1511,22 @@ class SkillManager:
                 present.add(str(data.get('name', name)).lower())
         if not include_active_only:
             # Append disabled/inactive skills that still have a servable on-disk file so the
-            # default listing is complete. Dedup by lowercase name to avoid the test-fixture
-            # case where a disabled skill is manually kept in the registry. Disk reads happen
-            # OUTSIDE the registry lock (only the snapshot above is under _write_lock);
-            # _find_servable_skill_path does no locking and reads _disabled_names as a plain
-            # set (consistent with scan_skills).
-            # Iterate _disabled_names DIRECTLY instead of walking the whole corpus via
-            # _servable_skill_names() first: that walk parsed every SKILL.md on disk (~193 ms)
-            # only to discard everything not disabled — 100% wasted work when the disabled set
-            # is empty (the common case). The per-name _find_servable_skill_path(nm) below is
-            # what actually proves servability, so it subsumes the listing walk.
-            # Known benign superset vs the old loop: if a skill's directory name differs from
-            # its frontmatter name AND _disabled_names is keyed by the DIRECTORY name, the new
-            # loop re-surfaces it while the old one silently dropped it (the old loop only ever
-            # saw frontmatter names). Unreachable in production — every _disabled_names writer
-            # lowercases and keys on the metrics/frontmatter name.
-            disabled = {n.lower() for n in self._disabled_names}
-            for nm in sorted(disabled):
+            # default listing is complete. The old code called _find_servable_skill_path +
+            # parse_skill_file per disabled name — an O(|disabled| x |corpus|) re-parse walk.
+            # Now each name is a single dict lookup into self._servable_index (built once in
+            # discover()), so this is O(|disabled|) with no disk I/O and no re-parsing. The
+            # index + _disabled_names are read live (not snapshotted at discovery time), which
+            # keeps the listing correct across status flips that invalidate the cache without a
+            # full re-scan. Dedup by lowercase name to avoid the test-fixture case where a
+            # disabled skill is manually kept in the registry. The 'name' key stays the
+            # lowercased disabled key (not the frontmatter name) — preserved from the old loop.
+            for nm in sorted({n.lower() for n in self._disabled_names}):
                 if nm in present:
                     continue
-                path = self._find_servable_skill_path(nm)
-                if path is None:
+                hit = self._servable_index.get(nm)
+                if hit is None:
                     continue
-                try:
-                    parsed = parse_skill_file(path)
-                except (FileNotFoundError, OSError):
-                    continue
+                _path, parsed = hit
                 fm = parsed.get('frontmatter', {})
                 result.append({
                     'name': nm,
