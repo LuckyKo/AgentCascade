@@ -731,7 +731,9 @@ TOOL_METADATA = {
             'query':
                 'Search query or task description to match against available skills. Leave empty to list all registered skills.',
             'active':
-                'If true, restrict the no-query listing to ACTIVE skills only (exclude disabled/inactive ones). Default: false — the default listing includes disabled/inactive skills, each marked with an " (inactive)" suffix.'
+                'If true, restrict the no-query listing to ACTIVE skills only (exclude disabled/inactive ones). Default: false — the default listing includes disabled/inactive skills, each marked with an " (inactive)" suffix.',
+            'preview':
+                'Skill name to preview. When provided, returns the full raw text of that skill\'s SKILL.md file in a code block — useful for anchoring when updating an existing skill. Overrides query/listing behavior.'
         }
     },
     'propose_skill': {

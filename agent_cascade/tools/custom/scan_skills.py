@@ -34,7 +34,8 @@ class ScanSkills(BaseTool):
     name = 'scan_skills'
     description = ('Scan registered skills and return matching skills with relevance scores. '
                    'Use this to discover which skills are available before calling call_agent with load_skill. '
-                   'Returns skill names, descriptions, match scores, and quality ratings for the given query.')
+                   'Returns skill names, descriptions, match scores, and quality ratings for the given query. '
+                   'Pass a skill name via `preview` (or as a single-word query) to get its full raw text.')
     parameters = {
         'type': 'object',
         'properties': {
