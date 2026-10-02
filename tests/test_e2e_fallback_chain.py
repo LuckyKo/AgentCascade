@@ -742,6 +742,133 @@ class TestCapacityAwareLastActiveFallback:
         assert chain[0]['max_input_tokens'] == 100, \
             f"expected first-match-wins (max_input_tokens=100), got {chain[0]['max_input_tokens']}"
 
+    # ------------------------------------------------------------------
+    # T8-T11 — Tier 1.5 self-saturation fix (count_active_excluding).
+    # A conc=0 agent that already holds the shared pool must NOT count its OWN
+    # permit as saturation, or it first-fits away from the endpoint it is about
+    # to call. Another agent holding it still counts → liveness fix intact.
+    # ------------------------------------------------------------------
+
+    def test_t8_self_holder_not_saturated_keeps_last_active(self, router):
+        """T8 (the fix): requesting instance's OWN name is the sole holder of the shared pool.
+
+        Unassigned agent on conc=0 endpoint A; its own instance_name already holds
+        '_shared_sequential_slot_'. Self-exclusion → not saturated → chain head == A
+        (NOT first-fit to another endpoint). This is repro Scenario A2.
+        """
+        base = 'http://a-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        # The requesting instance's OWN holder is the sole occupant of the shared pool.
+        pool = router.scheduler._get_or_create_pool(base, 0)
+        assert pool.key == '_shared_sequential_slot_'
+        own_name = 'Security_guard'
+        pool._running[own_name] = SlotHolder(
+            agent_name='security', instance_name=own_name, acquisition_id=1,
+        )
+
+        chain = router.get_endpoint_chain('security', instance_name=own_name)
+        head = chain[0]
+        assert head['api_base'] == base and head['model'] == 'model-a', \
+            f"expected self-held conc=0 last-active kept at head, got {head}"
+
+    def test_t9_other_holder_still_saturated_routes_away(self, router):
+        """T9 (liveness preserved): a DIFFERENT instance holds the shared pool → still saturated.
+
+        Same setup as T8 but the holder is NOT the requesting instance → first-fit must
+        still route to the free endpoint. Pins that self-exclusion does not regress L147.
+        """
+        base = 'http://a-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        pool = router.scheduler._get_or_create_pool(base, 0)
+        assert pool.key == '_shared_sequential_slot_'
+        # Someone ELSE holds the shared pool — self-exclusion must not hide this.
+        pool._running['other-agent'] = SlotHolder(
+            agent_name='other', instance_name='other-agent', acquisition_id=1,
+        )
+
+        chain = router.get_endpoint_chain('security', instance_name='Security_guard')
+        head = chain[0]
+        # First-fit must land on the free endpoint B (conc=1, own pool), not just "not A".
+        assert head['api_base'] == 'http://b-api' and head['model'] == 'model-b', \
+            f"expected first-fit to free endpoint B, got {head}"
+
+    def test_t10_conc_gt_0_self_holder_keeps_last_active(self, router):
+        """T10 (conc>0 unaffected — MANDATORY): conc=2 endpoint A, sole holder is the requesting
+        instance on its own per-base pool → chain head == A (already worked before; guards
+        against an over-broad change to count_active_excluding).
+        """
+        base = 'http://a-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=2)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        pool = router.scheduler._get_or_create_pool(base, 2)
+        assert pool.key == normalize_api_base(base)  # per-base pool, not the shared one
+        own_name = 'Security_guard'
+        pool._running[own_name] = SlotHolder(
+            agent_name='security', instance_name=own_name, acquisition_id=1,
+        )
+
+        chain = router.get_endpoint_chain('security', instance_name=own_name)
+        head = chain[0]
+        assert head['api_base'] == base and head['model'] == 'model-a', \
+            f"expected conc>0 self-held last-active kept at head, got {head}"
+
+    def test_t11_conc0_empty_shared_pool_keeps_last_active(self, router):
+        """T11 (conc=0 healthy path — MANDATORY): unassigned agent, conc=0 last-active A, shared
+        pool EMPTY, instance_name provided → chain head == A (last-active kept). Mirrors T3 but
+        with concurrency_limit=0; guards that self-exclusion does not alter the non-saturated path.
+        """
+        base = 'http://a-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        # Create the shared pool but leave it EMPTY.
+        pool = router.scheduler._get_or_create_pool(base, 0)
+        assert pool.key == '_shared_sequential_slot_'
+        assert len(pool._running) == 0
+
+        chain = router.get_endpoint_chain('security', instance_name='Security_guard')
+        head = chain[0]
+        assert head['api_base'] == base and head['model'] == 'model-a', \
+            f"expected empty-pool conc=0 last-active kept at head, got {head}"
+
+    def test_t12_selfsat_scenario_c_slot_and_chain_agree(self, router):
+        """Discriminator (Scenario-C invariant): after acquiring a conc=0 slot on an unassigned
+        agent, the instance-aware resolvers must agree on api_base:
+            get_effective_slot_info(...)['api_base'] == get_endpoint_chain(...)[0]['api_base'].
+        Do NOT compare against get_llm_config (no instance_name → still sees self-saturation).
+        """
+        base = 'http://a-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
+        with router._lock:
+            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+
+        # Simulate the slot acquire that production performs before the first LLM turn.
+        pool = router.scheduler._get_or_create_pool(base, 0)
+        assert pool.key == '_shared_sequential_slot_'
+        own_name = 'Security_guard'
+        pool._running[own_name] = SlotHolder(
+            agent_name='security', instance_name=own_name, acquisition_id=1,
+        )
+
+        slot_info = router.get_effective_slot_info('security', instance_name=own_name)
+        chain_head = router.get_endpoint_chain('security', instance_name=own_name)[0]
+        assert slot_info['api_base'] == chain_head['api_base'], \
+            f"slot api_base {slot_info['api_base']} != chain head api_base {chain_head['api_base']}"
+
 
 # ============================================================================
 # Tier 1.5 "last-released ENDPOINT" preference (capability matching)

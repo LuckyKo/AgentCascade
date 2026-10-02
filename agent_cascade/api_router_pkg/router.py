@@ -1016,7 +1016,10 @@ class APIRouter:
                                 # LOCK-SAFETY: same non-reentrant-Lock constraint as above; the
                                 # occupancy read is advisory/point-in-time (NOT a reservation) —
                                 # another thread may fill the pool before the agent's acquire().
-                                _active = self.scheduler.count_active(_la_ep.api_base, _conc)
+                                # The read excludes THIS instance's own holder (self-saturation would
+                                # first-fit a conc=0 agent off its own endpoint); remains lock-free/advisory.
+                                # Another agent holding it still counts → liveness intact.
+                                _active = self.scheduler.count_active_excluding(_la_ep.api_base, _conc, instance_name)
                                 _saturated = (_active >= _cap)
                             if _saturated and _free_ep is not None:
                                 # Last-active pool is full but another endpoint has room → route there.

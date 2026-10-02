@@ -206,6 +206,26 @@ class EndpointScheduler:
         pool = self._pools.get(slot_key)
         return len(pool._running) if pool else 0
 
+    def count_active_excluding(self, api_base: str, concurrency_limit: int,
+                               instance_name: Optional[str] = None) -> int:
+        """Count active tasks on an endpoint, excluding the requesting instance's own holder.
+
+        Used by Tier 1.5 to decide whether last-active is saturated BY SOMEONE ELSE: a
+        conc=0 agent that already holds the shared pool must not count its OWN permit as
+        saturation, or it first-fits away from the endpoint it is about to call. Derives
+        slot_key identically to :meth:`count_active`; lock-free (advisory read).
+        """
+        if concurrency_limit == -1:
+            return 0
+        slot_key = '_shared_sequential_slot_' if concurrency_limit == 0 else normalize_api_base(api_base)
+        pool = self._pools.get(slot_key)
+        if not pool:
+            return 0
+        if instance_name is None:
+            return len(pool._running)
+        # pool._running is keyed by instance_name (slot_queue.py).
+        return sum(1 for k in pool._running if k != instance_name)
+
     def get_status(self) -> Dict[str, Dict]:
         """Get status of all scheduled endpoints (for diagnostics).
 
