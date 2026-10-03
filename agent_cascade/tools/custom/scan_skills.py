@@ -136,7 +136,7 @@ class ScanSkills(BaseTool):
                 try:
                     from agent_cascade.skills.parser import parse_skill_file
                     return parse_skill_file(prod_file).get('version', '?')
-                except (OSError, FileNotFoundError):
+                except (FileNotFoundError, OSError, UnicodeDecodeError):
                     return '?'
 
             # Inactive marker (no-query mode): mark every disabled/inactive skill. Driven by
@@ -262,8 +262,8 @@ class ScanSkills(BaseTool):
                 parsed = parse_skill_file(Path(file_path))
                 version = parsed.get('version')
                 source = (parsed.get('frontmatter') or {}).get('source')
-            except (FileNotFoundError, OSError, UnicodeDecodeError):
-                pass
+            except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+                logger.debug('[SKILLS] preview: failed to parse %s: %s', file_path, e)
 
         if not file_path:
             return f"Skill '{display_name}' not found or not loadable."

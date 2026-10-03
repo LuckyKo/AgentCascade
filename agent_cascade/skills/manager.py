@@ -419,7 +419,8 @@ class SkillManager:
                         continue
                     try:
                         parsed = parse_skill_file(skill_file)
-                    except (FileNotFoundError, OSError):
+                    except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+                        logger.debug('[SKILLS] Servable-skill scan: skipping unreadable %s: %s', skill_file, e)
                         names.add(skill_dir.name.lower())
                         continue
                     frontmatter = parsed.get('frontmatter', {})
@@ -1221,7 +1222,7 @@ class SkillManager:
 
                     try:
                         parsed = parse_skill_file(skill_file)
-                    except (FileNotFoundError, OSError) as e:
+                    except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                         logger.warning('[SKILLS] Failed to read skill file %s: %s', skill_file, e)
                         skipped_count += 1
                         continue
@@ -1298,7 +1299,7 @@ class SkillManager:
         if parsed is None:
             try:
                 parsed = parse_skill_file(skill_file)
-            except (FileNotFoundError, OSError) as e:
+            except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                 logger.warning('[SKILLS] Failed to read skill file %s: %s', skill_file, e)
                 return
 
@@ -1652,7 +1653,7 @@ class SkillManager:
                         logger.debug("[SKILLS] Loaded evicted skill '%s' from servable disk (%d chars)",
                                      skill_name, len(body))
                         return body or None
-                    except (FileNotFoundError, OSError) as e:
+                    except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                         logger.debug("[SKILLS] Failed to load evicted skill '%s' from %s: %s",
                                      skill_name, sp, e)
                 logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry or on disk "
@@ -1681,7 +1682,7 @@ class SkillManager:
                     if count_load:
                         self._increment_load_count(skill_name, version)
                     return body or None
-                except (FileNotFoundError, OSError) as e:
+                except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                     # Non-loadable skills are expected during AUTO matching — keep this
                     # at debug level to match the silent-skip behavior of _resolve_skill_names.
                     logger.debug("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
@@ -2116,8 +2117,8 @@ class SkillManager:
         if prod_file.exists():
             try:
                 prod_version = parse_skill_file(prod_file).get('version', prod_version)
-            except (FileNotFoundError, OSError):
-                pass
+            except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+                logger.debug('[SKILLS] Candidate upgrade: could not read incumbent version from %s: %s', prod_file, e)
 
         # NEW (D-1): if a candidate A is already pending, resolve O-vs-A FIRST — while A's file
         # and registry entry are still intact — so the decision runs on A's own accumulated
@@ -2408,7 +2409,8 @@ class SkillManager:
                 # 1. Resolve versions: candidate from registry, incumbent parsed from its file.
                 try:
                     prod_version = parse_skill_file(prod_file).get('version', '1.0.0')
-                except (FileNotFoundError, OSError):
+                except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+                    logger.debug('[SKILLS] Candidate gate: could not read incumbent version from %s: %s', prod_file, e)
                     prod_version = '1.0.0'
                 avg_cand, cand_n = self._version_rating_avg(name, candidate_version)
                 avg_prod, prod_n = self._version_rating_avg(name, prod_version)

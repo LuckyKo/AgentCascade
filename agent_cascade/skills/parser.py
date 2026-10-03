@@ -271,6 +271,7 @@ def parse_skill_file(skill_path: Path) -> Dict[str, Any]:
 
     Raises:
         FileNotFoundError: If the skill_path does not exist.
+        UnicodeDecodeError: If the file is not valid UTF-8 (callers decide whether to skip or propagate).
     """
     if not skill_path.exists():
         raise FileNotFoundError(f"Skill file not found: {skill_path}")
