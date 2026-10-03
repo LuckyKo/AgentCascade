@@ -45,11 +45,6 @@ class SlotsMixin:
                 _ep_name = ''
                 _model = llm_cfg.get('model', '')
 
-            logger.debug(
-                f"[SLOT] {instance_name} ({agent_class}): acquire → "
-                f"endpoint='{_ep_name}' model={_model} api_base={api_base}, conc={concurrency_limit}"
-            )
-
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
             # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking.
             # `pool` is forwarded to SlotPool.acquire (plan §3.3 option a) so the

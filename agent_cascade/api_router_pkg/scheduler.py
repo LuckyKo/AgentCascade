@@ -4,7 +4,6 @@ Moved verbatim from api_router.py (Phase 3a pure-move refactor).
 Re-exports the timeout constants it reads as module globals so tests can patch them here.
 """
 
-import logging
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -13,7 +12,23 @@ from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.settings import ENDPOINT_SLOT_ACQUIRE_TIMEOUT
 from agent_cascade.slot_queue import QUEUE_WAIT_TIMEOUT, SlotPool
 
-logger = logging.getLogger(__name__)
+
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger.
+
+    Same pattern as slot_queue._AppLoggerProxy: init_logging() REBINDS the
+    log module's `logger` global to a handler-equipped instance; a module-level
+    import would bind the pre-init, handler-less object. This proxy resolves
+    the current log.logger on every attribute access.
+    """
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 
 class EndpointScheduler:
