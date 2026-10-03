@@ -900,6 +900,12 @@ class _FakeEngine:
         self._compression_lock = threading.RLock()
         self.reacquire_for = lambda instance, holder_name, context='reacquire': \
             ExecutionEngine.reacquire_for(self, instance, holder_name, context)
+        # reacquire_for (production) calls self._safe_note_held_endpoint for last-released
+        # bookkeeping. Bind the REAL staticmethod so the production call path resolves on this
+        # fake too — same "exercise real code" contract as reacquire_for above. Without it the
+        # bound production method raises AttributeError here and the stress scenarios report
+        # UNEXPLAINED (see test_stress_slot_pool liveness tests).
+        self._safe_note_held_endpoint = ExecutionEngine._safe_note_held_endpoint
         self._resolve_placeholders = lambda args, instance_name, tool_name: args
         self._cache_tool_args = lambda *a, **k: None
         # Baseline tree (d78f2347~1) calls engine._release_slot directly in the

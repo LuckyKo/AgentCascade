@@ -676,6 +676,13 @@ def release_slot_permit(
         if _router is not None and hasattr(_router, '_instance_committed_endpoint'):
             with _router._lock:
                 _committed = _router._instance_committed_endpoint.get(holder_name)
+                if _committed is None:
+                    # Committed marker was already consumed by a prior release (yield/reacquire
+                    # cycle whose LLM call never re-ran). Fall back to the acquire-time held
+                    # endpoint so _last_released_endpoint still tracks this holder's endpoint.
+                    _held = getattr(_router, '_instance_held_endpoint', {}).get(holder_name)
+                    if _held is not None:
+                        _committed = _held
                 if _committed is not None:
                     _router._last_released_endpoint = _committed
     except Exception:
@@ -683,12 +690,14 @@ def release_slot_permit(
 
     # Clear the committed-endpoint probe marker so the next acquisition re-probes
     # instead of skipping against a dead connection — same contract as
-    # APIRouter._drop_held_permit; recovered best-effort via holder._pool_ref.
+    # APIRouter._drop_held_permit; recovered best-effort via holder._pool_ref. The acquire-time
+    # held-endpoint marker is popped alongside it (last-released bookkeeping, see above).
     try:
         _router = _get_router_from_holder(holder)
         if _router is not None and hasattr(_router, '_instance_committed_endpoint'):
             with _router._lock:
                 _router._instance_committed_endpoint.pop(holder_name, None)
+                _router._instance_held_endpoint.pop(holder_name, None)
     except Exception:
         pass
 

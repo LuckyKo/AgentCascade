@@ -161,6 +161,14 @@ class APIRouter:
         # request, so re-probing it would be wasted HTTP.
         self._instance_committed_endpoint: Dict[str, Tuple[str, str]] = {}
 
+        # Per-instance "currently held endpoint" marker, dedicated to last-released recording.
+        # Distinct from _instance_committed_endpoint (which is the sanity-probe fast-path gate):
+        # this one is written at ACQUIRE time so a yield/reacquire cycle whose LLM call never ran
+        # still records the correct endpoint on release. Same tuple shape as
+        # _instance_committed_endpoint: instance_name → (normalized_base, model). In-memory only,
+        # guarded by self._lock. Popped on release/drop alongside the committed marker.
+        self._instance_held_endpoint: Dict[str, Tuple[str, str]] = {}
+
         # Global "last active endpoint" — the (normalized_base, model) of the most recent
         # successful call by ANY agent. Unlike _instance_committed_endpoint (per-instance,
         # probe fast-path only), this is a single shared marker used for UNASSIGNED-agent
@@ -511,6 +519,32 @@ class APIRouter:
         slot_info['needs_slot'] = True
         return slot_info
 
+    def note_held_endpoint(self, agent_class: str, instance_name: Optional[str]) -> None:
+        """Record the endpoint an instance is about to call as its currently-held endpoint.
+
+        Best-effort bookkeeping for _last_released_endpoint: at acquire time we have a slot
+        (hence an endpoint) but no completed LLM call yet. Written so release_slot_permit can
+        record the correct endpoint after a yield/reacquire cycle whose LLM call never ran.
+        Deliberately does NOT touch _instance_committed_endpoint (the sanity-probe fast-path
+        gate). Never raises — bookkeeping must not break slot acquisition.
+        """
+        if not instance_name:
+            return
+        try:
+            chain = self.get_endpoint_chain(agent_class, instance_name=instance_name)
+            if not chain:
+                return
+            cfg = chain[0]
+            base = cfg.get('api_base') or cfg.get('model_server') or ''
+            model = cfg.get('model')
+            if not base or not model:
+                return
+            key = (normalize_api_base(base), model)
+            with self._lock:
+                self._instance_held_endpoint[instance_name] = key
+        except Exception:
+            pass
+
     def sync_sticky_slot(
         self,
         instance: 'AgentInstance',
@@ -781,6 +815,10 @@ class APIRouter:
                 if inst_name:
                     with self._lock:
                         self._instance_committed_endpoint.pop(inst_name, None)
+                        # Also clear the acquire-time held-endpoint marker (last-released
+                        # bookkeeping): this permit is being dropped, so the endpoint it gated
+                        # is no longer held. Popped alongside the committed marker above.
+                        self._instance_held_endpoint.pop(inst_name, None)
 
         logger.debug(f"[SLOTPOOL] instance={inst_name} pool={old_key} "
                      f"action=drop-fallback waiters={self._pool_waiter_count(old_key)}" +

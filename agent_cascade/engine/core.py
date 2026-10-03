@@ -325,6 +325,22 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
+    @staticmethod
+    def _safe_note_held_endpoint(router, agent_class: str, instance_name: str) -> None:
+        """Best-effort last-released bookkeeping: record the endpoint an acquire resolved to.
+
+        Centralizes the guard+call pattern shared by every slot-acquire funnel (initial,
+        sleep-wakeup, and both reacquire_for grants). ``note_held_endpoint`` itself never
+        raises, but the call is wrapped here too so a router without the method (older/patched
+        builds) or any unexpected failure can never break slot acquisition. Pure bookkeeping —
+        distinct from the committed probe-gate marker.
+        """
+        try:
+            if router is not None and hasattr(router, 'note_held_endpoint'):
+                router.note_held_endpoint(agent_class, instance_name)
+        except Exception:
+            pass
+
     def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = 'initial') -> None:
         """Acquire concurrency slot with debug logging.
 
@@ -358,6 +374,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     else:
                         slot_info = router.get_agent_slot_info(instance.agent_class)
                     instance._slot_key = slot_info.get('slot_key')
+                    # Best-effort last-released bookkeeping: record the endpoint this acquire
+                    # resolved to so release_slot_permit can update _last_released_endpoint even
+                    # if the LLM call never completes (yield/reacquire cycle). Distinct from the
+                    # committed probe-gate marker; never raises.
+                    self._safe_note_held_endpoint(router, instance.agent_class, instance.instance_name)
             logger.debug(f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
                          f"class={instance.agent_class}")
         except AgentTerminatedError:
@@ -3000,6 +3021,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     instance._slot_release = release_cb
                     # Track which slot key this agent holds (for diagnostics).
                     instance._slot_key = slot_info.get('slot_key')
+                # Best-effort last-released bookkeeping (outside the state lock): record the
+                # endpoint this re-acquire resolved to so a later release updates
+                # _last_released_endpoint even if the LLM call never ran. Never raises.
+                self._safe_note_held_endpoint(router, instance.agent_class, holder_name)
                 logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}'")
                 return True
             else:
@@ -3056,6 +3081,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             with instance._state_lock:
                 instance._slot_release = release_cb
                 instance._slot_key = slot_info.get('slot_key')
+            # Best-effort last-released bookkeeping (outside the state lock): same as the fast
+            # window above — record the endpoint this re-acquire resolved to so a later release
+            # updates _last_released_endpoint even if the LLM call never ran. Never raises.
+            self._safe_note_held_endpoint(router, instance.agent_class, holder_name)
             logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}' "
                          f"after unbounded FIFO wait")
             return True

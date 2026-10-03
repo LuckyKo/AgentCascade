@@ -1067,3 +1067,116 @@ class TestLastReleasedEndpointPreference:
 
         # Field unchanged — the empty committed read recorded nothing (did NOT set to None).
         assert router._last_released_endpoint == (normalize_api_base('http://b-api'), 'model-b')
+
+    def test_second_reacquire_updates_last_released_endpoint(self, router):
+        """THE regression: a holder that does TWO yield/reacquire cycles must keep updating
+        _last_released_endpoint to whatever endpoint it currently holds — not freeze at the
+        first release's endpoint.
+
+        Before the fix, the committed marker (popped on the first release) was never repopulated
+        by a re-acquire whose LLM call never ran, so the second release recorded nothing and the
+        field stayed frozen at A. The acquire-time held-endpoint marker now backs the read.
+        """
+        base_a = 'http://a-api'
+        base_b = 'http://b-api'
+        _add_endpoint(router, 'a', base_a, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', base_b, model='model-b', concurrency_limit=0)
+        # Give the holder its own Tier-1 chain [A, B] so cursor rotation can move it A → B.
+        router.set_agent_priorities('coder', ['ep_a', 'ep_b'])
+
+        key_a = (normalize_api_base(base_a), 'model-a')
+        key_b = (normalize_api_base(base_b), 'model-b')
+
+        # ── Cycle 1: acquire on A, note held endpoint, release → records A. ────────────────
+        pool = router.scheduler._get_or_create_pool(base_a, 0)
+        rel = router.scheduler.acquire(base_a, 0, instance_name='holder', agent_class='coder')
+        # Simulate the acquire-time writeback (what Funnel A/B now do via note_held_endpoint).
+        router.note_held_endpoint('coder', 'holder')
+        with router._lock:
+            assert router._instance_held_endpoint.get('holder') == key_a, \
+                f"held marker should be A after first acquire, got {router._instance_held_endpoint.get('holder')}"
+        h = _ReleaseHolder(router, pool)
+        if rel is not None:
+            h._slot_release = rel
+        ok = release_slot_permit(h, 'holder', action='drop-handoff', pool=pool)
+        assert ok is True
+        # Release recorded A; BOTH markers were popped (read-before-pop ordering preserved).
+        assert router._last_released_endpoint == key_a, \
+            f"first release should record A, got {router._last_released_endpoint}"
+        with router._lock:
+            assert 'holder' not in router._instance_committed_endpoint
+            assert 'holder' not in router._instance_held_endpoint
+
+        # ── Cycle 2: cursor rotates to B; re-acquire notes held=B; release → records B. ─────
+        # Kick the instance past A so get_endpoint_chain resolves to B (the real yield/reacquire
+        # resolution path that note_held_endpoint reads).
+        router.advance_instance_endpoint('holder')
+        pool_b = router.scheduler._get_or_create_pool(base_b, 0)
+        rel2 = router.scheduler.acquire(base_b, 0, instance_name='holder', agent_class='coder')
+        router.note_held_endpoint('coder', 'holder')
+        with router._lock:
+            assert router._instance_held_endpoint.get('holder') == key_b, \
+                f"held marker should be B after re-acquire, got {router._instance_held_endpoint.get('holder')}"
+        h2 = _ReleaseHolder(router, pool_b)
+        if rel2 is not None:
+            h2._slot_release = rel2
+        ok2 = release_slot_permit(h2, 'holder', action='drop-handoff', pool=pool_b)
+        assert ok2 is True
+        # THE fix: the second release records B (the endpoint just held), NOT the frozen A.
+        assert router._last_released_endpoint == key_b, \
+            f"second release should record B (not frozen at A), got {router._last_released_endpoint}"
+
+    def test_release_prefers_committed_over_held(self, router):
+        """When BOTH committed and held markers are present for a holder, release uses the
+        COMMITTED value (preserves existing behavior). The held marker is only a fallback."""
+        base_a = 'http://a-api'
+        base_b = 'http://b-api'
+        _add_endpoint(router, 'a', base_a, model='model-a', concurrency_limit=0)
+        _add_endpoint(router, 'b', base_b, model='model-b', concurrency_limit=0)
+
+        key_a = (normalize_api_base(base_a), 'model-a')
+        key_b = (normalize_api_base(base_b), 'model-b')
+
+        pool = router.scheduler._get_or_create_pool(base_a, 0)
+        rel = router.scheduler.acquire(base_a, 0, instance_name='holder', agent_class='coder')
+        # Seed BOTH markers with DIFFERENT values: committed=A (a real call succeeded), held=B.
+        with router._lock:
+            router._instance_committed_endpoint['holder'] = key_a
+            router._instance_held_endpoint['holder'] = key_b
+
+        h = _ReleaseHolder(router, pool)
+        if rel is not None:
+            h._slot_release = rel
+        ok = release_slot_permit(h, 'holder', action='drop-handoff', pool=pool)
+        assert ok is True
+        # Committed wins over held.
+        assert router._last_released_endpoint == key_a, \
+            f"committed should win over held, got {router._last_released_endpoint}"
+        with router._lock:
+            assert 'holder' not in router._instance_committed_endpoint
+            assert 'holder' not in router._instance_held_endpoint
+
+    def test_note_held_endpoint_does_not_touch_committed(self, router):
+        """Probe-gate isolation guard: note_held_endpoint writes ONLY _instance_held_endpoint.
+        It must never write to _instance_committed_endpoint (the sanity-probe fast-path gate) —
+        otherwise an instance that acquires a slot but never completes a call would skip the probe."""
+        base_a = 'http://a-api'
+        _add_endpoint(router, 'a', base_a, model='model-a', concurrency_limit=0)
+        # Assign the endpoint to 'coder' so note_held_endpoint resolves Tier-1 (not Tier-4 default).
+        router.set_agent_priorities('coder', ['ep_a'])
+
+        router.note_held_endpoint('coder', 'holder')
+        with router._lock:
+            # Held marker was written...
+            assert router._instance_held_endpoint.get('holder') == (normalize_api_base(base_a), 'model-a'), \
+                f"held marker should be set, got {router._instance_held_endpoint.get('holder')}"
+            # ...and the committed probe-gate marker must remain absent.
+            assert 'holder' not in router._instance_committed_endpoint, \
+                'note_held_endpoint must NOT write to the committed probe-gate marker'
+
+        # Also verify it stays absent when a prior committed value exists (no overwrite).
+        with router._lock:
+            router._instance_committed_endpoint['other'] = ('sentinel', 'sentinel')
+        router.note_held_endpoint('coder', 'holder')
+        with router._lock:
+            assert 'holder' not in router._instance_committed_endpoint
