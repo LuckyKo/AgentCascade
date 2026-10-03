@@ -495,12 +495,9 @@ class TestLastActiveEndpointFallback:
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
 
         # Simulate a prior success on this endpoint by ANY agent.
-        # Key format mirrors call_with_fallback: (normalize_api_base(base), model).
+        # Now stored as endpoint ID (UUID) for O(1) Tier 1.5 lookup.
         with router._lock:
-            router._last_active_endpoint = (
-                normalize_api_base('http://c-api'),
-                'model-c',
-            )
+            router._last_active_endpoint = 'ep_c'
 
         # Works whether or not an instance_name is passed.
         chain = router.get_endpoint_chain('security', instance_name='worker1')
@@ -509,34 +506,34 @@ class TestLastActiveEndpointFallback:
         assert chain[-1]['api_base'] == 'http://default-api'
 
     def test_last_active_key_stale_after_from_dict_degrades_to_tier4(self, router):
-        """Last-active key stale (endpoint renamed by a UI reload) → chain = [Tier-4 only].
+        """Last-active ID stale (endpoint REMOVED by a UI reload) → chain = [Tier-4 only].
 
         _last_active_endpoint SURVIVES from_dict (it is an in-memory live-connection marker,
-        like _instance_committed_endpoint), so a stale key can outlive the config change. The
-        last-active tier must NOT offer an endpoint that no longer exists under its old
-        identity — it degrades gracefully to Tier-4.
+        like _instance_committed_endpoint), so a stale ID can outlive the config change. The
+        last-active tier must NOT offer an endpoint that no longer exists — it degrades
+        gracefully to Tier-4 with a warning log.
+
+        NOTE: With ID-based lookup, renaming a model does NOT make the marker stale (the ID
+        still resolves). Staleness occurs when the endpoint is REMOVED from config entirely.
         """
         # Endpoint 'c' originally served model-c; some agent just succeeded on it.
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
         with router._lock:
-            router._last_active_endpoint = (
-                normalize_api_base('http://c-api'),
-                'model-c',
-            )
+            router._last_active_endpoint = 'ep_c'
 
         # Sanity: before the reload, the last-active tier resolves to the endpoint.
         chain_before = router.get_endpoint_chain('security', instance_name='worker1')
         assert [c['api_base'] for c in chain_before] == ['http://c-api', 'http://default-api']
 
-        # User renames the model via a UI config change (from_dict). The last-active key now
-        # points at a (base, model) that no enabled endpoint matches. from_dict does NOT clear
+        # User REMOVES the endpoint via a UI config change (from_dict). The last-active ID now
+        # points at an endpoint that no longer exists. from_dict does NOT clear
         # _last_active_endpoint, so the stale marker is still present but must not be offered.
         router.from_dict({
-            'endpoints': [_ep_dict('c', 'http://c-api', 'model-NEW')],
+            'endpoints': [],  # endpoint 'c' removed entirely
             'agent_priorities': {},  # 'security' stays unassigned
         })
 
-        # The stale last-active key must NOT be offered → chain is Tier-4 only.
+        # The stale last-active ID must NOT be offered → chain is Tier-4 only.
         chain_after = router.get_endpoint_chain('security', instance_name='worker1')
         assert [c['api_base'] for c in chain_after] == ['http://default-api']
 
@@ -551,10 +548,7 @@ class TestLastActiveEndpointFallback:
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
         # A last-active key is set; we call WITHOUT instance_name.
         with router._lock:
-            router._last_active_endpoint = (
-                normalize_api_base('http://c-api'),
-                'model-c',
-            )
+            router._last_active_endpoint = 'ep_c'
 
         chain = router.get_endpoint_chain('security')  # instance_name defaults to None
 
@@ -603,7 +597,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Occupy pool 'a' (capacity 1) → saturated. Pool 'b' stays empty.
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
@@ -618,7 +612,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Occupy BOTH pools → no free endpoint exists.
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
@@ -634,7 +628,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Occupy only pool 'b' → last-active 'a' still has room.
         _occupy_pool(router, 'http://b-api', 1, n_holders=1)
@@ -657,7 +651,7 @@ class TestCapacityAwareLastActiveFallback:
         # A third endpoint on a DIFFERENT base with free capacity — the escape hatch.
         _add_endpoint(router, 'c', 'http://free-api', model='model-c', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Occupy the shared sequential pool (both a and b land here).
         shared_pool = _occupy_pool(router, base, 0, n_holders=1)
@@ -682,7 +676,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=-1)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Even if we occupy the other pool, unlimited last-active is never full.
         _occupy_pool(router, 'http://b-api', 1, n_holders=1)
@@ -699,7 +693,7 @@ class TestCapacityAwareLastActiveFallback:
         # conc=1 but we NEVER call _get_or_create_pool / acquire, so the pool is absent.
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Sanity: the pool truly is absent → count_active reads 0.
         assert router.scheduler.count_active('http://a-api', 1) == 0
@@ -708,18 +702,18 @@ class TestCapacityAwareLastActiveFallback:
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected absent-pool last-active kept at head, got {bases}"
 
-    def test_t7_first_match_wins_for_duplicate_last_active_key(self, router):
+    def test_t7_duplicate_key_endpoints_use_specific_id(self, router):
         """T7: two enabled endpoints share the SAME (api_base, model) but differ in config.
 
-        The pre-change code did `break` on the FIRST match; the capacity-aware rewrite must
-        preserve first-match-wins for _la_ep so the healthy path stays byte-identical. If it
-        instead kept scanning and took the LAST match, a duplicate-key endpoint with different
-        max_input_tokens would silently change which config is handed out.
+        With endpoint-ID-based lookup, there is no ambiguity: storing 'ep_a' always resolves
+        to endpoint 'a' regardless of dict iteration order. This is a STRONGER guarantee than
+        the pre-change first-match-wins behavior — the exact endpoint that succeeded is what
+        gets handed out next time, even if another endpoint shares the same (base, model).
 
         Setup: endpoints 'a' (max_input_tokens=100) and 'b' (max_input_tokens=999) both serve
-        model-d @ http://d-api with conc=-1 (never saturated). last-active = that shared key.
+        model-d @ http://d-api with conc=-1 (never saturated). last-active = ep_a's ID.
         The fixture default general_limit is 0, so no substitution happens and the endpoint's
-        TRUE max_input_tokens is what reaches the chain → first-match-wins must yield 100.
+        TRUE max_input_tokens is what reaches the chain → must yield 100 (endpoint 'a').
         """
         _add_endpoint(router, 'a', 'http://d-api', model='model-d', concurrency_limit=-1)
         _add_endpoint(router, 'b', 'http://d-api', model='model-d', concurrency_limit=-1)
@@ -731,16 +725,16 @@ class TestCapacityAwareLastActiveFallback:
                 elif e.name == 'b':
                     e.max_input_tokens = 999
 
-        # last-active points at the shared (base, model) key; neither pool is saturated.
+        # last-active points at endpoint 'a' specifically by ID; neither pool is saturated.
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://d-api'), 'model-d')
+            router._last_active_endpoint = 'ep_a'
 
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://d-api'
-        # First-match-wins: the FIRST endpoint ('a', max_input_tokens=100) is chosen, not 'b' (999).
+        # ID-based lookup: endpoint 'a' (max_input_tokens=100) is chosen, not 'b' (999).
         assert chain[0]['max_input_tokens'] == 100, \
-            f"expected first-match-wins (max_input_tokens=100), got {chain[0]['max_input_tokens']}"
+            f"expected endpoint 'a' by ID (max_input_tokens=100), got {chain[0]['max_input_tokens']}"
 
     # ------------------------------------------------------------------
     # T8-T11 — Tier 1.5 self-saturation fix (count_active_excluding).
@@ -760,7 +754,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # The requesting instance's OWN holder is the sole occupant of the shared pool.
         pool = router.scheduler._get_or_create_pool(base, 0)
@@ -785,7 +779,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         pool = router.scheduler._get_or_create_pool(base, 0)
         assert pool.key == '_shared_sequential_slot_'
@@ -809,7 +803,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=2)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         pool = router.scheduler._get_or_create_pool(base, 2)
         assert pool.key == normalize_api_base(base)  # per-base pool, not the shared one
@@ -832,7 +826,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Create the shared pool but leave it EMPTY.
         pool = router.scheduler._get_or_create_pool(base, 0)
@@ -854,7 +848,7 @@ class TestCapacityAwareLastActiveFallback:
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         # Simulate the slot acquire that production performs before the first LLM turn.
         pool = router.scheduler._get_or_create_pool(base, 0)
@@ -942,11 +936,11 @@ class TestLastReleasedEndpointPreference:
         assert ok is True
         # Another agent succeeds on B → overwrites the racy GLOBAL marker.
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://b-api'), 'model-b')
+            router._last_active_endpoint = 'ep_b'
 
-        # Release recorded A into _last_released_endpoint (BEFORE the committed pop).
-        assert router._last_released_endpoint == (normalize_api_base('http://a-api'), 'model-a'), \
-            f"release should have recorded A, got {router._last_released_endpoint}"
+        # Release recorded A's endpoint ID into _last_released_endpoint (BEFORE the committed pop).
+        assert router._last_released_endpoint == 'ep_a', \
+            f"release should have recorded A's ID, got {router._last_released_endpoint}"
 
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         # Chain head must be A's model, NOT the racy global B.
@@ -971,7 +965,7 @@ class TestLastReleasedEndpointPreference:
         assert pool_a.key == '_shared_sequential_slot_'
         # Another agent succeeds on B → overwrites the racy GLOBAL marker.
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base(base), 'model-b')
+            router._last_active_endpoint = 'ep_b'
 
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         # Even though both share one pool, the ENDPOINT identity (model-a) must win.
@@ -991,8 +985,8 @@ class TestLastReleasedEndpointPreference:
         pool_a, ok = _release_and_record(router, 'caller1', 'http://a-api', 1, 'model-a')
         assert ok is True
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://b-api'), 'model-b')
-        assert router._last_released_endpoint == (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_b'
+        assert router._last_released_endpoint == 'ep_a'
 
         # Saturate A's pool (capacity 1) → last-released endpoint is full.
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
@@ -1012,7 +1006,7 @@ class TestLastReleasedEndpointPreference:
         # No release has happened → field stays None.
         assert router._last_released_endpoint is None
         with router._lock:
-            router._last_active_endpoint = (normalize_api_base('http://a-api'), 'model-a')
+            router._last_active_endpoint = 'ep_a'
 
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         bases = [c['api_base'] for c in chain]
@@ -1032,10 +1026,9 @@ class TestLastReleasedEndpointPreference:
 
         pool_a, ok = _release_and_record(router, 'caller1', 'http://a-api', 1, 'model-a')
         assert ok is True
-        expected = (normalize_api_base('http://a-api'), 'model-a')
-        # The field was recorded from the committed map.
-        assert router._last_released_endpoint == expected, \
-            f"expected {expected}, got {router._last_released_endpoint}"
+        # The field was recorded as endpoint ID from the committed map.
+        assert router._last_released_endpoint == 'ep_a', \
+            f"expected 'ep_a', got {router._last_released_endpoint}"
         # ...and the committed-map entry was popped (the read happened BEFORE this pop).
         with router._lock:
             assert 'caller1' not in router._instance_committed_endpoint, \
@@ -1052,8 +1045,9 @@ class TestLastReleasedEndpointPreference:
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
 
         # Seed a previous value so we can prove it is NOT clobbered.
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
         with router._lock:
-            router._last_released_endpoint = (normalize_api_base('http://b-api'), 'model-b')
+            router._last_released_endpoint = 'ep_b'
 
         pool_a = router.scheduler._get_or_create_pool('http://a-api', 1)
         rel = router.scheduler.acquire(
@@ -1066,7 +1060,7 @@ class TestLastReleasedEndpointPreference:
         assert ok is True
 
         # Field unchanged — the empty committed read recorded nothing (did NOT set to None).
-        assert router._last_released_endpoint == (normalize_api_base('http://b-api'), 'model-b')
+        assert router._last_released_endpoint == 'ep_b'
 
     def test_second_reacquire_updates_last_released_endpoint(self, router):
         """THE regression: a holder that does TWO yield/reacquire cycles must keep updating
@@ -1100,9 +1094,9 @@ class TestLastReleasedEndpointPreference:
             h._slot_release = rel
         ok = release_slot_permit(h, 'holder', action='drop-handoff', pool=pool)
         assert ok is True
-        # Release recorded A; BOTH markers were popped (read-before-pop ordering preserved).
-        assert router._last_released_endpoint == key_a, \
-            f"first release should record A, got {router._last_released_endpoint}"
+        # Release recorded A's endpoint ID; BOTH markers were popped (read-before-pop ordering preserved).
+        assert router._last_released_endpoint == 'ep_a', \
+            f"first release should record A's ID, got {router._last_released_endpoint}"
         with router._lock:
             assert 'holder' not in router._instance_committed_endpoint
             assert 'holder' not in router._instance_held_endpoint
@@ -1122,9 +1116,9 @@ class TestLastReleasedEndpointPreference:
             h2._slot_release = rel2
         ok2 = release_slot_permit(h2, 'holder', action='drop-handoff', pool=pool_b)
         assert ok2 is True
-        # THE fix: the second release records B (the endpoint just held), NOT the frozen A.
-        assert router._last_released_endpoint == key_b, \
-            f"second release should record B (not frozen at A), got {router._last_released_endpoint}"
+        # THE fix: the second release records B's endpoint ID (the endpoint just held), NOT the frozen A.
+        assert router._last_released_endpoint == 'ep_b', \
+            f"second release should record B's ID (not frozen at A), got {router._last_released_endpoint}"
 
     def test_release_prefers_committed_over_held(self, router):
         """When BOTH committed and held markers are present for a holder, release uses the
@@ -1149,8 +1143,8 @@ class TestLastReleasedEndpointPreference:
             h._slot_release = rel
         ok = release_slot_permit(h, 'holder', action='drop-handoff', pool=pool)
         assert ok is True
-        # Committed wins over held.
-        assert router._last_released_endpoint == key_a, \
+        # Committed wins over held → records A's endpoint ID.
+        assert router._last_released_endpoint == 'ep_a', \
             f"committed should win over held, got {router._last_released_endpoint}"
         with router._lock:
             assert 'holder' not in router._instance_committed_endpoint

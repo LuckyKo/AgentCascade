@@ -169,27 +169,26 @@ class APIRouter:
         # guarded by self._lock. Popped on release/drop alongside the committed marker.
         self._instance_held_endpoint: Dict[str, Tuple[str, str]] = {}
 
-        # Global "last active endpoint" — the (normalized_base, model) of the most recent
+        # Global "last active endpoint" — the endpoint ID (UUID) of the most recent
         # successful call by ANY agent. Unlike _instance_committed_endpoint (per-instance,
         # probe fast-path only), this is a single shared marker used for UNASSIGNED-agent
         # selection: when an agent has no endpoints of its own it picks up whatever was last
         # used by anyone (a child spawned via call_agent typically inherits the parent's).
-        # In-memory only — NOT cleared by from_dict; after a config reload a stale key simply
+        # In-memory only — NOT cleared by from_dict; after a config reload a stale ID simply
         # fails to match any enabled endpoint and degrades gracefully to Tier-4. Guarded by
         # self._lock (simple assignment inside the existing lock block — no compound RMW).
-        self._last_active_endpoint: Optional[Tuple[str, str]] = None
+        self._last_active_endpoint: Optional[str] = None  # endpoint ID (UUID)
 
         # Last-released ENDPOINT preference (Tier 1.5 capability matching). Records the
-        # (normalized_base, model) of the endpoint the most recently RELEASED holder was
-        # committed to — i.e. what it actually succeeded on. Written in release_slot_permit
-        # (the single release funnel) and read ONLY in Tier 1.5 for UNASSIGNED agents, where it
-        # takes precedence over the racy global _last_active_endpoint. Same tuple shape as
-        # _instance_committed_endpoint / _last_active_endpoint, so downstream matching is
-        # unchanged. In-memory only — NOT cleared by from_dict (same
-        # reasoning as _last_active_endpoint: after a reload a stale key simply fails to match
-        # any enabled endpoint and degrades gracefully). Guarded by self._lock; written under it
-        # in release_slot_permit, read inside get_endpoint_chain's existing lock scope.
-        self._last_released_endpoint: Optional[Tuple[str, str]] = None
+        # endpoint ID (UUID) of the endpoint the most recently RELEASED holder was committed
+        # to — i.e. what it actually succeeded on. Written in release_slot_permit (the single
+        # release funnel) and read ONLY in Tier 1.5 for UNASSIGNED agents, where it takes
+        # precedence over the racy global _last_active_endpoint. In-memory only — NOT cleared
+        # by from_dict (same reasoning as _last_active_endpoint: after a reload a stale ID
+        # simply fails to match any enabled endpoint and degrades gracefully). Guarded by
+        # self._lock; written under it in release_slot_permit, read inside get_endpoint_chain's
+        # existing lock scope.
+        self._last_released_endpoint: Optional[str] = None  # endpoint ID (UUID)
 
         # Persistence path — env var takes precedence for test isolation
         if os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR'):
@@ -544,6 +543,18 @@ class APIRouter:
                 self._instance_held_endpoint[instance_name] = key
         except Exception:
             pass
+
+    def _endpoint_id_for_key(self, base: str, model: str) -> Optional[str]:
+        """Find the endpoint ID matching (normalized_base, model). Returns None if no match.
+
+        MUST be called under self._lock (reads self.endpoints). First-match-wins semantics
+        for duplicate (api_base, model) keys — consistent with Tier 1.5's pre-change behavior.
+        """
+        norm = normalize_api_base(base)
+        for ep in self.endpoints.values():
+            if ep.enabled and normalize_api_base(ep.api_base) == norm and ep.model == model:
+                return ep.id
+        return None
 
     def sync_sticky_slot(
         self,
@@ -1015,36 +1026,30 @@ class APIRouter:
             # today's behaviour. The healthy path (last-active pool has room) is byte-identical.
             if not endpoint_configs:
                 # Prefer the just-released holder's endpoint (capability matching) over the
-                # racy global marker. Plain attribute read — safe inside this existing lock
-                # scope; do NOT add a nested lock. count_active() below stays lock-free.
-                _la_key = self._last_released_endpoint or self._last_active_endpoint
-                if _la_key is not None:
-                    _la_base, _la_model = _la_key
-                    # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
-                    # it would otherwise be appended here AND again as the default below.
-                    _default_cfg = self.default_llm_cfg or {}
-                    _is_default = (normalize_api_base(
-                        _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == _la_base and
-                                   _default_cfg.get('model') == _la_model)
-                    if not _is_default:
-                        # ── Capacity-aware Tier 1.5 (L147, first-fit variant) ─────────────
-                        # Single pass over self.endpoints.values():
-                        #   • remember the enabled endpoint matching last-active as _la_ep
-                        #   • independently remember the FIRST enabled endpoint with ≥1 free
-                        #     slot as _free_ep (the fallback candidate).
-                        # An endpoint is "free" when conc==-1 (unlimited), or count_active <
-                        # capacity. We only compute occupancy where it matters (deciding if
-                        # last-active is saturated, and finding a free endpoint) — no ranking
-                        # headroom math, so every name referenced in a log line below is bound.
-                        _la_ep = None
-                        _free_ep = None
-                        for ep in self.endpoints.values():
-                            if not ep.enabled:
-                                continue
-                            if _la_ep is None and normalize_api_base(ep.api_base) == _la_base and ep.model == _la_model:
-                                _la_ep = ep  # first-match-wins (matches pre-change behavior); keep scanning for a free endpoint
-                                continue
-                            if _free_ep is None:
+                # racy global marker. Both are now endpoint IDs (UUIDs) — direct O(1) dict
+                # lookup, immune to name/model changes. Plain attribute read — safe inside
+                # this existing lock scope; do NOT add a nested lock. count_active() below
+                # stays lock-free.
+                _la_id = self._last_released_endpoint or self._last_active_endpoint
+                if _la_id is not None:
+                    _la_ep = self.endpoints.get(_la_id)  # O(1) dict lookup by ID
+                    if _la_ep is not None and _la_ep.enabled:
+                        # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
+                        # it would otherwise be appended here AND again as the default below.
+                        _default_cfg = self.default_llm_cfg or {}
+                        _is_default = (normalize_api_base(
+                            _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == normalize_api_base(_la_ep.api_base) and
+                                       _default_cfg.get('model') == _la_ep.model)
+                        if not _is_default:
+                            # ── Capacity-aware Tier 1.5 (L147, first-fit variant) ─────────────
+                            # Find the FIRST enabled endpoint with ≥1 free slot as _free_ep
+                            # (the fallback candidate). An endpoint is "free" when conc==-1
+                            # (unlimited), or count_active < capacity. We only compute occupancy
+                            # where it matters — no ranking headroom math.
+                            _free_ep = None
+                            for ep in self.endpoints.values():
+                                if not ep.enabled or ep.id == _la_id:
+                                    continue
                                 _conc = ep.concurrency_limit
                                 if _conc == -1:
                                     _free_ep = ep  # unlimited — always has room
@@ -1059,10 +1064,9 @@ class APIRouter:
                                     if _active < _cap:
                                         _free_ep = ep
 
-                        # Decide which endpoint to hand out.
-                        _chosen_ep = None
-                        _used_free = False
-                        if _la_ep is not None:
+                            # Decide which endpoint to hand out.
+                            _chosen_ep = None
+                            _used_free = False
                             _conc = _la_ep.concurrency_limit
                             if _conc == -1:
                                 _saturated = False  # unlimited — never full
@@ -1079,10 +1083,10 @@ class APIRouter:
                             if _saturated and _free_ep is not None:
                                 # Last-active pool is full but another endpoint has room → route there.
                                 logger.info(
-                                    f"[APIRouter] Tier 1.5: last-active '{_la_model}' @ {_la_base} "
+                                    f"[APIRouter] Tier 1.5: last-released '{_la_ep.name}' @ {_la_ep.api_base} "
                                     f"pool is saturated ({_active}/{_cap}); routing unassigned "
                                     f"{agent_type}/{instance_name} to free-capacity endpoint "
-                                    f"'{_free_ep.model}' @ {_free_ep.api_base}"
+                                    f"'{_free_ep.name}' @ {_free_ep.api_base}"
                                 )
                                 _chosen_ep = _free_ep
                                 _used_free = True
@@ -1090,25 +1094,29 @@ class APIRouter:
                                 # Not saturated, or no free endpoint → keep last-active (today's behaviour).
                                 _chosen_ep = _la_ep
 
-                        if _chosen_ep is not None:
-                            cfg = copy.deepcopy(_chosen_ep.to_llm_cfg())
-                            ep_limit = _chosen_ep.max_input_tokens
-                            if ep_limit <= 0 and general_limit > 0:
-                                cfg['max_input_tokens'] = general_limit
+                            if _chosen_ep is not None:
+                                cfg = copy.deepcopy(_chosen_ep.to_llm_cfg())
+                                ep_limit = _chosen_ep.max_input_tokens
+                                if ep_limit <= 0 and general_limit > 0:
+                                    cfg['max_input_tokens'] = general_limit
 
-                            # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
-                            endpoint_configs.append(cfg)
-                            if _used_free:
-                                logger.debug(
-                                    f"[APIRouter] {agent_type}/{instance_name}: using capacity-preferred "
-                                    f"endpoint '{_chosen_ep.model}' @ {_chosen_ep.api_base} (last-active saturated)"
-                                )
-                            else:
-                                logger.debug(
-                                    f"[APIRouter] {agent_type}/{instance_name}: using last-active endpoint '{_la_model}' @ {_la_base}"
-                                )
-                        # _chosen_ep is None → stale key (no enabled match) → append nothing,
-                        # degrade to Tier 3/4 as today.
+                                # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
+                                endpoint_configs.append(cfg)
+                                if _used_free:
+                                    logger.info(
+                                        f"[APIRouter] {agent_type}/{instance_name}: using capacity-preferred "
+                                        f"endpoint '{_chosen_ep.name}' @ {_chosen_ep.api_base} (last-released saturated)"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"[APIRouter] {agent_type}/{instance_name}: using last-released endpoint '{_la_ep.name}' @ {_la_ep.api_base}"
+                                    )
+                    else:
+                        # Stale ID (endpoint removed/disabled) — log a WARN so this is visible.
+                        logger.warning(
+                            f"[APIRouter] Tier 1.5: stale endpoint ID '{_la_id}' for {agent_type}/{instance_name} "
+                            f"— no enabled endpoint match, degrading to Tier 3/4"
+                        )
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
             if not endpoint_configs and self._last_successful_endpoint_cfg is not None:
@@ -2222,9 +2230,9 @@ class APIRouter:
                                 self._instance_committed_endpoint[_inst_name] = _det_key
                                 # Also update the GLOBAL last-active marker so any unassigned
                                 # agent (e.g. a child spawned via call_agent) picks up the
-                                # endpoint this call just succeeded on. Simple assignment — no
-                                # compound read-modify-write, safe under the shared lock.
-                                self._last_active_endpoint = _det_key
+                                # endpoint this call just succeeded on. Store the endpoint ID
+                                # for O(1) Tier 1.5 lookup — immune to name/model changes.
+                                self._last_active_endpoint = self._endpoint_id_for_key(_det_key[0], _det_key[1])
 
                         # Sticky slot: no per-call release on success (generator or not) —
                         # the permit lives on the instance and is released only at lifecycle

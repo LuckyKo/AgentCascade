@@ -684,7 +684,11 @@ def release_slot_permit(
                     if _held is not None:
                         _committed = _held
                 if _committed is not None:
-                    _router._last_released_endpoint = _committed
+                    # Convert (base, model) tuple to endpoint ID for O(1) Tier 1.5 lookup.
+                    # Already under _router._lock — safe to call the helper directly.
+                    _ep_id = _router._endpoint_id_for_key(_committed[0], _committed[1])
+                    if _ep_id is not None:
+                        _router._last_released_endpoint = _ep_id
     except Exception:
         pass
 
