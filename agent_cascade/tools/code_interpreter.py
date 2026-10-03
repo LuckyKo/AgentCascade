@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import base64
+import hashlib
 import io
 import json
 import os
@@ -78,6 +79,45 @@ app.launch_new_instance()
 INIT_CODE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_interpreter_init_kernel.py')
 ALIB_FONT_FILE = str(Path(__file__).absolute().parent / 'resource' / 'AlibabaPuHuiTi-3-45-Light.ttf')
 DOCKER_IMAGE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_interpreter_image.dockerfile')
+# Requirements file baked into the image — lives in the same resource dir as the Dockerfile.
+DOCKER_REQUIREMENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(DOCKER_IMAGE_FILE)),
+                                        'code_interpreter_requirements.txt')
+
+# Base name for sandbox images; content-hashed tags are derived from it (see _compute_docker_image_tag).
+DOCKER_IMAGE_BASE_NAME = 'code-interpreter'
+
+# Length of the hex digest used in the image tag — long enough to make collisions
+# negligible, short enough to keep the tag readable.
+TAG_DIGEST_LENGTH = 12
+
+
+def _compute_docker_image_tag(dockerfile: str = DOCKER_IMAGE_FILE, requirements_file: str = DOCKER_REQUIREMENTS_FILE) -> str:
+    """Compute a content-derived Docker image tag for the code interpreter sandbox.
+
+    The tag is ``code-interpreter:<hex>`` where the hash is sha256 over the
+    concatenated bytes of the Dockerfile and the requirements file, truncated to
+    TAG_DIGEST_LENGTH hex chars. Any change to either file yields a new tag, which
+    forces a rebuild in _build_docker_image() so newly spawned containers always
+    pick up the current dependencies — no manual ``docker rmi`` required.
+
+    The files are re-read on every call (no import-time caching), so edits take
+    effect for the next kernel start without a process restart.
+
+    If either file is missing/unreadable, falls back to ``code-interpreter:latest``
+    with a warning instead of crashing (keeps the tool usable in test envs).
+    """
+    try:
+        with open(dockerfile, 'rb') as f:
+            dockerfile_bytes = f.read()
+        with open(requirements_file, 'rb') as f:
+            requirements_bytes = f.read()
+    except OSError as e:
+        logger.warning(f'Could not read Docker image build inputs ({e}); '
+                       f'falling back to default tag {DOCKER_IMAGE_BASE_NAME}:latest')
+        return f'{DOCKER_IMAGE_BASE_NAME}:latest'
+    digest = hashlib.sha256(dockerfile_bytes + requirements_bytes).hexdigest()[:TAG_DIGEST_LENGTH]
+    return f'{DOCKER_IMAGE_BASE_NAME}:{digest}'
+
 
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
@@ -676,7 +716,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Store reference to operation_manager for dynamic extra-folder resolution at kernel start time
         self._operation_manager = None
         self.instance_id: str = str(uuid.uuid4())
-        self.docker_image_name: str = 'code-interpreter:latest'
+        # Content-derived tag: changes whenever the Dockerfile or requirements file change,
+        # forcing an image rebuild for newly spawned containers.
+        self.docker_image_name: str = _compute_docker_image_tag()
         self.container_work_dir = '/workspace'
         _check_docker_availability()
         _check_host_deps()
@@ -1474,8 +1516,67 @@ class CodeInterpreter(BaseToolWithFileAccess):
             }
         return path_mapping
 
+    def _prune_superseded_docker_images(self, current_tag: str):
+        """Best-effort removal of old code-interpreter images superseded by a new tag.
+
+        Only removes images whose tag differs from ``current_tag`` AND which are not
+        referenced by any container (running or stopped), so live kernels are never
+        orphaned. All failures are logged, never raised — pruning is cosmetic cleanup.
+        """
+        try:
+            list_result = subprocess.run(
+                ['docker', 'images', '--format', '{{.ID}} {{.Repository}}:{{.Tag}}', DOCKER_IMAGE_BASE_NAME],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10)
+            if list_result.returncode != 0:
+                logger.warning(f'Prune skipped: failed to list images: {list_result.stderr.strip()}')
+                return
+
+            for line in list_result.stdout.splitlines():
+                parts = line.strip().split(' ', 1)
+                if len(parts) != 2:
+                    continue
+                image_id, repo_tag = parts
+                if repo_tag == current_tag or not image_id:
+                    continue
+                # Guard: skip images still referenced by any container (running or stopped)
+                usage = subprocess.run(
+                    ['docker', 'ps', '-a', '--filter', f'ancestor={image_id}', '--format', '{{.ID}}'],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=10)
+                if usage.returncode == 0 and usage.stdout.strip():
+                    logger.info(f'Keeping image {repo_tag} (still used by a container)')
+                    continue
+                rmi = subprocess.run(['docker', 'rmi', repo_tag],
+                                     capture_output=True,
+                                     text=True,
+                                     encoding='utf-8',
+                                     errors='replace',
+                                     timeout=10)
+                if rmi.returncode != 0:
+                    logger.warning(f'Failed to remove superseded image {repo_tag}: {rmi.stderr.strip()}')
+                else:
+                    logger.info(f'Removed superseded Docker image {repo_tag}')
+        except Exception as e:
+            logger.warning(f'Docker image pruning failed (non-fatal): {e}')
+
     def _build_docker_image(self):
-        """Build Docker image from Dockerfile if not exists"""
+        """Build Docker image from Dockerfile if not exists.
+
+        The image tag is content-hashed from the Dockerfile + requirements file, so a
+        changed requirements file yields a new tag that does not exist yet → rebuild.
+        An unchanged build input set keeps the same tag → existing image short-circuits.
+        """
+        # Re-evaluate the tag per call so requirements/Dockerfile edits take effect
+        # for the next kernel start without re-instantiating the tool.
+        self.docker_image_name = _compute_docker_image_tag()
+
         # Check if image already exists
         result = subprocess.run(['docker', 'images', '-q', self.docker_image_name],
                                 capture_output=True,
@@ -1501,6 +1602,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             raise RuntimeError(f'Failed to build Docker image: {build_process.stderr}')
 
         logger.info(f'Successfully built Docker image {self.docker_image_name}')
+        self._prune_superseded_docker_images(self.docker_image_name)
 
     def _get_free_ports(self, n=5):
         ports = []

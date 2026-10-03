@@ -1,4 +1,5 @@
 aiohttp
+beautifulsoup4
 dashscope>=1.11.0
 eval_type_backport
 ipykernel
@@ -18,6 +19,6 @@ pyyaml
 regex
 requests
 seaborn
+soundfile
 sympy
 tiktoken
-soundfile
