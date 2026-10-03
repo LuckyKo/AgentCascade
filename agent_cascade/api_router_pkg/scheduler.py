@@ -164,9 +164,10 @@ class EndpointScheduler:
                 instance_resolver=instance_resolver,
             )
 
-            _ep_name = self._endpoint_name_for_api_base(api_base)
-            logger.info(f"[SLOT] {instance_name} ({agent_class}): acquire → endpoint='{_ep_name}' api_base={api_base} "
-                        f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
+            _ep_name = kwargs.get('endpoint_name') or self._endpoint_name_for_api_base(api_base)
+            _model = kwargs.get('model', '')
+            logger.debug(f"[SLOT] {instance_name} ({agent_class}): acquire → endpoint='{_ep_name}' model={_model} "
+                         f"api_base={api_base} (pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
 
             # Structured slot event (change #10a): every acquire emits exactly one
             # [SLOTPOOL] line — grant here; the enqueue moment is covered by SlotPool's
@@ -185,10 +186,9 @@ class EndpointScheduler:
 
                 # Log release with current pool stats.
                 log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
-                _ep_name = self._endpoint_name_for_api_base(api_base)
-                logger.info(
-                    f"[SLOT] {instance_name} ({agent_class}): release → endpoint='{_ep_name}' api_base={log_target} "
-                    f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
+                logger.debug(
+                    f"[SLOT] {instance_name} ({agent_class}): release → endpoint='{_ep_name}' model={_model} "
+                    f"api_base={log_target} (pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
 
             return release
 

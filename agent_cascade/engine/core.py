@@ -379,7 +379,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # if the LLM call never completes (yield/reacquire cycle). Distinct from the
                     # committed probe-gate marker; never raises.
                     self._safe_note_held_endpoint(router, instance.agent_class, instance.instance_name)
-            logger.info(f"[SLOT] {instance.instance_name} ({instance.agent_class}): acquired slot [{context}]")
+            logger.debug(f"[SLOT] {instance.instance_name} ({instance.agent_class}): acquired slot [{context}]")
         except AgentTerminatedError:
             # Clean abort — don't log as error, just propagate for caller to handle
             raise

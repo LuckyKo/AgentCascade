@@ -493,11 +493,13 @@ class APIRouter:
         # limit. Identity key: (normalized base, model) — same matching rule as
         # call_with_fallback's per-endpoint resolution.
         _norm_endpoint_base = normalize_api_base(api_base) if api_base else ''
+        _ep_name: Optional[str] = None
         with self._lock:
             for ep in self.endpoints.values():
                 if ep.enabled and normalize_api_base(ep.api_base) == _norm_endpoint_base \
                         and ep.model == llm_cfg.get('model'):
                     concurrency = ep.concurrency_limit
+                    _ep_name = ep.name
                     break
             else:
                 # Unmatched (e.g. Tier-4 default cfg not in self.endpoints):
@@ -516,6 +518,8 @@ class APIRouter:
         slot_info = self.scheduler.get_slot_info(api_base, concurrency)
         slot_info['api_base'] = api_base
         slot_info['needs_slot'] = True
+        slot_info['model'] = llm_cfg.get('model')
+        slot_info['endpoint_name'] = _ep_name
         return slot_info
 
     def note_held_endpoint(self, agent_class: str, instance_name: Optional[str]) -> None:

@@ -33,6 +33,8 @@ class SlotsMixin:
                 slot_info = router.get_effective_slot_info(agent_class, instance_name=instance_name)
                 api_base = slot_info.get('api_base') or 'unknown'
                 concurrency_limit = slot_info.get('concurrency_limit', 0)
+                _ep_name = slot_info.get('endpoint_name') or ''
+                _model = slot_info.get('model') or ''
             else:
                 # Get the effective concurrency for this agent class (includes default fallback)
                 concurrency_limit = router.get_effective_concurrency(agent_class)
@@ -40,10 +42,12 @@ class SlotsMixin:
                 # Resolve the actual api_base that will be used
                 llm_cfg = router.get_llm_config(agent_class)
                 api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+                _ep_name = ''
+                _model = llm_cfg.get('model', '')
 
-            logger.info(
-                f"[SLOT] {instance_name} ({agent_class}): acquire → api_base={api_base}, "
-                f"conc={concurrency_limit}"
+            logger.debug(
+                f"[SLOT] {instance_name} ({agent_class}): acquire → "
+                f"endpoint='{_ep_name}' model={_model} api_base={api_base}, conc={concurrency_limit}"
             )
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
@@ -54,6 +58,7 @@ class SlotsMixin:
             # gracefully to a context-free line.
             return router.scheduler.acquire(
                 api_base, concurrency_limit, instance_name, agent_class, pool=self,
+                endpoint_name=_ep_name, model=_model,
             )
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
