@@ -672,16 +672,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         tc = _msg_field_or_extra(msg, 'tool_calls')
         if isinstance(tc, list):
             for item in tc:
-                if isinstance(item, dict):
-                    fn = item.get('function', {})
-                    tool_name = fn.get('name') if isinstance(fn, dict) else getattr(fn, 'name', None)
-                    args = fn.get('arguments') if isinstance(fn, dict) else getattr(fn, 'arguments', None)
-                elif hasattr(item, 'function'):
-                    fn = item.function
+                fn = _msg_field_or_extra(item, 'function')
+                if fn is None:
+                    continue
+                if isinstance(fn, dict):
+                    tool_name = fn.get('name')
+                    args = fn.get('arguments')
+                else:
                     tool_name = getattr(fn, 'name', None)
                     args = getattr(fn, 'arguments', None)
-                else:
-                    continue
                 _harvest(args, tool_name)
         return out
 

@@ -1529,7 +1529,7 @@ class TestEngineQueryExtraction:
 
 
 class TestToolJustificationExtraction:
-    """Cases 1-17 from the plan: tool-call justification extraction into the hint query."""
+    """Cases 1-18 from the plan: tool-call justification extraction into the hint query."""
 
     @staticmethod
     def _extract(turn, max_chars=1000):
