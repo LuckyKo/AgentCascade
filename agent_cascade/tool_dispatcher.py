@@ -265,11 +265,7 @@ class ToolDispatcher:
                 # matching send_message.py:129-130. State was read under _state_lock above.
                 tagged = f"[MESSAGE from {caller_name}]: {task_text}"
                 self.pool.enqueue_message(target_canonical, tagged)
-                return (f"Task queued as a message to active agent '{target_canonical}' "
-                        f"(state={active_state.name}). It will not be executed as a separate "
-                        f"agent and you will NOT be woken with a result — '{target_canonical}' "
-                        f"receives it as a message and acts on it in its own turn. "
-                        f"Continue with other work; use send_message if you need its output.")
+                return f"Message sent successfully to '{target_canonical}'. It will be delivered on their next turn."
 
         # P2: Stacked-name cloning — if the target name is already in the execution stack
         # (a non-self duplicate), clone to {name}_child{N} to avoid state corruption.

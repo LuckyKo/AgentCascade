@@ -175,7 +175,7 @@ class TestActiveTargetMessaged:
         dispatcher._run_child_async.assert_not_called()
 
     def test_sleeping_target_wakes_with_message(self):
-        """#3 Target SLEEPING → same enqueue; return string mentions state=SLEEPING."""
+        """#3 Target SLEEPING → same enqueue; message delivered (no spawn)."""
         target = _make_mock_instance('worker1', 'coder', state=AgentState.SLEEPING)
         caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(instances={'worker1': target, 'Maine': caller})
@@ -184,13 +184,12 @@ class TestActiveTargetMessaged:
         result = _run(dispatcher, caller, 'worker1', 'coder', task='wake up and do X')
 
         assert not result.startswith('Error:')
-        assert 'state=SLEEPING' in result
         assert ('worker1', '[MESSAGE from Maine]: wake up and do X') in pool.enqueued
         dispatcher._run_child_sync.assert_not_called()
         dispatcher._run_child_async.assert_not_called()
 
     def test_completing_target_enqueued_with_state_noted(self):
-        """#4 Target COMPLETING → enqueued (no special reject); return contains state=COMPLETING."""
+        """#4 Target COMPLETING → enqueued (no special reject); message delivered (no spawn)."""
         target = _make_mock_instance('worker1', 'coder', state=AgentState.COMPLETING)
         caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(instances={'worker1': target, 'Maine': caller})
@@ -199,7 +198,6 @@ class TestActiveTargetMessaged:
         result = _run(dispatcher, caller, 'worker1', 'coder', task='one more thing')
 
         assert not result.startswith('Error:')
-        assert 'state=COMPLETING' in result
         assert ('worker1', '[MESSAGE from Maine]: one more thing') in pool.enqueued
         dispatcher._run_child_sync.assert_not_called()
         dispatcher._run_child_async.assert_not_called()
@@ -380,8 +378,8 @@ class TestConcurrencyAndEdgeCases:
         dispatcher._run_child_sync.assert_not_called()
         _ = result  # non-Error either way; the contract is "no blank message enqueued"
 
-    def test_return_string_mentions_no_wakeup(self):
-        """#13 Return string contains 'will NOT be woken' (pins the LLM-facing fire-and-forget contract)."""
+    def test_return_string_says_message_sent(self):
+        """#13 Return string confirms the message was sent (matches send_message style)."""
         target = _make_mock_instance('worker1', 'coder', state=AgentState.RUNNING)
         caller = _make_mock_instance('Maine', 'orchestrator')
         pool = FakePool(instances={'worker1': target, 'Maine': caller})
@@ -389,6 +387,6 @@ class TestConcurrencyAndEdgeCases:
 
         result = _run(dispatcher, caller, 'worker1', 'coder', task='do the thing')
 
-        assert 'will NOT be woken' in result
+        assert 'Message sent successfully' in result
         # Also confirm it is a clear non-error signal.
         assert not result.startswith('Error:')
