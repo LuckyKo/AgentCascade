@@ -431,6 +431,8 @@ def build_state_from_pool(
                 getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
+            'skill_selector_mode':
+                getattr(ps, 'skill_selector_mode', 'keyword'),
             # Telegram bridge (Phase 3)
             'telegram_bridge_enabled':
                 getattr(ps, 'telegram_bridge_enabled', False),
@@ -669,6 +671,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'auto_skill_min_turns', 20),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
+            'skill_selector_mode':
+                getattr(ps, 'skill_selector_mode', 'keyword'),
             # Telegram bridge (Phase 3)
             'telegram_bridge_enabled':
                 getattr(ps, 'telegram_bridge_enabled', False),

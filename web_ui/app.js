@@ -178,6 +178,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
   { id: '#setting-auto-skill-mode', prop: 'value', key: 'auto_skill_mode', localKey: 'auto-skill-mode' },
+  { id: '#setting-skill-selector-mode', prop: 'value', key: 'skill_selector_mode', localKey: 'skill-selector-mode' },
   { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
   { id: '#setting-auto-skill-min-turns', prop: 'value', key: 'auto_skill_min_turns', localKey: 'auto-skill-min-turns' },
   // Telegram bridge (Phase 3) — underscore key via getGenerateCfg().
@@ -1204,6 +1205,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
   if ($('#setting-auto-skill-mode')) s['auto-skill-mode'] = $('#setting-auto-skill-mode').value;
+  if ($('#setting-skill-selector-mode')) s['skill-selector-mode'] = $('#setting-skill-selector-mode').value;
   if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
   if ($('#setting-auto-skill-min-turns')) s['auto-skill-min-turns'] = $('#setting-auto-skill-min-turns').value;
   // Telegram bridge (Phase 3) — persist under the underscore key (matches POOL_SETTINGS_MAP localKey).
@@ -1388,6 +1390,7 @@ function loadSettings() {
     if (_present(s['auto-continue'])) $('#setting-auto-continue').checked = s['auto-continue'];
     if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
     if (_present(s['auto-skill-mode'])) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
+    if (_present(s['skill-selector-mode'])) $('#setting-skill-selector-mode').value = s['skill-selector-mode'];
     if (_present(s['auto-skill-gen'])) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
     if (_isFiniteRestore(s['auto-skill-min-turns'])) $('#setting-auto-skill-min-turns').value = s['auto-skill-min-turns'];
     // Telegram bridge (Phase 3): restore prior local preference.
@@ -5743,6 +5746,7 @@ function getGenerateCfg() {
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
   if ($('#setting-auto-skill-mode')) cfg.auto_skill_mode = $('#setting-auto-skill-mode').value;
+  if ($('#setting-skill-selector-mode')) cfg.skill_selector_mode = $('#setting-skill-selector-mode').value;
   if ($('#setting-auto-skill-gen')) cfg.auto_skill_enabled = $('#setting-auto-skill-gen').checked;
   if ($('#setting-auto-skill-min-turns')) cfg.auto_skill_min_turns = parseInt($('#setting-auto-skill-min-turns').value) || 20;
   // Telegram bridge (Phase 3) — always sent so the server-side handler can idempotently start/stop.
@@ -6695,6 +6699,12 @@ function renderAgentApiAssignments() {
   if (!agentTypes.includes('security')) {
     agentTypes.push('security');
     typeToName['security'] = 'Security';
+  }
+  // Reserved pseudo-type: the Skill Selector's endpoint fallback list, stored under
+  // agent_priorities['skill_selector']. Reuses the same ▲/▼/✕ UI + update_endpoints persistence.
+  if (!agentTypes.includes('skill_selector')) {
+    agentTypes.push('skill_selector');
+    typeToName['skill_selector'] = 'Skill Selector';
   }
 
   if (endpoints.length === 0) {

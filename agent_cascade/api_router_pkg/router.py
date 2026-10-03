@@ -274,6 +274,23 @@ class APIRouter:
         """Get a single endpoint by ID."""
         return self.endpoints.get(endpoint_id)
 
+    def get_endpoint_by_name(self, name: str) -> Optional[APIEndpoint]:
+        """Get the first endpoint whose human-friendly ``name`` matches.
+
+        Endpoint names are NOT unique-enforced, so when more than one endpoint
+        shares a name the FIRST match (insertion order) is returned and a warning
+        is logged. Returns ``None`` when no endpoint has that name.
+        """
+        with self._lock:
+            matches = [ep for ep in self.endpoints.values() if ep.name == name]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            logger.warning(
+                f"[APIRouter.get_endpoint_by_name] {len(matches)} endpoints share name "
+                f"'{name}'; returning the first ({matches[0].id}). Names are not unique.")
+        return matches[0]
+
     def list_endpoints(self) -> List[APIEndpoint]:
         """Return all endpoints in insertion order."""
         with self._lock:

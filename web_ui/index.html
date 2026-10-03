@@ -524,7 +524,7 @@
 
                 <!-- Agent API Assignments Section -->
                 <div class="settings-section">
-                  <h3 class="settings-section-title">Agent API Assignments</h3>
+                  <h3 class="settings-section-title">Agent &amp; Skill Selector API Assignments</h3>
                   <div id="agent-api-assignments" class="settings-section-body">
                     <!-- Per-agent-type endpoint priority lists injected here by JS -->
                     <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
@@ -532,7 +532,7 @@
                     </div>
                   </div>
                   <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
-                    ℹ️ Agents try endpoints top-to-bottom. Falls back to General Settings API.
+                    ℹ️ Agents and the Skill Selector try endpoints top-to-bottom. Falls back to General Settings API.
                   </div>
                 </div>
 
@@ -597,6 +597,13 @@
                             <option value="basic" selected>Basic</option>
                             <option value="advanced">Advanced</option>
                             <option value="none">None</option>
+                          </select>
+                        </label>
+                        <label class="setting-field">
+                          <span title="How the Skill Selector picks skills. Keyword = basic keyword matching (no extra LLM call). API = a decision model resolves the selection; endpoint fallbacks are configured under Agent &amp; Skill Selector API Assignments below.">Skill Selector Mode</span>
+                          <select id="setting-skill-selector-mode">
+                            <option value="keyword" selected>Keyword (basic matching)</option>
+                            <option value="api">API (decision model)</option>
                           </select>
                         </label>
                         <label class="setting-field toggle-field">

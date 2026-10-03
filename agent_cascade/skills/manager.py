@@ -35,6 +35,7 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher, _TOP_K
+from .selector import ApiSelector
 from .parser import parse_frontmatter, parse_skill_file
 from .scoring import (CLASS_BAD, CLASS_PROTECTED, CLASS_UNPROVEN, CLASS_USEFUL, CLASS_USELESS,
                       eviction_rank_key, skill_classify, skill_score)
@@ -1436,6 +1437,37 @@ class SkillManager:
 
         Returns:
             List of (skill_name, relevance_score) tuples sorted by score descending.
+        """
+        # Skill selector strategy (Feature: API decision-model skill selector).
+        # Read LIVE at call time (not an import-time constant) so a UI change to
+        # settings.skill_selector_mode takes effect without restart. When mode is not
+        # 'api' we fall through to the byte-identical keyword path below; when it is,
+        # the API selector may return a re-ranked list or None (fall back to keyword).
+        _settings = getattr(getattr(self, 'pool', None), 'settings', None)
+        _selector_mode = getattr(_settings, 'skill_selector_mode', 'keyword') if _settings is not None else 'keyword'
+        if _selector_mode == 'api':
+            try:
+                _api_result = ApiSelector(self).select(query, include_inactive, cap)
+            except Exception as e:  # noqa: BLE001 — selector must never block delegation
+                logger.warning('[SKILL-SELECTOR] API selector failed; falling back to keyword: %s', e)
+                _api_result = None
+            if _api_result is not None:
+                # Honor the same cap contract as the keyword path so callers that
+                # pass `cap` (e.g. the advisor's pre-filter budget) get ≤cap results.
+                if cap is not None and cap >= 0:
+                    return _api_result[:cap]
+                return _api_result
+        # mode != 'api' (or the API selector had no opinion): unchanged keyword path.
+        return self._keyword_match(query, include_inactive, cap)
+
+    def _keyword_match(self, query: str, include_inactive: bool = False,
+                       cap: Optional[int] = None) -> List[Tuple[str, float]]:
+        """The pure keyword-matching path (no strategy dispatch).
+
+        This is the historical body of :meth:`match_skills` and is what both the
+        default ``keyword`` mode and the API selector's candidate pool / fallback
+        use. Calling it directly (rather than re-entering ``match_skills``) is what
+        keeps the API selector from recursing when mode == 'api'.
         """
         with self._write_lock:
             if not self._skills_registry and not self._matcher._field_index:

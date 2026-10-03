@@ -53,6 +53,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'auto_skill_enabled',
     'auto_skill_min_turns',
     'auto_skill_mode',
+    'skill_selector_mode',
     # Retry policy
     'retry_max_attempts',
     'endpoint_max_retries',
@@ -454,6 +455,23 @@ def _handle_auto_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
         if val not in (AUTO_SKILL_MODE_BASIC, AUTO_SKILL_MODE_ADVANCED, AUTO_SKILL_MODE_NONE):
             val = DEFAULT_AUTO_SKILL_MODE
         agent_pool.settings.auto_skill_mode = val
+
+
+@register_config_handler('skill_selector_mode')
+def _handle_skill_selector_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the skill selector mode (keyword or api).
+
+    Selects which strategy backs SkillManager.match_skills auto-matching. Invalid
+    values fall back to the default ("keyword") so a bad UI payload can never break
+    skill loading — keyword is always the safe, byte-identical baseline.
+    """
+    from agent_cascade.settings import (DEFAULT_SKILL_SELECTOR_MODE, SKILL_SELECTOR_MODE_API,
+                                        SKILL_SELECTOR_MODE_KEYWORD)
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = str(ui_cfg.get('skill_selector_mode', DEFAULT_SKILL_SELECTOR_MODE)).strip().lower()
+        if val not in (SKILL_SELECTOR_MODE_KEYWORD, SKILL_SELECTOR_MODE_API):
+            val = DEFAULT_SKILL_SELECTOR_MODE
+        agent_pool.settings.skill_selector_mode = val
 
 
 @register_config_handler('auto_skill_min_turns')

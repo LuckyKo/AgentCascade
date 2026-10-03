@@ -559,6 +559,13 @@ DEFAULT_AUTO_SKILL_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_AUTO_SKILL_MODE'
 AUTO_SKILL_MODE_BASIC: str = 'basic'
 AUTO_SKILL_MODE_ADVANCED: str = 'advanced'
 AUTO_SKILL_MODE_NONE: str = 'none'
+# Skill selector mode — which strategy backs SkillManager.match_skills auto-matching:
+#   "keyword" (default) — existing keyword matcher only (today's behavior, byte-identical)
+#   "api"             — decision-model endpoint (/v1/systemone) picks the best skill,
+#                       degrading gracefully to keyword on any failure.
+DEFAULT_SKILL_SELECTOR_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_SKILL_SELECTOR_MODE', 'keyword')
+SKILL_SELECTOR_MODE_KEYWORD: str = 'keyword'
+SKILL_SELECTOR_MODE_API: str = 'api'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
                                                 '0.15'))  # Minimum relevance score for AUTO mode skill loading
 MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skills per call (self-augmentation excluded)

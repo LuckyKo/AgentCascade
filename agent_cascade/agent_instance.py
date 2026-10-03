@@ -26,8 +26,8 @@ from agent_cascade.settings import (
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
-    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
-    SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD)
+    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, SKILL_SELECTOR_MODE_KEYWORD, STREAM_MAX_SILENCE_SECONDS,
+    STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD)
 
 
 class AgentState(Enum):
@@ -934,6 +934,10 @@ class PoolSettings:
     #   "none"     — disables system-injected auto-matched skills (no Basic match, no Advanced
     #                advisor); Self-Augmentation and caller-explicit load_skill lists still apply
     auto_skill_mode: str = DEFAULT_AUTO_SKILL_MODE  # "basic" (default), "advanced", or "none"
+    # Skill selector mode — strategy backing SkillManager.match_skills auto-matching:
+    #   "keyword" (default) — existing keyword matcher only (today's behavior)
+    #   "api"             — decision-model endpoint picks the best skill, degrading to keyword on failure
+    skill_selector_mode: str = SKILL_SELECTOR_MODE_KEYWORD  # "keyword" (default) or "api"
 
     # Agent budgeting settings
     enable_agent_budgeting: bool = False  # Enable max_turns propagation/budgeting for agent calls
