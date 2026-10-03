@@ -1528,6 +1528,308 @@ class TestEngineQueryExtraction:
         assert q == ''
 
 
+class TestToolJustificationExtraction:
+    """Cases 1-17 from the plan: tool-call justification extraction into the hint query."""
+
+    @staticmethod
+    def _extract(turn, max_chars=1000):
+        from agent_cascade.engine.core import ExecutionEngine
+        return ExecutionEngine._extract_memory_hint_query(turn, max_chars)
+
+    # ── Case 1: legacy function_call with justification ─────────────────────
+    def test_legacy_function_call_with_justification(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='edit_file',
+                                                 arguments='{"path":"x.py","justification":"Fix broken logger sink"}'))
+        q = self._extract([msg])
+        assert 'Fix broken logger sink' in q
+
+    # ── Case 2: modern tool_calls list, dict function ───────────────────────
+    def test_modern_tool_calls_dict_function(self):
+        from agent_cascade.llm.schema import ASSISTANT, Message
+        msg = Message(role=ASSISTANT, content='',
+                      extra={'tool_calls': [
+                          {'function': {'name': 'shell_cmd',
+                                        'arguments': '{"command":"ls","justification":"Check file layout"}'}}]})
+        q = self._extract([msg])
+        assert 'Check file layout' in q
+
+    # ── Case 3: ToolCall object with .function object ───────────────────────
+    def test_tool_call_object_with_function_attr(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+
+        class _FakeToolCall:
+            def __init__(self, fn):
+                self.function = fn
+
+        msg = Message(role=ASSISTANT, content='',
+                      extra={'tool_calls': [_FakeToolCall(FunctionCall(name='write_file',
+                                                                       arguments='{"path":"y.py","justification":"Add new module"}'))]})
+        q = self._extract([msg])
+        assert 'Add new module' in q
+
+    # ── Case 4: justification missing → no crash, no marker ────────────────
+    def test_justification_missing_no_marker(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='some text',
+                      function_call=FunctionCall(name='read_file', arguments='{"path":"x"}'))
+        q = self._extract([msg])
+        assert '[tool-justification]' not in q
+        assert 'some text' in q
+
+    # ── Case 5: non-string justification values skipped ────────────────────
+    def test_non_string_justification_skipped(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        for bad_val in (123, [1, 2], {'a': 1}):
+            args = '{"path":"x","justification":' + str(bad_val).replace("'", '"') + '}'
+            msg = Message(role=ASSISTANT, content='text here',
+                          function_call=FunctionCall(name='edit_file', arguments=args))
+            q = self._extract([msg])
+            assert '[tool-justification]' not in q
+
+    # ── Case 6: malformed JSON → skipped, no exception ─────────────────────
+    def test_malformed_json_skipped_no_exception(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='still works',
+                      function_call=FunctionCall(name='edit_file', arguments='{"justification": '))
+        q = self._extract([msg])  # must not raise
+        assert 'still works' in q
+        assert '[tool-justification]' not in q
+
+    # ── Case 7: 5000-char justification truncated to ≤ MAX_CHARS ───────────
+    def test_long_justification_truncated(self):
+        from agent_cascade.engine.core import JUSTIFICATION_MAX_CHARS, JUSTIFICATION_SECTION_PREFIX
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        long_j = 'x' * 5000
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='edit_file',
+                                                 arguments=f'{{"justification":"{long_j}"}}'))
+        q = self._extract([msg])
+        # The justification portion must be ≤ JUSTIFICATION_MAX_CHARS
+        assert len(q) <= JUSTIFICATION_MAX_CHARS + len(JUSTIFICATION_SECTION_PREFIX)
+
+    # ── Case 8: regression — the reported bug (no justification → empty) ───
+    def test_regression_no_justification_empty(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='read_file', arguments='{"path":"x"}'),
+                      extra={'function_id': 'call_0'})
+        q = self._extract([msg])
+        assert q == ''
+
+    # ── Case 9: regression — no arg leak ───────────────────────────────────
+    def test_regression_no_arg_leak(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='read_file',
+                                                 arguments='{"path":"secret_path_x","justification":"Need to inspect the config"}'))
+        q = self._extract([msg])
+        assert 'secret_path_x' not in q
+        assert 'TOOL CALL' not in q
+        assert 'read_file' not in q
+        assert 'Need to inspect the config' in q
+
+    # ── Case 10: function_call AND tool_calls → only function_call used ────
+    def test_function_call_takes_priority_over_tool_calls(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='edit_file',
+                                                 arguments='{"justification":"From function_call"}'),
+                      extra={'tool_calls': [
+                          {'function': {'name': 'shell_cmd',
+                                        'arguments': '{"justification":"From tool_calls"}'}}]})
+        q = self._extract([msg])
+        assert 'From function_call' in q
+        assert 'From tool_calls' not in q
+
+    # ── Case 11: 3 calls, 2 with justifications → both present, order kept ─
+    def test_multiple_calls_order_preserved(self):
+        from agent_cascade.llm.schema import ASSISTANT, Message
+        msg = Message(role=ASSISTANT, content='',
+                      extra={'tool_calls': [
+                          {'function': {'name': 'a', 'arguments': '{"justification":"First reason"}'}},
+                          {'function': {'name': 'b', 'arguments': '{"path":"x"}'}},  # no justification
+                          {'function': {'name': 'c', 'arguments': '{"justification":"Second reason"}'}},
+                      ]})
+        q = self._extract([msg])
+        assert 'First reason' in q
+        assert 'Second reason' in q
+        assert q.index('First reason') < q.index('Second reason')
+
+    # ── Case 12: duplicate justifications appear once ───────────────────────
+    def test_duplicate_justifications_deduped(self):
+        from agent_cascade.llm.schema import ASSISTANT, Message
+        msg = Message(role=ASSISTANT, content='',
+                      extra={'tool_calls': [
+                          {'function': {'name': 'a', 'arguments': '{"justification":"Same reason"}'}},
+                          {'function': {'name': 'b', 'arguments': '{"justification":"Same reason"}'}},
+                      ]})
+        q = self._extract([msg])
+        assert q.count('Same reason') == 1
+
+    # ── Case 13: text + justification → both present, prose first ──────────
+    def test_text_and_justification_prose_first(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='Investigating the compression hang',
+                      function_call=FunctionCall(name='shell_cmd',
+                                                 arguments='{"command":"ps","justification":"Check running processes"}'))
+        q = self._extract([msg])
+        assert 'Investigating the compression hang' in q
+        assert 'Check running processes' in q
+        assert q.index('Investigating') < q.index('Check running')
+
+    # ── Case 14: max_chars=50 with big justification → total ≤ 50 ──────────
+    def test_max_chars_cap_respected(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='short',
+                      function_call=FunctionCall(name='edit_file',
+                                                 arguments='{"justification":"' + 'y' * 500 + '"}'))
+        q = self._extract([msg], max_chars=50)
+        assert len(q) <= 50
+
+    # ── Case 15: plain dict messages (not Message objects) ─────────────────
+    def test_plain_dict_messages(self):
+        msg = {'role': 'assistant', 'content': '',
+               'function_call': {'name': 'edit_file',
+                                 'arguments': '{"justification":"Dict path works"}'}}
+        q = self._extract([msg])
+        assert 'Dict path works' in q
+
+    # ── Case 16: no function attr on a tool_calls item → skipped, no crash ─
+    def test_tool_call_item_without_function(self):
+        from agent_cascade.llm.schema import ASSISTANT, Message
+        msg = Message(role=ASSISTANT, content='safe',
+                      extra={'tool_calls': [{'id': 'call_0', 'type': 'function'}]})  # no 'function' key
+        q = self._extract([msg])
+        assert 'safe' in q
+        assert '[tool-justification]' not in q
+
+    # ── Case 17: propose_skill justification excluded ──────────────────────
+    def test_propose_skill_excluded(self):
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        msg = Message(role=ASSISTANT, content='',
+                      function_call=FunctionCall(name='propose_skill',
+                                                 arguments='{"name":"foo","justification":"This skill is needed for bar"}'))
+        q = self._extract([msg])
+        assert 'This skill is needed for bar' not in q
+
+    # ── Case 18: long prose + justification → block survives truncation ────
+    def test_long_prose_justification_block_survives(self):
+        """When prose exceeds max_chars, the justification block must still be present."""
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+        long_prose = 'word ' * 400  # ~2000 chars
+        msg = Message(role=ASSISTANT, content=long_prose.strip(),
+                      function_call=FunctionCall(name='edit_file',
+                                                 arguments='{"justification":"Critical fix"}'))
+        q = self._extract([msg], max_chars=1000)
+        assert len(q) <= 1000
+        assert 'Critical fix' in q, f'Justification block was truncated away by long prose. Query tail: {q[-80:]!r}'
+
+
+# ── 6b. A/B matcher harness (plan §6.2) ─────────────────────────────────────
+
+class TestJustificationMatcherBenefit:
+    """Prove the justification text actually improves recall, not just that extraction works."""
+
+    @staticmethod
+    def _make_skill_matcher():
+        from agent_cascade.skills.matcher import SkillMatcher
+        skills = [
+            {'name': 'docker-best-practices', 'description': 'Docker container orchestration and image optimization best practices', 'triggers': ['docker', 'container', 'image']},
+            {'name': 'python-testing', 'description': 'Python unit testing with pytest fixtures and mocking patterns', 'triggers': ['pytest', 'unittest', 'mock']},
+            {'name': 'api-design', 'description': 'REST API design patterns including pagination error handling and versioning', 'triggers': ['rest', 'api', 'endpoint']},
+        ]
+        m = SkillMatcher()
+        m.build_index(skills)
+        return m
+
+    @staticmethod
+    def _make_memory_matcher():
+        from agent_cascade.memory_hint.matcher import MemoryMatcher
+        docs = {
+            'docker-setup.md': ('docker container setup', 'How to set up docker containers for development'),
+            'pytest-fixtures.md': ('pytest fixtures testing', 'Guide to writing pytest test fixtures and mocking'),
+            'api-versioning.md': ('api versioning design', 'REST API versioning strategies and pagination patterns'),
+        }
+        m = MemoryMatcher()
+        m.set_documents(docs)
+        return m
+
+    def test_justification_improves_skill_recall(self):
+        """A tool-call-only turn with a justification must match where baseline matches nothing."""
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+
+        matcher = self._make_skill_matcher()
+
+        # Baseline: tool-call-only turn, no justification → empty query → no matches.
+        msg_baseline = Message(role=ASSISTANT, content='',
+                               function_call=FunctionCall(name='shell_cmd', arguments='{"command":"docker ps"}'))
+        q_base = ExecutionEngine._extract_memory_hint_query([msg_baseline], 1000)
+        assert q_base == ''
+        results_base = matcher.match(q_base) if q_base else []
+        assert results_base == []
+
+        # With justification mentioning docker → should match.
+        msg_just = Message(role=ASSISTANT, content='',
+                           function_call=FunctionCall(name='shell_cmd',
+                                                      arguments='{"command":"docker ps","justification":"Check running docker containers for orchestration"}'))
+        q_just = ExecutionEngine._extract_memory_hint_query([msg_just], 1000)
+        assert q_just != ''
+        results_just = matcher.match(q_just)
+        # The justification text contains "docker" and "containers" which are in-vocab.
+        assert len(results_just) > 0, f'Expected skill matches from justification, got none. Query: {q_just!r}'
+
+    def test_justification_recall_superset(self):
+        """On a turn with both text and justification, recall (top-k set) must be >= baseline."""
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+
+        matcher = self._make_skill_matcher()
+
+        # Text that matches "python-testing" skill.
+        text = 'I need to write pytest unit tests with mocking'
+        msg_base = Message(role=ASSISTANT, content=text)
+        q_base = ExecutionEngine._extract_memory_hint_query([msg_base], 1000)
+
+        msg_just = Message(role=ASSISTANT, content=text,
+                           function_call=FunctionCall(name='write_file',
+                                                      arguments='{"path":"test_x.py","justification":"Add fixture for the mock"}'))
+        q_just = ExecutionEngine._extract_memory_hint_query([msg_just], 1000)
+
+        results_base = matcher.match(q_base, k=5)
+        results_just = matcher.match(q_just, k=5)
+
+        # Every skill in the baseline top-k must still appear in the justification top-k.
+        base_names = {name for name, _ in results_base}
+        just_names = {name for name, _ in results_just}
+        assert base_names.issubset(just_names), (
+            f'Baseline skills {base_names - just_names} lost when justification added')
+
+    def test_memory_matcher_justification_nonempty(self):
+        """Tool-call-only turn with justification produces non-empty memory matches."""
+        from agent_cascade.engine.core import ExecutionEngine
+        from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
+
+        matcher = self._make_memory_matcher()
+
+        # Baseline: no text, no justification → empty.
+        msg_base = Message(role=ASSISTANT, content='',
+                           function_call=FunctionCall(name='shell_cmd', arguments='{"command":"ls"}'))
+        q_base = ExecutionEngine._extract_memory_hint_query([msg_base], 1000)
+        assert q_base == ''
+
+        # With justification mentioning docker setup.
+        msg_just = Message(role=ASSISTANT, content='',
+                           function_call=FunctionCall(name='shell_cmd',
+                                                      arguments='{"command":"docker build","justification":"Rebuild the docker container image"}'))
+        q_just = ExecutionEngine._extract_memory_hint_query([msg_just], 1000)
+        assert q_just != ''
+        results = matcher.match(q_just)
+        assert len(results) > 0, f'Expected memory matches from justification query: {q_just!r}'
+
+
 # ── 7. Constants sanity (orchestrator hard constraints) ─────────────────────
 
 class TestConstants:
