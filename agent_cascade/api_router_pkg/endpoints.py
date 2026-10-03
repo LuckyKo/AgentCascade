@@ -4,13 +4,22 @@ Moved verbatim from api_router.py (Phase 3a pure-move refactor).
 """
 
 import json
-import logging
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, Optional
 
-logger = logging.getLogger(__name__)
+
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger (same pattern as slot_queue/scheduler)."""
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 def ensure_api_endpoints_config(config_dir: Optional[str] = None) -> bool:
     """

@@ -120,11 +120,10 @@ class TestBug11GrantLog:
         holder_cb()              # release → B granted from queue
 
         assert acquired.wait(timeout=5)
-        granted = [r for r in records(slot_log, '[SLOTPOOL] Granted')
-                   if 'ticket=' in r.getMessage()]
+        granted = [r for r in records(slot_log, '[SLOT]')
+                   if 'granted' in r.getMessage() and 'B (test)' in r.getMessage()]
         assert len(granted) == 1
         msg = granted[0].getMessage()
-        assert 'agent=B' in msg
         assert 'waited=' in msg
         waited = float(msg.split('waited=')[1].split('s')[0])
         assert waited >= 0.2, f"waited={waited}s should reflect real queue time"
@@ -136,11 +135,10 @@ class TestBug11GrantLog:
         pool = SlotPool(key='p3', capacity=1)
         cb = pool.acquire(instance_name='A', agent_class='test')
 
-        granted = records(slot_log, '[SLOTPOOL] Granted')
+        granted = [r for r in records(slot_log, '[SLOT]') if 'granted' in r.getMessage()]
         assert len(granted) == 1
         msg = granted[0].getMessage()
         assert '(fast-path)' in msg
-        assert 'ticket=' not in msg
 
         cb()
 
@@ -155,12 +153,12 @@ class TestBug11ReleaseLog:
         time.sleep(hold_for)
         cb()
 
-        released = records(slot_log, '[SLOTPOOL] Released')
+        released = [r for r in records(slot_log, '[SLOT]') if 'released' in r.getMessage()]
         assert len(released) == 1
         msg = released[0].getMessage()
         held = float(msg.split('held=')[1].split('s')[0])
         assert held >= hold_for - 0.05, f"held={held}s should be ≥ {hold_for - 0.05}s"
-        assert 'running=0/1' in msg
+        assert 'remaining=0/1' in msg
 
     def test_stale_release_stays_silent(self, slot_log):
         pool = SlotPool(key='p5', capacity=1)
@@ -169,7 +167,7 @@ class TestBug11ReleaseLog:
         cb()   # real release → logs
         cb()   # stale/idempotent release → silent
 
-        assert len(records(slot_log, '[SLOTPOOL] Released')) == 1
+        assert len([r for r in records(slot_log, '[SLOT]') if 'released' in r.getMessage()]) == 1
 
 
 class TestBug11CancelLogs:

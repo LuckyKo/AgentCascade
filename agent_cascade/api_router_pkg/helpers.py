@@ -1,11 +1,20 @@
 """Termination-check + interruptible-sleep helpers (moved verbatim from api_router.py)."""
 
-import logging
 import time
 
 from agent_cascade.exceptions import AgentTerminatedError
 
-logger = logging.getLogger(__name__)
+
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger (same pattern as slot_queue/scheduler)."""
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 
 def _check_termination(pool, instance_name: str) -> bool:

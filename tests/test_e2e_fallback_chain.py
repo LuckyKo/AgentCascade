@@ -270,7 +270,7 @@ class TestTier4Logging:
         """Agent with NO effective endpoints → INFO log fires exactly once per call."""
         # 'security' has no assigned endpoints → chain is only the Tier-4 default.
         import logging
-        with caplog.at_level(logging.INFO, logger='agent_cascade.api_router_pkg.router'):
+        with caplog.at_level(logging.INFO, logger='agent_cascade_logger'):
             result = router.call_with_fallback('security', lambda cfg, *a, **k: 'ok-default')
 
         assert result == 'ok-default'
@@ -290,7 +290,7 @@ class TestTier4Logging:
         router.set_agent_priorities('coder', ['ep_a'])
 
         import logging
-        with caplog.at_level(logging.INFO, logger='agent_cascade.api_router_pkg.router'):
+        with caplog.at_level(logging.INFO, logger='agent_cascade_logger'):
             result = router.call_with_fallback('coder', lambda cfg, *a, **k: 'ok')
 
         assert result == 'ok'
@@ -332,7 +332,7 @@ class TestTier4Logging:
             return (base != 'http://a-api', False)
 
         try:
-            with caplog.at_level(logging.INFO, logger='agent_cascade.api_router_pkg.router'):
+            with caplog.at_level(logging.INFO, logger='agent_cascade_logger'):
                 with patch.object(router, '_sanity_probe', side_effect=_fake_probe):
                     result = router.call_with_fallback('coder', lambda cfg, *a, **k: 'ok-default')
         finally:
@@ -453,7 +453,7 @@ class TestPriorityDropWarning:
         router.set_agent_priorities('coder', ['ep_a'])
 
         import logging
-        with caplog.at_level(logging.WARNING, logger='agent_cascade.api_router_pkg.router'):
+        with caplog.at_level(logging.WARNING, logger='agent_cascade_logger'):
             router.set_agent_priorities('coder', ['nope1', 'nope2'])
 
         # Priorities were removed (all IDs invalid).

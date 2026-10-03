@@ -402,7 +402,7 @@ class TestRouterLayer1:
             return ModelServiceError(exception=ConnectError('connection refused'))
 
         router, do_call = _make_router_with_failing_endpoint(fail, max_retries=2)  # 3 attempts
-        with caplog.at_level(logging.DEBUG, logger='agent_cascade.api_router_pkg.router'):
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
             with pytest.raises(RuntimeError, match='All API endpoints exhausted'):
                 router.call_with_fallback('coder', do_call, agent_instance_name='test-inst')
 

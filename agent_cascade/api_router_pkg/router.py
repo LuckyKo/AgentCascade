@@ -12,7 +12,6 @@ do not add new ungated ones.
 import collections
 import copy
 import json
-import logging
 import os
 import re
 import threading
@@ -42,7 +41,16 @@ from agent_cascade.slot_queue import release_slot_permit
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
     from agent_cascade.agent_instance import AgentInstance
 
-logger = logging.getLogger(__name__)
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger (same pattern as slot_queue/scheduler)."""
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 # Per-thread session for sanity probes — enables TCP keep-alive so N probes to the same
 # host reuse one socket instead of opening N (WinError 10055 / WSAENOBUFS exhaustion fix).

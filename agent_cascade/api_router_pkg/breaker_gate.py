@@ -10,12 +10,21 @@ collected — no explicit dispose hook needed. Consultations are NON-mutating
 half-open probe slot — only real call_with_fallback traffic does that.
 """
 
-import logging
 import threading
 import weakref
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+
+class _AppLoggerProxy:
+    """Late-bound delegate to agent_cascade.log.logger (same pattern as slot_queue/scheduler)."""
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
+logger = _AppLoggerProxy()
 
 _lock = threading.Lock()
 _routers: list = []  # weakrefs to live APIRouter instances
