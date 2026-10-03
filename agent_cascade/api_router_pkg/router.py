@@ -1007,17 +1007,17 @@ class APIRouter:
             # recently used successfully by ANY agent (_last_active_endpoint). Fires ONLY for
             # unassigned agents (Tier-1 empty); no instance_name required to look it up, so a
             # child spawned via call_agent picks up whatever the parent (or anyone) just used.
-            # Maps the stored (normalized_base, model) key back to an ENABLED endpoint in
-            # self.endpoints (same matching pattern as Tier 3 below). On no match (endpoint
-            # removed/renamed/disabled by a UI reload) the tier is silently skipped and Tier-4
-            # remains the last resort. Read-only w.r.t. _last_active_endpoint — no writes.
+            # Maps the stored endpoint ID (UUID) back to an ENABLED endpoint in
+            # self.endpoints via O(1) dict lookup. On no match (endpoint removed/disabled
+            # by a UI reload) the tier logs a WARN and Tier-4 remains the last resort.
+            # Read-only w.r.t. _last_released_endpoint / _last_active_endpoint — no writes.
             # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
             # per-instance probe fast-path gate (skip re-probing a live connection).
             #
             # CAPACITY-AWARE (L147 liveness fix): this tier used to be capacity-BLIND — it
             # handed an unassigned agent the last-used endpoint without checking whether that
             # endpoint's pool is at full concurrency. Under conc=0 every such endpoint collapses
-            # into ONE global capacity-1 pool ('_shared_sequential_slot_', scheduler.py:62-63),
+            # into ONE global capacity-1 pool ('_shared_sequential_slot_' — see scheduler.py),
             # so a long-running parallel agent holding it starved an unassigned child (e.g. a
             # spawned Security agent) for the full QUEUE_WAIT_TIMEOUT (300s) even when other
             # endpoints had free pools. Now, before handing out last-active, we check whether
@@ -1054,7 +1054,7 @@ class APIRouter:
                                 if _conc == -1:
                                     _free_ep = ep  # unlimited — always has room
                                 else:
-                                    _cap = _conc if _conc > 0 else 1  # mirrors scheduler.py:65 (0→1)
+                                    _cap = _conc if _conc > 0 else 1  # mirrors scheduler shared-pool key logic (0→1)
                                     # LOCK-SAFETY: self._lock is a NON-reentrant threading.Lock.
                                     # count_active() takes no lock and never re-enters the router,
                                     # so this is safe TODAY — but any future change that makes it
