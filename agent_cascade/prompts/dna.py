@@ -565,7 +565,10 @@ TOOL_METADATA = {
         'description': (
             'Delegate a task to a specialized agent instance. '
             'If the instance_name already exists, the session continues with the existing context. '
-            'Otherwise, a new session is started using the specified agent_class.\n\n'
+            'Otherwise, a new session is started using the specified agent_class. '
+            'Note: if that instance is ALREADY ACTIVE (RUNNING/SLEEPING/COMPLETING), the task is delivered '
+            'to it as a message (fire-and-forget — no separate agent is spawned and you will NOT be woken '
+            'with a result).\n\n'
             'Example usage:\n'
             '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}'
         ),

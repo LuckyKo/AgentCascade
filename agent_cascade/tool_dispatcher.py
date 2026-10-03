@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.agent_instance import AgentInstance
 
+from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
 
@@ -232,6 +233,44 @@ class ToolDispatcher:
             return (f"Error: Cannot call_agent yourself ('{caller_name}'). "
                     f"Use a different instance name.")
 
+        # ── Active Instance → deliver as MESSAGE (todo.md #141) ────────────────
+        # An existing ACTIVE instance (RUNNING/SLEEPING/COMPLETING) cannot be re-entered:
+        # spawning a second instance under the same name corrupts its log/state. The old
+        # behaviour REJECTED here and told the LLM to retry with '{name}_child', which is
+        # how duplicate child agents got spawned. Instead, deliver the task as a message to
+        # the live instance — identical to what the send_message tool does. The target drains
+        # its own queue mid-run (engine/core.py:2036 post-LLM, :2620 post-tool) and wakes from
+        # SLEEPING on any queued message (engine/core.py:3205), so this is genuinely
+        # fire-and-forget with no caller wake-up.
+        #
+        # Placement matters: this MUST run BEFORE the P2 stacked-name clone below, which
+        # renames `instance_name` to '{name}_child{N}' when the target is on the execution
+        # stack — i.e. exactly when it is ACTIVE. Running after P2 would make the lookup miss
+        # the live instance and spawn the shadow child silently.
+        task_text = str(args.get('task') or '').strip()
+        # target_canonical is guaranteed non-empty (see _resolve_instance_name), so no fallback needed.
+        active_inst = self.pool.get_instance(target_canonical)
+        if active_inst is not None:
+            with active_inst._state_lock:
+                active_state = active_inst.state
+            # Only message when there is an actual task to deliver. _validate_call_agent_args
+            # does NOT validate `task`, so an empty/whitespace task falls through to the normal
+            # spawn flow (current behaviour preserved) instead of enqueueing a blank message.
+            if active_state in ACTIVE_STATES and task_text:
+                actual_class = getattr(active_inst, 'agent_class', 'unknown') or 'unknown'
+                logger.info('call_agent → messaging active instance %s (state=%s, class=%s; '
+                            "requested class '%s' ignored — no spawn)",
+                            target_canonical, active_state.name, actual_class, agent_class)
+                # Enqueue OUTSIDE any _pool_lock (enqueue_message has its own queue lock),
+                # matching send_message.py:129-130. State was read under _state_lock above.
+                tagged = f"[MESSAGE from {caller_name}]: {task_text}"
+                self.pool.enqueue_message(target_canonical, tagged)
+                return (f"Task queued as a message to active agent '{target_canonical}' "
+                        f"(state={active_state.name}). It will not be executed as a separate "
+                        f"agent and you will NOT be woken with a result — '{target_canonical}' "
+                        f"receives it as a message and acts on it in its own turn. "
+                        f"Continue with other work; use send_message if you need its output.")
+
         # P2: Stacked-name cloning — if the target name is already in the execution stack
         # (a non-self duplicate), clone to {name}_child{N} to avoid state corruption.
         # Self-calls are rejected above, so this only sees other agents' duplicates.
@@ -298,27 +337,6 @@ class ToolDispatcher:
             self._save_parent_state_before_delegation(instance)
         except Exception:
             pass
-
-        # ── Active Instance Guard ────────────────────────────────────────────
-        # Prevent calling an instance name that's already in use by an active agent.
-        # lifecycle_manager only reuses IDLE/TERMINATED instances; if the target is
-        # RUNNING/SLEEPING/COMPLETING, attempting to call it creates a shadow instance
-        # with the same name → logger collision → corrupted logs with duplicate system messages.
-        # Catch this early and reject with guidance to use a different instance name.
-        from .agent_instance import ACTIVE_STATES
-
-        target_inst = self.pool.get_instance(instance_name)
-        if target_inst is not None:
-            with target_inst._state_lock:
-                target_state = target_inst.state
-
-            if target_state in ACTIVE_STATES:
-                logger.debug('Active instance guard rejected: %s trying to call active instance %s (state=%s)',
-                             caller_name, instance_name, target_state.name)
-                return (
-                    f"Error: Agent instance '{instance_name}' is already actively executing (state={target_state.name}). "
-                    f"Cannot create a second instance with the same name. Use a different instance name like "
-                    f"'{instance_name}_child' or wait for '{instance_name}' to complete.")
 
         # ── Slot Collision Detection (Target Architecture) ────────────────
         # Determine whether A calling B requires sync or async execution based on
