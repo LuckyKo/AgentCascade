@@ -461,8 +461,8 @@ class SlotPool:
             # (held_duration is only computable here — the scheduler layer never
             # sees the SlotHolder).
             held = time.monotonic() - holder.granted_at
-            logger.debug(f"[SLOTPOOL] Released '{self.key}': agent={holder.instance_name} "
-                         f"held={held:.1f}s running={len(self._running)}/{self.capacity}")
+            logger.info(f"[SLOT] {holder.instance_name}: released pool='{self.key}' "
+                        f"held={held:.1f}s remaining={len(self._running)}/{self.capacity}")
             self._cond.notify_all()
 
     def create_held_slot(self, agent_name: str, instance_name: Optional[str] = None) -> SlotHolder:
@@ -689,6 +689,7 @@ def release_slot_permit(
                     _ep_id = _router._endpoint_id_for_key(_committed[0], _committed[1])
                     if _ep_id is not None:
                         _router._last_released_endpoint = _ep_id
+                        logger.info(f"[SLOT] {holder_name}: last_released_endpoint → {_ep_id}")
     except Exception:
         pass
 
@@ -735,8 +736,7 @@ def release_slot_permit(
                     _waiters = len(_pool._waiters)
         except Exception:
             pass
-        logger.debug(f"[SLOTPOOL] instance={holder_name} pool={slot_key} "
-                     f"action={action} waiters={_waiters}")
+        logger.info(f"[SLOT] {holder_name}: release ({action}) pool={slot_key} waiters={_waiters}")
     return True
 
 
@@ -854,9 +854,9 @@ def _grant(pool: SlotPool, instance_name: str, agent_class: str, ticket: Optiona
 
     # BUG-11: once-per-grant lifecycle trace.
     waited = (time.monotonic() - ticket.created_at) if ticket else 0.0
-    logger.debug(f"[SLOTPOOL] Granted on '{pool.key}': agent={instance_name} ({agent_class}) "
-                 f"acquisition={holder.acquisition_id}" +
-                 (f" ticket={ticket.ticket_id} waited={waited:.1f}s" if ticket else ' (fast-path)'))
+    logger.info(f"[SLOT] {instance_name} ({agent_class}): granted pool='{pool.key}' "
+                f"acquisition={holder.acquisition_id}" +
+                (f" waited={waited:.1f}s" if ticket else ' (fast-path)'))
     return holder
 
 

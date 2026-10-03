@@ -41,9 +41,9 @@ class SlotsMixin:
                 llm_cfg = router.get_llm_config(agent_class)
                 api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
 
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
-                f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
+            logger.info(
+                f"[SLOT] {instance_name} ({agent_class}): acquire → api_base={api_base}, "
+                f"conc={concurrency_limit}"
             )
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)

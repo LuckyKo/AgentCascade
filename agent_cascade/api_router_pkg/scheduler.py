@@ -43,6 +43,26 @@ class EndpointScheduler:
         # Lazy counter for acquisition IDs (for backward compat with diagnostics).
         self._next_acquisition_id = 0
 
+    def _endpoint_name_for_api_base(self, api_base: str) -> str:
+        """Resolve a human-friendly endpoint name from an api_base URL.
+
+        Uses the router back-reference (set in APIRouter.__init__) to look up the
+        endpoint label. Best-effort: returns 'unknown' when no match is found or
+        the router reference is unavailable (e.g. minimal test doubles).
+        """
+        router = getattr(self, '_router_ref', None)
+        if router is None or not hasattr(router, 'endpoints'):
+            return 'unknown'
+        try:
+            norm_target = normalize_api_base(api_base) if api_base else ''
+            with router._lock:
+                for ep in router.endpoints.values():
+                    if ep.enabled and normalize_api_base(ep.api_base) == norm_target:
+                        return ep.name or 'unknown'
+        except Exception:
+            pass
+        return 'unknown'
+
     def _get_or_create_pool(self, api_base: str, concurrency_limit: int) -> Optional[SlotPool]:
         """Get or lazily create a SlotPool for the given endpoint.
 
@@ -144,7 +164,8 @@ class EndpointScheduler:
                 instance_resolver=instance_resolver,
             )
 
-            logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "
+            _ep_name = self._endpoint_name_for_api_base(api_base)
+            logger.info(f"[SLOT] {instance_name} ({agent_class}): acquire → endpoint='{_ep_name}' api_base={api_base} "
                         f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
 
             # Structured slot event (change #10a): every acquire emits exactly one
@@ -164,8 +185,9 @@ class EndpointScheduler:
 
                 # Log release with current pool stats.
                 log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
+                _ep_name = self._endpoint_name_for_api_base(api_base)
                 logger.info(
-                    f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) released slot on '{log_target}' "
+                    f"[SLOT] {instance_name} ({agent_class}): release → endpoint='{_ep_name}' api_base={log_target} "
                     f"(pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
 
             return release
