@@ -927,6 +927,10 @@ class PoolSettings:
     # Telegram bridge (Phase 3): when True, AC runs the bridge in-process as a daemon
     # thread via agent_pool.telegram_supervisor. Default OFF; persisted to pool_settings.json.
     telegram_bridge_enabled: bool = False
+
+    # User-message log (t154): append every message pushed to the UI's Agent Messages tab
+    # to an instance-isolated JSONL file (agent_cascade/user_message_log.py). Default ON.
+    user_message_log_enabled: bool = True
     auto_skill_min_turns: int = AUTO_SKILL_MIN_TURNS  # Min turns effectuated before a natural finish triggers auto-skill reflection (strictly-greater gate)
     # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
     #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)

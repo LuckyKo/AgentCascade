@@ -139,6 +139,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'dismiss_thread_join_timeout',
     # Telegram bridge (Phase 3) — UI toggle; starts/stops the in-process daemon thread.
     'telegram_bridge_enabled',
+    # User-message log (t154) — gate for the Agent-Messages JSONL audit trail.
+    'user_message_log_enabled',
 })
 
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
@@ -418,6 +420,18 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
     """Toggle auto-skill generation/proposal on/off."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.auto_skill_enabled = bool(ui_cfg.get('auto_skill_enabled', True))
+
+
+@register_config_handler('user_message_log_enabled')
+def _handle_user_message_log_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the Agent-Messages JSONL audit trail on/off (t154).
+
+    Pure settings gate — no runtime side effect. The writer reads this flag on
+    every call via getattr(..., 'user_message_log_enabled', True), so it takes
+    effect immediately for subsequent messages. Default ON.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.user_message_log_enabled = bool(ui_cfg.get('user_message_log_enabled', True))
 
 
 @register_config_handler('telegram_bridge_enabled')

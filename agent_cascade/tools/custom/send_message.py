@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.operation_manager.path_security import _get_current_instance_name
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.user_message_log import log_user_message
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
@@ -77,11 +78,18 @@ class SendMessage(BaseTool):
             if not (ws_queue and ws_loop and not ws_loop.is_closed()):
                 logger.warning(
                     f"WebSocket unavailable, message to user not delivered via notification: [{sender}] {message}")
+                # Audit trail: log the intent even though delivery failed (delivered=False).
+                log_user_message(pool, content=message, channel='ui', source_instance=sender,
+                                 kind='agent_message', delivered=False)
                 return 'Warning: User notification sent but WebSocket unavailable. Message logged.'
 
             event = {'type': 'agent_message_to_user', 'sender': sender, 'message': message, 'timestamp': time.time()}
 
             asyncio.run_coroutine_threadsafe(_put_stream_update(ws_queue, event), ws_loop)
+
+            # Audit trail: the WS frame was queued successfully (delivered=True).
+            log_user_message(pool, content=message, channel='ui', source_instance=sender,
+                             kind='agent_message', delivered=True)
 
             # Also deliver to the Telegram bridge (phone) if one is attached. This is
             # best-effort and separate from the guaranteed WS push above: it no-ops
