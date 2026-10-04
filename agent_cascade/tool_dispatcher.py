@@ -524,7 +524,8 @@ class ToolDispatcher:
         This method:
         1. Releases caller's slot
         2. Calls run_child_core() for unified execution logic
-        3. Re-acquires caller's slot via _reacquire_caller_slot() (finally block)
+        3. Re-acquires caller's slot (and restores its KV) via the shared
+           engine.reacquire_after_slot_yield() helper (finally block)
         4. Returns result_string from step 2
 
         Args:
@@ -586,35 +587,17 @@ class ToolDispatcher:
             return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
 
         finally:
-            # FIX 3: Always re-acquire caller's slot, even on early exit due to stop
+            # FIX 3: Always re-acquire caller's slot, even on early exit due to stop.
+            # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores the
+            # caller's KV onto the endpoint it ACTUALLY holds (never the stale
+            # _last_endpoint_config — a live bug this path had), clearing the orphaned label
+            # on every skip path. tolerate_failure=False preserves today's raise-on-hard-failure
+            # semantics; only the restore target and label handling change.
             logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
-            if not self._reacquire_caller_slot(caller_slot_holder, caller_name, 'sync child'):
-                logger.warning(
-                    f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
-                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
-                # Clear saved state label to prevent orphaned state accumulation.
-                # restore_instance_state() normally clears this on success/failure, but we skipped it here.
-                try:
-                    with caller_slot_holder._state_lock:
-                        if caller_slot_holder._state_label is not None:
-                            caller_slot_holder._state_label = None
-                            logger.debug('Cleared orphaned state label for %s (re-acquire failed)', caller_name)
-                except Exception as e:
-                    logger.debug('Failed to clear state label for %s: %s', caller_name, e)
-            else:
-                # Restore parent's state ONLY AFTER re-acquiring the slot.
-                # This avoids evicting another agent's model while they're still running
-                # on the same conc=0 pool (e.g., B's child D using same model as A).
-                try:
-                    from agent_cascade.state_ops import restore_instance_state
-                    restored = restore_instance_state(caller_slot_holder)
-                    if restored:
-                        logger.debug('Restored caller KV state for %s', caller_name)
-                except Exception as e:
-                    logger.debug('Failed to restore caller state for %s: %s', caller_name, e)
-
-                logger.debug(f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
-                             f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
+            self.engine.reacquire_after_slot_yield(
+                caller_slot_holder, caller_name, 'sync child', tolerate_failure=False)
+            logger.debug(f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{caller_name}'. "
+                         f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
 
     def _run_child_async(self, caller_name: str, function_id: Optional[str], agent_class: str, instance_name: str,
                          args: dict, child_depth: int) -> str:

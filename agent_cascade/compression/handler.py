@@ -801,110 +801,6 @@ class CompressionHandler:
 
         return False
 
-    def _build_compression_halt_scope(self, instance: AgentInstance) -> List[str]:
-        """Compute the precise set of instances to halt before a forced compression.
-
-        Replaces the old blanket ``halt_all_instances()`` which halted EVERY non-exempt
-        sibling — including agents on a completely different endpoint pool that could never
-        starve the Compressor (todo.md:151). Those unrelated siblings then hit
-        ``_wait_for_compression_to_clear`` (engine/core.py:1922) and were forced through a
-        save-state → drop-slot → sleep → re-acquire → restore-state cycle, i.e. a needless
-        multi-GB model reload on tier-15/autoloader backends.
-
-        The Compressor is already FIFO-queued through the endpoint router (it runs via
-        ``engine.run`` → ``_acquire_slot_with_logging``), so no bypass exists. The only
-        agents that can actually starve it are its **pool-mates** — instances sharing the
-        same resolved slot pool. This returns exactly those, minus the existing exemptions.
-
-        Scope rules (see plans/t151_forced_compression_fifo_PLAN.md §7.2):
-          * Compressor's own pool = ``get_effective_slot_info('Compressor')`` with NO
-            instance_name — the chain-head pool the not-yet-created compressor will target.
-            If that is ``None`` (unlimited endpoint), nothing is a pool-mate → halt set empty.
-          * Each candidate's pool key: PRIMARY = its authoritative ``_slot_key`` (written by
-            the real acquire funnel at core.py:385, cursor-aware); FALLBACK only when that is
-            ``None`` = ``get_effective_slot_info(agent_class, instance_name=name)``. The two
-            sources are never OR'd — a stale ``_slot_key`` and a fresh resolution can disagree.
-          * Unresolvable candidates are NOT halted (prefer a missed halt over a wrong halt).
-
-        Mirrors ``halt_all_instances`` bookkeeping in pool/lifecycle.py: only instances
-        not already in ``_halted_instances`` are recorded into ``_compression_halted``, so
-        ``resume_all_instances()`` stays symmetric and manual halts are preserved.
-
-        Returns the list of instance names actually halted by this call (empty if none).
-        """
-        pool = self.pool
-        router = getattr(pool, 'api_router', None)
-        if router is None or not hasattr(router, 'get_effective_slot_info'):
-            # No slot infrastructure available (minimal test doubles / unlimited endpoints):
-            # cannot scope halts precisely. Proceed without halting any instances — the
-            # compressor may starve but will time out after a bounded wait
-            # (QUEUE_WAIT_TIMEOUT), which is the existing safety net.
-            return []
-
-        # Snapshot ONCE — self.pool.instances is mutated without a dedicated lock; iterating
-        # it live while a sibling is created/removed can raise RuntimeError: dictionary
-        # changed size during iteration. (Matches the lock-free snapshot-then-act convention
-        # used by halt_all_instances.)
-        instance_names = list(pool.instances)
-
-        # Existing exemptions: the compression target, its parent, and every Compressor_*.
-        exempt = {instance.instance_name}
-        if instance.parent_instance:
-            exempt.add(instance.parent_instance)
-        for name in instance_names:
-            if name.startswith('Compressor_'):
-                exempt.add(name)
-
-        # Resolve the Compressor's OWN pool. The compressor instance does not exist yet at
-        # halt-scope time (it is created later inside compress_context → _create_system_agent),
-        # so we cannot use its instance_name; the chain-head resolution is exactly what it will
-        # target, because per-instance cursor rotation only matters for live instances that have
-        # already acquired. slot_key None ⇒ unlimited endpoint ⇒ no pool-mates ⇒ halt nothing.
-        try:
-            compressor_pool_key = router.get_effective_slot_info('Compressor').get('slot_key')
-        except Exception as e:
-            logger.debug(f"[COMPRESSION_HALT] could not resolve Compressor pool: {e}")
-            return []
-        if compressor_pool_key is None:
-            logger.info('[COMPRESSION_HALT] Compressor endpoint is unlimited (slot_key=None) — '
-                        'no pool-mates to halt.')
-            return []
-
-        halted: List[str] = []
-        for name in instance_names:
-            if name in exempt:
-                continue
-            inst = pool.instances.get(name)
-            if inst is None:
-                continue  # removed concurrently between snapshot and lookup — skip, don't halt
-
-            # PRIMARY: the authoritative pool key this instance really holds (cursor-aware).
-            candidate_key = getattr(inst, '_slot_key', None)
-            # FALLBACK only when it has not acquired yet (IDLE / never-run / slot released):
-            # resolve what it WOULD target. Never OR'd with _slot_key.
-            if candidate_key is None:
-                try:
-                    candidate_key = router.get_effective_slot_info(
-                        inst.agent_class, instance_name=name).get('slot_key')
-                except Exception as e:
-                    logger.debug(f"[COMPRESSION_HALT] could not resolve pool for {name}: {e}")
-                    continue  # unresolvable → prefer a missed halt over a wrong halt
-
-            if candidate_key != compressor_pool_key:
-                continue  # not a pool-mate — spare it (this is the collateral-damage fix)
-
-            was_already_halted = name in pool._halted_instances
-            pool.halt_instance(name)
-            # Only track instances that weren't already halted — preserves manual halts so
-            # resume_all_instances() does not resurrect a manually stopped agent.
-            if not was_already_halted:
-                pool._compression_halted.add(name)
-            halted.append(name)
-
-        logger.info(f"[COMPRESSION_HALT] {instance.instance_name}: halted pool-mates of "
-                    f"Compressor (pool={compressor_pool_key}): {', '.join(halted) if halted else '(none)'}")
-        return halted
-
     def execute_force_compression(self,
                                   instance: AgentInstance,
                                   messages: List[Message],
@@ -945,13 +841,12 @@ class CompressionHandler:
                                                         self.engine._get_effective_limit(instance))
                 return False  # Explicit: not compressed, keep going
 
-        # Halt only the Compressor's genuine pool-mates (same resolved slot pool), not every
-        # sibling. The blanket halt_all_instances() also stopped unrelated agents on other
-        # endpoint pools, forcing them through a save/drop/sleep/re-acquire/restore reprocess
-        # cycle for no reason (todo.md:151). Pool-mate scoping keeps the deadlock-avoidance
-        # guarantee (a pool-mate holding the only permit is still stepped off) while removing
-        # the collateral damage. resume_all_instances() in the finally below stays symmetric.
-        self._build_compression_halt_scope(instance)
+        # t151b: forced compression no longer halts any sibling. The Compressor is a pure FIFO
+        # citizen — it acquires its slot through the endpoint router like every other agent and
+        # is bounded by QUEUE_WAIT_TIMEOUT if a pool-mate holds the only permit. This removes the
+        # collateral save/drop/sleep/re-acquire/restore reprocess cycle (and the multi-GB model
+        # reload) that halting unrelated siblings used to force (todo.md:151). The finally-block
+        # resume_all_instances() below is retained as a defensive no-op for symmetry.
 
         try:
             logger.info(f"Context usage at {usage_pct:.1f}% for {inst_name} — "
@@ -1041,6 +936,10 @@ class CompressionHandler:
             return False
 
         finally:
+            # t151b: forced compression no longer populates _compression_halted (no sibling is
+            # halted), so this resume is a defensive no-op on the compression path. It is retained
+            # for symmetry / idempotency — resume_all_instances() only clears _compression_halted
+            # and never touches manually-halted instances, so it cannot resurrect a manual halt.
             self.pool.resume_all_instances()
 
         # Success path — reset the failure streak under lock.

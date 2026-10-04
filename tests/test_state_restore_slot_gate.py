@@ -374,3 +374,76 @@ class TestNoWrongfulEviction:
         assert len(load_urls) == 1, \
             f"only the slot holder may restore; got loads: {load_urls}"
         assert AUTOLOADER_X.rstrip('/') in load_urls[0]
+
+
+# ============================================================================
+# t151b — sync-child path (tool_dispatcher._run_child_sync) uses the shared helper
+# ============================================================================
+
+
+class TestSyncChildYieldReacquireGate:
+    """The sync-child re-acquire now routes through engine.reacquire_after_slot_yield,
+    which restores onto the HELD endpoint (never the stale _last_endpoint_config — a live bug
+    that path had) and clears the orphaned label on every skip path. These tests pin that down
+    against the shared helper directly (the same one tool_dispatcher's finally block calls)."""
+
+    def test_sync_child_restores_to_held_endpoint_not_stale(self):
+        """A sync child re-acquires with a pending label → restore fires to the HELD endpoint
+        X/model-A, never the stale config Y/stale-model-B."""
+        inst = make_instance()  # label='B' pending, _last_endpoint_config → STALE_Y
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire):
+                ok = engine.reacquire_after_slot_yield(inst, inst.instance_name, 'sync child')
+
+        assert ok is True
+        load_urls = _recorded_load_urls(post_mock)
+        assert len(load_urls) == 1, f"exactly one state/load expected: {load_urls}"
+        url = load_urls[0]
+        assert AUTOLOADER_X.rstrip('/') in url and 'model-A' in url, \
+            f"sync-child restore must target the held endpoint X: {url}"
+        assert STALE_Y not in url and 'stale-model-B' not in url, \
+            f"sync-child restore must NOT target stale config Y: {url}"
+
+    def test_sync_child_reacquire_failure_clears_label_no_restore(self):
+        """reacquire_for returns False (no router) → no restore fires AND the orphaned label is
+        cleared so it cannot re-fire a multi-GB load on a later turn."""
+        inst = make_instance()  # label pending
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            with patch.object(engine, 'reacquire_for', return_value=False):
+                ok = engine.reacquire_after_slot_yield(inst, inst.instance_name, 'sync child')
+
+        assert ok is False
+        assert _recorded_load_urls(post_mock) == [], \
+            'no state/load may fire when re-acquire fails'
+        with inst._state_lock:
+            assert inst._state_label is None, 'orphaned label must be cleared on re-acquire failure'
+
+    def test_sync_child_no_pending_label_no_restore(self):
+        """Re-acquired but no saved label (nothing evicted in the window) → zero load calls."""
+        inst = make_instance(label=None)  # nothing saved → no pending label
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire):
+                engine.reacquire_after_slot_yield(inst, inst.instance_name, 'sync child')
+
+        assert _recorded_load_urls(post_mock) == [], \
+            'no state/load may fire when no save is pending (label gate)'

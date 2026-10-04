@@ -1911,11 +1911,15 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         return result
 
     def _is_suspended_by_compression(self, inst_name: str) -> bool:
-        """Check if this instance is suspended because of forced compression.
+        """Check if this instance is suspended by a compression halt.
 
-        Returns True only when the instance was halted by forced compression's
-        halt_all_instances(). These agents should wait cooperatively and resume
-        automatically when resume_all_instances() clears the flag.
+        Returns True only when the instance is tracked in ``pool._compression_halted`` —
+        i.e. it was halted via the pool's public ``halt_all_instances()`` (manual /
+        programmatic callers and tests). Forced compression itself no longer halts any
+        sibling (t151b: the Compressor is a pure FIFO citizen bounded by QUEUE_WAIT_TIMEOUT),
+        so this set is now populated only by explicit halt_all_instances() calls. These
+        agents should wait cooperatively and resume automatically when
+        resume_all_instances() clears the flag.
         """
         return inst_name in self.pool._compression_halted
 
@@ -2052,6 +2056,103 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     logger.debug('Cleared orphaned state label for %s (restore skipped)', inst_name)
         except Exception as e:
             logger.debug('Failed to clear state label for %s: %s', inst_name, e)
+
+    def save_before_slot_yield(self, instance: AgentInstance, inst_name: str, reason: str = '') -> bool:
+        """Persist KV state just before the caller yields its slot to a system agent.
+
+        Called by every ``yield_caller_slot`` production caller (Security / Compressor)
+        via an injected callback so the save happens *before* the permit is released —
+        at that instant the caller still owns the endpoint, and FIFO guarantees it is the
+        sole holder for conc=0, so the save lands on its own held endpoint (eviction-safe).
+        This makes the KV durable across the yield window: if an interleaved Compressor
+        model swap evicts the resident cache while the caller is slotless, the persisted
+        label survives and can be restored on re-acquisition.
+
+        Delegates to ``state_ops.save_instance_state`` (which self-gates: no-op for
+        non-autoloader / state-save-disabled / missing-endpoint instances) under the
+        instance's ``_state_lock``, matching the lock discipline of the compression-halt
+        save above. Never raises — a missed save degrades to today's behavior, never worse.
+
+        Returns:
+            True if a label was saved (a restore is pending), False otherwise.
+        """
+        try:
+            from agent_cascade.state_ops import save_instance_state
+            with instance._state_lock:
+                return bool(save_instance_state(instance))
+        except Exception as e:
+            logger.debug('[STATE_SAVE_SKIP] %s (%s) — save before slot yield failed: %s',
+                         inst_name, reason or 'slot-yield', e)
+            return False
+
+    def reacquire_after_slot_yield(self, instance: AgentInstance, inst_name: str, context: str = '',
+                                   *, tolerate_failure: bool = False) -> bool:
+        """Re-acquire the caller's slot after a system-agent yield and restore its KV.
+
+        Shared re-acquire + restore for every ``yield_caller_slot`` production caller
+        (Security / Compressor / sync child). Wraps :meth:`reacquire_for` (bounded FIFO,
+        no-slot handling) and then restores the saved KV — but ONLY when both safety gates
+        hold:
+
+          1. The instance actually re-acquired a slot (``_slot_release is not None``) —
+             restoring onto an endpoint we don't hold would auto-evict a live sibling.
+          2. A saved state label is pending (``_state_label is not None``) — the consume-once
+             gate that stops a redundant multi-GB reload when nothing evicted in the window.
+
+        The restore is routed through :meth:`_restore_held_slot_state` (never a bare
+        ``restore_instance_state(instance)``), so it targets the endpoint the instance
+        ACTUALLY holds, not the stale ``_last_endpoint_config`` — this also fixes the sync-child
+        path that previously restored ungated against the stale config.
+
+        The orphaned label is cleared on EVERY skip path (re-acquire returned False, no slot
+        held, resolution failure, or an exception) so a leaked label can never re-fire a
+        multi-GB restore on later turns.
+
+        Args:
+            instance / inst_name: The caller that yielded its slot.
+            context: Log label (e.g. "after_security_check", "sync child").
+            tolerate_failure: When False (default) any re-acquire failure PROPAGATES —
+                preserving Security's sanctioned raise-on-hard-failure behavior. When True,
+                the failure is swallowed (label cleared, False returned) for callers that are
+                mid-turn and must continue (compression).
+
+        Returns:
+            True if the slot was re-acquired (restored or not), else False.
+        """
+        try:
+            ok = self.reacquire_for(instance, inst_name, context=context)
+        except Exception as e:
+            # Clear any pending label so it does not leak and re-fire a restore later,
+            # then honor the caller's failure policy.
+            self._clear_orphaned_state_label(instance, inst_name)
+            if tolerate_failure:
+                logger.warning(
+                    f"[SLOT_REACQUIRE_DEGRADED] {context or 'slot-yield'} for '{inst_name}' "
+                    f"failed to re-acquire its slot; continuing WITHOUT a re-acquired slot: {e}",
+                    exc_info=True,
+                )
+                return False
+            raise
+
+        if not ok:
+            # reacquire_for returned False (no router available) — no slot held.
+            self._clear_orphaned_state_label(instance, inst_name)
+            return False
+
+        # Re-acquired. Restore only when we actually hold a slot AND a save is pending.
+        with instance._state_lock:
+            has_saved_state = instance._state_label is not None
+        if instance._slot_release is None:
+            # No-slot / unlimited endpoint — nothing to restore onto; clear any label so it
+            # does not leak and re-trigger an expensive state/load on a later turn.
+            self._clear_orphaned_state_label(instance, inst_name)
+            return True
+        if has_saved_state:
+            self._restore_held_slot_state(instance, inst_name)
+        else:
+            logger.debug('[STATE_RESTORE_SKIP] %s — no saved state to restore after %s '
+                         '(keeping warm KV cache)', inst_name, context or 'slot-yield')
+        return True
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
         """Check if we should skip the LLM call due to stop conditions.

@@ -958,15 +958,24 @@ class TestSlotYieldBeforeSecurityCheck:
         # Reacquire must run in the finally block to restore the caller's slot.
         # Without reacquire, the caller remains slotless for the entire remaining run()
         # (slots are acquired once at run() entry, not per-turn).
-        assert engine_instance.reacquire_for.called, (
-            "reacquire_for should be called in the finally block to restore the caller's slot"
+        # t151b: the security path now uses the shared yield/reacquire helper
+        # reacquire_after_slot_yield (which wraps reacquire_for AND restores any KV saved
+        # by save_before_slot_yield), not a bare reacquire_for call.
+        assert engine_instance.reacquire_after_slot_yield.called, (
+            "reacquire_after_slot_yield should be called in the finally block to restore the caller's slot"
         )
-        # Verify it was called with the correct instance.
+        # Verify it was called with the correct instance and tolerate_failure=False.
         assert any(
             c.args and c.args[0] is caller_inst
-            for c in engine_instance.reacquire_for.call_args_list
+            for c in engine_instance.reacquire_after_slot_yield.call_args_list
         ), (
-            'reacquire_for should be called with the caller instance'
+            'reacquire_after_slot_yield should be called with the caller instance'
+        )
+        assert all(
+            c.kwargs.get('tolerate_failure') is False
+            for c in engine_instance.reacquire_after_slot_yield.call_args_list
+        ), (
+            'security path must use tolerate_failure=False to preserve raise-on-hard-failure'
         )
 
     def test_skip_path_when_no_slot_held(self):
@@ -1006,9 +1015,10 @@ class TestSlotYieldBeforeSecurityCheck:
         assert not engine_instance._release_slot.called, (
             "_release_slot should NOT be called when there's no slot to yield"
         )
-        # No reacquire either (nothing was yielded)
-        assert not engine_instance.reacquire_for.called, (
-            'reacquire_for should NOT be called when nothing was yielded'
+        # No reacquire either (nothing was yielded). t151b: the shared helper is the one that's
+        # skipped now — no slot held → _yielded_slot is False → reacquire_after_slot_yield not called.
+        assert not engine_instance.reacquire_after_slot_yield.called, (
+            'reacquire_after_slot_yield should NOT be called when nothing was yielded'
         )
 
 

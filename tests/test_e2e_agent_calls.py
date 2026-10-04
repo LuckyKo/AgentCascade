@@ -1232,11 +1232,11 @@ class TestSecuritySlotYieldOnSharedSlot:
 
       1. caller.run() holds the shared slot while its (fake) LLM stream is held open.
       2. Security.run() starts → blocks FIFO on the same shared pool.
-      3. The caller is compression-halted (exactly mirroring
-         execute_force_compression's halt_all_instances(exempt=[target])) →
-         the caller releases the slot at its next checkpoint (BUG-1) →
-         Security acquires WELL WITHIN the (shortened) QUEUE_WAIT_TIMEOUT
-         instead of timing out.
+      3. The caller is compression-halted via pool.halt_all_instances(except=[caller's
+         siblings]) — the retained manual/programmatic halt mechanism (t151b: forced
+         compression itself no longer halts; this test drives the halt directly to exercise
+         the yield path) → the caller releases the slot at its next checkpoint (BUG-1) →
+         Security acquires WELL WITHIN the (shortened) QUEUE_WAIT_TIMEOUT instead of timing out.
       4. resume_all_instances() → the caller re-acquires at the FIFO TAIL after
          Security finishes; both agents complete with no slot-timeout errors.
 

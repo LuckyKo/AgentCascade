@@ -1,26 +1,24 @@
-"""t151 — forced compression must halt only the Compressor's genuine pool-mates.
+"""t151b — forced compression no longer halts ANY sibling; the Compressor is a pure FIFO citizen.
 
-The todo premise ("forced compression does not queue the compressor in the router FIFO") is
-half wrong: the Compressor IS already FIFO-queued (agent_invoker.py:372 → engine.run →
-core.py:1020 _acquire_slot_with_logging → slots.py:54 scheduler.acquire). The real defect was
-the blanket ``halt_all_instances()`` at compression/handler.py:852, which halted EVERY non-exempt
-sibling — including agents on a completely different endpoint pool that could never starve the
-Compressor. Those unrelated siblings then hit _wait_for_compression_to_clear (engine/core.py:1922)
-and were forced through a save-state → drop-slot → sleep → re-acquire → restore-state reprocess
-cycle for no reason.
+Pre-t151b (the original t151 fix), forced compression called a pool-scoped
+``halt_all_instances()`` and halted every non-exempt sibling on the Compressor's resolved
+slot pool. t151b removes that halt entirely: the Compressor simply acquires its OWN endpoint
+slot through the normal router FIFO (bounded by ``QUEUE_WAIT_TIMEOUT``), so it can never
+force a sibling into a save-state → drop-slot → sleep → re-acquire → restore cycle. The
+sibling just keeps running; if the Compressor's acquire times out, the handler records the
+fail-streak (BUG-7 backoff gate) and reports failure — no halt was ever issued to resume.
 
-The fix replaces the blanket halt with a pool-aware, bounded halt
-(CompressionHandler._build_compression_halt_scope): only instances sharing the Compressor's
-resolved slot pool are halted, minus exemptions, minus already-halted.
+Status legend (plan §8.A):
+  T1 = forced compression leaves ``pool._compression_halted`` EMPTY (nothing halted).
+       Collapses the old "does-not-halt unrelated pool agent" + "manual-halt not resurrected"
+       tests: with no halt at all, both properties hold trivially and are asserted in one place.
+  KEEP (unmodified) = the two literal todo-151 FIFO guards proving the Compressor acquires
+       through the SAME real SlotPool as a normal agent (no bypass) and that a queued-behind-
+       sibling acquire is BOUNDED (raises TimeoutError), not an infinite hang.
 
-Status legend (plan §6.2):
-  ⛔ = MUST fail on pre-fix code (revert-proof bug test) — Test 2
-  ✅ = passes today / regression guard — Tests 1, 3, 4, 5, 6
-
-Tests 1-3 and 6 drive the REAL CompressionHandler against a REAL APIRouter/AgentPool so the
-slot resolution is exercised end to end (a MagicMock pool would make _build_compression_halt_scope
-return [] vacuously — see the mock-pool-real-lifecycle-wiring skill). Test 4 drives the REAL
-ExecutionEngine acquire funnel.
+Tests drive the REAL CompressionHandler against a REAL APIRouter/AgentPool so the slot
+resolution is exercised end to end (a MagicMock pool would make _acquire_slot return a
+MagicMock and hide any bypass). Run serially: ``pytest -n 0 --timeout=120``.
 """
 import os
 os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"t151_{os.getpid()}")
@@ -104,6 +102,7 @@ def _run_forced(handler, inst):
 
     Returns (result, halted_snapshot) where halted_snapshot is the set of names in
     pool._compression_halted observed *while* compression runs (i.e. what was actually halted).
+    With t151b's no-halt design this must be empty — nothing is ever compression-halted.
     """
     from agent_cascade.compression import core as _ccore
     seen = {}
@@ -120,86 +119,59 @@ def _run_forced(handler, inst):
     return result, seen.get('halted', set())
 
 
-class TestForcedCompressionHaltScope:
+class TestForcedCompressionNoHalt:
 
-    def test_forced_compression_halts_genuine_pool_mate(self, tmp_path):
-        """✅ CONTROL (passes today; guards against over-narrowing).
+    def test_forced_compression_halts_nothing(self, tmp_path):
+        """T1 — forced compression leaves ``pool._compression_halted`` EMPTY.
 
-        A sibling that shares the Compressor's pool must STILL be halted — otherwise the
-        Compressor can starve at >95% context (plan §3.3).
-        """
-        router = _build_router(tmp_path)
-        pool = _build_pool(router, tmp_path)
-        handler, engine = _make_handler(pool)
+        The Compressor acquires its own slot through the router FIFO; it never halts a sibling.
+        This collapses the two old tests: (a) an unrelated pool agent is trivially not halted
+        because NO ONE is halted, and (b) a manually-halted sibling is preserved by
+        resume_all_instances() because compression added nothing to _compression_halted to
+        clear. Both invariants hold by construction now — asserted here in one place.
 
-        target = _make_instance(pool, 'coder', 'coder')          # compression target (exempt)
-        mate = _make_instance(pool, 'writer', 'writer')          # same shared conc=0 pool
-        mate._slot_key = SHARED_KEY                              # authoritative: holds the shared permit
-
-        result, halted = _run_forced(handler, target)
-
-        assert result is True
-        assert 'writer' in halted, \
-            f"pool-mate 'writer' (shared {SHARED_KEY}) must be halted; got {halted}"
-        # Symmetry: resume cleared the compression-halt set.
-        assert pool._compression_halted == set()
-
-    def test_forced_compression_does_not_halt_unrelated_pool_agent(self, tmp_path):
-        """⛔ THE revert-proof bug test — MUST fail on pre-fix code.
-
-        A sibling on a DIFFERENT endpoint pool (different api_base) cannot starve the
-        Compressor and must NOT be halted. Pre-fix halt_all_instances() reached it anyway.
+        A manually-halted sibling is included so the "not resurrected" property is exercised:
+        it must still be halted after the forced-compression cycle completes (its manual halt
+        is untouched, and resume_all_instances() only clears compression halts — of which there
+        are none).
         """
         router = _build_router(tmp_path)
         ep_b = _add_par_endpoint(router)
-        # writer is assigned to the per-base endpoint → resolves to BASE_B, a different pool.
+        # writer is assigned to the per-base endpoint → resolves to BASE_B (a different pool);
+        # researcher shares the Compressor's shared conc=0 pool. Both must end up untouched.
         router.set_agent_priorities('writer', [ep_b])
         pool = _build_pool(router, tmp_path)
         handler, engine = _make_handler(pool)
 
         target = _make_instance(pool, 'coder', 'coder')          # compression target (exempt)
         unrelated = _make_instance(pool, 'writer', 'writer')     # different pool (BASE_B)
-        unrelated._slot_key = None                               # not holding the shared permit
+        mate = _make_instance(pool, 'researcher', 'researcher')  # same shared conc=0 pool
 
-        # Sanity: writer really resolves to a different pool than the Compressor.
+        # Sanity: the two siblings really resolve to DIFFERENT pools than / each other.
         comp_key = router.get_effective_slot_info('Compressor')['slot_key']
         writer_key = router.get_effective_slot_info('writer', instance_name='writer')['slot_key']
+        mate_key = router.get_effective_slot_info('researcher', instance_name='researcher')['slot_key']
         assert comp_key == SHARED_KEY and writer_key != comp_key, \
             f"fixture broken: compressor={comp_key} writer={writer_key}"
 
-        result, halted = _run_forced(handler, target)
-
-        assert result is True
-        assert 'writer' not in halted, \
-            f"unrelated agent 'writer' on a different pool must NOT be halted; got {halted}"
-        assert pool._compression_halted == set()  # nothing was compression-halted
-
-    def test_manual_halt_not_resurrected_by_forced_compression(self, tmp_path):
-        """✅ regression guard — the lifecycle.py:211-215 invariant.
-
-        A manually halted sibling must survive resume_all_instances(): it is not recorded into
-        _compression_halted, so resume only clears what compression actually halted.
-        """
-        router = _build_router(tmp_path)
-        pool = _build_pool(router, tmp_path)
-        handler, engine = _make_handler(pool)
-
-        target = _make_instance(pool, 'coder', 'coder')          # exempt
-        manual = _make_instance(pool, 'writer', 'writer')        # same pool, but manually halted
-        mate = _make_instance(pool, 'researcher', 'researcher')  # same pool, not yet halted
-
-        pool.halt_instance('writer')   # MANUAL halt (not via compression)
-        manual._slot_key = SHARED_KEY
-        mate._slot_key = SHARED_KEY
+        # A manual halt on the pool-mate must survive the whole cycle (not resurrected).
+        pool.halt_instance('researcher')
 
         result, halted = _run_forced(handler, target)
 
         assert result is True
-        # The genuinely-halted-by-compression pool-mate was resumed…
-        assert 'researcher' not in pool._halted_instances
-        # …but the manually halted sibling was NOT resurrected.
-        assert 'writer' in pool._halted_instances, \
-            'manual halt must be preserved by resume_all_instances()'
+        # THE t151b invariant: nothing was compression-halted at any point during the run.
+        assert halted == set(), \
+            f"forced compression must halt NOTHING (Compressor is a FIFO citizen); got {halted}"
+        # And the pool's compression-halt bookkeeping is empty afterwards.
+        assert pool._compression_halted == set(), \
+            f"pool._compression_halted must be empty after forced compression: {pool._compression_halted}"
+        # The manually-halted sibling was NOT resurrected by resume_all_instances().
+        assert 'researcher' in pool._halted_instances, \
+            'manual halt must be preserved (resume only clears compression halts)'
+
+
+class TestCompressorFIFOGuards:
 
     def test_compressor_acquires_slot_through_router_fifo(self, tmp_path):
         """✅ regression guard — the literal todo-151 requirement.
@@ -362,66 +334,19 @@ class TestForcedCompressionHaltScope:
             # And the handler path reports that failure honestly: False + fail-streak (BUG-7 gate).
             with patch('agent_cascade.compression.core.compress_context',
                        side_effect=TimeoutError('Compressor_t151 timed out')), \
-                 patch.object(handler.engine, '_rebuild_working_set'), \
-                 patch.object(handler, '_inject_compression_notification'):
+              patch.object(handler.engine, '_rebuild_working_set'), \
+              patch.object(handler, '_inject_compression_notification'):
                 result = handler.execute_force_compression(target, [], [], 96.0)
 
             assert result is False, 'a queued-behind-sibling timeout must report failure'
             assert target._force_compress_fail_streak == 1, \
                 'fail-streak must be recorded so the BUG-7 backoff gate suppresses instant re-halt'
-            # Symmetry: the pool-mate that was halted is resumed in the finally block.
-            assert 'writer' not in pool._halted_instances
         finally:
             _sched_mod.QUEUE_WAIT_TIMEOUT = old_timeout
             released.set()
             holder.join(timeout=5)
             if holder.is_alive():
                 pytest.fail('holder thread did not finish (release leaked)')
-
-    def test_halt_set_snapshot_is_immutable_during_iteration(self, tmp_path):
-        """✅ regression guard — the list(...) snapshot introduced by the fix.
-
-        Creating/removing instances concurrently while _build_compression_halt_scope runs must
-        not raise RuntimeError: dictionary changed size during iteration (pool mutation without
-        a dedicated lock during iteration). The snapshot is taken once up front.
-        """
-        router = _build_router(tmp_path)
-        pool = _build_pool(router, tmp_path)
-        handler, engine = _make_handler(pool)
-
-        target = _make_instance(pool, 'coder', 'coder')          # exempt
-        mate = _make_instance(pool, 'writer', 'writer')          # pool-mate (halted)
-        mate._slot_key = SHARED_KEY
-
-        stop = threading.Event()
-        errors = []
-
-        def _churn():
-            i = 0
-            while not stop.is_set():
-                try:
-                    name = f'churn_{i}'
-                    inst = _make_instance(pool, name, 'writer')
-                    inst._slot_key = SHARED_KEY
-                    pool.instances.pop(name, None)
-                except Exception as e:  # noqa: BLE001 - we want to catch the iteration error
-                    errors.append(e)
-                    break
-                i += 1
-
-        churner = threading.Thread(target=_churn, daemon=True)
-        churner.start()
-        try:
-            halted = handler._build_compression_halt_scope(target)
-        except RuntimeError as e:
-            pytest.fail(f"RuntimeError escaped halt-scope computation (snapshot bug): {e}")
-        finally:
-            stop.set()
-            churner.join(timeout=5)
-
-        # The real pool-mate was still halted; no iteration error escaped.
-        assert 'writer' in halted, f"pool-mate must be halted amid churn: {halted}"
-        assert not errors, f"churn thread hit an unexpected error: {errors!r}"
 
 
 if __name__ == '__main__':

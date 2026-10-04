@@ -7,9 +7,14 @@ pool-holder diagnostic are defined once instead of duplicated nearly verbatim.
 This module intentionally depends ONLY on stdlib + logging — it takes the
 agent pool / engine as parameters, so no agent_cascade imports are needed and
 there is no circular-import risk.
+
+KV save/restore is INJECTED, not imported: callers pass a ``save_fn`` callback
+(an ExecutionEngine method) that persists the caller's KV state before the slot
+is released. This keeps the module stdlib-only (no state_ops import) while making
+every yield caller eviction-safe by construction.
 """
 import logging
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,7 @@ def yield_caller_slot(
     log_prefix: str,
     release_reason: str,
     before_action: str,
+    save_fn: Optional[Callable[[Any, str], bool]] = None,
 ) -> bool:
     """Yield the caller's endpoint slot before running a system-launched agent.
 
@@ -74,6 +80,13 @@ def yield_caller_slot(
         release_reason: String passed to engine._release_slot() (e.g. "before_security_check").
         before_action: Human-readable action phrase for the Path-1 log
             (e.g. "Security check" / "compression").
+        save_fn: Optional injected callback ``(instance, reason) -> bool`` that persists
+            the caller's KV state BEFORE the slot is released (eviction-safety). Called on
+            both Path 1 and Path 2, immediately before the release, inside the existing
+            try/logging discipline. Production callers pass
+            ``engine.save_before_slot_yield``; it self-gates for non-autoloader instances
+            and never raises. When None (default) no save is performed — preserving the
+            legacy behavior for any caller that has not opted in.
 
     Returns:
         True if a slot was yielded (so the caller knows to reacquire in its finally
@@ -88,6 +101,15 @@ def yield_caller_slot(
         logger.debug(
             f"[{log_prefix}] Releasing slot for '{caller_name}' before {before_action}"
         )
+        # Persist KV state BEFORE releasing (eviction-safety): at this instant the caller
+        # still owns the endpoint, so the save lands on its held endpoint and the label
+        # survives any model swap that happens while it is slotless. Best-effort; never
+        # raises (save_fn is engine.save_before_slot_yield, which swallows errors).
+        if save_fn is not None:
+            try:
+                save_fn(caller_inst, release_reason)
+            except Exception as e:  # noqa: BLE001 — a missed save degrades to legacy behavior
+                logger.debug(f"[{log_prefix}] KV save before yield failed for '{caller_name}': {e}")
         # Structured drop-handoff event (sticky slot plan change #9/#10c): system agents
         # (Security/Compressor) use the same yield/reacquire path as sync children.
         engine._release_slot(caller_inst, caller_name, release_reason, action='drop-handoff')
@@ -116,6 +138,13 @@ def yield_caller_slot(
             f"— force-releasing"
         )
         try:
+            # Persist KV state BEFORE the force-release too (eviction-safety): the caller is
+            # about to be slotless, so save first. Same best-effort discipline as Path 1.
+            if save_fn is not None:
+                try:
+                    save_fn(caller_inst, release_reason)
+                except Exception as e:  # noqa: BLE001 — a missed save degrades to legacy behavior
+                    logger.debug(f"[{log_prefix}] KV save before force-release failed for '{caller_name}': {e}")
             sched_pool.release(_leaked_holder)
             # release() is silent on stale/no-op (returns None), so verify
             # the holder actually left the pool before flagging a yield —

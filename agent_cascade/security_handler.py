@@ -486,6 +486,7 @@ class SecurityAdvisorHandler:
                     log_prefix='SECURITY_SLOT_YIELD',
                     release_reason='before_security_check',
                     before_action='Security check',
+                    save_fn=engine.save_before_slot_yield,
                 )
 
                 # Last-resort guard against a generator that never yields its first token.
@@ -647,7 +648,12 @@ class SecurityAdvisorHandler:
             if _yielded_slot and caller_inst_sec:
                 logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
                 try:
-                    engine.reacquire_for(caller_inst_sec, caller_agent, 'after_security_check')
+                    # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores
+                    # the KV saved by save_before_slot_yield (only when a label is pending and
+                    # we actually hold the slot). tolerate_failure=False preserves the existing
+                    # raise-on-hard-failure sanction below.
+                    engine.reacquire_after_slot_yield(
+                        caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False)
                 except SlotCancelled:
                     # A stop/dismiss cancelled the reacquire. This is EXPECTED, not a
                     # failure: the verdict was already delivered by _handle_result

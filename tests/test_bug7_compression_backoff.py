@@ -3,17 +3,18 @@ Unit tests for BUG-7 fix — failed-compression backoff gate + honest return val
 
 Spec: reports/fix_plans/BUG-7_compression_failure_backoff.md
 
-Covers (gate timing and method invocation, NOT scoping correctness):
+Covers (gate timing and method invocation, NOT scoping):
 - Exception path: streak recorded, returns False (was: return True).
-- Backoff gate: immediate retry short-circuits BEFORE _build_compression_halt_scope.
-- Gate expiry: proceeds to halt+compress once the backoff window passes.
+- Backoff gate: immediate retry short-circuits BEFORE compress_context runs.
+- Gate expiry: proceeds to compress once the backoff window passes.
 - Soft-failure path (result.success=False): streak + False (was: implicit None).
 - Success resets the failure streak.
 
-Note: These tests use MagicMock pools without api_router, so they verify that
-_build_compression_halt_scope is called/skipped at the right times, not that it
-computes correct halt scopes. Scoping correctness is covered by
-tests/test_t151_forced_compression_fifo.py (real router + pool).
+Note: t151b removed the pool-scoped halt (_build_compression_halt_scope) — forced compression
+no longer halts any sibling; the Compressor is a pure FIFO citizen bounded by QUEUE_WAIT_TIMEOUT.
+These tests therefore verify only that the BUG-7 backoff gate short-circuits BEFORE compress_context
+on an immediate retry (the gate sits ahead of the acquire). Scoping / no-halt behavior is covered by
+tests/test_t151_forced_compression_fifo.py and tests/test_t151b_compressor_fifo_fairness.py.
 """
 
 import threading
@@ -56,15 +57,14 @@ class TestBug7BackoffGate:
         inst = make_instance()
         messages, llm_messages = [Message(role='user', content='x')], []
 
-        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')), \
-             patch.object(handler, '_build_compression_halt_scope') as halt_scope:
+        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')):
             result = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert result is False
         assert inst._force_compress_fail_streak == 1
         assert inst._last_force_compress_fail_at > 0.0
-        # t151: halt is now pool-scoped (_build_compression_halt_scope), not blanket halt_all_instances.
-        halt_scope.assert_called_once()
+        # t151b: forced compression no longer halts any sibling (Compressor is a FIFO citizen);
+        # the finally block still calls resume_all_instances() defensively (idempotent now).
         pool.resume_all_instances.assert_called_once()
 
     def test_gate_short_circuits_before_halt_on_immediate_retry(self):
@@ -73,19 +73,18 @@ class TestBug7BackoffGate:
         inst = make_instance()
         messages, llm_messages = [Message(role='user', content='x')], []
 
-        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')), \
-             patch.object(handler, '_build_compression_halt_scope') as halt_scope:
+        with patch('agent_cascade.compression.core.compress_context', side_effect=RuntimeError('boom')):
             first = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert first is False
-        assert halt_scope.call_count == 1
 
+        # t151b: the gate short-circuits BEFORE compress_context runs (there is no longer a halt to
+        # skip — the Compressor simply acquires its slot through the FIFO). Assert compress_context
+        # itself was not reached on the immediate retry.
         with patch('agent_cascade.engine.compression_exec.logger'), \
              patch.object(engine, '_count_history_tokens', return_value=90_000), \
              patch.object(engine, '_get_max_tokens', return_value=100_000), \
-             patch('agent_cascade.compression.core.compress_context') as compress_mock, \
-             patch.object(handler, '_build_compression_halt_scope', side_effect=AssertionError(
-                 'gate must fire before halt — no pool freeze while backing off')):
+             patch('agent_cascade.compression.core.compress_context') as compress_mock:
             second = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert second is False
@@ -105,12 +104,10 @@ class TestBug7BackoffGate:
         with patch('agent_cascade.compression.core.compress_context', return_value=ok), \
              patch.object(engine, '_rebuild_working_set'), \
              patch.object(handler, '_sync_logger_after_compression'), \
-             patch.object(handler, '_inject_compression_notification'), \
-             patch.object(handler, '_build_compression_halt_scope') as halt_scope:
+             patch.object(handler, '_inject_compression_notification'):
             result = handler.execute_force_compression(inst, messages, llm_messages, 96.0)
 
         assert result is True
-        halt_scope.assert_called_once()
 
     def test_soft_failure_records_streak_and_returns_false(self):
         """result.success=False → previously fell off returning None; now False + streak."""

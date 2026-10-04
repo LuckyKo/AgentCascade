@@ -100,7 +100,9 @@ def _run_execute_check(handler, ap, rid, caller_agent):
     engine_instance._create_system_agent.side_effect = lambda **kw: _make_sec_instance(
         kw.get('instance_name', 'Security'))
     engine_instance._telemetry.return_value = None
-    engine_instance.reacquire_for.return_value = True
+    # t151b: the security path now re-acquires via the shared helper reacquire_after_slot_yield
+    # (which internally wraps reacquire_for + restores any KV saved by save_before_slot_yield).
+    engine_instance.reacquire_after_slot_yield.return_value = True
 
     mock_engine_cls = MagicMock(return_value=engine_instance)
 
@@ -339,11 +341,12 @@ def test_normal_yield_path_completes(slot_harness):
     # waiting for the slot — i.e. the caller's permit was freed in time for it to proceed.
     # After the check, the finally-block RE-ACQUIRES the caller's slot, so the caller is
     # expected to hold the permit again (yield → run Security → reacquire is in-order).
-    assert engine_instance.reacquire_for.called, (
+    # t151b: reacquire now goes through the shared helper (wraps reacquire_for + KV restore).
+    assert engine_instance.reacquire_after_slot_yield.called, (
         '_yielded_slot should be True so the finally-block reacquire runs.\n' + report)
     # Reacquire must have targeted the caller.
-    assert any(c.args and c.args[0] is caller for c in engine_instance.reacquire_for.call_args_list), (
-        'reacquire_for should be called with the caller instance to restore its slot.\n' + report)
+    assert any(c.args and c.args[0] is caller for c in engine_instance.reacquire_after_slot_yield.call_args_list), (
+        'reacquire_after_slot_yield should be called with the caller instance to restore its slot.\n' + report)
 
 
 # ── Test 2: force-release fallback path (leaked permit) ──────────────────────
@@ -398,8 +401,8 @@ def test_force_release_fallback_path(slot_harness):
     # After a successful force-release, the caller's permit must be gone from the pool.
     assert 'caller' not in shared._running, (
         f"Force-release fallback should remove the leaked holder from _running: {list(shared._running)}\n{report}")
-    # Reacquire must run (the finally block restores the caller's slot).
-    assert engine_instance.reacquire_for.called, (
+    # Reacquire must run (the finally block restores the caller's slot). t151b: via the shared helper.
+    assert engine_instance.reacquire_after_slot_yield.called, (
         '_yielded_slot should be True after force-release so the reacquire runs.\n' + report)
 
 

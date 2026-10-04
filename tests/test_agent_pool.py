@@ -243,6 +243,29 @@ class TestHaltLifecycle:
         assert agent_pool.is_instance_halted('a') is True  # still halted (manual)
         assert agent_pool.is_instance_halted('b') is False  # resumed
 
+    def test_manual_halt_not_in_compression_halted_set(self, agent_pool):
+        """t151b regression guard — the was_manual_halt bookkeeping (child_runner.py:52).
+
+        A manually halted instance must be in _halted_instances but NOT in
+        _compression_halted, so that resume_all_instances() never resurrects it and the
+        child-runner's was_manual_halt check classifies it correctly. t151b keeps this
+        mechanism intact: forced compression no longer populates _compression_halted at all,
+        but manual halts still must be tracked in exactly one of the two sets.
+        """
+        agent_pool.halt_instance('a')  # MANUAL halt (not via compression)
+
+        assert agent_pool.is_instance_halted('a') is True
+        assert 'a' in agent_pool._halted_instances, \
+            'manual halt must be recorded in _halted_instances'
+        assert 'a' not in agent_pool._compression_halted, \
+            'manual halt must NOT be recorded in _compression_halted (would be resurrected by resume)'
+
+        # The child-runner's was_manual_halt classification: halted AND not compression-halted.
+        was_manual_halt = ('a' in agent_pool._halted_instances
+                           and 'a' not in agent_pool._compression_halted)
+        assert was_manual_halt is True, \
+            'a manually-halted instance must classify as a manual halt (not a compression halt)'
+
     def test_state_lock_protection(self, agent_pool):
         """State mutations should be lock-guarded via _state_lock."""
         import threading

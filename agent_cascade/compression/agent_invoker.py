@@ -359,6 +359,7 @@ def _execute_compressor_and_extract_summary(
             log_prefix='COMPRESSION_SLOT_YIELD',
             release_reason='before_compression',
             before_action='compression',
+            save_fn=engine.save_before_slot_yield,
         )
 
         _last_comp_send = 0.0
@@ -454,16 +455,19 @@ def _execute_compressor_and_extract_summary(
 
         # ── SLOT REACQUIRE: restore caller's slot if we yielded it ──
         # Runs in the outer finally so it fires whether the inner block succeeded or
-        # raised. No KV save/restore here (unlike the compression-HALT path in core.py,
-        # which blocks for a long time): this inline compressor call is a single
-        # engine.run() that completes normally, and the caller's KV stays resident in
-        # RAM during it — same as the security check. Mirrors tool_dispatcher's sync-child
-        # yield/reacquire without KV save.
+        # raised. KV save/restore IS performed here (via the shared yield/reacquire helper):
+        # the caller was slotless for the whole compression window, during which an
+        # interleaved Compressor model swap on a shared conc=0 autoloader can evict its
+        # resident KV — so we saved it before release (save_before_slot_yield) and restore
+        # it now onto the endpoint it actually holds. The old "KV stays resident in RAM"
+        # premise is exactly what that interleaving falsifies. tolerate_failure=True: the
+        # compression caller is mid-turn and must continue even if re-acquisition fails.
         if _yielded_slot and caller_inst is not None:
             logger.debug(
                 f"[COMPRESSION_SLOT_REACQUIRE] Restoring slot for '{caller_name}' after compression"
             )
-            engine.reacquire_for(caller_inst, caller_name, context='after_compression')
+            engine.reacquire_after_slot_yield(
+                caller_inst, caller_name, context='after_compression', tolerate_failure=True)
 
     # Extract the summary from the last assistant message
     summary = ''
