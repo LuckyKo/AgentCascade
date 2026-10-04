@@ -382,8 +382,8 @@ class TestForcedCompressionHaltScope:
         """✅ regression guard — the list(...) snapshot introduced by the fix.
 
         Creating/removing instances concurrently while _build_compression_halt_scope runs must
-        not raise RuntimeError: dictionary changed size during iteration
-        (.agent_lessons/agent-pool-no-instance-lock.md). The snapshot is taken once up front.
+        not raise RuntimeError: dictionary changed size during iteration (pool mutation without
+        a dedicated lock during iteration). The snapshot is taken once up front.
         """
         router = _build_router(tmp_path)
         pool = _build_pool(router, tmp_path)

@@ -826,7 +826,7 @@ class CompressionHandler:
             sources are never OR'd — a stale ``_slot_key`` and a fresh resolution can disagree.
           * Unresolvable candidates are NOT halted (prefer a missed halt over a wrong halt).
 
-        Mirrors ``halt_all_instances`` bookkeeping (pool/lifecycle.py:211-215): only instances
+        Mirrors ``halt_all_instances`` bookkeeping in pool/lifecycle.py: only instances
         not already in ``_halted_instances`` are recorded into ``_compression_halted``, so
         ``resume_all_instances()`` stays symmetric and manual halts are preserved.
 
@@ -841,9 +841,10 @@ class CompressionHandler:
             # (QUEUE_WAIT_TIMEOUT), which is the existing safety net.
             return []
 
-        # Snapshot ONCE — self.pool.instances is mutated without a pool lock
-        # (.agent_lessons/agent-pool-no-instance-lock.md); iterating it live while a sibling
-        # is created/removed raises RuntimeError: dictionary changed size during iteration.
+        # Snapshot ONCE — self.pool.instances is mutated without a dedicated lock; iterating
+        # it live while a sibling is created/removed can raise RuntimeError: dictionary
+        # changed size during iteration. (Matches the lock-free snapshot-then-act convention
+        # used by halt_all_instances.)
         instance_names = list(pool.instances)
 
         # Existing exemptions: the compression target, its parent, and every Compressor_*.
@@ -901,7 +902,7 @@ class CompressionHandler:
             halted.append(name)
 
         logger.info(f"[COMPRESSION_HALT] {instance.instance_name}: halted pool-mates of "
-                    f"Compressor (pool={compressor_pool_key}): {halted}")
+                    f"Compressor (pool={compressor_pool_key}): {', '.join(halted) if halted else '(none)'}")
         return halted
 
     def execute_force_compression(self,
