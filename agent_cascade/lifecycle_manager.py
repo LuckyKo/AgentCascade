@@ -145,6 +145,12 @@ class AgentLifecycleManager:
         inst._tg_final_pushed_phase = None
         inst._tg_first_pushed_text = None
 
+        # Streaming partials (agent_instance.py:323) — reset_conversation() does NOT clear
+        # _streaming_responses, so a reused instance would otherwise serve its previous run's stale
+        # tail on the first frame. It is repopulated from the first LLM yield of the new run. Mirrored
+        # in ExecutionEngine._acquire_reusable_system_agent so both reuse paths stay in lockstep.
+        inst._streaming_responses = []
+
         # Remove from old parent's tracking even if new caller is None
         if old_parent is not None:
             self.pool._update_child_relationship(old_parent, inst.instance_name, add=False)
@@ -265,6 +271,15 @@ class AgentLifecycleManager:
                 inst = self.pool.instances.get(instance_name) or inst
                 logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
                 session_was_loaded = True
+
+        # BUG_0052 (Change A): give the child a back-reference to the pool so release_slot_permit can
+        # recover the router via holder._pool_ref.api_router (slot_queue.py:578). Without this, call_agent
+        # children (registered directly here, not via pool/lifecycle.py:90) silently skip the
+        # _last_released_endpoint write + committed-marker cleanup on release. Set UNCONDITIONALLY on the
+        # FINAL instance — placed AFTER the session-load block above because load_session_from_log can
+        # reassign `inst` to a fresh instance (line ~279), which would otherwise lose this reference.
+        # Covers all three outcomes: fresh-creation, reuse, and session-restored. Touches no lock (Gotcha 3).
+        inst._pool_ref = self.pool
 
         return inst, is_reuse, session_was_loaded
 

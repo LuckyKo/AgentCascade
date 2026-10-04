@@ -18,6 +18,7 @@ Only the actual HTTP call (call_fn) is mocked — router internals are exercised
 The lazy sanity probe is disabled so fake endpoints are not pruned by a real GET /models.
 """
 
+import threading
 import time
 from unittest.mock import patch
 
@@ -589,9 +590,11 @@ def _occupy_pool(router, api_base, concurrency_limit, n_holders=1):
 
 class TestCapacityAwareLastActiveFallback:
 
-    def test_t1_last_active_full_routes_to_free_endpoint(self, router):
-        """T1: last-active pool FULL, another endpoint free → chain head is the free one.
+    def test_t1_last_active_full_keeps_last_active(self, router):
+        """T1: last-active pool FULL, another endpoint free → chain head is STILL last-active.
 
+        The scheduler queues the agent on the saturated pool (FIFO). We do NOT first-fit to an
+        arbitrary free endpoint — that can route a text-only agent to a vision/multimodal API.
         Last in chain is still the Tier-4 default (unchanged).
         """
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
@@ -604,7 +607,7 @@ class TestCapacityAwareLastActiveFallback:
 
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
-        assert bases[0] == 'http://b-api', f"expected free endpoint b at head, got {bases}"
+        assert bases[0] == 'http://a-api', f"expected last-active a kept at head (scheduler queues), got {bases}"
         assert bases[-1] == 'http://default-api'
 
     def test_t2_all_pools_full_falls_back_to_last_active(self, router):
@@ -637,18 +640,18 @@ class TestCapacityAwareLastActiveFallback:
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected last-active a at head (not full), got {bases}"
 
-    def test_t4_conc0_collapse_routes_away_from_shared_pool(self, router):
-        """T4 (the L147 condition): two endpoints, different models, SAME base, both conc=0.
+    def test_t4_conc0_collapse_keeps_last_active(self, router):
+        """T4: two endpoints, different models, SAME base, both conc=0.
 
         Both collapse into the single '_shared_sequential_slot_' pool (capacity 1). Occupy it
-        via the real factory and assert the unassigned agent is routed AWAY from that shared
-        pool. Companion assertion pins the finding: count_active(base, 0) is non-zero for BOTH
-        endpoints (they share one pool), so a per-endpoint occupancy check would have failed.
+        via the real factory and assert the unassigned agent STAYS on the last-active endpoint
+        (the scheduler queues it FIFO). We do NOT route away to an arbitrary free endpoint —
+        that can send a text agent to a vision/multimodal API.
         """
         base = 'http://shared-api'
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
         _add_endpoint(router, 'b', base, model='model-b', concurrency_limit=0)
-        # A third endpoint on a DIFFERENT base with free capacity — the escape hatch.
+        # A third endpoint on a DIFFERENT base with free capacity.
         _add_endpoint(router, 'c', 'http://free-api', model='model-c', concurrency_limit=1)
         with router._lock:
             router._last_active_endpoint = 'ep_a'
@@ -657,19 +660,15 @@ class TestCapacityAwareLastActiveFallback:
         shared_pool = _occupy_pool(router, base, 0, n_holders=1)
         assert shared_pool.key == '_shared_sequential_slot_'
 
-        # Companion assertion (pins the §2.2 finding): BOTH conc=0 endpoints map to the SAME
-        # occupied shared pool — count_active(base, 0) is non-zero for each model's base. This is
-        # why a naive per-endpoint occupancy check would have failed to see the saturation: the
-        # collapse to '_shared_sequential_slot_' makes one holder saturate every conc=0 endpoint.
+        # Companion assertion: BOTH conc=0 endpoints map to the SAME occupied shared pool.
         assert router.scheduler.count_active(base, 0) > 0, \
             'count_active(base,0) must be non-zero (shared pool occupied)'
 
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
-        # Must route away from the saturated shared base → head is the free endpoint.
-        assert bases[0] == 'http://free-api', f"expected escape to free endpoint, got {bases}"
-        # The chosen cfg must NOT be either conc=0 model on the shared base.
-        assert chain[0]['model'] == 'model-c'
+        # Must KEEP the last-active endpoint (scheduler queues on the shared pool).
+        assert bases[0] == base, f"expected last-active kept at head (scheduler queues), got {bases}"
+        assert chain[0]['model'] == 'model-a'
 
     def test_t5_conc_minus1_last_active_never_saturated(self, router):
         """T5: last-active endpoint conc=-1 (unlimited) → never saturated → chain head = last-active."""
@@ -769,11 +768,13 @@ class TestCapacityAwareLastActiveFallback:
         assert head['api_base'] == base and head['model'] == 'model-a', \
             f"expected self-held conc=0 last-active kept at head, got {head}"
 
-    def test_t9_other_holder_still_saturated_routes_away(self, router):
-        """T9 (liveness preserved): a DIFFERENT instance holds the shared pool → still saturated.
+    def test_t9_other_holder_saturated_keeps_last_active(self, router):
+        """T9 (saturated by another agent): a DIFFERENT instance holds the shared pool.
 
-        Same setup as T8 but the holder is NOT the requesting instance → first-fit must
-        still route to the free endpoint. Pins that self-exclusion does not regress L147.
+        With the first-fit logic removed, Tier 1.5 now keeps the last-active endpoint even when
+        saturated by another holder — the scheduler queues the agent FIFO on that pool. We do NOT
+        bounce to an arbitrary free endpoint (could be a vision/multimodal API). The Tier-4 global
+        default remains the ultimate fallback.
         """
         base = 'http://a-api'
         _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)
@@ -783,16 +784,16 @@ class TestCapacityAwareLastActiveFallback:
 
         pool = router.scheduler._get_or_create_pool(base, 0)
         assert pool.key == '_shared_sequential_slot_'
-        # Someone ELSE holds the shared pool — self-exclusion must not hide this.
+        # Someone ELSE holds the shared pool.
         pool._running['other-agent'] = SlotHolder(
             agent_name='other', instance_name='other-agent', acquisition_id=1,
         )
 
         chain = router.get_endpoint_chain('security', instance_name='Security_guard')
         head = chain[0]
-        # First-fit must land on the free endpoint B (conc=1, own pool), not just "not A".
-        assert head['api_base'] == 'http://b-api' and head['model'] == 'model-b', \
-            f"expected first-fit to free endpoint B, got {head}"
+        # Keep last-active A (scheduler queues on the saturated pool), do NOT first-fit to B.
+        assert head['api_base'] == base and head['model'] == 'model-a', \
+            f"expected last-active A kept at head (scheduler queues), got {head}"
 
     def test_t10_conc_gt_0_self_holder_keeps_last_active(self, router):
         """T10 (conc>0 unaffected — MANDATORY): conc=2 endpoint A, sole holder is the requesting
@@ -972,11 +973,13 @@ class TestLastReleasedEndpointPreference:
         assert chain[0]['model'] == 'model-a', \
             f"expected A's model to survive conc=0 collapse, got {[(c['model'], c['api_base']) for c in chain]}"
 
-    def test_falls_through_when_last_released_saturated(self, router):
-        """A saturated at resolve time → unassigned resolves to a free endpoint via first-fit.
+    def test_keeps_last_released_when_saturated(self, router):
+        """A saturated at resolve time → unassigned KEEPS the last-released endpoint.
 
-        Never B, never worse than baseline: the existing capacity-aware first-fit routes away
-        from the saturated last-released endpoint automatically (no extra code).
+        With first-fit removed, a saturated last-released endpoint is NOT escaped from — the
+        scheduler queues the agent FIFO on that pool. We do not bounce to an arbitrary free
+        endpoint (could be a vision/multimodal API). The Tier-4 global default remains the
+        ultimate fallback.
         """
         _add_endpoint(router, 'a', 'http://a-api', model='model-a', concurrency_limit=1)
         _add_endpoint(router, 'b', 'http://b-api', model='model-b', concurrency_limit=1)
@@ -993,9 +996,9 @@ class TestLastReleasedEndpointPreference:
 
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         bases = [c['api_base'] for c in chain]
-        # Must route to the free endpoint B (first-fit), not the saturated A.
-        assert bases[0] == 'http://b-api', \
-            f"expected first-fit escape to free B, got {[(c['model'], c['api_base']) for c in chain]}"
+        # Keep the saturated last-released A (scheduler queues), do NOT first-fit to B.
+        assert bases[0] == 'http://a-api', \
+            f"expected last-released A kept at head (scheduler queues), got {[(c['model'], c['api_base']) for c in chain]}"
 
     def test_cold_start_uses_global_marker(self, router):
         """_last_released_endpoint is None (no release yet) → behavior identical to the current
@@ -1174,3 +1177,82 @@ class TestLastReleasedEndpointPreference:
         router.note_held_endpoint('coder', 'holder')
         with router._lock:
             assert 'holder' not in router._instance_committed_endpoint
+
+
+# ============================================================================
+# BUG_0051 — reacquire_for must carry the caller's TRUE endpoint identity into the
+# scheduler.acquire log line (endpoint_name + model), not a lossy first-match-by-base guess.
+#
+# Root cause (plans/BUG_0051_endpoint_reacquire_ROOT_CAUSE.md §6 F1): ExecutionEngine.reacquire_for
+# called router.scheduler.acquire(...) WITHOUT endpoint_name=/model=. On a shared api_base config
+# (8 LM Studio endpoints on one base, differing only by model) the scheduler falls back to
+# _endpoint_name_for_api_base (first-match-by-base → always the FIRST endpoint in file order) and an
+# EMPTY model. The slot/routing is correct; only the [SLOT] acquire log line is wrong — but that is
+# exactly the diagnostic a future investigator relies on. get_effective_slot_info ALREADY computes the
+# true (endpoint_name, model) pair (router.py:529-530); reacquire_for simply discarded it.
+# ============================================================================
+
+import re as _re  # noqa: E402
+
+
+def _extract_acquire_line(msg):
+    """Parse endpoint='...' and model=... out of a scheduler [SLOT] acquire log line."""
+    ep = _re.search(r"endpoint='([^']*)'", msg)
+    mo = _re.search(r'model=(\S+)', msg)
+    return (ep.group(1) if ep else None, mo.group(1) if mo else None)
+
+
+class TestReacquireLogsRealEndpointIdentity:
+
+    def test_reacquire_logs_real_endpoint_identity(self, router, caplog):
+        """BUG_0051 F1: reacquire_for's scheduler.acquire must log the caller's TRUE endpoint name
+        and a NON-EMPTY model — not the first-in-file shared-base guess + empty model.
+
+        Shared-base multi-model fixture (mirror production): two enabled endpoints on ONE base, both
+        conc=0. The caller resolves to 'b' (the SECOND in file order) so that the lossy fallback would
+        pick 'a' — making the defect observable. Drives the real reacquire_for via a minimal host object
+        (ExecutionEngine.__init__ is too heavy to instantiate for a unit test; the plan allows the exact
+        call shape). Pre-fix: endpoint='a' + model= empty → FAILS. Post-fix: endpoint='b' + model=model-b.
+        """
+        import logging
+        from agent_cascade.engine.core import ExecutionEngine
+
+        base = 'http://shared-api'
+        _add_endpoint(router, 'a', base, model='model-a', concurrency_limit=0)  # first in file order
+        _add_endpoint(router, 'b', base, model='model-b', concurrency_limit=0)  # caller's TRUE endpoint
+        router.set_agent_priorities('coder', ['ep_b'])
+
+        # The caller's true identity as get_effective_slot_info computes it (router.py:529-530).
+        info = router.get_effective_slot_info('coder', instance_name='caller')
+        assert info.get('needs_slot') is True
+        true_name, true_model = info['endpoint_name'], info['model']
+        assert true_name == 'b' and true_model == 'model-b', \
+            f"fixture must resolve the caller to endpoint b/model-b, got {true_name!r}/{true_model!r}"
+
+        # Minimal host object: reacquire_for only reads self.pool.api_router (core.py:3083) and calls
+        # the static _safe_note_held_endpoint. Bind that staticmethod onto the host so the real method
+        # body runs (it is a pure bookkeeping no-raise helper). A plain namespace keeps this a tight test.
+        import types
+        host = types.SimpleNamespace(pool=types.SimpleNamespace(api_router=router))
+        # Accessed on the class, a @staticmethod is already a plain function (no __func__).
+        host._safe_note_held_endpoint = ExecutionEngine._safe_note_held_endpoint
+        inst = types.SimpleNamespace(agent_class='coder', instance_name='caller',
+                                     _state_lock=threading.RLock(), _slot_release=None, _slot_key=None)
+
+        # The scheduler logs through the SHARED agent_cascade_logger (via _AppLoggerProxy), NOT a
+        # per-module logger — caplog must target that name or DEBUG records are silently dropped.
+        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+            ok = ExecutionEngine.reacquire_for(host, inst, 'caller', context='after_security_check')
+        assert ok is True, 'reacquire_for should re-acquire the slot on the fast path'
+
+        acquire_lines = [r.getMessage() for r in caplog.records if 'acquire →' in r.getMessage()]
+        assert acquire_lines, f"no scheduler acquire log line captured: {[r.getMessage() for r in caplog.records][:5]}"
+        got_name, got_model = _extract_acquire_line(acquire_lines[0])
+
+        # THE BUG (pre-fix): endpoint is the first-in-file shared-base guess ('a') and model is empty.
+        assert got_name == true_name, \
+            f"BUG_0051: reacquire logged endpoint={got_name!r}, expected the caller's true " \
+            f"{true_name!r} (lossy first-match-by-base picked the wrong shared-base endpoint)"
+        assert got_model is not None and got_model != '' and got_model == true_model, \
+            f"BUG_0051: reacquire logged model={got_model!r} (empty/missing), expected " \
+            f"the caller's true model {true_model!r}"

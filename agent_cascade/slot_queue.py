@@ -690,6 +690,14 @@ def release_slot_permit(
                     if _ep_id is not None:
                         _router._last_released_endpoint = _ep_id
                         logger.debug(f"[SLOT] {holder_name}: last_released_endpoint → {_ep_id}")
+        elif _router is None:
+            # BUG_0052 (Change C): router recovery failed (e.g. a call_agent child whose
+            # _pool_ref was never set). Previously this silent-skip of the _last_released_endpoint
+            # write hid for an entire session — make it visible so the stale-marker symptom is
+            # diagnosable. Single WARNING per release; does not change any other behavior.
+            logger.warning(
+                f"[SLOT] {holder_name}: router recovery failed on release "
+                f"(_pool_ref or api_router missing) — _last_released_endpoint NOT updated")
     except Exception:
         pass
 
@@ -703,6 +711,13 @@ def release_slot_permit(
             with _router._lock:
                 _router._instance_committed_endpoint.pop(holder_name, None)
                 _router._instance_held_endpoint.pop(holder_name, None)
+        elif _router is None:
+            # BUG_0052 (Change C): router recovery failed — the committed/held markers for this
+            # holder will NOT be cleared. Surface it (single WARNING per release) instead of a
+            # silent skip; does not change any other behavior.
+            logger.warning(
+                f"[SLOT] {holder_name}: router recovery failed on release "
+                f"(_pool_ref or api_router missing) — committed/held markers NOT cleared")
     except Exception:
         pass
 

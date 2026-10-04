@@ -3120,11 +3120,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return True
 
         try:
+            # BUG_0051 (F1): pass the caller's TRUE endpoint identity so the scheduler's acquire log
+            # line names the real endpoint + model. Without these, on a shared api_base config the
+            # scheduler falls back to first-match-by-base (always the FIRST endpoint in file order) and
+            # an empty model — misleading diagnostics even though the slot itself is correct. Both are
+            # already computed by get_effective_slot_info (router.py:529-530); .get() tolerates None/''.
+            _ep_name = slot_info.get('endpoint_name')
+            _model = slot_info.get('model')
             release_cb = router.scheduler.acquire(
                 api_base=api_base,
                 concurrency_limit=concurrency_limit,
                 instance_name=holder_name,
                 agent_class=instance.agent_class,
+                endpoint_name=_ep_name,
+                model=_model,
                 timeout=REACQUIRE_TIMEOUT,  # module constant — bounded FAST re-acquire window
             )
             if release_cb is not None:
@@ -3169,11 +3178,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     f"action=acquire-queued waiters=-1 (post-yield fast re-acquire timed out after "
                     f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, bounded by QUEUE_WAIT_TIMEOUT)")
         try:
+            # BUG_0051 (F1): same identity pass-through as the fast path above — the bug survives the
+            # timeout branch unless BOTH reacquire sites carry endpoint_name + model.
+            _ep_name = slot_info.get('endpoint_name')
+            _model = slot_info.get('model')
             release_cb = router.scheduler.acquire(
                 api_base=api_base,
                 concurrency_limit=concurrency_limit,
                 instance_name=holder_name,
                 agent_class=instance.agent_class,
+                endpoint_name=_ep_name,
+                model=_model,
                 timeout=None,  # wait the full queue window (QUEUE_WAIT_TIMEOUT), not the short fast path
             )
         except SlotCancelled:
@@ -4399,55 +4414,79 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             #    RUNNING/SLEEPING/COMPLETING — engine.run() would raise at the L1 guard otherwise.
             with inst._state_lock:
                 if inst.state != AgentState.IDLE:
+                    logger.debug('[SECURITY_REUSE] %s ineligible (gate=state_not_idle, rid=%s): state=%s',
+                                 instance_name, rid, inst.state)
                     return None
 
             # 4. No leaked endpoint permit (todo.md:158 permit-leak program).
             if inst._slot_release is not None or inst._slot_key is not None:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=slot_permit_leaked, rid=%s): slot_release=%r slot_key=%r',
+                             instance_name, rid, inst._slot_release, inst._slot_key)
                 return None
 
             # 5. No live LLM call, and the last activity is older than a small epsilon — guards
             #    against a generator abandoned by `break` without close() still mid-flight.
             if inst._llm_call_active:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=llm_call_active, rid=%s): live LLM call in flight',
+                             instance_name, rid)
                 return None
             _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
             if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=llm_recent_activity, rid=%s): age=%.3fs eps=%.2fs',
+                             instance_name, rid, time.monotonic() - _last_llm, _REUSE_IDLE_EPSILON)
                 return None
 
             # 6. Not genuinely halted (compression-halt / manual stop).
             if getattr(pool, 'is_instance_halted', None) is not None and pool.is_instance_halted(instance_name):
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=halted, rid=%s): instance halted',
+                             instance_name, rid)
                 return None
 
             # 7. Not terminated (pool-level set or per-instance flag).
             if getattr(pool, 'is_instance_terminated', None) is not None and pool.is_instance_terminated(instance_name):
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=terminated_pool, rid=%s): pool-level termination set',
+                             instance_name, rid)
                 return None
             if inst.is_terminated:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=terminated_flag, rid=%s): instance flag is_terminated',
+                             instance_name, rid)
                 return None
 
             # 8. Conversation present and starting with a SYSTEM message (the prefix we keep).
             conv = inst.conversation
             if not conv or getattr(conv[0], 'role', None) != SYSTEM:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=bad_conversation_head, rid=%s): len=%d head_role=%r',
+                             instance_name, rid, len(conv), getattr(conv[0], 'role', None) if conv else None)
                 return None
 
             # 8b. The system prompt must already be FROZEN. An unfrozen instance would re-run the
             #     _setup_turn M1 rewrite on its next turn and inject volatile run-identity lines,
             #     silently killing the byte-identical prefix — so it must fall back to a fresh spawn.
             if inst._system_prompt_frozen is not True:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=prompt_not_frozen, rid=%s): system prompt not frozen',
+                             instance_name, rid)
                 return None
 
             # 9. No pending queued messages for this instance.
             mq = getattr(pool, 'message_queues', None)
             if mq and mq.get(instance_name):
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=queued_messages, rid=%s): count=%d',
+                             instance_name, rid, len(mq.get(instance_name)))
                 return None
 
             # 11. Not currently on the active stack (a live run would be mid-conversation).
             with pool._execution._state_lock:
                 if any(n == instance_name for n, _d in pool._execution.active_stack):
+                    logger.debug('[SECURITY_REUSE] %s ineligible (gate=on_active_stack, rid=%s): instance on active stack',
+                                 instance_name, rid)
                     return None
 
             # 10. Compression lock must be acquirable WITHOUT blocking — a live compressor or
             #     rollback holding it means the instance is not quiescent (plan R3). Non-blocking
             #     acquire guarantees we never stall here (test asserts < 0.5s wall time).
             if not inst._compression_lock.acquire(blocking=False):
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=compression_lock_busy, rid=%s): compression lock held',
+                             instance_name, rid)
                 return None
 
             try:
@@ -4493,6 +4532,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 inst._tg_first_pushed = False
                 inst._tg_final_pushed_phase = None
                 inst._tg_first_pushed_text = None
+                # Streaming partials (agent_instance.py:323) — reset_conversation() does NOT clear
+                # _streaming_responses, so a reused instance would otherwise serve its previous run's
+                # stale tail on the first frame. Cleared here (compression lock already held); it is
+                # repopulated from the first LLM yield of the new run. Mirrored in
+                # lifecycle_manager._prepare_instance_for_reuse so both reuse paths stay in lockstep.
+                inst._streaming_responses = []
 
                 # ── H3: child relationship + ownership re-pointing (shared with find_or_create) ──
                 # NOTE: _prepare_instance_for_reuse lives on the ENGINE's lifecycle manager
@@ -4526,6 +4571,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             pool.active_stack_append(instance_name, 0)
             self._update_webui_state(instance_name, agent_class, inst, inst.conversation, final_resp=[], is_initial=True)
             self.stream_publisher.push_initial_state(inst, caller)
+
+            # Drop the warm instance's cached serialization/version so the first frame of the new
+            # run re-serializes from the freshly-reset conversation (stale tail / version otherwise
+            # survives reuse). Paired eviction — one extra full re-serialization per reuse is cheap.
+            from agent_cascade.api_integration_pkg.cache import _cache_mgr
+            _cache_mgr.evict_instance(instance_name)
 
             logger.info('[SECURITY_REUSE] reusing warm %s (rid=%s, caller=%s)', instance_name, rid, caller)
             _success_returned = True  # hand the claim to the caller's finally — do NOT release here
