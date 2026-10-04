@@ -1788,20 +1788,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     if re.search(pattern, m0_content):
                         m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
 
-                    # 2. Inject/update Session Metadata section
+                    # 2. Refresh Session Metadata section.
+                    # Always a refresh (never first-injection) because the pre-log writers handle
+                    # persistence for every instance class. _replace_section's byte-identical early-out
+                    # makes this a no-op when unchanged, preserving the KV-cache prefix. Do NOT re-add
+                    # a first-injection branch here: todo.md:155.
                     meta_block = _build_session_metadata(self.pool, instance)
                     if meta_block:
-                        if '## Session Metadata' in m0_content:
-                            # Replace the existing block with fresh data
-                            m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
-                        else:
-                            # First injection — insert after the identity line
-                            # (same position as before)
-                            content_lines = m0_content.split('\n')
-                            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith('#') else 1
-                            for i, ml in enumerate(meta_block.split('\n')):
-                                content_lines.insert(insert_pos + i, ml)
-                            m0_content = '\n'.join(content_lines)
+                        m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
 
                     # 3. Inject/update available resources (agent types and
                     # cache pool note based on feature flags)

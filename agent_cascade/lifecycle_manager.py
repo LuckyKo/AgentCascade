@@ -26,8 +26,10 @@ if TYPE_CHECKING:
 def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance: AgentInstance) -> None:
     """Inject Session Metadata block into system message if not already present.
 
-    This is called before logging to ensure sub-agent log files contain the metadata block.
-    The existing injection in execution_engine._setup_turn() is preserved for runtime updates.
+    This is the PERSISTING pre-log writer (todo.md:155): it runs before logging so the
+    metadata block reaches the JSONL on disk for every instance class. The refresh in
+    execution_engine._setup_turn() only updates an already-present block and never
+    first-injects — do NOT remove this call assuming _setup_turn covers persistence.
 
     Args:
         sys_msg: System Message object to modify in-place
@@ -402,12 +404,10 @@ class AgentLifecycleManager:
         Returns:
             Conversation list (either preserved or newly created)
         """
-        # METADATA INJECTION FIX: Inject metadata into sys_msg BEFORE
-        # logging/update_history().
-        # This ensures sub-agent log files contain the "Session Metadata" block
-        # in their initial system message.
-        # The existing injection in _setup_turn() is preserved for runtime
-        # updates (e.g., workspace changes).
+        # Pre-log injection (todo.md:155): ensures the block reaches the JSONL on disk for every
+        # instance class. This is the PERSISTING writer. The refresh-only path in _setup_turn()
+        # only updates an already-present block and never first-injects — so do NOT remove this
+        # call assuming _setup_turn covers persistence.
         _inject_metadata_into_message(sys_msg, self.pool, instance)
 
         # FIX (todo.md:117): Ensure logger metadata reflects actual supervisor.

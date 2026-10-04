@@ -608,6 +608,8 @@ class SessionIOMixin:
                     _inject_metadata_into_message(sys_msg, self, new_inst)
                     # rewrite_log_with_history writes from the dict list `cleaned`; sync the
                     # injected content back so the block actually reaches the rewritten log file.
+                    # Invariant: `cleaned[0]` is the system dict whenever `sys_msg` (= conversation[0])
+                    # is a system Message — see working-set construction above.
                     cleaned[0]['content'] = sys_msg.content
             except Exception as e:
                 logger.warning(f"[METADATA] Session metadata injection on restore failed for {instance_name}: {e}")
