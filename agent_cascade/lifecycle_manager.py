@@ -272,6 +272,24 @@ class AgentLifecycleManager:
                 logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
                 session_was_loaded = True
 
+                # BUG_0032: A resurrected instance must not be pre-terminated. The name-scoped
+                # pool.terminated_instances set is NOT cleared by load_session_from_log (it only
+                # swaps the instance object), so a stale entry left behind by a prior
+                # terminate_instance() with no clean thread-join (sub-agent names never register a
+                # thread in pool._instance_threads, so their entry is immortal) would make
+                # is_instance_terminated(name) return True and abort the run at core.py before the
+                # first turn. Clear it here — the orchestration decision point ("this call is
+                # resurrecting an instance"). Mirrors the reuse-path flag reset (FIX #4 below).
+                # Only runs on the log_file branch; discard on an absent name is a no-op. Under
+                # _pool_lock (the RLock guarding instances + terminated_instances); taken alone
+                # here — never nested inside a per-instance lock (Gotcha 3).
+                with self.pool._pool_lock:
+                    was_terminated = instance_name in self.pool.terminated_instances
+                    self.pool.terminated_instances.discard(instance_name)
+                if was_terminated:
+                    logger.info(f"[LOG_FILE_LOAD] Cleared stale termination marker for "
+                                f"'{instance_name}' so the restored session can run.")
+
         # BUG_0052 (Change A): give the child a back-reference to the pool so release_slot_permit can
         # recover the router via holder._pool_ref.api_router (slot_queue.py:578). Without this, call_agent
         # children (registered directly here, not via pool/lifecycle.py:90) silently skip the
