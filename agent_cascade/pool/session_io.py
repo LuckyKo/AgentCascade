@@ -592,6 +592,26 @@ class SessionIOMixin:
             new_inst._pool_ref = self
             self._instances_version += 1
 
+            # FIX (todo.md:155): On RESTART the root agent is restored here, NOT via
+            # create_main_agent_instance — so the fresh-creation metadata injection never runs.
+            # Inject the Session Metadata block into the restored system message and sync it back
+            # into the DICT list `cleaned` (the rewrite_log_with_history call later in this function
+            # persists from `cleaned`, not from msg_objects), so a restart self-heals the block on
+            # disk. Idempotent: the helper is a no-op if '## Session Metadata' is already present,
+            # and _system_prompt_frozen defaults to False for a freshly built new_inst so it will
+            # NOT skip. `sys_msg` is the system message only when `system_msg` (cleaned[0]) is set,
+            # so isinstance(sys_msg, Message) alone is the correct guard.
+            try:
+                from agent_cascade.lifecycle_manager import _inject_metadata_into_message
+                sys_msg = new_inst.conversation[0]
+                if isinstance(sys_msg, Message):
+                    _inject_metadata_into_message(sys_msg, self, new_inst)
+                    # rewrite_log_with_history writes from the dict list `cleaned`; sync the
+                    # injected content back so the block actually reaches the rewritten log file.
+                    cleaned[0]['content'] = sys_msg.content
+            except Exception as e:
+                logger.warning(f"[METADATA] Session metadata injection on restore failed for {instance_name}: {e}")
+
         # --- 8. Set up logger pointing to the log file ---------------------
         try:
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger

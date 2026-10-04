@@ -212,3 +212,170 @@ class TestRootMetadataPersistence:
         )
 
         assert inst.conversation[0].content.count('## Session Metadata') == 1
+
+
+# ── Restore path: load_session_from_log ────────────────────────────────────────
+# The root is NOT re-created via create_main_agent_instance on restart; it is restored
+# directly inside pool.load_session_from_log. That path must ALSO inject the block and
+# sync it back into the DICT list `cleaned` (which rewrite_log_with_history persists),
+# otherwise the missing block propagates to disk forever.
+
+
+def _make_blockless_restore_log(tmp_path):
+    """Build a JSONL log whose system message has NO Session Metadata block."""
+    import json as _json
+
+    lines = [
+        {'role': 'system', 'content': 'You are Maine. Technical lead.'},
+        {'role': 'user', 'content': 'Do the thing.'},
+        {'role': 'assistant', 'content': 'Done.'},
+    ]
+    log_file = tmp_path / 'orchestrator_Maine_test.jsonl'
+    with open(log_file, 'w', encoding='utf-8') as f:
+        for m in lines:
+            f.write(_json.dumps(m) + '\n')
+    return str(log_file)
+
+
+def _make_restore_pool():
+    """A mock pool sufficient to drive the REAL load_session_from_log end-to-end.
+
+    ``self._logger`` is a MagicMock (its ``log_dir``/``_lock``/``_loggers`` are used by step 8),
+    and AgentInstanceLogger is patched so its rewrite_log_with_history records the DICT list it
+    receives — that list is exactly what would be written to disk, i.e. the revert-proof target.
+    """
+    import threading
+    from agent_cascade.pool.session_io import SessionIOMixin
+
+    # Subclass the mixin so the real _parse_json_input / _extract_last_session helpers are
+    # available; only load_session_from_log is what we drive end-to-end.
+    class MockPool(SessionIOMixin):
+        def __init__(self):
+            self.instances = {}
+            self.instance_state = {}
+            self.instance_summaries = {}
+            self.children = {}
+            self.terminated_instances = set()
+            self._halted_instances = set()
+            self._compression_halted = set()
+            self._instances_version = 0
+            self._children_lock = threading.Lock()
+            # _execution._state_lock is acquired around the instance swap; a plain RLock suffices.
+            self._execution = MagicMock()
+            self._execution._state_lock = threading.RLock()
+
+            self._logger = MagicMock()
+            self._logger.log_dir = '/tmp/root_meta_restore'
+            self._logger.workspace_dir = None
+            # {key: logger} registry; load_session_from_log pops/closes then re-inserts.
+            self._logger._loggers = {}
+
+            om = MagicMock()
+            om.base_dir = '/tmp/root_meta_ws'
+            om.extra_work_folders_ro = []
+            om.extra_work_folders_rw = []
+            self.operation_manager = om
+
+        def _resolve_instance_name(self, name, exclude=None):
+            return name
+
+        def _dismiss_all_instances(self, exclude=None):
+            # No-op: the pool starts empty for this test.
+            pass
+
+    return MockPool()
+
+
+def _run_restore(pool, log_file):
+    """Bind the real SessionIOMixin.load_session_from_log onto the mock pool and run it."""
+    from agent_cascade.pool.session_io import SessionIOMixin
+
+    load = SessionIOMixin.load_session_from_log.__get__(pool, type(pool))
+    return load(log_input=log_file, target_instance='Maine', clear_sub_agents_before_load=False)
+
+
+class TestRootMetadataRestorePath:
+
+    def test_restore_in_memory_and_persisted_gain_metadata(self, tmp_path):
+        """Core revert-proof contract for the RESTORE path.
+
+        A blockless system message is loaded via the REAL load_session_from_log. After it runs,
+        BOTH (a) the in-memory conversation[0] AND (b) the dict list handed to
+        rewrite_log_with_history (i.e. what hits disk) must contain the block. Without the fix,
+        neither does — the blockless system message is faithfully propagated to the new log.
+        """
+        from unittest.mock import patch
+
+        pool = _make_restore_pool()
+        captured = {}
+
+        class _CapturingAIL:
+            def __init__(self, *args, **kwargs):
+                self.log_path = '/tmp/root_meta_restore/restored.jsonl'
+                self.data = {'history': [], 'metadata': {}}
+
+            @staticmethod
+            def copy_session_file(source_path, log_dir, agent_class, instance_name):
+                return '/tmp/root_meta_restore/restored.jsonl'
+
+            def rewrite_log_with_history(self, new_history, allow_shrink=False, caller='unknown'):
+                captured['history'] = list(new_history)
+                return True
+
+        # AgentInstanceLogger is imported locally inside load_session_from_log, so patch it at its
+        # home module (the import resolves to the mock there). This does NOT rebind any package
+        # module in sys.modules — it only swaps one attribute on an already-imported module.
+        with patch('agent_cascade.logger.agent_instance_logger.AgentInstanceLogger', _CapturingAIL):
+            result = _run_restore(pool, _make_blockless_restore_log(tmp_path))
+
+        assert 'Loaded' in result, f"unexpected load result: {result!r}"
+
+        # (a) In-memory conversation[0] gained the block.
+        inst = pool.instances['Maine']
+        assert isinstance(inst.conversation[0], Message)
+        assert '## Session Metadata' in inst.conversation[0].content, (
+            "restored root's in-memory system message is missing the Session Metadata block")
+
+        # (b) The re-persisted log (the dict list rewrite_log_with_history received) has it too.
+        rewritten = captured.get('history')
+        assert rewritten is not None, 'load_session_from_log did not call rewrite_log_with_history'
+        sys_dicts = [d for d in rewritten if isinstance(d, dict) and d.get('role') == 'system']
+        assert len(sys_dicts) >= 1, 'rewritten history must contain the system message'
+        assert '## Session Metadata' in sys_dicts[0].get('content', ''), (
+            "restored root's RE-PERSISTED system message is missing the Session Metadata block — "
+            'the injected content was not synced back into the dict list before rewrite')
+
+    def test_restore_is_idempotent_when_block_present(self, tmp_path):
+        """If the loaded log already carries the block, it is not duplicated."""
+        from unittest.mock import patch
+        import json as _json
+
+        pool = _make_restore_pool()
+
+        class _CapturingAIL:
+            def __init__(self, *args, **kwargs):
+                self.log_path = '/tmp/root_meta_restore/restored.jsonl'
+                self.data = {'history': [], 'metadata': {}}
+
+            @staticmethod
+            def copy_session_file(source_path, log_dir, agent_class, instance_name):
+                return '/tmp/root_meta_restore/restored.jsonl'
+
+            def rewrite_log_with_history(self, new_history, allow_shrink=False, caller='unknown'):
+                return True
+
+        lines = [
+            {'role': 'system',
+             'content': 'You are Maine.\n## Session Metadata\n- Supervisor: User\n- System: x'},
+            {'role': 'user', 'content': 'hi'},
+        ]
+        log_file = tmp_path / 'orchestrator_Maine_idem.jsonl'
+        with open(log_file, 'w', encoding='utf-8') as f:
+            for m in lines:
+                f.write(_json.dumps(m) + '\n')
+
+        with patch('agent_cascade.logger.agent_instance_logger.AgentInstanceLogger', _CapturingAIL):
+            _run_restore(pool, str(log_file))
+
+        inst = pool.instances['Maine']
+        assert inst.conversation[0].content.count('## Session Metadata') == 1
