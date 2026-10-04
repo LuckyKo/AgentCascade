@@ -75,6 +75,18 @@ def create_main_agent_instance(
     except Exception as e:
         logger.warning(f"[SKILLS] Skill injection failed for main agent instance '{instance_name}': {e}")
 
+    # FIX (todo.md:155): Inject the Session Metadata block into the root's system message
+    # BEFORE it is logged to JSONL. The sub-agent path does this via lifecycle_manager, but the
+    # root bypasses that path — so without this, the block never reaches disk (fresh or restored).
+    # conversation[0] is the system Message in both branches; injection is idempotent and safe.
+    try:
+        from agent_cascade.lifecycle_manager import _inject_metadata_into_message
+        sys_msg = conversation[0]
+        if isinstance(sys_msg, Message):
+            _inject_metadata_into_message(sys_msg, pool, instance)
+    except Exception as e:
+        logger.warning(f"[METADATA] Session metadata injection failed for main agent '{instance_name}': {e}")
+
     # FIX: Log initial messages to JSONL so index-based sync in _log_messages_to_jsonl() works correctly.
     # Load existing history from file first (for session restore) so we don't double-log.
     # Only log initial messages if the history was empty (new session).
