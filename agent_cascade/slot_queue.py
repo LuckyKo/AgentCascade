@@ -576,9 +576,35 @@ class SlotPool:
 
 
 def _get_router_from_holder(holder: Any):
-    """Best-effort recovery of the APIRouter from a slot holder (may be None)."""
+    """Best-effort recovery of the APIRouter from a slot holder (may be None).
+
+    The only reachable source is the per-instance back-ref ``holder._pool_ref.api_router``: this
+    function receives ONLY the holder, with no pool/scheduler/engine in scope. The router's own
+    back-ref to its pool (``api_router._pool``) is useless as a second source — it lives on the
+    object being sought, and ``release_slot_permit(pool=...)`` passes a SlotPool, not the AgentPool.
+
+    RESIDUAL LIMITATION: no safe second source exists here without new coupling (a global registry
+    was deliberately NOT added), so a holder whose ``_pool_ref`` was never set still returns None
+    and skips the marker write + committed/held cleanup. The known construction gap is now closed at
+    every site; if a future unguarded AgentInstance( appears, recovery silently degrades — the
+    release_slot_permit WARNING is what makes that visible.
+
+    Logging-only: the DEBUG line names which source succeeded (or that none was available). No lock,
+    no network I/O; return value is byte-identical to the pre-change implementation.
+    """
     pool_ref = getattr(holder, '_pool_ref', None)
-    return getattr(pool_ref, 'api_router', None) if pool_ref is not None else None
+    _router = getattr(pool_ref, 'api_router', None) if pool_ref is not None else None
+    try:
+        if _router is not None:
+            logger.debug(
+                f"[SLOT] {getattr(holder, 'instance_name', '?')}: router recovery source=pool_ref")
+        else:
+            logger.debug(
+                f"[SLOT] {getattr(holder, 'instance_name', '?')}: "
+                f"router recovery source=none (_pool_ref missing or api_router absent)")
+    except Exception:
+        pass  # observability must never alter the release path
+    return _router
 
 
 def release_slot_permit(
@@ -691,13 +717,36 @@ def release_slot_permit(
                         _router._last_released_endpoint = _ep_id
                         logger.debug(f"[SLOT] {holder_name}: last_released_endpoint → {_ep_id}")
         elif _router is None:
-            # BUG_0052 (Change C): router recovery failed (e.g. a call_agent child whose
-            # _pool_ref was never set). Previously this silent-skip of the _last_released_endpoint
-            # write hid for an entire session — make it visible so the stale-marker symptom is
-            # diagnosable. Single WARNING per release; does not change any other behavior.
+            # BUG_0052 Change C: make the silent skip of the _last_released_endpoint write visible.
+            # In this branch _router is None, so the retained global marker can't be read safely
+            # (no handle — would need a lock/new coupling); log 'unrecoverable'. The holder's own
+            # endpoint id is best-effort, read lock-free below. Prefix preserved verbatim for greps.
+            _retained = 'unrecoverable'  # no router handle in this branch — see comment above
+            try:
+                # Holder's own committed/held endpoint id, if safely readable. Prefer the per-instance
+                # markers on holder._pool_ref.api_router (the exact source release_slot_permit would
+                # have written); fall back to the holder's cached endpoint config / slot key. Read
+                # lock-free — this is observability only and must never break the release path.
+                _own_id = None
+                _pr = getattr(holder, '_pool_ref', None)
+                if _pr is not None:
+                    _r2 = getattr(_pr, 'api_router', None)
+                    if _r2 is not None:
+                        _key = (_r2._instance_committed_endpoint.get(holder_name)
+                                or _r2._instance_held_endpoint.get(holder_name))
+                        if _key is not None:
+                            _own_id = _r2._endpoint_id_for_key(_key[0], _key[1])
+                if _own_id is None:
+                    _own_id = (getattr(holder, '_last_endpoint_config', None) or
+                               getattr(holder, '_slot_key', None))
+                if _own_id is not None:
+                    _retained += f"; holder_endpoint={_own_id}"
+            except Exception:
+                pass  # observability must never alter the release path
             logger.warning(
                 f"[SLOT] {holder_name}: router recovery failed on release "
-                f"(_pool_ref or api_router missing) — _last_released_endpoint NOT updated")
+                f"(_pool_ref or api_router missing) — _last_released_endpoint NOT updated "
+                f"(retained marker={_retained})")
     except Exception:
         pass
 

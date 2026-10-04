@@ -583,6 +583,13 @@ class SessionIOMixin:
                 latest_marker_index=-1,
             )
             self.instances[instance_name] = new_inst
+            # Tier 1.5 fix (BUG_0052 sibling): a session-restored instance must carry _pool_ref,
+            # or release_slot_permit's router recovery (_get_router_from_holder) returns None and
+            # the single _last_released_endpoint write is skipped — leaving the global marker stale
+            # so Tier 1.5 hands the next endpointless agent a foreign model. Mirrors create_instance()
+            # and find_or_create_instance(), which set it on `self` (the AgentPool); done inside the
+            # same state lock that installs the instance.
+            new_inst._pool_ref = self
             self._instances_version += 1
 
         # --- 8. Set up logger pointing to the log file ---------------------
