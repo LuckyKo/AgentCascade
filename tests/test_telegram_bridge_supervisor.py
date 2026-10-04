@@ -693,51 +693,20 @@ def test_notify_user_schedules_even_without_chat_id(tmp_path):
 
 def test_send_to_user_calls_notify_user_when_supervisor_present():
     """_send_to_user calls pool.telegram_supervisor.notify_user after WS push."""
-    import asyncio
-
     from agent_cascade.tools.custom.send_message import SendMessage
 
-    pool = MagicMock()
-    ws_queue = asyncio.Queue(maxsize=10)
-    # We need a real running loop for run_coroutine_threadsafe.
-    loop_ready = threading.Event()
-    stop_evt = threading.Event()
-    loop_holder = {}
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user('test message')
 
-    def _loop_thread():
-        l = asyncio.new_event_loop()
-        asyncio.set_event_loop(l)
-        loop_holder['loop'] = l
-        loop_ready.set()
-
-        async def _run():
-            while not stop_evt.is_set():
-                await asyncio.sleep(0.01)
-
-        try:
-            l.run_until_complete(_run())
-        finally:
-            l.close()
-
-    t = threading.Thread(target=_loop_thread, daemon=True)
-    t.start()
-    assert loop_ready.wait(timeout=5.0)
-    loop = loop_holder['loop']
-
-    pool._ws_send_queue = ws_queue
-    pool._ws_loop = loop
-    sup = MagicMock()
-    sup.notify_user.return_value = True
-    pool.telegram_supervisor = sup
-
-    tool = SendMessage(agent_pool=pool)
-    result = tool._send_to_user('test message')
-
-    assert 'successfully' in result.lower()
-    sup.notify_user.assert_called_once_with('test message')
-
-    stop_evt.set()
-    t.join(timeout=3.0)
+        assert 'successfully' in result.lower()
+        # todo 133: the TG copy is now tagged with the source agent. The fixture sets no
+        # thread-local instance name, so sender == 'unknown' (see `_get_sender_name`).
+        sup.notify_user.assert_called_once_with('[MESSAGE from unknown]: test message')
+    finally:
+        stop_evt.set()
+        t.join(timeout=3.0)
 
 
 def test_send_to_user_no_error_when_supervisor_absent():
@@ -783,6 +752,189 @@ def test_send_to_user_no_error_when_supervisor_absent():
 
     stop_evt.set()
     t.join(timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# G2. send_message -> user: TG copy tagged with the source agent (todo 133)
+# ---------------------------------------------------------------------------
+# _send_to_user pushes a RAW message to the WS event + UI audit log, but tags the
+# Telegram-only copy passed to supervisor.notify_user() with `[MESSAGE from <sender>]: `
+# (the same format as the agent-to-agent branch). These tests pin that contract and
+# guard the "TG-only" claim: the WS event must stay untagged.
+
+
+def _send_to_user_pool_with_live_loop():
+    """Build a MagicMock pool wired with a real running loop + ws_queue, plus a
+    recording notify_user supervisor. Returns (pool, sup, t, stop_evt); the caller
+    owns stopping/joining the loop thread."""
+    import asyncio
+
+    pool = MagicMock()
+    ws_queue = asyncio.Queue(maxsize=10)
+    loop_ready = threading.Event()
+    stop_evt = threading.Event()
+    loop_holder = {}
+
+    def _loop_thread():
+        l = asyncio.new_event_loop()
+        asyncio.set_event_loop(l)
+        loop_holder['loop'] = l
+        loop_ready.set()
+
+        async def _run():
+            while not stop_evt.is_set():
+                await asyncio.sleep(0.01)
+
+        try:
+            l.run_until_complete(_run())
+        finally:
+            l.close()
+
+    t = threading.Thread(target=_loop_thread, daemon=True)
+    t.start()
+    assert loop_ready.wait(timeout=5.0)
+    loop = loop_holder['loop']
+
+    pool._ws_send_queue = ws_queue
+    pool._ws_loop = loop
+    sup = MagicMock()
+    sup.notify_user.return_value = True
+    pool.telegram_supervisor = sup
+    return pool, sup, t, stop_evt
+
+
+def test_send_to_user_tags_tg_message_with_sender():
+    """TG call arg starts with `[MESSAGE from <sender>]: ` and the remainder is the
+    original message. Sender comes from the thread-local (set here to a real name)."""
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.operation_manager.path_security import set_current_instance_name, clear_current_instance_name
+
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        set_current_instance_name('worker1')
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user('hello phone')
+
+        assert 'successfully' in result.lower()
+        sup.notify_user.assert_called_once()
+        tg_arg = sup.notify_user.call_args.args[0]
+        prefix = '[MESSAGE from worker1]: '
+        assert tg_arg.startswith(prefix), f'tg arg missing sender tag: {tg_arg!r}'
+        # The remainder after the tag is exactly the original message.
+        assert tg_arg[len(prefix):] == 'hello phone'
+    finally:
+        clear_current_instance_name()
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_send_to_user_tg_tag_is_idempotent():
+    """A message already starting with the exact current-sender prefix is NOT
+    double-tagged (the transform is idempotent)."""
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.operation_manager.path_security import set_current_instance_name, clear_current_instance_name
+
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        set_current_instance_name('worker1')
+        prefix = '[MESSAGE from worker1]: '
+        already_tagged = prefix + 'inner text'
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user(already_tagged)
+
+        assert 'successfully' in result.lower()
+        sup.notify_user.assert_called_once()
+        tg_arg = sup.notify_user.call_args.args[0]
+        # Exactly one prefix: the tag appears once, not twice.
+        assert tg_arg.count(prefix) == 1, f'expected exactly one tag, got {tg_arg!r}'
+        assert tg_arg == already_tagged, 'idempotent transform must be a no-op here'
+    finally:
+        clear_current_instance_name()
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_send_to_user_ws_event_untagged_by_tg_tag():
+    """The `agent_message_to_user` WS event pushed onto `_ws_send_queue` still carries
+    the message UNMODIFIED and the `sender` field set — guards the §2 "TG-only" claim."""
+    import asyncio
+
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.operation_manager.path_security import set_current_instance_name, clear_current_instance_name
+
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        set_current_instance_name('worker1')
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user('hello phone')
+
+        assert 'successfully' in result.lower()
+        # Drain the WS queue and inspect the event dict.
+        ws_queue = pool._ws_send_queue
+        deadline = time.monotonic() + 5.0
+        while ws_queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not ws_queue.empty(), 'expected an agent_message_to_user event on the WS queue'
+        event = ws_queue.get_nowait()
+        assert event['type'] == 'agent_message_to_user'
+        assert event['sender'] == 'worker1'
+        # The WS payload stays RAW: no TG tag, original text intact.
+        assert event['message'] == 'hello phone', \
+            f'WS event must be untagged (raw), got {event['message']!r}'
+        assert not event['message'].startswith('[MESSAGE from'), \
+            'WS event message must NOT carry the TG sender tag'
+    finally:
+        clear_current_instance_name()
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_send_to_user_unknown_sender_still_tagged():
+    """With no thread-local set, the tag is `[MESSAGE from unknown]: ` — regression guard
+    against a future "hide unknown" shortcut that would reintroduce the ambiguity."""
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.operation_manager.path_security import clear_current_instance_name
+
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        clear_current_instance_name()  # ensure no thread-local leaks in from elsewhere
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user('test message')
+
+        assert 'successfully' in result.lower()
+        sup.notify_user.assert_called_once()
+        tg_arg = sup.notify_user.call_args.args[0]
+        assert tg_arg == '[MESSAGE from unknown]: test message', \
+            f'unknown sender must still be tagged, got {tg_arg!r}'
+    finally:
+        clear_current_instance_name()
+        stop_evt.set()
+        t.join(timeout=3.0)
+
+
+def test_send_to_user_different_agent_prefix_not_double_suppressed():
+    """A body that starts with a DIFFERENT agent's bracket prefix gets the current
+    sender's tag added on top (the guard is exact-match on the current sender only)."""
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.operation_manager.path_security import set_current_instance_name, clear_current_instance_name
+
+    pool, sup, t, stop_evt = _send_to_user_pool_with_live_loop()
+    try:
+        set_current_instance_name('coder1')
+        other_body = '[MESSAGE from worker1]: x'
+        tool = SendMessage(agent_pool=pool)
+        result = tool._send_to_user(other_body)
+
+        assert 'successfully' in result.lower()
+        sup.notify_user.assert_called_once()
+        tg_arg = sup.notify_user.call_args.args[0]
+        # Current sender's tag is prepended; the other agent's prefix is preserved.
+        assert tg_arg == '[MESSAGE from coder1]: [MESSAGE from worker1]: x', \
+            f'expected stacked tags, got {tg_arg!r}'
+    finally:
+        clear_current_instance_name()
+        stop_evt.set()
+        t.join(timeout=3.0)
 
 
 # ---------------------------------------------------------------------------

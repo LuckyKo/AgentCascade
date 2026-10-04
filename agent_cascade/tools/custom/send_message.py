@@ -99,7 +99,16 @@ class SendMessage(BaseTool):
             supervisor = getattr(pool, 'telegram_supervisor', None)
             if supervisor is not None and hasattr(supervisor, 'notify_user'):
                 try:
-                    supervisor.notify_user(message)
+                    # Tag the Telegram copy with the source agent so a phone user can tell
+                    # which agent wrote it (todo 133). Tagging happens HERE, on a TG-only
+                    # string: the WS event and the UI audit log above keep the raw text,
+                    # and the browser already renders `sender` itself. Format matches the
+                    # agent-to-agent tag in `_send_to_agent`. Idempotent: if the message
+                    # already carries this exact tag (agent re-sent its own text, or it
+                    # echoed a bridged message), do not double it.
+                    prefix = f'[MESSAGE from {sender}]: '
+                    tg_text = message if message.startswith(prefix) else prefix + message
+                    supervisor.notify_user(tg_text)
                 except Exception:
                     logger.warning('Telegram notify_user failed (non-fatal)', exc_info=True)
 
