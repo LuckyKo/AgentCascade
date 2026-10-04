@@ -560,6 +560,226 @@ def test_rg_cmd_no_bare_replace_flag():
         fixture.teardown()
 
 
+def test_rg_cmd_includes_text_flag():
+    """Regression (todo line 138): the ripgrep command MUST include '--text' so that files
+    containing a NUL byte are searched as text instead of being classified "binary" and
+    silently skipped. Without it, a binary file with a matching line is dropped (rc=0) or
+    causes a false "No matches found" (rc=1).
+
+    Mirrors test_rg_cmd_no_bare_replace_flag: force rg availability, mock subprocess.run to
+    capture the exact cmd list built by _try_subprocess_grep.
+    """
+    print('\n--- Test: ripgrep cmd includes --text flag (todo line 138) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager import grep as grep_module
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+
+        # Minimal stand-in exposing only what the rg branch touches (no __init__ needed).
+        host = GrepMixin()
+
+        captured = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            captured['cmd'] = list(cmd)
+
+            class _R:
+                returncode = 1
+                stdout = ''
+                stderr = ''
+            return _R()
+
+        with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+             mock.patch('subprocess.run', side_effect=fake_run):
+            GrepMixin._try_subprocess_grep(
+                host,
+                pattern='hello',
+                path=root,
+                include='*',
+                char_limit=1000,
+                timeout=5.0,
+                agent_name='test',
+            )
+
+        cmd = captured['cmd']
+        assert cmd[0] == 'rg', f"expected rg branch; got: {cmd}"
+        # --text (= rg -a) is required so NUL-byte/binary files are searched, not skipped.
+        assert '--text' in cmd, \
+            f"todo line 138 regression: ripgrep cmd missing '--text'; binary/NUL files would be " \
+            f"silently skipped; cmd={cmd}"
+
+        print(f"  rg cmd (first 9): {cmd[:9]}")
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        fixture.teardown()
+
+
+def test_rc2_partial_error_surfaces_matches():
+    """Regression (Fix B, todo line 138): when ripgrep exits with code 2 ("matches found, but
+    errors also occurred"), the tool must parse stdout and surface the real matches instead of
+    discarding them / falling back to Python. A genuine usage error (rc=2 with NO match JSON)
+    still falls back.
+
+    Mocks subprocess.run to return rc=2 WITH valid match JSON on stdout, then asserts the
+    method returns those matches (results is not None and count>0).
+    """
+    print('\n--- Test: rc=2 partial-error search surfaces matches (Fix B) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager import grep as grep_module
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+        host = GrepMixin()
+
+        # Two valid match entries in rg --json format (one per file).
+        match_json_1 = ('{"type":"match","data":{"path":{"text":"normal.txt"},'
+                        '"line_number":1,"lines":{"text":"hello world\\n"}}}')
+        match_json_2 = ('{"type":"match","data":{"path":{"text":"binary.txt"},'
+                        '"line_number":1,"lines":{"text":"hello\\\\u0000world\\n"}}}')
+
+        def fake_run(cmd, *args, **kwargs):
+            class _R:
+                returncode = 2
+                stdout = match_json_1 + '\n' + match_json_2 + '\n'
+                stderr = 'rg: somefile.txt: Permission denied'
+            return _R()
+
+        with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+             mock.patch('subprocess.run', side_effect=fake_run):
+            (results, count, was_timed_out, _trunc, _orig, _spill, _total, _shown) = \
+                GrepMixin._try_subprocess_grep(
+                    host,
+                    pattern='hello',
+                    path=root,
+                    include='*',
+                    char_limit=1000,
+                    timeout=5.0,
+                    agent_name='test',
+                )
+
+        # Matches must be surfaced, NOT discarded (results is not None) and count>0.
+        assert results is not None, \
+            f"Fix B regression: rc=2 with valid match JSON fell back to Python (results=None)"
+        assert count == 2, f"Fix B regression: expected 2 matches surfaced, got {count}; results={results}"
+        assert 'normal.txt' in results[0], f"first match should be normal.txt; results={results}"
+
+        print(f"  rc=2 with matches -> surfaced {count} matches (no fallback)")
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        fixture.teardown()
+
+
+def test_rc2_usage_error_still_falls_back():
+    """Regression (Fix B guard): rc=2 with NO parseable match JSON (a genuine usage error) must
+    still return None so the caller falls back to Python — Fix B must not swallow that case."""
+    print('\n--- Test: rc=2 usage error (no matches) still falls back ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager import grep as grep_module
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+        host = GrepMixin()
+
+        def fake_run(cmd, *args, **kwargs):
+            class _R:
+                returncode = 2
+                stdout = ''
+                stderr = 'rg: unrecognized flag --bogus'
+            return _R()
+
+        with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+             mock.patch('subprocess.run', side_effect=fake_run):
+            (results, count, *_) = GrepMixin._try_subprocess_grep(
+                host,
+                pattern='hello',
+                path=root,
+                include='*',
+                char_limit=1000,
+                timeout=5.0,
+                agent_name='test',
+            )
+
+        assert results is None, \
+            f"rc=2 usage error with empty stdout must fall back (results=None); got {results!r}"
+        assert count == 0, f"expected count 0 for usage-error fallback; got {count}"
+
+        print('  rc=2 usage error (empty stdout) -> fell back to Python')
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        fixture.teardown()
+
+
+def test_binary_nul_match_end_to_end():
+    """Regression (todo line 138, end-to-end): a file whose matching line contains a NUL byte
+    must be reported. Without Fix A (--text), ripgrep classifies it as binary and either drops
+    the match (when other files match) or reports "No matches found" (when it's the only match).
+
+    This test REQUIRES ripgrep to actually be available on the host; it skips gracefully when
+    rg is absent, consistent with the file's existing conventions.
+    """
+    print('\n--- Test: binary/NUL-byte match end-to-end (todo line 138) ---')
+    from agent_cascade.operation_manager import grep as grep_module
+
+    _rg_available, _grep_available = grep_module._check_tool_availability()
+    if not _rg_available:
+        print('  [SKIP] ripgrep not available on this host; end-to-end binary test requires rg')
+        return
+
+    fixture = TestFixture()
+    try:
+        root = fixture.build()
+        # One normal match file + one file whose matching line contains a NUL byte.
+        (root / 'normal.txt').write_text('needle here\n')
+        (root / 'binary.txt').write_bytes(b'needle\x00here\n')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        tool_output = om.grep(pattern='needle', path='.')
+        # BOTH files must be reported. Without --text, binary.txt is dropped (rc=0) and only
+        # normal.txt appears — that is the false "success" this test guards against.
+        assert 'normal.txt' in tool_output, \
+            f"Should find normal.txt; output: {tool_output[:300]}"
+        assert 'binary.txt' in tool_output, \
+            f"todo line 138 regression: binary.txt (NUL-byte match) was silently dropped; " \
+            f"output: {tool_output[:300]}"
+
+        print('  Both normal.txt and binary.txt (NUL-byte match) reported')
+        print('  [PASS]')
+    except Exception as e:
+        print(f"  [FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        fixture.teardown()
+
+
 def test_include_glob_does_not_reinclude_git():
     """Regression: a user include glob (e.g. '**/*.py') must NOT re-include files inside .git/
     when ignore_vcs=True (the default). This guards the ripgrep "last match wins" --glob ordering:
@@ -618,6 +838,11 @@ def main():
         # Regression tests
         ('rg cmd: no bare -r flag (BUG_0042)', test_rg_cmd_no_bare_replace_flag),
         ('Include glob does not re-include .git/', test_include_glob_does_not_reinclude_git),
+        # todo line 138 — binary/NUL-byte content-dependent false "no matches"/dropped matches
+        ('rg cmd: includes --text flag (todo 138)', test_rg_cmd_includes_text_flag),
+        ('rc=2 partial-error surfaces matches (Fix B)', test_rc2_partial_error_surfaces_matches),
+        ('rc=2 usage error still falls back', test_rc2_usage_error_still_falls_back),
+        ('binary/NUL-byte match end-to-end (todo 138)', test_binary_nul_match_end_to_end),
     ]
 
     passed = 0

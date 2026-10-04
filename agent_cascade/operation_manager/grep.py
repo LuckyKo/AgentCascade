@@ -174,6 +174,11 @@ class GrepMixin:
                     # Search hidden files/dirs (default rg skips dotfiles) so results match the
                     # Python fallback, which walks .hidden/ etc. via os.walk. Always applied.
                     '--hidden',
+                    # Treat binary files as text (rg -a). Without this, any file containing a NUL
+                    # byte is classified as "binary" and silently skipped: if no other file matches
+                    # the tool falsely reports "No matches", and if other files DO match rg returns
+                    # rc=0 so the binary file's match is dropped with no Python fallback (todo line 138).
+                    '--text',
                 ]
 
                 is_vcs_search = not ignore_vcs
@@ -249,65 +254,90 @@ class GrepMixin:
                                     errors='replace',
                                     timeout=timeout)
 
-            if result.returncode == 0:
+            # Parse ripgrep's --json stdout into (formatted, match_count). Shared by the rc==0
+            # and rc==2 paths so a partial-error search never discards matches that were found.
+            def _parse_rg_json(stdout_text):
+                formatted = []
+                match_count = 0
+                lines = stdout_text.split('\n') if stdout_text.strip() else []
+
+                for line in lines:
+                    if not line.strip():
+                        continue
+
+                    try:
+                        json_obj = json.loads(line)
+                        entry_type = json_obj.get('type', '')
+
+                        if entry_type == 'match':
+                            data = json_obj.get('data', {})
+                            file_path = data.get('path', {}).get('text', '')
+
+                            line_num_data = data.get('line_number', 0)
+                            if isinstance(line_num_data, dict):
+                                line_num = line_num_data.get('start', 0)
+                            else:
+                                line_num = line_num_data
+
+                            # rg's lines.text always carries a trailing newline
+                            # ('\n' on POSIX, '\r\n' on Windows) — strip it so the
+                            # entries don't gain blank lines when joined below.
+                            match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
+
+                            normalized_path = file_path.replace('\\', '/')
+
+                            if context > 0:
+                                formatted.append(f"{normalized_path}:{line_num}: >>>{match_text}")
+                            else:
+                                formatted.append(f"{normalized_path}:{line_num}: {match_text}")
+
+                            match_count += 1
+
+                        elif entry_type == 'context' and context > 0:
+                            data = json_obj.get('data', {})
+                            file_path = data.get('path', {}).get('text', '')
+                            line_num_data = data.get('line_number', 0)
+                            if isinstance(line_num_data, dict):
+                                line_num = line_num_data.get('start', 0)
+                            else:
+                                line_num = line_num_data
+
+                            # Strip rg's trailing newline (same as 'match' branch above) —
+                            # would otherwise create blank lines between entries.
+                            match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
+                            normalized_path = file_path.replace('\\', '/')
+                            formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
+
+                    except json.JSONDecodeError as e:
+                        logger.debug('ripgrep JSON parse error: %s', e)
+
+                return formatted, match_count
+
+            # rc==0 (matches found) and rc==2 (matches found but some files errored) both carry
+            # valid match data on stdout — parse and surface them through the SAME truncation path
+            # below so a partial-error search can never produce unbounded output. A genuine usage
+            # error (rc=2 with no parseable matches) is detected inside this block and falls back
+            # to Python before reaching the truncation code.
+            _rg_partial_error = False
+            if result.returncode == 0 or (result.returncode == 2 and _rg_available):
                 lines = result.stdout.split('\n') if result.stdout.strip() else []
 
                 formatted = []
 
                 if _rg_available:
-                    match_count = 0
-
-                    for line in lines:
-                        if not line.strip():
-                            continue
-
-                        try:
-                            json_obj = json.loads(line)
-                            entry_type = json_obj.get('type', '')
-
-                            if entry_type == 'match':
-                                data = json_obj.get('data', {})
-                                file_path = data.get('path', {}).get('text', '')
-
-                                line_num_data = data.get('line_number', 0)
-                                if isinstance(line_num_data, dict):
-                                    line_num = line_num_data.get('start', 0)
-                                else:
-                                    line_num = line_num_data
-
-                                # rg's lines.text always carries a trailing newline
-                                # ('\n' on POSIX, '\r\n' on Windows) — strip it so the
-                                # entries don't gain blank lines when joined below.
-                                match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
-
-                                normalized_path = file_path.replace('\\', '/')
-
-                                if context > 0:
-                                    formatted.append(f"{normalized_path}:{line_num}: >>>{match_text}")
-                                else:
-                                    formatted.append(f"{normalized_path}:{line_num}: {match_text}")
-
-                                match_count += 1
-
-                            elif entry_type == 'context' and context > 0:
-                                data = json_obj.get('data', {})
-                                file_path = data.get('path', {}).get('text', '')
-                                line_num_data = data.get('line_number', 0)
-                                if isinstance(line_num_data, dict):
-                                    line_num = line_num_data.get('start', 0)
-                                else:
-                                    line_num = line_num_data
-
-                                # Strip rg's trailing newline (same as 'match' branch above) —
-                                # would otherwise create blank lines between entries.
-                                match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
-                                normalized_path = file_path.replace('\\', '/')
-                                formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
-
-                        except json.JSONDecodeError as e:
-                            logger.debug('ripgrep JSON parse error: %s', e)
-
-                    count = match_count
+                    formatted, count = _parse_rg_json(result.stdout)
+                    # rc==2 with NO parseable matches is a genuine error (e.g. invalid regex or an
+                    # unrecognized flag), NOT "matches found but some files skipped". Fall back to
+                    # Python so the real error surfaces (Python raises re.error for bad patterns).
+                    if result.returncode == 2 and count == 0:
+                        stderr_msg = (result.stderr or '').strip()[:500]
+                        logger.warning(
+                            f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
+                        return None, 0, False, False, 0, None, 0, 0
+                    # rc==2 that DID yield matches means some files were skipped (e.g. permission
+                    # denied) — warn once so the partial nature is visible without discarding matches.
+                    if result.returncode == 2 and count > 0:
+                        _rg_partial_error = True
 
                 else:
                     _match_re = re.compile(r'^(.+?):(\d+):(.*)$')
@@ -389,14 +419,22 @@ class GrepMixin:
                             count = sum(1 for entry in formatted if entry != '---')
                         _was_truncated = True
 
+                if _rg_partial_error:
+                    stderr_msg = (result.stderr or '').strip()[:500]
+                    logger.warning(
+                        f"grep subprocess found {count} match(es) but exited with code 2 "
+                        f"(partial errors; some files may have been skipped): {stderr_msg}")
+
                 return (formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path,
                         _total_lines_before, _shown_lines_after)
 
-            # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
+            # Non-zero return code (e.g., grep returns 1 for no matches) — still valid.
+            # Note: rc==2 is fully handled in the success path above (matches found → surfaced;
+            # no matches → already returned None to fall back to Python), so it never reaches here.
             if result.returncode == 1:
                 return [], 0, False, False, 0, None, 0, 0
 
-            # Unexpected non-zero exit code (e.g., rg returns 2 for usage errors like unrecognized flags)
+            # Unexpected non-zero exit code (e.g., rg returns 3+ for internal errors)
             stderr_msg = (result.stderr or '').strip()[:500]
             logger.warning(
                 f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
