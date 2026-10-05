@@ -53,6 +53,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'default_load_skill_mode',
     'auto_skill_enabled',
     'auto_skill_min_turns',
+    'auto_skill_extra_turns',
     'auto_skill_mode',
     'skill_selector_mode',
     # Retry policy
@@ -495,6 +496,14 @@ def _handle_auto_skill_min_turns(ui_cfg: dict, agent_pool: Optional[Any], agents
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg.get('auto_skill_min_turns', 20))
         agent_pool.settings.auto_skill_min_turns = max(1, min(500, val))
+
+
+@register_config_handler('auto_skill_extra_turns')
+def _handle_auto_skill_extra_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the fresh turn budget granted for auto-skill reflection at trigger time."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('auto_skill_extra_turns', 25))
+        agent_pool.settings.auto_skill_extra_turns = max(1, min(200, val))
 
 
 @register_config_handler('loop_min_chars')

@@ -577,7 +577,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         ``yield response; continue``). Does NOT re-run trigger/qualification logic.
         """
         instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
-        new_max = instance._current_turn + AUTO_SKILL_EXTRA_TURNS
+        settings = getattr(self.pool, 'settings', None)
+        extra_turns = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
+        new_max = instance._current_turn + extra_turns
         instance.max_turns = new_max
         return new_max
 
@@ -1393,7 +1395,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         instance._auto_skill_dirty_stop = True
                         max_turns = self._grant_auto_skill_extension(instance)
                         _suppress_budget_warnings = True
-                        turns_available = AUTO_SKILL_EXTRA_TURNS
+                        settings = getattr(self.pool, 'settings', None)
+                        turns_available = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
                         yield response
                         continue
                     # logger.debug("tool used - %s looping",
@@ -1439,7 +1442,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
                             # budget-exhaustion design fired BEFORE _consume_turn, which is why its
                             # reset carried a +1; that no longer applies at this call site.
-                            turns_available = AUTO_SKILL_EXTRA_TURNS
+                            settings = getattr(self.pool, 'settings', None)
+                            turns_available = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
                             yield response
                             continue                                               # run the reflection turns
                     break

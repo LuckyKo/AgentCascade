@@ -182,6 +182,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-skill-selector-mode', prop: 'value', key: 'skill_selector_mode', localKey: 'skill-selector-mode' },
   { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
   { id: '#setting-auto-skill-min-turns', prop: 'value', key: 'auto_skill_min_turns', localKey: 'auto-skill-min-turns' },
+  { id: '#setting-auto-skill-extra-turns', prop: 'value', key: 'auto_skill_extra_turns', localKey: 'auto-skill-extra-turns' },
   // Telegram bridge (Phase 3) — underscore key via getGenerateCfg().
   { id: '#setting-telegram-bridge-enabled', prop: 'checked', key: 'telegram_bridge_enabled', localKey: 'telegram_bridge_enabled' },
   // Retry policy settings (Phase 6)
@@ -1209,6 +1210,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-skill-selector-mode')) s['skill-selector-mode'] = $('#setting-skill-selector-mode').value;
   if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
   if ($('#setting-auto-skill-min-turns')) s['auto-skill-min-turns'] = $('#setting-auto-skill-min-turns').value;
+  if ($('#setting-auto-skill-extra-turns')) s['auto-skill-extra-turns'] = $('#setting-auto-skill-extra-turns').value;
   // Telegram bridge (Phase 3) — persist under the underscore key (matches POOL_SETTINGS_MAP localKey).
   if ($('#setting-telegram-bridge-enabled')) s['telegram_bridge_enabled'] = $('#setting-telegram-bridge-enabled').checked;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
@@ -1396,6 +1398,7 @@ function loadSettings() {
     if (_present(s['skill-selector-mode'])) $('#setting-skill-selector-mode').value = s['skill-selector-mode'];
     if (_present(s['auto-skill-gen'])) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
     if (_isFiniteRestore(s['auto-skill-min-turns'])) $('#setting-auto-skill-min-turns').value = s['auto-skill-min-turns'];
+    if (_isFiniteRestore(s['auto-skill-extra-turns'])) $('#setting-auto-skill-extra-turns').value = s['auto-skill-extra-turns'];
     // Telegram bridge (Phase 3): restore prior local preference.
     if (typeof s['telegram_bridge_enabled'] === 'boolean') {
       const _tgBridge = $('#setting-telegram-bridge-enabled');
@@ -5755,6 +5758,7 @@ function getGenerateCfg() {
   if ($('#setting-skill-selector-mode')) cfg.skill_selector_mode = $('#setting-skill-selector-mode').value;
   if ($('#setting-auto-skill-gen')) cfg.auto_skill_enabled = $('#setting-auto-skill-gen').checked;
   if ($('#setting-auto-skill-min-turns')) cfg.auto_skill_min_turns = parseInt($('#setting-auto-skill-min-turns').value) || 20;
+  if ($('#setting-auto-skill-extra-turns')) cfg.auto_skill_extra_turns = parseInt($('#setting-auto-skill-extra-turns').value) || 25;
   // Telegram bridge (Phase 3) — always sent so the server-side handler can idempotently start/stop.
   if ($('#setting-telegram-bridge-enabled')) cfg.telegram_bridge_enabled = $('#setting-telegram-bridge-enabled').checked;
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;

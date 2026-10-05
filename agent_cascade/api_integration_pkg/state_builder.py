@@ -438,6 +438,8 @@ def build_state_from_pool(
                 getattr(ps, 'auto_skill_enabled', True),
             'auto_skill_min_turns':
                 getattr(ps, 'auto_skill_min_turns', 20),
+            'auto_skill_extra_turns':
+                getattr(ps, 'auto_skill_extra_turns', 25),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
             'skill_selector_mode':
@@ -680,6 +682,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'auto_skill_enabled', True),
             'auto_skill_min_turns':
                 getattr(ps, 'auto_skill_min_turns', 20),
+            'auto_skill_extra_turns':
+                getattr(ps, 'auto_skill_extra_turns', 25),
             'auto_skill_mode':
                 getattr(ps, 'auto_skill_mode', 'basic'),
             'skill_selector_mode':
