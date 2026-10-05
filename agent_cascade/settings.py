@@ -53,7 +53,7 @@ SECURITY_REUSE_ENABLED: bool = os.getenv('AGENT_CASCADE_SECURITY_REUSE',
 SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPROVAL_NAME', 'Security_guard')
 # Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
 # from the approval name: that path holds no lock, so it must not share one warm object.
-SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_reuse_skilladvisor')
+SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_skilladvisor')
 # Compressor: its tool restrictions come from UI config (seeded by the one-time class-defaults
 # migration, which disables nearly all of its tools) — it only performs compression internally.
 # A single turn forces no tool calls, guaranteeing a pure one-shot summary. Bump only if the

@@ -234,65 +234,72 @@ def _serialize_instances_incremental(
     all_instances = {}
 
     for name, inst in instance_snapshot_data.items():
-        with inst._compression_lock:
-            current_msgs = list(inst.conversation)
-            inst_streaming_responses = (list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None)
+        try:
+            with inst._compression_lock:
+                current_msgs = list(inst.conversation)
+                inst_streaming_responses = (list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None)
 
-        # Calculate content length for this instance's streaming responses (used for version tracking).
-        # Include total character count so that growing streaming content invalidates the cache
-        # even when message count stays at 1 (single partial response being accumulated).
-        stream_content_len = sum(
-            len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
-            for m in inst_streaming_responses) if inst_streaming_responses else 0
+            # Calculate content length for this instance's streaming responses (used for version tracking).
+            # Include total character count so that growing streaming content invalidates the cache
+            # even when message count stays at 1 (single partial response being accumulated).
+            stream_content_len = sum(
+                len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
+                for m in inst_streaming_responses) if inst_streaming_responses else 0
 
-        current_version = (
-            len(current_msgs),
-            _msg_fingerprint(current_msgs[-1]) if current_msgs else None,
-            len(inst_streaming_responses) if inst_streaming_responses else 0,
-            stream_content_len,
-        )
+            current_version = (
+                len(current_msgs),
+                _msg_fingerprint(current_msgs[-1]) if current_msgs else None,
+                len(inst_streaming_responses) if inst_streaming_responses else 0,
+                stream_content_len,
+            )
 
-        # C4: Atomic read-compare-write under lock to prevent TOCTOU race.
-        # Lock is acquired per-instance inside the loop — this allows concurrent
-        # instance dismissal (evict_instance) between iterations, which is correct
-        # but may cause re-serialization of dismissed instances. Acceptable trade-off
-        # since RLock prevents deadlocks and worst case is a slightly stale snapshot.
-        with _cache_mgr._lock:
-            prev_version = _cache_mgr.stream_versions.get(name)
+            # C4: Atomic read-compare-write under lock to prevent TOCTOU race.
+            # Lock is acquired per-instance inside the loop — this allows concurrent
+            # instance dismissal (evict_instance) between iterations, which is correct
+            # but may cause re-serialization of dismissed instances. Acceptable trade-off
+            # since RLock prevents deadlocks and worst case is a slightly stale snapshot.
+            with _cache_mgr._lock:
+                prev_version = _cache_mgr.stream_versions.get(name)
 
-            # Serialize if: active instance OR version changed OR forced full refresh
-            if name == instance_name or current_version != prev_version or force_full:
-                # Prefix-shrink detection (replaces a per-instance _conv_version counter):
-                # compression/rollback SHRINK the conversation, so if the message count dropped
-                # since the last frame we must emit a FULL frame (no tail cut) — the client no
-                # longer holds a valid prefix. Same-length rewrites are an accepted gap: the
-                # 100-tick force_full self-heals within ~10s.
-                prefix_shrank = (
-                    prev_version is not None and current_version[0] < prev_version[0]  # message count decreased
-                )
-                full_this_frame = force_full or prefix_shrank
-                all_instances[name] = _serialize_instance(
-                    inst,
-                    pool,
-                    include_messages=True,
-                    streaming=(not full_this_frame),  # False => no tail cut + is_partial from responses
-                    streaming_responses=inst_streaming_responses,
-                )
-                _cache_mgr.stream_versions[name] = current_version
-                _cache_mgr.cached_instances[name] = all_instances[name]
-            else:
-                # Reuse the previously serialized data for unchanged instances
-                all_instances[name] = _cache_mgr.cached_instances.get(name)
-                if all_instances[name] is None:
+                # Serialize if: active instance OR version changed OR forced full refresh
+                if name == instance_name or current_version != prev_version or force_full:
+                    # Prefix-shrink detection (replaces a per-instance _conv_version counter):
+                    # compression/rollback SHRINK the conversation, so if the message count dropped
+                    # since the last frame we must emit a FULL frame (no tail cut) — the client no
+                    # longer holds a valid prefix. Same-length rewrites are an accepted gap: the
+                    # 100-tick force_full self-heals within ~10s.
+                    prefix_shrank = (
+                        prev_version is not None and current_version[0] < prev_version[0]  # message count decreased
+                    )
+                    full_this_frame = force_full or prefix_shrank
                     all_instances[name] = _serialize_instance(
                         inst,
                         pool,
                         include_messages=True,
-                        streaming=(not force_full),
+                        streaming=(not full_this_frame),  # False => no tail cut + is_partial from responses
                         streaming_responses=inst_streaming_responses,
                     )
                     _cache_mgr.stream_versions[name] = current_version
                     _cache_mgr.cached_instances[name] = all_instances[name]
+                else:
+                    # Reuse the previously serialized data for unchanged instances
+                    all_instances[name] = _cache_mgr.cached_instances.get(name)
+                    if all_instances[name] is None:
+                        all_instances[name] = _serialize_instance(
+                            inst,
+                            pool,
+                            include_messages=True,
+                            streaming=(not force_full),
+                            streaming_responses=inst_streaming_responses,
+                        )
+                        _cache_mgr.stream_versions[name] = current_version
+                        _cache_mgr.cached_instances[name] = all_instances[name]
+        except Exception as e:  # noqa: BLE001 — one malformed instance must not abort the frame for every agent
+            logger.warning(
+                f"[STREAM_SERIALIZE] Skipping instance '{name}' after serialization error "
+                f"(non-critical, other instances continue): {e}"
+            )
+            continue
 
     return all_instances
 

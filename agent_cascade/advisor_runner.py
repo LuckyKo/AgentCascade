@@ -101,11 +101,17 @@ def run_lightweight_advisor(
     # dereferences it for _cleanup_advisor_instance; an unbound local would raise UnboundLocalError
     # and mask the real error if ExecutionEngine(pool) raises first.
     actual_name: Optional[str] = None
+    # Pre-bound so the except/finally handlers can reference it even if ExecutionEngine(pool)
+    # raises before the assignment inside the try block.  Falls back to instance_name (the
+    # per-call name) which is always available as a function parameter.
+    effective_name: Optional[str] = None
 
     def _first_yield_timeout_trigger():
+        # actual_name is pre-bound to None (above) and assigned after acquire; the timer thread may
+        # fire before that assignment completes, in which case it falls back to instance_name — safe.
         logger.warning(
             "[ADVISOR] First-yield timeout trigger fired for '%s' after %.0fs — model has not yielded.",
-            instance_name,
+            actual_name or instance_name,
             first_yield_timeout,
         )
         first_yield_event.set()
@@ -133,6 +139,12 @@ def run_lightweight_advisor(
         )
         if _was_reused:
             logger.info('[SECURITY_REUSE] advisor reusing warm %s (rid=%s)', reuse_name, adv_rid)
+
+        # The REAL instance name in pool.instances — the fixed reuse name on a
+        # warm-reuse hit, the per-call fallback name on a fresh spawn.  Every
+        # downstream reference (broadcast, state bookkeeping, logs, cleanup)
+        # must use this, NOT the bare `instance_name` parameter.
+        effective_name = actual_name or instance_name
 
         # ── 3. Turn budget ───────────────────────────────────────────────────
         if max_turns is None:
@@ -187,7 +199,7 @@ def run_lightweight_advisor(
                         logger.warning(
                             "[ADVISOR] First-yield timeout after %.0fs for '%s'. Generator did not yield in time.",
                             time.monotonic() - start_time,
-                            instance_name,
+                            effective_name,
                         )
                         break
 
@@ -203,7 +215,7 @@ def run_lightweight_advisor(
 
                 _last_send, _last_resp_len = broadcast_stream_update(
                     pool=pool,
-                    instance_name=instance_name,
+                    instance_name=effective_name,
                     turn_output=turn_output,
                     is_streaming_tick=is_streaming_tick,
                     tick_num=_tick_num,
@@ -218,8 +230,8 @@ def run_lightweight_advisor(
                 try:
                     if hasattr(pool, '_execution') and hasattr(pool._execution, '_state_lock'):
                         with pool._execution._state_lock:
-                            if instance_name in pool.instance_state:
-                                pool.instance_state[instance_name]['message_count'] = len(instance.conversation)
+                            if effective_name in pool.instance_state:
+                                pool.instance_state[effective_name]['message_count'] = len(instance.conversation)
                 except Exception:
                     pass  # non-critical — never break the advisor over UI bookkeeping
 
@@ -233,7 +245,7 @@ def run_lightweight_advisor(
                             getattr(_last, 'content', '') or ''):
                         logger.debug(
                             "[ADVISOR] Verdict detected in output — stopping early for '%s'",
-                            instance_name,
+                            effective_name,
                         )
                         break
         finally:
@@ -252,7 +264,7 @@ def run_lightweight_advisor(
     except Exception as e:  # noqa: BLE001 — advisor must never crash the caller
         result.was_error = True
         result.error_msg = str(e)
-        logger.error("[ADVISOR] Execution error for '%s': %s", instance_name, e)
+        logger.error("[ADVISOR] Execution error for '%s': %s", effective_name or instance_name, e)
 
     finally:
         # ── 8. Telemetry (non-blocking, always fires even on timeout/error) ──
@@ -288,6 +300,19 @@ def run_lightweight_advisor(
         # can take it. release_claim no-ops on a None/empty name AND on a mismatched rid, so this is
         # safe on every path — including fresh-spawn fallback where reuse_name is None.
         security_reuse.release_claim(reuse_name, adv_rid)
+
+        # ── 11. Remove the fresh-spawn fallback from the pool (BUG: stale Security_op_* tab) ──
+        # A warm hit / seed uses the FIXED reuse name and must persist for the next check; only a
+        # fresh-spawn fallback (effective_name != reuse_name) is a one-off that _cleanup_advisor_instance
+        # marked inactive but never popped from pool.instances, so its UI tab lingered. Remove it here;
+        # the fixed-name warm instance is left intact. The `effective_name` truthiness check guards the
+        # pre-acquire-exception path where effective_name is still None (acquire raised before assignment).
+        if effective_name and effective_name != reuse_name:
+            try:
+                pool.remove_instance(effective_name)
+            except Exception as e:  # noqa: BLE001 — cleanup must never crash the caller
+                logger.debug("[ADVISOR] remove_instance failed for '%s' (non-critical): %s",
+                             effective_name, e)
 
     return result
 

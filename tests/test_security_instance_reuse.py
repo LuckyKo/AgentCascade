@@ -33,6 +33,7 @@ from agent_cascade.llm.schema import Message, SYSTEM, USER  # noqa: E402
 from agent_cascade.engine.helpers import _with_run_identity  # noqa: E402
 
 REUSE_NAME = 'Security_guard'
+FALLBACK_INSTANCE_NAME = 'Security_op_fallback1234'  # per-call fresh-spawn name used across tests
 
 
 # ── Fixtures / helpers ────────────────────────────────────────────────────────
@@ -264,6 +265,34 @@ class TestEligibilityPredicate:
         finally:
             release_claim(REUSE_NAME, 'someone_else')
         assert got is None
+
+    def test_state_not_idle_logs_gate_diagnostic(self, caplog):
+        """A predicate-driven fallback must leave a greppable DEBUG line naming the gate that fired.
+
+        Representative case (Gate 3, state != IDLE). core.py logs through the SHARED module logger
+        (`from agent_cascade.log import logger` → name 'agent_cascade_logger'), NOT getLogger(__name__),
+        so a bare caplog fixture would drop these DEBUG records — we must raise THAT logger's level.
+        """
+        import logging
+        from agent_cascade.log import logger as app_logger
+
+        inst = _make_warm_instance()
+        with inst._state_lock:
+            inst.state = AgentState.RUNNING  # non-IDLE → Gate 3 must fire
+        engine = _make_engine(_make_pool(inst))
+
+        caplog.set_level(logging.DEBUG, logger=app_logger.name)
+        try:
+            assert _acquire(engine) is None  # still falls back (no behavior change)
+        finally:
+            caplog.set_level(logging.NOTSET, logger=app_logger.name)
+
+        gate_lines = [r for r in caplog.records if 'gate=state_not_idle' in r.getMessage()]
+        assert gate_lines, (
+            f'expected a DEBUG line with gate=state_not_idle, got: '
+            f'{[r.getMessage() for r in caplog.records]}')
+        # The uniform format carries the instance name and rid so it is machine-parseable.
+        assert REUSE_NAME in gate_lines[-1].getMessage()
 
 
 # ── B2. Claim released on EVERY failure path (regression guard) ───────────────
@@ -522,7 +551,7 @@ class TestBootstrapSeedOnMiss:
         with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
              patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy):
             result = run_lightweight_advisor(
-                pool=pool, agent_class='Security', instance_name='Security_op_fallback1234',
+                pool=pool, agent_class='Security', instance_name=FALLBACK_INSTANCE_NAME,
                 task='advise me', caller='Maine')
 
         assert result.ok is True
@@ -978,7 +1007,7 @@ class TestAdvisorRunnerIntegration:
     def _run_advisor(self, pool, engine_instance):
         from agent_cascade.advisor_runner import run_lightweight_advisor
         return run_lightweight_advisor(
-            pool=pool, agent_class='Security', instance_name='Security_op_fallback1234',
+            pool=pool, agent_class='Security', instance_name=FALLBACK_INSTANCE_NAME,
             task='advise me', caller='Maine')
 
     def test_reuse_path_uses_warm_instance(self):
@@ -1017,7 +1046,251 @@ class TestAdvisorRunnerIntegration:
         engine_instance._create_system_agent.assert_called_once()
         # Fallback uses the per-call instance_name passed in.
         kw = engine_instance._create_system_agent.call_args.kwargs
-        assert kw['instance_name'] == 'Security_op_fallback1234'
+        assert kw['instance_name'] == FALLBACK_INSTANCE_NAME
+
+    # ── T1: THE regression test (fails before Change A, passes after) ──────────
+    def test_broadcast_uses_actual_name_on_reuse_hit(self):
+        """On a reuse hit the advisor must broadcast under the REAL instance name (the fixed reuse
+        name), not the per-call fallback — otherwise build_stream_update_from_pool can't resolve it
+        and zero frames are enqueued for the whole run (the streaming-freeze bug)."""
+        import asyncio
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME
+        pool = _make_integration_pool()
+        # broadcast_stream_update resolves ws_queue/ws_loop from the pool and bails early if either
+        # is missing — so give it a live loop + queue to reach build_stream_update_from_pool.
+        loop = asyncio.new_event_loop()
+        pool._ws_send_queue = asyncio.Queue(maxsize=10)
+        pool._ws_loop = loop
+        warm = _make_warm_instance(SECURITY_REUSE_SKILL_ADVISOR_NAME)
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, SECURITY_REUSE_SKILL_ADVISOR_NAME)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        try:
+            with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+                 patch('agent_cascade.api_integration_pkg.streaming.build_stream_update_from_pool') as bsu:
+                self._run_advisor(pool, engine_instance)
+        finally:
+            loop.close()
+
+        assert bsu.called, 'build_stream_update_from_pool must be invoked at least once during the run'
+        # The broadcast must target the real reuse name so pool.get_instance() resolves it.
+        assert bsu.call_args.kwargs['instance_name'] == SECURITY_REUSE_SKILL_ADVISOR_NAME
+        assert bsu.call_args.kwargs['instance_name'] != FALLBACK_INSTANCE_NAME
+
+    # ── T2: fallback path unchanged ────────────────────────────────────────────
+    def test_broadcast_uses_fallback_name_on_fresh_spawn(self):
+        """On a fresh-spawn fallback (acquire returns None) the broadcast must still use the per-call
+        instance_name — Change A must not alter the legacy path."""
+        import asyncio
+        pool = _make_integration_pool()
+        loop = asyncio.new_event_loop()
+        pool._ws_send_queue = asyncio.Queue(maxsize=10)
+        pool._ws_loop = loop
+        fresh_inst = MagicMock()
+        fresh_inst.conversation = []
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.return_value = None  # wedged → fresh spawn
+        engine_instance._create_system_agent.return_value = fresh_inst
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        try:
+            with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+                 patch('agent_cascade.api_integration_pkg.streaming.build_stream_update_from_pool') as bsu:
+                self._run_advisor(pool, engine_instance)
+        finally:
+            loop.close()
+
+        assert bsu.called
+        assert bsu.call_args.kwargs['instance_name'] == FALLBACK_INSTANCE_NAME
+
+    # ── T3: end-to-end frame actually builds (no mocks for the builder) ────────
+    def test_reuse_hit_builds_real_frame_and_enqueues(self):
+        """With NO mock on the builder, a reuse hit must produce a real stream_update dict and
+        enqueue it — proving frames flow for the whole run instead of being silently dropped.
+
+        (The pre-fix bug: broadcast used the per-call fallback name → pool.get_instance(fallback) →
+        None → build returned None → nothing enqueued. With Change A the reuse name resolves.)"""
+        import asyncio
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME
+
+        warm = _make_warm_instance(SECURITY_REUSE_SKILL_ADVISOR_NAME)
+        # A pool whose get_instance resolves the reuse name to the warm instance but NOT the
+        # per-call fallback (mirrors production: only Security_skilladvisor exists in the pool).
+        pool = MagicMock()
+        pool.stopped = False
+        pool.instance_state = {}
+        pool.get_template.return_value = None  # advisor falls back to minimal cfg — fine here
+        pool._execution = MagicMock()
+        pool._execution._state_lock = threading.Lock()
+
+        def _get_instance(name):
+            return warm if name == SECURITY_REUSE_SKILL_ADVISOR_NAME else None
+
+        pool.get_instance.side_effect = _get_instance
+
+        # A live event loop + send queue so broadcast_stream_update's run_coroutine_threadsafe works.
+        # (asyncio.Queue(loop=...) was removed in 3.10+; bind the loop explicitly instead.)
+        loop = asyncio.new_event_loop()
+        ws_queue = asyncio.Queue(maxsize=10)
+        try:
+            ws_queue._loop = loop
+        except Exception:
+            pass
+        pool._ws_send_queue = ws_queue
+        pool._ws_loop = loop
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, SECURITY_REUSE_SKILL_ADVISOR_NAME)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        # The builder is REAL here. The only non-defensive call in _serialize_instance against a
+        # MagicMock pool is _get_max_tokens_for_instance (its sibling calls are try/except-guarded),
+        # so patch it to return an int and let the rest of the real build + enqueue path run.
+        import agent_cascade.api_integration_pkg.state_builder as sb
+
+        # The advisor acquires the instance via the ENGINE (not pool.get_instance), so the only way a
+        # frame reaches the WS queue is if broadcast_stream_update resolves the REAL reuse name through
+        # build_stream_update_from_pool → pool.get_instance(reuse_name). Before Change A it used the
+        # per-call fallback name, which get_instance returns None for → no frame. So "a frame landed"
+        # is the end-to-end proof that Change A took effect.
+        try:
+            with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+                 patch.object(sb, '_get_max_tokens_for_instance', return_value=8192):
+                self._run_advisor(pool, engine_instance)
+
+            # A stream_update frame was actually dispatched to the WS queue. Drain the pending
+            # put_nowait tasks (scheduled via run_coroutine_threadsafe) and confirm at least one
+            # event landed in the queue.
+            async def _drain():
+                while ws_queue.qsize() < 1:
+                    await asyncio.sleep(0)
+                return True
+
+            loop.run_until_complete(asyncio.wait_for(_drain(), timeout=5.0))
+            assert ws_queue.qsize() >= 1, \
+                'at least one stream_update frame must be enqueued (proves the reuse name resolved)'
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    # ── T4: _serialize_instances_incremental isolation (Change B) ──────────────
+    def test_serialize_isolation_bad_instance_does_not_abort_frame(self):
+        """One malformed instance whose serialization raises must NOT abort the whole frame — the
+        healthy instance's entry is still returned and no exception escapes. Without Change B the
+        per-instance body has no try/except, so a single bad instance would propagate and drop every
+        other agent from the frame."""
+        import logging
+        import agent_cascade.api_integration_pkg.state_builder as sb
+        from agent_cascade.api_integration_pkg.state_builder import _serialize_instances_incremental
+
+        # Healthy: a REAL warm instance (real locks + real [system] conversation) so its serialization
+        # completes cleanly.
+        healthy = _make_warm_instance('healthy_inst')
+
+        # Bad: a MagicMock whose per-instance body raises at its very first step — acquiring
+        # inst._compression_lock (state_builder.py:238). That `with` is the FIRST line inside Change B's
+        # try block, so the raise propagates straight to the per-instance except and the bad instance is
+        # skipped. A plain MagicMock would otherwise serialize "cleanly" (auto-attrs) and wrongly land in
+        # the result.
+        bad = MagicMock()
+        bad.instance_name = 'bad_inst'
+        # Make `with inst._compression_lock:` raise: set __enter__.side_effect (not the mock's own
+        # side_effect, which only fires on call() not context-manager entry).
+        bad._compression_lock.__enter__.side_effect = RuntimeError('simulated serialization crash')
+
+        pool = MagicMock()
+        pool.instances = {'bad_inst': bad, 'healthy_inst': healthy}
+
+        # Capture the WARNING Change B emits when it skips the bad instance.
+        records = []
+        handler = logging.Handler()
+        handler.emit = lambda r: records.append(r)
+        sb_logger = logging.getLogger('agent_cascade_logger')
+        old_level = sb_logger.level
+        sb_logger.addHandler(handler)
+        try:
+            # _get_max_tokens_for_instance does an int comparison against pool settings; with a
+            # MagicMock pool that raises. Patch it so the HEALTHY instance serializes to completion and
+            # only the BAD one trips Change B's isolation (via slice_history_for_llm above).
+            with patch.object(sb, '_get_max_tokens_for_instance', return_value=8192):
+                result = _serialize_instances_incremental(pool, instance_name='healthy_inst', force_full=False)
+        finally:
+            sb_logger.removeHandler(handler)
+            sb_logger.setLevel(old_level)
+
+        # The healthy instance was serialized; the bad one was skipped without raising.
+        assert 'healthy_inst' in result
+        assert 'bad_inst' not in result
+        # Change B must have logged a WARNING naming the skipped (bad) instance — proof the isolation
+        # path ran rather than silently swallowing the error.
+        skip_msgs = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert any('bad_inst' in m for m in skip_msgs), \
+            f'expected a WARNING naming bad_inst, got: {skip_msgs}'
+
+    # ── T5: _streaming_responses cleared on acquire (Change C) ────────────────
+    def test_streaming_responses_cleared_on_acquire(self):
+        """A warm instance seeded with a stale partial must have _streaming_responses == [] after a
+        successful reuse, and its conversation reset to [system, new_task] (len 2)."""
+        inst = _make_warm_instance()
+        inst._streaming_responses = [Message(role='assistant', content='old')]
+        engine = _make_engine(_make_pool(inst))
+        got = _acquire(engine)
+        assert got is not None, 'acquire must reuse the warm instance for this test'
+        assert inst._streaming_responses == [], '_streaming_responses must be cleared on reuse acquire'
+        assert len(inst.conversation) == 2
+
+    # ── T6: regression guard for the approval path ────────────────────────────
+    def test_approval_path_broadcasts_under_reuse_name(self):
+        """The approval (security_handler) path already broadcasts under sec_state_key = the fixed reuse
+        name. Guard that a reuse hit keeps streaming under SECURITY_REUSE_APPROVAL_NAME, not the
+        per-rid fallback — mirrors the T1 contract for the sibling path."""
+        import asyncio
+        from agent_cascade.security_handler import SecurityAdvisorHandler
+        from agent_cascade.settings import SECURITY_REUSE_APPROVAL_NAME
+        pool = _make_integration_pool()
+        loop = asyncio.new_event_loop()
+        real_queue = asyncio.Queue(maxsize=10)
+        pool._ws_send_queue = real_queue
+        pool._ws_loop = loop
+        # Build the handler with a REAL send queue (not _make_handler's MagicMock): _handle_verdict calls
+        # run_coroutine_threadsafe(self.send_queue.put(...)), which needs a real coroutine, not a MagicMock.
+        app = type('App', (), {})()
+        session = {'session_name': 'Maine', 'generate_cfg': {}}
+        handler = SecurityAdvisorHandler(pool, session, app, real_queue, lambda: None)
+        warm = _make_warm_instance(SECURITY_REUSE_APPROVAL_NAME)
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, SECURITY_REUSE_APPROVAL_NAME)
+
+        # The real engine.run commits the turn's assistant output to the conversation before returning;
+        # extract_instance_output then reads messages[-1].content. Mirror that so the handler parses a
+        # real [YES] verdict (otherwise it sees only the system prompt → ambiguous → _handle_ambiguous).
+        def _run(inst):
+            inst.append_message(Message(role='assistant', content='[YES] safe'))
+            yield (' [YES] safe', False)
+
+        engine_instance.run.side_effect = lambda inst: _run(inst)
+
+        # _run_check lives on TestSecurityHandlerIntegration; invoke its method directly.
+        run_check = TestSecurityHandlerIntegration._run_check
+
+        try:
+            with patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', True), \
+                 patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+                 patch('agent_cascade.api_integration_pkg.streaming.build_stream_update_from_pool') as bsu:
+                run_check(self, handler, pool, engine_instance, 'rid_t6')
+        finally:
+            loop.close()
+
+        # The approval path must broadcast under the fixed reuse name (sec_state_key), never the fallback.
+        assert bsu.called, 'the approval path must broadcast stream updates'
+        names = [c.kwargs.get('instance_name') for c in bsu.call_args_list]
+        assert SECURITY_REUSE_APPROVAL_NAME in names, f'expected {SECURITY_REUSE_APPROVAL_NAME} in broadcast names, got {names}'
 
     def test_engine_ctor_error_not_masked_by_unbound_reuse_name(self):
         """B8 regression: if ExecutionEngine(pool) raises BEFORE reuse_name is assigned inside the
@@ -1074,6 +1347,148 @@ class TestAdvisorRunnerIntegration:
         assert isinstance(rid_arg, str) and rid_arg.startswith('adv_'), f'unexpected rid {rid_arg!r}'
         # Belt-and-braces: the registry is actually clean too (no leaked owner).
         assert claim_holder(SECURITY_REUSE_SKILL_ADVISOR_NAME) is None
+
+    # ── Fresh-spawn fallback cleanup: remove_instance discriminator proof ────────
+    # BUG: a fresh-spawn fallback (effective_name != reuse_name) was marked inactive by
+    # _cleanup_advisor_instance but never popped from pool.instances, so its Security_op_* UI tab
+    # lingered forever. The fix removes it in the finally — but ONLY for the fresh-spawn path; a
+    # warm hit / seed uses the FIXED reuse name and must persist for the next check to reuse it.
+    #
+    # CRITICAL fixture caveat: _make_integration_pool returns a MagicMock with pool.instance_state={}
+    # but NO real .instances dict and NO real remove_instance — pool.remove_instance(name) on that
+    # mock is an auto-spec call that mutates nothing, so asserting on pool.instances membership is
+    # VACUOUS. Option A (below): give each test a REAL dict + a spy whose side_effect actually pops,
+    # so "the name is gone from pool.instances" is meaningful.
+
+    def _wire_remove_spy(self, pool, seed_name=None, seed_inst=None):
+        """Give the MagicMock pool a REAL .instances dict and a remove_instance spy that pops.
+
+        Returns (remove_spy, cleanup_spy, release_spy). The side_effect actually mutates the real
+        dict so membership assertions are meaningful; wrapping release_claim keeps its real no-op-on-None
+        behavior while recording args.
+        """
+        from agent_cascade.security_reuse import _clear_all
+        pool.instances = {seed_name: seed_inst} if seed_name else {}
+        remove_spy = MagicMock(side_effect=lambda n: pool.instances.pop(n, None))
+        pool.remove_instance = remove_spy
+        cleanup_spy = MagicMock()
+        release_spy = MagicMock(wraps=release_claim)
+        _clear_all()  # isolate the claim registry per test
+        return remove_spy, cleanup_spy, release_spy
+
+    def test_fresh_spawn_fallback_removes_itself(self):
+        """T1 (POSITIVE discriminator half): a fresh-spawn fallback (name != fixed reuse name) is
+        popped from pool.instances in the finally — its Security_op_* tab no longer lingers."""
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME as ADV_NAME
+        FALLBACK = FALLBACK_INSTANCE_NAME  # the per-call instance_name _run_advisor passes in
+        pool = _make_integration_pool()
+        fresh_inst = MagicMock()
+        fresh_inst.conversation = []
+
+        engine_instance = MagicMock()
+        # Real 3-tuple: a FRESH-SPAWN fallback — was_reused=False, actual_name=FALLBACK != ADV_NAME.
+        engine_instance._acquire_reusable_system_agent.return_value = (fresh_inst, False, FALLBACK)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        remove_spy, cleanup_spy, release_spy = self._wire_remove_spy(pool, FALLBACK, fresh_inst)
+        with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+             patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy), \
+             patch('agent_cascade.security_reuse.release_claim', release_spy):
+            result = self._run_advisor(pool, engine_instance)
+
+        assert result.ok is True
+        # THE assertion: the fallback name was removed from the pool (and actually popped).
+        remove_spy.assert_called_once_with(FALLBACK)
+        assert FALLBACK not in pool.instances, 'fresh-spawn corpse must be popped from pool.instances'
+        # Regression guards: existing teardown still ran with the correct actual_name + claim released.
+        # _cleanup_advisor_instance(pool, name) — the NAME is args[1], not args[0].
+        assert cleanup_spy.call_count == 1 and cleanup_spy.call_args.args[1] == FALLBACK
+        assert release_spy.call_count >= 1
+
+    def test_warm_hit_does_not_remove(self):
+        """T2: a warm hit (was_reused=True, name == fixed reuse name) must NOT be removed — ZERO
+        calls to remove_instance. Asserting not-called-with-ADV_NAME would be vacuous; assert_not_called
+        is what proves the guard keys on effective_name != reuse_name, not was_reused."""
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME as ADV_NAME
+        pool = _make_integration_pool()
+        warm = _make_warm_instance(ADV_NAME)
+
+        engine_instance = MagicMock()
+        # Real 3-tuple: a WARM HIT — was_reused=True, actual_name=ADV_NAME.
+        engine_instance._acquire_reusable_system_agent.return_value = (warm, True, ADV_NAME)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        remove_spy, cleanup_spy, release_spy = self._wire_remove_spy(pool, ADV_NAME, warm)
+        with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+             patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy), \
+             patch('agent_cascade.security_reuse.release_claim', release_spy):
+            result = self._run_advisor(pool, engine_instance)
+
+        assert result.ok is True
+        # THE assertion: ZERO removals — the warm instance must survive for reuse.
+        remove_spy.assert_not_called()
+        assert ADV_NAME in pool.instances, 'warm instance must persist in pool.instances'
+        # Regression guards: existing teardown still ran with the correct actual_name + claim released.
+        assert cleanup_spy.call_count == 1 and cleanup_spy.call_args.args[1] == ADV_NAME
+        assert release_spy.call_count >= 1
+
+    def test_seed_on_miss_does_not_remove(self):
+        """T3 (CRITICAL discriminator half): a seed-on-miss has was_reused=False BUT name == fixed reuse
+        name — it must NOT be removed. This is the case that separates 'fresh spawn' from 'seed': both
+        have was_reused=False, so only the name-equality discriminator distinguishes them. T2+T3 together
+        prove the guard is NOT keyed on was_reused."""
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME as ADV_NAME
+        pool = _make_integration_pool()
+        seeded = _make_warm_instance(ADV_NAME)
+
+        engine_instance = MagicMock()
+        # Real 3-tuple: a SEED-ON-MISS — was_reused=False, actual_name=ADV_NAME (== reuse name).
+        engine_instance._acquire_reusable_system_agent.return_value = (seeded, False, ADV_NAME)
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        remove_spy, cleanup_spy, release_spy = self._wire_remove_spy(pool, ADV_NAME, seeded)
+        with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+             patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy), \
+             patch('agent_cascade.security_reuse.release_claim', release_spy):
+            result = self._run_advisor(pool, engine_instance)
+
+        assert result.ok is True
+        # THE assertion: ZERO removals even though was_reused=False — the seeded first-warm persists.
+        remove_spy.assert_not_called()
+        assert ADV_NAME in pool.instances, 'seeded warm instance must persist in pool.instances'
+        # Regression guards: existing teardown still ran with the correct actual_name + claim released.
+        assert cleanup_spy.call_count == 1 and cleanup_spy.call_args.args[1] == ADV_NAME
+        assert release_spy.call_count >= 1
+
+    def test_kill_switch_off_removes_every_run(self):
+        """T4: SECURITY_REUSE_ENABLED=False → reuse_name=None, so EVERY run is a fresh spawn under its
+        per-call name and must self-remove (there is no warm instance to preserve). Covers the
+        `reuse_name is None` branch of the guard. Mirrors test_fallback_path_spawns_fresh."""
+        FALLBACK = FALLBACK_INSTANCE_NAME  # the per-call instance_name _run_advisor passes in
+        pool = _make_integration_pool()
+        fresh_inst = MagicMock()
+        fresh_inst.conversation = []
+
+        engine_instance = MagicMock()
+        # Kill-switch OFF: acquire is never called; the legacy fresh-spawn path creates a fresh
+        # instance under the per-call name. Pin it so we can assert on the exact removed name.
+        engine_instance._create_system_agent.return_value = fresh_inst
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        remove_spy, cleanup_spy, release_spy = self._wire_remove_spy(pool, FALLBACK, fresh_inst)
+        with patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', False), \
+             patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)), \
+             patch('agent_cascade.advisor_runner._cleanup_advisor_instance', cleanup_spy), \
+             patch('agent_cascade.security_reuse.release_claim', release_spy):
+            result = self._run_advisor(pool, engine_instance)
+
+        assert result.ok is True
+        # THE assertion: the per-call name was removed (reuse_name=None → effective_name != None).
+        remove_spy.assert_called_once_with(FALLBACK)
+        assert FALLBACK not in pool.instances, 'fresh-spawn corpse must be popped from pool.instances'
+        # Regression guards: existing teardown still ran with the correct actual_name + claim released.
+        assert cleanup_spy.call_count == 1 and cleanup_spy.call_args.args[1] == FALLBACK
+        assert release_spy.call_count >= 1
 
 
 # ── F. Concurrency ────────────────────────────────────────────────────────────

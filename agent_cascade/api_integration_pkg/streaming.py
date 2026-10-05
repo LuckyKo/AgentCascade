@@ -550,9 +550,11 @@ def broadcast_stream_update(
         return (now_sec, resp_len)
 
     except Exception as e:
-        # RuntimeError if event loop is closed; catch-all for safety
-        logger.debug(f"[STREAM_BROADCAST] Update failed for {instance_name} "
-                     f"(non-critical): {e}")
+        # RuntimeError if event loop is closed; catch-all for safety. Logged at WARNING (not debug)
+        # so an unresolvable instance name / build failure is visible — the streaming-freeze bug was
+        # invisible precisely because this path stayed silent.
+        logger.warning(f"[STREAM_BROADCAST] Update failed for {instance_name} "
+                       f"(non-critical): {e}")
         return (last_send, resp_len)
 
 

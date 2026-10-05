@@ -244,6 +244,8 @@ class TestSystemAgentRestrictedShellFlag:
 
         inst = object.__new__(ExecutionEngine)  # no __init__ — we only exercise the flag assignment
 
+        from agent_cascade.llm.schema import USER, Message
+
         class _Lifecycle:
             def find_or_create_instance(self, *a, **k):
                 fake = type('FakeInst', (), {'agent_class': 'Security'})()
@@ -252,6 +254,12 @@ class TestSystemAgentRestrictedShellFlag:
             def build_system_message(self, *a, **k):
                 return 'sys'
 
+            # _create_system_agent builds the task message via the ENGINE's lifecycle manager
+            # (self.lifecycle.build_task_message) — a real AgentPool has no `lifecycle` attribute.
+            # Return a real Message(role=USER) so _with_run_identity can read .role/.content off it.
+            def build_task_message(self, args, caller):
+                return Message(role=USER, content=f"Task: {args.get('task', '')}")
+
             def initialize_conversation(self, *a, **k):
                 return []
 
@@ -259,6 +267,8 @@ class TestSystemAgentRestrictedShellFlag:
                 return None
 
         inst.lifecycle = _Lifecycle()
+        # The pool only needs active_stack_append here — build_task_message lives on the engine's
+        # lifecycle (see above), NOT on the pool.
         inst.pool = type('FakePool', (), {'active_stack_append': staticmethod(lambda *a, **k: None)})()
         inst.stream_publisher = type('FakeSP', (), {'push_initial_state': staticmethod(lambda *a, **k: None)})()
 

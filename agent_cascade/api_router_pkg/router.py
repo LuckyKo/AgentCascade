@@ -1026,16 +1026,14 @@ class APIRouter:
             # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
             # per-instance probe fast-path gate (skip re-probing a live connection).
             #
-            # CAPACITY-AWARE (L147 liveness fix): this tier used to be capacity-BLIND — it
-            # handed an unassigned agent the last-used endpoint without checking whether that
-            # endpoint's pool is at full concurrency. Under conc=0 every such endpoint collapses
-            # into ONE global capacity-1 pool ('_shared_sequential_slot_' — see scheduler.py),
-            # so a long-running parallel agent holding it starved an unassigned child (e.g. a
-            # spawned Security agent) for the full QUEUE_WAIT_TIMEOUT (300s) even when other
-            # endpoints had free pools. Now, before handing out last-active, we check whether
-            # ITS pool is saturated; if so we prefer the FIRST enabled endpoint with ≥1 free
-            # slot (first-fit). If none is free we keep last-active anyway — never worse than
-            # today's behaviour. The healthy path (last-active pool has room) is byte-identical.
+            # Tier 1.5 (capability matching): hand an unassigned agent the last-used/last-released
+            # endpoint directly. We do NOT first-fit to an arbitrary free endpoint when that pool
+            # is saturated — doing so could route a text-only agent onto a vision/multimodal API
+            # whose /models probe fails, wasting a round-trip and confusing capability matching.
+            # When the pool IS saturated the scheduler simply queues the agent FIFO on it; the
+            # Tier-4 global default (appended below) remains the ultimate fallback. This is the
+            # self-saturation-safe behaviour: an agent always lands on a capable endpoint and, at
+            # worst, waits its turn rather than being bounced to an incompatible one.
             if not endpoint_configs:
                 # Prefer the just-released holder's endpoint (capability matching) over the
                 # racy global marker. Both are now endpoint IDs (UUIDs) — direct O(1) dict
@@ -1053,58 +1051,12 @@ class APIRouter:
                             _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == normalize_api_base(_la_ep.api_base) and
                                        _default_cfg.get('model') == _la_ep.model)
                         if not _is_default:
-                            # ── Capacity-aware Tier 1.5 (L147, first-fit variant) ─────────────
-                            # Find the FIRST enabled endpoint with ≥1 free slot as _free_ep
-                            # (the fallback candidate). An endpoint is "free" when conc==-1
-                            # (unlimited), or count_active < capacity. We only compute occupancy
-                            # where it matters — no ranking headroom math.
-                            _free_ep = None
-                            for ep in self.endpoints.values():
-                                if not ep.enabled or ep.id == _la_id:
-                                    continue
-                                _conc = ep.concurrency_limit
-                                if _conc == -1:
-                                    _free_ep = ep  # unlimited — always has room
-                                else:
-                                    _cap = _conc if _conc > 0 else 1  # mirrors scheduler shared-pool key logic (0→1)
-                                    # LOCK-SAFETY: self._lock is a NON-reentrant threading.Lock.
-                                    # count_active() takes no lock and never re-enters the router,
-                                    # so this is safe TODAY — but any future change that makes it
-                                    # consult router state, or wrapping this block in a nested
-                                    # `with self._lock:`, will SELF-DEADLOCK. Keep it lock-free.
-                                    _active = self.scheduler.count_active(ep.api_base, _conc)
-                                    if _active < _cap:
-                                        _free_ep = ep
-
-                            # Decide which endpoint to hand out.
-                            _chosen_ep = None
-                            _used_free = False
-                            _conc = _la_ep.concurrency_limit
-                            if _conc == -1:
-                                _saturated = False  # unlimited — never full
-                            else:
-                                _cap = _conc if _conc > 0 else 1
-                                # LOCK-SAFETY: same non-reentrant-Lock constraint as above; the
-                                # occupancy read is advisory/point-in-time (NOT a reservation) —
-                                # another thread may fill the pool before the agent's acquire().
-                                # The read excludes THIS instance's own holder (self-saturation would
-                                # first-fit a conc=0 agent off its own endpoint); remains lock-free/advisory.
-                                # Another agent holding it still counts → liveness intact.
-                                _active = self.scheduler.count_active_excluding(_la_ep.api_base, _conc, instance_name)
-                                _saturated = (_active >= _cap)
-                            if _saturated and _free_ep is not None:
-                                # Last-active pool is full but another endpoint has room → route there.
-                                logger.info(
-                                    f"[APIRouter] Tier 1.5: last-released '{_la_ep.name}' @ {_la_ep.api_base} "
-                                    f"pool is saturated ({_active}/{_cap}); routing unassigned "
-                                    f"{agent_type}/{instance_name} to free-capacity endpoint "
-                                    f"'{_free_ep.name}' @ {_free_ep.api_base}"
-                                )
-                                _chosen_ep = _free_ep
-                                _used_free = True
-                            else:
-                                # Not saturated, or no free endpoint → keep last-active (today's behaviour).
-                                _chosen_ep = _la_ep
+                            # ── Tier 1.5: use the last-released endpoint directly ─────────────
+                            # When saturated, the scheduler will queue the agent on that endpoint's
+                            # pool (FIFO). We do NOT first-fit to an arbitrary free endpoint — that
+                            # can route a text-only agent to a vision/multimodal API. The Tier-4
+                            # global default is already appended below as the ultimate fallback.
+                            _chosen_ep = _la_ep
 
                             if _chosen_ep is not None:
                                 cfg = copy.deepcopy(_chosen_ep.to_llm_cfg())
@@ -1114,15 +1066,6 @@ class APIRouter:
 
                                 # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
                                 endpoint_configs.append(cfg)
-                                if _used_free:
-                                    logger.info(
-                                        f"[APIRouter] {agent_type}/{instance_name}: using capacity-preferred "
-                                        f"endpoint '{_chosen_ep.name}' @ {_chosen_ep.api_base} (last-released saturated)"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"[APIRouter] {agent_type}/{instance_name}: using last-released endpoint '{_la_ep.name}' @ {_la_ep.api_base}"
-                                    )
                     else:
                         # Stale ID (endpoint removed/disabled) — log a WARN so this is visible.
                         logger.warning(
@@ -1180,7 +1123,7 @@ class APIRouter:
                         filtered_configs.append(cfg)
                 if skipped_count > 0:
                     endpoint_configs = filtered_configs if filtered_configs else []
-                    logger.info(f"[APIRouter] Endpoint cooldown: skipped {skipped_count} endpoint(s), "
+                    logger.debug(f"[APIRouter] Endpoint cooldown: skipped {skipped_count} endpoint(s), "
                                 f"{len(endpoint_configs)} available for '{normalized_agent_type}'")
 
             # Tier 4: Always append the default as last resort — inside lock so cursor rotation reads atomically
@@ -1392,8 +1335,8 @@ class APIRouter:
             # expiry timeout already bounds how long this matters, and a genuinely dead endpoint is
             # caught by the next real call's connection timeout.
             if is_live and not blacklisted:
-                logger.debug(f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
-                             f"(instance '{instance_name}' holds a live connection — fast path)")
+                # logger.debug(f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
+                #              f"(instance '{instance_name}' holds a live connection — fast path)")
                 validated.append(cfg)
                 continue
 
@@ -2013,8 +1956,8 @@ class APIRouter:
                                     _failures = getattr(self, '_endpoint_deterministic_failures', None)
                                     if _failures is not None:
                                         _failures.pop(_probe_key, None)
-                            logger.info(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                        f"passed sanity probe.")
+                            logger.debug(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                         f"passed sanity probe.")
                         else:
                             # Probe failure = the endpoint is unreachable RIGHT NOW. Record it
                             # into the cooldown so get_endpoint_chain filters it out on the next
@@ -2024,8 +1967,8 @@ class APIRouter:
                                 with self._lock:
                                     self._cleanup_stale_failure_records(time.time())
                                     self._endpoint_failure_times[_probe_key] = time.time()
-                            logger.info(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                        f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
+                            logger.debug(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                         f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
 
                             # Connection-level failure → the host is unreachable RIGHT NOW. Mark
                             # the base so remaining same-base endpoints skip their probes this
