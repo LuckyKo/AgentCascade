@@ -2082,6 +2082,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         Returns:
             True if a label was saved (a restore is pending), False otherwise.
         """
+        if not self._get_pool_setting('state_kv_save_enabled', True):
+            logger.debug('[STATE_SAVE_SKIP] %s (%s) — KV save before slot yield disabled by toggle',
+                         inst_name, reason or 'slot-yield')
+            return False
         try:
             from agent_cascade.state_ops import save_instance_state
             with instance._state_lock:
@@ -2144,6 +2148,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # reacquire_for returned False (no router available) — no slot held.
             self._clear_orphaned_state_label(instance, inst_name)
             return False
+
+        if not self._get_pool_setting('state_kv_save_enabled', True):
+            logger.debug('[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
+                         inst_name, context or 'slot-yield')
+            # Clear any stale label (save may have occurred before toggle was turned OFF).
+            self._clear_orphaned_state_label(instance, inst_name)
+            return True
 
         # Re-acquired. Restore only when we actually hold a slot AND a save is pending.
         with instance._state_lock:

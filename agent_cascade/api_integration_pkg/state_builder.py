@@ -410,6 +410,8 @@ def build_state_from_pool(
                 getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':
                 getattr(ps, 'allow_parallel_agents', True),
+            'state_kv_save_enabled':
+                getattr(ps, 'state_kv_save_enabled', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks':
@@ -654,6 +656,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':
                 getattr(ps, 'allow_parallel_agents', True),
+            'state_kv_save_enabled':
+                getattr(ps, 'state_kv_save_enabled', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks':

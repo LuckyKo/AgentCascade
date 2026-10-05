@@ -565,6 +565,10 @@
                           <span title="When disabled, every call_agent dispatch runs synchronously — the orchestrator waits for each child to finish before proceeding">Allow Parallel Agents</span>
                           <input type="checkbox" id="setting-allow-parallel" checked />
                         </label>
+                        <label class="setting-field toggle-field">
+                          <span title="When enabled, agent context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted.">State KV Save/Restore</span>
+                          <input type="checkbox" id="setting-state-kv-save" checked />
+                        </label>
                         <label class="setting-field">
                           <span>Max Parallel Agents</span>
                           <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
