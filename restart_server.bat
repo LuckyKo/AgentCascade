@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0restart_and_continue.ps1" %*
+python trigger_restart.py 8126
