@@ -174,6 +174,12 @@ def test_safe_commands():
         'test -f /etc/hosts',
         'true',
         'false',
+
+        # ── Primary-safe commands as pipe stages (policy: primary-safe ⇒ stage-safe) ──
+        'echo "a" | echo "b"',
+        'date | wc -l',
+        'whoami | sort',
+        'cat file.txt | cat',
     ]
 
     print('=== Testing SAFE commands (should all be True) ===')
@@ -314,6 +320,11 @@ def test_unsafe_commands():
         'git branch -D main',
         'find . -exec rm {} \\;',
         'powershell -c "Get-Process"',
+
+        # ── Pipe-stage wrappers / dangerous stages must stay False after union widening ──
+        'ls | cmd /c x',
+        'echo hi | powershell -Command Get-Date',
+        'find . | git push origin',
     ]
 
     print('\n=== Testing UNSAFE commands (should all be False) ===')

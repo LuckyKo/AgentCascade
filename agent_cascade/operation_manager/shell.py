@@ -187,6 +187,14 @@ class ShellMixin:
         'false',
     }
 
+    # Policy: any command safe as a primary is also safe as a pipe stage.
+    # Effective set used by _validate_pipeline_stages at BOTH call sites
+    # (regular pipelines and git pipelines). Derived dynamically from the two
+    # allow-lists so the policy can never drift if either set changes. Must be
+    # defined AFTER both base sets above. Keeps _SAFE_PIPE_COMMANDS itself
+    # untouched — tests and __help text reference it directly.
+    _PIPE_STAGE_COMMANDS: set = _SAFE_PIPE_COMMANDS | _SAFE_PRIMARY_COMMANDS
+
     @staticmethod
     def _is_safe_readonly_shell_command(command: str) -> bool:
         """Check if a shell command is purely read-only (directory listing/search/git/control).
@@ -257,8 +265,8 @@ class ShellMixin:
             if '-exec' in stripped_cmd.lower() or '-ok' in stripped_cmd.lower():
                 return False
 
-        # Validate pipe stages are safe
-        if not ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._SAFE_PIPE_COMMANDS):
+        # Validate pipe stages are safe (any primary-safe command is also a valid stage)
+        if not ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._PIPE_STAGE_COMMANDS):
             return False
 
         return True
@@ -299,7 +307,8 @@ class ShellMixin:
         lines += [
             '',
             "Safe pipe/filter stages (anything after a '|'):",
-            f"  {_join(ShellMixin._SAFE_PIPE_COMMANDS)}",
+            # Any primary-safe command is also a valid stage, so list the union.
+            f"  {_join(ShellMixin._PIPE_STAGE_COMMANDS)}",
             '',
             'Allowed patterns:',
             "  - 'cd <path> && <cmd>' or 'cd <path>; <cmd>' prefix (single command after)",
@@ -421,8 +430,8 @@ class ShellMixin:
         if args and args[0] in ShellMixin._DANGEROUS_GIT_ARGS.get(subcommand, set()):
             return False
 
-        # Validate pipe stages are safe
-        return ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._SAFE_PIPE_COMMANDS)
+        # Validate pipe stages are safe (any primary-safe command is also a valid stage)
+        return ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._PIPE_STAGE_COMMANDS)
 
     # ------------------------------------------------------------------
     @staticmethod
