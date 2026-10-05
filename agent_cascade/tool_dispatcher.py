@@ -394,6 +394,13 @@ class ToolDispatcher:
                 # slot and the child needs the SAME slot pool. An A→B(async)→C scenario is
                 # handled by C simply waiting in the FIFO queue (bounded wait + timeout).
 
+        # UI toggle "Allow Parallel Agents" (PoolSettings.allow_parallel_agents). When off,
+        # force SYNC for every dispatch regardless of slot analysis. Read live from
+        # pool.settings so the toggle applies without restart. Do NOT hoist to __init__
+        # or a module constant — that would make it a no-op until restart.
+        if not getattr(self.pool.settings, 'allow_parallel_agents', True):
+            caller_holds_slot = True
+
         if caller_holds_slot:
             return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
         else:

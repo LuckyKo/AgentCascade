@@ -408,6 +408,8 @@ def build_state_from_pool(
                 getattr(ps, 'auto_continue', True),
             'enable_agent_budgeting':
                 getattr(ps, 'enable_agent_budgeting', True),
+            'allow_parallel_agents':
+                getattr(ps, 'allow_parallel_agents', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks':
@@ -648,6 +650,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'auto_continue', True),
             'enable_agent_budgeting':
                 getattr(ps, 'enable_agent_budgeting', True),
+            'allow_parallel_agents':
+                getattr(ps, 'allow_parallel_agents', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
             'max_auto_rollbacks':

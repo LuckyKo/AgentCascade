@@ -557,6 +557,10 @@
                           <span title="When disabled, all agents use the Max Turns setting regardless of call_agent max_turns args">Enable Agent Budgeting</span>
                           <input type="checkbox" id="setting-agent-budgeting" checked />
                         </label>
+                        <label class="setting-field toggle-field">
+                          <span title="When disabled, every call_agent dispatch runs synchronously — the orchestrator waits for each child to finish before proceeding">Allow Parallel Agents</span>
+                          <input type="checkbox" id="setting-allow-parallel" checked />
+                        </label>
                         <label class="setting-field">
                           <span>Max Parallel Agents</span>
                           <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />

@@ -29,6 +29,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'max_workers',
     'auto_continue',
     'enable_agent_budgeting',
+    'allow_parallel_agents',
     'max_turns',
     'max_auto_rollbacks',
     'auto_rollback_on_loop',
@@ -1051,6 +1052,12 @@ def _handle_enable_agent_budgeting(ui_cfg: dict, agent_pool: Optional[Any], agen
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = bool(ui_cfg['enable_agent_budgeting'])
         agent_pool.settings.enable_agent_budgeting = val
+
+
+@register_config_handler('allow_parallel_agents')
+def _handle_allow_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.allow_parallel_agents = bool(ui_cfg['allow_parallel_agents'])
 
 
 @register_config_handler('idle_check_interval')

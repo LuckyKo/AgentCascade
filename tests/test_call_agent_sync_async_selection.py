@@ -391,3 +391,141 @@ class TestEffectiveConcurrencyDecision:
         # conc=1 is NOT zero → guard does not trigger → ASYNC (caller has no slot)
         pool.register_async_call.assert_called(), \
             f"Expected async for conc=1 child but took sync. Result: {result}"
+
+
+# ============================================================================
+# Test 6: allow_parallel_agents toggle forces SYNC when off
+# ============================================================================
+
+
+class TestAllowParallelAgentsToggleOff:
+    """PoolSettings.allow_parallel_agents=False forces every call_agent dispatch onto the
+    SYNC path regardless of slot-collision analysis (tool_dispatcher.py gate).
+
+    TRAP: make_mock_pool() sets pool.settings = MagicMock(), whose attributes are truthy by
+    default — so the gate is invisible unless each test sets allow_parallel_agents EXPLICITLY.
+    """
+
+    def test_off_forces_sync_when_caller_holds_no_slot(self, router_with_endpoints):
+        """Case 1 (child on unlimited conc=-1 endpoint, caller holds no slot) is ASYNC today;
+        with the toggle off it must take SYNC. This is the hazard-lock test: a slotless caller
+        forced through _run_child_sync must return cleanly (no exception, no hang) — see plan
+        §8.1 (reacquire_for discards the stale permit for needs_slot=False callers)."""
+        caller = make_mock_instance(
+            instance_name='caller1',
+            agent_class='researcher',
+            slot_release=None,  # No slot held
+        )
+
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+        router_with_endpoints.set_agent_priorities('coder', ['ep_unlimited'])
+
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        pool.settings.allow_parallel_agents = False  # MUST set explicitly (MagicMock trap, plan §7)
+        dispatcher, _ = create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'coder',
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        # SYNC path: register_async_call must NOT be called
+        pool.register_async_call.assert_not_called()
+        assert 'launched asynchronously' not in result.lower(), \
+            f"Expected sync (toggle off) for unlimited child but got async: {result}"
+        # Hazard lock: a slotless caller forced through the sync path returns cleanly.
+        assert isinstance(result, str) and result, f"Sync path returned empty/None result: {result!r}"
+
+    def test_off_forces_sync_when_slots_do_not_collide(self, router_with_endpoints):
+        """Case 4 (caller holds a slot, child on a DIFFERENT pool with conc=3) is ASYNC today;
+        with the toggle off it must take SYNC."""
+        caller = make_mock_instance(
+            instance_name='caller1',
+            agent_class='coder',
+            slot_release=lambda: None,  # Holds a slot
+        )
+
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
+
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        pool.settings.allow_parallel_agents = False  # MUST set explicitly (MagicMock trap, plan §7)
+        dispatcher, _ = create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'reviewer',
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        pool.register_async_call.assert_not_called()
+        assert 'launched asynchronously' not in result.lower(), \
+            f"Expected sync (toggle off) for non-colliding child but got async: {result}"
+
+    def test_on_preserves_async_for_non_colliding_child(self, router_with_endpoints):
+        """Same setup as the Case 4 test above but toggle ON — guards against over-broad
+        forcing: the pre-existing async behavior must NOT regress."""
+        caller = make_mock_instance(
+            instance_name='caller1',
+            agent_class='coder',
+            slot_release=lambda: None,  # Holds a slot
+        )
+
+        router_with_endpoints.set_agent_priorities('coder', ['ep_sequential'])
+        router_with_endpoints.set_agent_priorities('reviewer', ['ep_parallel'])
+
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        pool.settings.allow_parallel_agents = True  # MUST set explicitly (MagicMock trap, plan §7)
+        dispatcher, _ = create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'reviewer',
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        pool.register_async_call.assert_called(), \
+            f"Expected async (toggle on, different pools) but took sync. Result: {result}"
+
+    def test_off_still_sync_for_sequential_child(self, router_with_endpoints):
+        """Case 2 (child on conc=0 shared sequential pool) is already SYNC; the toggle off must
+        leave that unchanged."""
+        caller = make_mock_instance(
+            instance_name='caller1',
+            agent_class='researcher',
+            slot_release=None,  # No slot held
+        )
+
+        router_with_endpoints.set_agent_priorities('researcher', ['ep_unlimited'])
+        router_with_endpoints.set_agent_priorities('security', ['ep_zero'])
+
+        pool = make_mock_pool(router_with_endpoints, [caller])
+        pool.settings.allow_parallel_agents = False  # MUST set explicitly (MagicMock trap, plan §7)
+        dispatcher, _ = create_dispatcher(pool)
+
+        result = dispatcher.handle_call_agent(
+            args={
+                'instance_name': 'child1',
+                'agent_class': 'security',
+                'task': 'test'
+            },
+            messages=[],
+            instance=caller,
+        )
+
+        pool.register_async_call.assert_not_called()
+        assert 'launched asynchronously' not in result.lower(), \
+            f"Expected sync for conc=0 child (toggle off) but got async: {result}"

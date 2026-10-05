@@ -160,6 +160,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max_auto_rollbacks' },
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
+  { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents', localKey: 'allow_parallel_agents' },
   // Inner-loop detection (master toggle)
   { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
   // Inner-loop thresholds
@@ -1213,6 +1214,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
+  // Save Allow Parallel Agents toggle state
+  if ($('#setting-allow-parallel')) s['allow_parallel_agents'] = $('#setting-allow-parallel').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
   // wild_read_truncation_chars is persisted via getGenerateCfg() as the underscore key (like grep_char_limit) — no hyphenated duplicate needed here.
   // Memory-hint feature (plan §7): persist the toggle + 3 numeric settings under underscore keys.
@@ -1401,6 +1404,8 @@ function loadSettings() {
     if (_present(s['inner-loop-detect'])) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (_present(s['enable_agent_budgeting'])) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
+    // Restore Allow Parallel Agents toggle state
+    if (_present(s['allow_parallel_agents'])) $('#setting-allow-parallel').checked = s['allow_parallel_agents'];
     // Restore Log API POST Dump toggle (use consistent key; support old key for migration)
     const logApiPost = _present(s['log-api-post']) ? s['log-api-post'] : s['log_api_post'];
     if (_present(logApiPost)) $('#setting-log-api-post').checked = logApiPost;
@@ -5741,6 +5746,7 @@ function getGenerateCfg() {
 
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
   if ($('#setting-agent-budgeting')) cfg.enable_agent_budgeting = $('#setting-agent-budgeting').checked;
+  if ($('#setting-allow-parallel')) cfg.allow_parallel_agents = $('#setting-allow-parallel').checked;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
