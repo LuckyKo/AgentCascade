@@ -329,10 +329,12 @@ class ToolDispatcher:
 
         # Save parent's state before delegating via call_agent.
         # Best-effort — silent on failure, never blocks execution.
-        try:
-            self._save_parent_state_before_delegation(instance)
-        except Exception:
-            pass
+        # Gated by global toggle (UI: Agent & Tools → Execution → State KV Save).
+        if self._engine._get_pool_setting('state_kv_save_enabled', True):
+            try:
+                self._save_parent_state_before_delegation(instance)
+            except Exception:
+                pass
 
         # ── Slot Collision Detection (Target Architecture) ────────────────
         # Determine whether A calling B requires sync or async execution based on

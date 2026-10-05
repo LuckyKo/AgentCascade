@@ -951,6 +951,10 @@ class PoolSettings:
     # regardless of slot-collision analysis (tool_dispatcher.py:397).
     allow_parallel_agents: bool = True
 
+    # State KV save/restore toggle: when False, skips all KV cache state
+    # save/restore operations before/after agent delegation (autoloader only).
+    state_kv_save_enabled: bool = True
+
     # Streaming timeout settings (layered defense against stuck streams)
     stream_max_silence_seconds: float = STREAM_MAX_SILENCE_SECONDS  # Max seconds between chunks before considering stream stalled
     stream_max_total_seconds: float = STREAM_MAX_TOTAL_SECONDS  # Max total duration of a streaming response
