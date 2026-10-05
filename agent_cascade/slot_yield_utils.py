@@ -67,7 +67,8 @@ def yield_caller_slot(
       1. Normal yield   — caller holds a live _slot_release callback.
       2. Force-release  — callback was cleared but the pool still shows the caller
                           holding a permit (leaked/stale state).
-      3. Skip           — nothing to yield (pool already free); log diagnostic.
+      3. Skip           — nothing to yield (pool already free); still persist KV so a
+                           later restore has something to consume, then log diagnostic.
 
     Args:
         agent_pool: The AgentPool instance (used for pool diagnostics / force-release).
@@ -82,8 +83,9 @@ def yield_caller_slot(
             (e.g. "Security check" / "compression").
         save_fn: Optional injected callback ``(instance, reason) -> bool`` that persists
             the caller's KV state BEFORE the slot is released (eviction-safety). Called on
-            both Path 1 and Path 2, immediately before the release, inside the existing
-            try/logging discipline. Production callers pass
+            all three paths — Path 1 and Path 2 immediately before the release, and Path 3
+            (no slot to yield) so a later restore still has something to consume — inside
+            the existing try/logging discipline. Production callers pass
             ``engine.save_before_slot_yield``; it self-gates for non-autoloader instances
             and never raises. When None (default) no save is performed — preserving the
             legacy behavior for any caller that has not opted in.
@@ -163,7 +165,17 @@ def yield_caller_slot(
             )
         return False
 
-    # Path 3 — no slot to yield; log a diagnostic for debuggability.
+    # Path 3 — no slot to yield; still persist KV so a later restore has something
+    # to consume. Without this the whole save/restore pair was a silent no-op whenever
+    # the caller is already slotless. Best-effort; never raises (same discipline as Paths 1/2).
+    # The success is logged at INFO (unlike Paths 1/2) because this skip path used to be
+    # invisible — operators need to see that a save actually happened here.
+    if save_fn is not None:
+        try:
+            save_fn(caller_inst, release_reason)
+            logger.info(f"[{log_prefix}] KV saved on skip-path for '{caller_name}' (no slot to yield)")
+        except Exception as e:  # noqa: BLE001 — a missed save degrades to legacy behavior
+            logger.debug(f"[{log_prefix}] KV save on skip-path failed for '{caller_name}': {e}")
     logger.debug(
         f"[{log_prefix}_SKIPPED] No slot to yield for "
         f"'{caller_name}' — Pool holders: {describe_pool_holders(agent_pool, caller_name)}"

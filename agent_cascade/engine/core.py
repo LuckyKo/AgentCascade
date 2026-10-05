@@ -2026,7 +2026,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         try:
             held_cfg = self._resolve_held_endpoint(instance)
             if not held_cfg:
-                logger.debug('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
+                logger.info('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
                 # Clear the orphaned label so it does NOT re-trigger an expensive
                 # state/load on every subsequent turn (a leaked _state_label would keep
                 # firing the 3.1GB restore attempt while resolution stays broken). Mirrors
@@ -2037,7 +2037,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
         except Exception as e:
             # Never evict on a resolution error — skip the restore.
-            logger.debug('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
+            logger.info('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
             self._clear_orphaned_state_label(instance, inst_name)
             return False
 
