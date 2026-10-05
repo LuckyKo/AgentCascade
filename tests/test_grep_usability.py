@@ -405,6 +405,30 @@ def test_grep_fast_path_context_no_blank_lines():
     print('[PASS] test_grep_fast_path_context_no_blank_lines')
 
 
+def test_grep_comma_glob_rejected():
+    """BUG_0056: comma-separated glob patterns in include/exclude must return a clear error."""
+    from agent_cascade.tools.custom.file_ops import Grep
+    tool = Grep()
+    # Comma in include → explicit error, not silent "No matches"
+    result = tool.call('{"pattern": "foo", "include": "*.py,*.js"}')
+    assert 'ERROR' in result, f"Expected ERROR for comma in include, got: {result!r}"
+    assert 'single glob pattern' in result, f"Expected helpful hint, got: {result!r}"
+    # Comma in exclude → explicit error
+    result = tool.call('{"pattern": "foo", "exclude": "*.pyc,*.so"}')
+    assert 'ERROR' in result, f"Expected ERROR for comma in exclude, got: {result!r}"
+    assert 'single glob pattern' in result, f"Expected helpful hint, got: {result!r}"
+    # Single pattern (no comma) → should NOT trigger the comma-glob error.
+    # (May raise AttributeError from agent_pool=None in bare test context — that's fine,
+    #  we only verify it's NOT our specific comma-glob rejection.)
+    try:
+        result = tool.call('{"pattern": "def", "path": ".", "include": "*.py"}')
+    except AttributeError:
+        pass  # agent_pool is None in bare context; the point is we got PAST the comma check
+    else:
+        assert 'single glob pattern' not in result, f"Single glob should not trigger comma error: {result!r}"
+    print('[PASS] test_grep_comma_glob_rejected')
+
+
 if __name__ == '__main__':
     tests = [
         test_compile_grep_pattern_flags,
@@ -428,6 +452,7 @@ if __name__ == '__main__':
         test_grep_fast_path_truncation_surfaces_spillover,
         test_grep_fast_path_no_blank_lines_between_matches,
         test_grep_fast_path_context_no_blank_lines,
+        test_grep_comma_glob_rejected,
     ]
     passed = 0
     failed = 0
