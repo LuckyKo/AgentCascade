@@ -265,6 +265,10 @@
                     <span>Model</span>
                     <input type="text" id="setting-model" placeholder="Model name or ID" />
                   </label>
+                  <label class="setting-field toggle-field">
+                    <span title="When enabled, AC spawns and owns the Telegram bridge as a child process (long-polls Telegram and routes messages to the target agent). Requires telegram_bot_token in config/secrets.json and ALLOWED_USERS set; on failure AC logs the error and does not crash-loop.">Enable Telegram Bridge</span>
+                    <input type="checkbox" id="setting-telegram-bridge-enabled" />
+                  </label>
                 </div>
               </div>
 
@@ -617,17 +621,6 @@
                         <label class="setting-field">
                           <span title="Minimum turns an agent must complete before a natural finish triggers auto-skill reflection.">Auto-Skill Min Turns</span>
                           <input type="number" id="setting-auto-skill-min-turns" min="1" max="500" value="20" />
-                        </label>
-                      </div>
-                    </details>
-
-                    <!-- Telegram Bridge -->
-                    <details class="settings-section">
-                      <summary class="settings-section-title">Telegram Bridge</summary>
-                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
-                        <label class="setting-field toggle-field">
-                          <span title="When enabled, AC spawns and owns the Telegram bridge as a child process (long-polls Telegram and routes messages to the target agent). Requires telegram_bot_token in config/secrets.json and ALLOWED_USERS set; on failure AC logs the error and does not crash-loop.">Enable Telegram Bridge</span>
-                          <input type="checkbox" id="setting-telegram-bridge-enabled" />
                         </label>
                       </div>
                     </details>
