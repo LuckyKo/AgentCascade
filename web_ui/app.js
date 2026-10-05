@@ -6095,11 +6095,21 @@ function formatNumber(n) {
 }
 
 function formatMs(ms) {
-  if (!ms || ms === 0) return '—';
-  if (ms >= 60000) return (ms / 60000).toFixed(1) + 'min';
-  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
-  return Math.round(ms) + 'ms';
-}
+      if (!ms || ms === 0) return '—';
+      if (ms >= 60000) return (ms / 60000).toFixed(1) + 'min';
+      if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+      return Math.round(ms) + 'ms';
+    }
+
+    function formatDuration(ms) {
+      if (!ms || ms === 0) return '—';
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      if (h > 0) return h + 'h ' + m + 'm';
+      if (m > 0) return m + 'm ' + s + 's';
+      return s + '.' + Math.floor((ms % 1000) / 100) + 's';
+    }
 
 function getSuccessClass(rate) {
   if (rate >= 95) return 'telem-success';
@@ -6126,14 +6136,13 @@ function updateTelemetryPanel(telemetry) {
   set('telem-avg-tps', telemetry.avg_tps ? telemetry.avg_tps.toFixed(1) : '—');
   set('telem-avg-llm-lat', formatMs(telemetry.avg_llm_latency_ms));
   set('telem-avg-tool-lat', formatMs(telemetry.avg_tool_latency_ms));
-  set('telem-loops', formatNumber(telemetry.total_loops_detected));
+  // Wallclock: sum of all LLM + tool durations across all agents (can exceed real time with parallelism)
+  set('telem-wallclock', telemetry.wallclock_ms != null ? formatDuration(telemetry.wallclock_ms) : '—');
   set('telem-compressions', formatNumber(telemetry.total_compressions));
   set('telem-malformed', formatNumber(telemetry.total_auto_continues));
   set('telem-loops-outer', formatNumber(telemetry.loops_outer));
   set('telem-loops-inner', formatNumber(telemetry.loops_inner));
   set('telem-cache-hit-ratio', telemetry.llm_cache_hit_ratio != null ? (telemetry.llm_cache_hit_ratio * 100).toFixed(1) + '%' : '—');
-  // Coverage: share of LLM calls actually measured by the backend (authoritative cached_tokens).
-  set('telem-cache-measured', telemetry.llm_cache_classified_ratio != null ? (telemetry.llm_cache_classified_ratio * 100).toFixed(1) + '%' : '—');
 
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');

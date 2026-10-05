@@ -853,6 +853,9 @@ class TelemetryCollector:
             'llm_cache_unknown': stats.get('llm_cache_unknown', 0),
             'llm_cache_hit_ratio': llm_cache_hit_ratio,
             'llm_cache_classified_ratio': llm_cache_classified_ratio,
+            # Wallclock time: sum of all LLM + tool call durations across all agents.
+            # With parallel agents this can exceed real elapsed time (by design).
+            'wallclock_ms': stats.get('total_llm_latency_ms', 0) + stats.get('total_tool_latency_ms', 0),
         }
 
     def get_config_comparison(self) -> List[Dict]:
