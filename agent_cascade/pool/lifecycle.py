@@ -385,30 +385,39 @@ class LifecycleMixin:
         if inst and inst.parent_instance:
             parent_name = inst.parent_instance
             parent = self.get_instance(parent_name)
-            if parent:
-                from agent_cascade.agent_instance import AgentState
-                with parent._state_lock:
-                    parent_state = parent.state
-                parent_is_sleeping = (parent_state == AgentState.SLEEPING)
-                parent_is_idle = (parent_state == AgentState.IDLE)
-
-                if (parent_is_sleeping or parent_is_idle) and hasattr(self, '_async_registry'):
-                    # Look up the async registration for this child
-                    parent_info = self._async_registry.get_parent_for_child(instance_name)
-                    if parent_info:
-                        _, func_id = parent_info
+            # abandon_child() atomically resolves the child's pending handle and reports
+            # who was waiting (Bug #132). It owns resolution of _pending[parent] and the
+            # _child_to_parent mapping. Enqueue the dismissal message only when it resolved a
+            # LIVE handle (resolved=True) — see abandon_child()'s docstring for the
+            # "exactly one terminal message" invariant.
+            if parent and hasattr(self, '_async_registry'):
+                parent_info = self._async_registry.abandon_child(instance_name)
+                if parent_info:
+                    _, _, resolved = parent_info
+                    if not resolved:
+                        # The child's worker already completed and delivered its real result
+                        # to the parent before this teardown. Do NOT send a redundant message.
+                        logger.debug(
+                            f"[ASYNC_WAKEUP] abandon_child('{instance_name}'): no live handle "
+                            f"(worker already delivered) — skipping dismissal message for '{parent_name}'")
+                    else:
+                        from agent_cascade.agent_instance import AgentState
+                        with parent._state_lock:
+                            parent_state = parent.state
+                        # Enqueue unconditionally (not gated on SLEEPING/IDLE): a RUNNING or
+                        # COMPLETING parent drains its queue at the end of its turn, so this is
+                        # safe and closes the "parent was mid-turn at teardown" deadlock path.
                         result_msg = f"[Agent '{instance_name}' Dismissed]:\nAgent was dismissed before completing."
                         try:
-                            # Enqueue the dismissal result to wake up the parent
                             self.enqueue_message(parent_name, result_msg)
                             logger.debug(f"[ASYNC_WAKEUP] Enqueued dismissal result for child '{instance_name}' "
                                          f"to wake {parent_state.name} parent '{parent_name}'")
                         except Exception as e:
                             logger.debug(f"Failed to enqueue dismissal result for {instance_name}: {e}")
-                        # Fix B: a SLEEPING parent's live poll thread drains the queue
-                        # itself — only an IDLE parent needs a relaunch. No-op in all
-                        # other cases (stopped pool / terminated instance / non-IDLE).
-                        if parent_is_idle:
+                        # Fix B: a SLEEPING parent's live poll thread drains the queue itself —
+                        # only an IDLE parent needs a relaunch. No-op in all other cases
+                        # (stopped pool / terminated instance / non-IDLE).
+                        if parent_state == AgentState.IDLE:
                             try:
                                 from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
                                 relaunch_idle_agent(self, parent_name)
@@ -416,8 +425,6 @@ class LifecycleMixin:
                                 logger.debug(
                                     f"[ASYNC_WAKEUP] Idle relaunch failed for parent '{parent_name}' (non-critical): {e}"
                                 )
-                        # Clean up the child mapping since this instance is being removed
-                        self._async_registry.remove_child_mapping(instance_name)
 
         # ── Sticky slot cleanup on dismiss (plan change #14 / §3.11, G8). ──
         # The old thread may still hold the shared sequential slot (mid-LLM-call, mid-tool,

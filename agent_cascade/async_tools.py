@@ -37,6 +37,10 @@ class BackgroundToolEntry:
                      Used to match results back to original tool calls in the LLM API.
         future: ThreadPoolExecutor Future for cancellation support (Fix TODO #41).
                 Set after registration via entry.future = future.
+        abandoned: Whether this entry was resolved by abandon_child() because its
+                   async child was torn down before the worker finished. When True,
+                   _execute's finally suppresses the stale duplicate result and the
+                   spurious idle relaunch (the parent already got a dismissal message).
     """
     tool_call: Callable[[], str]
     agent_instance_name: str
@@ -48,6 +52,7 @@ class BackgroundToolEntry:
     function_id: Optional[str] = None
     future: Optional[Future] = None  # Set after registration, allows cancellation (Fix TODO #41)
     child_instance_name: Optional[str] = None  # Name of async child agent, if this entry runs a child agent
+    abandoned: bool = False  # Set by abandon_child(); suppresses the stale duplicate result in _execute
 
 
 class AsyncToolRegistry:
@@ -75,8 +80,10 @@ class AsyncToolRegistry:
         self._lock = threading.Lock()
         self.pool = pool
         # Reverse mapping: child_instance_name -> (parent_instance_name, function_id)
-        # Used to wake up SLEEPING parent when async child is dismissed
-        self._child_to_parent: Dict[str, Tuple[str, str]] = {}
+        # Used to wake up SLEEPING parent when async child is dismissed.
+        # function_id may be None — the mapping is stored unconditionally (see register())
+        # so a tool call with an empty id still resolves on dismissal.
+        self._child_to_parent: Dict[str, Tuple[str, Optional[str]]] = {}
         # Size the executor from settings (single source of truth) when a pool
         # with settings is provided; fall back to AGENT_MAX_WORKERS otherwise.
         # Validate the value is a positive int so a misconfigured/mock settings
@@ -155,8 +162,11 @@ class AsyncToolRegistry:
                                         function_id=function_id,
                                         child_instance_name=child_instance_name)
             self._pending.setdefault(instance_name, []).append(entry)
-            # Track child->parent mapping for dismissal wakeup support
-            if child_instance_name and function_id:
+            # Track child->parent mapping for dismissal wakeup support.
+            # Stored unconditionally on child_instance_name (not gated on function_id)
+            # so a tool call with an empty/missing id still resolves when the child is
+            # dismissed — otherwise the parent's pending handle would be orphaned.
+            if child_instance_name:
                 self._child_to_parent[child_instance_name] = (instance_name, function_id)
             # Submit to executor while holding _lock so a concurrent resize sees a
             # consistent (fully-old or fully-new) executor — no torn read.
@@ -200,12 +210,20 @@ class AsyncToolRegistry:
         except Exception as e:
             entry.error = str(e)
         finally:
-            # Mark completed AND put result into buffer WHILE holding lock to prevent
-            # race condition where has_pending returns False but result isn't in buffer yet
+            # Mark completed AND decide the message WHILE holding lock so the completed-flag
+            # transition and the abandoned check are atomic (no other thread can observe a
+            # half-updated entry). The actual enqueue_message call is made OUTSIDE _lock: it
+            # takes the pool's message-queue lock, and holding two locks at once risks a
+            # deadlock with any path that acquires them in the reverse order.
+            deliver = False
+            result_msg = None
             with self._lock:
                 entry.completed = True
-                # Put result into message queue while holding lock (enqueue_message is also thread-safe)
-                if self.pool and hasattr(self.pool, 'enqueue_message'):
+                # An abandoned entry (its async child was torn down via abandon_child())
+                # must not deliver a second, stale result or trigger an idle relaunch —
+                # the parent already received exactly one dismissal message.
+                if not entry.abandoned:
+                    deliver = True
                     if entry.error:
                         result_msg = f"[Background Tool Error]:\n{entry.error}"
                     else:
@@ -216,19 +234,25 @@ class AsyncToolRegistry:
                             result_msg = f"[Background Tool Result]:\n{entry.result}"
                         else:
                             result_msg = '[Background Tool Result]: (no output)'
-                    try:
-                        self.pool.enqueue_message(entry.agent_instance_name, result_msg)
-                    except Exception as e:
-                        # Log but don't propagate — we want to mark entry as completed even if put fails
-                        # This prevents the tool from being stuck in pending state forever
-                        logger.error(
-                            f"[AsyncToolRegistry] Failed to enqueue result for {entry.agent_instance_name}: {e}")
+            # Enqueue OUTSIDE the registry lock (see note above). The completed flag is
+            # already set, so has_pending() reports False even if this put fails.
+            if deliver and self.pool and hasattr(self.pool, 'enqueue_message'):
+                try:
+                    self.pool.enqueue_message(entry.agent_instance_name, result_msg)
+                except Exception as e:
+                    # Log but don't propagate — we want to mark entry as completed even if put fails
+                    # This prevents the tool from being stuck in pending state forever
+                    logger.error(
+                        f"[AsyncToolRegistry] Failed to enqueue result for {entry.agent_instance_name}: {e}")
             # Fix B (idle-wakeup): an IDLE parent whose run() thread already exited
             # never drains its queue — relaunch it, mirroring the user-message path.
             # Enqueue happens first (above) so the relaunched run() finds the result
             # on its first drain. The helper is a no-op unless the instance is IDLE
             # and not stopped/terminated; called outside _lock (it spawns a thread).
-            if self.pool:
+            # Only relaunch when we actually delivered a result: an abandoned entry
+            # (deliver=False) already had exactly one dismissal message sent by
+            # dismiss_instance, so a spurious idle relaunch here would be redundant.
+            if deliver and self.pool:
                 try:
                     from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
                     relaunch_idle_agent(self.pool, entry.agent_instance_name)
@@ -291,24 +315,59 @@ class AsyncToolRegistry:
             }
             return cancelled
 
-    def get_parent_for_child(self, child_instance_name: str) -> Optional[Tuple[str, str]]:
-        """Get the parent instance name and function_id waiting for a specific child.
+    def abandon_child(self, child_instance_name: str) -> Optional[Tuple[str, Optional[str], bool]]:
+        """Resolve all pending handles that reference a child being torn down.
 
-        Used to wake up a SLEEPING parent when its async child is dismissed.
+        Called from dismiss_instance when an async child is force-terminated/dismissed.
+        Atomically resolves every piece of pending-handle state that references the child:
+        pops the _child_to_parent mapping and marks every matching LIVE BackgroundToolEntry in
+        _pending as completed + abandoned (so has_pending() reports False and _execute's
+        finally suppresses the stale duplicate result). Reports who to notify and whether a
+        live handle was actually resolved.
+
+        The `resolved` flag enforces the "exactly one terminal message" invariant:
+        - resolved=True  → the child's worker had NOT already delivered its real result, so
+          dismiss_instance MUST send exactly one "[Agent ... Dismissed]" message.
+        - resolved=False → either no parent was tracking this child, or the worker already
+          completed and delivered its real result before teardown. In both cases the parent
+          has already been told (or never was waiting), so NO dismissal message is sent.
 
         Args:
-            child_instance_name: The child agent instance name.
+            child_instance_name: The child agent instance name being torn down.
 
         Returns:
-            Tuple of (parent_instance_name, function_id) if found, None otherwise.
+            (parent_instance_name, function_id, resolved) if a parent was tracking this
+            child, else None. `resolved` is True iff at least one LIVE pending entry was
+            found and marked abandoned. Idempotent: a second call finds nothing live to
+            resolve (mapping already popped, entries already completed) → resolved=False.
         """
         with self._lock:
-            return self._child_to_parent.get(child_instance_name)
-
-    def remove_child_mapping(self, child_instance_name: str):
-        """Remove the child->parent mapping for a dismissed/completed child."""
-        with self._lock:
-            self._child_to_parent.pop(child_instance_name, None)
+            parent_info = self._child_to_parent.pop(child_instance_name, None)
+            # Fall back to a scan so the mapping-less registration case (register()
+            # only records _child_to_parent when function_id is truthy) still resolves.
+            parent_name = parent_info[0] if parent_info else None
+            function_id = parent_info[1] if parent_info else None
+            resolved = False
+            for owner, entries in self._pending.items():
+                for e in entries:
+                    if e.child_instance_name != child_instance_name:
+                        continue
+                    # Only a LIVE (not-yet-completed) entry counts as "resolved". If the
+                    # worker already finished and delivered its real result (completed=True),
+                    # we must NOT report resolved — the parent was already told.
+                    if e.completed:
+                        continue
+                    if parent_name is None:
+                        parent_name, function_id = owner, (function_id or e.function_id)
+                    e.abandoned = True          # suppresses the duplicate result in _execute
+                    e.completed = True          # has_pending() now reports False
+                    resolved = True
+                    if e.future is not None:
+                        try:
+                            e.future.cancel()   # no-op if already started; harmless either way
+                        except Exception:
+                            pass
+            return (parent_name, function_id, resolved) if parent_name else None
 
     def shutdown(self, wait: bool = True):
         """Shutdown the executor.

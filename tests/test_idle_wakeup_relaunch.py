@@ -410,10 +410,14 @@ class TestDismissWiring:
         pool.get_instance = lambda name: pool.instances.get(name)
         pool.enqueue_message = MagicMock()
         pool.is_instance_terminated = lambda name: False
-        pool._async_registry = SimpleNamespace(
-            get_parent_for_child=lambda cname: ('Maine', 'call_1') if cname == 'child1' else None,
-            remove_child_mapping=MagicMock(),
-        )
+        # Bug #132: dismiss_instance now resolves the child's pending handle via a single
+        # abandon_child() call (which also owns the mapping cleanup), so the stub exposes
+        # that method instead of get_parent_for_child / remove_child_mapping. A MagicMock
+        # records the call so the tests can assert it was invoked for 'child1'.
+        # Return (parent, function_id, resolved) with resolved=True → a live handle was
+        # found, so dismiss_instance sends exactly one dismissal message (the contract under test).
+        abandon_mock = MagicMock(return_value=('Maine', 'call_1', True))
+        pool._async_registry = SimpleNamespace(abandon_child=abandon_mock)
         # Surface touched by the post-wakeup tail of dismiss_instance.
         pool.api_router = None
         pool.remove_instance = MagicMock()
@@ -445,8 +449,8 @@ class TestDismissWiring:
         ft = fake_thread.instances[0]
         assert ft.started
         assert ft.args == (mixin, 'Maine')
-        # Child mapping cleaned up.
-        pool._async_registry.remove_child_mapping.assert_called_once_with('child1')
+        # Bug #132: the child's pending handle + mapping are resolved via abandon_child().
+        pool._async_registry.abandon_child.assert_called_once_with('child1')
 
     def test_sleeping_parent_dismiss_no_relaunch(self):
         from agent_cascade.pool.lifecycle import LifecycleMixin
@@ -459,4 +463,5 @@ class TestDismissWiring:
         # Existing SLEEPING behavior: enqueue only, no relaunch thread.
         pool.enqueue_message.assert_called_once()
         assert not fake_thread.instances
-        pool._async_registry.remove_child_mapping.assert_called_once_with('child1')
+        # Bug #132: the child's pending handle + mapping are resolved via abandon_child().
+        pool._async_registry.abandon_child.assert_called_once_with('child1')
