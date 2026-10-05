@@ -1355,6 +1355,7 @@ class TestInLoopTrigger:
         # pool.settings, not the patched module constant — set it explicitly so a bare
         # MagicMock doesn't auto-create a child mock that breaks the int comparison.
         pool.settings.auto_skill_min_turns = min_turns
+        pool.settings.auto_skill_extra_turns = extra_turns
         pool.settings.default_load_skill_mode = load_mode
         pool.settings.tail_sync_check_enabled = False
         pool.get_template.return_value = template

@@ -6108,7 +6108,7 @@ function formatMs(ms) {
       const s = Math.floor((ms % 60000) / 1000);
       if (h > 0) return h + 'h ' + m + 'm';
       if (m > 0) return m + 'm ' + s + 's';
-      return s + '.' + Math.floor((ms % 1000) / 100) + 's';
+      return s + '.' + Math.round((ms % 1000) / 100) + 's';
     }
 
 function getSuccessClass(rate) {

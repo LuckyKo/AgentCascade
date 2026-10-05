@@ -1309,8 +1309,12 @@ class Grep(BaseTool):
             return f"ERROR: {e}"
         pattern = params['pattern']
         path = params.get('path', '.')
-        include = params.get('include', '*')
-        exclude = params.get('exclude', '')
+        include = params.get('include')
+        if include is None:
+            include = '*'
+        exclude = params.get('exclude')
+        if exclude is None:
+            exclude = ''
         # BUG_0056: comma-separated globs (e.g. "*.py,*.js") are supported —
         # split and applied per-pattern in operation_manager/grep.py.
         # FIX: Handle None/Null values properly for ignore_vcs
