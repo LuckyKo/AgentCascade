@@ -161,6 +161,30 @@ class ShellMixin:
         'file',
         'du',
         'df',
+        # Read-only text utilities (BUG_0057) — no side effects, no filesystem writes.
+        # `cat` caveat: reads arbitrary paths the agent could already read_file; truncation/
+        # spillover covers size. `clip` is deliberately EXCLUDED (mutates user clipboard state).
+        'echo',
+        'cat',
+        'wc',
+        'sort',
+        'uniq',
+        'head',
+        'tail',
+        'diff',
+        'basename',
+        'dirname',
+        'realpath',
+        'date',
+        'env',
+        'printenv',
+        'hostname',
+        'whoami',
+        'id',
+        'uname',
+        'test',
+        'true',
+        'false',
     }
 
     @staticmethod

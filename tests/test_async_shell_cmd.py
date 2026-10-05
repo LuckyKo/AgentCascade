@@ -898,6 +898,55 @@ class TestWaitInControlCommands:
 # ============================================================================
 
 
+
+# ============================================================================
+# BUG_0057: head/tail pipe stripping in async path
+# ============================================================================
+
+
+class TestAsyncHeadTailStrip:
+    """The async _launch_async path must strip | head / | tail and emit AUTO-APPROVED."""
+
+    def test_async_strips_tail_and_auto_approves(self, shell_cmd_tool):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        mock_pool = MagicMock()
+        mock_pool.llm_cfg = {}
+        tracker = MagicMock()
+        # Simulate early completion with output
+        tracker.launch.return_value = (1, 99999, ['commit abc'], True, 0)
+        mock_pool._async_shell_tracker = tracker
+        shell_cmd_tool.agent_pool = mock_pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        result = shell_cmd_tool.call(
+            '{"command": "git log | tail -5", "execution_mode": "async", "justification": "test"}')
+
+        # tracker.launch must receive the STRIPPED command
+        call_kwargs = tracker.launch.call_args.kwargs
+        assert call_kwargs['command'] == 'git log', (
+            f"expected stripped 'git log', got {call_kwargs['command']!r}")
+        # AUTO-APPROVED must be emitted (git log is safe after strip)
+        assert 'AUTO-APPROVED' in result, f"expected AUTO-APPROVED in: {result!r}"
+        # Strip note must be present
+        assert '[note] stripped' in result, f"strip note missing from: {result!r}"
+
+    def test_async_no_strip_no_note(self, shell_cmd_tool):
+        mock_pool = MagicMock()
+        mock_pool.llm_cfg = {}
+        tracker = MagicMock()
+        tracker.launch.return_value = (1, 99999, None, False, None)
+        mock_pool._async_shell_tracker = tracker
+        shell_cmd_tool.agent_pool = mock_pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        result = shell_cmd_tool.call(
+            '{"command": "git log --oneline", "execution_mode": "async", "justification": "test"}')
+
+        call_kwargs = tracker.launch.call_args.kwargs
+        assert call_kwargs['command'] == 'git log --oneline'
+        assert '[note] stripped' not in result
+
+
 class TestAutoAsyncMode:
 
     def _tool_with_tracker(self, shell_cmd_tool, tracker=None):

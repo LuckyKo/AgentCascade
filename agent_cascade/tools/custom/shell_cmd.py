@@ -356,31 +356,50 @@ class ShellCmd(BaseTool):
         return None
 
     # ────────────────────────────────────────────────────────────────
-    _HEAD_TAIL_DENIAL = ("DENIED: shell_cmd auto-rejects '| head' / '| tail' pipe stages — they are not "
-                         'available on Windows and are redundant: AgentCascade already truncates shell '
-                         "output with spillover. Remove the '| head ...' / '| tail ...' segment and run "
-                         'the base command; large output is truncated automatically (use read_file/grep '
-                         'for targeted extraction).')
+    # BUG_0057: `| head` / `| tail` pipe stages are STRIPPED (not denied) on all platforms.
+    # AgentCascade already truncates shell output with spillover, so the trailing filter is
+    # redundant — but stripping silently changes which bytes survive (last-N → first-N+spill),
+    # so a note is emitted to keep the model honest about what it saw.
+    _HEAD_TAIL_STRIP_NOTE = ("[note] stripped '| head'/'| tail' pipe stage(s); "
+                              'output truncated with spillover instead.')
 
     @staticmethod
-    def _detect_head_tail_pipe(command: str) -> str | None:
-        """Detect a `head`/`tail` pipe stage and return the denial string, else ``None``.
+    def _strip_note(was_stripped: bool) -> str:
+        """Return the strip note (with trailing newline) if pipes were stripped, else ''."""
+        return ShellCmd._HEAD_TAIL_STRIP_NOTE + '\n' if was_stripped else ''
 
-        Inspects only post-``|`` stages (case-insensitive, skipping leading `-flag`
-        tokens, so ``head -n 5``, ``tail --lines=10`` and ``HEAD`` are all caught).
-        `head`/`tail` as the first command or a git arg (e.g. ``git show-ref --head``)
-        is NOT matched. The leading ``cd <path> &&`` / ``;`` prefix is stripped via
-        :meth:`ShellMixin._strip_cd_prefix` for consistency with the safe classifier.
+    @staticmethod
+    def _strip_head_tail_pipes(command: str) -> tuple[str, bool]:
+        """Strip post-``|`` ``head``/``tail`` stages from a shell command.
 
-        Tool-level denial only — does not affect ``_is_safe_readonly_shell_command``.
+        Returns ``(stripped_command, was_stripped)``. Only post-first pipe stages are
+        inspected (case-insensitive, skipping leading ``-flag`` tokens, so ``head -n 5``,
+        ``tail --lines=10`` and ``HEAD`` all match). ``head``/``tail`` as the FIRST stage or
+        as a git arg (e.g. ``git show-ref --head``) is NOT stripped. The leading
+        ``cd <path> &&`` / ``;`` prefix is handled via :meth:`ShellMixin._strip_cd_prefix`
+        for consistency with the safe classifier, and re-attached to the result so the
+        executed command still changes directory first.
+
+        Surviving stages are rejoined with ``' | '`` (no naive ``str.replace``). If stripping
+        would leave no runnable stage (e.g. a malformed leading-pipe command like ``| head``),
+        the original command is returned unchanged with ``was_stripped=False`` so normal
+        classification/approval handles it.
         """
         if not command:
-            return None
+            return command, False
         cmd = ShellMixin._strip_cd_prefix(command.strip())
+        cd_prefix = ''
+        if cmd != command.strip():
+            sep_match = re.search(r'\s*(&&|;)\s*', command.strip())
+            if sep_match:
+                prefix = command.strip()[:sep_match.start()].strip()
+                if prefix.lower().startswith('cd'):
+                    cd_prefix = f"{prefix} && "
         stages = cmd.split('|')
+        surviving = [stages[0]]
+        was_stripped = False
         for stage in stages[1:]:
             tokens = stage.strip().split()
-            # Skip leading flag tokens (e.g. `-n`, `--lines=10`) before the command name.
             first_cmd = None
             for tok in tokens:
                 if tok.startswith('-'):
@@ -388,8 +407,16 @@ class ShellCmd(BaseTool):
                 first_cmd = tok.lower()
                 break
             if first_cmd in ('head', 'tail'):
-                return ShellCmd._HEAD_TAIL_DENIAL
-        return None
+                was_stripped = True
+            else:
+                surviving.append(stage)
+        if not was_stripped:
+            return command, False
+        stripped_body = ' | '.join(s.strip() for s in surviving).strip()
+        if not stripped_body:
+            # Nothing left to run — leave the original command for normal handling.
+            return command, False
+        return f"{cd_prefix}{stripped_body}", was_stripped
 
     # ────────────────────────────────────────────────────────────────
     def _launch_async(
@@ -414,11 +441,10 @@ class ShellCmd(BaseTool):
         Returns:
             Response string with tool_id and PID, or completion result if command finished quickly.
         """
-        # ── Denial guard: reject `| head` / `| tail` pipes BEFORE any cwd
-        #    resolution, approval flow, or process spawn (never executes). ──
-        denial = ShellCmd._detect_head_tail_pipe(command)
-        if denial is not None:
-            return denial
+        # ── Strip `| head` / `| tail` pipe stages (BUG_0057): the base command runs,
+        #    output is truncated with spillover instead. No early return — the (possibly
+        #    rewritten) command flows through to classification and execution. ──
+        command, was_stripped = ShellCmd._strip_head_tail_pipes(command)
 
         # ── Resolve cwd using the same resolver as file tools ────────
         try:
@@ -514,8 +540,10 @@ class ShellCmd(BaseTool):
             approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
             if not is_safe and justification_text:
                 approval_line += f"Security Justification: {justification_text}\n"
+            strip_note = ShellCmd._strip_note(was_stripped)
             result = (f"⟨shell_cmd completed⟩ Tool ID: {tool_id} | PID: {pid}\n"
                       f"{approval_line}"
+                      f"{strip_note}"
                       f"Completed in {elapsed:.1f} s ({status}).\n")
             # Append early output if available (truncate if large)
             if early_output:
@@ -544,9 +572,11 @@ class ShellCmd(BaseTool):
         approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
         if not is_safe and justification_text:
             approval_line += f"Security Justification: {justification_text}\n"
+        strip_note = ShellCmd._strip_note(was_stripped)
         launched_msg = (
             f"⟨shell_cmd launched⟩ Tool ID: {tool_id} | PID: {pid}\n"
             f"{approval_line}"
+            f"{strip_note}"
             f"Command running in background.\n"
             f"Command: `{command[:200]}`\n"
             f"Heartbeat interval: {heartbeat_interval}s\n"
@@ -715,11 +745,10 @@ class ShellCmd(BaseTool):
         Returns:
             Command output or error message.
         """
-        # ── Denial guard: reject `| head` / `| tail` pipes BEFORE any
-        #    char-limit check, approval flow, or process spawn (never executes). ──
-        denial = ShellCmd._detect_head_tail_pipe(command)
-        if denial is not None:
-            return denial
+        # ── Strip `| head` / `| tail` pipe stages (BUG_0057): the base command runs,
+        #    output is truncated with spillover instead. The rewritten command flows to
+        #    execute_shell_command so the classifier sees the same string that executes. ──
+        command, was_stripped = ShellCmd._strip_head_tail_pipes(command)
 
         # Get the truncation limit from agent/tool options
         char_limit = 2048
@@ -729,7 +758,7 @@ class ShellCmd(BaseTool):
         elif self.cfg.get('shell_char_limit'):
             char_limit = self.cfg.get('shell_char_limit')
 
-        return self.agent_pool.operation_manager.execute_shell_command(
+        result = self.agent_pool.operation_manager.execute_shell_command(
             command=command,
             justification=justification,
             agent_name=agent_name,
@@ -737,3 +766,5 @@ class ShellCmd(BaseTool):
             char_limit=int(char_limit),
             timeout=timeout,
         )
+        note = ShellCmd._strip_note(was_stripped)
+        return f"{note}{result}"

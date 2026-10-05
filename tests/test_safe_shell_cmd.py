@@ -151,6 +151,29 @@ def test_safe_commands():
         'Git Status',
         'git DIFF --stat',
         'GIT LOG --oneline',
+
+        # ── BUG_0057: expanded primary vocabulary (read-only text utilities) ──
+        'echo hello',
+        'cat /etc/hostname',
+        'wc -l file.txt',
+        'sort file.txt',
+        'uniq data.txt',
+        'head -5 file.txt',
+        'tail -3 file.txt',
+        'diff a.txt b.txt',
+        'basename /a/b/c.txt',
+        'dirname /a/b/c.txt',
+        'realpath /a/b/c.txt',
+        'date',
+        'env',
+        'printenv PATH',
+        'hostname',
+        'whoami',
+        'id',
+        'uname -a',
+        'test -f /etc/hosts',
+        'true',
+        'false',
     ]
 
     print('=== Testing SAFE commands (should all be True) ===')
@@ -282,6 +305,15 @@ def test_unsafe_commands():
         'git -C /workspace -c color.ui=always merge main',
         'git --git-dir=.git --work-tree=/workspace checkout main',
         'git -C /workspace stash drop',
+
+        # ── BUG_0057 regression battery: must stay False after vocabulary expansion ──
+        'cmd1 || evil',
+        'rm -rf / | cat',
+        'cat x > y',
+        'echo $(rm -rf /)',
+        'git branch -D main',
+        'find . -exec rm {} \\;',
+        'powershell -c "Get-Process"',
     ]
 
     print('\n=== Testing UNSAFE commands (should all be False) ===')
