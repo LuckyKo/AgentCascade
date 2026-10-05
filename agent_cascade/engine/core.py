@@ -564,6 +564,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             logger.warning('[AUTO-SKILL] In-loop trigger failed for %s: %s', getattr(instance, 'instance_name', '?'), e)
             return False
 
+    def _get_pool_setting(self, name, default=None):
+        """Safely read a live pool setting (UI-editable without restart)."""
+        settings = getattr(self.pool, 'settings', None)
+        return getattr(settings, name, default) if settings else default
+
     def _grant_auto_skill_extension(self, instance) -> int:
         """Shared budget-reset side-effects for a FIRED auto-skill reflection extension.
 
@@ -577,8 +582,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         ``yield response; continue``). Does NOT re-run trigger/qualification logic.
         """
         instance._auto_skill_orig_max_turns = instance.max_turns   # R6 snapshot
-        settings = getattr(self.pool, 'settings', None)
-        extra_turns = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
+        extra_turns = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
         new_max = instance._current_turn + extra_turns
         instance.max_turns = new_max
         return new_max
@@ -1395,8 +1399,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                         instance._auto_skill_dirty_stop = True
                         max_turns = self._grant_auto_skill_extension(instance)
                         _suppress_budget_warnings = True
-                        settings = getattr(self.pool, 'settings', None)
-                        turns_available = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
+                        turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
                         yield response
                         continue
                     # logger.debug("tool used - %s looping",
@@ -1442,8 +1445,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                             # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
                             # budget-exhaustion design fired BEFORE _consume_turn, which is why its
                             # reset carried a +1; that no longer applies at this call site.
-                            settings = getattr(self.pool, 'settings', None)
-                            turns_available = getattr(settings, 'auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS) if settings else AUTO_SKILL_EXTRA_TURNS
+                            turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
                             yield response
                             continue                                               # run the reflection turns
                     break

@@ -6108,6 +6108,7 @@ function formatMs(ms) {
       const s = Math.floor((ms % 60000) / 1000);
       if (h > 0) return h + 'h ' + m + 'm';
       if (m > 0) return m + 'm ' + s + 's';
+      // Single decimal digit for sub-second (e.g., 1.5s = 1s + ~500ms)
       return s + '.' + Math.round((ms % 1000) / 100) + 's';
     }
 
