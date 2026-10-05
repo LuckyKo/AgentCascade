@@ -1311,15 +1311,8 @@ class Grep(BaseTool):
         path = params.get('path', '.')
         include = params.get('include', '*')
         exclude = params.get('exclude', '')
-        # BUG_0056: reject comma-separated globs with a clear error instead of
-        # silently matching nothing (ripgrep treats "*.py,*.js" as a literal name).
-        if ',' in include:
-            return ("ERROR: grep 'include' accepts a single glob pattern only "
-                    f"(got {include!r}). Run separate searches for each extension, "
-                    "e.g. include='*.py' then include='*.js'.")
-        if ',' in exclude:
-            return ("ERROR: grep 'exclude' accepts a single glob pattern only "
-                    f"(got {exclude!r}). Run separate searches for each pattern.")
+        # BUG_0056: comma-separated globs (e.g. "*.py,*.js") are supported —
+        # split and applied per-pattern in operation_manager/grep.py.
         # FIX: Handle None/Null values properly for ignore_vcs
         # When JSON has "ignore_vcs": null, params.get('ignore_vcs', True) returns None (key exists)
         # We need to treat None as True (default behavior). Also handle string values.

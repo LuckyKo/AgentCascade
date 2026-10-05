@@ -198,12 +198,19 @@ class GrepMixin:
                         cmd.append('-i')
 
                 # "*" with --glob breaks ripgrep (matches only root files). Searches all by default.
+                # BUG_0056: support comma-separated globs (e.g. "*.py,*.js") — one --glob per pattern.
                 if include and include != '*':
-                    cmd.extend(['--glob', include])
+                    for _g in include.split(','):
+                        _g = _g.strip()
+                        if _g:
+                            cmd.extend(['--glob', _g])
 
-                # User-specified excludes (basename or path globs).
+                # User-specified excludes (basename or path globs). Comma-separated supported.
                 if exclude:
-                    cmd.extend(['--glob', f'!{exclude}'])
+                    for _e in exclude.split(','):
+                        _e = _e.strip()
+                        if _e:
+                            cmd.extend(['--glob', f'!{_e}'])
 
                 if not is_vcs_search:
                     # --hidden overrides ripgrep's implicit .git skip, so re-exclude .git to keep
@@ -221,10 +228,15 @@ class GrepMixin:
                 cmd = [
                     'grep',
                     '-r',
-                    '--include=' + include,
                     '-n',
                     '-E',  # Extended regex to support alternation (|), groups, etc. — matches Python re semantics
                 ]
+                # BUG_0056: support comma-separated globs — one --include per pattern.
+                if include and include != '*':
+                    for _g in include.split(','):
+                        _g = _g.strip()
+                        if _g:
+                            cmd.append('--include=' + _g)
 
                 has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
                 if smart_case:
@@ -234,8 +246,12 @@ class GrepMixin:
                 if context > 0:
                     cmd.extend(['-C', str(context)])
 
+                # BUG_0056: comma-separated excludes — one --exclude per pattern.
                 if exclude:
-                    cmd.append('--exclude=' + exclude)
+                    for _e in exclude.split(','):
+                        _e = _e.strip()
+                        if _e:
+                            cmd.append('--exclude=' + _e)
 
                 if ignore_vcs:
                     for _dir in self._GREP_DEFAULT_EXCLUDE_DIRS:
@@ -697,7 +713,9 @@ class GrepMixin:
 
             # When include is "*" (all files), use os.walk with directory skipping to match
             # subprocess behavior. rglob("*") doesn't respect ignores and only matches root level.
-            if include == '*':
+            # BUG_0056: support comma-separated globs — union of rglob for each pattern.
+            _include_patterns = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
+            if not _include_patterns:
                 # Mutate dirs in-place to skip unwanted directories during walk
                 def _walk_with_skips():
                     for root, dirs, files in os.walk(resolved):
@@ -707,7 +725,17 @@ class GrepMixin:
 
                 file_iter_gen = (Path(os.path.join(root, f)) for root, dirs, files in _walk_with_skips() for f in files)
             else:
-                file_iter_gen = resolved.rglob(include)
+                # Union of rglob results across all patterns (dedup via set)
+                _seen = set()
+
+                def _multi_rglob():
+                    for _pat in _include_patterns:
+                        for _fp in resolved.rglob(_pat):
+                            if _fp not in _seen:
+                                _seen.add(_fp)
+                                yield _fp
+
+                file_iter_gen = _multi_rglob()
 
             for file_path in file_iter_gen:
                 if time.time() - start_time > timeout:
@@ -734,20 +762,27 @@ class GrepMixin:
                 # - If pattern has no path separator → match only against basename
                 #   (e.g., "test*" excludes "test.py" but NOT "tests/main.py")
                 # - If pattern has separators → match against full relative path
+                # BUG_0056: support comma-separated excludes — check each pattern.
                 if exclude:
                     try:
                         rel = file_path.relative_to(resolved)
+                        rel_str = str(rel).replace('\\', '/')
                         should_exclude = False
 
-                        if '/' not in exclude and '\\' not in exclude:
-                            # No separator: match only basename (like grep --exclude)
-                            if fnmatch.fnmatch(file_path.name, exclude):
-                                should_exclude = True
-                        else:
-                            # Has separator: match against full relative path
-                            rel_str = str(rel).replace('\\', '/')
-                            if fnmatch.fnmatch(rel_str, exclude):
-                                should_exclude = True
+                        for _exc in exclude.split(','):
+                            _exc = _exc.strip()
+                            if not _exc:
+                                continue
+                            if '/' not in _exc and '\\' not in _exc:
+                                # No separator: match only basename (like grep --exclude)
+                                if fnmatch.fnmatch(file_path.name, _exc):
+                                    should_exclude = True
+                                    break
+                            else:
+                                # Has separator: match against full relative path
+                                if fnmatch.fnmatch(rel_str, _exc):
+                                    should_exclude = True
+                                    break
 
                         if should_exclude:
                             continue
