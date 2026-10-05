@@ -68,6 +68,103 @@ def _get_probe_session() -> requests.Session:
     return session
 
 
+# ── Sanity-probe error classification (transient vs hard) ───────────────────
+# A connection-level probe failure means the host was unreachable RIGHT NOW, but
+# that conflates two very different cases:
+#   * transient — a client-side transport blip on a HEALTHY server. The classic
+#     trigger is WinError 10055 (WSAENOBUFS): local send-buffer / ephemeral-port
+#     exhaustion in connect(). The request never left the client socket; the host
+#     is fine and penalizing it with a 60s cooldown is pure self-inflicted harm.
+#   * hard — the host is genuinely down or misconfigured (connection refused,
+#     WinError 10061, DNS failure, ...). A cooldown here is correct.
+# We must NOT write a cooldown for the transient case: it is exactly the incident
+# where a healthy endpoint got locked out and Security was silently demoted to the
+# global default model (see reports/sec_probe_fail_DIAG.md).
+_TRANSIENT_SOCKET_ERRNOS = frozenset({10048, 10053, 10055})  # EADDRINUSE / WSAECONNABORTED / WSAENOBUFS
+
+# Carries the classification from _sanity_probe to its caller within ONE synchronous
+# call: _sanity_probe is invoked at call_with_fallback's probe gate and its result is
+# consumed in the same straight-line branch (no lock release, no thread hop), so a
+# thread-local written there and read immediately is safe — consistent with the
+# existing thread-local probe session above. Holds 'transient' | 'hard'.
+_probe_err_class_local = threading.local()
+
+# urllib3 2.x formats the socket errno into the message string ("[Errno 10055] ...")
+# rather than exposing it as a structured attribute on the wrapped exceptions, so we
+# also scan the (short) formatted messages for the transient codes.
+_ERRNO_MSG_RE = re.compile(r'\[Errno (\d+)\]')
+
+
+def _iter_probe_error_chain(exc: BaseException):
+    """Yield ``exc`` and every nested exception reachable via args / .reason / __cause__ / __context__.
+
+    urllib3 wraps the socket OSError in layers (requests.ConnectionError -> MaxRetryError
+    -> NewConnectionError) where the errno may sit on an attribute, in a nested arg, or only
+    in the formatted message string — this walks all of them.
+    """
+    seen = set()
+    stack = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        yield e
+        for a in getattr(e, 'args', ()):
+            if isinstance(a, BaseException):
+                stack.append(a)
+        reason = getattr(e, 'reason', None)
+        if isinstance(reason, BaseException):
+            stack.append(reason)
+        nxt = getattr(e, '__cause__', None) or getattr(e, '__context__', None)
+        if isinstance(nxt, BaseException):  # defensive: __cause__/__context__ are not guaranteed to be exceptions
+            stack.append(nxt)
+
+
+def _classify_probe_error(exc: BaseException) -> str:
+    """Return 'transient' (client-side blip; host likely alive) or 'hard' (host/misconfig down).
+
+    Only the transient class must suppress the endpoint cooldown. Transient means a
+    *client-side* socket-buffer / port-exhaustion blip on an otherwise healthy host —
+    exactly WSAENOBUFS(10055), EADDRINUSE(10048) and WSAECONNABORTED(10053).
+
+    Everything else is 'hard' and keeps today's cooldown behaviour: connection refused,
+    DNS failure, read errors, AND connect-timeout. NOTE: on Windows a CLOSED localhost port
+    surfaces as a connect-timeout (not ECONNREFUSED), so a connect-timeout is the primary
+    "host down" signal here — it must NOT be treated as transient (that would lock out a
+    genuinely dead endpoint and let a healthy fallback be skipped). See
+    tests/test_probe_trigger.py::test_dead_head_walks_to_second, which models an unreachable
+    host with a closed port and requires it to enter cooldown.
+    """
+    def _has_transient_errno(e: BaseException) -> bool:
+        if getattr(e, 'errno', None) in _TRANSIENT_SOCKET_ERRNOS:
+            return True
+        if getattr(e, 'winerror', None) in _TRANSIENT_SOCKET_ERRNOS:
+            return True
+        # NewConnectionError / ConnectionError may wrap the OSError as a nested arg.
+        for a in getattr(e, 'args', ()):
+            if isinstance(a, BaseException):
+                if getattr(a, 'errno', None) in _TRANSIENT_SOCKET_ERRNOS:
+                    return True
+                if getattr(a, 'winerror', None) in _TRANSIENT_SOCKET_ERRNOS:
+                    return True
+        return False
+
+    # 1) Structured errno/winerror anywhere in the reachable chain (covers legacy/older urllib3).
+    for e in _iter_probe_error_chain(exc):
+        if _has_transient_errno(e):
+            return 'transient'
+    # 2) Textual fallback: urllib3 2.x carries "[Errno NNN]" only inside the formatted message.
+    for e in _iter_probe_error_chain(exc):
+        for a in getattr(e, 'args', ()):
+            if isinstance(a, str) and len(a) <= 1000:
+                m = _ERRNO_MSG_RE.search(a)
+                if m and int(m.group(1)) in _TRANSIENT_SOCKET_ERRNOS:
+                    return 'transient'
+    # No transient socket errno anywhere → hard (refused / connect-timeout / DNS / read / ...).
+    return 'hard'
+
+
 # A1/A2 gate safety factor for server-reported context windows (n_ctx). llama.cpp rejects
 # at roughly n_prompt >= n_ctx - n_predict_reserve, so a payload that provably exceeds
 # this fraction of the reported window is a genuine overflow even when it fits the
@@ -1251,6 +1348,10 @@ class APIRouter:
             # Connection-level failure: no HTTP response was received at all. The host is
             # unreachable right now (WinError 10055/10061, refused, timeout, DNS, ...), so
             # callers can dedup remaining same-base probes in this pass.
+            # Record the transient-vs-hard class for the caller (same thread, read immediately):
+            # a transient client-side blip must NOT write an endpoint cooldown. The 2-tuple
+            # return is UNCHANGED — E2E fakes mock _sanity_probe as (passed, was_connection_error).
+            _probe_err_class_local.value = _classify_probe_error(e)
             logger.warning(f"[SanityProbe] Probe connection failed for {api_base}: {e}")
             return (False, True)
         except Exception as e:
@@ -1601,6 +1702,20 @@ class APIRouter:
         expired_bl = [k for k, v in self._endpoint_blacklist.items() if now >= v]
         for k in expired_bl:
             del self._endpoint_blacklist[k]
+
+    def _record_probe_cooldown(self, key: tuple, model: str, api_base: str, reason: str) -> None:
+        """Record a probe-failed endpoint into the cooldown store (lock handled here).
+
+        Centralizes the guard + lock + cleanup + dict write so every probe-failure site that
+        penalizes an endpoint shares ONE implementation. ``reason`` is a short label for the
+        debug log only — it does not affect behaviour.
+        """
+        if ENDPOINT_COOLDOWN_SECONDS > 0:
+            with self._lock:
+                self._cleanup_stale_failure_records(time.time())
+                self._endpoint_failure_times[key] = time.time()
+        logger.debug(f"[APIRouter] Endpoint '{model}' @ {api_base} "
+                     f"failed sanity probe ({reason}). Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
 
     # ── Per-Server Circuit Breaker (Change B/D) ──────────────────────────
 
@@ -1959,16 +2074,36 @@ class APIRouter:
                             logger.debug(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
                                          f"passed sanity probe.")
                         else:
-                            # Probe failure = the endpoint is unreachable RIGHT NOW. Record it
-                            # into the cooldown so get_endpoint_chain filters it out on the next
-                            # acquisition — otherwise an engine retry of this same fresh
-                            # acquisition would immediately re-probe the just-failed endpoint.
-                            if ENDPOINT_COOLDOWN_SECONDS > 0:
-                                with self._lock:
-                                    self._cleanup_stale_failure_records(time.time())
-                                    self._endpoint_failure_times[_probe_key] = time.time()
-                            logger.debug(f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                         f"failed sanity probe. Skipping (cooldown {ENDPOINT_COOLDOWN_SECONDS}s).")
+                            # Probe failure — two distinct causes, handled differently:
+                            #   * CONNECTION-level (_probe_conn_err=True): the host was unreachable
+                            #     RIGHT NOW. Whether to penalize depends on WHY (see
+                            #     _classify_probe_error): a transient client-side blip (e.g. WinError
+                            #     10055 / WSAENOBUFS) means the host is actually healthy — writing a
+                            #     cooldown would lock out a good endpoint for ENDPOINT_COOLDOWN_SECONDS
+                            #     and silently demote the agent to the global default. A hard failure
+                            #     (refused, DNS, ...) keeps today's behaviour: record the cooldown so
+                            #     get_endpoint_chain filters it out on the next acquisition (otherwise
+                            #     an engine retry of this same fresh acquisition would immediately
+                            #     re-probe the just-failed endpoint). The classification is read from
+                            #     the thread-local set by _sanity_probe in THIS synchronous call.
+                            #   * HTTP-level (_probe_conn_err=False, 401/403/404/5xx): the host IS
+                            #     reachable — only this endpoint is bad. Keep today's behaviour exactly:
+                            #     write the cooldown. Do NOT consult the thread-local here (it may hold a
+                            #     STALE value from an earlier connection-error probe in this same thread).
+                            if _probe_conn_err:
+                                _err_class = getattr(_probe_err_class_local, 'value', None)  # 'transient' | 'hard' | None
+                                if _err_class == 'transient':
+                                    logger.warning(
+                                        f"[APIRouter] Endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                                        f"failed sanity probe with a TRANSIENT client-side socket error — "
+                                        f"NOT penalizing endpoint (no cooldown). Will re-probe on next acquisition.")
+                                else:
+                                    # 'hard' or None (defensive default): EXACTLY today's behaviour.
+                                    self._record_probe_cooldown(_probe_key, llm_cfg.get('model', ''), _probe_base, 'unreachable')
+                            else:
+                                # HTTP-level failure (401/403/404/5xx): host reachable, endpoint bad.
+                                # EXACTLY today's behaviour — write the cooldown; do NOT touch the thread-local.
+                                self._record_probe_cooldown(_probe_key, llm_cfg.get('model', ''), _probe_base, 'HTTP error')
 
                             # Connection-level failure → the host is unreachable RIGHT NOW. Mark
                             # the base so remaining same-base endpoints skip their probes this
@@ -1993,6 +2128,15 @@ class APIRouter:
                                             f"(all filtered/exhausted), using global default "
                                             f"'{_t4.get('model', 'unknown')}' @ "
                                             f"{_t4.get('api_base') or _t4.get('model_server', 'unknown')}")
+                                # Observability (todo #163): the INFO above reads as routine and
+                                # masked the WinError-10055 incident, where a HEALTHY configured
+                                # model was silently demoted to the default. When this substitution
+                                # is caused by probe/cooldown filtering of a NON-default endpoint,
+                                # name BOTH models at WARNING so it cannot be missed again.
+                                logger.warning(
+                                    f"[APIRouter] {agent_type}: demoting from configured model "
+                                    f"'{llm_cfg.get('model', '')}' @ {_probe_base} (probe/cooldown filtered) "
+                                    f"to global default '{_t4.get('model', '')}'. Security-relevant agents run on a different model.")
                                 _tier4_only_logged = True
 
                             continue
