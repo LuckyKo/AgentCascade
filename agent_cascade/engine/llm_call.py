@@ -362,7 +362,7 @@ class LLMCallMixin:
                     # _cached_llm_messages). NOT appended to the local `messages` list —
                     # the loop-detection view may omit it, which keeps our own warning
                     # outside Tier-1's window on the next check.
-                    warn_msg = Message(role=USER, content=random.choice(FUZZY_LOOP_FEEDBACK_MESSAGES).format(reason=reason))
+                    warn_msg = Message(role=USER, content=random.choice(FUZZY_LOOP_FEEDBACK_MESSAGES))
                     self._append_and_log_to_llm(instance, warn_msg, llm_messages)
 
                     instance._fuzzy_warn_armed = False

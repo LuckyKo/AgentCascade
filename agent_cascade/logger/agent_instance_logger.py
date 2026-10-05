@@ -282,14 +282,14 @@ class AgentInstanceLogger:
                 os.fsync(f.fileno())
             # Retry os.replace: on Windows a transient lock (e.g. the just-closed handle not
             # fully released, or an antivirus scan) makes replace raise WinError 5/32.
-            # A short bounded retry avoids aborting the rewrite and leaving stale state.
-            for attempt in range(5):
+            # A bounded retry avoids aborting the rewrite and leaving stale state.
+            for attempt in range(10):
                 try:
                     os.replace(tmp_path, self.log_path)
                     return True
                 except OSError:
-                    if attempt < 4:
-                        time.sleep(0.02 * (attempt + 1))
+                    if attempt < 9:
+                        time.sleep(0.05 * (attempt + 1))
                         continue
                     raise
         except Exception as e:

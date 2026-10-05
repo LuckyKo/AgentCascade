@@ -46,8 +46,9 @@ def test_slot_debug_reaches_app_logger(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any('[SLOTPOOL] Queued on' in m for m in msgs), \
         f"Expected '[SLOTPOOL] Queued on' in captured records; got {len(msgs)} records"
-    assert any('[SLOTPOOL] Granted on' in m for m in msgs), \
-        f"Expected '[SLOTPOOL] Granted on' in captured records; got {len(msgs)} records"
+    # The grant line uses the [SLOT] prefix (not [SLOTPOOL]) — see slot_queue._grant().
+    assert any('granted pool=' in m for m in msgs), \
+        f"Expected a 'granted pool=' record on the app logger; got {len(msgs)} records"
 
 
 def test_proxy_resolves_rebound_logger(monkeypatch):

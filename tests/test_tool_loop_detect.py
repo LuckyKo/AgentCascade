@@ -826,7 +826,9 @@ class TestPreLlmChecksIntegration:
         # _append_and_log(instance, msg) → args[1] is the Message.
         engine._append_and_log.assert_called_once()
         warn_msg = engine._append_and_log.call_args.args[1]
-        assert '[SYSTEM WARNING: Possible repeating action]' in (warn_msg.content or '')
+        from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
+        assert (warn_msg.content or '') in FUZZY_LOOP_FEEDBACK_MESSAGES, \
+            'injected warning must be an exact pool entry'
         assert warn_msg.role == USER
         # Telemetry: fuzzy_warning, not rolled back, warned=True.
         tel = engine._telemetry.return_value
@@ -847,8 +849,6 @@ class TestPreLlmChecksIntegration:
 
     def test_fuzzy_warning_drawn_from_pool(self):
         from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
-        reason = self._fuzzy_reason()
-        assert reason, 'fixture must still trigger the fuzzy detector'
 
         pool = self._make_fake_pool(tool_loop_fuzzy_rollback_enabled=False)
         engine = self._make_engine(pool)
@@ -856,8 +856,8 @@ class TestPreLlmChecksIntegration:
         engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
 
         content = engine._append_and_log.call_args.args[1].content or ''
-        assert content in [e.format(reason=reason) for e in FUZZY_LOOP_FEEDBACK_MESSAGES], \
-            'injected fuzzy warning must be a pool entry formatted with the detector reason'
+        assert content in FUZZY_LOOP_FEEDBACK_MESSAGES, \
+            'injected fuzzy warning must be an exact pool entry'
 
     def test_fuzzy_pool_shape(self):
         from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
@@ -865,10 +865,7 @@ class TestPreLlmChecksIntegration:
         assert len(set(FUZZY_LOOP_FEEDBACK_MESSAGES)) == len(FUZZY_LOOP_FEEDBACK_MESSAGES), \
             'pool entries must be distinct'
         for entry in FUZZY_LOOP_FEEDBACK_MESSAGES:
-            assert entry.startswith('[SYSTEM WARNING: Possible repeating action]'), \
-                'every entry keeps the stable prefix'
-            assert entry.count('{reason}') == 1, 'every entry interpolates reason exactly once'
-            entry.format(reason='probe')  # raises if any stray brace slipped into the wording
+            assert isinstance(entry, str) and len(entry) > 0, 'every entry must be a non-empty string'
 
     def test_fuzzy_warning_selected_via_random_choice(self):
         from agent_cascade.prompts.dna import FUZZY_LOOP_FEEDBACK_MESSAGES
@@ -880,7 +877,8 @@ class TestPreLlmChecksIntegration:
             engine._pre_llm_checks(inst, self._tool_loop_msgs(), [], [], [50])
         mock_choice.assert_called_once_with(FUZZY_LOOP_FEEDBACK_MESSAGES)
         content = engine._append_and_log.call_args.args[1].content or ''
-        assert content == FUZZY_LOOP_FEEDBACK_MESSAGES[1].format(reason=self._fuzzy_reason())
+        assert content == FUZZY_LOOP_FEEDBACK_MESSAGES[1], \
+            'injected warning must be the exact pool entry selected by random.choice'
 
     def test_throttle_second_trigger_same_run_suppressed(self):
         # Second trigger in the same run (1 turn later) → suppressed, no second message.

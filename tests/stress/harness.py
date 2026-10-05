@@ -900,6 +900,24 @@ class _FakeEngine:
         self._compression_lock = threading.RLock()
         self.reacquire_for = lambda instance, holder_name, context='reacquire': \
             ExecutionEngine.reacquire_for(self, instance, holder_name, context)
+        # t151b: production slot-reacquire callers (Security / Compressor / sync child) now
+        # invoke the shared helper reacquire_after_slot_yield (core.py), which wraps
+        # reacquire_for and then restores the saved KV. Bind the REAL unbound method so the
+        # stress scenarios exercise the CURRENT production path, mirroring reacquire_for above.
+        # The kw-only tolerate_failure is forwarded verbatim (default False preserves the
+        # sanctioned raise-on-hard-failure behavior). Its internal self.-bound helpers are also
+        # bound below so they resolve on this non-subclassing fake:
+        #   _clear_orphaned_state_label  (@staticmethod — stored directly, called with no self)
+        #   _restore_held_slot_state / _resolve_held_endpoint (instance methods → real unbound form)
+        self.reacquire_after_slot_yield = \
+            lambda instance, inst_name, context='', *, tolerate_failure=False: \
+            ExecutionEngine.reacquire_after_slot_yield(
+                self, instance, inst_name, context, tolerate_failure=tolerate_failure)
+        self._clear_orphaned_state_label = ExecutionEngine._clear_orphaned_state_label
+        self._restore_held_slot_state = lambda instance, inst_name: \
+            ExecutionEngine._restore_held_slot_state(self, instance, inst_name)
+        self._resolve_held_endpoint = lambda instance: \
+            ExecutionEngine._resolve_held_endpoint(self, instance)
         # reacquire_for (production) calls self._safe_note_held_endpoint for last-released
         # bookkeeping. Bind the REAL staticmethod so the production call path resolves on this
         # fake too — same "exercise real code" contract as reacquire_for above. Without it the

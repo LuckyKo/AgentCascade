@@ -800,7 +800,7 @@ def release_slot_permit(
                     _waiters = len(_pool._waiters)
         except Exception:
             pass
-        logger.debug(f"[SLOT] {holder_name}: release ({action}) pool={slot_key} waiters={_waiters}")
+        logger.debug(f"[SLOTPOOL] instance={holder_name} pool={slot_key} action={action} waiters={_waiters}")
     return True
 
 
