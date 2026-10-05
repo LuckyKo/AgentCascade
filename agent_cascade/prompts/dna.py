@@ -442,10 +442,10 @@ TOOL_METADATA = {
     'shell_cmd': {
         'description': (
             'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
-            '**WARNING:** DO NOT use shell_cmd with file redirects, pipes or filters.\n\n'
             '**Execution mode:** auto/sync/async — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with special commands via that tool_id.\n\n'
             'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N.\n'
+            '**WARNING:** DO NOT use async shell_cmd with file redirects, pipes or filters.\n'
         ),
         'parameters': {
             'command':
