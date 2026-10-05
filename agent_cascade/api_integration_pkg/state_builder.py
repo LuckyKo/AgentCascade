@@ -407,7 +407,7 @@ def build_state_from_pool(
             'auto_continue':
                 getattr(ps, 'auto_continue', True),
             'enable_agent_budgeting':
-                getattr(ps, 'enable_agent_budgeting', True),
+                getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':
                 getattr(ps, 'allow_parallel_agents', True),
             'max_turns':
@@ -649,7 +649,7 @@ def build_stream_update_from_pool(
             'auto_continue':
                 getattr(ps, 'auto_continue', True),
             'enable_agent_budgeting':
-                getattr(ps, 'enable_agent_budgeting', True),
+                getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':
                 getattr(ps, 'allow_parallel_agents', True),
             'max_turns':
