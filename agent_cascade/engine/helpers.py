@@ -325,6 +325,23 @@ def _check_message_truncation(msg):
     return extra is not None and isinstance(extra, dict) and extra.get('finish_reason') == 'length'
 
 
+def _extract_text_content(msg: Message) -> str:
+    """Return ``msg``'s text content, normalizing content-block lists to plain text.
+
+    Multimodal turns carry ``content`` as a list of blocks; only ``type == 'text'``
+    blocks are joined. Non-str, non-list content is coerced with ``str()``.
+    Shared by :func:`_is_incomplete_state` and the completion classifier's
+    ``_last_assistant_text`` so the content-shape idiom lives in exactly one place.
+    """
+    content = msg_field(msg, 'content', '') or ''
+    if isinstance(content, list):
+        return ' '.join(
+            item.get('text', '') for item in content
+            if isinstance(item, dict) and item.get('type') == 'text'
+        ).strip()
+    return content if isinstance(content, str) else str(content).strip()
+
+
 def _is_incomplete_state(turn_output: List[Message]) -> str | None:
     """Check if the latest LLM response indicates a malformed/incomplete output.
 
@@ -358,21 +375,18 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
         has_tool_call = bool(func_call)
 
         # Check text content
-        content = msg_field(msg, 'content', '') or ''
-        if isinstance(content, list):
-            text_parts = [
-                item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
-            ]
-            content = ' '.join(text_parts).strip()
-        elif not isinstance(content, str):
-            content = str(content).strip()
+        content = _extract_text_content(msg)
+        has_text = bool(content.strip())
 
         # Malformed message detection — any of these means incomplete output:
-        # 1. Reasoning-only block: has reasoning but no content and no tool calls
-        if has_reasoning and not content.strip() and not has_tool_call:
-            return 'reasoning-only'
+        # 1. Reasoning-only block: reasoning, nothing else
+        # 2. Incomplete tool call: tool call with broken JSON arguments
+        # 3. Empty output: nothing at all
+        # 1 and 3 differ only by has_reasoning and both require no tool call, so they
+        # share one guard; disjoint from 2 (which requires a tool call).
+        if not has_text and not has_tool_call:
+            return 'reasoning-only' if has_reasoning else 'empty-output'
 
-        # 2. Incomplete tool call: has tool call with broken JSON arguments
         if has_tool_call:
             args = func_call.get('arguments', '') if isinstance(func_call, dict) else ''
             if args and isinstance(args, str):
@@ -386,10 +400,6 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
                 # Only flag if mismatch exists, or ends with comma/quote AND has some content
                 if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < MIN_OUTPUT_LENGTH):
                     return 'broken-json'
-
-        # 3. Empty output: no reasoning, no content, no tool calls
-        if not has_reasoning and not content.strip() and not has_tool_call:
-            return 'empty-output'
 
         break  # Only check the last assistant message
 

@@ -162,6 +162,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
   { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents', localKey: 'allow_parallel_agents' },
   { id: '#setting-state-kv-save', prop: 'checked', key: 'state_kv_save_enabled', localKey: 'state_kv_save_enabled' },
+  { id: '#setting-completion-classifier', prop: 'checked', key: 'completion_classifier_enabled', localKey: 'completion-classifier' },
   // Inner-loop detection (master toggle)
   { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
   // Inner-loop thresholds
@@ -1206,6 +1207,7 @@ function saveSettings(sendToServer) {
   // (POOL_SETTINGS_MAP localKey='max_auto_rollbacks') has data to protect against server stomps.
   if ($('#setting-max-rollbacks')) s['max_auto_rollbacks'] = $('#setting-max-rollbacks').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
+  if ($('#setting-completion-classifier')) s['completion-classifier'] = $('#setting-completion-classifier').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
   if ($('#setting-auto-skill-mode')) s['auto-skill-mode'] = $('#setting-auto-skill-mode').value;
   if ($('#setting-skill-selector-mode')) s['skill-selector-mode'] = $('#setting-skill-selector-mode').value;
@@ -1396,6 +1398,7 @@ function loadSettings() {
     if (_present(s['vision-enabled'])) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (_isFiniteRestore(s['max-turns'])) $('#setting-max-turns').value = s['max-turns'];
     if (_present(s['auto-continue'])) $('#setting-auto-continue').checked = s['auto-continue'];
+    if (_present(s['completion-classifier'])) $('#setting-completion-classifier').checked = s['completion-classifier'];
     if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
     if (_present(s['auto-skill-mode'])) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
     if (_present(s['skill-selector-mode'])) $('#setting-skill-selector-mode').value = s['skill-selector-mode'];
@@ -5758,6 +5761,7 @@ function getGenerateCfg() {
   if ($('#setting-state-kv-save')) cfg.state_kv_save_enabled = $('#setting-state-kv-save').checked;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
+  if ($('#setting-completion-classifier')) cfg.completion_classifier_enabled = $('#setting-completion-classifier').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
   if ($('#setting-auto-skill-mode')) cfg.auto_skill_mode = $('#setting-auto-skill-mode').value;
@@ -6726,11 +6730,12 @@ function renderAgentApiAssignments() {
     agentTypes.push('security');
     typeToName['security'] = 'Security';
   }
-  // Reserved pseudo-type: the Skill Selector's endpoint fallback list, stored under
-  // agent_priorities['skill_selector']. Reuses the same ▲/▼/✕ UI + update_endpoints persistence.
+  // Reserved pseudo-type: the Classifier's endpoint fallback list (shared by skill
+  // selection and the completion classifier), stored under agent_priorities['skill_selector'].
+  // Reuses the same ▲/▼/✕ UI + update_endpoints persistence.
   if (!agentTypes.includes('skill_selector')) {
     agentTypes.push('skill_selector');
-    typeToName['skill_selector'] = 'Skill Selector';
+    typeToName['skill_selector'] = 'Classifier';
   }
 
   if (endpoints.length === 0) {

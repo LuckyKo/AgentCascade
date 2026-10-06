@@ -860,6 +860,10 @@ class PoolSettings:
     max_nesting_depth: int = AGENT_MAX_NESTING_DEPTH  # Max depth of nested agent calls (prevent infinite chains)
     max_workers: int = AGENT_MAX_WORKERS  # ThreadPoolExecutor workers for parallel agent execution
     auto_continue: bool = True  # Auto-continue on message truncation (respects user toggle)
+    # Completion classifier at natural end (Recovery & Continuity toggle). When True, a
+    # text-only/tool-call-free turn is judged by the shared decision model; 'incomplete'
+    # feeds the existing generic auto-continue retry path. Fail-open: no verdict = no change.
+    completion_classifier_enabled: bool = True
 
     # SLEEPING state settings (for async tools)
     # DEPRECATED: sleeping_timeout is no longer used; agents stay SLEEPING until woken by messages or completed.

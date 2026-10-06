@@ -28,6 +28,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'max_parallel_agents',
     'max_workers',
     'auto_continue',
+    'completion_classifier_enabled',
     'enable_agent_budgeting',
     'allow_parallel_agents',
     'state_kv_save_enabled',
@@ -354,6 +355,14 @@ def _handle_auto_continue(ui_cfg: dict, agent_pool: Optional[Any], agents: list)
     """Update auto_continue setting on the agent pool."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
+
+
+@register_config_handler('completion_classifier_enabled')
+def _handle_completion_classifier_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the completion classifier (BUG_0048). Default True when absent."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.completion_classifier_enabled = bool(
+            ui_cfg.get('completion_classifier_enabled', True))
 
 
 @register_config_handler('inner_loop_detect_enabled')

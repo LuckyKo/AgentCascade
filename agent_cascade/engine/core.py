@@ -42,6 +42,7 @@ from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_
                                     REACQUIRE_TIMEOUT, REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
                                     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
+from agent_cascade.skills.selector import classify_completion
 from agent_cascade.stream_publisher import StreamPublisher
 from agent_cascade.tool_dispatcher import ToolDispatcher
 from agent_cascade.tool_utils import (MAX_SPILL_SIZE, apply_cached_entry_resolutions, clear_truncation_state,
@@ -234,7 +235,8 @@ def _tg_push_final(instance: AgentInstance, response: List[Message], pool: Any, 
 from agent_cascade.engine.compression_exec import CompressionExecMixin
 from agent_cascade.engine.helpers import (MAX_TEXT_LENGTH_FOR_REGEX, MIN_OUTPUT_LENGTH, SleepAction,
                                           _build_resources_block, _build_session_metadata, _check_message_truncation,
-                                          _extract_tool_calls_from_text, _inject_skills_to_system_message,
+                                          _extract_text_content, _extract_tool_calls_from_text,
+                                          _inject_skills_to_system_message,
                                           _is_incomplete_state, _normalize_gemma_thought_tags,
                                           _merge_loaded_skill_names, _normalize_thinking_blocks,
                                           _replace_resources_block, _replace_section, _with_run_identity)
@@ -248,6 +250,19 @@ from agent_cascade.engine.tool_execution import ToolExecMixin
 # after its last activity; real inter-check gaps run ~0.2-1s, so 0.2s lets them reuse while leaving
 # a small tail buffer. (plan §3.4 item 5 / R1.)
 _REUSE_IDLE_EPSILON = 0.2
+
+
+def _last_assistant_text(turn_output: List[Message]) -> str:
+    """Return the last assistant message's text content, ``''`` if there is none.
+
+    Deliberately NOT reusing _is_incomplete_state: that walks the whole list to classify a
+    shape, this only extracts the text the classifier needs to read.
+    """
+    for msg in reversed(turn_output):
+        if msg_field(msg, 'role', '') != ASSISTANT:
+            continue
+        return _extract_text_content(msg)
+    return ''
 
 
 class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
@@ -2628,6 +2643,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             False otherwise.
         """
         is_incomplete = _is_incomplete_state(turn_output)
+        # BUG_0048: a text-bearing, tool-call-free turn is structurally ambiguous — the
+        # structural detector cannot tell "final answer" from "announced more work".
+        # Ask the decision model; an 'incomplete' verdict becomes an opaque tag that lands
+        # in the EXISTING generic retry path below (rollback + rebuild + clear). Gate on BOTH
+        # toggles before the call so either being off costs zero HTTP and is byte-identical
+        # to the pre-fix path. getattr default True: the feature is on by default.
+        if (is_incomplete is None and self.pool.settings.auto_continue
+                and getattr(self.pool.settings, 'completion_classifier_enabled', True)):
+            verdict = classify_completion(self.pool, _last_assistant_text(turn_output))
+            if verdict == 'incomplete':
+                is_incomplete = 'text-only-incomplete'
         if (is_truncated or
                 is_incomplete) and not self._is_terminal_stop(inst_name) and self.pool.settings.auto_continue:
             instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1

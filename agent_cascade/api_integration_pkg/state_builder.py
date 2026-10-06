@@ -406,6 +406,8 @@ def build_state_from_pool(
                 getattr(ps, 'max_workers', 10),
             'auto_continue':
                 getattr(ps, 'auto_continue', True),
+            'completion_classifier_enabled':
+                getattr(ps, 'completion_classifier_enabled', True),
             'enable_agent_budgeting':
                 getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':
@@ -652,6 +654,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'max_workers', 10),
             'auto_continue':
                 getattr(ps, 'auto_continue', True),
+            'completion_classifier_enabled':
+                getattr(ps, 'completion_classifier_enabled', True),
             'enable_agent_budgeting':
                 getattr(ps, 'enable_agent_budgeting', False),
             'allow_parallel_agents':

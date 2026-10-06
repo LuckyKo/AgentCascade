@@ -528,7 +528,7 @@
 
                 <!-- Agent API Assignments Section -->
                 <div class="settings-section">
-                  <h3 class="settings-section-title">Agent &amp; Skill Selector API Assignments</h3>
+                  <h3 class="settings-section-title">Agent &amp; Classifier API Assignments</h3>
                   <div id="agent-api-assignments" class="settings-section-body">
                     <!-- Per-agent-type endpoint priority lists injected here by JS -->
                     <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
@@ -536,7 +536,7 @@
                     </div>
                   </div>
                   <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
-                    ℹ️ Agents and the Skill Selector try endpoints top-to-bottom. Falls back to General Settings API.
+                    ℹ️ Agents and the Classifier try endpoints top-to-bottom. Falls back to General Settings API.
                   </div>
                 </div>
 
@@ -585,6 +585,10 @@
                           <input type="checkbox" id="setting-auto-continue" checked />
                         </label>
                         <label class="setting-field toggle-field">
+                          <span title="On a text-only turn with no tool call, asks a fast decision model whether the agent genuinely finished or still has work pending. If it looks unfinished, auto-continues (bounded). Adds up to ~3s to natural-end turns. Falls back to normal completion if the classifier endpoint is unavailable.">Completion Classifier</span>
+                          <input type="checkbox" id="setting-completion-classifier" checked />
+                        </label>
+                        <label class="setting-field toggle-field">
                           <span>Auto-Rollback on Loop</span>
                           <input type="checkbox" id="setting-auto-rollback" checked />
                         </label>
@@ -612,7 +616,7 @@
                           </select>
                         </label>
                         <label class="setting-field">
-                          <span title="How the Skill Selector picks skills. Keyword = basic keyword matching (no extra LLM call). API = a decision model resolves the selection; endpoint fallbacks are configured under Agent &amp; Skill Selector API Assignments below.">Skill Selector Mode</span>
+                          <span title="How the Classifier picks skills. Keyword = basic keyword matching (no extra LLM call). API = a decision model resolves the selection; endpoint fallbacks are configured under Agent &amp; Classifier API Assignments below and are shared with the completion classifier.">Classifier Mode</span>
                           <select id="setting-skill-selector-mode">
                             <option value="keyword" selected>Keyword (basic matching)</option>
                             <option value="api">API (decision model)</option>

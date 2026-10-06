@@ -213,6 +213,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'max_auto_rollbacks',
     'auto_rollback_on_loop',
     'auto_continue',
+    'completion_classifier_enabled',
     'max_turns',
     'enable_agent_budgeting',
     'allow_parallel_agents',

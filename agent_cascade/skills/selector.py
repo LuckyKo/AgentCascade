@@ -57,6 +57,87 @@ _NONE_CRITERION = (
     'that does not require any domain-specific procedure.'
 )
 
+# Classifier-specific timeout: tighter than skill selection because the completion
+# classifier blocks the normal-completion path of a finished agent.
+_COMPLETION_CLASSIFIER_TIMEOUT_SECONDS: float = 3.0
+
+# The instructions the skill selector always asks (question key 'pick').
+_SKILL_PICK_INSTRUCTIONS = (
+    'Select the single most relevant skill to load for this task. '
+    "Choose 'none' if no skill is needed."
+)
+
+
+def resolve_endpoints(pool, priority_key: str = 'skill_selector',
+                      log_prefix: str = 'SKILL-SELECTOR') -> List[APIEndpoint]:
+    """Return the ordered usable endpoints for ``agent_priorities[priority_key]``.
+
+    Endpoints with a missing/empty ``api_base`` are dropped here (not just at
+    request time) so we never fire a guaranteed-failing relative-URL request.
+
+    ``log_prefix`` names the CALLING subsystem in log lines; each caller passes its
+    own so a shared-helper message is never attributed to the wrong component.
+    """
+    api_router = getattr(pool, 'api_router', None)
+    if api_router is None:
+        return []
+    endpoints: List[APIEndpoint] = []
+    for endpoint_id in api_router.agent_priorities.get(priority_key, []) or []:
+        endpoint = api_router.get_endpoint(endpoint_id)
+        if endpoint is None:
+            continue
+        if not getattr(endpoint, 'api_base', None):
+            logger.debug('[%s] endpoint %s has empty api_base; skipping', log_prefix,
+                         getattr(endpoint, 'id', '?'))
+            continue
+        endpoints.append(endpoint)
+    return endpoints
+
+
+def ask_decision_model(endpoint, model: str, state: str, question_key: str,
+                       instructions: str, criteria: dict,
+                       timeout: float = _API_TIMEOUT_SECONDS,
+                       log_prefix: str = 'SKILL-SELECTOR') -> Optional[str]:
+    """POST one ``/v1/systemone`` choice question; return the chosen criterion or ``None``.
+
+    Shared by every decision-model consumer (skill selection, completion classifier).
+    Never raises — a per-endpoint failure yields ``None`` ("no opinion").
+    ``log_prefix`` names the calling subsystem in the failure log line (see
+    :func:`resolve_endpoints`).
+    """
+    url = ApiSelector._endpoint_url(getattr(endpoint, 'api_base', ''))
+    payload = {
+        'model': model,
+        'state': state,
+        'questions': {
+            question_key: {
+                'type': 'choice',
+                'instructions': instructions,
+                'criteria': criteria,
+            }
+        },
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f"Bearer {getattr(endpoint, 'api_key', '')}",
+        # Cloudflare WAF blocks the default Python UA (error 1010); send a real one.
+        'User-Agent': _BROWSER_USER_AGENT,
+    }
+    try:
+        resp = requests.post(url, data=json.dumps(payload).encode('utf-8'),
+                             headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+        answer = (body.get('answers') or {}).get(question_key, {})
+        choice = answer.get('choice')
+        if not choice:
+            return None
+        return str(choice)
+    except Exception as e:  # noqa: BLE001 — per-endpoint failure → no opinion
+        logger.debug('[%s] endpoint %s failed: %s', log_prefix,
+                     getattr(endpoint, 'id', '?'), e)
+        return None
+
 
 class KeywordSelector:
     """Strategy that delegates to the existing keyword matcher (default path)."""
@@ -123,27 +204,8 @@ class ApiSelector:
     # ── Endpoint resolution (ordered fallback list) ──────────────────────────
 
     def _resolve_endpoints(self) -> List[APIEndpoint]:
-        """Return the ordered list of usable endpoints for ``agent_priorities['skill_selector']``.
-
-        Endpoints with a missing/empty ``api_base`` are dropped here (not just at
-        request time) so we never fire a guaranteed-failing relative-URL request.
-        """
-        pool = getattr(self._manager, 'pool', None)
-        api_router = getattr(pool, 'api_router', None)
-        if api_router is None:
-            return []
-        ids = api_router.agent_priorities.get('skill_selector', []) or []
-        endpoints: List[APIEndpoint] = []
-        for endpoint_id in ids:
-            endpoint = api_router.get_endpoint(endpoint_id)
-            if endpoint is None:
-                continue
-            if not getattr(endpoint, 'api_base', None):
-                logger.debug('[SKILL-SELECTOR] endpoint %s has empty api_base; skipping',
-                             getattr(endpoint, 'id', '?'))
-                continue
-            endpoints.append(endpoint)
-        return endpoints
+        """Ordered usable endpoints for ``agent_priorities['skill_selector']``."""
+        return resolve_endpoints(getattr(self._manager, 'pool', None))
 
     # ── Request construction ─────────────────────────────────────────────────
 
@@ -170,41 +232,8 @@ class ApiSelector:
 
     def _ask_endpoint(self, endpoint, model: str, state: str, criteria: dict) -> Optional[str]:
         """POST to one endpoint; return the chosen criterion name or ``None``."""
-        url = self._endpoint_url(getattr(endpoint, 'api_base', ''))
-        payload = {
-            'model': model,
-            'state': state,
-            'questions': {
-                'pick': {
-                    'type': 'choice',
-                    'instructions': (
-                        'Select the single most relevant skill to load for this task. '
-                        "Choose 'none' if no skill is needed."
-                    ),
-                    'criteria': criteria,
-                }
-            },
-        }
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f"Bearer {getattr(endpoint, 'api_key', '')}",
-            # Cloudflare WAF blocks the default Python UA (error 1010); send a real one.
-            'User-Agent': _BROWSER_USER_AGENT,
-        }
-        try:
-            resp = requests.post(url, data=json.dumps(payload).encode('utf-8'),
-                                 headers=headers, timeout=_API_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            body = resp.json()
-            answer = (body.get('answers') or {}).get('pick', {})
-            choice = answer.get('choice')
-            if not choice:
-                return None
-            return str(choice)
-        except Exception as e:  # noqa: BLE001 — per-endpoint failure → next in chain
-            logger.debug('[SKILL-SELECTOR] endpoint %s failed: %s',
-                         getattr(endpoint, 'id', '?'), e)
-            return None
+        return ask_decision_model(endpoint, model, state, 'pick',
+                                  _SKILL_PICK_INSTRUCTIONS, criteria)
 
     # ── Answer mapping ───────────────────────────────────────────────────────
 
@@ -222,3 +251,51 @@ class ApiSelector:
             if name != choice:
                 ordered.append((name, score_by_name.get(name, 0.0)))
         return ordered
+
+
+# ── Completion classifier (BUG_0048) ──────────────────────────────────────────
+
+_COMPLETION_INSTRUCTIONS = (
+    'Decide whether the agent turn is a genuine final answer or an unfinished '
+    "announcement. Choose 'completed' or 'incomplete'."
+)
+
+# Log subsystem name owned by this feature; the shared helpers take it as a parameter
+# so a classifier-side failure is never logged under [SKILL-SELECTOR].
+_LOG_PREFIX = 'COMPLETION-CLASSIFIER'
+
+
+def classify_completion(pool, state_text: str) -> Optional[str]:
+    """Return ``'completed'`` | ``'incomplete'`` | ``None`` (no opinion). Never raises.
+
+    Reuses the skill selector's endpoint list and decision-model HTTP envelope via the
+    module-level helpers above (no duplicated request logic). Fails OPEN: any error,
+    timeout, abstention or unparseable answer yields ``None``, which callers treat as
+    "treat the turn as complete" — the pre-existing behavior.
+    """
+    try:
+        criteria = {
+            'completed': 'The agent has genuinely finished; this text was its final answer '
+                         'and no further tool calls are needed.',
+            'incomplete': 'The agent announced or implied further work but did not emit the '
+                          'tool calls; more steps remain to be done.',
+        }
+        endpoints = resolve_endpoints(pool, 'skill_selector', log_prefix=_LOG_PREFIX)
+        if not endpoints:
+            return None
+        state = state_text[:_STATE_MAX_CHARS]
+        # Single-endpoint attempt (latency ceiling): the classifier runs on every
+        # natural-end turn, so we bound worst-case latency at ~3s instead of walking
+        # the whole fallback chain. A failure here fails open (None).
+        endpoint = endpoints[0]
+        model = getattr(endpoint, 'model', '') or DEFAULT_SKILL_SELECTOR_MODEL
+        choice = ask_decision_model(endpoint, model, state, 'verdict',
+                                    _COMPLETION_INSTRUCTIONS, criteria,
+                                    timeout=_COMPLETION_CLASSIFIER_TIMEOUT_SECONDS,
+                                    log_prefix=_LOG_PREFIX)
+        # 'none' and any unknown string collapse to None here — the whole
+        # degradation contract in one expression.
+        return choice if choice in criteria else None
+    except Exception as e:  # noqa: BLE001 — fail-open contract
+        logger.debug('[COMPLETION-CLASSIFIER] failed; no opinion: %s', e)
+        return None
