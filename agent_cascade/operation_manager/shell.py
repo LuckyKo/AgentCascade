@@ -195,6 +195,10 @@ class ShellMixin:
     # untouched — tests and __help text reference it directly.
     _PIPE_STAGE_COMMANDS: set = _SAFE_PIPE_COMMANDS | _SAFE_PRIMARY_COMMANDS
 
+    # Redirect operator: optional fd prefix (2>, 1>), the bash &> "both" form,
+    # then a single or double >. Does NOT match && or || (no > present).
+    _REDIRECT_RE: 're.Pattern[str]' = re.compile(r'(?:\d*|&)>>?')
+
     @staticmethod
     def _is_safe_readonly_shell_command(command: str) -> bool:
         """Check if a shell command is purely read-only (directory listing/search/git/control).
@@ -218,15 +222,23 @@ class ShellMixin:
         if '$(' in cmd or '`' in cmd:
             return False
 
-        # Redirections that write to files (but not 2>/dev/null or 2>&1)
-        redirect_match = re.search(r'>[^>]', cmd)
-        if redirect_match:
-            redir_target = redirect_match.group(0)
-            if '/dev/null' not in redir_target and 'NUL' not in redir_target.upper() and '&' not in redir_target:
+        # Redirections: reject any redirect whose target is a real file.
+        # Allowed sinks only: fd duplication (2>&1, >&2) and the null device
+        # (/dev/null, NUL). Scans EVERY operator so `cmd > out.txt 2>/dev/null`
+        # rejects on the real-file target regardless of position/order.
+        for m in ShellMixin._REDIRECT_RE.finditer(cmd):
+            target_match = re.match(r'\s*(\S+)', cmd[m.end():])
+            if not target_match:
+                return False  # bare `>` / no target → malformed, reject on uncertainty
+            target = target_match.group(1).strip('"\'')
+            # fd-duplication (2>&1, >&2) or an exact null-device token are the only sinks.
+            if not (target.startswith('&') or target.lower() in ('/dev/null', 'nul')):
                 return False
 
-        # Background processes: & that's not part of && (already checked above)
-        if re.search(r'(?<!&)&(?!&)', cmd):
+        # Background processes: standalone & that is not part of && nor part of an
+        # fd-duplication (i.e. a & directly following a >, as in 2>&1 or >&2). A genuine
+        # background & is never preceded by > so it still rejects here.
+        if re.search(r'(?<![>&])&(?!&)', cmd):
             return False
 
         # ── Strip "cd <path> &&" prefix ──

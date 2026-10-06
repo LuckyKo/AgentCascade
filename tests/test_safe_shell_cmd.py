@@ -180,6 +180,20 @@ def test_safe_commands():
         'date | wc -l',
         'whoami | sort',
         'cat file.txt | cat',
+
+        # ── Redirection to null device / fd duplication (allowed sinks) ──
+        'git log 2>/dev/null',
+        'git diff > /dev/null',
+        'ls > NUL',
+        'ls >nul',
+        'dir 2>&1',
+        'ls >&2',
+        'find . 2>/dev/null | wc -l',
+        'git log 2>&1 | head -5',
+        'ls 2>/dev/null 1>/dev/null',
+        'git log >>/dev/null',
+        'git diff > /dev/null 2>&1',
+        'cd /workspace && git log 2>/dev/null',
     ]
 
     print('=== Testing SAFE commands (should all be True) ===')
@@ -325,6 +339,18 @@ def test_unsafe_commands():
         'ls | cmd /c x',
         'echo hi | powershell -Command Get-Date',
         'find . | git push origin',
+
+        # ── File-write redirections (must stay blocked) ──
+        'echo hi > out.txt',
+        'git diff > patch.diff',
+        'ls >> log.txt',
+        'ls > out.txt 2>/dev/null',       # one null sink does not excuse a real file target
+        'ls 2>/dev/null > out.txt',       # order must not matter
+        'git status &> file.txt',
+        'ls >nul.txt',                    # NUL-prefixed real filename is not the null device
+        'ls >',                           # malformed / no target → reject on uncertainty
+        'echo "a>b"',                     # quoted '>' is not quote-parsed → conservative reject
+        'ls 2>nul & echo x',              # background '&' guard, independent of the redirect fix
     ]
 
     print('\n=== Testing UNSAFE commands (should all be False) ===')
