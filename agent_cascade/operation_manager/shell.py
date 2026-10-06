@@ -244,9 +244,19 @@ class ShellMixin:
         # ── Strip "cd <path> &&" prefix ──
         stripped_cmd = ShellMixin._strip_cd_prefix(cmd)
 
-        # Check for remaining chaining after stripping cd prefix
+        # Handle remaining chaining after stripping cd prefix: split on &&, ;, ||
+        # and recursively validate each segment. Since the global checks (subshells,
+        # redirects, background) already ran on the full command above, each segment
+        # is independently validated here for primary + pipeline safety.
         if '&&' in stripped_cmd or ';' in stripped_cmd or '||' in stripped_cmd:
-            return False
+            segments = re.split(r'\s*(?:&&|;|\|\|)\s*', stripped_cmd)
+            for seg in segments:
+                seg = seg.strip()
+                if not seg:
+                    continue
+                if not ShellMixin._is_safe_readonly_shell_command(seg):
+                    return False
+            return True
 
         # Split into pipeline stages
         pipeline = stripped_cmd.split('|')

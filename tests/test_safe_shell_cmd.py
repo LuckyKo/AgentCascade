@@ -194,6 +194,21 @@ def test_safe_commands():
         'git log >>/dev/null',
         'git diff > /dev/null 2>&1',
         'cd /workspace && git log 2>/dev/null',
+
+        # ── Chained commands: all segments individually safe → auto-approved ──
+        'cd /workspace && git diff && git status',
+        'cd /workspace ; git diff ; git status',
+        'cd /workspace && git diff || git status',
+        'git log --oneline -5 && echo --- && git status --short && git diff HEAD~1 --stat 2>nul',
+        'ls -la && pwd && whoami',
+        'git log && git status && git diff --stat',
+        'echo hello; echo world',
+        'date && hostname && whoami',
+        'ls -la && cat secret.txt',
+        'find . ; whoami',
+        'ls || cat /etc/passwd',
+        'cd /workspace && git status; git diff',
+        'cd /workspace && git diff && cat file.py',
     ]
 
     print('=== Testing SAFE commands (should all be True) ===')
@@ -211,16 +226,9 @@ def test_safe_commands():
 def test_unsafe_commands():
     """Commands that should require approval (potentially dangerous)."""
     unsafe = [
-        # Command chaining with &&
+        # Command chaining where at least one segment is UNSAFE
         "find . -name '*.py' && rm -rf /",
-        'ls -la && cat secret.txt',
-
-        # Command chaining with ;
         'dir; rm -f important.txt',
-        'find . ; whoami',
-
-        # Command chaining with ||
-        'ls || cat /etc/passwd',
 
         # Subshell execution
         'find . $(malicious)',
@@ -261,11 +269,9 @@ def test_unsafe_commands():
         # Just whitespace
         '   ',
 
-        # ── Git piggyback operations ──
+        # ── Git piggyback operations (one segment unsafe) ──
         'cd /workspace && git diff && git merge main',
-        'cd /workspace && git status; git diff',
         'cd /workspace && git diff > output.txt',
-        'cd /workspace && git diff && cat file.py',
         'cd /workspace && git log && git merge --no-ff feature',
         'cd /workspace && git status && git add .',
         'cd /workspace && git diff && git checkout main',
@@ -281,10 +287,9 @@ def test_unsafe_commands():
         'cd /workspace && git pull',
         'cd /workspace && git checkout -b new-branch',
 
-        # cd with multiple chained git commands
-        'cd /workspace && git diff && git status',
-        'cd /workspace ; git diff ; git status',
-        'cd /workspace && git diff || git status',
+        # cd with multiple chained commands where one segment is UNSAFE
+        'cd /workspace && git diff && git checkout main',
+        'cd /workspace ; git diff ; rm -rf /',
 
         # ── Dangerous stash operations ──
         'git stash drop',
