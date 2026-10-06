@@ -682,7 +682,13 @@ class ToolDispatcher:
         if not instance_name or not agent_class:
             logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", caller_name,
                            instance_name, agent_class)
-            return instance_name, agent_class, 'Error: call_agent requires instance_name and agent_class.'
+            if not instance_name and not agent_class:
+                err_msg = 'Error: call_agent requires instance_name and agent_class.'
+            elif not instance_name:
+                err_msg = 'Error: call_agent requires instance_name.'
+            else:
+                err_msg = 'Error: call_agent requires agent_class.'
+            return instance_name, agent_class, err_msg
 
         return instance_name, agent_class, None
 

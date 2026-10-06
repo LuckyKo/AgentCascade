@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Any, List, Tuple
 
-from agent_cascade.llm.schema import FUNCTION, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.settings import COMPRESSION_MAX_LAST_TASK_CHARS
 from agent_cascade.utils.utils import extract_text_from_message
@@ -763,16 +763,52 @@ def extract_instance_output(
             return f"Sub-agent {instance_name} was terminated by user. Check log for details: {log_hint}"
         return f"Sub-agent {instance_name} finished but provided no text output."
 
-    # Get the last message in the conversation
-    last_msg = messages[-1]
+    def _has_prose_text(msg) -> bool:
+        if isinstance(msg, dict):
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+        else:
+            role = getattr(msg, 'role', '')
+            content = getattr(msg, 'content', '')
 
+        if role != ASSISTANT:
+            return False
+
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    txt = item.get('text', '')
+                    if isinstance(txt, str) and txt.strip():
+                        return True
+                else:
+                    txt = getattr(item, 'text', '')
+                    if isinstance(txt, str) and txt.strip():
+                        return True
+            return False
+        elif isinstance(content, str):
+            return bool(content.strip())
+        return False
+
+    # First check if the very last message has prose text
+    last_msg = messages[-1]
+    if _has_prose_text(last_msg):
+        result_str = extract_text_from_message(last_msg, add_upload_info=False).strip()
+        if result_str:
+            return result_str
+
+    # Fallback: search backwards for the latest assistant message with prose text
+    for msg in reversed(messages[:-1]):
+        if _has_prose_text(msg):
+            result_str = extract_text_from_message(msg, add_upload_info=False).strip()
+            if result_str:
+                return result_str
+
+    # If no assistant prose text found across conversation:
     if isinstance(last_msg, dict):
         msg_role = last_msg.get('role', '')
     else:
         msg_role = getattr(last_msg, 'role', '')
 
-    # Guard: if the last message is a tool result (function role), the agent
-    # likely terminated incorrectly without producing a final text response.
     if msg_role == FUNCTION:
         log_hint = _get_log_path_hint()
         return (f"WARNING: Sub-agent {instance_name} terminated with a tool result "
