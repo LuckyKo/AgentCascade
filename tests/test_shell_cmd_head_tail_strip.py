@@ -89,6 +89,38 @@ class TestStripHeadTailPipes:
         assert result == 'echo x'
 
 
+class TestStripHeadTailPipesQuotedPipes:
+    """BUG_0060: a '|' inside a quoted string literal is argument data, not a pipeline
+    separator. The naive cmd.split('|') used to split these in half and the rejoin then
+    produced a corrupted command (e.g. a Python SyntaxError). These must be left untouched."""
+
+    @pytest.mark.parametrize('command', [
+        # double-quoted python -c with '| head' inside the string literal
+        'python -c "s=\\"| head\\"; print(s)"',
+        # single-quoted variant from the original bug report
+        "python -c \"s='git log 2>&1 | head -5'; print(s)\"",
+        # a real pipeline whose FIRST stage carries a quoted pipe must still strip the tail
+        # only if there is an unquoted trailing head/tail; here none → unchanged
+        "echo 'a|b' | grep 'c|d'",
+    ])
+    def test_quoted_pipe_not_stripped(self, command):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        result, was_stripped = ShellCmd._strip_head_tail_pipes(command)
+        assert was_stripped is False, f"quoted pipe wrongly treated as a stage: {command!r}"
+        assert result == command, f"command corrupted: {result!r} != {command!r}"
+
+    def test_quoted_pipe_plus_real_trailing_tail(self):
+        """A quoted pipe in an early stage coexists with a genuine trailing '| tail' —
+        only the real (unquoted) tail is stripped; the quoted one survives intact."""
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        command = "python -c \"print('x|y')\" | tail -3"
+        result, was_stripped = ShellCmd._strip_head_tail_pipes(command)
+        assert was_stripped is True
+        # the quoted 'x|y' must be preserved verbatim in the surviving command
+        assert "print('x|y')" in result, f"quoted pipe lost: {result!r}"
+        assert '| tail' not in result, f"trailing tail not stripped: {result!r}"
+
+
 class TestSyncStripEndToEnd:
     """_execute_sync must strip head/tail, pass rewritten command to execute_shell_command."""
 

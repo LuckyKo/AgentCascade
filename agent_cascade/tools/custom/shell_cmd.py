@@ -384,6 +384,10 @@ class ShellCmd(BaseTool):
         would leave no runnable stage (e.g. a malformed leading-pipe command like ``| head``),
         the original command is returned unchanged with ``was_stripped=False`` so normal
         classification/approval handles it.
+
+        BUG_0060: only UNQUOTED ``|`` are treated as pipeline separators. A ``|`` inside a
+        single- or double-quoted argument (e.g. ``python -c "...'| head'..."``) is string data,
+        not a stage boundary, and is left untouched so the command is not corrupted.
         """
         if not command:
             return command, False
@@ -395,7 +399,27 @@ class ShellCmd(BaseTool):
                 prefix = command.strip()[:sep_match.start()].strip()
                 if prefix.lower().startswith('cd'):
                     cd_prefix = f"{prefix} && "
-        stages = cmd.split('|')
+        # BUG_0060: split only on UNQUOTED '|'. A naive cmd.split('|') breaks commands like
+        # `python -c "...'| head'..."` where '|' appears inside a quoted string literal — the
+        # rejoin below then splits the string in half (SyntaxError). Pipes inside single or
+        # double quotes are argument data, not shell pipeline separators.
+        stages = []
+        cur = ''
+        quote = None
+        for ch in cmd:
+            if quote:
+                cur += ch
+                if ch == quote:
+                    quote = None
+            elif ch in ('"', "'"):
+                quote = ch
+                cur += ch
+            elif ch == '|':
+                stages.append(cur)
+                cur = ''
+            else:
+                cur += ch
+        stages.append(cur)
         surviving = [stages[0]]
         was_stripped = False
         for stage in stages[1:]:
