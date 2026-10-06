@@ -92,6 +92,15 @@ def _recorded_state_urls(post_mock):
     return urls
 
 
+def _make_fake_reacquire():
+    """Build a fake reacquire_for side_effect that grants the instance a held slot."""
+    def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+        instance_arg._slot_release = lambda: None
+        instance_arg._slot_key = 'pool-x'
+        return True
+    return fake_reacquire
+
+
 # ============================================================================
 # PoolSettings field
 # ============================================================================
@@ -278,6 +287,57 @@ class TestReacquireGate:
         loads = [u for u in _recorded_state_urls(post_mock) if '/state/load' in u]
         assert len(loads) == 1, f"exactly one state/load expected: {loads}"
         assert AUTOLOADER_X.rstrip('/') in loads[0], f"restore must target the held endpoint: {loads[0]}"
+
+    def test_sync_child_off_still_restores(self):
+        """REGRESSION (sync-child normal delegation): with the toggle OFF, a pending label and a
+        held slot, passing respect_toggle=False MUST still perform the KV restore — it must NOT hit
+        the '[STATE_RESTORE_SKIP] ... disabled by toggle' branch. The UI toggle only gates
+        system-agent yields (Security/Compressor), never normal parent→child→parent delegation."""
+        inst = make_instance()  # label='B' pending — would normally trigger a restore
+        engine = make_engine(inst, state_kv_save_enabled=False)
+
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire) as reacq:
+                ok = engine.reacquire_after_slot_yield(
+                    inst, inst.instance_name, 'sync child', respect_toggle=False)
+
+        assert ok is True
+        reacq.assert_called_once()  # slot re-acquire still happened — never conditional
+        loads = [u for u in _recorded_state_urls(post_mock) if '/state/load' in u]
+        assert len(loads) == 1, \
+            f"toggle OFF + respect_toggle=False must STILL restore the warm cache: {loads}"
+        assert AUTOLOADER_X.rstrip('/') in loads[0], f"restore must target the held endpoint: {loads[0]}"
+
+    def test_sync_child_off_respect_toggle_default_still_skips(self):
+        """CONTRAST (system-agent yield, default respect_toggle=True): same conditions as the
+        sync-child case above but with the DEFAULT toggle behavior — the OFF skip branch IS taken,
+        no state/load fires, and the stale label is cleared. This preserves the existing gate for
+        Security/Compressor paths."""
+        inst = make_instance()  # label='B' pending — would normally trigger a restore
+        engine = make_engine(inst, state_kv_save_enabled=False)
+
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire):
+                ok = engine.reacquire_after_slot_yield(
+                    inst, inst.instance_name, 'after_security_check')  # default respect_toggle=True
+
+        assert ok is True
+        assert _recorded_state_urls(post_mock) == [], \
+            'no state/load may fire when the toggle is OFF and respect_toggle defaults to True'
+        with inst._state_lock:
+            assert inst._state_label is None, \
+                'stale label must be cleared on the OFF skip path (save occurred while ON)'
 
 
 class TestGeneralSaveNotGated:

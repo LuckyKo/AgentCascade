@@ -604,8 +604,13 @@ class ToolDispatcher:
             # on every skip path. tolerate_failure=False preserves today's raise-on-hard-failure
             # semantics; only the restore target and label handling change.
             logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
+            # respect_toggle=False: this is a NORMAL-delegation return (parent → sync child → parent),
+            # NOT a system-agent yield. Its warm-cache restore must ALWAYS run regardless of the
+            # State KV Save/Restore UI toggle — that toggle only gates Security/Compressor yields.
+            # The save side (_save_parent_state_before_delegation) is already ungated, so gating
+            # only this restore would drop a saved-but-never-restored state and force reprocess.
             self.engine.reacquire_after_slot_yield(
-                caller_slot_holder, caller_name, 'sync child', tolerate_failure=False)
+                caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False)
             logger.debug(f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{caller_name}'. "
                          f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
 

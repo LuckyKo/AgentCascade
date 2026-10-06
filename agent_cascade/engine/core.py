@@ -2096,7 +2096,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return False
 
     def reacquire_after_slot_yield(self, instance: AgentInstance, inst_name: str, context: str = '',
-                                   *, tolerate_failure: bool = False) -> bool:
+                                   *, tolerate_failure: bool = False, respect_toggle: bool = True) -> bool:
         """Re-acquire the caller's slot after a system-agent yield and restore its KV.
 
         Shared re-acquire + restore for every ``yield_caller_slot`` production caller
@@ -2125,6 +2125,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 preserving Security's sanctioned raise-on-hard-failure behavior. When True,
                 the failure is swallowed (label cleared, False returned) for callers that are
                 mid-turn and must continue (compression).
+            respect_toggle: When True (default) the KV restore honors the ``state_kv_save_enabled``
+                UI toggle — OFF skips the restore. System-agent yield callers (Security / Compressor)
+                keep this default. The sync-child NORMAL-delegation path passes False so its warm-cache
+                restore ALWAYS runs regardless of the toggle (the save side is already ungated there, so
+                gating only the restore would drop a saved-but-never-restored state and force reprocess).
 
         Returns:
             True if the slot was re-acquired (restored or not), else False.
@@ -2149,7 +2154,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             self._clear_orphaned_state_label(instance, inst_name)
             return False
 
-        if not self._get_pool_setting('state_kv_save_enabled', True):
+        # The sync-child NORMAL-delegation path passes respect_toggle=False so its warm-cache
+        # restore always runs (its save side is already ungated). System-agent yields keep the
+        # default True and honor the UI toggle.
+        if respect_toggle and not self._get_pool_setting('state_kv_save_enabled', True):
             logger.debug('[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
                          inst_name, context or 'slot-yield')
             # Clear any stale label (save may have occurred before toggle was turned OFF).
