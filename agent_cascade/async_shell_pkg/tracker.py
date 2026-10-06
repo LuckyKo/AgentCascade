@@ -81,6 +81,14 @@ def _dead_shell_message(agent_name: str, tool_id: int) -> str:
 _ATRACKERS: 'list' = []
 _ATEXIT_REGISTERED = [False]  # mutable guard so __init__ flips it without `global`
 
+# BUG_0061: bounds for the completed-run store. A late __wait/__status after the live
+# task is reaped should still return the buffered output, but we must not retain every
+# run forever — cap entries per agent and drop records older than the TTL. 5 minutes is
+# comfortably longer than the "agent busy with other tool calls" window that motivated
+# this bug, while the size cap keeps memory flat for chatty agents.
+COMPLETED_RUNS_MAX_ENTRIES = 64
+COMPLETED_RUNS_TTL = 300.0  # seconds
+
 
 def _atexit_kill_all_trackers():
     """Single process-wide atexit hook: kill live tasks in every tracker instance."""
@@ -112,6 +120,10 @@ class AsyncShellTracker:
         """
         self._id_counters: Dict[str, int] = {}
         self._tasks: Dict[str, Dict[int, AsyncShellTask]] = {}
+        # BUG_0061: short-lived record of recently-completed runs so a late __wait /
+        # __status (after the live task was reaped from _tasks) can still return the
+        # buffered output instead of "No running shell found". Bounded by size + TTL.
+        self._completed_runs: Dict[str, Dict[int, dict]] = {}
         self._lock = threading.Lock()
         self._pool = pool
 
@@ -184,6 +196,55 @@ class AsyncShellTracker:
         """Get a task by agent name and tool_id (thread-safe read)."""
         with self._lock:
             return self._tasks.get(agent_name, {}).get(tool_id)
+
+    # ────────────────────────────────────────────────────────────────
+    def _record_completed_run(self, agent_name: str, tool_id: int, task: 'AsyncShellTask') -> None:
+        """Snapshot a just-finished task into the bounded completed-run store (BUG_0061).
+
+        Called from the tracking thread's finally block right before the task is popped
+        from _tasks. Captures enough to answer a late __wait/__status: exit code, elapsed
+        seconds, and the full buffered stdout+stderr text. The store is capped at
+        COMPLETED_RUNS_MAX_ENTRIES per agent and pruned by COMPLETED_RUNS_TTL so it can
+        never grow unbounded even if agents churn through many short commands.
+        """
+        if task is None:
+            return
+        try:
+            with task._lock:
+                rc = task.return_code
+                elapsed = time.time() - task.start_time
+                combined = list(task.stdout_lines) + list(task.stderr_lines)
+            output = '\n'.join(l for l in combined if l.strip()) or None
+            record = {
+                'return_code': rc,
+                'elapsed': elapsed,
+                'output': output,
+                'completed_at': time.time(),
+            }
+        except Exception as e:
+            logger.debug(f'[AsyncShell] _record_completed_run failed for {agent_name} '
+                         f'tool_id={tool_id}: {e}')
+            return
+        with self._lock:
+            agent_runs = self._completed_runs.setdefault(agent_name, {})
+            agent_runs[tool_id] = record
+            # Prune by TTL first (cheap), then enforce the size cap by dropping oldest.
+            now = time.time()
+            stale = [tid for tid, r in agent_runs.items()
+                     if now - r.get('completed_at', 0) > COMPLETED_RUNS_TTL]
+            for tid in stale:
+                agent_runs.pop(tid, None)
+            if len(agent_runs) > COMPLETED_RUNS_MAX_ENTRIES:
+                # Drop the oldest entries beyond the cap.
+                overflow = len(agent_runs) - COMPLETED_RUNS_MAX_ENTRIES
+                oldest = sorted(agent_runs.items(), key=lambda kv: kv[1].get('completed_at', 0))
+                for tid, _ in oldest[:overflow]:
+                    agent_runs.pop(tid, None)
+
+    def _get_completed_run(self, agent_name: str, tool_id: int) -> Optional[dict]:
+        """Return the completed-run record for a reaped task, or None (thread-safe read)."""
+        with self._lock:
+            return self._completed_runs.get(agent_name, {}).get(tool_id)
 
     # ────────────────────────────────────────────────────────────────
     def _active_count(self, agent_name: str) -> int:
@@ -870,6 +931,10 @@ class AsyncShellTracker:
             if t_err is not None and t_err.is_alive():
                 t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
 
+            # BUG_0061: snapshot the finished run into the completed-run store BEFORE it
+            # is reaped from _tasks, so a late __wait/__status can still return output.
+            self._record_completed_run(agent_name, tool_id, task)
+
             # Cleanup from _tasks dict
             with self._lock:
                 if agent_name in self._tasks:
@@ -1494,6 +1559,20 @@ class AsyncShellTracker:
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
+            # BUG_0061: the live task may already have been reaped after completion.
+            # Fall back to the bounded completed-run record so __status on a just-finished
+            # shell returns its buffered output instead of the terminal "No running shell"
+            # message. Only when there is no completed record either do we report dead.
+            run = self._get_completed_run(agent_name, tool_id)
+            if run is not None:
+                rc = run.get('return_code')
+                elapsed = run.get('elapsed', 0.0) or 0.0
+                output = run.get('output')
+                msg = (f"⟨shell_cmd status⟩ Tool ID: {tool_id}\n"
+                       f"Process already completed (exit code {rc}, {elapsed:.0f}s).")
+                if output:
+                    msg += f"\n\nOutput:\n{output}"
+                return msg
             return _dead_shell_message(agent_name, tool_id)
 
         # Read status fields under lock

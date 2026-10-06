@@ -677,6 +677,21 @@ class ShellCmd(BaseTool):
             task = tracker._get_task(agent_name, tool_id)
 
             if task is None:
+                # BUG_0061: the live task may already have been reaped after completion.
+                # Fall back to the bounded completed-run record so a late __wait returns
+                # the buffered output instead of dropping it. Only when the id is genuinely
+                # unknown (no live task AND no completed record) do we report not-found —
+                # and we keep the "No running shell found" substring for that terminal case.
+                run = tracker._get_completed_run(agent_name, tool_id)
+                if run is not None:
+                    rc = run.get('return_code')
+                    elapsed = run.get('elapsed', 0.0) or 0.0
+                    output = run.get('output')
+                    body = (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
+                            f"(exit code {rc}, elapsed {elapsed:.0f}s).")
+                    if output:
+                        body += f"\n\nOutput:\n{output}"
+                    return ShellCmd._truncate_shell_message(body, agent_name, self.agent_pool)
                 # RC4 softening: a follow-up __wait can race task cleanup right before the
                 # completion USER message lands; keep the "No running shell found" substring.
                 return (f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found "

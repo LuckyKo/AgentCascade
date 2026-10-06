@@ -600,6 +600,69 @@ class TestWaitCommand:
 
 
 # ============================================================================
+# BUG_0061: late __wait / __status after the live task was reaped must still
+# return the buffered output via the bounded completed-run store.
+# ============================================================================
+
+
+class TestCompletedRunFallback:
+
+    def _recorded_tracker(self):
+        """A tracker with a completed run recorded (live task already gone)."""
+        tracker = AsyncShellTracker(pool=None)
+        # Simulate the finally-block snapshot: record then remove from _tasks.
+        task = AsyncShellTask(tool_id=7,
+                              agent_name='test_agent',
+                              command='python -m pytest tests/ -q',
+                              pid=13696,
+                              completed=True,
+                              return_code=0,
+                              stdout_lines=['20 passed, 4 warnings in 5.87s'])
+        tracker._record_completed_run('test_agent', 7, task)
+        # Ensure no live task remains (the reaped state the bug describes).
+        assert tracker._get_task('test_agent', 7) is None
+        return tracker
+
+    def test_wait_returns_output_for_reaped_completed_run(self, shell_cmd_tool):
+        """__wait on a just-finished shell returns its buffered output, not 'No running shell'."""
+        tracker = self._recorded_tracker()
+        _make_tool_with_tracker(shell_cmd_tool, tracker)
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 7, "execution_mode": "async"}')
+        assert 'No running shell found' not in result, f"output was dropped: {result!r}"
+        assert 'Process already completed' in result
+        assert 'Tool ID: 7' in result
+        assert '20 passed, 4 warnings in 5.87s' in result, f"buffered output missing: {result!r}"
+
+    def test_status_returns_output_for_reaped_completed_run(self):
+        """__status on a just-finished shell returns its buffered output too."""
+        tracker = self._recorded_tracker()
+        result = tracker.get_status('test_agent', 7)
+        assert 'No running shell found' not in (result or ''), f"output was dropped: {result!r}"
+        assert 'Process already completed' in result
+        assert '20 passed, 4 warnings in 5.87s' in result
+
+    def test_wait_still_reports_unknown_when_no_record(self, shell_cmd_tool):
+        """A genuinely unknown tool_id (no live task AND no record) still reports not-found."""
+        tracker = AsyncShellTracker(pool=None)
+        _make_tool_with_tracker(shell_cmd_tool, tracker)
+        result = shell_cmd_tool.call('{"command": "__wait", "tool_id": 999, "execution_mode": "async"}')
+        assert 'No running shell found' in result
+
+    def test_completed_run_store_is_bounded(self):
+        """The store prunes by the size cap so it cannot grow unbounded."""
+        from agent_cascade.async_shell_pkg.tracker import COMPLETED_RUNS_MAX_ENTRIES
+        tracker = AsyncShellTracker(pool=None)
+        for tid in range(COMPLETED_RUNS_MAX_ENTRIES + 10):
+            task = AsyncShellTask(tool_id=tid, agent_name='test_agent', command='echo x',
+                                  pid=1, completed=True, return_code=0, stdout_lines=['x'])
+            tracker._record_completed_run('test_agent', tid, task)
+        with tracker._lock:
+            count = len(tracker._completed_runs.get('test_agent', {}))
+        assert count <= COMPLETED_RUNS_MAX_ENTRIES, \
+            f"store exceeded cap: {count} > {COMPLETED_RUNS_MAX_ENTRIES}"
+
+
+# ============================================================================
 # Justification rules
 # ============================================================================
 
