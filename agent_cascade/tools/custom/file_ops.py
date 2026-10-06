@@ -1073,6 +1073,20 @@ class EditFile(BaseTool, PathResolutionMixin):
         if not path:
             return "ERROR: Missing 'path'."
 
+        # Guard against tool-XML tag injection: a mangled payload that carries the tool's
+        # own closing-tag / justification delimiters would otherwise be written verbatim
+        # into the target file (silent corruption, surfacing far from the cause). Reject it
+        # loudly instead. Legitimate edits never contain these exact fragments.
+        _FORBIDDEN_FRAGMENTS = ('</new_content>', '</old_content>',
+                                '</new_string>', '</old_string>', '<justification>')
+        for _field_name, _val in (('old_content', old_content), ('new_content', new_content)):
+            if isinstance(_val, str):
+                for _frag in _FORBIDDEN_FRAGMENTS:
+                    if _frag in _val:
+                        return (f"ERROR: {_field_name} contains the forbidden fragment "
+                                f"{_frag!r}, which looks like tool-XML markup that leaked into "
+                                f"the payload. The edit was NOT applied — re-issue it with clean content.")
+
         if match_mode == 'delete_and_insert':
             if new_content is None:
                 new_content = ''

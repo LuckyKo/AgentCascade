@@ -109,3 +109,41 @@ def test_write_file_nonjson_fallback_still_strips_wrapper():
     # so only the bare inner content is forwarded. This is pre-existing behavior —
     # the fix does not touch this path; we just pin it as a regression guard.
     assert om.write[1] == 'print(1)', f"fallback strip changed: {om.write[1]!r}"
+
+
+def test_edit_file_rejects_tool_xml_tag_injection():
+    """A payload carrying the tool's own closing-tag/justification fragments must be
+    rejected (not written to disk). Regression for silent source corruption where a
+    mangled edit_file payload leaked `</new_string>` etc. into the target file."""
+    from agent_cascade.tools.custom.file_ops import EditFile
+    om = _RecordingOM()
+    t = _tool(EditFile, om)
+    # The exact fragment observed in the field: a closing tag glued to code content.
+    bad_new = '    }, models_dir)</new_string>'
+    result = t.call(json.dumps({'path': 'doc.py', 'old_content': 'OLD',
+                                'new_content': bad_new, 'match_mode': 'exact'}))
+    assert om.edit is None, f"forbidden payload was forwarded to the filesystem: {om.edit!r}"
+    assert 'ERROR' in result and '</new_string>' in result
+
+
+def test_edit_file_rejects_justification_fragment_in_old_content():
+    """The guard covers old_content too (not just new_content)."""
+    from agent_cascade.tools.custom.file_ops import EditFile
+    om = _RecordingOM()
+    t = _tool(EditFile, om)
+    result = t.call(json.dumps({'path': 'doc.py', 'old_content': 'x <justification>y',
+                                'new_content': 'NEW', 'match_mode': 'exact'}))
+    assert om.edit is None, 'forbidden payload was forwarded to the filesystem'
+    assert 'ERROR' in result and '<justification>' in result
+
+
+def test_edit_file_allows_clean_payload():
+    """A legitimate edit whose content has no forbidden fragment must pass through
+    untouched — the guard must not be a false positive on normal code."""
+    from agent_cascade.tools.custom.file_ops import EditFile
+    om = _RecordingOM()
+    t = _tool(EditFile, om)
+    clean = 'def f():\n    return compute(a)  # ordinary line\n'
+    t.call(json.dumps({'path': 'doc.py', 'old_content': 'OLD', 'new_content': clean}))
+    assert om.edit is not None, 'a clean payload was wrongly rejected'
+    assert om.edit[2] == clean
