@@ -280,11 +280,11 @@ class TestReacquireGate:
         assert AUTOLOADER_X.rstrip('/') in loads[0], f"restore must target the held endpoint: {loads[0]}"
 
 
-class TestGeneralSaveGateUnchanged:
-    """Regression: tool_dispatcher.py's general pre-delegation save gate is untouched — it
-    still reads the same pool setting with the True default."""
+class TestGeneralSaveNotGated:
+    """Regression: tool_dispatcher.py's general pre-delegation save is NOT gated by the
+    State KV toggle — normal agent save/restore always runs regardless of toggle state."""
 
-    def test_guard_line_still_reads_setting(self):
+    def test_general_save_not_gated_by_toggle(self):
         src = Path('agent_cascade/tool_dispatcher.py').read_text(encoding='utf-8')
-        assert "_get_pool_setting('state_kv_save_enabled', True)" in src, \
-            'tool_dispatcher general-save gate must still read state_kv_save_enabled (default True)'
+        assert "_get_pool_setting('state_kv_save_enabled'" not in src, \
+            'tool_dispatcher general-save must NOT be gated by state_kv_save_enabled'
