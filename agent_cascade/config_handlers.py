@@ -63,6 +63,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'endpoint_max_retries',
     'retry_base_delay',
     'retry_max_delay',
+    # Slot pool dead-man's switch (activity window; hard cap is derived as 6x)
+    'slot_queue_timeout_seconds',
     # Code interpreter
     'ci_execution_timeout',
     'ci_watchdog_timeout',
@@ -558,6 +560,25 @@ def _handle_retry_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], agents: 
         if val < 1 or val > 6:
             raise ValueError(f"retry_max_attempts must be in [1, 6], got {val}")
         agent_pool.settings.retry_max_attempts = val
+
+
+@register_config_handler('slot_queue_timeout_seconds')
+def _handle_slot_queue_timeout_seconds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the slot-queue dead-man's-switch activity window. Range [30, 7200].
+
+    This is the WINDOW, not a total wait budget: it resets on every holder sign of life,
+    so it is safe to raise. The hard ceiling (6x) is derived at acquire time
+    (pool/slots.py::_queue_limits) and is deliberately not configurable.
+
+    NOTE: the ValueError below is swallowed and downgraded to a warning by the dispatch
+    loop, so the UI would silently appear to accept an out-of-range value. That is why the
+    range check assigns nothing before raising — pool.settings keeps its previous value.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('slot_queue_timeout_seconds', 300))
+        if val < 30 or val > 7200:
+            raise ValueError(f"slot_queue_timeout_seconds must be in [30, 7200], got {val}")
+        agent_pool.settings.slot_queue_timeout_seconds = val
 
 
 @register_config_handler('endpoint_max_retries')

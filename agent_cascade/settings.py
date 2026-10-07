@@ -248,6 +248,15 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_SLOT_
 # re-enters FIFO at tail (unbounded).
 REACQUIRE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_REACQUIRE_TIMEOUT', 30.0))
 
+# Bounded TAIL re-acquire after a post-yield fast-path miss (plan §3 A4). Deliberately a
+# SEPARATE, SHORT, LITERAL bound: this call does NOT pass `pool=`, so the holder-activity
+# resolver is absent and the dead-man's-switch window can never reset here. Without an
+# explicit cap the wait would inherit the user's window and then the derived 6x hard cap —
+# i.e. a Security check could hold its worker for up to 6x the user's setting. Passed as
+# BOTH timeout and hard_cap, which makes the sliding logic inert (the two deadlines
+# coincide and the cap fires first) — a plain fixed wait.
+POST_YIELD_REACQUIRE_TIMEOUT: float = 120.0
+
 # Per-endpoint reasoning effort values (UI pulldown → LLM API `reasoning_effort`).
 # "none" means the param is NOT sent (model uses default behavior).
 # "xhigh" maps to "high" at the API level (future-proofing for extended levels).
@@ -290,7 +299,7 @@ ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_FAIL
 # backoff is misconfigured or an endpoint never recovers. Set to 0 to disable.
 LLM_CALL_DEADLINE_SECONDS: int = int(
     os.getenv('AGENT_CASCADE_LLM_CALL_DEADLINE_SECONDS',
-              900))  # Wall-clock deadline (seconds) for one LLM call, all retries included
+              2400))  # Wall-clock deadline (seconds) for one LLM call, all retries included
 
 # Phase 1: Fix D — lightweight pre-allocation API sanity probe.
 # Before the router allocates an endpoint to a real call, it checks reachability

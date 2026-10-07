@@ -911,6 +911,15 @@ class PoolSettings:
     retry_base_delay: float = 1.0  # Initial backoff delay in seconds [≥0.1]
     retry_max_delay: float = 8.0  # Maximum backoff cap in seconds [≥1.0]
 
+    # Slot pool queueing (dead-man's switch)
+    # This is the ACTIVITY WINDOW, not a throughput cap: it is reset every time the slot
+    # holder shows a sign of life (new turn or LLM output), so a healthy long-running
+    # holder never kills its waiters. It only fires on genuine silence, and carries the
+    # holder's name + quiet duration so the failure is diagnosable. The hard ceiling
+    # (6 × this value) is DERIVED at acquire time in pool/slots.py::_queue_limits — never
+    # a second knob. Read live at acquire time; not cached at import.
+    slot_queue_timeout_seconds: int = 300  # Activity window in seconds [30, 7200]
+
     # Code interpreter settings (Feature: CI session sharing)
     ci_execution_timeout: int = CI_EXECUTION_TIMEOUT  # Per-call code execution timeout (seconds)
     ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT  # Kernel inactivity watchdog timeout (seconds)

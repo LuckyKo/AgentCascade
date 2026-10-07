@@ -208,7 +208,12 @@ class AsyncToolRegistry:
                     raise AgentTerminatedError(entry.child_instance_name)
             entry.result = entry.tool_call()
         except Exception as e:
-            entry.error = str(e)
+            # C-fix-3 (plan §3 C): format_crash walks to the ROOT cause, so a slot-queue
+            # timeout that the scheduler re-wrapped still carries the holder name and the
+            # quiet duration into the parent's [Background Tool Error]. Bare str(e) would
+            # deliver only the outer wrap message — a failure the parent cannot act on.
+            from agent_cascade.error_reporting import format_crash
+            entry.error = format_crash(e)
         finally:
             # Mark completed AND decide the message WHILE holding lock so the completed-flag
             # transition and the abandoned check are atomic (no other thread can observe a

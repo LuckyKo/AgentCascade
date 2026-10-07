@@ -1131,7 +1131,16 @@ class LLMCallMixin:
                             instance._streaming_responses = []
                         break
 
-                    if retry_count > _max_attempts:
+                    if retry_count >= _max_attempts:
+                        # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
+                        # retry_count for EVERY non-loop exception, so after _max_attempts
+                        # failures retry_count == _max_attempts and the `while
+                        # retry_count < _max_attempts` loop guard exits the loop — `>` was
+                        # therefore UNREACHABLE, and control fell through to the
+                        # `[SYSTEM ERROR: Empty LLM response]` branch with last_output=None.
+                        # Any plain-raising exception that exhausted the retry budget
+                        # (slot timeouts included) produced a useless message. `>=` makes
+                        # this informative terminal branch actually reachable.
                         # Telemetry: record LLM call end for exhausted retries (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         error_msg = str(e).split('\n')[0] if e else 'Unknown error'

@@ -114,6 +114,7 @@ class EndpointScheduler:
         agent_class: str = 'unknown',
         pool=None,
         timeout: Optional[float] = None,
+        hard_cap: Optional[float] = None,
         instance_resolver: Optional[Callable[[str], Any]] = None,
         **kwargs,
     ) -> Optional[Callable[[], None]]:
@@ -129,7 +130,13 @@ class EndpointScheduler:
             instance_name: Name of the agent instance acquiring the slot (for tracking)
             agent_class: Class of the agent instance (for tracking)
             pool: Optional AgentPool reference for termination checks during blocking acquire
-            timeout: Optional override for wait timeout in seconds
+            timeout: Optional override for wait timeout in seconds. This is the
+                dead-man's-switch ACTIVITY WINDOW: it is reset every time the slot holder
+                shows a sign of life, so it alone cannot bound the wait.
+            hard_cap: Optional override for the unconditional wall-clock ceiling
+                (plan §3 A3). Fires even if holder-activity detection is broken. Pass
+                ``hard_cap == timeout`` for a plain fixed wait. Defaults to None →
+                SlotPool's SLOT_QUEUE_HARD_CAP_DEFAULT.
             instance_resolver: Optional name→AgentInstance resolver forwarded to
                 SlotPool.acquire for the FIFO head-stall alarm context (plan §3.3).
                 Default None → the alarm degrades to a context-free line.
@@ -175,6 +182,7 @@ class EndpointScheduler:
                 instance_name=instance_name,
                 agent_class=agent_class,
                 timeout=effective_timeout,
+                hard_cap=hard_cap,
                 pool=pool,
                 instance_resolver=instance_resolver,
             )
@@ -218,6 +226,15 @@ class EndpointScheduler:
             raise TimeoutError(
                 f"Timed out after {effective_timeout}s waiting for endpoint slot on {api_base}. "
                 f"Current active count: {len(sched_pool._running)}, max allowed: {sched_pool.capacity}{holder_info}"
+                # B-fix-3 (plan §3 B): the dead-man's-switch reason (holder name + how long
+                # it was quiet) lives on the inner SlotQueueTimeout, i.e. on __cause__. The
+                # consumer that matters — llm_call.py's fatal branch — builds its message
+                # from `str(e).split('\n')[0]` of THIS outer exception, so without inlining
+                # the root cause the reason dies here and the user sees a clear message
+                # that still does not say WHY it timed out. format_crash() output is
+                # unchanged: it walks to the root cause through this same chain.
+                + (f" (root cause: {type(e.__cause__).__name__}: {e.__cause__})"
+                   if getattr(e, '__cause__', None) is not None else '')
             ) from e
 
         except Exception as e:

@@ -192,6 +192,9 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
   { id: '#setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
   { id: '#setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
+      // Slot pool dead-man's switch — ONE knob. The hard cap is derived as 6x this value
+      // server-side (pool/slots.py::_queue_limits); it is deliberately not a second setting.
+      { id: '#setting-slot-queue-timeout', prop: 'value', key: 'slot_queue_timeout_seconds', localKey: 'slot-queue-timeout' },
   // Cache pool
   { id: '#setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
   { id: '#setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
@@ -1221,6 +1224,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
   // Save Allow Parallel Agents toggle state
   if ($('#setting-allow-parallel')) s['allow_parallel_agents'] = $('#setting-allow-parallel').checked;
+  // Save Slot Queue Timeout (seconds)
+  if ($('#setting-slot-queue-timeout')) s['slot_queue_timeout_seconds'] = parseInt($('#setting-slot-queue-timeout').value, 10) || 300;
   // Save State KV Save/Restore toggle state
   if ($('#setting-state-kv-save')) s['state_kv_save_enabled'] = $('#setting-state-kv-save').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
@@ -1415,6 +1420,8 @@ function loadSettings() {
     if (_present(s['enable_agent_budgeting'])) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
     // Restore Allow Parallel Agents toggle state
     if (_present(s['allow_parallel_agents'])) $('#setting-allow-parallel').checked = s['allow_parallel_agents'];
+    // Restore Slot Queue Timeout (seconds)
+    if (_present(s['slot_queue_timeout_seconds'])) $('#setting-slot-queue-timeout').value = s['slot_queue_timeout_seconds'];
     // Restore State KV Save/Restore toggle state
     if (_present(s['state_kv_save_enabled'])) $('#setting-state-kv-save').checked = s['state_kv_save_enabled'];
     // Restore Log API POST Dump toggle (use consistent key; support old key for migration)
@@ -5846,6 +5853,11 @@ function getGenerateCfg() {
   if ($('#setting-endpoint-max-retries')) cfg.endpoint_max_retries = parseInt($('#setting-endpoint-max-retries').value) || 1;
   if ($('#setting-retry-base-delay')) cfg.retry_base_delay = parseFloat($('#setting-retry-base-delay').value) || 1.0;
   if ($('#setting-retry-max-delay')) cfg.retry_max_delay = parseFloat($('#setting-retry-max-delay').value) || 8.0;
+  // Slot pool dead-man's switch activity window. Clamp to the [30, 7200] range the
+  // config handler enforces, so the UI can never post a value the server rejects.
+  if ($('#setting-slot-queue-timeout')) {
+    cfg.slot_queue_timeout_seconds = Math.min(7200, Math.max(30, parseInt($('#setting-slot-queue-timeout').value, 10) || 300));
+  }
 
   if ($('#setting-mcp-enabled') && !$('#setting-mcp-enabled').checked) {
     // MCP is disabled

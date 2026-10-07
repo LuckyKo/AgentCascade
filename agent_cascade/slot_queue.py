@@ -55,6 +55,13 @@ if TYPE_CHECKING:
 QUEUE_WAIT_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_SLOT_QUEUE_TIMEOUT', 300))
 """Default timeout for waiting in the slot queue. Configurable via AGENT_CASCADE_SLOT_QUEUE_TIMEOUT."""
 
+# Dead-man's switch: unconditional wall-clock ceiling for a queued waiter. FALLBACK ONLY —
+# the live value is derived as `max(6 × window, 60)` in `pool/slots.py::_queue_limits` from
+# `PoolSettings.slot_queue_timeout_seconds`. This constant is what that helper falls back to
+# when no settings object is reachable, and what tests that patch QUEUE_WAIT_TIMEOUT expect.
+SLOT_QUEUE_HARD_CAP_DEFAULT: float = 1800.0
+"""Fallback hard cap (6 × 300). Not user-facing — the real cap is always derived from the window."""
+
 # ── FIFO head-stall alarm thresholds (plan §3.3) ──────────────────────────────
 # Read by NAME at use time inside SlotPool.acquire / _holder_activity_context —
 # do NOT hoist into function defaults or copy elsewhere: that would freeze the
@@ -81,12 +88,23 @@ class SlotQueueTimeout(TimeoutError):
     Carries diagnostic information about the ticket and pool state at time of timeout.
     Subclasses TimeoutError so callers (e.g., EndpointScheduler.acquire) can catch it
     with a plain `except TimeoutError` and wrap it in a holder-aware message.
+
+    Args:
+        ticket: the queue ticket this waiter owned.
+        message: fully-formed message override (bypasses the default format entirely).
+        reason: optional human-readable WHY (plan §3 A3-bis) — e.g. the dead-man's
+            switch's "holder 'X' made no progress for 300s". Appended to the default
+            message so the agent/caller can tell the user what actually went wrong.
+            Without it a timed-out waiter is indistinguishable from any other timeout,
+            which is the root of the `Empty LLM response` incident.
     """
 
-    def __init__(self, ticket: 'QueueTicket', message: Optional[str] = None):
+    def __init__(self, ticket: 'QueueTicket', message: Optional[str] = None, reason: str = ''):
         self.ticket = ticket
-        super().__init__(message or f"Slot queue timeout for ticket {ticket.ticket_id} "
-                         f"(agent={ticket.agent_name}, instance={ticket.instance_name})")
+        self.reason = reason
+        base = message or f"Slot queue timeout for ticket {ticket.ticket_id} " \
+                         f"(agent={ticket.agent_name}, instance={ticket.instance_name})"
+        super().__init__(f"{base} — {reason}" if reason else base)
 
 
 class SlotCancelled(Exception):
@@ -185,6 +203,7 @@ class SlotPool:
                 agent_class: str,
                 timeout: Optional[float] = None,
                 pool=None,
+                hard_cap: Optional[float] = None,
                 **kwargs) -> Callable[[], None]:
         """Acquire a slot permit from this pool, waiting in FIFO order if necessary.
 
@@ -215,12 +234,22 @@ class SlotPool:
                 resolver; when omitted, it falls back to an ``instance_resolver``
                 kwarg if one was passed, and finally degrades to a context-free
                 line (the alarm must NEVER be gated on the resolver).
+            hard_cap: Unconditional wall-clock ceiling for the dead-man's switch
+                (plan §3 A3). `timeout` is the ACTIVITY WINDOW — it slides forward
+                every time the holder shows a sign of life — so it alone cannot bound
+                the wait when holder-activity detection is broken. `hard_cap` closes
+                that hole. Callers that want a plain fixed wait pass `hard_cap ==
+                timeout` (the sliding logic then becomes inert because both deadlines
+                coincide and the cap fires first). Defaults to
+                SLOT_QUEUE_HARD_CAP_DEFAULT when omitted.
         """
         if self.capacity == float('inf'):
             return lambda: None
 
         if timeout is None:
             timeout = QUEUE_WAIT_TIMEOUT
+        if hard_cap is None:
+            hard_cap = SLOT_QUEUE_HARD_CAP_DEFAULT
 
         # Holder-context resolver for the head-stall alarm (plan §3.3 option a):
         # an explicit `instance_resolver` kwarg always wins; only fall back to the
@@ -325,7 +354,27 @@ class SlotPool:
                                    f"running={len(self._running)}/{self.capacity}, "
                                    f"holders={[h.instance_name for h in self._running.values()]}, timeout={timeout:.0f}s)")
 
-                    deadline = ticket.deadline
+                    # ── DEAD-MAN'S SWITCH state (plan §3 A3) ─────────────────────────
+                    # `ticket.deadline` (the fixed wall-clock deadline) is NO LONGER
+                    # consumed by the wait loop — a healthy long-running holder is
+                    # indistinguishable from a wedged one by elapsed time alone, and
+                    # killing a waiter for the holder's legitimate work was the incident.
+                    # Instead the wait is bounded by TWO sliding quantities:
+                    #   _window_deadline — slides forward on every holder sign of life;
+                    #                      fires with a REAL reason (who/why/how long).
+                    #   _hard_cap_deadline — never slides; the safety net for the case
+                    #                      where activity detection is completely broken.
+                    # Plain locals, like the head-stall locals below — the lock-free
+                    # resolution phase writes them safely (§3.3.1 rationale).
+                    _hard_cap_deadline = ticket.created_at + hard_cap
+                    _window_deadline = time.monotonic() + timeout
+                    # Baseline for the "how long has it been quiet" number in the fail-fast
+                    # reason. NOT the same as _last_progress_ts: until the first activity is
+                    # observed that is 0.0, and reporting `now_mono - 0.0` would print the raw
+                    # monotonic clock (e.g. "no progress for 4829131s") as the quiet duration.
+                    # Tracks the start of the CURRENT window, so it advances on every reset.
+                    _window_started_at = time.monotonic()
+                    _last_progress_ts = 0.0
                     last_wait_warn = ticket.created_at
                     # FIFO head-stall escalation state — plain locals, NOT pool state (§3.3.1):
                     # the lock-free resolution phase writes them safely, and this keeps the
@@ -385,12 +434,53 @@ class SlotPool:
                                            f"holders={[h.instance_name for h in self._running.values()]})")
                             last_wait_warn = now_mono
 
-                        remaining = deadline - now_mono
-
-                        if remaining <= 0:
+                        # ── DEAD-MAN'S SWITCH (sliding window + hard cap) (plan §3 A3) ─────
+                        # Runs on the existing ~1s tick. The activity read MUST happen with
+                        # pool._cond RELEASED, for the same lock-order reason as the release()
+                        # above — see _holder_activity_context's docstring. ORDER IS LOAD-BEARING:
+                        #   ① hard cap  ② reset  ③ fail-fast
+                        # Reversing ①/② lets a pathologically active holder reset forever and
+                        # makes the cap unreachable (defeating its entire purpose); reversing
+                        # ②/③ kills a healthy holder on the very tick its activity first
+                        # becomes visible.
+                        if now_mono >= _hard_cap_deadline:                       # ① HARD CAP first
+                            _reason = (f"slot queue hard cap {hard_cap:.0f}s reached waiting for "
+                                       f"'{self.key}' (position={len(self._waiters)}, "
+                                       f"holders={[h.instance_name for h in self._running.values()]})")
                             _remove_ticket(self, ticket)
-                            _log_acquire_timeout(self, ticket)
-                            raise SlotQueueTimeout(ticket)
+                            _log_acquire_timeout(self, ticket, reason=_reason)
+                            raise SlotQueueTimeout(ticket, reason=_reason)
+
+                        self._cond.release()      # legal: _cond is RLock-backed, depth 1 here
+                        ctx: Dict[str, Any] = {}
+                        progress_ts = 0.0
+                        try:
+                            ctx = _holder_activity_context(self, now_mono, resolver=instance_resolver)
+                            progress_ts = ctx.get('progress_ts', 0.0)   # 0.0 when nothing resolved
+                        except Exception:
+                            ctx, progress_ts = {}, 0.0      # degrade, never break the wait
+                        finally:
+                            self._cond.acquire()          # MUST run on every path
+
+                        # ② RESET — holder advanced since we last looked ⇒ healthy ⇒ extend.
+                        if progress_ts > 0 and progress_ts > _last_progress_ts:
+                            _last_progress_ts = progress_ts
+                            _window_deadline = now_mono + timeout
+                            _window_started_at = now_mono
+
+                        # ③ FAIL FAST — window elapsed with no new activity. Checked AFTER the
+                        #    reset so a healthy holder can never trip it on the same tick its
+                        #    activity first becomes visible.
+                        if now_mono >= _window_deadline:
+                            _reason = (f"holder '{ctx.get('holder_name', '?')}' on '{self.key}' made "
+                                       f"no progress for {now_mono - _window_started_at:.0f}s "
+                                       f"(state={ctx.get('holder_state', '?')}, "
+                                       f"streaming={str(ctx.get('streaming', False)).lower()})")
+                            _remove_ticket(self, ticket)
+                            _log_acquire_timeout(self, ticket, reason=_reason)
+                            raise SlotQueueTimeout(ticket, reason=_reason)
+
+                        remaining = min(_window_deadline, _hard_cap_deadline) - now_mono
 
                         # Wait until predicate is true: capacity free + we are head.
                         granted = self._cond.wait_for(lambda:
@@ -818,7 +908,7 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
     supposed to be releasing permits (lock-order inversion, plan §3.3.1).
 
     Returns a dict with: holder_name, holder_class, holder_state, held_s,
-    last_activity_age_s, llm_active, streaming, context_available.
+    last_activity_age_s, llm_active, streaming, context_available, progress_ts.
 
     ``streaming`` is the ONLY suppression predicate (§3.2.1): the holder stamped
     an LLM call start or a stream chunk within SLOT_HEAD_STALL_ACTIVE_S. Read by
@@ -833,6 +923,7 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
         'llm_active': False,
         'streaming': False,
         'context_available': resolver is not None,
+        'progress_ts': 0.0,   # dead-man's switch input (plan §3 A0) — 0.0 until resolved
     }
     holders = list(pool._running.values())
     if not holders:
@@ -860,6 +951,26 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
         # zero output ages out of this on purpose — see plan §3.2.1.
         ctx['streaming'] = (ctx['llm_active'] and last_activity > 0 and
                             (now_mono - last_activity) <= SLOT_HEAD_STALL_ACTIVE_S)
+
+        # ── ADDITIVE (plan §3 A0) — dead-man's switch input. ──────────────────────
+        # NEW key, read ONLY by the window logic. It is deliberately a RAW timestamp,
+        # not an age, because the switch compares it against the previously observed
+        # value to decide whether the holder advanced.
+        #
+        # DO NOT fold this `max()` into the `last_activity` local above. That local
+        # feeds BOTH `last_activity_age_s` AND `streaming`, and `streaming` is the sole
+        # suppression predicate for the head-stall ALARM in acquire(). Widening it
+        # would let a holder suppress its own alarm — and there are ZERO test
+        # assertions on `streaming` anywhere in the repo, so the regression would ship
+        # silently. The additive key has no such coupling: it cannot perturb the ALARM.
+        #
+        # NOTE (known limitation, deliberately not fixed here): `holders[0]` above picks
+        # the FIRST holder, which for capacity > 1 is an arbitrary one rather than the
+        # holder actually blocking us. Exact for the conc=1 (conc=0 endpoint) case this
+        # change targets; fixing it means threading a holder identity into the resolver.
+        _la = getattr(inst, 'last_activity', 0.0)
+        _llm = getattr(inst, '_last_llm_activity', 0.0)
+        ctx['progress_ts'] = _la if _la > _llm else _llm
     return ctx
 
 
@@ -962,10 +1073,14 @@ def _ticket_cancelled(pool: SlotPool, instance_name: str) -> bool:
     return not any(not t.cancelled.is_set() for t in tickets)
 
 
-def _log_acquire_timeout(pool: SlotPool, ticket: QueueTicket) -> None:
+def _log_acquire_timeout(pool: SlotPool, ticket: QueueTicket, reason: str = '') -> None:
     """Log diagnostic information when acquire() times out. Must be called under pool._cond."""
     now = time.monotonic()
     wait_time = now - ticket.created_at
-    logger.warning(f"[SLOTPOOL] Acquire timeout on pool '{pool.key}' for ticket {ticket.ticket_id} "
-                   f"(agent={ticket.instance_name}, wait_time={wait_time:.1f}s): "
-                   f"running={len(pool._running)}/{pool.capacity}, waiters={len(pool._waiters)}")
+    # The reason is logged at ERROR: it names the holder and how long it was quiet, which
+    # is the whole point of the dead-man's switch (plan §3 A3-bis). Without it the only
+    # user-visible trace is a bare "acquire timeout" that cannot be acted on.
+    logger.error(f"[SLOTPOOL] Acquire timeout on pool '{pool.key}' for ticket {ticket.ticket_id} "
+                 f"(agent={ticket.instance_name}, wait_time={wait_time:.1f}s): "
+                 f"running={len(pool._running)}/{pool.capacity}, waiters={len(pool._waiters)}"
+                 + (f" — {reason}" if reason else ''))

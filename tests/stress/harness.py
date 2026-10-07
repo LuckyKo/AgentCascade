@@ -301,6 +301,22 @@ class Harness:
         self._saved_timeouts = (_sq.QUEUE_WAIT_TIMEOUT, _sched.QUEUE_WAIT_TIMEOUT)
         _sq.QUEUE_WAIT_TIMEOUT = QUEUE_WAIT_TIMEOUT
         _sched.QUEUE_WAIT_TIMEOUT = QUEUE_WAIT_TIMEOUT
+        # ALSO set the new PoolSettings field. Since the dead-man's switch, the acquire
+        # path resolves its window from pool.settings.slot_queue_timeout_seconds FIRST and
+        # only falls back to the module constants, so patching the constants alone is now a
+        # no-op and the stress run would sit on the real 300s window — the watchdog would
+        # never see a timeout and the stall invariant would silently not be tested.
+        # The hard cap is derived as 6x, so it comes to 150s, also bounded.
+        self._saved_slot_window = None
+        try:
+            self._saved_slot_window = self.pool.settings.slot_queue_timeout_seconds
+            self.pool.settings.slot_queue_timeout_seconds = QUEUE_WAIT_TIMEOUT
+        except Exception as exc:  # pragma: no cover - harness must not die here
+            import warnings
+            warnings.warn(
+                f'slot_queue_timeout_seconds not settable on the stress pool: {exc!r} — '
+                f'the acquire path will fall back to the patched module constants',
+                RuntimeWarning, stacklevel=2)
 
     def _quiet_agent_cascade_logging(self) -> None:
         """Drop the agent_cascade loggers to CRITICAL for the duration.
@@ -342,6 +358,14 @@ class Harness:
         if getattr(self, '_saved_timeouts', None) is not None:
             _sq.QUEUE_WAIT_TIMEOUT, _sched.QUEUE_WAIT_TIMEOUT = self._saved_timeouts
             self._saved_timeouts = None
+        # Restore the slot-queue activity window — a leaked 25.0 would silently shorten
+        # every later acquire in this process (the pool is shared/reused across tests).
+        if getattr(self, '_saved_slot_window', None) is not None:
+            try:
+                self.pool.settings.slot_queue_timeout_seconds = self._saved_slot_window
+            except Exception:  # pragma: no cover - teardown must not raise
+                pass
+            self._saved_slot_window = None
         for p in reversed(self._patches):
             try:
                 p.stop()

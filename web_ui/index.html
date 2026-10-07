@@ -447,6 +447,10 @@
                     <span>System Agents (Compressor/Security) Auto-Discard (seconds, 0=off)</span>
                     <input type="number" id="setting-system-idle-timeout" min="0" max="3600" step="10" value="900" />
                   </label>
+                  <label class="setting-field">
+                    <span title="Dead-man's switch: how long the slot holder may go with no sign of life (new turn or LLM output) before this wait is declared failed. Reset on every sign of life. Hard cap is derived as 6x this value.">Slot Queue Activity Window (s)</span>
+                    <input type="number" id="setting-slot-queue-timeout" min="30" max="7200" step="30" value="300" />
+                  </label>
                 </div>
               </div>
 

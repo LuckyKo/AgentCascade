@@ -40,6 +40,7 @@ from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY,
                                     LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_CONTINUE_ATTEMPTS,
                                     REACQUIRE_TIMEOUT, REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
+                                    POST_YIELD_REACQUIRE_TIMEOUT,
                                     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
 from agent_cascade.skills.selector import classify_completion
@@ -3307,22 +3308,26 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # Fast-window timeout. The pool raises SlotQueueTimeout, but we always
             # acquire through EndpointScheduler.acquire, which re-raises it as a plain
             # TimeoutError (scheduler.py) — so catch both. Falling through here means:
-            # re-enter the FIFO at the tail (unbounded), below.
+            # re-enter the FIFO at the tail (bounded by POST_YIELD_REACQUIRE_TIMEOUT), below.
             pass
 
         # Sticky slot plan change #5b (user decision 3 / §3.9 Gap A): there is NO
         # slotless degraded state. The fast window above only bounds the post-yield
         # fast path; on timeout the instance re-enters the FIFO at the TAIL for its
         # resolved effective slot and blocks until granted — no bypass, no preemption.
-        # NOTE: passing timeout=None here is NOT truly unbounded — EndpointScheduler.acquire
-        # (scheduler.py) resolves None to QUEUE_WAIT_TIMEOUT (default 300s), so this re-acquire
-        # still gives up after ~QUEUE_WAIT_TIMEOUT and raises TimeoutError. The intent is simply
-        # "wait the full queue window, not the short fast path", not "block forever". The old
-        # [SLOT_REACQUIRE_FAILED] "degrade to async-only" path is deleted: it left a
+        # The old [SLOT_REACQUIRE_FAILED] "degrade to async-only" path is deleted: it left a
         # conc=0 agent ungated, reintroducing the trashing window this project closes.
+        #
+        # Plan §3 A4: this tail re-queue passes LITERAL bounds, NOT _queue_limits() and NOT
+        # the user's window. It does not pass `pool=`, so instance_resolver is None and the
+        # dead-man's-switch window can NEVER reset here — which is precisely why it is
+        # bounded explicitly. With hard_cap == timeout the sliding logic is inert (both
+        # deadlines coincide, the cap fires first) so this is a plain fixed wait, unaffected
+        # by the 6x derivation or by any UI setting.
         logger.info(f"[SLOTPOOL] instance={holder_name} pool={slot_info.get('slot_key')} "
                     f"action=acquire-queued waiters=-1 (post-yield fast re-acquire timed out after "
-                    f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, bounded by QUEUE_WAIT_TIMEOUT)")
+                    f"{REACQUIRE_TIMEOUT:.0f}s — re-entering FIFO at tail, bounded by "
+                    f"{POST_YIELD_REACQUIRE_TIMEOUT:.0f}s)")
         try:
             # BUG_0051 (F1): same identity pass-through as the fast path above — the bug survives the
             # timeout branch unless BOTH reacquire sites carry endpoint_name + model.
@@ -3335,7 +3340,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 agent_class=instance.agent_class,
                 endpoint_name=_ep_name,
                 model=_model,
-                timeout=None,  # wait the full queue window (QUEUE_WAIT_TIMEOUT), not the short fast path
+                # Literal, deliberately NOT via _queue_limits — see the comment above.
+                # Do NOT add `pool=self` here: that would silently re-enable the sliding
+                # window on this path and reintroduce the unbounded-worker risk.
+                timeout=POST_YIELD_REACQUIRE_TIMEOUT,
+                hard_cap=POST_YIELD_REACQUIRE_TIMEOUT,
             )
         except SlotCancelled:
             raise

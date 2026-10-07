@@ -8,6 +8,41 @@ import time
 from typing import Callable, Optional
 
 from agent_cascade.log import logger
+from agent_cascade.slot_queue import QUEUE_WAIT_TIMEOUT, SLOT_QUEUE_HARD_CAP_DEFAULT
+
+# Dead-man's-switch hard-cap derivation (see _queue_limits): the cap is not a second
+# knob but is derived from the activity window so the invalid state cap <= window is
+# unrepresentable. The multiplier hits the design target (300s window -> 1800s cap)
+# and the floor guarantees a safety ceiling even for a tiny window.
+SLOT_QUEUE_WINDOW_MULTIPLIER = 6   # hard cap = 6x the activity window (design target: 300s -> 1800s)
+SLOT_QUEUE_CAP_FLOOR = 60          # minimum hard cap so a tiny window still has a safety ceiling
+
+
+def _queue_limits(pool) -> tuple:
+    """Resolve the slot-queue (window, hard_cap) pair for one acquire.
+
+    The window is the dead-man's-switch ACTIVITY WINDOW: it is reset every time the
+    slot holder shows a sign of life, so a healthy long-running holder never kills its
+    waiters. The hard cap is the unconditional wall-clock ceiling that closes the hole
+    when holder-activity detection is broken outright.
+
+    The cap is DERIVED as ``max(6 × window, 60)``, never a second knob: 1800 = 6 × 300
+    matches the design target exactly, and deriving it makes the invalid state
+    ``cap <= window`` unrepresentable by construction (plan §3 A2).
+
+    MUST be called at ACQUIRE time, never cached at import — the value is a live UI
+    setting and caching it would make every change a no-op until restart (gotcha #10).
+    The fallback path reads the LIVE module constant so the suites that monkeypatch
+    ``QUEUE_WAIT_TIMEOUT`` (tests/stress/harness.py, the two e2e security suites) keep
+    resolving against their shortened value.
+    """
+    try:
+        window = float(pool.settings.slot_queue_timeout_seconds)
+        if window <= 0:
+            window = float(QUEUE_WAIT_TIMEOUT)
+        return window, max(SLOT_QUEUE_WINDOW_MULTIPLIER * window, SLOT_QUEUE_CAP_FLOOR)
+    except Exception:
+        return float(QUEUE_WAIT_TIMEOUT), SLOT_QUEUE_HARD_CAP_DEFAULT
 
 
 class SlotsMixin:
@@ -45,15 +80,22 @@ class SlotsMixin:
                 _ep_name = ''
                 _model = llm_cfg.get('model', '')
 
-            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
+            # Acquire the endpoint slot (blocks if at capacity)
             # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking.
             # `pool` is forwarded to SlotPool.acquire (plan §3.3 option a) so the
             # FIFO head-stall alarm can resolve holder state/activity context via
             # pool.get_instance; every other call site passes None and degrades
             # gracefully to a context-free line.
+            #
+            # `timeout`/`hard_cap` come from _queue_limits(self) — the LIVE UI setting
+            # read at call time (plan §3 A2). Passing no explicit timeout here would
+            # leave EndpointScheduler.acquire to resolve the module constant instead,
+            # which is why the setting would silently never apply.
+            _window, _hard_cap = _queue_limits(self)
             return router.scheduler.acquire(
                 api_base, concurrency_limit, instance_name, agent_class, pool=self,
                 endpoint_name=_ep_name, model=_model,
+                timeout=_window, hard_cap=_hard_cap,
             )
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")

@@ -140,6 +140,11 @@ def leak_harness(tmp_path, request):
     router = _build_real_router(cfg_dir)
     pool = _build_pool(router)
     router._pool = pool
+    # The dead-man's switch resolves its window from the LIVE pool setting FIRST, so the
+    # module-constant patches above are a no-op for this real pool — set the setting to
+    # match so the 5s bounded window is honored (plan §2.5). Restore in teardown.
+    old_slot_window = getattr(pool.settings, 'slot_queue_timeout_seconds', None)
+    pool.settings.slot_queue_timeout_seconds = 5
 
     shared = router.scheduler._get_or_create_pool(SEQ_BASE, 0)
     assert shared is not None and shared.key == SHARED_KEY, \
@@ -151,6 +156,8 @@ def leak_harness(tmp_path, request):
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
     _rmod.ENDPOINT_COOLDOWN_SECONDS = old_cool
     _core_mod.REACQUIRE_TIMEOUT = old_reacq
+    if old_slot_window is not None:
+        pool.settings.slot_queue_timeout_seconds = old_slot_window
     if old_cfg_dir is None:
         _os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
     else:

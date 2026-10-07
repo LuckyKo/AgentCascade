@@ -594,7 +594,13 @@ class ToolDispatcher:
             # Catch all exceptions and return formatted error string.
             # Loop detection is handled inline inside engine.run().
             logger.error(f"Sync child '{instance_name}' failed: {e}")
-            return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
+            # C-fix-3 (plan §3 C): format_crash walks to the ROOT cause, so a slot-queue
+            # timeout that the scheduler re-wrapped still surfaces the holder name and the
+            # quiet duration. Bare str(e) would show only the outer wrap message, leaving
+            # the parent with a "[Agent 'X' Failed]" and no explanation — the silent
+            # idle on a conc=0 pool this replaces. pool/slots.py:136 already did this.
+            from agent_cascade.error_reporting import format_crash
+            return f"[Agent '{instance_name}' Failed]:\n{format_crash(e)}"
 
         finally:
             # FIX 3: Always re-acquire caller's slot, even on early exit due to stop.

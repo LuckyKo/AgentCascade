@@ -1304,6 +1304,12 @@ class TestSecuritySlotYieldOnSharedSlot:
             router.default_llm_cfg = ep.to_llm_cfg()
 
             pool = AgentPool(llm_cfg, agents_dir=str(tmp_path), api_router=router)
+            # The dead-man's switch resolves its window from the LIVE pool setting FIRST, so
+            # the module-constant patches above are a no-op for this real pool — set the
+            # setting to match so a regression surfaces as a ~3s stall, not a 300s hang
+            # (plan §2.5). Restored in the finally block below.
+            _OLD_SLOT_WINDOW = getattr(pool.settings, 'slot_queue_timeout_seconds', None)
+            pool.settings.slot_queue_timeout_seconds = 3
 
             # ── Sync primitives ────────────────────────────────────────────────────
             security_llm_called = threading.Event()  # Security got the slot, entered its LLM stage
@@ -1472,6 +1478,8 @@ class TestSecuritySlotYieldOnSharedSlot:
         finally:
             _sq_mod.QUEUE_WAIT_TIMEOUT = _OLD_QWT
             _ar_mod.QUEUE_WAIT_TIMEOUT = _OLD_AR_QWT
+            if _OLD_SLOT_WINDOW is not None:
+                pool.settings.slot_queue_timeout_seconds = _OLD_SLOT_WINDOW
             # Restore the config-dir env var to its prior value (or drop it if it was unset).
             if _OLD_CFG_DIR is None:
                 _os2.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)

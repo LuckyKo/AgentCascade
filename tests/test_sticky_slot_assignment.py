@@ -177,6 +177,11 @@ def sticky_harness(tmp_path, request):
     pool = _build_pool(router)
     # call_with_fallback reads self._pool for get_instance / termination checks.
     router._pool = pool
+    # The dead-man's switch resolves its window from the LIVE pool setting FIRST, so the
+    # module-constant patches above are a no-op for this real pool — set the setting to
+    # match so the 5s bounded window is honored (plan §2.5). Restore in teardown.
+    old_slot_window = getattr(pool.settings, 'slot_queue_timeout_seconds', None)
+    pool.settings.slot_queue_timeout_seconds = 5
 
     # Trigger the shared pool's lazy creation now (conc=0 endpoint is in effect).
     shared = router.scheduler._get_or_create_pool(SEQ_BASE, 0)
@@ -189,6 +194,8 @@ def sticky_harness(tmp_path, request):
     _sq_mod.QUEUE_WAIT_TIMEOUT = old_sq
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
     _rmod.ENDPOINT_COOLDOWN_SECONDS = old_cool
+    if old_slot_window is not None:
+        pool.settings.slot_queue_timeout_seconds = old_slot_window
 
 
 def _slot_pool_holders(pool_obj):
@@ -1033,17 +1040,25 @@ class TestN8SlotlessNeverUngated:
 
         # The DELETED behavior was a `return True` after the fast-window timeout —
         # continuing the turn with NO slot held (slotless degrade). That statement is
-        # gone from the code; only the unbounded re-queue's error path may still
-        # mention the old [SLOT_REACQUIRE_FAILED] label in a comment/log.
+        # gone from the code; only the re-queue's error path may still mention the old
+        # [SLOT_REACQUIRE_FAILED] label in a comment/log.
         code_only = '\n'.join(ln for ln in inspect.getsource(core_mod.ExecutionEngine.reacquire_for).splitlines()
                               if not ln.strip().startswith('#'))
-        assert 'return True' not in code_only.split('timeout=None')[0].rsplit(
-            'except (SlotQueueTimeout, TimeoutError)'), \
-            "the deleted slotless-degrade 'return True' after the fast-window timeout must not be restored"
-        # The fast-window timeout handler must fall through to the unbounded re-queue,
-        # not return a slotless state.
-        assert 'timeout=None' in code_only, \
-            'reacquire_for must re-enter the FIFO with an unbounded (timeout=None) wait'
+        # The fast-window timeout handler must fall through (pass) to the re-queue,
+        # NOT return a slotless state.
+        after_except = code_only.split('except (SlotQueueTimeout, TimeoutError)')
+        assert len(after_except) == 2, \
+            'reacquire_for must still catch the fast-window timeout'
+        assert 'pass' in after_except[1].split('\n\n')[0], \
+            'the fast-window timeout handler must fall through (pass), not return a slotless state'
+        # Plan §3 A4: the tail re-queue is now BOUNDED — it passes a finite
+        # POST_YIELD_REACQUIRE_TIMEOUT, not an unbounded timeout=None. The unbounded
+        # wait was the unbounded-worker risk A4 removes (a post-yield worker could
+        # otherwise sit in the FIFO forever).
+        assert 'POST_YIELD_REACQUIRE_TIMEOUT' in code_only, \
+            'reacquire_for must re-enter the FIFO with a BOUNDED (POST_YIELD_REACQUIRE_TIMEOUT) wait'
+        assert 'timeout=None' not in code_only, \
+            'reacquire_for must NOT re-enter the FIFO unbounded (timeout=None) — that is the unbounded-worker risk'
 
         src_cwf = inspect.getsource(rmod.APIRouter.call_with_fallback)
         # A sticky-sync failure must be re-raised, never swallowed into an ungated call.

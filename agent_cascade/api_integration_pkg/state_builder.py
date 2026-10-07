@@ -460,6 +460,11 @@ def build_state_from_pool(
                 getattr(ps, 'retry_base_delay', 1.0),
             'retry_max_delay':
                 getattr(ps, 'retry_max_delay', 8.0),
+            # Slot pool dead-man's switch activity window (hard cap is derived as 6x).
+            # MUST be emitted in BOTH state blocks — emitting it in only one makes the
+            # value revert on every stream tick, a silent UI failure.
+            'slot_queue_timeout_seconds':
+                getattr(ps, 'slot_queue_timeout_seconds', 300),
             # Code interpreter
             'ci_execution_timeout':
                 getattr(ps, 'ci_execution_timeout', 120),
@@ -708,6 +713,11 @@ def build_stream_update_from_pool(
                 getattr(ps, 'retry_base_delay', 1.0),
             'retry_max_delay':
                 getattr(ps, 'retry_max_delay', 8.0),
+            # Slot pool dead-man's switch activity window (hard cap is derived as 6x).
+            # MUST be emitted in BOTH state blocks — emitting it in only one makes the
+            # value revert on every stream tick, a silent UI failure.
+            'slot_queue_timeout_seconds':
+                getattr(ps, 'slot_queue_timeout_seconds', 300),
             # Code interpreter
             'ci_execution_timeout':
                 getattr(ps, 'ci_execution_timeout', 120),

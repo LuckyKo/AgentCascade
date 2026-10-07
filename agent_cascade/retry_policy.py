@@ -117,6 +117,19 @@ def classify_error(error: Exception) -> str:
         'invalid_model',
         'invalid_request',
         'validation',
+        # Slot exhaustion is FATAL, not transient (plan §3 B-fix-2). The scheduler's wrap
+        # message is "Timed out after 300s waiting for endpoint slot…", which matches the
+        # retryable 'timeout'/'timed out' patterns below — so before this the agent burned
+        # 3 futile attempts re-queueing against the same busy pool and emitted visible
+        # [RETRYING] noise before surfacing nothing useful. Retrying is pointless: the
+        # slot is held by a peer, and the dead-man's switch already waited out a healthy
+        # holder before firing.
+        #
+        # Matched by STRING rather than by type on purpose: the type is destroyed at
+        # scheduler.py's `raise TimeoutError(...) from e` re-wrap, so an isinstance check
+        # cannot see SlotQueueTimeout without also changing that public contract.
+        'slot queue',
+        'endpoint slot',
     )
 
     # Retryable errors (transient)

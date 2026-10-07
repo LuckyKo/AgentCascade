@@ -228,6 +228,14 @@ def slot_harness(tmp_path, request):
     router = _build_real_router(cfg_dir)
     pool = _build_pool(router)
 
+    # ALSO shorten the new PoolSettings field. Since the dead-man's switch, the acquire
+    # path resolves its window from pool.settings.slot_queue_timeout_seconds FIRST and
+    # only falls back to the module constants above, so patching the constants alone is
+    # now a no-op — the Security waiter would sit on the real 300s window and this suite
+    # would hang instead of exercising the deadlock detection. Derived hard cap: 60s.
+    old_slot_window = getattr(pool.settings, 'slot_queue_timeout_seconds', None)
+    pool.settings.slot_queue_timeout_seconds = 5
+
     # The real AgentPool has operation_manager=None. Give it a minimal one so
     # _execute_check's prompt-building + result handling don't crash on None.
     om = MagicMock()
@@ -292,6 +300,13 @@ def slot_harness(tmp_path, request):
         pass
     _sq_mod.QUEUE_WAIT_TIMEOUT = old_sq
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
+    # Restore the slot-queue activity window — a leaked 5s would silently shorten every
+    # later acquire against this pool.
+    if old_slot_window is not None:
+        try:
+            pool.settings.slot_queue_timeout_seconds = old_slot_window
+        except Exception:
+            pass
     # Restore the config-dir env var to its prior value (or drop it if it was unset).
     if old_cfg_dir is None:
         _os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)

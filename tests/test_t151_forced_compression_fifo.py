@@ -312,6 +312,13 @@ class TestCompressorFIFOGuards:
         # proving it is BOUNDED (raises within ~timeout), not an infinite hang.
         old_timeout = _sched_mod.QUEUE_WAIT_TIMEOUT
         _sched_mod.QUEUE_WAIT_TIMEOUT = 2
+        # The dead-man's switch resolves its window from the LIVE pool setting FIRST (not
+        # the module constant), so patching the constant alone is a no-op for a real pool —
+        # the acquire would sit on the 300s default and this test's 10s deadline would
+        # expire with no timeout. Set the setting alongside so the 2s bounded window is
+        # honored (plan §2.5); restore it in teardown so the shared pool is not left short.
+        old_slot_window = getattr(pool.settings, 'slot_queue_timeout_seconds', None)
+        pool.settings.slot_queue_timeout_seconds = 2
         try:
             comp_box = {}
 
@@ -343,6 +350,8 @@ class TestCompressorFIFOGuards:
                 'fail-streak must be recorded so the BUG-7 backoff gate suppresses instant re-halt'
         finally:
             _sched_mod.QUEUE_WAIT_TIMEOUT = old_timeout
+            if old_slot_window is not None:
+                pool.settings.slot_queue_timeout_seconds = old_slot_window
             released.set()
             holder.join(timeout=5)
             if holder.is_alive():
