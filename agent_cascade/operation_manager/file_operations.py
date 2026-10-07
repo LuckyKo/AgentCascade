@@ -886,6 +886,7 @@ class FileOpsMixin:
                   new_content: str,
                   match_mode: str = 'exact',
                   range_param: str = None,
+                  occurrence: int = None,
                   justification: str = '') -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
@@ -997,11 +998,26 @@ class FileOpsMixin:
             count = file_content.count(old_content)
             if count == 0:
                 return f"ERROR: Pattern not found in {path} (exact) — try heuristic match_mode or include more context lines"
-            if count > 1:
+            if occurrence is not None:
+                # Coerce/validate the 1-based occurrence index (LLMs may send a string).
+                try:
+                    occurrence = int(occurrence)
+                except (ValueError, TypeError):
+                    return f"ERROR: 'occurrence' must be a positive integer, got {occurrence!r}"
+                if occurrence < 1 or occurrence > count:
+                    return (f"ERROR: occurrence={occurrence} out of range — pattern found "
+                            f"{count} time(s) in {path} (valid range: 1-{count})")
+            if count > 1 and occurrence is None:
                 return f"ERROR: Pattern found {count} times in {path} — add more context lines to old_content to disambiguate"
 
-            # Record match position for feedback message (line range)
+            # Record match position for feedback message (line range).
+            # occurrence is 1-based; None (or a unique pattern) selects the 1st match.
+            # Advance by len(old_content) so the Nth occurrence matches str.count()
+            # semantics (non-overlapping), keeping the range check above consistent.
             match_start_pos = file_content.index(old_content)
+            if occurrence is not None:
+                for _ in range(occurrence - 1):
+                    match_start_pos = file_content.index(old_content, match_start_pos + len(old_content))
             match_end_pos = match_start_pos + len(actual_old_content)
             exact_start_line = file_content[:match_start_pos].count('\n') + 1
             # BUG FIX: Trailing newline is a terminator, not the start of a new line.
@@ -1301,6 +1317,12 @@ class FileOpsMixin:
             if match_mode == 'delete_and_insert':
                 # new_file_content was already computed above — skip string replace
                 pass
+            elif match_mode == 'exact' and occurrence is not None:
+                # Replace only the Nth match — match_start_pos points at its start (computed
+                # in the exact branch above). The default path below stays byte-identical.
+                new_file_content = (file_content[:match_start_pos]
+                                    + new_content
+                                    + file_content[match_start_pos + len(actual_old_content):])
             else:
                 new_file_content = file_content.replace(actual_old_content, new_content, 1)
 

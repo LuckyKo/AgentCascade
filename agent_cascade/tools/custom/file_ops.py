@@ -1017,6 +1017,11 @@ class EditFile(BaseTool, PathResolutionMixin):
                 'type': 'string',
                 'description': TOOL_METADATA['edit_file']['parameters']['range']
             },
+            'occurrence': {
+                'type': 'integer',
+                'minimum': 1,
+                'description': TOOL_METADATA['edit_file']['parameters']['occurrence']
+            },
             'justification': {
                 'type': 'string',
                 'description': 'Why you need to edit this file'
@@ -1060,6 +1065,7 @@ class EditFile(BaseTool, PathResolutionMixin):
         new_content = params_json.get('new_content')
         match_mode = params_json.get('match_mode', 'exact')
         range_param = params_json.get('range')
+        occurrence = params_json.get('occurrence')
         justification = params_json.get('justification', '')
 
         # Handle cases where model uses XML tags with old names
@@ -1104,6 +1110,7 @@ class EditFile(BaseTool, PathResolutionMixin):
             new_content=new_content,
             match_mode=match_mode,
             range_param=range_param,
+            occurrence=occurrence,
             justification=justification,
         )
 

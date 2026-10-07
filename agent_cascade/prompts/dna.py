@@ -313,6 +313,8 @@ TOOL_METADATA = {
                 "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content).",
             'range':
                 "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file.",
+            'occurrence':
+                "Optional 1-based index selecting WHICH match to replace when the pattern is found multiple times in exact mode (e.g., occurrence=2 replaces only the 2nd match). Only used with match_mode='exact'; ignored for other modes. When omitted, a non-unique pattern errors as before.",
             'justification':
                 'Why you need to edit this file'
         }

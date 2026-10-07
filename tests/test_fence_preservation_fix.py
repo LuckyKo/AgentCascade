@@ -34,7 +34,7 @@ class _RecordingOM:
         return 'written'
 
     def edit_file(self, path, agent_name=None, old_content=None, new_content=None,
-                  match_mode='exact', range_param=None, justification=''):
+                  match_mode='exact', range_param=None, occurrence=None, justification=''):
         self.edit = (path, old_content, new_content, match_mode)
         return 'edited'
 

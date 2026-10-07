@@ -896,3 +896,176 @@ def test_delete_and_insert_preserves_whitespace_via_tool_pipeline():
         assert content == expected, (f"Whitespace was corrupted!\n"
                                      f"Expected:\n{repr(expected)}\n"
                                      f"Got:\n{repr(content)}")
+
+
+def test_edit_file_occurrence_param():
+    """BUG_0055: the occurrence param disambiguates exact-mode matches.
+
+    Covers: single match, Nth-match selection, out-of-range (high and low),
+    backward-compatible ambiguity error when omitted, and LLM string coercion.
+    """
+    from agent_cascade.operation_manager import OperationManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+        file_path = Path(tmpdir) / 'dup.txt'
+        base = 'alpha\nbeta\nalpha\nbeta\nalpha\n'  # 3x 'alpha\n'
+
+        file_path.write_text(base, encoding='utf-8')
+        op_mgr._own(file_path.resolve(), 'test_agent')
+
+        # Case 1: multiple matches, no occurrence -> backward-compatible ambiguity error
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact')
+        assert 'ERROR' in res
+        assert 'found 3 times' in res
+        assert 'disambiguate' in res
+        assert file_path.read_text(encoding='utf-8') == base  # unchanged
+
+        # Case 2: occurrence=2 -> replace only the 2nd 'alpha'
+        file_path.write_text(base, encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence=2)
+        assert 'OK:' in res
+        assert file_path.read_text(encoding='utf-8') == 'alpha\nbeta\nALPHA\nbeta\nalpha\n'
+
+        # Case 3: occurrence=1 -> replace only the 1st 'alpha' (line 1)
+        file_path.write_text(base, encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence=1)
+        assert 'OK:' in res
+        assert file_path.read_text(encoding='utf-8') == 'ALPHA\nbeta\nalpha\nbeta\nalpha\n'
+
+        # Case 4: occurrence=3 -> replace only the 3rd (last) 'alpha' (line 5)
+        file_path.write_text(base, encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence=3)
+        assert 'OK:' in res
+        assert file_path.read_text(encoding='utf-8') == 'alpha\nbeta\nalpha\nbeta\nALPHA\n'
+
+        # Case 5: occurrence out of range (too high) -> clear, distinct error
+        file_path.write_text(base, encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence=4)
+        assert 'ERROR' in res
+        assert 'out of range' in res
+        assert '1-3' in res
+        assert file_path.read_text(encoding='utf-8') == base  # unchanged
+
+        # Case 6: occurrence below 1 -> out of range
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence=0)
+        assert 'ERROR' in res
+        assert 'out of range' in res
+
+        # Case 7: single match with occurrence=1 -> works
+        file_path.write_text('unique_line\n', encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='unique_line\n',
+                               new_content='UNIQUE\n',
+                               match_mode='exact',
+                               occurrence=1)
+        assert 'OK:' in res
+        assert file_path.read_text(encoding='utf-8') == 'UNIQUE\n'
+
+        # Case 8: single match with occurrence=2 -> out of range
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='UNIQUE\n',
+                               new_content='X\n',
+                               match_mode='exact',
+                               occurrence=2)
+        assert 'ERROR' in res
+        assert 'out of range' in res
+
+        # Case 9: occurrence as a string (LLM coercion) -> works
+        file_path.write_text('alpha\nbeta\nalpha\n', encoding='utf-8')
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence='2')
+        assert 'OK:' in res
+        assert file_path.read_text(encoding='utf-8') == 'alpha\nbeta\nALPHA\n'
+
+        # Case 10: occurrence non-integer -> clear error
+        res = op_mgr.edit_file(path='dup.txt',
+                               agent_name='test_agent',
+                               old_content='alpha\n',
+                               new_content='ALPHA\n',
+                               match_mode='exact',
+                               occurrence='abc')
+        assert 'ERROR' in res
+        assert 'positive integer' in res
+
+
+def test_edit_file_occurrence_tool_wiring():
+    """BUG_0055: occurrence is exposed in the tool schema and passed through call()."""
+    from agent_cascade.operation_manager import OperationManager
+    from agent_cascade.tools.custom.file_ops import EditFile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        edit_tool = EditFile(cfg=None,
+                             agent_pool=type('obj', (object,), {'operation_manager': op_mgr})(),
+                             agent_name='test_agent')
+
+        # Schema exposes occurrence as an integer with minimum 1
+        props = edit_tool.parameters['properties']
+        assert 'occurrence' in props
+        assert props['occurrence']['type'] == 'integer'
+        assert props['occurrence'].get('minimum') == 1
+
+        file_path = Path(tmpdir) / 'dup.txt'
+        file_path.write_text('alpha\nbeta\nalpha\n', encoding='utf-8')
+        op_mgr._own(file_path.resolve(), 'test_agent')
+
+        # Tool call with occurrence=2 replaces only the 2nd match
+        result = edit_tool.call({
+            'path': 'dup.txt',
+            'old_content': 'alpha\n',
+            'new_content': 'ALPHA\n',
+            'match_mode': 'exact',
+            'occurrence': 2,
+        })
+        assert 'OK:' in result, f"Edit failed: {result}"
+        assert file_path.read_text(encoding='utf-8') == 'alpha\nbeta\nALPHA\n'
+
+        # Tool call without occurrence on a duplicate -> backward-compat ambiguity error
+        file_path.write_text('alpha\nbeta\nalpha\n', encoding='utf-8')
+        result = edit_tool.call({
+            'path': 'dup.txt',
+            'old_content': 'alpha\n',
+            'new_content': 'ALPHA\n',
+            'match_mode': 'exact',
+        })
+        assert 'ERROR' in result
+        assert 'found 2 times' in result
