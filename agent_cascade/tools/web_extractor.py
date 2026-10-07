@@ -16,7 +16,7 @@ from typing import Optional, Union
 
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.tools.simple_doc_parser import SimpleDocParser
+from agent_cascade.tools.simple_doc_parser import SimpleDocParser, DocParserError
 
 
 @register_tool('web_extractor')
@@ -65,6 +65,11 @@ class WebExtractor(BaseTool):
     def _describe_fetch_error(e: Exception) -> str:
         """Reduce an exception to a short human/agent-readable reason (no traceback)."""
         msg = str(e)
+        # Parse timeout (distinct from a connection timeout — the download succeeded; the
+        # document itself was too large/complex to parse in time). Type-based so it is not
+        # coupled to the exact wording of the raised message.
+        if isinstance(e, DocParserError) and e.code == 'TimeoutError':
+            return 'document parsing timed out (file is too large or too complex to parse in time)'
         # Extract an HTTP status code if present (e.g. "404 Client Error: Not Found ...").
         import re
         m = re.search(r'\b([45]\d{2})\b', msg)

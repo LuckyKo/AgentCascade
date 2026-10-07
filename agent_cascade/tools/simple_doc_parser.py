@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import json
 import os
 import re
@@ -20,8 +21,8 @@ import urllib.parse
 from collections import Counter
 from typing import Dict, List, Optional, Union
 
+import agent_cascade.settings as settings
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.storage import KeyNotExistsError, Storage
 from agent_cascade.utils.str_processing import rm_cid, rm_continuous_placeholders, rm_hexadecimal
@@ -776,6 +777,13 @@ def table_converter(table):
 
 PARSER_SUPPORTED_FILE_TYPES = ['pdf', 'docx', 'pptx', 'md', 'txt', 'html', 'csv', 'tsv', 'xlsx', 'xls']
 
+# Shared worker pool bounding the CPU-bound parse step (budgets in settings.py
+# WEB_EXTRACTOR_PARSE_TIMEOUT_*). Shared, not per-call, so timed-out parses don't leak
+# unbounded threads. A hung parse occupies one worker; the worker can't be killed
+# (CPython), so on timeout we abandon it and it finishes on its own.
+_PARSE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=settings.WEB_EXTRACTOR_PARSE_WORKERS, thread_name_prefix='docparse')
+
 
 def get_plain_doc(doc: list):
     paras = []
@@ -813,8 +821,8 @@ class SimpleDocParser(BaseTool):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        self.data_root = self.cfg.get('path', os.path.join(DEFAULT_WORKSPACE, 'tools', self.name))
-        self.work_dir = self.cfg.get('work_dir', DEFAULT_WORKSPACE)
+        self.data_root = self.cfg.get('path', os.path.join(settings.DEFAULT_WORKSPACE, 'tools', self.name))
+        self.work_dir = self.cfg.get('work_dir', settings.DEFAULT_WORKSPACE)
         self.extract_image = self.cfg.get('extract_image', False)
         self.structured_doc = self.cfg.get('structured_doc', False)
 
@@ -894,29 +902,47 @@ class SimpleDocParser(BaseTool):
                 tmp_file_root = os.path.join(self.data_root, hash_sha256(path))
                 os.makedirs(tmp_file_root, exist_ok=True)
                 path = save_url_to_local_work_dir(path, tmp_file_root)
-            try:
+            # Bound the CPU-bound parse step with a wall-clock budget. The network download
+            # above (save_url_to_local_work_dir) is already bounded by _HTTP_FETCH_TIMEOUT;
+            # this bounds pdfminer/pdfplumber etc. The dispatch runs in a shared worker thread;
+            # on timeout we abandon the future and raise a clean TimeoutError (the orphaned
+            # thread cannot be killed — it finishes on its own). Capture the extract_image
+            # flag (not self) so the parser isn't held alive by the orphaned worker.
+            ei = self.extract_image
+            budget = settings.WEB_EXTRACTOR_PARSE_TIMEOUT_BY_TYPE.get(
+                f_type, settings.WEB_EXTRACTOR_PARSE_TIMEOUT_SECONDS)
+
+            def _dispatch():
                 if f_type == 'pdf':
-                    parsed_file = parse_pdf(path, self.extract_image)
+                    return parse_pdf(path, ei)
                 elif f_type == 'docx':
-                    parsed_file = parse_word(path, self.extract_image)
+                    return parse_word(path, ei)
                 elif f_type == 'pptx':
-                    parsed_file = parse_ppt(path, self.extract_image)
+                    return parse_ppt(path, ei)
                 elif f_type == 'txt':
-                    parsed_file = parse_txt(path)
+                    return parse_txt(path)
                 elif f_type == 'html':
-                    parsed_file = parse_html_bs(path, self.extract_image, base_url=base_for_html)
+                    return parse_html_bs(path, ei, base_url=base_for_html)
                 elif f_type == 'csv':
-                    parsed_file = parse_csv(path, self.extract_image)
+                    return parse_csv(path, ei)
                 elif f_type == 'tsv':
-                    parsed_file = parse_tsv(path, self.extract_image)
+                    return parse_tsv(path, ei)
                 elif f_type == 'md':
-                    parsed_file = parse_txt(path)
+                    return parse_txt(path)
                 elif f_type in ['xlsx', 'xls']:
-                    parsed_file = parse_excel(path, self.extract_image)
+                    return parse_excel(path, ei)
                 else:
                     _t = '/'.join(PARSER_SUPPORTED_FILE_TYPES)
                     raise ValueError(
                         f'Failed: The current parser does not support this file type! Supported types: {_t}')
+
+            try:
+                _fut = _PARSE_EXECUTOR.submit(_dispatch)
+                try:
+                    parsed_file = _fut.result(timeout=budget)
+                except concurrent.futures.TimeoutError:
+                    raise TimeoutError(
+                        f'Document parsing timed out after {budget:.0f}s (file type: {f_type})')
             except Exception as ex:
                 exception_type = type(ex).__name__
                 exception_message = str(ex)

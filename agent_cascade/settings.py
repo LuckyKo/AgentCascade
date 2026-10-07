@@ -124,6 +124,25 @@ DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LI
 # agent for tens of seconds; ripgrep searches normally finish well under this.
 DEFAULT_GREP_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_GREP_TIMEOUT', 5.0))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_HEURISTIC_MATCH_THRESHOLD', 0.90))
+# Wall-clock ceiling (seconds) for the CPU-bound document-parse step in web_extractor /
+# SimpleDocParser. The network download is already bounded by _HTTP_FETCH_TIMEOUT
+# (utils.py); this bounds pdfminer/pdfplumber etc., which can run for minutes on a
+# large/corrupt PDF. On timeout the parse is abandoned in a worker thread and a clean
+# DocParserError is returned to the agent.
+# PDF gets the longest budget (pdfminer on a 100-page PDF can take 30-90s); fast
+# text-based types (txt/html/csv/tsv/md) fall back to the default below.
+WEB_EXTRACTOR_PARSE_TIMEOUT_SECONDS: float = float(
+    os.getenv('AGENT_CASCADE_WEB_EXTRACTOR_PARSE_TIMEOUT', 30.0))  # default for fast types
+WEB_EXTRACTOR_PARSE_TIMEOUT_BY_TYPE: dict = {
+    'pdf': 120.0,
+    'docx': 60.0,
+    'pptx': 60.0,
+    'xlsx': 60.0,
+    'xls': 60.0,
+}
+# Pool size for the shared parse-timeout worker executor (module-level in
+# simple_doc_parser.py). One hung parse occupies one worker; the rest stay available.
+WEB_EXTRACTOR_PARSE_WORKERS: int = int(os.getenv('AGENT_CASCADE_WEB_EXTRACTOR_PARSE_WORKERS', 4))
 
 # Settings for RAG
 DEFAULT_MAX_REF_TOKEN: int = int(os.getenv('AGENT_CASCADE_DEFAULT_MAX_REF_TOKEN',
