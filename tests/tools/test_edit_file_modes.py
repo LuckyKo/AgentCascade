@@ -580,6 +580,100 @@ def test_delete_and_insert_mode():
         assert content == 'appended\n', f"Test 18 assertion: got [{content}]"
 
 
+def test_delete_and_insert_indent_preservation():
+    """BUG_0063: delete_and_insert must preserve new_content indentation.
+
+    - Unindented replacement inherits the replaced line's indent (not col 0).
+    - Multi-line blocks are never flattened: relatively-indented lines keep
+      their own leading whitespace verbatim.
+    - Caller-supplied indentation is honored verbatim (never overridden).
+    - Append at EOF does not crash and stays at column 0.
+    - Tabs are preserved literally (no tab→space conversion).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        file_path = Path(tmpdir) / 'indent_test.py'
+
+        def run(file_content, new_content, range_param, expected):
+            """Write the fixture, apply a delete_and_insert edit, assert the result."""
+            file_path.write_text(file_content, encoding='utf-8')
+            op_mgr._own(file_path.resolve(), 'test_agent')
+            res = op_mgr.edit_file(path='indent_test.py',
+                                   agent_name='test_agent',
+                                   old_content='',
+                                   new_content=new_content,
+                                   match_mode='delete_and_insert',
+                                   range_param=range_param)
+            assert 'OK:' in res, f"edit failed: {res}"
+            content = file_path.read_text(encoding='utf-8')
+            assert content == expected, f"got [{content!r}]"
+
+        # 1. Single-line indented replace, unindented new_content → inherits the
+        #    replaced line's 8-space indent (the original BUG_0063 repro).
+        run(
+            'import shutil\n'
+            'def clean(root):\n'
+            '    try:\n'
+            '        work()\n'
+            '        _rmtree(root)\n'
+            '    finally:\n'
+            '        cleanup()\n',
+            '_rmtree_force(root)\n',
+            '5:5',
+            'import shutil\n'
+            'def clean(root):\n'
+            '    try:\n'
+            '        work()\n'
+            '        _rmtree_force(root)\n'  # inherited 8-space indent
+            '    finally:\n'
+            '        cleanup()\n')
+
+        # 2. Multi-line block — first line inherits base_indent, later lines keep
+        #    their own relative indentation verbatim (no flattening).
+        run(
+            'def outer():\n'
+            '    old_line()\n'
+            '    tail()\n',
+            'if x:\n        y()\n',
+            '2:2',
+            'def outer():\n'
+            '    if x:\n'       # first line inherited base_indent (4 spaces)
+            '        y()\n'     # second line kept its own 8 spaces verbatim
+            '    tail()\n')
+
+        # 3. Caller-supplied indentation honored verbatim — the caller's 12-space
+        #    indent wins and is NOT overridden by the replaced line's 4 spaces.
+        run(
+            'def f():\n'
+            '    a()\n'
+            '    b()\n',
+            '            deep()\n',
+            '2:2',
+            'def f():\n'
+            '            deep()\n'  # caller's 12 spaces preserved verbatim
+            '    b()\n')
+
+        # 4. Append at EOF, unindented content → no crash, stays at column 0
+        #    (start_idx == total_lines → base_indent = '').
+        run(
+            'line1\n'
+            'line2\n',
+            'footer\n',
+            '0',
+            'line1\nline2\nfooter\n')
+
+        # 5. Tab-indented replaced line → tabs preserved literally (no tab→space).
+        run(
+            'def g():\n'
+            '\t\tx()\n'
+            '\t\tz()\n',
+            'y()\n',
+            '2:2',
+            'def g():\n\t\ty()\n\t\tz()\n')
+
+
 def test_re_indent_shift_mode():
     """Test all scenarios for the new shift mode of re_indent.
 

@@ -988,6 +988,11 @@ class FileOpsMixin:
                 return '\r'
             return ''
 
+        def _leading_whitespace(line: str) -> str:
+            """Return the leading run of spaces/tabs of a line ('' if none)."""
+            stripped = line.lstrip(' \t')
+            return line[:len(line) - len(stripped)]
+
         if match_mode == 'exact':
             count = file_content.count(old_content)
             if count == 0:
@@ -1231,7 +1236,20 @@ class FileOpsMixin:
 
             if new_content:
                 inserted = new_content.splitlines(keepends=True)
+                # BUG_0063: preserve new_content indentation. Lines with their own
+                # leading whitespace are kept verbatim; unindented lines inherit the
+                # replaced line's indent (base_indent), so a multi-line block is never
+                # flattened and an append at EOF (start_idx out of range) stays col 0.
+                base_indent = ''
+                if start_idx < total_lines:
+                    base_indent = _leading_whitespace(file_lines[start_idx])
+                if base_indent:
+                    for i in range(len(inserted)):
+                        if not _leading_whitespace(inserted[i]):
+                            inserted[i] = base_indent + inserted[i]
                 # Preserve line ending style from surrounding context for ALL inserted lines
+                # (runs AFTER the indent step; only rstrips '\r\n' and appends, so it
+                # never disturbs the leading whitespace set above)
                 if after:
                     ref_ending = _detect_line_ending(after[0])
                     if not ref_ending and before:
