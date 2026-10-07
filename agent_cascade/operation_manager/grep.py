@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent_cascade.tool_utils import truncate_with_spillover, format_truncation_notice
+from agent_cascade.operation_manager.grep_ignore import DEFAULT_IGNORED_DIRS, IgnoreResolver
 
 # ─── Module-level cached helpers ──────────────────────────────────────────
 
@@ -63,13 +64,12 @@ class GrepMixin:
         '*.zip',
     ]
 
-    # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems)
-    _GREP_DEFAULT_EXCLUDE_DIRS = [
-        'node_modules',
-        '__pycache__',
-        '.git',
-        '*.egg-info',
-    ]
+    # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems).
+    # BUG_0062: widened to the shared union so this path, the Python fallback, and the
+    # rg fast path stop carrying three different dir lists. GNU grep cannot read ignore
+    # files at all, so this stays an honest approximation — a documented, POSIX-only
+    # residual divergence, not an oversight.
+    _GREP_DEFAULT_EXCLUDE_DIRS = sorted(DEFAULT_IGNORED_DIRS)
 
     @staticmethod
     def _sanitize_glob_pattern(pattern: str, *, allow_traversal: bool = False) -> str:
@@ -239,9 +239,12 @@ class GrepMixin:
         Callers MUST treat None as "unknown" and stay silent — this probe exists only to
         disambiguate a zero-match result and must never turn a good search into an error.
 
-        Note: only meaningful on the ripgrep fast path. The Python fallback never reads any
-        ignore file (it prunes a hardcoded skip_dirs set), so it is NOT subject to this bug
-        and must not report these matches as "hidden".
+        Note: only meaningful on the ripgrep fast path. Since BUG_0062 the Python fallback
+        also honours ignore files (.gitignore/.ignore/.rgignore), so it is no longer immune
+        to this class of false negative — but it honours them only to PRUNE the walk and
+        never re-runs a probe to count what it pruned. The note therefore stays a
+        fast-path-only feature by design: the fallback reports zero matches, which under the
+        now-shared pruning semantics is a true statement about the files it searched.
         """
         import subprocess
 
@@ -275,6 +278,11 @@ class GrepMixin:
                                     text=True,
                                     encoding='utf-8',
                                     errors='replace',
+                                    # BUG_0063: same hazard as the main fast path — rg gets no
+                                    # path operand, so it would read the parent's stdin and block
+                                    # until probe_timeout, at which point this returns None and the
+                                    # BUG_0061 note silently disappears.
+                                    stdin=subprocess.DEVNULL,
                                     timeout=probe_timeout)
         except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError) as e:
             logger.debug('grep: ignored-path probe failed: %s', e)
@@ -389,6 +397,12 @@ class GrepMixin:
                                     text=True,
                                     encoding='utf-8',
                                     errors='replace',
+                                    # BUG_0063: rg is invoked with `cwd=` and NO path operand, so
+                                    # whenever stdin is not a TTY (CI runners, piped shells, any
+                                    # captured-stdin parent) it falls back to reading stdin and blocks
+                                    # forever — surfacing as a spurious "Search timed out". DEVNULL
+                                    # guarantees rg never consumes the parent's stdin.
+                                    stdin=subprocess.DEVNULL,
                                     timeout=timeout)
 
             # Parse ripgrep's --json stdout into (formatted, match_count). Shared by the rc==0
@@ -844,7 +858,12 @@ class GrepMixin:
             file_count = 0
             match_count = 0
 
-            skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.tox'}
+            # BUG_0062: honour .gitignore/.ignore/.rgignore so the fallback returns the SAME
+            # file set as the ripgrep fast path when ignore_vcs=True. The resolver owns
+            # DEFAULT_IGNORED_DIRS as its lowest-precedence source, so no local skip_dirs
+            # literal remains here. Degrades to the hardcoded-dir-only behaviour when
+            # `pathspec` is unavailable.
+            _ignore_resolver = IgnoreResolver(resolved)
 
             # Default file excludes for Python fallback — aligns with subprocess behavior.
             # Match against basename only (fnmatch).
@@ -855,11 +874,14 @@ class GrepMixin:
             # BUG_0056: support comma-separated globs — union of rglob for each pattern.
             _include_patterns = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
             if not _include_patterns:
-                # Mutate dirs in-place to skip unwanted directories during walk
+                # Mutate dirs in-place to skip unwanted directories during walk. Pruning here
+                # rather than post-hoc is a performance requirement: it is what stops the
+                # fallback from descending into an ignored node_modules/ at all.
                 def _walk_with_skips():
                     for root, dirs, files in os.walk(resolved):
                         if ignore_vcs:
-                            dirs[:] = [d for d in dirs if d not in skip_dirs]
+                            dirs[:] = [d for d in dirs
+                                       if not _ignore_resolver.is_ignored(Path(root) / d, is_dir=True)]
                         yield root, dirs, files
 
                 file_iter_gen = (Path(os.path.join(root, f)) for root, dirs, files in _walk_with_skips() for f in files)
@@ -886,11 +908,14 @@ class GrepMixin:
                 # Skip files under ignored directories (for rglob path; os.walk already prunes dirs)
                 if ignore_vcs:
                     try:
-                        parts = file_path.relative_to(resolved).parts
-                        if any(p in skip_dirs for p in parts):
-                            continue
+                        file_path.relative_to(resolved)
                     except ValueError:
                         # File path is not relative to resolved search root — skip it
+                        continue
+                    # BUG_0062: the resolver also re-checks ancestors, so a file reached via
+                    # the rglob branch (which never prunes mid-traversal) is still filtered by
+                    # nested .gitignore files, not just by the hardcoded dir set.
+                    if _ignore_resolver.is_ignored(file_path, is_dir=False):
                         continue
 
                 # Apply default excludes (aligns with subprocess behavior)

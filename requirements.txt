@@ -26,6 +26,9 @@ lxml                       # Fast XML/HTML parser backend for BeautifulSoup
 mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
 openai==3.1.0              # Pinned: _iter_events() read-timeout behavior verified against this version (BUG_0026)
 
+# ── File Filtering ───────────────────────────────────────────
+pathspec                   # gitignore/.ignore/.rgignore matching for grep's Python fallback
+
 # ── Image Processing ────────────────────────────────────────
 pillow                     # Image manipulation
 pydantic>=2.3.0            # Data validation for agent configs
