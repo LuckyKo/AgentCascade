@@ -163,10 +163,13 @@ class SessionIOMixin:
           3. Release concurrency slots for all active instances (NEW — prevents stuck API slots)
           4. Clear cached message sets / message queues / async results
           5. Clear pending approvals (unblocks any threads waiting for user approval)
+          6. Dismiss sub-agent instances (BUG_0045 fix — prevents stale context across sessions)
+
+        Does:
+          - Dismiss sub-agent instances (BUG_0045 fix — prevents stale context across sessions)
 
         Does NOT:
-          - Dismiss sub-agents (they remain in pool with their current state)
-          - Clear conversations (user expects to Resume from the same point)
+          - Clear conversations of root orchestrator (user expects to Resume from the same point)
           - Clear instance_summaries, terminated_instances, or any session data
           - Create a new logger session
           - Shutdown/recreate async infrastructure
@@ -272,6 +275,20 @@ class SessionIOMixin:
                     self.operation_manager.pending.clear()
             except Exception as e:
                 logger.warning(f"clear_pending failed during stop_session (threads may hang): {e}")
+
+        # ── Step 6: Dismiss sub-agent instances (BUG_0045 fix) ─────────────────────
+        # Stop session should clean up delegated workers (Security, coder, researcher, etc.)
+        # so they don't carry stale conversation context into the next generation.
+        # Root orchestrator(s) are preserved for potential resume.
+        try:
+            # Count sub-agents before dismissal for logging
+            with self._pool_lock:
+                sub_agent_count = sum(1 for inst in self.instances.values() if inst.parent_instance is not None)
+            if sub_agent_count > 0:
+                self.clear_sub_agents()
+                logger.info(f"[STOP_SESSION] Dismissed {sub_agent_count} sub-agent instance(s)")
+        except Exception as e:
+            logger.warning(f"clear_sub_agents failed during stop_session (non-critical): {e}")
 
         # ── Instrumentation: Report stop state ──────────────────────────────────────
         with self._execution._state_lock:
