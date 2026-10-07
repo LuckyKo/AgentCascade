@@ -131,6 +131,173 @@ class GrepMixin:
             path = path[:-1].rstrip()
         return path or None
 
+    def _build_rg_argv(self,
+                       pattern: str,
+                       include: str,
+                       exclude: str,
+                       context: int,
+                       smart_case: bool,
+                       *,
+                       force_no_ignore: bool = False,
+                       exclude_git: bool = False) -> list:
+        """Single source of truth for the ripgrep argv used by BOTH the fast path and the
+        BUG_0061 ignored-path probe, so the two can never drift apart (a drifting probe
+        would silently misreport how many matches are hidden).
+
+        Two intentional knobs, set by each caller to match its own role:
+          force_no_ignore — emit `--no-ignore`, disabling ripgrep's built-in .gitignore/
+                            .ignore/.rgignore handling. The fast path wants this only when
+                            ignore_vcs=False; the probe always wants it (its entire purpose).
+          exclude_git     — append `--glob '!.git/'`. The fast path wants this only when
+                            ignore_vcs=True (to keep the documented .git exclusion);
+                            the probe always wants it (to avoid descending into .git/).
+
+        Defaults are False/False so neither behaviour is imposed on a caller implicitly —
+        each call site must state which behaviour it needs.
+
+        Ordering is load-bearing: ripgrep uses "last match wins" for --glob, so the user
+        globs must precede '!.git/' for the .git exclusion to hold against a user include
+        glob such as **/*.py.
+        """
+        cmd = [
+            'rg',
+            '--no-heading',
+            '-n',
+            '--json',
+            '--color',
+            'never',
+            '--no-mmap',
+            # Search hidden files/dirs (default rg skips dotfiles) so results match the
+            # Python fallback, which walks .hidden/ etc. via os.walk. Always applied.
+            '--hidden',
+            # Treat binary files as text (rg -a). Without this, any file containing a NUL
+            # byte is classified as "binary" and silently skipped: if no other file matches
+            # the tool falsely reports "No matches", and if other files DO match rg returns
+            # rc=0 so the binary file's match is dropped with no Python fallback (todo line 138).
+            '--text',
+        ]
+
+        if force_no_ignore:
+            cmd.append('--no-ignore')
+
+        if context > 0:
+            cmd.extend(['-C', str(context)])
+
+        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+        if smart_case:
+            if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+                cmd.append('-i')
+
+        # "*" with --glob breaks ripgrep (matches only root files). Searches all by default.
+        # BUG_0056: support comma-separated globs (e.g. "*.py,*.js") — one --glob per pattern.
+        if include and include != '*':
+            for _g in include.split(','):
+                _g = _g.strip()
+                if _g:
+                    cmd.extend(['--glob', _g])
+
+        # User-specified excludes (basename or path globs). Comma-separated supported.
+        if exclude:
+            for _e in exclude.split(','):
+                _e = _e.strip()
+                if _e:
+                    cmd.extend(['--glob', f'!{_e}'])
+
+        if exclude_git:
+            # --hidden overrides ripgrep's implicit .git skip, so re-exclude .git to keep
+            # the documented .git exclusion guarantee (matches the Python fallback, which
+            # prunes .git from its os.walk when ignore_vcs=True). Added LAST because rg uses
+            # "last match wins" for --glob: this guarantees .git stays excluded even if a
+            # user include glob (e.g. **/*.py) would otherwise re-match files inside .git.
+            # NOTE: use '!.git/' (directory form), NOT '!.git/**' — on ripgrep 15.1.0 the
+            # '!.git/**' glob does not exclude .git, while '!.git/' reliably excludes both
+            # top-level and nested .git files (verified on Windows + POSIX).
+            cmd.extend(['--glob', '!.git/'])
+
+        cmd.extend(['-e', pattern])
+        return cmd
+
+    def _probe_ignored_matches(self,
+                               pattern: str,
+                               path: Path,
+                               include: str,
+                               exclude: str,
+                               context: int,
+                               smart_case: bool,
+                               timeout: float) -> Optional[int]:
+        """Best-effort count of matches hiding behind VCS ignore rules (BUG_0061).
+
+        With ignore_vcs=True the fast path passes NO explicit ignore flag, so ripgrep applies
+        its built-in .gitignore/.ignore/.rgignore rules and silently prunes matching files. A
+        search matching only gitignored files is then byte-identical to a genuine absence, and
+        `rg --json` offers no way to recover the pruned paths (it emits only begin/end/match/
+        context/summary — no ignored-path message). The only way to disambiguate is to ask rg
+        a second time with the ignores turned off.
+
+        Returns the number of `match` messages ripgrep reports when `--no-ignore` is forced
+        on, or None if the probe could not be completed (ripgrep missing, timeout, error).
+        Callers MUST treat None as "unknown" and stay silent — this probe exists only to
+        disambiguate a zero-match result and must never turn a good search into an error.
+
+        Note: only meaningful on the ripgrep fast path. The Python fallback never reads any
+        ignore file (it prunes a hardcoded skip_dirs set), so it is NOT subject to this bug
+        and must not report these matches as "hidden".
+        """
+        import subprocess
+
+        from agent_cascade.log import logger
+
+        _rg_available, _ = _check_tool_availability()
+        if not _rg_available:
+            return None
+
+        # WHY these two flags (BUG_0061): the probe's whole purpose is to ask rg a second
+        # question with ignores turned OFF, so force_no_ignore is always True. It still keeps
+        # '--glob !.git/' (exclude_git always True) — without that, `--hidden --no-ignore`
+        # descends into .git/ internals and the probe becomes enormous and irrelevant.
+        # Everything else comes from the shared builder so it cannot drift from the fast path.
+        cmd = self._build_rg_argv(pattern,
+                                  include,
+                                  exclude,
+                                  context,
+                                  smart_case,
+                                  force_no_ignore=True,
+                                  exclude_git=True)
+
+        # Bounded: never let the diagnostic probe exceed the caller's time budget.
+        # Cap at 5s for sanity, but also clamp to the caller's own timeout so a
+        # sub-second caller is not held up by the probe.
+        probe_timeout = min(float(timeout), 5.0)
+        try:
+            result = subprocess.run(cmd,
+                                    cwd=str(path),
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    timeout=probe_timeout)
+        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError) as e:
+            logger.debug('grep: ignored-path probe failed: %s', e)
+            return None
+
+        if result.returncode not in (0, 1, 2):
+            return None
+
+        # `json` and `re` are already module-level imports in this file (grep.py L4-5).
+        count = 0
+        for line in result.stdout.split('\n'):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get('type') == 'match':
+                # One `match` message == one reported match line, matching the existing
+                # _parse_rg_json counting. Deliberately NOT counting submatches.
+                count += 1
+        return count
+
     def _try_subprocess_grep(self,
                              pattern: str,
                              path: Path,
@@ -163,67 +330,21 @@ class GrepMixin:
 
         try:
             if _rg_available:
-                cmd = [
-                    'rg',
-                    '--no-heading',
-                    '-n',
-                    '--json',
-                    '--color',
-                    'never',
-                    '--no-mmap',
-                    # Search hidden files/dirs (default rg skips dotfiles) so results match the
-                    # Python fallback, which walks .hidden/ etc. via os.walk. Always applied.
-                    '--hidden',
-                    # Treat binary files as text (rg -a). Without this, any file containing a NUL
-                    # byte is classified as "binary" and silently skipped: if no other file matches
-                    # the tool falsely reports "No matches", and if other files DO match rg returns
-                    # rc=0 so the binary file's match is dropped with no Python fallback (todo line 138).
-                    '--text',
-                ]
-
                 is_vcs_search = not ignore_vcs
-                if is_vcs_search:
-                    # ignore_vcs=False means "search everything" (per dna.py contract), including
-                    # .git. --no-ignore disables rg's built-in ignores; combined with --hidden this
-                    # lets rg descend into .git, matching the Python fallback which does not prune
-                    # skip_dirs when ignore_vcs=False.
-                    cmd.extend(['--no-ignore'])
-
-                if context > 0:
-                    cmd.extend(['-C', str(context)])
-
-                has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-                if smart_case:
-                    if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-                        cmd.append('-i')
-
-                # "*" with --glob breaks ripgrep (matches only root files). Searches all by default.
-                # BUG_0056: support comma-separated globs (e.g. "*.py,*.js") — one --glob per pattern.
-                if include and include != '*':
-                    for _g in include.split(','):
-                        _g = _g.strip()
-                        if _g:
-                            cmd.extend(['--glob', _g])
-
-                # User-specified excludes (basename or path globs). Comma-separated supported.
-                if exclude:
-                    for _e in exclude.split(','):
-                        _e = _e.strip()
-                        if _e:
-                            cmd.extend(['--glob', f'!{_e}'])
-
-                if not is_vcs_search:
-                    # --hidden overrides ripgrep's implicit .git skip, so re-exclude .git to keep
-                    # the documented .git exclusion guarantee (matches the Python fallback, which
-                    # prunes .git from its os.walk when ignore_vcs=True). Added LAST because rg uses
-                    # "last match wins" for --glob: this guarantees .git stays excluded even if a
-                    # user include glob (e.g. **/*.py) would otherwise re-match files inside .git.
-                    # NOTE: use '!.git/' (directory form), NOT '!.git/**' — on ripgrep 15.1.0 the
-                    # '!.git/**' glob does not exclude .git, while '!.git/' reliably excludes both
-                    # top-level and nested .git files (verified on Windows + POSIX).
-                    cmd.extend(['--glob', '!.git/'])
-
-                cmd.extend(['-e', pattern])
+                # WHY these two flags: ignore_vcs=False means "search everything" (per
+                # dna.py contract), including .git. --no-ignore disables rg's built-in
+                # ignores; combined with --hidden this lets rg descend into .git, matching the
+                # Python fallback which does not prune skip_dirs when ignore_vcs=False.
+                # Conversely ignore_vcs=True must KEEP .git excluded (see the builder's
+                # exclude_git note), so the two knobs are complementary here. The probe
+                # passes force_no_ignore=True, exclude_git=True — both always on.
+                cmd = self._build_rg_argv(pattern,
+                                          include,
+                                          exclude,
+                                          context,
+                                          smart_case,
+                                          force_no_ignore=is_vcs_search,
+                                          exclude_git=not is_vcs_search)
             else:
                 cmd = [
                     'grep',
@@ -639,6 +760,24 @@ class GrepMixin:
                 if count == 0 and not _sub_truncated:
                     logger.debug(f"grep: subprocess found no matches for '{pattern}'")
                     summary = f"No matches found for '{pattern}' in {path}"
+                    # BUG_0061: with ignore_vcs=True the fast path passes no explicit ignore
+                    # flag, so ripgrep's built-in .gitignore rules can prune the only matching
+                    # file — making "no matches" indistinguishable from "matches were hidden".
+                    # Probe once with --no-ignore; report only if it finds something. Advisory
+                    # text appended to the summary line, so the existing "No matches found"
+                    # prefix every format consumer matches on stays byte-preserved.
+                    if ignore_vcs:
+                        _hidden = self._probe_ignored_matches(pattern=pattern,
+                                                              path=resolved,
+                                                              include=include,
+                                                              exclude=exclude,
+                                                              context=context,
+                                                              smart_case=smart_case,
+                                                              timeout=timeout)
+                        if _hidden:
+                            summary += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
+                                        f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
+                                        f"to include them]")
                     return f"{summary}:\n\n"
                 else:
                     output_text = '\n'.join(results)

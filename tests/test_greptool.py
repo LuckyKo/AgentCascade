@@ -815,6 +815,494 @@ def test_include_glob_does_not_reinclude_git():
 
 
 # ──────────────────────────────────────────────
+#  BUG_0061: gitignored-path false negative + advisory note
+# ──────────────────────────────────────────────
+
+
+def _make_git_fixture(root: Path, *, add_gitignored_match: bool) -> None:
+    """Create a real git repo fixture with a '.gitignore' containing '*.log'."""
+    import subprocess as _sp
+
+    _sp.run(['git', 'init', '-q'], cwd=str(root), check=True, stdin=_sp.DEVNULL)
+    (Path(root) / '.gitignore').write_text('*.log\n', encoding='utf-8')
+    (Path(root) / 'normal.txt').write_text('hello world\n', encoding='utf-8')
+    _sp.run(['git', 'add', '.gitignore', 'normal.txt'], cwd=str(root), check=True,
+            stdin=_sp.DEVNULL)
+    _sp.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
+             'commit', '-q', '-m', 'init'], cwd=str(root), check=True, stdin=_sp.DEVNULL)
+    if add_gitignored_match:
+        # Gitignored ('*.log') and holds the ONLY match.
+        (Path(root) / 'app.log').write_text('error NEEDLE_TOKEN here\n', encoding='utf-8')
+
+
+def _rmtree_force(path: str) -> None:
+    """Remove a temp fixture tree. Git object files are read-only on Windows, so a plain
+    shutil.rmtree leaves the directory behind — clear the read-only flag via onexc."""
+    import os as _os
+    import stat as _stat
+
+    def _onerror(func, p, _exc):
+        try:
+            _os.chmod(p, _stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=_onerror)
+
+
+def test_gitignored_only_match_gets_note():
+    """BUG_0061 integration: the only matching file is gitignored. ignore_vcs=True must still
+    report 'No matches found' (prefix byte-preserved) AND append the advisory note.
+
+    Real git + real ripgrep. Case B (a non-ignored match also present, rc=0) is covered by
+    test_no_note_when_normal_match_present; here the ONLY match is gitignored (rc=1).
+    """
+    print('\n--- Test: gitignored-only match gets advisory note (BUG_0061) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    root = tempfile.mkdtemp(prefix='bug61_a_')
+    try:
+        # NOTE: ripgrep only honours '.gitignore' inside an actual git repository (verified on
+        # rg 15.1.0: identical argv returns rc=0 without 'git init' and rc=1 with it). A plain
+        # .gitignore file in a non-repo dir is NOT enough, so git is required here.
+        _make_git_fixture(Path(root), add_gitignored_match=True)
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        # Execution witness: the probe must actually run. Without it, the note assertion below
+        # could in principle be satisfied by a different code path.
+        # NOTE: autospec=True is REQUIRED here. Patching a class attribute with a plain Mock
+        # installs a non-descriptor object, so `self._probe_ignored_matches(...)` never binds
+        # self and raises "missing 1 required positional argument: 'self'". autospec builds a
+        # real function object, which binds correctly on attribute access.
+        with mock.patch.object(GrepMixin, '_probe_ignored_matches', autospec=True,
+                               wraps=GrepMixin._probe_ignored_matches) as spy:
+            # Case A: 'app.log' (gitignored) holds the ONLY match.
+            tool_output = om.grep(pattern='NEEDLE_TOKEN', path='.',
+                                  ignore_vcs=True, char_limit=-1)
+
+        assert spy.call_count == 1, \
+            f'witness: probe must run exactly once on zero-match + ignore_vcs=True; ' \
+            f'call_count={spy.call_count}; output: {tool_output[:300]}'
+        # The note text itself is the observable side effect: it must report the hidden count.
+        assert '[note: 1 match(es) exist in gitignored path(s)' in tool_output, \
+            f'note must report the 1 hidden match; output: {tool_output[:300]!r}'
+
+        assert 'No matches found' in tool_output, \
+            f"summary prefix must be preserved; output: {tool_output[:300]}"
+        assert 'ignore_vcs=False' in tool_output, \
+            f"BUG_0061: advisory note missing for gitignored-only match; output: {tool_output[:300]}"
+        assert 'gitignored path(s)' in tool_output
+        assert 'app.log' not in tool_output, \
+            f"the match must still be reported as NOT found (note is advisory only); output: {tool_output[:300]}"
+
+        # Case A counterpart: ignore_vcs=False must find it, with no note.
+        out_false = om.grep(pattern='NEEDLE_TOKEN', path='.', ignore_vcs=False, char_limit=-1)
+        assert 'app.log' in out_false, \
+            f"ignore_vcs=False must surface the gitignored file; output: {out_false[:300]}"
+        assert 'gitignored path(s)' not in out_false, f'no note expected; got: {out_false[:300]}'
+
+        print('  gitignored-only match reported 0 matches WITH advisory note;')
+        print('  ignore_vcs=False surfaced app.log with no note')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+def test_probe_cmd_forces_no_ignore_and_keeps_git_excluded():
+    """BUG_0061: the probe argv must force '--no-ignore' EXACTLY ONCE while keeping the
+    '--glob !.git/' exclusion LAST (ripgrep uses 'last match wins' for --glob).
+    """
+    print('\n--- Test: probe cmd forces --no-ignore and keeps !.git/ (BUG_0061) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    host = GrepMixin()
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured['cmd'] = list(cmd)
+        captured['kwargs'] = kwargs
+
+        class _R:
+            returncode = 1
+            stdout = ''
+            stderr = ''
+
+        return _R()
+
+    from agent_cascade.operation_manager import grep as grep_module
+    with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+            mock.patch('subprocess.run', side_effect=fake_run):
+        out = host._probe_ignored_matches(pattern='needle',
+                                          path=Path('.'),
+                                          include='*.py',
+                                          exclude='build',
+                                          context=2,
+                                          smart_case=True,
+                                          timeout=5.0)
+
+    cmd = captured['cmd']
+    assert cmd[0] == 'rg', f'expected rg branch; got: {cmd}'
+    assert cmd.count('--no-ignore') == 1, f'--no-ignore must appear exactly once; cmd={cmd}'
+    assert '--glob' in cmd and '!.git/' in cmd, \
+        f"probe must KEEP the '.git/' exclusion (or --no-ignore + --hidden descends into .git); cmd={cmd}"
+    # '!.git/' must come after user globs — last match wins.
+    git_glob_idx = cmd.index('!.git/')
+    user_glob_idx = max(cmd.index('*.py'), cmd.index('!build'))
+    assert git_glob_idx > user_glob_idx, \
+        f"'!.git/' must be appended last so it wins over user globs; cmd={cmd}"
+    assert cmd[-2:] == ['-e', 'needle'], f'pattern must be last; cmd={cmd}'
+    assert out == 0, f'empty stdout with rc=1 must yield count 0, got {out!r}'
+    assert captured['kwargs'].get('cwd') == '.', 'probe must run in the search root'
+
+
+def test_fastpath_and_probe_argv_relationship_is_exact():
+    """Drift guard: the probe's argv must be EXACTLY the fast path's ignore_vcs=False argv
+    plus '!.git/', for every combination of include/exclude/context/pattern.
+
+    Both paths now share _build_rg_argv, so this asserts the *contract between the two call
+    sites* rather than re-listing the argv. If someone changes how one caller passes the
+    force_no_ignore/exclude_git knobs, this fails — which is the whole point: a drifting
+    probe silently misreports how many matches are hidden.
+    """
+    import itertools
+    import pathlib as _pl
+    import unittest.mock as _mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin as _GM
+
+    captured = []
+
+    class _R:
+        returncode = 1
+        stdout = ''
+        stderr = ''
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return _R()
+
+    def _main_argv(ignore_vcs, include, exclude, context, pattern):
+        from agent_cascade.operation_manager import grep as grep_module
+        captured.clear()
+        with _mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+                _mock.patch('subprocess.run', side_effect=_fake_run):
+            _GM()._try_subprocess_grep(pattern=pattern,
+                                      path=_pl.Path('.'),
+                                      include=include,
+                                      char_limit=-1,
+                                      timeout=5.0,
+                                      exclude=exclude,
+                                      ignore_vcs=ignore_vcs,
+                                      context=context,
+                                      smart_case=True)
+        assert len(captured) == 1, f'fast path must run rg exactly once; got {len(captured)}'
+        return captured[0]
+
+    def _probe_argv(include, exclude, context, pattern):
+        from agent_cascade.operation_manager import grep as grep_module
+        captured.clear()
+        with _mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
+                _mock.patch('subprocess.run', side_effect=_fake_run):
+            _GM()._probe_ignored_matches(pattern=pattern,
+                                        path=_pl.Path('.'),
+                                        include=include,
+                                        exclude=exclude,
+                                        context=context,
+                                        smart_case=True,
+                                        timeout=5.0)
+        assert len(captured) == 1, f'probe must run rg exactly once; got {len(captured)}'
+        return captured[0]
+
+    checked = 0
+    for include, exclude, context, pattern in itertools.product(
+            ('', '*', '*.py', '*.py, *.js'), ('', 'build', 'a,b'), (0, 2), ('needle', 'Needle')):
+        probe = _probe_argv(include, exclude, context, pattern)
+        main_vcs = _main_argv(False, include, exclude, context, pattern)
+        # Splice rather than insert(): a user '--glob' may already be present, so index-based
+        # insertion can match the wrong occurrence.
+        at = main_vcs.index('-e')
+        expected = main_vcs[:at] + ['--glob', '!.git/'] + main_vcs[at:]
+
+        assert probe == expected, (
+            f'probe argv drifted from the fast path.\n'
+            f'  include={include!r} exclude={exclude!r} context={context} pattern={pattern!r}\n'
+            f'  probe: {probe}\n  expected: {expected}')
+        checked += 1
+
+    assert checked == 48, f'expected the full 48-combination matrix, only ran {checked}'
+
+    # The relationship assertions above are DERIVED from the fast path's own output, so they
+    # guard knob drift but cannot catch base-flag drift (both paths move together). Pin the
+    # absolute base argv against an independent literal so one test fails if the shared base
+    # list is edited at all.
+    base = ['rg', '--no-heading', '-n', '--json', '--color', 'never', '--no-mmap',
+            '--hidden', '--text']
+    assert _probe_argv('', '', 0, 'needle') == base + ['--no-ignore', '-i', '--glob', '!.git/',
+                                                        '-e', 'needle'], \
+        f'shared base argv drifted from the pinned literal; got: {_probe_argv('', '', 0, 'needle')}'
+    assert _main_argv(True, '', '', 0, 'needle') == base + ['-i', '--glob', '!.git/', '-e', 'needle'], \
+        f'shared base argv drifted from the pinned literal; got: {_main_argv(True, '', '', 0, 'needle')}'
+
+    # And the documented knob contract on the fast path itself: ignore_vcs=True keeps .git
+    # excluded and does NOT pass --no-ignore; ignore_vcs=False is the mirror image.
+    for ignore_vcs, want_no_ignore, want_git_glob in ((True, False, True), (False, True, False)):
+        cmd = _main_argv(ignore_vcs, '*.py', 'build', 2, 'needle')
+        assert ('--no-ignore' in cmd) is want_no_ignore, \
+            f'ignore_vcs={ignore_vcs}: --no-ignore presence wrong; cmd={cmd}'
+        assert ('!.git/' in cmd) is want_git_glob, \
+            f'ignore_vcs={ignore_vcs}: !.git/ presence wrong; cmd={cmd}'
+
+    print(f'  verified {checked} argv combinations')
+    print('  [PASS]')
+
+
+def test_no_note_when_ignore_vcs_false():
+    """BUG_0061: with ignore_vcs=False no probe may run and no note may appear."""
+    print('\n--- Test: no note when ignore_vcs=False (BUG_0061) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    root = tempfile.mkdtemp(prefix='bug61_b_')
+    try:
+        (Path(root) / '.gitignore').write_text('*.log\n', encoding='utf-8')
+        (Path(root) / 'other.txt').write_text('nothing here\n', encoding='utf-8')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        with mock.patch.object(GrepMixin, '_probe_ignored_matches',
+                               side_effect=AssertionError('probe must not run when ignore_vcs=False')):
+            tool_output = om.grep(pattern='ABSENT_TOKEN_XYZ', path='.', ignore_vcs=False, char_limit=-1)
+
+        assert 'No matches found' in tool_output, f'output: {tool_output[:300]}'
+        assert 'gitignored path(s)' not in tool_output, \
+            f'no note expected when ignore_vcs=False; output: {tool_output[:300]}'
+
+        print('  ignore_vcs=False: no probe, no note')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+def test_probe_failure_is_silent():
+    """BUG_0061: if the probe raises (timeout / missing binary), the zero-match result must be
+    returned UNCHANGED — a diagnostic must never turn a good search into an error.
+    """
+    print('\n--- Test: probe failure is silent (BUG_0061) ---')
+    import subprocess as _sp
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    root = tempfile.mkdtemp(prefix='bug61_c_')
+    try:
+        (Path(root) / '.gitignore').write_text('*.log\n', encoding='utf-8')
+        (Path(root) / 'other.txt').write_text('nothing here\n', encoding='utf-8')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        # Patch subprocess.run (NOT _probe_ignored_matches) so the REAL probe runs and its own
+        # defensive handler is what we exercise. The first call is the main search (rc=1,
+        # no matches); every subsequent call is the probe and must blow up.
+        for exc in (_sp.TimeoutExpired('rg', 5.0), OSError('boom'), PermissionError('denied'),
+                    FileNotFoundError('no rg')):
+            calls = {'n': 0}
+
+            def flaky_run(cmd, *a, **kw):
+                calls['n'] += 1
+                if calls['n'] == 1:
+                    class _R:
+                        returncode = 1
+                        stdout = ''
+                        stderr = ''
+                    return _R()
+                raise exc
+
+            with mock.patch('subprocess.run', side_effect=flaky_run):
+                tool_output = om.grep(pattern='ABSENT_TOKEN_XYZ', path='.',
+                                      ignore_vcs=True, char_limit=-1)
+
+            assert calls['n'] >= 2, \
+                f'witness: probe must actually have been invoked; calls={calls['n']}'
+            assert tool_output.startswith("No matches found for 'ABSENT_TOKEN_XYZ'"), \
+                f'probe failure must leave the result unchanged, got: {tool_output[:300]!r}'
+            assert 'gitignored path(s)' not in tool_output
+            assert 'Error searching' not in tool_output, \
+                f'probe failure must never surface as an error; got: {tool_output[:300]!r}'
+
+        # The probe in isolation returns None (never raises) for every failure mode.
+        for exc in (_sp.TimeoutExpired('rg', 5.0), OSError('boom'),
+                    PermissionError('denied'), FileNotFoundError('no rg')):
+            with mock.patch('subprocess.run', side_effect=exc):
+                assert GrepMixin()._probe_ignored_matches(
+                    pattern='x', path=Path(root), include='*', exclude='',
+                    context=0, smart_case=True, timeout=5.0) is None, \
+                    f'probe must return None (not raise) for {exc!r}'
+
+        print('  probe failure swallowed at every layer; zero-match result unchanged')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+def test_note_absent_when_no_hidden_matches():
+    """BUG_0061: a genuine absence (probe finds 0 with --no-ignore) must produce output
+    byte-identical to today's behaviour — no spurious note.
+    """
+    print('\n--- Test: no note when probe finds nothing (BUG_0061) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    root = tempfile.mkdtemp(prefix='bug61_d_')
+    try:
+        (Path(root) / '.gitignore').write_text('*.log\n', encoding='utf-8')
+        (Path(root) / 'other.txt').write_text('nothing here\n', encoding='utf-8')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        # Execution witness: probe WAS called, and returned 0.
+        spy = mock.Mock(return_value=0)
+        with mock.patch.object(GrepMixin, '_probe_ignored_matches', spy):
+            tool_output = om.grep(pattern='ABSENT_TOKEN_XYZ', path='.',
+                                  ignore_vcs=True, char_limit=-1)
+
+        assert spy.call_count == 1, \
+            f'probe must actually run on zero-match + ignore_vcs=True (witness missing → ' \
+            f'this test could pass for the wrong reason); call_count={spy.call_count}'
+        assert tool_output == "No matches found for 'ABSENT_TOKEN_XYZ' in .:\n\n", \
+            f'output must be byte-identical to pre-fix behaviour, got: {tool_output!r}'
+        assert 'gitignored path(s)' not in tool_output
+
+        print('  genuine absence: probe ran, returned 0, no note')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+def test_no_note_when_normal_match_present():
+    """BUG_0061 Case B: rc=0 (a normal, non-ignored match exists) must NOT produce a note even
+    though a gitignored match also exists. Guards against a false positive on the match path.
+    """
+    print('\n--- Test: no false note when a normal match exists (BUG_0061 Case B) ---')
+    import unittest.mock as mock
+
+    from agent_cascade.operation_manager.grep import GrepMixin
+
+    root = tempfile.mkdtemp(prefix='bug61_e_')
+    try:
+        # Real git repo required: without one rg ignores '.gitignore' entirely (rc=0 on the
+        # gitignored file too), so this test would silently stop covering the rc=0-vs-rc=1 split.
+        _make_git_fixture(Path(root), add_gitignored_match=True)
+        # The non-ignored match that makes the main search rc=0.
+        (Path(root) / 'tracked.txt').write_text('plain NEEDLE_TOKEN line\n', encoding='utf-8')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        with mock.patch.object(GrepMixin, '_probe_ignored_matches',
+                               side_effect=AssertionError('probe must not run when count > 0')):
+            tool_output = om.grep(pattern='NEEDLE_TOKEN', path='.',
+                                  ignore_vcs=True, char_limit=-1)
+
+        assert 'Found' in tool_output, f'output: {tool_output[:300]}'
+        assert 'tracked.txt' in tool_output, f'normal match must be found; output: {tool_output[:300]}'
+        assert 'gitignored path(s)' not in tool_output, \
+            f'FALSE POSITIVE note on rc=0; output: {tool_output[:300]}'
+
+        print('  rc=0 path: normal match found, no probe, no false note')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+def test_grep_compare_parser_unaffected():
+    """BUG_0061: the advisory note must not break the differential harness's parser.
+    grep_compare.parse_om_result returns ([], 0) for any 'No matches found' output.
+    """
+    print('\n--- Test: grep_compare parser unaffected by note (BUG_0061) ---')
+    import importlib.util
+
+    root = tempfile.mkdtemp(prefix='bug61_f_')
+    try:
+        compare_path = Path(__file__).resolve().parent / 'scripts' / 'grep_compare.py'
+        if not compare_path.exists():
+            print('  [SKIP] grep_compare.py not present')
+            return
+        spec = importlib.util.spec_from_file_location('grep_compare_bug61', compare_path)
+        cmp_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cmp_mod)
+
+        # Real git repo: rg only honours '.gitignore' inside one (verified on rg 15.1.0).
+        _make_git_fixture(Path(root), add_gitignored_match=False)
+        (Path(root) / 'app.log').write_text('error PARSE_TOKEN here\n', encoding='utf-8')
+
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager(base_dir=str(root))
+
+        tool_output = om.grep(pattern='PARSE_TOKEN', path='.', ignore_vcs=True, char_limit=-1)
+
+        assert 'gitignored path(s)' in tool_output, \
+            f'expected a note here (Case A); got: {tool_output[:300]!r}'
+
+        lines, count = cmp_mod.parse_om_result(tool_output)
+        assert lines == [], f'parser must return no match lines for a zero-match search, got {lines}'
+        assert count == 0, f'parser must report count 0, got {count}'
+
+        # And a normal match output still parses.
+        (Path(root) / 'ok.txt').write_text('PARSE_TOKEN plain\n', encoding='utf-8')
+        ok_out = om.grep(pattern='PARSE_TOKEN', path='.', ignore_vcs=False, char_limit=-1)
+        ok_lines, ok_count = cmp_mod.parse_om_result(ok_out)
+        assert ok_count >= 1, f'parser must still find the match, got {ok_count}'
+        assert any('ok.txt' in ln for ln in ok_lines), f'parsed lines: {ok_lines}'
+
+        print('  note-bearing zero-match output parses as ([], 0); match output unaffected')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
+
+# ──────────────────────────────────────────────
 #  Main runner
 # ──────────────────────────────────────────────
 
@@ -843,6 +1331,15 @@ def main():
         ('rc=2 partial-error surfaces matches (Fix B)', test_rc2_partial_error_surfaces_matches),
         ('rc=2 usage error still falls back', test_rc2_usage_error_still_falls_back),
         ('binary/NUL-byte match end-to-end (todo 138)', test_binary_nul_match_end_to_end),
+        # BUG_0061: gitignored-path false negative
+        ('BUG_0061 gitignored-only match gets note', test_gitignored_only_match_gets_note),
+        ('BUG_0061 probe cmd forces --no-ignore', test_probe_cmd_forces_no_ignore_and_keeps_git_excluded),
+        ('BUG_0061 no note when ignore_vcs=False', test_no_note_when_ignore_vcs_false),
+        ('BUG_0061 probe failure is silent', test_probe_failure_is_silent),
+        ('BUG_0061 no note when probe finds nothing', test_note_absent_when_no_hidden_matches),
+        ('BUG_0061 no false note on rc=0 (Case B)', test_no_note_when_normal_match_present),
+        ('BUG_0061 grep_compare parser unaffected', test_grep_compare_parser_unaffected),
+        ('BUG_0061 fast-path/probe argv drift guard', test_fastpath_and_probe_argv_relationship_is_exact),
     ]
 
     passed = 0
