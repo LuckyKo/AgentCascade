@@ -14,6 +14,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import traceback
@@ -2949,8 +2950,23 @@ class APIRouter:
 
     # ── Persistence ──────────────────────────────────────────────────────
 
+    def _tmp_path(self) -> Path:
+        """Sibling temp-file path used for the atomic write (same dir as the primary)."""
+        return self._config_path.with_suffix(self._config_path.suffix + '.tmp')
+
+    def _backup_path(self) -> Path:
+        """Path of the one-generation backup, e.g. api_endpoints.json.bak."""
+        return self._config_path.with_suffix(self._config_path.suffix + '.bak')
+
     def _save(self):
-        """Persist config to disk."""
+        """Persist config to disk (atomic write + one .bak generation).
+
+        config/api_endpoints.json is gitignored, so a truncated write is unrecoverable
+        from version control. Write to a sibling .tmp, fsync it, copy the current file to
+        .bak, then os.replace() into position — os.replace is atomic on both POSIX and
+        Windows, so a reader never observes a partially written config.
+        """
+        tmp_path = None
         try:
             self._config_dir.mkdir(parents=True, exist_ok=True)
             data = {
@@ -2958,10 +2974,25 @@ class APIRouter:
                 'agent_priorities': self.agent_priorities,
                 'agent_types_with_priorities': list(self._agent_types_with_priorities),
             }
-            with open(self._config_path, 'w', encoding='utf-8') as f:
+            # Same directory as the primary so os.replace stays on one filesystem.
+            tmp_path = self._tmp_path()
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            # Backup the *previous* generation before swapping in the new one, so a save
+            # that is later found to be wrong can still be rolled back one step.
+            if self._config_path.exists():
+                shutil.copy2(self._config_path, self._backup_path())
+            os.replace(tmp_path, self._config_path)
         except Exception as e:
             logger.error(f"[APIRouter] Failed to save config: {e}")
+            # Best-effort cleanup so a failed save never leaves a stray .tmp behind.
+            try:
+                if tmp_path is not None:
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     def _normalize_agent_priorities(self, priorities: dict) -> dict:
         """
@@ -3031,17 +3062,24 @@ class APIRouter:
             except OSError as e:
                 logger.error(f"[APIRouter] Failed to create config/api_endpoints.json: {e}")
             return
-        try:
-            with open(self._config_path, 'r', encoding='utf-8-sig') as f:
-                content = f.read().strip()
-                if not content:
-                    return
-                data = json.loads(content)
-
-            if not isinstance(data, dict):
-                logger.warning(f"[APIRouter] Config file {self._config_path} is not a dictionary. Skipping.")
+        # BUG_0060 / Layer 3b: config/api_endpoints.json is gitignored, so a truncated or
+        # corrupted primary is unrecoverable from version control. _save() keeps one .bak
+        # generation; use it when the primary cannot be read. An empty file counts as
+        # unreadable too — a zero-length config is a failed write, not a valid config.
+        data = self._read_config_file(self._config_path)
+        source_path = self._config_path
+        if data is None:
+            bak_path = self._backup_path()
+            data = self._read_config_file(bak_path)
+            if data is None:
+                # Both unreadable — keep the historical behaviour: log and start empty.
+                logger.error(f"[APIRouter] Failed to load config from {self._config_path} "
+                             f"(and no usable backup at {bak_path}). Starting with empty configuration.")
                 return
-
+            source_path = bak_path
+            logger.warning(f"[APIRouter] Primary config {self._config_path} is unreadable; "
+                           f"recovered configuration from backup {bak_path}.")
+        try:
             for ep_data in data.get('endpoints', []):
                 try:
                     ep = APIEndpoint.from_dict(ep_data)
@@ -3067,9 +3105,27 @@ class APIRouter:
             # Prevents incorrect Tier 3 (last-successful) fallback if config has tracked types without actual priorities.
             self._agent_types_with_priorities &= set(self.agent_priorities.keys())
 
-            logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {self._config_path}")
+            logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {source_path}")
         except Exception as e:
-            logger.error(f"[APIRouter] Failed to load config from {self._config_path}: {e}")
+            logger.error(f"[APIRouter] Failed to load config from {source_path}: {e}")
+
+    def _read_config_file(self, path) -> Optional[dict]:
+        """Read and JSON-parse a config file. Returns None if missing/unreadable/not a dict.
+
+        Never raises: _load() uses a None return to decide whether to fall back to the
+        .bak generation, so an IO or decode error must be reported as "unusable", not
+        propagated.
+        """
+        try:
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                content = f.read().strip()
+            if not content:
+                return None
+            data = json.loads(content)
+        except Exception as e:
+            logger.warning(f"[APIRouter] Could not read config file {path}: {e}")
+            return None
+        return data if isinstance(data, dict) else None
 
     # ── Serialization (for UI transport) ─────────────────────────────────
 
@@ -3091,12 +3147,40 @@ class APIRouter:
             # Parse endpoints into a temporary dict first — don't clear existing endpoints yet.
             # This prevents leaving the router in a corrupted (empty) state if parsing fails mid-way.
             new_endpoints = {}
+            # BUG_0060: captured BEFORE the swap below — the zero-drop diagnostic needs to
+            # compare against the pre-update generation.
+            previous_endpoints = dict(self.endpoints)
             for ep_data in data.get('endpoints', []):
                 try:
+                    if isinstance(ep_data, dict):
+                        existing = self.endpoints.get(ep_data.get('id'))
+                        if existing is not None:
+                            # Inherit keys absent from the payload (absent = transport
+                            # artefact, not a user edit; a key present with value 0 is honoured).
+                            for k, v in vars(existing).items():
+                                if k not in ep_data:
+                                    ep_data[k] = v
                     ep = APIEndpoint.from_dict(ep_data)
                     new_endpoints[ep.id] = ep
                 except Exception as e:
                     logger.error(f"[APIRouter.from_dict] Failed to parse endpoint data: {e}")
+
+            # Diagnostic only — never overrides the payload. 0 is a documented, user-selectable
+            # value, so silently rewriting it to the previous value would misrepresent what the
+            # UI holds. Logging makes "user typed 0" distinguishable from "something ate the
+            # value" (see BUG_0060: the UI blur echo loop used to manufacture these zeros).
+            for ep_id, new_ep in new_endpoints.items():
+                old_ep = previous_endpoints.get(ep_id)
+                if old_ep is None:
+                    continue
+                for k, new_val in vars(new_ep).items():
+                    old_val = getattr(old_ep, k, None)
+                    if isinstance(old_val, (int, float)) and not isinstance(old_val, bool) \
+                            and isinstance(new_val, (int, float)) and not isinstance(new_val, bool) \
+                            and old_val > 0 and new_val == 0:
+                        logger.warning(
+                            f"[APIRouter.from_dict] endpoint {new_ep.name!r} ({ep_id}): "
+                            f"{k} {old_val} -> 0 (0 = auto; confirm this was intended)")
 
             # Swap atomically only after all parsing succeeds
             self.endpoints.clear()

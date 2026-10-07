@@ -6374,21 +6374,21 @@ function renderApiEndpoints() {
              <div style="display:flex;gap:8px;">
                <label class="setting-field" style="flex:1;">
                  <span>Retries</span>
-                 <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries}">
+                 <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries ?? 2}">
                </label>
                <label class="setting-field" style="flex:1;">
                  <span>Concurrency</span>
-                 <input type="number" min="0" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit || 0}" title="0 = Unlimited. Set to 1 for local servers like LM Studio.">
+                 <input type="number" min="-1" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit ?? -1}" title="-1 = Unlimited. Set to 1 for local servers like LM Studio.">
                </label>
                <label class="setting-field" style="flex:1;">
                  <span>Token Limit</span>
-                 <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens || 0}" title="0 = Use General Settings. Caps context for this endpoint.">
+                 <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens ?? 0}" title="0 = Use General Settings. Caps context for this endpoint.">
                </label>
              </div>
              <div style="display:flex;gap:8px;margin-top:6px;">
                <label class="setting-field" style="flex:1;">
                  <span>Rate Limit (rpm)</span>
-                 <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
+                 <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm ?? 0}" title="Requests per minute. 0 = unlimited">
                </label>
              </div>
 
@@ -6610,15 +6610,34 @@ function handleApiEndpointToggle(e) {
   }
 }
 
-// Helper: safely read a numeric value from an input element within a card.
-// Returns defaultValue if the element is missing, parsing fails, or result is NaN/null/undefined.
-function _epVal(card, selector, parseFn, defaultValue) {
+// Sentinel meaning "the user supplied nothing for this field" — the input element was
+// absent, blank, or unparseable. BUG_0060: handleApiEndpointBlur used to coerce these
+// into a hardcoded default (parseInt('') -> NaN -> 0), which then got persisted for the
+// whole endpoint and destroyed values the user never touched (e.g. a -1 concurrency limit
+// became 0, a 120000 token cap became 0).
+const _EP_UNSET = Symbol('ep_unset');
+
+// Read a value from an input inside an endpoint card.
+// Returns _EP_UNSET when the element is missing, the value is blank, or parsing fails;
+// callers use _epSet to decide what that means. An explicit "0" parses successfully and
+// is therefore returned as a real value — 0 is a legitimate setting ("auto"), so it must
+// never be confused with "the user said nothing".
+function _epVal(card, selector, parseFn) {
   const el = card.querySelector(selector);
-  if (!el) return defaultValue;
+  if (!el) return _EP_UNSET;
+  const raw = String(el.value ?? '').trim();
+  if (raw === '') return _EP_UNSET;
   try {
-    const v = parseFn(el.value);
-    return (Number.isNaN(v) || v === null || v === undefined) ? defaultValue : v;
-  } catch { return defaultValue; }
+    const v = parseFn(raw);
+    return (Number.isNaN(v) || v === null || v === undefined) ? _EP_UNSET : v;
+  } catch { return _EP_UNSET; }
+}
+
+// Assign ep[key] only when the user actually supplied a parseable value; otherwise the
+// prior value is left untouched.
+function _epSet(ep, card, key, selector, parseFn) {
+  const v = _epVal(card, selector, parseFn);
+  if (v !== _EP_UNSET) ep[key] = v;
 }
 
 function handleApiEndpointBlur(e) {
@@ -6629,19 +6648,22 @@ function handleApiEndpointBlur(e) {
   const ep = endpoints.find(ep => ep.id === id);
   if (!ep) return;
 
-  // String fields (trim, fallback to defaults where applicable)
-  ep.name = _epVal(card, '.ep-input-name', v => v.trim(), '');
-  ep.api_base = _epVal(card, '.ep-input-base', v => v.trim(), '');
-  ep.api_key = _epVal(card, '.ep-input-key', v => v.trim() || 'EMPTY', 'EMPTY');
-  ep.model = _epVal(card, '.ep-input-model', v => v.trim(), '');
+  // BUG_0060: every field below is written only when the user supplied a parseable
+  // value. A blank box (e.g. select-all-then-click-away while retyping) now keeps the
+  // stored value instead of persisting a manufactured default.
+  // Note: clearing the API-key box therefore leaves the previous key in place rather
+  // than writing the literal 'EMPTY'.
+  _epSet(ep, card, 'name', '.ep-input-name', v => v.trim());
+  _epSet(ep, card, 'api_base', '.ep-input-base', v => v.trim());
+  _epSet(ep, card, 'api_key', '.ep-input-key', v => v.trim());
+  _epSet(ep, card, 'model', '.ep-input-model', v => v.trim());
 
-  // Integer fields (NaN-safe with zero defaults)
-  ep.max_retries = _epVal(card, '.ep-input-retries', parseInt, 0);
-  ep.concurrency_limit = _epVal(card, '.ep-input-concurrency', parseInt, 0);
-  ep.max_input_tokens = _epVal(card, '.ep-input-tokens', parseInt, 0);
+  // Integer fields
+  _epSet(ep, card, 'max_retries', '.ep-input-retries', parseInt);
+  _epSet(ep, card, 'concurrency_limit', '.ep-input-concurrency', parseInt);
+  _epSet(ep, card, 'max_input_tokens', '.ep-input-tokens', parseInt);
 
-  // Float fields (NaN-safe with appropriate defaults)
-  ep.rate_limit_rpm = _epVal(card, '.ep-input-rate-limit', parseInt, 0);
+  _epSet(ep, card, 'rate_limit_rpm', '.ep-input-rate-limit', parseInt);
 
   // Checkbox toggles (optional elements)
   const visionCb = card.querySelector('.ep-input-vision');
@@ -6653,15 +6675,15 @@ function handleApiEndpointBlur(e) {
   const reasoningEffortSel = card.querySelector('.ep-input-reasoning-effort');
   if (reasoningEffortSel) ep.reasoning_effort = reasoningEffortSel.value || 'none';
 
-  // Sampler parameters (NaN-safe, zero means "use default")
-  ep.temperature = _epVal(card, '.ep-input-temperature', parseFloat, 0);
-  ep.top_p = _epVal(card, '.ep-input-top-p', parseFloat, 0);
-  ep.top_k = _epVal(card, '.ep-input-top-k', parseInt, 0);
-  ep.min_p = _epVal(card, '.ep-input-min-p', parseFloat, 0);
-  ep.repeat_penalty = _epVal(card, '.ep-input-repeat-penalty', parseFloat, 0);
-  ep.presence_penalty = _epVal(card, '.ep-input-presence-penalty', parseFloat, 0);
-  ep.frequency_penalty = _epVal(card, '.ep-input-frequency-penalty', parseFloat, 0);
-  ep.max_tokens = _epVal(card, '.ep-input-max-tokens', parseInt, 0);
+  // Sampler parameters (blank means "leave as stored"; a parsed 0 means "use default")
+  _epSet(ep, card, 'temperature', '.ep-input-temperature', parseFloat);
+  _epSet(ep, card, 'top_p', '.ep-input-top-p', parseFloat);
+  _epSet(ep, card, 'top_k', '.ep-input-top-k', parseInt);
+  _epSet(ep, card, 'min_p', '.ep-input-min-p', parseFloat);
+  _epSet(ep, card, 'repeat_penalty', '.ep-input-repeat-penalty', parseFloat);
+  _epSet(ep, card, 'presence_penalty', '.ep-input-presence-penalty', parseFloat);
+  _epSet(ep, card, 'frequency_penalty', '.ep-input-frequency-penalty', parseFloat);
+  _epSet(ep, card, 'max_tokens', '.ep-input-max-tokens', parseInt);
 
   sendApiRouterUpdate();
 }
@@ -7052,18 +7074,33 @@ if (btnAddEndpoint) {
     if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
     if (!state.api_router.endpoints) state.api_router.endpoints = [];
 
-    // Add a new blank endpoint with defaults matching backend dataclass
-    state.api_router.endpoints.push({
-      id: crypto.randomUUID(),
-      name: 'New Endpoint',
-      api_base: 'http://localhost:1234/v1',
-      api_key: 'EMPTY',
-      model: '',
-      enabled: true,
-      max_retries: 2,
-      rate_limit_rpm: 0,
-      reasoning_effort: 'none'
-    });
+    // Add a new blank endpoint with defaults matching the backend dataclass.
+      // Schema-complete on purpose (BUG_0060): an omitted field used to be filled in
+      // downstream by a `?? 0` renderer, which is indistinguishable from a real 0.
+      state.api_router.endpoints.push({
+        id: crypto.randomUUID(),
+        name: 'New Endpoint',
+        api_base: 'http://localhost:1234/v1',
+        api_key: 'EMPTY',
+        model: '',
+        enabled: true,
+        max_retries: 2,
+        concurrency_limit: -1, // -1 = unlimited (backend default)
+        max_input_tokens: 0,
+        rate_limit_rpm: 0,
+        temperature: 0,
+        top_p: 0,
+        top_k: 0,
+        min_p: 0,
+        repeat_penalty: 0,
+        presence_penalty: 0,
+        frequency_penalty: 0,
+        max_tokens: 0,
+        vision_enabled: true,
+        use_custom_sampling: false,
+        state_save_enabled: false,
+        reasoning_effort: 'none'
+      });
 
     sendApiRouterUpdate();
   });
