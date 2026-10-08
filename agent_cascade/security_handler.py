@@ -27,23 +27,27 @@ import agent_cascade.security_reuse as security_reuse
 # ── Deadlock protection constants ───────────────────────────────────────────
 # NOTE: The system-launched Security advisor is bounded by a turn budget
 # (SECURITY_AGENT_MAX_TURNS in settings.py), which lets the model finish its
-# reasoning and forces a final verdict on its last turn. A wall-clock first-yield
-# timer (below) remains only as a last-resort guard against an LLM generator that
-# never yields its first token. The user-facing approval_timeout_seconds still
-# governs the "taking longer than expected" warning.
+# reasoning and forces a final verdict on its last turn. The user-facing
+# approval_timeout_seconds still governs the "taking longer than expected" warning.
 
 # Timeout for acquiring the security check lock.
 # Security checks are FIFO-serialized via this global lock — a waiting check must
-# wait as long as the previous one legitimately runs (up to ~300s first-yield + turns).
+# wait as long as the previous one legitimately runs (up to ~300s inactivity window + turns).
 # Set well beyond max legitimate hold time so concurrent requests queue properly.
 # The ResettableRLock dead-holder detection still recovers from truly leaked locks.
 SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_LOCK_ACQUIRE_TIMEOUT', 600))
 
-# Last-resort guard against an LLM generator that never yields its first token.
-# The engine watchdog only activates after the first output; this timer covers the
-# pre-first-yield gap. Generous on purpose — it must not cut off a slow-but-progressing
-# model (the turn budget handles normal completion). Only fires if NO yield at all.
-SECURITY_FIRST_YIELD_TIMEOUT_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_FIRST_YIELD_TIMEOUT', 300))
+# Dead-man's switch (BUG_0040): sliding INACTIVITY window on the security advisor's
+# streaming loop. A generator yield is the liveness signal; the window resets on every
+# yield and trips (auto-reject) only after 300s of total silence. Kept at 300s — not the
+# engine's 180s stream-silence bound — so endpoints that go silent during long tool calls
+# are not false-positived. NO hard cap: every case a cap would cover is already bounded by
+# the engine's stream watchdog, which runs INSIDE the generator (engine/llm_call.py:583-603)
+# and stays active even while the security loop is blocked in next(). Plain module constant
+# (read at import) so tests can patch it — do NOT resolve it from pool.settings first
+# (that would silently defeat test patching; see .agent_lessons/dead-mans-switch-timeout-
+# is-activity-relative.md, Trap 3).
+SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_INACTIVITY_WINDOW', 300))
 
 # ── Module-level helpers used by the security handler ───────────────────────
 
@@ -316,7 +320,6 @@ class SecurityAdvisorHandler:
                            # dereferences it (release_claim) — if prompt build / ExecutionEngine raise
                            # first, an unbound local would raise UnboundLocalError and mask the real error.
         sec_warning_timer = None  # Track for cleanup in finally block
-        sec_first_yield_timer = None  # Last-resort guard against a hung generator (FIX 1)
         _yielded_slot = False  # True if we released the caller's slot → must reacquire in finally
 
         sec_prompt_lock = _get_security_check_lock(self.app_state)
@@ -399,10 +402,11 @@ class SecurityAdvisorHandler:
 
                 logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
 
-                # Result-tracking flags. These are set True ONLY on a pre-first-yield hang:
-                # if the LLM generator never yields its first token, the first-yield timer
-                # (below) fires and we break out here so _handle_result can auto-reject.
-                # Normal completion is governed by the turn budget (sec_instance.max_turns).
+                # Result-tracking flags. sec_timeout_reached is set True when the dead-man's
+                # switch (sliding inactivity window, below) trips: the advisor went silent
+                # past the window and we break out so _handle_result can auto-reject with the
+                # real reason (_dm_reason). Normal completion is governed by the turn budget
+                # (sec_instance.max_turns).
                 sec_timeout_reached = False
                 sec_elapsed_at_timeout = None
                 sec_start_time = time.monotonic()
@@ -492,21 +496,6 @@ class SecurityAdvisorHandler:
                     save_fn=engine.save_before_slot_yield,
                 )
 
-                # Last-resort guard against a generator that never yields its first token.
-                # The turn budget is the primary mechanism; this timer only covers the
-                # pre-first-yield gap the engine watchdog cannot see. Cancelled on first yield.
-                _first_yield_timeout_event = threading.Event()
-
-                def _first_yield_timeout_trigger():
-                    logger.warning(f"[SECURITY] First-yield timeout trigger fired for request {rid} "
-                                   f"after {SECURITY_FIRST_YIELD_TIMEOUT_SECONDS}s — model has not yielded.")
-                    _first_yield_timeout_event.set()
-
-                sec_first_yield_timer = threading.Timer(SECURITY_FIRST_YIELD_TIMEOUT_SECONDS,
-                                                        _first_yield_timeout_trigger)
-                sec_first_yield_timer.daemon = True
-                sec_first_yield_timer.start()
-
                 # ── Engine execution loop with streaming ───────────────────
                 _last_sec_send = 0.0
                 _sec_tick_num = 0
@@ -520,30 +509,49 @@ class SecurityAdvisorHandler:
                 logger.debug(f"[SECURITY_SLOT_ACQUIRE] About to run Security agent; current pool holders: "
                              f"{self._describe_pool_holders(caller_agent)}")
 
-                _got_first_yield = False
+                # ── DEAD-MAN'S SWITCH state (BUG_0040; analogous to slot_queue.py but with
+                #    fail-fast BEFORE reset and no hard cap — see ordering note below) ──
+                # The one-shot first-yield timer is replaced by a sliding inactivity window.
+                # Activity = a generator yield from engine.run() (each streaming tick). The
+                # window is NOT started until the first yield arrives, so the slot-wait phase
+                # (already bounded by the slot-queue dead-man's switch) does not trigger a
+                # false timeout. NO hard cap: every case it would have covered is already
+                # bounded by the engine watchdog, which runs inside the generator and stays
+                # active even while this loop is blocked in next() (llm_call.py:583-603).
+                # Plain locals, read/written only on this worker thread — NO lock is acquired
+                # here (slot-queue lock-inversion trap; see
+                # .agent_lessons/dead-mans-switch-timeout-is-activity-relative.md).
+                _last_yield_ts = 0.0   # 0.0 = "no activity observed yet" (first-yield sentinel)
+                _dm_reason = ''        # real reason for a window trip (threaded into _handle_timeout)
+
                 _sec_gen = engine.run(sec_instance)
                 for resp in _sec_gen:
                     if self.agent_pool.stopped:
                         break
 
-                    # First-yield guard: fires only if the generator never yielded a token.
-                    # Once we get any yield, cancel the timer — the engine watchdog + turn
-                    # budget take over from here on.
-                    if not _got_first_yield:
-                        _got_first_yield = True
-                        try:
-                            sec_first_yield_timer.cancel()
-                        except Exception:
-                            pass  # Timer may have already fired
+                    now_mono = time.monotonic()
 
-                        if _first_yield_timeout_event.is_set():
-                            sec_timeout_reached = True
-                            sec_elapsed_at_timeout = time.monotonic() - sec_start_time
-                            logger.warning(f"[SECURITY] First-yield timeout after {sec_elapsed_at_timeout:.0f}s "
-                                           f"for request {rid}. Generator did not yield in time.")
-                            break
+                    # ① FAIL FAST — inactivity window elapsed since the last yield.
+                    #    Skipped on the first yield (_last_yield_ts == 0.0) so the baseline is
+                    #    established, not tripped. Also tolerates endpoints that go silent during
+                    #    long tool calls (300s threshold, not 180s).
+                    if _last_yield_ts > 0.0 and (now_mono - _last_yield_ts) > SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS:
+                        sec_timeout_reached = True
+                        sec_elapsed_at_timeout = now_mono - sec_start_time
+                        _dm_reason = (f"security advisor produced no output for "
+                                      f"{now_mono - _last_yield_ts:.0f}s (window="
+                                      f"{SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS:.0f}s, request {rid})")
+                        logger.warning(f"[SECURITY] {_dm_reason}")
+                        break
 
-                    now_sec = time.monotonic()
+                    # ② RESET — a yield arrived ⇒ healthy ⇒ slide the window forward.
+                    #    Must run AFTER ①: a yield has just arrived on every pass, so resetting
+                    #    first would clear the gap on the same tick and make the window
+                    #    un-tripable (deliberately different from the slot queue's
+                    #    reset-before-fail-fast ordering, where activity is an external read).
+                    _last_yield_ts = now_mono
+
+                    now_sec = now_mono
 
                     # Unpack (turn_output, is_streaming_tick) from engine.run() yield
                     if isinstance(resp, tuple) and len(resp) == 2:
@@ -627,6 +635,7 @@ class SecurityAdvisorHandler:
                 sec_elapsed_at_timeout,
                 timeout_seconds,
                 loop,
+                reason=_dm_reason,
             )
 
         except RuntimeError as e:
@@ -651,13 +660,6 @@ class SecurityAdvisorHandler:
                     sec_warning_timer.cancel()
                 except Exception:
                     pass  # Timer may have already fired
-
-            # First-yield guard timer — cancel if it hasn't fired (already cancelled on first yield).
-            if sec_first_yield_timer is not None:
-                try:
-                    sec_first_yield_timer.cancel()
-                except Exception:
-                    pass  # Timer may have already fired or been cancelled
 
             # ── Slot reacquire: restore caller's slot if we yielded it ──
             if _yielded_slot and caller_inst_sec:
@@ -799,6 +801,7 @@ class SecurityAdvisorHandler:
         elapsed_at_timeout: Optional[float],
         timeout_seconds: float,
         loop,
+        reason: str = '',
     ) -> None:
         """Handle the security check result.
 
@@ -807,18 +810,27 @@ class SecurityAdvisorHandler:
           - YES/NO with auto_apply → approve/reject + broadcast approvals
           - YES/NO without auto_apply → send verdict for manual confirmation
           - Ambiguous in auto-apply mode → reject + notify
+
+        ``reason`` carries the dead-man's-switch trip reason (BUG_0040) into
+        ``_handle_timeout``; the default '' preserves the legacy message verbatim.
         """
 
         if timeout_reached:
-            self._handle_timeout(rid, auto_apply, elapsed_at_timeout, timeout_seconds, sec_state_key)
+            self._handle_timeout(rid, auto_apply, elapsed_at_timeout, timeout_seconds,
+                                 sec_state_key, reason=reason)
         elif is_yes or is_no:
             self._handle_verdict(rid, auto_apply, is_yes, is_no, justification, parsing_response, loop)
         else:
             self._handle_ambiguous(rid, auto_apply, parsing_response, loop)
 
     def _handle_timeout(self, rid: str, auto_apply: bool, elapsed: float, timeout_seconds: float,
-                        sec_instance_name: Optional[str] = None) -> None:
-        """Handle security check timeout — reject and notify UI."""
+                        sec_instance_name: Optional[str] = None, reason: str = '') -> None:
+        """Handle security check timeout — reject and notify UI.
+
+        ``reason`` (BUG_0040) is the dead-man's-switch trip reason, appended as a
+        trailing clause to the rejection message (mirrors SlotQueueTimeout,
+        slot_queue.py:102-107). The default '' keeps the shipped message verbatim.
+        """
         from agent_cascade.log import logger
 
         logger.info(f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. "
@@ -831,11 +843,15 @@ class SecurityAdvisorHandler:
         if self.agent_pool:
             self.agent_pool.halt_instance(target)
 
+        # Shipped transient/retry-first wording — preserve byte-for-byte. The real
+        # dead-man's-switch reason is appended as a trailing clause (BUG_0040).
         reject_msg = ('SECURITY ADVISOR TIMEOUT: The security check did not reach a verdict within its time limit. '
                       'This is usually transient (the advisor was slow on this turn) and does NOT mean the request '
                       'is unsafe or that your justification was wrong. Simply RETRY the same request — it often '
                       'passes on the next attempt. If timeouts keep recurring, a clearer, more specific '
                       'justification can help the advisor decide faster.')
+        if reason:
+            reject_msg += f' — {reason}'
         self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
         # Notify UI about the timeout

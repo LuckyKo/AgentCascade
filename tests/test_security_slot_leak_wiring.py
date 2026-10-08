@@ -1,13 +1,14 @@
 """Integration tests for the security slot-permit leak fix (slot_leak_fix_PLAN.md).
 
-Fix 1 (Commit A — the actual fix): on the first-yield-timeout / abandon ``break`` path,
-``SecurityAdvisorHandler._execute_check``'s ``finally`` must deterministically release the
-Security instance's slot permit so the shared ``conc=0`` pool (``_shared_sequential_slot_``)
-is not pinned forever. The load-bearing assertion is the END-TO-END break-path test
-(``test_execute_check_timeout_break_releases_permit``): it drives the real handler through
-the timeout ``break`` and asserts the pool no longer holds the holder. A direct
-``_discard_stale_permit`` unit test (below) is only a sanity check — it proves nothing about
-the wiring, which is why the integration test is the primary one (plan R4).
+Fix 1 (Commit A — the actual fix): on the dead-man's-switch (inactivity-timeout) /
+abandon ``break`` path, ``SecurityAdvisorHandler._execute_check``'s ``finally`` must
+deterministically release the Security instance's slot permit so the shared ``conc=0``
+pool (``_shared_sequential_slot_``) is not pinned forever. The load-bearing assertion is
+the END-TO-END break-path test (``test_execute_check_timeout_break_releases_permit``):
+it drives the real handler through the timeout ``break`` and asserts the pool no longer
+holds the holder. A direct ``_discard_stale_permit`` unit test (below) is only a sanity
+check — it proves nothing about the wiring, which is why the integration test is the
+primary one (plan R4).
 
 Fix 3 (Commit B — insurance ONLY): the reuse Gate 4 must clear a provably-stale permit
 instead of rejecting, for the ``IDLE`` state it guards. The primary leak leaves
@@ -181,17 +182,19 @@ def _make_security_ap(rid):
     }
 
 
-# ── Fix 1 — PRIMARY: end-to-end first-yield-timeout break path ─────────────────
+# ── Fix 1 — PRIMARY: end-to-end dead-man's-switch break path ─────────────────
 
 def test_execute_check_timeout_break_releases_permit(wiring_harness):
-    """Drive the REAL first-yield-timeout ``break`` path end-to-end.
+    """Drive the REAL dead-man's-switch (mid-stream-silence) ``break`` path end-to-end.
 
     The fake ``engine.run`` acquires the shared conc=0 permit (as the real run() does at
-    core.py:1042), blocks long enough for the first-yield timer to fire, yields one token,
-    then hangs forever WITHOUT a finally that releases (so ``close()`` in the handler's
-    finally cannot free the permit). The handler sees the timeout event on the first yield
-    and ``break``s. Only the NEW explicit ``_discard_stale_permit`` in the finally can then
-    clear the pool. Pre-fix (no close / no discard) the pool stays pinned → this fails.
+    core.py:1042), yields one token (which establishes the dead-man's-switch baseline —
+    the first yield SKIPS the fail-fast check), goes silent past the (patched) 0.1s
+    inactivity window, then yields again WITHOUT a finally that releases (so ``close()``
+    in the handler's finally cannot free the permit). The handler sees the window elapsed
+    on the second yield and ``break``s. Only the NEW explicit ``_discard_stale_permit`` in
+    the finally can then clear the pool. Pre-fix (no close / no discard) the pool stays
+    pinned → this fails.
     """
     h = wiring_harness
     pool, shared, handler = h['pool'], h['shared'], h['handler']
@@ -204,13 +207,16 @@ def test_execute_check_timeout_break_releases_permit(wiring_harness):
         with inst._state_lock:
             inst._slot_release = rel
             inst._slot_key = SHARED_KEY
-        # Block before the first yield so the first-yield timer (patched to 0.1s) fires.
-        time.sleep(0.3)
+        # First yield establishes the dead-man's-switch baseline (skips fail-fast).
         yield ('[partial] still thinking', False)
+        # Go silent past the (patched) 0.1s inactivity window, then yield again —
+        # the second yield trips the fail-fast break in the handler.
+        time.sleep(0.3)
+        yield ('[partial] still stuck', False)
         # Abandoned while stuck: NO finally that releases the permit.
         threading.Event().wait(3600)
 
-    with patch('agent_cascade.security_handler.SECURITY_FIRST_YIELD_TIMEOUT_SECONDS', 0.1):
+    with patch('agent_cascade.security_handler.SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS', 0.1):
         _run_execute_check(handler, _make_security_ap(rid), rid, 'Maine', _stuck_run)
 
     # THE load-bearing assertion: the shared conc=0 pool is no longer pinned by the holder.
@@ -250,8 +256,9 @@ def test_execute_check_normal_exit_is_safe_noop(wiring_harness):
             if cb is not None:
                 cb()
 
-    with patch('agent_cascade.security_handler.SECURITY_FIRST_YIELD_TIMEOUT_SECONDS', 300):
-        _run_execute_check(handler, _make_security_ap(rid), rid, 'Maine', _normal_run)
+    # No timeout constant to patch: a single yield establishes the dead-man's-switch
+    # baseline and the generator completes on the same tick — the window never trips.
+    _run_execute_check(handler, _make_security_ap(rid), rid, 'Maine', _normal_run)
 
     assert sec_name not in shared._running, (
         f"normal-exit path should leave the pool clear: {list(shared._running)}")

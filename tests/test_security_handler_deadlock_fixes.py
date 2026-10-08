@@ -726,67 +726,72 @@ class TestTimerCleanupOnException:
             holder.join(timeout=2)
 
 
-class TestFirstYieldSafetyNet:
-    """Integration test for the first-yield safety net (commit fb74f04).
+class TestDeadMansSwitch:
+    """Integration tests for the dead-man's switch (BUG_0040).
 
-    The last-resort guard in _execute_check starts a daemon threading.Timer
-    (SECURITY_FIRST_YIELD_TIMEOUT_SECONDS) right before the engine.run() loop. If the
-    LLM generator stalls so long that the timer fires BEFORE any token is yielded, the
-    first-iteration check observes the set event, sets sec_timeout_reached=True and
-    breaks — routing to _handle_timeout → user_reject with a "SECURITY ADVISOR TIMEOUT"
-    message. This test simulates exactly that: a generator that blocks past the timeout
-    before its first yield.
+    The one-shot first-yield timer (SECURITY_FIRST_YIELD_TIMEOUT_SECONDS, commit fb74f04)
+    is replaced by a sliding INACTIVITY window on the ``for resp in engine.run(...)`` loop
+    (SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS). Each generator yield is the liveness
+    signal: the window resets on every yield and trips (sec_timeout_reached →
+    _handle_timeout → user_reject with a "SECURITY ADVISOR TIMEOUT" message) only when
+    the gap since the PREVIOUS yield exceeds the window. The first yield SKIPS the
+    fail-fast check (sentinel 0.0) so the baseline is established, not tripped — a
+    slow-but-completing advisor is no longer killed.
+
+    NO hard cap: every case a cap would cover is bounded by the engine's stream watchdog,
+    which runs INSIDE the generator (llm_call.py:583-603) and stays active even while the
+    security loop is blocked in next(). No lock is acquired in the dead-man's-switch code
+    — ``_last_yield_ts`` is a plain local read/written only on the worker thread (the
+    slot-queue lock-inversion trap does not apply; do not add a lock read here).
     """
 
-    def test_stalled_generator_triggers_first_yield_timeout_and_auto_rejects(self):
-        """A generator that never yields its first token within the window must auto-reject."""
+    # ── shared harness (same shape as the pre-BUG_0040 first-yield test) ──────
+
+    @staticmethod
+    def _make_harness(rid):
         pool = _make_minimal_pool()
         app = _make_minimal_app()
         session = {'session_name': 'Maine', 'generate_cfg': {}}
         send_queue = MagicMock()
-
         handler = SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
-
         ap = {
-            'request_id': 'test_rid_firstyield',
+            'request_id': rid,
             'tool_name': 'shell_cmd',
             'description': 'test',
             'tool_args': {},
             'agent_name': 'Maine',
         }
-
-        # A generator that simulates a hung model: it blocks for longer than the
-        # (patched) 0.5s first-yield timeout before producing its first yield. The
-        # loop's first-iteration check should see the timer's event set and break.
-        def _stalled_generator():
-            time.sleep(2.0)          # longer than the 0.5s timeout → timer fires first
-            yield ('', False)        # only now does it "yield"; loop detects timeout, breaks
-
         # _create_system_agent must return an object supporting attribute assignment
         # (sec_instance.max_turns = ...) and .conversation access downstream.
         sec_instance_mock = MagicMock()
         sec_instance_mock.conversation = []
+        return pool, handler, ap, sec_instance_mock
 
+    @staticmethod
+    def _run_check(handler, ap, rid, generator, sec_instance_mock, window_seconds):
+        """Drive the REAL _execute_check with the engine patched; patch ONLY the
+        inactivity window constant (there is no hard-cap constant to patch)."""
         # ExecutionEngine is imported locally inside _execute_check
         # (from agent_cascade.execution_engine import ExecutionEngine), so it is NOT a
         # module attribute of security_handler — patch it at its source module instead.
         # It's used as a *class* (ExecutionEngine(pool)), so we patch with a factory whose
         # return_value is the engine instance mock; that instance's .run() yields our
-        # stalled generator and ._create_system_agent() returns the sec instance mock.
+        # generator and ._create_system_agent() returns the sec instance mock.
         engine_instance = MagicMock()
-        engine_instance.run.return_value = _stalled_generator()
+        engine_instance.run.return_value = generator
         engine_instance._create_system_agent.return_value = sec_instance_mock
         # Skip telemetry bookkeeping in the execution loop's finally block.
         engine_instance._telemetry.return_value = None
         mock_engine_cls = MagicMock(return_value=engine_instance)
 
-        with patch('agent_cascade.security_handler.SECURITY_FIRST_YIELD_TIMEOUT_SECONDS', 0.5):
+        with patch('agent_cascade.security_handler.SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS',
+                   window_seconds):
             with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
                 start = time.monotonic()
                 handler._execute_check(
                     ap=ap,
                     sec_inst=None,
-                    rid='test_rid_firstyield',
+                    rid=rid,
                     auto_apply=True,
                     instance_name='Maine',
                     caller_agent='Maine',
@@ -794,28 +799,151 @@ class TestFirstYieldSafetyNet:
                     timeout_seconds=3600,
                     warning_seconds=2400,
                 )
-                elapsed = time.monotonic() - start
+                return time.monotonic() - start
+
+    def test_mid_stream_silence_triggers_deadmans_switch_and_auto_rejects(self):
+        """A generator whose gap between yields exceeds the window must auto-reject.
+
+        Rewritten from the old first-yield test: a single LATE yield no longer trips
+        anything (the first yield skips fail-fast and establishes the baseline). The
+        SECOND yield, arriving after a gap > window, trips the fail-fast break.
+        """
+        pool, handler, ap, sec_instance = self._make_harness('test_rid_dm_silence')
+
+        # A generator that simulates a wedged model: the first (slow) yield establishes
+        # the baseline (NOT a timeout), then it goes silent past the (patched) 0.5s
+        # window before the second yield — the second yield trips ① FAIL FAST.
+        def _stalled_generator():
+            time.sleep(1.0)          # slow first token — establishes the baseline
+            yield ('', False)
+            time.sleep(1.0)          # gap > 0.5s window, then a second token arrives
+            yield ('', False)        # second yield → ① FAIL FAST fires, loop breaks
+
+        elapsed = self._run_check(handler, ap, 'test_rid_dm_silence',
+                                  _stalled_generator(), sec_instance, window_seconds=0.5)
 
         # The check must have auto-rejected via the timeout path.
         assert pool.operation_manager.user_reject.called, (
-            'user_reject should be called when the first-yield timeout fires'
+            'user_reject should be called when the inactivity window trips'
         )
         args = pool.operation_manager.user_reject.call_args.args
-        assert args[0] == 'test_rid_firstyield', (
+        assert args[0] == 'test_rid_dm_silence', (
             f"user_reject should target the request id, got {args[0]!r}"
         )
         assert 'SECURITY ADVISOR TIMEOUT' in args[1], (
             f"reject message should carry the timeout marker, got {args[1]!r}"
         )
+        # The real dead-man's-switch reason is threaded into the rejection message.
+        assert 'produced no output' in args[1], (
+            f"reject message should carry the dead-man's-switch reason, got {args[1]!r}"
+        )
 
-        # The Security instance should have been halted as part of _handle_timeout.
-        pool.halt_instance.assert_called_once_with('Security_test_rid_firstyield')
+        # Control (passed pre-BUG_0040 too): the Security instance is halted as part of
+        # _handle_timeout — proves the harness reaches the timeout path.
+        pool.halt_instance.assert_called_once_with('Security_test_rid_dm_silence')
 
-        # Sanity: the run was gated by the 2.0s stalled-generator sleep (not instant),
-        # confirming we actually exercised the blocking path. Keep loose to avoid flakiness.
-        assert elapsed >= 1.5, (
+        # Sanity: the run was gated by the stalled-generator sleeps (not instant),
+        # confirming we actually exercised the blocking path. Loose to avoid flakiness.
+        assert elapsed >= 1.8, (
             f"Check should have blocked ~2s on the stalled generator, got {elapsed:.2f}s"
         )
+
+    def test_busy_but_slow_generator_does_not_time_out(self):
+        """A busy-but-slow generator (steady yields, all gaps < window) must complete.
+
+        Core of the user's directive: the old one-shot first-yield timer measured from
+        check-start would have killed a slow advisor; the sliding window resets on every
+        yield, so a steadily-progressing advisor completes with a real verdict — NOT the
+        timeout marker.
+        """
+        pool, handler, ap, sec_instance = self._make_harness('test_rid_dm_slow')
+
+        # 12 ticks every 0.1s (~1.2s total, all gaps far below the 0.5s window), then a
+        # final verdict message.
+        def _slow_generator():
+            for i in range(12):
+                sec_instance.conversation.append(
+                    {'role': 'assistant', 'content': f'thinking step {i}'})
+                yield (f'thinking step {i}', False)
+                time.sleep(0.1)
+            sec_instance.conversation.append(
+                {'role': 'assistant', 'content': '[YES] safe to proceed'})
+            yield ('[YES] safe to proceed', False)
+
+        elapsed = self._run_check(handler, ap, 'test_rid_dm_slow',
+                                  _slow_generator(), sec_instance, window_seconds=0.5)
+
+        # Must complete with a REAL verdict (auto-apply YES → user_approve),
+        # NOT the timeout auto-reject.
+        assert pool.operation_manager.user_approve.called, (
+            'a busy-but-slow advisor must complete with a real verdict, not a timeout'
+        )
+        assert not pool.operation_manager.user_reject.called, (
+            'no timeout rejection for a steadily-progressing generator'
+        )
+        # Sanity: it really took ~1.2s (genuinely slow), not instant.
+        assert elapsed >= 1.0, (
+            f"Check should have taken ~1.2s on the slow generator, got {elapsed:.2f}s"
+        )
+
+    def test_tool_call_silence_below_window_does_not_time_out(self):
+        """Silence below the window (but above the engine's 180s-equivalent) must NOT trip.
+
+        Endpoints stop streaming during long tool calls. The production window is 300s
+        (NOT the engine's 180s stream-silence bound) precisely so a 210s tool-call
+        silence is safe. This test encodes that ratio at test scale: gap = 0.7 × window
+        (i.e. 210/300 in production) — below the window, so the advisor must complete.
+        """
+        pool, handler, ap, sec_instance = self._make_harness('test_rid_dm_toolcall')
+
+        window = 0.5
+        gap = 0.7 * window  # 0.35s — below the window; production-equivalent 210s > 180s
+
+        def _tool_call_generator():
+            sec_instance.conversation.append(
+                {'role': 'assistant', 'content': 'invoking long-running tool…'})
+            yield ('invoking long-running tool…', False)
+            time.sleep(gap)          # endpoint silent during the "long tool call"
+            sec_instance.conversation.append(
+                {'role': 'assistant', 'content': '[YES] safe'})
+            yield ('[YES] safe', False)
+
+        self._run_check(handler, ap, 'test_rid_dm_toolcall',
+                        _tool_call_generator(), sec_instance, window_seconds=window)
+
+        assert pool.operation_manager.user_approve.called, (
+            'tool-call silence below the window must not time out'
+        )
+        assert not pool.operation_manager.user_reject.called, (
+            'no timeout rejection for a sub-window tool-call silence'
+        )
+
+    def test_window_trips_on_mid_stream_silence_after_two_ticks(self):
+        """Two healthy ticks, then silence past the window, then a third tick → trip.
+
+        The "stream stalled after starting" case: the security layer's defense-in-depth
+        fires independently of the engine's 180s silence detector.
+        """
+        pool, handler, ap, sec_instance = self._make_harness('test_rid_dm_midstream')
+
+        def _mid_stream_stall_generator():
+            yield ('', False)        # tick 1 — establishes the baseline
+            time.sleep(0.1)
+            yield ('', False)        # tick 2 — window slides forward
+            time.sleep(0.7)          # silence past the 0.5s window
+            yield ('', False)        # tick 3 → ① FAIL FAST fires
+
+        self._run_check(handler, ap, 'test_rid_dm_midstream',
+                        _mid_stream_stall_generator(), sec_instance, window_seconds=0.5)
+
+        assert pool.operation_manager.user_reject.called, (
+            'mid-stream silence past the window must auto-reject'
+        )
+        args = pool.operation_manager.user_reject.call_args.args
+        assert 'SECURITY ADVISOR TIMEOUT' in args[1], (
+            f"reject message should carry the timeout marker, got {args[1]!r}"
+        )
+        pool.halt_instance.assert_called_once_with('Security_test_rid_dm_midstream')
 
 
 class TestActiveChecksCleanupOnLockTimeout:
