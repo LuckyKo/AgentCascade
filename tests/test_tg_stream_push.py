@@ -143,6 +143,7 @@ def _make_engine(fresh_manager, tmp_path, *, max_turns=3, min_turns=99, extra_tu
     pool.telemetry = None
     pool.settings.auto_skill_enabled = True
     pool.settings.auto_skill_min_turns = min_turns
+    pool.settings.auto_skill_extra_turns = extra_turns  # pin to int (MagicMock auto-attr would poison turns_available)
     pool.settings.default_load_skill_mode = 'AUTO'
     pool.settings.tail_sync_check_enabled = False
     # _is_terminal_stop reads these off the pool: stopped=False and a stable generation
