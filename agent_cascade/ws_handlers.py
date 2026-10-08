@@ -1334,7 +1334,11 @@ class WsMessageHandler:
         text = data.get('text', '').strip()
         target = data.get('target_agent') or self.session.get('session_name', 'Maine')
         if text and self.agent_pool:
-            self.agent_pool.enqueue_message(target, text)
+            # Route through the shared user-message parse path so /goal rewriting
+            # (todo.md:160) and image handling apply here too — this endpoint was a
+            # bypass of _parse_multimodal_content.
+            from agent_cascade.api_server import _parse_multimodal_content
+            self.agent_pool.enqueue_message(target, _parse_multimodal_content(text))
 
     async def handle_dismiss_queue(self, data: dict) -> None:
         """Handle 'dismiss_queue' — remove a queued message by index.

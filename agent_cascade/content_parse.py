@@ -24,6 +24,41 @@ def _extract_system_message(agent) -> str:
     return ''
 
 
+def _rewrite_goal_command(text):
+    """Rewrite a leading ``/goal <text>`` into the supervisor-task prefix (todo.md:160).
+
+    The compression system preserves only USER messages that start with
+    ``Context: This is a message from`` (see ``is_supervisor_task_message`` in
+    agent_cascade/compression/helpers.py) when building the
+    ``<last_supervisor_task>`` block of a compression marker. Rewriting the
+    user's ``/goal`` command to that prefix — BEFORE any other processing —
+    makes the new goal stick through compression automatically, with no
+    further logic needed.
+
+    Rules:
+      - Only an EXACT leading ``/goal`` word is rewritten (case-insensitive);
+        ``/goals``, ``/goalx``, or ``/goal`` mid-message are left untouched.
+      - The rest of the line becomes the task text; leading/trailing whitespace
+        around it is stripped, internal spacing preserved.
+      - Non-matching input is returned unchanged (byte-identical).
+
+    Uses ``_TASK_PREFIX`` from compression/helpers.py so the prefix this rewrite
+    produces and the prefix the compression system detects can never drift apart.
+    """
+    if not isinstance(text, str):
+        return text
+    t = text.lstrip()
+    low = t.lower()
+    goal_word = '/goal'
+    if not (low == goal_word or low.startswith(goal_word + ' ')):
+        return text
+    rest = t[len(goal_word):].strip()
+    # Local import: compression/helpers.py is a heavier module and this keeps the
+    # content_parse -> compression dependency lazy (house style for cross-module refs).
+    from agent_cascade.compression.helpers import _TASK_PREFIX
+    return f'{_TASK_PREFIX} User:\n{rest}'
+
+
 def _parse_multimodal_content(text):
     """
     Parse markdown images ![alt](data:...) and return a list of content items.
@@ -33,6 +68,11 @@ def _parse_multimodal_content(text):
     base64 if media storage fails.
     """
     from agent_cascade.log import logger
+
+    # todo.md:160 — rewrite /goal into the supervisor-task prefix so the new
+    # goal is preserved verbatim in compression markers (logic already exists
+    # in compression/helpers.py). Must run before any other content processing.
+    text = _rewrite_goal_command(text)
 
     parts = []
     last_end = 0
