@@ -763,13 +763,17 @@ class TestTimeoutMessageFormatting(unittest.TestCase):
         self.assertIn('exceeded the 120-second time limit', msg)
 
     def test_per_message_timeout_uses_iopub_idle_constant(self):
-        """per_message_timeout must be min(IOPUB_IDLE_TIMEOUT, timeout), not min(10, timeout)."""
+        """per_message_timeout must be min(iopub_idle_timeout, timeout), not min(10, timeout).
+
+        BUG_0046: the silence leg is now the per-call `iopub_idle_timeout` param (default
+        IOPUB_IDLE_TIMEOUT = 30s) instead of the frozen module constant directly.
+        """
         import inspect
         from agent_cascade.tools.code_interpreter import (CodeInterpreter, IOPUB_IDLE_TIMEOUT)
         self.assertEqual(IOPUB_IDLE_TIMEOUT, 30)
 
         src = inspect.getsource(CodeInterpreter._execute_code)
-        self.assertIn('per_message_timeout = min(IOPUB_IDLE_TIMEOUT, timeout)', src)
+        self.assertIn('per_message_timeout = min(iopub_idle_timeout, timeout)', src)
         self.assertNotIn('min(10, timeout)', src)
 
     def test_silence_raise_site_carries_kind(self):
@@ -779,6 +783,137 @@ class TestTimeoutMessageFormatting(unittest.TestCase):
         src = inspect.getsource(CodeInterpreter._execute_code)
         self.assertIn("'kind': 'silence'", src)
         self.assertIn("'kind': 'wall_clock'", src)
+
+
+class TestIopubIdleTimeout(unittest.TestCase):
+    """BUG_0046 — the per-call `idle_timeout` schema param controls the IOPub silence window.
+
+    Default stays IOPUB_IDLE_TIMEOUT (30s); NO settings wiring. The silence leg of
+    ``per_message_timeout = min(iopub_idle_timeout, timeout)`` is now agent-controllable.
+    The `_execute_code` tests drive a stubbed `kc` (no real kernel / ZMQ / 30s wait); the
+    resolution-helper tests cover invalid-value fallbacks without needing a kernel.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ci(self):
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+        return CodeInterpreter(cfg={'work_dir': self.tmpdir})
+
+    def _silence_timeout_arg(self, timeout=None, iopub_idle_timeout=None):
+        """Drive `_execute_code` with a stub `kc` and return the per_message_timeout it used.
+
+        The stub records every ``get_iopub_msg(timeout=...)`` call then raises ``queue.Empty``.
+        The drain loop records 0.5 first; the main-loop call records ``per_message_timeout``,
+        which triggers the silence ``TimeoutError``. We return that last recorded value.
+        """
+        import queue as _queue
+        recorded = []
+
+        class StubKC:
+            def execute(self, code):
+                pass
+
+            def get_iopub_msg(self, timeout=None):
+                recorded.append(timeout)
+                raise _queue.Empty()
+
+        try:
+            self._ci()._execute_code(StubKC(), 'pass', timeout=timeout,
+                                     iopub_idle_timeout=iopub_idle_timeout, kernel_id='test_kernel')
+        except TimeoutError:
+            pass
+        self.assertGreaterEqual(len(recorded), 1)
+        return recorded[-1]
+
+    # ── Resolution helper (invalid-value fallbacks — no kernel needed) ──
+
+    def test_resolve_default_when_no_param(self):
+        """No `idle_timeout` (or a non-dict param) → the 30s module default."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter, IOPUB_IDLE_TIMEOUT
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout({'code': 'x'}), IOPUB_IDLE_TIMEOUT)
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout('just-a-string'), IOPUB_IDLE_TIMEOUT)
+
+    def test_resolve_honors_positive_int(self):
+        """A positive integer `idle_timeout` is used verbatim."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout({'code': 'x', 'idle_timeout': 120}), 120)
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout({'code': 'x', 'idle_timeout': 60}), 60)
+
+    def test_resolve_numeric_string_accepted(self):
+        """A numeric string (e.g. from a lenient JSON parse) is accepted as an int."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout({'code': 'x', 'idle_timeout': '120'}), 120)
+
+    def test_resolve_invalid_values_fall_back(self):
+        """0 / negative / non-numeric / None `idle_timeout` → falls back to the 30s default (no crash)."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter, IOPUB_IDLE_TIMEOUT
+        for bad in (0, -5, 'abc', None, [120], {'s': 1}):
+            self.assertEqual(
+                CodeInterpreter._resolve_iopub_idle_timeout({'code': 'x', 'idle_timeout': bad}),
+                IOPUB_IDLE_TIMEOUT,
+                f'idle_timeout={bad!r} should fall back to the 30s default')
+
+    def test_resolve_json_string_params_via_validated(self):
+        """The LLM may send `params` as a JSON *string*; the parsed override lives in
+        `validated_params`. Resolving from both sources (as `call()` does) must honor it —
+        passing only the raw string would silently drop the override (POLISH finding)."""
+        import json
+        from agent_cascade.tools.code_interpreter import CodeInterpreter, IOPUB_IDLE_TIMEOUT
+        raw_string = json.dumps({'code': 'x', 'idle_timeout': 120})
+        validated = {'code': 'x', 'idle_timeout': 120}
+        # Raw string alone → no dict to read → default (documents the trap).
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout(raw_string), IOPUB_IDLE_TIMEOUT)
+        # Both sources, as call() passes them → override honored.
+        self.assertEqual(CodeInterpreter._resolve_iopub_idle_timeout(raw_string, validated), 120)
+
+    # ── _execute_code enforcement (stubbed kc, no real kernel) ──
+
+    def test_default_is_30(self):
+        """No `iopub_idle_timeout` → per_message_timeout == min(30, timeout) (unchanged behavior)."""
+        from agent_cascade.tools.code_interpreter import IOPUB_IDLE_TIMEOUT
+        self.assertEqual(IOPUB_IDLE_TIMEOUT, 30)
+        self.assertEqual(self._silence_timeout_arg(timeout=120), 30)  # min(30, 120) = 30
+        self.assertEqual(self._silence_timeout_arg(timeout=20), 20)   # min(30, 20) = 20
+
+    def test_per_call_override_honored(self):
+        """`idle_timeout` raises the silence leg; the wall-clock `timeout` still caps it."""
+        self.assertEqual(self._silence_timeout_arg(timeout=120, iopub_idle_timeout=120), 120)  # min(120, 120)
+        self.assertEqual(self._silence_timeout_arg(timeout=120, iopub_idle_timeout=60), 60)    # min(60, 120)
+        self.assertEqual(self._silence_timeout_arg(timeout=45, iopub_idle_timeout=120), 45)    # min(120, 45)
+
+    def test_silence_trip_reports_configured_window(self):
+        """The silence TimeoutError reports the configured window, not a hard-coded 30."""
+        import queue as _queue
+
+        class StubKC:
+            def execute(self, code):
+                pass
+
+            def get_iopub_msg(self, timeout=None):
+                raise _queue.Empty()
+
+        with self.assertRaises(TimeoutError) as ctx:
+            self._ci()._execute_code(StubKC(), 'pass', timeout=120, iopub_idle_timeout=60,
+                                     kernel_id='test_kernel')
+        err = ctx.exception.args[0]
+        self.assertEqual(err['kind'], 'silence')
+        self.assertIn('no output for 60s', err['message'])
+
+    # ── Schema exposure ──
+
+    def test_schema_contains_idle_timeout(self):
+        """The tool schema exposes an optional integer `idle_timeout` param the LLM can set."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+        props = CodeInterpreter.parameters['properties']
+        self.assertIn('idle_timeout', props)
+        self.assertEqual(props['idle_timeout']['type'], 'integer')
+        self.assertNotIn('idle_timeout', CodeInterpreter.parameters.get('required', []))
 
 
 if __name__ == '__main__':

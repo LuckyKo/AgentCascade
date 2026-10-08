@@ -700,6 +700,17 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 'description': 'Force a fresh kernel with a new container (discard existing state). Default is false.',
                 'type': 'boolean',
                 'default': False,
+            },
+            'idle_timeout': {
+                'description':
+                    ('Optional. IOPub silence window (seconds) for this call — how long the code may run '
+                     'without producing ANY output before it is considered stalled and killed. Default 30. '
+                     'Raise this (e.g. 120 or 300) when running code that legitimately produces no output '
+                     'for a while (long blocking I/O, big-file parsing, subprocesses, sleeps). This is a '
+                     'SILENCE limit, not a wall-clock limit; the separate `timeout` parameter controls total '
+                     'wall-clock time.'),
+                'type': 'integer',
+                'default': 30,
             }
         },
         'required': ['code'],
@@ -732,6 +743,33 @@ class CodeInterpreter(BaseToolWithFileAccess):
             else:
                 fmt = 'Enclose the code within triple backticks (`) at the beginning and end of the code.'
         return fmt
+
+    @staticmethod
+    def _resolve_iopub_idle_timeout(*param_sources: object) -> int:
+        """BUG_0046: resolve the per-call IOPub silence window.
+
+        Accepts one or more candidate param dicts (typically the raw ``params`` and, when
+        available, the parsed ``validated_params``). The first source that is a dict with a
+        positive-integer ``idle_timeout`` wins; otherwise the 30s default applies. This mirrors
+        how ``fresh`` is resolved from both ``params`` and ``validated_params`` — important because
+        the LLM may send ``params`` as a JSON *string*, in which case only ``validated_params``
+        carries the parsed override. Non-numeric, zero, or negative values fall back to the 30s
+        default. Agent control ONLY — no settings/cfg wiring.
+        """
+        iopub_idle = IOPUB_IDLE_TIMEOUT
+        for source in param_sources:
+            if not isinstance(source, dict):
+                continue
+            idle_param = source.get('idle_timeout')
+            if idle_param is None:
+                continue
+            try:
+                if int(idle_param) > 0:
+                    iopub_idle = int(idle_param)
+                    break
+            except (TypeError, ValueError):
+                pass  # non-numeric — keep scanning / fall back to the 30s default
+        return iopub_idle
 
     def call(self, params: Union[str, dict], files: List[str] = None, timeout: Optional[int] = None, **kwargs) -> str:
         super().call(params=params, files=files)  # copy remote files to work_dir
@@ -805,6 +843,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
         exec_timeout = exec_timeout or CODE_EXECUTION_TIMEOUT
         wd_timeout = wd_timeout or CONTAINER_WATCHDOG_TIMEOUT
         stale_ttl = stale_ttl or STALE_CONTAINER_TTL
+
+        # ── Resolve IOPub silence window (BUG_0046): per-call `idle_timeout` > 30s default ──
+        # Optional per-call override so the agent can raise the silence window for a single
+        # call (long blocking I/O, sleeps, big-file parsing). Default stays IOPUB_IDLE_TIMEOUT;
+        # no settings/cfg wiring. Check both raw params and parsed validated_params (the LLM may
+        # send a JSON string, in which case only validated_params carries the override).
+        iopub_sources = [params]
+        if 'validated_params' in dir():
+            iopub_sources.append(validated_params)
+        iopub_idle = self._resolve_iopub_idle_timeout(*iopub_sources)
 
         # ── Build session-scoped kernel_id (all agents in same session share one container) ──
         # Sanitize session_name: replace non-alphanumeric chars with underscores for safe Docker naming
@@ -977,7 +1025,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     container_font_path = f'{self.container_work_dir}/{os.path.basename(ALIB_FONT_FILE)}'
                     start_code = start_code.replace('{{M6_FONT_PATH}}', repr(container_font_path)[1:-1])
                     start_code += '\n%xmode Minimal'
-                self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id)
+                self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id,
+                                   iopub_idle_timeout=iopub_idle)
             except Exception as init_err:
                 # Init failed — clean up the broken kernel so next call recreates fresh
                 kc_to_clean = None
@@ -1032,7 +1081,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         fixed_code += '\n\n'  # Prevent code not executing in notebook due to no line breaks at the end
 
         try:
-            result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id)
+            result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id,
+                                        iopub_idle_timeout=iopub_idle)
         except TimeoutError as e:
             # On timeout, escalate through 3 tiers to recover the kernel
             logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating...")
@@ -1167,7 +1217,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if kind == 'silence':
                     hint = ('This is a SILENCE limit, not a wall-clock limit — the cell may be doing real '
                             'work (blocking I/O, sleep, subprocess) with no output. Print a heartbeat at '
-                            'least every few seconds, or increase M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT.')
+                            'least every few seconds, or increase M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT '
+                            '(or pass idle_timeout=<seconds> to this tool for a per-call override).')
                     return f'{timeout_msg} {hint}'
                 return f'{timeout_msg}. Please optimize your code or break it into smaller steps.'
             raise
@@ -1917,7 +1968,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         return kc, container_id
 
-    def _execute_code(self, kc, code: str, timeout: Optional[int] = None, kernel_id: Optional[str] = None) -> str:
+    def _execute_code(self, kc, code: str, timeout: Optional[int] = None, kernel_id: Optional[str] = None,
+                      iopub_idle_timeout: Optional[int] = None) -> str:
         """Execute code in the Jupyter kernel with a message-level timeout.
 
         Args:
@@ -1927,6 +1979,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     Set to None to disable timeout (not recommended).
             kernel_id: Kernel identifier for watchdog tracking (passed from caller).
                       Defaults to self.instance_id_pid if not provided.
+            iopub_idle_timeout: BUG_0046 — IOPub silence window (seconds) for this call.
+                    The kernel may go this long without emitting ANY IOPub message before it is
+                    treated as stalled. Default: IOPUB_IDLE_TIMEOUT (30s). The effective per-message
+                    timeout is min(iopub_idle_timeout, timeout).
 
         Returns:
             Formatted string with stdout, stderr, execution results, and images.
@@ -1940,6 +1996,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
             kernel_id = f'ci_default_{os.getpid()}'
         if timeout is None:
             timeout = CODE_EXECUTION_TIMEOUT
+        if iopub_idle_timeout is None:
+            iopub_idle_timeout = IOPUB_IDLE_TIMEOUT
 
         # Drain any leftover messages from the probe execute before sending real code
         try:
@@ -1968,8 +2026,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
         start_time = time.time()
         # Per-message (silence) tolerance: how long the kernel may go quiet before we interrupt.
         # Capped by the overall wall-clock budget so a small `timeout` still bounds it, but no
-        # longer hard-capped at 10s — see IOPUB_IDLE_TIMEOUT / BUG_0027.
-        per_message_timeout = min(IOPUB_IDLE_TIMEOUT, timeout)
+        # longer hard-capped at 10s — see IOPUB_IDLE_TIMEOUT / BUG_0027. BUG_0046: the silence leg
+        # is now per-call (`iopub_idle_timeout`), defaulting to IOPUB_IDLE_TIMEOUT (30s).
+        per_message_timeout = min(iopub_idle_timeout, timeout)
 
         while True:
             # Check if the kernel was killed by the watchdog during execution (thread-safe)
