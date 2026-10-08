@@ -514,7 +514,8 @@ TOOL_METADATA = {
             'workflow': 'Full path to a ComfyUI workflow JSON file. Omit to use the default from settings.',
             'width': 'Output width in pixels (overrides workflow default)',
             'height': 'Output height in pixels (overrides workflow default)',
-            'seed': 'Random seed for reproducibility (random if omitted)'
+            'seed': 'Random seed for reproducibility (random if omitted)',
+            'input_image': 'Image file path to use as reference or for editing'
         }
     },
     'web_search': {

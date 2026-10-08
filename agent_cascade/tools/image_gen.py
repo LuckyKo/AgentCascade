@@ -44,6 +44,7 @@ the placeholder: there is no LLM/endpoint here to gate.
 
 import json
 import logging
+import mimetypes
 import random
 import re
 import threading
@@ -438,6 +439,54 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
             client.close()
 
 
+def _upload_image(url: str, local_path: Path, client: Optional[httpx.Client] = None) -> str:
+    """Upload a local image to ComfyUI's input directory.
+
+    Sends the file as a multipart ``image`` part (the standard ComfyUI upload
+    mechanism) and returns the server-side filename reference to wire into a
+    ``LoadImage`` node. The server-returned ``name`` is used (not the local
+    filename) so duplicate uploads that ComfyUI renames are referenced correctly.
+
+    Args:
+        url: Base URL of the ComfyUI server (e.g. ``http://localhost:8188``).
+        local_path: Local path to the image file to upload.
+        client: Optional httpx.Client (injected by tests with a MockTransport).
+
+    Returns:
+        The server-side image reference, e.g. ``"cat.png"`` or ``"sub/cat.png"``.
+
+    Raises:
+        RuntimeError: Upload failed (non-200, missing 'name', or network error).
+    """
+    own_client = client is None
+    if own_client:
+        client = httpx.Client()
+    try:
+        mime_type = mimetypes.guess_type(local_path.name)[0] or 'application/octet-stream'
+        with local_path.open('rb') as f:
+            resp = client.post(
+                f"{url}/upload/image",
+                files={'image': (local_path.name, f, mime_type)},
+                data={'type': 'input'},
+                timeout=30,
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"ComfyUI image upload failed: {resp.status_code} {resp.text[:200]}")
+        data = resp.json()
+        name = data.get('name')
+        if not name:
+            raise RuntimeError(f"ComfyUI upload response missing 'name': {resp.text[:200]}")
+        subfolder = data.get('subfolder') or ''
+        return f"{subfolder}/{name}" if subfolder else name
+    except OSError as e:
+        raise RuntimeError(f"ComfyUI image upload failed to read {local_path.name}: {e}") from e
+    except httpx.RequestError as e:
+        raise RuntimeError(f"ComfyUI image upload failed at {url}: {e}") from e
+    finally:
+        if own_client:
+            client.close()
+
+
 # ── The tool ───────────────────────────────────────────────────────────────────
 
 @register_tool('image_gen', allow_overwrite=True)
@@ -474,6 +523,14 @@ class ImageGen(BaseTool):
             'width': {'type': 'integer', 'description': 'Output width in pixels (overrides workflow default).'},
             'height': {'type': 'integer', 'description': 'Output height in pixels (overrides workflow default).'},
             'seed': {'type': 'integer', 'description': 'Random seed for reproducibility (random if omitted).'},
+            'input_image': {
+                'type': 'string',
+                'description': (
+                    'Optional local image file path to upload into ComfyUI for workflows that '
+                    'contain exactly one standard LoadImage node. Use for image editing/reference. '
+                    'Not used for SVG rendering.'
+                ),
+            },
         },
         'required': ['prompt'],
     }
@@ -549,6 +606,10 @@ class ImageGen(BaseTool):
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
 
         # ── SVG path (local render — no VRAM management needed) ──────────────
+        # input_image is a ComfyUI-only feature (it uploads a reference image and wires a
+        # LoadImage node); SVG rendering is fully local, so reject the combination early.
+        if params.get('input_image') and _is_svg_code(prompt):
+            return [ContentItem(text='ERROR: input_image is only supported for ComfyUI workflows, not SVG rendering.')]
         if _is_svg_code(prompt):
             return self._handle_svg(prompt, params)
 
@@ -637,6 +698,45 @@ class ImageGen(BaseTool):
         except ValueError as e:
             return [ContentItem(text=f"ERROR: {e}")]
         logger.info('image_gen injection for %s: %s', Path(workflow_path).name, '; '.join(report))
+
+        # ── Optional input_image: upload + wire LoadImage node (before VRAM save) ──────
+        # After parameter injection, before the VRAM block — upload failures return early
+        # without saving/unloading model state. Absent param = byte-identical path.
+        input_image = params.get('input_image')
+        if input_image:
+            if not isinstance(input_image, str) or not input_image.strip():
+                return [ContentItem(text="ERROR: 'input_image' must be a non-empty string path.")]
+            try:
+                from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+                local_path = resolve_tool_path(input_image.strip(), mode='ro', agent_pool=self.agent_pool)
+            except ValueError as e:
+                return [ContentItem(text=f"ERROR: Invalid input_image path: {e}")]
+            if not local_path.is_file():
+                return [ContentItem(text=f"ERROR: input_image file not found: {input_image}")]
+            # Find standard LoadImage nodes (scalar string 'image' input only).
+            load_nodes = [
+                node_id
+                for node_id, node in workflow.items()
+                if isinstance(node, dict)
+                and node.get('class_type') == 'LoadImage'
+                and isinstance((node.get('inputs') or {}).get('image'), str)
+            ]
+            if not load_nodes:
+                return [ContentItem(text=(
+                    'ERROR: input_image was provided, but the selected workflow has no '
+                    'standard LoadImage node.'
+                ))]
+            if len(load_nodes) > 1:
+                return [ContentItem(text=(
+                    f"ERROR: input_image supports exactly one LoadImage node, but the workflow "
+                    f"has {len(load_nodes)}."
+                ))]
+            try:
+                image_ref = _upload_image(url, local_path)
+            except RuntimeError as e:
+                return [ContentItem(text=f"ERROR: {e}")]
+            workflow[load_nodes[0]]['inputs']['image'] = image_ref
+            report.append(f"input_image → {load_nodes[0]} (LoadImage)")
 
         # ── VRAM management: save → unload → (ComfyUI) → [caption] → restore ──
         # Restore is NOT in a finally block. It is called explicitly at the end (after
