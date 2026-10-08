@@ -248,9 +248,9 @@ from agent_cascade.engine.tool_execution import ToolExecMixin
 # Performance-only heuristic, NOT a correctness guard — an in-flight call is caught by Gate 5a
 # (`_llm_call_active`), which is cleared synchronously at the 'end' stamp before any slot handoff.
 # This margin just keeps back-to-back serialized checks from touching the instance in the instant
-# after its last activity; real inter-check gaps run ~0.2-1s, so 0.2s lets them reuse while leaving
-# a small tail buffer. (plan §3.4 item 5 / R1.)
-_REUSE_IDLE_EPSILON = 0.2
+# after its last activity; real inter-check gaps run ~0.1-1s, so 0.1s lets them reuse while leaving
+# a minimal tail buffer. (plan §3.4 item 5 / R1.)
+_REUSE_IDLE_EPSILON = 0.1
 
 
 def _last_assistant_text(turn_output: List[Message]) -> str:
