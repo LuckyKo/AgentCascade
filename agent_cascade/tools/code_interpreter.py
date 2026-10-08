@@ -1212,9 +1212,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     return f'{timeout_msg}\n\nPartial output:\n{partial_result}'
                 if kind == 'silence':
                     hint = ('This is a SILENCE limit, not a wall-clock limit — the cell may be doing real '
-                            'work (blocking I/O, sleep, subprocess) with no output. Print a heartbeat at '
-                            'least every few seconds, or increase M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT '
-                            '(or pass idle_timeout=<seconds> to this tool for a per-call override).')
+                            'work (blocking I/O, sleep, subprocess) with no output. Pass '
+                            'idle_timeout=<seconds> to this tool for a per-call override, print a heartbeat '
+                            'at least every few seconds, or raise M6_CODE_INTERPRETER_IOPUB_IDLE_TIMEOUT.')
                     return f'{timeout_msg} {hint}'
                 return f'{timeout_msg}. Please optimize your code or break it into smaller steps.'
             raise
