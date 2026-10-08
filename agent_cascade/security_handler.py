@@ -309,6 +309,9 @@ class SecurityAdvisorHandler:
 
         sec_state_key = None
         sec_instance = None
+        _sec_gen = None  # MUST be pre-bound: assigned inside the try below, but the finally
+                         # closes it — if prompt build / ExecutionEngine raise first, an unbound
+                         # local would raise UnboundLocalError and mask the real error.
         reuse_name = None  # MUST be pre-bound: assigned inside the try below, but the finally
                            # dereferences it (release_claim) — if prompt build / ExecutionEngine raise
                            # first, an unbound local would raise UnboundLocalError and mask the real error.
@@ -518,7 +521,8 @@ class SecurityAdvisorHandler:
                              f"{self._describe_pool_holders(caller_agent)}")
 
                 _got_first_yield = False
-                for resp in engine.run(sec_instance):
+                _sec_gen = engine.run(sec_instance)
+                for resp in _sec_gen:
                     if self.agent_pool.stopped:
                         break
 
@@ -575,6 +579,17 @@ class SecurityAdvisorHandler:
                 logger.error(f"Security agent execution error: {e}")
                 raise
             finally:
+                # Deterministic cleanup on every exit path (break on timeout / pool stopped /
+                # exception): best-effort close of the run() generator + explicit release of any
+                # slot permit the abandoned generator left behind. When the generator is abandoned
+                # while blocked in acquire(), the run() exit-finally that would normally release
+                # the permit never runs, so _slot_release/_slot_key stay set and pin the shared
+                # conc=0 pool forever. Centralized in security_reuse.release_permit_on_abandon
+                # (idempotent; releases the permit only, does NOT force state=IDLE).
+                security_reuse.release_permit_on_abandon(
+                    _sec_gen, sec_instance, sec_state_key,
+                    context='security timeout/abandon')
+
                 # Telemetry: record Security agent instance call (non-blocking, always fires even on timeout/error)
                 _call_latency_ms = (time.perf_counter() - _call_start) * 1000
                 if (tel := engine._telemetry()) is not None:

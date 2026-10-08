@@ -105,6 +105,9 @@ def run_lightweight_advisor(
     # raises before the assignment inside the try block.  Falls back to instance_name (the
     # per-call name) which is always available as a function parameter.
     effective_name: Optional[str] = None
+    # Pre-bound so the finally can reference it even if engine.run() raises before the
+    # assignment inside the try; release_permit_on_abandon skips the close when it is None.
+    _engine_gen = None
 
     def _first_yield_timeout_trigger():
         # actual_name is pre-bound to None (above) and assigned after acquire; the timer thread may
@@ -249,12 +252,16 @@ def run_lightweight_advisor(
                         )
                         break
         finally:
-            # Ensure the generator is properly closed on any exit path (break,
-            # exception, timeout) to release resources and allow clean GC.
-            try:
-                _engine_gen.close()
-            except Exception:
-                pass
+            # Ensure the generator is properly closed on any exit path (break, exception,
+            # timeout) AND deterministically release any slot permit the abandoned generator
+            # left behind. When the generator is abandoned while blocked in acquire(), the run()
+            # exit-finally that would normally release the permit never runs, so
+            # _slot_release/_slot_key stay set and pin the shared conc=0 pool forever.
+            # Centralized in security_reuse.release_permit_on_abandon (idempotent; the None
+            # guards for _engine_gen/instance are handled internally).
+            security_reuse.release_permit_on_abandon(
+                _engine_gen, instance, effective_name or instance_name,
+                context='advisor timeout/abandon')
 
         # ── 7. Extract output ────────────────────────────────────────────────
         if not result.was_timeout:

@@ -4573,11 +4573,25 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                  instance_name, rid, inst.state)
                     return None
 
-            # 4. No leaked endpoint permit (todo.md:158 permit-leak program).
+            # 4. A leaked endpoint permit (the slot-permit-leak program). Gate 3 already
+            #    proved state == IDLE, so NO live run of this instance holds a permit — a set
+            #    _slot_release here is by definition a leaked (orphaned) permit from an
+            #    abandoned run. Release it (idempotent, atomic) instead of rejecting, so the
+            #    warm instance can be reused. If a live holder still owns the pool entry for
+            #    this name, the release no-ops on the pool (acquisition_id mismatch,
+            #    slot_queue.py) and we stay conservative: re-check and reject only if it is
+            #    still set. (Insurance only — the primary leak leaves state=RUNNING, so Gate 3
+            #    rejects before Gate 4 is ever reached; see plan Fix 3 / R1.)
             if inst._slot_release is not None or inst._slot_key is not None:
-                logger.debug('[SECURITY_REUSE] %s ineligible (gate=slot_permit_leaked, rid=%s): slot_release=%r slot_key=%r',
-                             instance_name, rid, inst._slot_release, inst._slot_key)
-                return None
+                cleared = self._discard_stale_permit(
+                    inst, instance_name,
+                    context='reuse-gate4-stale-permit', action='drop-stale-reuse')
+                if not cleared and (inst._slot_release is not None or inst._slot_key is not None):
+                    logger.debug('[SECURITY_REUSE] %s ineligible (gate=slot_permit_leaked, rid=%s): slot_release=%r slot_key=%r',
+                                 instance_name, rid, inst._slot_release, inst._slot_key)
+                    return None
+                logger.warning('[SECURITY_REUSE] %s recovered a leaked permit at reuse-gate4 '
+                               '(rid=%s) — cleared and proceeding.', instance_name, rid)
 
             # 5. No live LLM call, and the last activity is older than a small epsilon — guards
             #    against a generator abandoned by `break` without close() still mid-flight.

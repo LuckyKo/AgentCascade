@@ -145,12 +145,22 @@ class TestEligibilityPredicate:
         engine = _make_engine(_make_pool(inst))
         assert _acquire(engine) is None
 
-    def test_slot_held_falls_back(self):
+    def test_slot_held_cleared_and_reused(self):
+        """Fix 3 (Gate 4): a leaked (stale) permit on an IDLE warm instance is CLEARED and the
+        instance is REUSED — not rejected. Gate 3 already proved state == IDLE, so a set
+        _slot_release here is by definition stale (no live run holds it). Pre-fix this fell
+        back to a fresh spawn, wedging the warm instance."""
         inst = _make_warm_instance()
         inst._slot_release = lambda: None  # leaked permit
         inst._slot_key = 'some_endpoint'
         engine = _make_engine(_make_pool(inst))
-        assert _acquire(engine) is None
+        got = _acquire(engine)
+        assert got is not None, 'a stale-permit IDLE instance must be cleared and reused (Fix 3)'
+        result_inst, was_reused, name = got
+        assert result_inst is inst and was_reused is True
+        assert name == REUSE_NAME
+        assert inst._slot_release is None and inst._slot_key is None, \
+            'Gate 4 must clear the stale permit before reusing'
 
     def test_llm_active_falls_back(self):
         inst = _make_warm_instance()
@@ -355,13 +365,18 @@ class TestClaimReleasedOnFailure:
         assert got is None
         assert claim_holder(REUSE_NAME) is None
 
-    def test_slot_held_releases_claim(self):
+    def test_slot_held_reused_hands_off_claim(self):
+        """Fix 3: a stale-permit IDLE instance is cleared and REUSED (not a failure path), so the
+        claim is handed to the caller (stays held) — the opposite of the old fall-back. The
+        no-leak intent is preserved: a successful reuse is the ONLY case that keeps the claim
+        (the caller's finally owns it from here on)."""
         inst = _make_warm_instance()
         inst._slot_release = lambda: None
         inst._slot_key = 'some_endpoint'
         got = self._acquire_and_check(inst)
-        assert got is None
-        assert claim_holder(REUSE_NAME) is None
+        assert got is not None, 'a stale-permit IDLE instance is now reused (Fix 3)'
+        assert claim_holder(REUSE_NAME) is not None, \
+            'successful reuse hands the claim to the caller (stays held)'
 
     def test_llm_active_releases_claim(self):
         inst = _make_warm_instance()
@@ -2078,12 +2093,15 @@ class TestT5ClaimReleaseOnFailure:
         assert got is None
         assert claim_holder(REUSE_NAME) is None
 
-    def test_slot_held_releases_claim(self):
+    def test_slot_held_reused_hands_off_claim(self):
+        """Fix 3: a stale-permit IDLE instance is cleared and REUSED (not a failure path), so the
+        claim is handed to the caller (stays held) — the opposite of the old fall-back."""
         inst = _make_warm_instance()
-        inst._slot_release = lambda: None  # leaked permit → not quiescent
+        inst._slot_release = lambda: None  # stale permit → cleared at Gate 4
         got, _ = self._acquire(inst)
-        assert got is None
-        assert claim_holder(REUSE_NAME) is None
+        assert got is not None, 'a stale-permit IDLE instance is now reused (Fix 3)'
+        assert claim_holder(REUSE_NAME) is not None, \
+            'successful reuse hands the claim to the caller (stays held)'
 
     def test_lock_held_releases_claim(self):
         """Compression lock already held by another run → non-blocking acquire fails → release.

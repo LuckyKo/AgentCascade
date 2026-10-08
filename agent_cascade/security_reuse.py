@@ -128,3 +128,40 @@ def acquire_security_agent(engine, agent_class: str, reuse_name: Optional[str],
     instance = engine._create_system_agent(
         agent_class=agent_class, instance_name=fallback_name, task=task, caller=caller)
     return instance, False, fallback_name
+
+
+def release_permit_on_abandon(
+    gen: Optional[Any],
+    instance: Optional[Any],
+    instance_name: str,
+    context: str,
+) -> None:
+    """Best-effort generator close + deterministic slot-permit release on abandon.
+
+    Shared by the Security handler (``security_handler.py``) and the skill-advisor runner
+    (``advisor_runner.py``). When a daemon-thread generator is abandoned (break on timeout /
+    pool stopped) while blocked inside ``acquire()``, the ``run()`` exit-finally that would
+    normally release the permit never runs, so ``_slot_release``/``_slot_key`` stay set and
+    pin the shared ``conc=0`` pool forever. Centralizing the two-part cleanup here keeps both
+    call sites in lockstep:
+
+      * ``gen.close()`` — best-effort. Swallows ``ValueError`` (raised when the generator is
+        blocked in ``acquire()``) and any other close-time error.
+      * ``ExecutionEngine._discard_stale_permit(...)`` — deterministic, idempotent, atomic under
+        the instance's ``_state_lock``: a no-op when the normal exit-finally already released, a
+        real release when it did not. Releases the PERMIT only (does NOT force ``state=IDLE``,
+        which would race a live worker).
+
+    ``gen`` and ``instance`` may be ``None`` (early exit before the generator/instance was
+    created); each step is skipped independently. ``ExecutionEngine`` is imported lazily so
+    this module stays import-time dependency-free (no circular-import risk at load).
+    """
+    if gen is not None:
+        try:
+            gen.close()
+        except Exception:  # noqa: BLE001 — best-effort; ValueError if blocked in acquire()
+            pass
+    if instance is not None:
+        from agent_cascade.execution_engine import ExecutionEngine
+        ExecutionEngine._discard_stale_permit(
+            instance, instance_name, context=context, action='drop-exit')
