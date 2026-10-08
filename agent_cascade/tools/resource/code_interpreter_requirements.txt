@@ -12,8 +12,10 @@ numpy
 openai
 openpyxl
 pandas
+pathspec
 Pillow
 pydantic>=2.3.0
+pytest
 python-dotenv
 pyyaml
 regex
@@ -22,3 +24,4 @@ seaborn
 soundfile
 sympy
 tiktoken
+tqdm
