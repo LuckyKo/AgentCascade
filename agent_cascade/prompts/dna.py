@@ -440,7 +440,7 @@ TOOL_METADATA = {
             'fresh':
                 'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
             'idle_timeout':
-                'Optional. IOPub silence window (seconds) for this call — how long the code may run without producing ANY output before it is considered stalled and killed. Default 30. Raise this (e.g. 120 or 300) when running code that legitimately produces no output for a while (long blocking I/O, big-file parsing, subprocesses, sleeps). This is a SILENCE limit, not a wall-clock limit.',
+                'Seconds of no output before the kernel is killed. Default 30. Raise for code that runs silently (blocking I/O, big-file parse, subprocess). Silence limit, not wall-clock.',
         }
     },
     'shell_cmd': {

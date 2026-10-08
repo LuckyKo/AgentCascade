@@ -703,12 +703,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
             },
             'idle_timeout': {
                 'description':
-                    ('Optional. IOPub silence window (seconds) for this call — how long the code may run '
-                     'without producing ANY output before it is considered stalled and killed. Default 30. '
-                     'Raise this (e.g. 120 or 300) when running code that legitimately produces no output '
-                     'for a while (long blocking I/O, big-file parsing, subprocesses, sleeps). This is a '
-                     'SILENCE limit, not a wall-clock limit; the separate `timeout` parameter controls total '
-                     'wall-clock time.'),
+                    ('Seconds of no output before the kernel is killed. Default 30. Raise for code that '
+                     'runs silently (blocking I/O, big-file parse, subprocess). Silence limit, not wall-clock.'),
                 'type': 'integer',
                 'default': 30,
             }
