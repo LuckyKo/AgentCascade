@@ -374,8 +374,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # identical to the built-in [media, workspace] roots. MUST be nested here:
     # agent_pool is a closure variable of create_app, not a module global.
     def _norm_root(x):
-        # Normalize a root the same way path_security._is_within() does (normcase +
-        # normpath + resolve) so dedup can never disagree with the matching logic.
+        # Normalize a root to the same canonical form path_security matches against
+        # (resolve, then normcase + normpath — _is_path_allowed resolves each root
+        # before _is_within compares) so dedup can never disagree with the match.
         # Returns None on failure — callers treat that as "include" (fail open), which
         # is safe because base_dir is the legitimate workspace either way.
         try:
