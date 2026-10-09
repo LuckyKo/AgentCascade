@@ -364,6 +364,44 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     config = config or {}
     app = FastAPI(title='AgentCascade API')
 
+    # Resolve the session's extra work folders (RO + RW) at REQUEST time so /api/file
+    # can serve images that live in extra paths (BUG_0066). Since BUG_0068 it ALSO
+    # supplies the session's LIVE workspace root (om.base_dir) when it differs from the
+    # import-time DEFAULT_WORKSPACE, so files under a relocated/renamed live workspace
+    # render in the WebUI instead of 403. Read per-request (no caching) so live config
+    # changes (config_handlers.set_extra_work_folders, om.set_base_dir) take effect on
+    # the very next fetch. Returns [] when there is no pool/OM, keeping behavior
+    # identical to the built-in [media, workspace] roots. MUST be nested here:
+    # agent_pool is a closure variable of create_app, not a module global.
+    def _norm_root(x):
+        # Normalize a root the same way path_security._is_within() does (normcase +
+        # normpath + resolve) so dedup can never disagree with the matching logic.
+        # Returns None on failure — callers treat that as "include" (fail open), which
+        # is safe because base_dir is the legitimate workspace either way.
+        try:
+            return os.path.normcase(os.path.normpath(str(Path(x).resolve())))
+        except (OSError, ValueError):
+            return None
+
+    def _current_extra_roots():
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is None:
+            return []
+        roots = (list(getattr(om, 'extra_work_folders_ro', []) or [])
+                 + list(getattr(om, 'extra_work_folders_rw', []) or []))
+        # BUG_0068: also allow the LIVE workspace root when it differs from
+        # DEFAULT_WORKSPACE. getattr(om, 'base_dir', None) is MANDATORY (not om.base_dir)
+        # — the test stub _ExtraRootsOm has no base_dir attribute and a bare access would
+        # raise AttributeError inside the request handler. Dedup is hygiene, not
+        # correctness; on normalization failure we fail open (include the root).
+        base_dir = getattr(om, 'base_dir', None)
+        if base_dir is not None and str(base_dir).strip():
+            base_norm = _norm_root(base_dir)
+            default_norm = _norm_root(DEFAULT_WORKSPACE)
+            if base_norm is None or default_norm is None or base_norm != default_norm:
+                roots.insert(0, Path(base_dir))
+        return roots
+
     # Ensure media directory exists at startup (non-critical fallback)
     from agent_cascade.utils.media_utils import MediaStorageError, get_images_dir
     try:
@@ -1558,8 +1596,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # Support for windows paths like n:/...
         # Sometimes file:///N:/... gets parsed as N:/...
 
-        # Security check: ensure path is within allowed roots
-        if not _is_path_allowed(path):
+        # Security check: ensure path is within allowed roots (incl. session extra paths)
+        if not _is_path_allowed(path, extra_roots=_current_extra_roots()):
             logger.warning(f"Blocked access to disallowed path via /api/file: {path}")
             return JSONResponse(status_code=403, content={'message': 'Access denied'})
 

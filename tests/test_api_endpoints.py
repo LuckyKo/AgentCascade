@@ -647,6 +647,183 @@ class TestSessionsInstanceAwareLogDir:
         assert 'generating' in state
 
 
+class _ExtraRootsOm:
+    """Minimal operation_manager double exposing the extra work folder lists.
+
+    ``base_dir`` is optional (BUG_0068): when left ``None`` the new live-workspace-root
+    logic in ``_current_extra_roots`` skips it, so existing call sites are unaffected.
+    """
+
+    def __init__(self, ro=None, rw=None, base_dir=None):
+        self.extra_work_folders_ro = list(ro or [])
+        self.extra_work_folders_rw = list(rw or [])
+        self.base_dir = base_dir
+
+
+class TestFileEndpointExtraRoots:
+    """BUG_0066 — /api/file serves images from the session's extra work folders.
+
+    The module-scoped ``test_app`` fixture builds a real ``AgentPool`` whose
+    ``operation_manager`` is not configured with extra folders. We recover that
+    closure-bound pool, swap in a stub ``operation_manager`` per test, and restore
+    it in the fixture teardown so the shared module-scoped app/pool stays clean.
+    """
+
+    @pytest.fixture
+    def pool(self, test_app):
+        from agent_cascade.agent_pool import AgentPool
+
+        recovered = None
+        for route in test_app.router.routes:
+            fn = getattr(route, 'endpoint', None)
+            if fn is None or not fn.__closure__:
+                continue
+            for cell in fn.__closure__:
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(val, AgentPool):
+                    recovered = val
+                    break
+            if recovered is not None:
+                break
+        assert recovered is not None, 'Could not recover AgentPool from app route closures'
+
+        saved = getattr(recovered, 'operation_manager', None)
+        yield recovered
+        recovered.operation_manager = saved
+
+    def test_get_file_serves_extra_root_image(self, client, pool, tmp_path):
+        """GET /api/file serves a real image that lives in an extra RW root (200)."""
+        img_dir = tmp_path / 'extra_rw'
+        img_dir.mkdir()
+        img = img_dir / 'photo.png'
+        img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * 16)
+
+        pool.operation_manager = _ExtraRootsOm(rw=[img_dir])
+        resp = client.get('/api/file', params={'path': str(img)})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        assert len(resp.content) > 0, 'Served body should be non-empty'
+
+    def test_get_file_extra_root_403_after_removal(self, client, pool, tmp_path):
+        """Clearing om.extra_work_folders_rw makes the same path 403 (no stale caching)."""
+        img_dir = tmp_path / 'extra_rw'
+        img_dir.mkdir()
+        img = img_dir / 'photo.png'
+        img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * 16)
+
+        pool.operation_manager = _ExtraRootsOm(rw=[])
+        resp = client.get('/api/file', params={'path': str(img)})
+        assert resp.status_code == 403, \
+            f"Expected 403 after clearing extras, got {resp.status_code}"
+
+
+class TestFileEndpointWorkspaceRoot:
+    """BUG_0068 — /api/file also allows the session's LIVE workspace root (om.base_dir).
+
+    When om.base_dir differs from the import-time DEFAULT_WORKSPACE (relocated/renamed
+    workspace), files under it must render (200) instead of 403. The live root is folded
+    into the existing ``extra_roots`` path by ``_current_extra_roots()`` at request time.
+
+    This class keeps its OWN copy of the closure-recovery pool fixture (deliberately not
+    shared with ``TestFileEndpointExtraRoots``) so BUG_0066's tests stay untouched.
+    """
+
+    @pytest.fixture
+    def pool(self, test_app):
+        from agent_cascade.agent_pool import AgentPool
+
+        recovered = None
+        for route in test_app.router.routes:
+            fn = getattr(route, 'endpoint', None)
+            if fn is None or not fn.__closure__:
+                continue
+            for cell in fn.__closure__:
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(val, AgentPool):
+                    recovered = val
+                    break
+            if recovered is not None:
+                break
+        assert recovered is not None, 'Could not recover AgentPool from app route closures'
+
+        saved = getattr(recovered, 'operation_manager', None)
+        yield recovered
+        recovered.operation_manager = saved
+
+    def test_live_base_dir_image_is_served(self, client, pool, tmp_path):
+        """GET /api/file serves an image under a live base_dir that != DEFAULT_WORKSPACE."""
+        from agent_cascade.settings import DEFAULT_WORKSPACE
+
+        live_ws = tmp_path / 'live_ws'
+        live_ws.mkdir()
+        img = live_ws / 'photo.png'
+        img.write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * 16)
+
+        # Guard the test's own premise: the live root must differ from DEFAULT_WORKSPACE.
+        assert live_ws.resolve() != Path(DEFAULT_WORKSPACE).resolve(), \
+            'tmp live_ws unexpectedly equals DEFAULT_WORKSPACE; test premise broken'
+
+        pool.operation_manager = _ExtraRootsOm(base_dir=live_ws)
+        resp = client.get('/api/file', params={'path': str(img)})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        assert len(resp.content) > 0, 'Served body should be non-empty'
+
+    def test_base_dir_change_takes_effect_next_request(self, client, pool, tmp_path):
+        """Mutating om.base_dir re-evaluates the root on the next request (no caching)."""
+        ws_a = tmp_path / 'ws_a'
+        ws_b = tmp_path / 'ws_b'
+        ws_a.mkdir()
+        ws_b.mkdir()
+        img_a = ws_a / 'photo.png'
+        img_b = ws_b / 'photo.png'
+        img_a.write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * 16)
+        img_b.write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * 16)
+
+        pool.operation_manager = _ExtraRootsOm(base_dir=ws_a)
+        resp_a = client.get('/api/file', params={'path': str(img_a)})
+        assert resp_a.status_code == 200, f"ws_a image should be 200, got {resp_a.status_code}"
+
+        # Relocate the live workspace; the new root must be allowed...
+        pool.operation_manager.base_dir = ws_b
+        resp_b = client.get('/api/file', params={'path': str(img_b)})
+        assert resp_b.status_code == 200, f"ws_b image should be 200, got {resp_b.status_code}"
+
+        # ...and the old root must be dropped (no stale caching / widening).
+        resp_a2 = client.get('/api/file', params={'path': str(img_a)})
+        assert resp_a2.status_code == 403, \
+            f"Old ws_a root should be 403 after relocation, got {resp_a2.status_code}"
+
+    def test_no_duplicate_root_when_base_dir_is_default(self, client, pool, monkeypatch):
+        """When base_dir == DEFAULT_WORKSPACE, it is deduped out of the extra_roots list."""
+        import agent_cascade.api_server as api_server
+        from agent_cascade.path_security import _is_path_allowed as real_is_path_allowed
+        from agent_cascade.settings import DEFAULT_WORKSPACE
+
+        recorded = {}
+
+        def spy(path, extra_roots=None):
+            recorded['extra_roots'] = list(extra_roots or [])
+            return real_is_path_allowed(path, extra_roots=extra_roots)
+
+        # The endpoint resolves _is_path_allowed from api_server's module globals, so
+        # patching the module attribute is what the request handler actually sees.
+        monkeypatch.setattr(api_server, '_is_path_allowed', spy)
+
+        pool.operation_manager = _ExtraRootsOm(base_dir=Path(DEFAULT_WORKSPACE))
+        resp = client.get('/api/file', params={'path': str(DEFAULT_WORKSPACE)})
+        assert resp.status_code in (200, 403, 404), \
+            f"Unexpected status {resp.status_code}: {resp.text}"
+
+        # base_dir == DEFAULT_WORKSPACE must NOT be re-added as an extra root.
+        assert DEFAULT_WORKSPACE not in [str(r) for r in recorded['extra_roots']], \
+            f"base_dir==DEFAULT_WORKSPACE should be deduped, extras={recorded['extra_roots']}"
+
+
 class TestEndpointManagementCRUD:
     """Test endpoint configuration CRUD operations."""
 

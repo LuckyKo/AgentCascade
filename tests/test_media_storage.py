@@ -439,6 +439,134 @@ class TestIsPathAllowedSecurity:
             assert not _is_path_allowed(str(test_file)), \
                 f"Path outside allowed roots should be blocked: {test_file}"
 
+    # ── BUG_0066: extra work folders (RO/RW) threaded through the guard ──────
+
+    def test_extra_rw_path_allowed(self):
+        """A file under an extra RW root is allowed."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rw_root = Path(tmpdir) / 'rw'
+            rw_root.mkdir()
+            img = rw_root / 'img.png'
+            img.write_bytes(b'fake')
+
+            assert _is_path_allowed(str(img), extra_roots=[rw_root]), \
+                f"File under extra RW root should be allowed: {img}"
+
+    def test_extra_ro_path_allowed(self):
+        """A file under an extra RO root is allowed (GET is read-only)."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ro_root = Path(tmpdir) / 'ro'
+            ro_root.mkdir()
+            img = ro_root / 'img.png'
+            img.write_bytes(b'fake')
+
+            assert _is_path_allowed(str(img), extra_roots=[ro_root]), \
+                f"File under extra RO root should be allowed: {img}"
+
+    def test_roots_still_allowed_when_extras_passed(self):
+        """Passing extras does NOT displace the built-in media/workspace roots."""
+        from agent_cascade.api_server import _get_allowed_file_roots, _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extra = Path(tmpdir) / 'extra'
+            extra.mkdir()
+
+            media_root = _get_allowed_file_roots(extra_roots=[extra])[0]
+            media_root.mkdir(parents=True, exist_ok=True)
+            media_file = media_root / 'm.jpg'
+            media_file.write_bytes(b'fake')
+            assert _is_path_allowed(str(media_file), extra_roots=[extra]), \
+                f"Media root must stay allowed when extras passed: {media_file}"
+            media_file.unlink(missing_ok=True)
+
+            ws_root = _get_allowed_file_roots(extra_roots=[extra])[1]
+            ws_file = ws_root / 'w.txt'
+            ws_file.write_bytes(b'ok')
+            assert _is_path_allowed(str(ws_file), extra_roots=[extra]), \
+                f"Workspace root must stay allowed when extras passed: {ws_file}"
+            ws_file.unlink(missing_ok=True)
+
+    def test_extra_root_index_contract(self):
+        """_get_allowed_file_roots: [0]=media, [1]=workspace, [2:]=extras (append-only)."""
+        from agent_cascade.api_server import _get_allowed_file_roots
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extra = Path(tmpdir) / 'extra'
+            extra.mkdir()
+
+            roots = _get_allowed_file_roots(extra_roots=[extra])
+            assert roots[0] == _get_allowed_file_roots()[0], 'Index [0] must remain the media dir'
+            assert roots[1] == _get_allowed_file_roots()[1], 'Index [1] must remain the workspace root'
+            assert roots[2:] == [extra], f"Extras must be appended after [1]: {roots[2:]}"
+
+    def test_outside_all_roots_still_blocked_with_extras(self):
+        """A tempdir that is not any root stays blocked even when extras are supplied."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extra = Path(tmpdir) / 'extra'
+            extra.mkdir()
+            other = Path(tmpdir) / 'other'
+            other.mkdir()
+            secret = other / 'secret.txt'
+            secret.write_bytes(b'outside')
+
+            assert not _is_path_allowed(str(secret), extra_roots=[extra]), \
+                f"Path outside all roots should stay blocked with extras: {secret}"
+
+    def test_sibling_prefix_escape_blocked(self):
+        """<root>Evil must not match root <root> (the §2 security regression guard)."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proj = Path(tmpdir) / 'proj'
+            proj.mkdir()
+            evil = Path(tmpdir) / 'projEvil'
+            evil.mkdir()
+            evil_img = evil / 'x.png'
+            evil_img.write_bytes(b'fake')
+
+            assert not _is_path_allowed(str(evil_img), extra_roots=[proj]), \
+                f"Sibling-prefix escape must be blocked: {evil_img} vs root {proj}"
+
+    def test_dotfile_in_extra_root_blocked(self):
+        """A .env inside an extra root is blocked by the filename guard."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extra = Path(tmpdir) / 'extra'
+            extra.mkdir()
+            env = extra / '.env'
+            env.write_bytes(b'SECRET=123')
+
+            assert not _is_path_allowed(str(env), extra_roots=[extra]), \
+                f".env inside an extra root should be blocked: {env}"
+
+    @pytest.mark.skipif(os.name != 'nt', reason='Backslash is a legal filename char on POSIX')
+    def test_backslash_form_extra_root_matches(self):
+        """A backslash-form Windows root matches a forward-slash candidate (and vice versa)."""
+        from agent_cascade.api_server import _is_path_allowed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / 'winroot'
+            root.mkdir()
+            img = root / 'img.png'
+            img.write_bytes(b'fake')
+
+            backslash_root = str(root).replace(os.sep, '\\')
+            forward_candidate = str(img).replace(os.sep, '/')
+            assert _is_path_allowed(forward_candidate, extra_roots=[backslash_root]), \
+                f"Backslash root should match forward-slash candidate: {forward_candidate}"
+
+            forward_root = str(root).replace(os.sep, '/')
+            backslash_candidate = str(img).replace(os.sep, '\\')
+            assert _is_path_allowed(backslash_candidate, extra_roots=[forward_root]), \
+                f"Forward-slash root should match backslash candidate: {backslash_candidate}"
+
 
 class TestParseMultimodalContent:
     """Tests for _parse_multimodal_content() function."""
