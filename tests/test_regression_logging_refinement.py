@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_cascade.settings import DEFAULT_WORKSPACE
+
 
 class TestReadLogsAutoResolution:
     """Test the new auto-resolution feature in read_logs for bare filenames."""
@@ -114,7 +116,8 @@ class TestReadLogsAutoResolution:
         This verifies the fallback doesn't crash — actual success depends on workspace config.
         """
         import os
-        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        _default_ws = os.environ.get('AGENT_WORKSPACE') or DEFAULT_WORKSPACE  # honor env var; else settings-resolved workspace (allowed dir in standalone mode)
+        workspace_root = Path(_default_ws)
         test_file = workspace_root / '_test_regression_fullpath.jsonl'
 
         try:
@@ -180,7 +183,8 @@ class TestReadLogsAutoResolution:
         a workspace path instead of a temp dir.
         """
         import os
-        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        _default_ws = os.environ.get('AGENT_WORKSPACE') or DEFAULT_WORKSPACE  # honor env var; else settings-resolved workspace (allowed dir in standalone mode)
+        workspace_root = Path(_default_ws)
         test_file = workspace_root / '_test_regression_nopool.jsonl'
 
         try:
@@ -205,7 +209,8 @@ class TestReadLogsAutoResolution:
         depends on workspace path restrictions.
         """
         import os
-        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        _default_ws = os.environ.get('AGENT_WORKSPACE') or DEFAULT_WORKSPACE  # honor env var; else settings-resolved workspace (allowed dir in standalone mode)
+        workspace_root = Path(_default_ws)
         subdir = workspace_root / '_test_regression_sub'
         subdir.mkdir(exist_ok=True)
         test_file = subdir / 'nested.jsonl'
@@ -273,7 +278,8 @@ class TestFileOpsRefactoring:
     def test_read_file_basic(self):
         """ReadFile can read a file within allowed directories."""
         import os
-        workspace_root = Path(os.environ.get('AGENT_WORKSPACE', 'N:\\work\\WD\\AgentWorkspace'))
+        _default_ws = os.environ.get('AGENT_WORKSPACE') or DEFAULT_WORKSPACE  # honor env var; else settings-resolved workspace (allowed dir in standalone mode)
+        workspace_root = Path(_default_ws)
         test_file = workspace_root / '_test_regression_readfile.txt'
 
         try:

@@ -78,7 +78,6 @@ class TestConsoleCtrlGuard:
             assert result1 is True
             assert install_console_ctrl_guard() is False
 
-    @pytest.mark.windows_only  # gate: ctypes.WINFUNCTYPE (Windows-only; shared_init.py:409)
     def test_guard_install_idempotent_with_fake_kernel32(self):
         """The internal installer registers exactly once and is idempotent.
 
@@ -101,7 +100,6 @@ class TestConsoleCtrlGuard:
         assert second is False
         assert len(fake.registrations) == 1
 
-    @pytest.mark.windows_only  # gate: ctypes.WINFUNCTYPE (Windows-only; shared_init.py:409)
     def test_guard_callback_redispatches_sigint(self):
         """CRITICAL regression pin: the callback re-dispatches SIGINT (not a no-op).
 

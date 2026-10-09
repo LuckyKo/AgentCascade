@@ -406,7 +406,11 @@ def _install_windows_console_guard(kernel32=None) -> bool:
 
     # WINFUNCTYPE signature for SetConsoleCtrlHandler: BOOL CALLBACK Handler(DWORD dwCtrlType)
     _console_ctrl_raw_handler = _handler  # keep the raw callable reachable (test hook / introspection)
-    _console_ctrl_handler = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(_handler)
+    # WINFUNCTYPE is Windows-only; on non-Windows the callback is never OS-invoked
+    # (real install is gated by os.name != 'nt' in install_console_ctrl_guard), so
+    # CFUNCTYPE is a safe stand-in that lets the fake-kernel32 test path run cross-platform.
+    _functype = getattr(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE)
+    _console_ctrl_handler = _functype(ctypes.c_int, ctypes.c_uint)(_handler)
     ok = bool(kernel32.SetConsoleCtrlHandler(_console_ctrl_handler, True))
     if ok:
         _console_guard_installed = True
