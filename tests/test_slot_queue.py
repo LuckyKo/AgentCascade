@@ -18,6 +18,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
+import pytest
+
 from agent_cascade.slot_queue import SlotCancelled, SlotHolder, SlotPool, SlotQueueTimeout
 
 
@@ -324,6 +326,7 @@ class TestConcurrencyStress(unittest.TestCase):
 class TestMassCancellation(unittest.TestCase):
     """Test mass cancellation performance."""
 
+    @pytest.mark.heavy_concurrency  # spawns 100 raw OS threads (suite norm is <=8 via ThreadPoolExecutor)
     def test_mass_cancel_performance(self):
         """Enqueue 100 waiters on cap=1 pool; terminate_for_agent completes in <50ms.
 

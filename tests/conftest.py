@@ -188,6 +188,85 @@ def _local_tests_opted_in() -> bool:
     return val in ('1', 'true', 'yes', 'on')
 
 
+# ---------------------------------------------------------------------------
+# Environment capability probes — evaluated ONCE per session, then cached
+# ---------------------------------------------------------------------------
+# These power the capability-based skip guards in pytest_collection_modifyitems
+# (requires_docker / heavy_concurrency / windows_only). Probing once per session
+# (not per test) keeps collection fast and matches the _local_llm_detector idiom
+# above. See docs/ci_testing.md for what CI runs and why these exist.
+
+_DOCKER_OK = None      # tri-state cache: None = not yet probed
+_THREAD_LIMIT_OK = None  # cached thread-limit probe result (None = not yet probed)
+
+
+def docker_available() -> bool:
+    """True when a Docker CLI *and* a reachable daemon are present.
+
+    Required by every test that constructs CodeInterpreter: __init__ calls
+    _check_docker_availability() unconditionally (code_interpreter.py:730), which
+    raises RuntimeError when the daemon is absent. Mocking subprocess in the test
+    body does NOT avoid this — the check runs in the constructor.
+
+    AGENT_CASCADE_DISABLE_DOCKER=1 forces False, so CI can deterministically
+    exercise the skip path on a Docker-capable runner (e.g. GitHub Actions).
+    """
+    global _DOCKER_OK
+    if _DOCKER_OK is None:
+        if os.environ.get('AGENT_CASCADE_DISABLE_DOCKER', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+            _DOCKER_OK = False
+        else:
+            import subprocess
+            try:
+                r = subprocess.run(['docker', 'info'], capture_output=True, timeout=10)
+                _DOCKER_OK = (r.returncode == 0)
+            except (OSError, subprocess.SubprocessError):
+                _DOCKER_OK = False
+    return _DOCKER_OK
+
+
+def thread_limit_ok(min_threads: int = 256) -> bool:
+    """True when the platform can plausibly create `min_threads` OS threads.
+
+    Used by the heavy_concurrency guard: a test that spawns ~100 raw threads is
+    order-fragile when the process is near its thread ceiling. On Windows there is
+    no RLIMIT_NPROC and no cgroup PID cap, so the test always runs on the dev
+    platform.
+
+    Checks BOTH limits, because they constrain thread creation independently:
+      - RLIMIT_NPROC (per-user process/thread cap)
+      - cgroup v2 ``pids.max`` / v1 ``pids/pids.max`` (container PID+thread cap)
+    A sandbox can have an *infinite* RLIMIT_NPROC yet a low cgroup ``pids.max``
+    (e.g. 100), which is what actually kills a 100-thread test with
+    ``RuntimeError: can't start new thread`` — so checking RLIMIT_NPROC alone
+    would miss it (see .agent_lessons/ac-ci-sandbox-thread-limit.md).
+
+    Cached like docker_available() for consistency (the hook calls it once per
+    session, but the probe may be reused elsewhere).
+    """
+    global _THREAD_LIMIT_OK
+    if _THREAD_LIMIT_OK is not None:
+        return _THREAD_LIMIT_OK
+    limits = []
+    try:
+        import resource
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        if soft not in (resource.RLIM_INFINITY, -1):
+            limits.append(soft)
+    except (ImportError, ValueError):  # Windows: no RLIMIT_NPROC
+        pass
+    for path in ('/sys/fs/cgroup/pids.max', '/sys/fs/cgroup/pids/pids.max'):
+        try:
+            with open(path) as fh:
+                val = fh.read().strip()
+            if val.isdigit():  # 'max' == unlimited -> ignore
+                limits.append(int(val))
+        except OSError:
+            pass
+    _THREAD_LIMIT_OK = (True if not limits else min(limits) >= min_threads)
+    return _THREAD_LIMIT_OK
+
+
 def _find_text_model():
     """Find the best text model from detected local models.
 
@@ -306,10 +385,19 @@ def _enable_worker_faulthandler() -> None:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip tests marked 'skip_if_no_local' unless a server is found AND the user opted in.
+    """Apply capability-based skip markers to environment-gated tests.
 
-    Production-safety: the local server may be the production box; live LLM calls
-    must be explicitly enabled via AGENT_CASCADE_RUN_LOCAL_TESTS.
+    Two families of skips, both "minimum separation" (the test still runs by
+    default when the resource is present):
+
+    1. `skip_if_no_local` — skip unless a local LLM server is found AND the user
+       opted in (AGENT_CASCADE_RUN_LOCAL_TESTS). Production-safety: the "local"
+       server may be the production box.
+    2. Capability markers (see the probes above + docs/ci_testing.md):
+         - requires_docker   → skip when no Docker daemon
+         - heavy_concurrency → skip when the OS thread limit is too low
+         - windows_only      → skip off Windows (ctypes.WINFUNCTYPE et al.)
+       These turn would-be environment failures on CI into clean skips.
     """
     if (not _local_llm_detector.available) or (not _local_tests_opted_in()):
         if not _local_llm_detector.available:
@@ -321,6 +409,25 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if 'skip_if_no_local' in item.keywords:
                 item.add_marker(skip_marker)
+
+    # Capability-based skips (probes are cached — see docker_available /
+    # thread_limit_ok above). Each marker is only applied when its resource is
+    # genuinely unavailable, so the default Windows run is unchanged.
+    if not docker_available():
+        docker_skip = pytest.mark.skip(reason='Docker daemon not available (requires_docker)')
+        for item in items:
+            if 'requires_docker' in item.keywords:
+                item.add_marker(docker_skip)
+    if not thread_limit_ok():
+        thread_skip = pytest.mark.skip(reason='OS thread limit too low for heavy concurrency (heavy_concurrency)')
+        for item in items:
+            if 'heavy_concurrency' in item.keywords:
+                item.add_marker(thread_skip)
+    if sys.platform != 'win32':
+        win_skip = pytest.mark.skip(reason='Windows-only OS API (ctypes.WINFUNCTYPE) — runs on Windows only')
+        for item in items:
+            if 'windows_only' in item.keywords:
+                item.add_marker(win_skip)
 
 
 # ---------------------------------------------------------------------------

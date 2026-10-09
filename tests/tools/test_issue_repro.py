@@ -1,6 +1,9 @@
+import pytest
+
 from agent_cascade.tools import CodeInterpreter
 
 
+@pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
 def test_code_interpreter_dict_input():
     tool = CodeInterpreter()
     # This should not raise TypeError
@@ -9,6 +12,7 @@ def test_code_interpreter_dict_input():
     assert 'hello world' in result
 
 
+@pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
 def test_code_interpreter_string_input():
     tool = CodeInterpreter()
     # This should work as before

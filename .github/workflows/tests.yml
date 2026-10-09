@@ -1,0 +1,119 @@
+name: Tests
+
+# Runs the REAL test suite (pytest.ini + tests/) on Linux CI — the same suite the
+# Windows dev machine runs. No parallel manifest, no divergent test list. See
+# docs/ci_testing.md for what runs, why, and how to reproduce locally.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Avoid duplicate runs piling up on the same ref.
+concurrency:
+  group: "tests-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  tests-normal:
+    # Docker-capable runner: the full suite should be GREEN. The requires_docker
+    # tests must PASS here (not skip) and the windows_only tests SKIP on Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        env:
+          # Required: without it test_regression_logging_refinement.py falls back
+          # to a hardcoded N:\ path and 4 tests hard-fail on Linux.
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+        run: |
+          mkdir -p "$AGENT_WORKSPACE"
+          # Reuses pytest.ini addopts verbatim (same suite as the Windows default).
+          # -n auto: do NOT cap on a normal runner — capping halves parallelism.
+          pytest -n auto -p no:cacheprovider
+
+      - name: Assert Docker-gated tests PASS (not skipped)
+        env:
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+        run: |
+          out="$(pytest tests/test_code_interpreter_image_tag.py -v -p no:cacheprovider)"
+          echo "$out"
+          echo "$out" | grep -qE '[0-9]+ passed'
+          if echo "$out" | grep -q 'skipped'; then
+            echo "FAIL: requires_docker tests were SKIPPED on a Docker-capable runner"
+            exit 1
+          fi
+
+      - name: Assert windows_only tests SKIP on Linux
+        env:
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+        run: |
+          out="$(pytest tests/test_console_ctrl_guard.py -v -p no:cacheprovider)"
+          echo "$out"
+          # Invariant (robust to the suite growing): no failures, and at least one
+          # windows_only test skipped on Linux. Exact counts are intentionally NOT
+          # asserted so adding a test here does not break CI.
+          if echo "$out" | grep -qE '[0-9]+ failed'; then
+            echo "FAIL: console_ctrl_guard tests FAILED on Linux"; exit 1
+          fi
+          echo "$out" | grep -qE '[1-9][0-9]* skipped'
+
+  tests-no-docker:
+    # Constrained / no-Docker job: proves the capability skip-guards turn would-be
+    # failures into clean skips. GitHub runners DO have Docker, so we force the
+    # probe off via AGENT_CASCADE_DISABLE_DOCKER=1 to exercise the skip path
+    # deterministically. Thread vars are capped to keep the constrained runner stable.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite (no Docker)
+        env:
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+          AGENT_CASCADE_DISABLE_DOCKER: '1'
+          OPENBLAS_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+          MKL_NUM_THREADS: '1'
+          NUMEXPR_NUM_THREADS: '1'
+        run: |
+          mkdir -p "$AGENT_WORKSPACE"
+          # -n 2 on the constrained runner (see docs/ci_testing.md §5).
+          pytest -n 2 -p no:cacheprovider
+
+      - name: Assert Docker-gated tests SKIP (not fail)
+        env:
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+          AGENT_CASCADE_DISABLE_DOCKER: '1'
+        run: |
+          out="$(pytest tests/test_code_interpreter_image_tag.py -v -p no:cacheprovider)"
+          echo "$out"
+          # Invariant (robust to the suite growing): no failures, and at least one
+          # requires_docker test SKIPPED when the daemon is unavailable. Exact counts
+          # are intentionally NOT asserted so adding a test here does not break CI.
+          if echo "$out" | grep -qE '[0-9]+ failed'; then
+            echo "FAIL: Docker-gated tests FAILED instead of skipping"; exit 1
+          fi
+          echo "$out" | grep -qE '[1-9][0-9]* skipped'

@@ -3,8 +3,11 @@ Test that the code interpreter Docker image tag is content-derived from the
 Dockerfile + requirements file, so editing either file forces a rebuild for
 newly spawned containers.
 
-Tests do NOT require Docker or the real resource files to exist — subprocess.run
-is mocked and temp files are used for hash input.
+The pure _compute_docker_image_tag helper tests do NOT require Docker (temp files
+are used for hash input, subprocess.run is mocked). The tests that construct
+CodeInterpreter DO require a Docker daemon — CodeInterpreter.__init__ calls
+_check_docker_availability() unconditionally — so they are marked requires_docker
+and skip cleanly on a runner without Docker.
 """
 import os
 import re
@@ -12,6 +15,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -84,6 +89,7 @@ class TestCodeInterpreterImageName(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.requires_docker  # CodeInterpreter.__init__ -> _check_docker_availability()
     def test_docker_image_name_is_content_derived(self):
         """docker_image_name matches the helper output for the real resource dir."""
         from agent_cascade.tools.code_interpreter import (CodeInterpreter, DOCKER_IMAGE_FILE,
@@ -122,6 +128,7 @@ class TestBuildDockerImage(unittest.TestCase):
         r.returncode = returncode
         return mock.Mock(return_value=r)
 
+    @pytest.mark.requires_docker  # CodeInterpreter.__init__ -> _check_docker_availability()
     def test_short_circuits_when_image_exists(self):
         """docker images -q returns non-empty → no docker build call."""
         with mock.patch('subprocess.run', side_effect=self._fake_run(stdout='abc123\n')) as m:
@@ -130,6 +137,7 @@ class TestBuildDockerImage(unittest.TestCase):
             args = call.args[0] if call.args else call.kwargs.get('args', [])
             self.assertNotIn('build', args)
 
+    @pytest.mark.requires_docker  # CodeInterpreter.__init__ -> _check_docker_availability()
     def test_builds_when_image_missing(self):
         """docker images -q returns empty → docker build is called with the hashed tag."""
         with mock.patch('subprocess.run', side_effect=self._fake_run(stdout='')) as m:

@@ -20,6 +20,7 @@ import requests
 from agent_cascade.tools import CodeInterpreter, ImageGen, Retrieval, WebSearch
 
 
+@pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
 @pytest.mark.parametrize('params', ["print('hello qwen')", {'code': "print('hello qwen')"}])
 def test_code_interpreter(params):
     tool = CodeInterpreter()

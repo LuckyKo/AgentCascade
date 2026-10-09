@@ -113,6 +113,7 @@ class TestCodeInterpreterClose:
         assert hasattr(CodeInterpreter, 'close'), 'CodeInterpreter should have close() method'
         assert callable(getattr(CodeInterpreter, 'close')), 'close() should be callable'
 
+    @pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
     def test_close_shuts_down_kernel_clients(self):
         """Verify close() calls shutdown on kernel clients."""
         from agent_cascade.tools.code_interpreter import _DOCKER_CONTAINERS, _KERNEL_CLIENTS, CodeInterpreter
@@ -144,6 +145,7 @@ class TestCodeInterpreterClose:
         assert kernel_id not in _DOCKER_CONTAINERS, 'Container should be removed from _DOCKER_CONTAINERS'
         assert result == 1, f"close() should return 1, got {result}"
 
+    @pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
     def test_close_noop_when_no_kernels(self):
         """Verify close() returns 0 when no kernels owned."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
@@ -203,6 +205,7 @@ class TestDismissTriggersCleanup:
         assert kernel_id not in _KERNEL_ACTIVITY, 'Activity tracking should be cleared'
         assert result == 1
 
+    @pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
     def test_close_clears_all_kernel_state(self):
         """Verify CodeInterpreter.close() clears all tracked state for its kernels."""
         from agent_cascade.tools.code_interpreter import (_AGENT_KERNELS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY,
@@ -369,6 +372,7 @@ class TestTempFileCleanup:
             assert not os.path.exists(conn_container), 'Container connection file should be removed'
             assert not os.path.exists(launch_script), 'Launch script should be removed'
 
+    @pytest.mark.requires_docker  # constructs CodeInterpreter -> _check_docker_availability()
     def test_close_removes_temp_files(self):
         """Verify CodeInterpreter.close() removes connection files and launch scripts."""
         import tempfile

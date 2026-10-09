@@ -32,6 +32,11 @@ pathspec                   # gitignore/.ignore/.rgignore matching for grep's Pyt
 # ── Image Processing ────────────────────────────────────────
 pillow                     # Image manipulation
 pydantic>=2.3.0            # Data validation for agent configs
+pytest-asyncio             # provides @pytest.mark.asyncio (used across tests/)
+pytest-timeout             # provides --timeout=60
+
+# ── Test Suite (pytest plugins required by pytest.ini addopts/markers) ──
+pytest-xdist               # provides -n (parallel execution)
 
 # ── Configuration & Environment ─────────────────────────────
 python-dotenv              # .env file loading

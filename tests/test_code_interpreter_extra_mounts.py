@@ -12,11 +12,16 @@ import tempfile
 import unittest
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 class TestExtraMounts(unittest.TestCase):
     """Test extra folder resolution and path mapping using actual CodeInterpreter methods."""
+
+    # Every test here constructs CodeInterpreter -> __init__ -> _check_docker_availability().
+    pytestmark = pytest.mark.requires_docker
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -481,6 +486,9 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
 
     These tests mock _build_docker_image and subprocess.run to avoid requiring Docker."""
 
+    # Every test here constructs CodeInterpreter -> __init__ -> _check_docker_availability().
+    pytestmark = pytest.mark.requires_docker
+
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
 
@@ -588,6 +596,9 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
 class TestWorkDirAttributeExists(unittest.TestCase):
     """Lesson #3 Bug A — ci.work_dir must exist and be used (not self.base_dir)."""
 
+    # Every test here constructs CodeInterpreter -> __init__ -> _check_docker_availability().
+    pytestmark = pytest.mark.requires_docker
+
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
 
@@ -637,6 +648,9 @@ class TestWorkDirAttributeExists(unittest.TestCase):
 
 class TestWorkDirPriorityChain(unittest.TestCase):
     """Lesson #5 — work_dir follows: config > env var > default."""
+
+    # Every test here constructs CodeInterpreter -> __init__ -> _check_docker_availability().
+    pytestmark = pytest.mark.requires_docker
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -874,6 +888,7 @@ class TestIopubIdleTimeout(unittest.TestCase):
 
     # ── _execute_code enforcement (stubbed kc, no real kernel) ──
 
+    @pytest.mark.requires_docker  # drives _execute_code via self._ci() -> CodeInterpreter(...)
     def test_default_is_30(self):
         """No `iopub_idle_timeout` → per_message_timeout == min(30, timeout) (unchanged behavior)."""
         from agent_cascade.tools.code_interpreter import IOPUB_IDLE_TIMEOUT
@@ -881,12 +896,14 @@ class TestIopubIdleTimeout(unittest.TestCase):
         self.assertEqual(self._silence_timeout_arg(timeout=120), 30)  # min(30, 120) = 30
         self.assertEqual(self._silence_timeout_arg(timeout=20), 20)   # min(30, 20) = 20
 
+    @pytest.mark.requires_docker  # drives _execute_code via self._ci() -> CodeInterpreter(...)
     def test_per_call_override_honored(self):
         """`idle_timeout` raises the silence leg; the wall-clock `timeout` still caps it."""
         self.assertEqual(self._silence_timeout_arg(timeout=120, iopub_idle_timeout=120), 120)  # min(120, 120)
         self.assertEqual(self._silence_timeout_arg(timeout=120, iopub_idle_timeout=60), 60)    # min(60, 120)
         self.assertEqual(self._silence_timeout_arg(timeout=45, iopub_idle_timeout=120), 45)    # min(120, 45)
 
+    @pytest.mark.requires_docker  # drives _execute_code via self._ci() -> CodeInterpreter(...)
     def test_silence_trip_reports_configured_window(self):
         """The silence TimeoutError reports the configured window, not a hard-coded 30."""
         import queue as _queue
