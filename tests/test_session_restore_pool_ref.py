@@ -13,8 +13,11 @@ production: LM Studio endpoints all on one api_base, differing only by ``model``
 """
 
 import json
+import os
 import threading
 from types import SimpleNamespace
+
+import pytest
 
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.pool.session_io import SessionIOMixin
@@ -27,6 +30,65 @@ from tests.conftest import _add_endpoint  # noqa: E402
 SHARED_BASE = 'http://127.0.0.1:1234/v1'
 A_NAME, A_MODEL = 'LMS-Agents-A1-35B-MTP', 'Agents-A1-APEX-I-Quality'   # stale marker (top-level)
 B_NAME, B_MODEL = 'LMS-27B-3.8-MTP', 'qwen3.8-27b'                       # caller's endpoint
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _repo_root_strays():
+    """Return the set of orchestrator_*.jsonl files in the repo root (the leak location).
+
+    PROJECT_ROOT is the AgentCascade repo root (NOT the workspace). A real AgentInstanceLogger
+    whose log_dir resolves to the process CWD writes orchestrator_Maine_<ts>.jsonl here.
+    """
+    import glob
+    return set(glob.glob(os.path.join(PROJECT_ROOT, 'orchestrator_*.jsonl')))
+
+
+@pytest.fixture(autouse=True)
+def _no_stray_orchestrator_logs():
+    """Regression guard: catch a stray orchestrator_*.jsonl leaking into the repo root if the
+    session-restore path (``SessionIOMixin.load_session_from_log``) ever constructs a real
+    AgentInstanceLogger with a CWD-resolving log_dir. Snapshots the repo-root globs before/after
+    each test so a pre-existing (stale) stray does not false-fail, but a NEW leak does.
+    """
+    before = _repo_root_strays()
+    yield
+    new = _repo_root_strays() - before
+    assert not new, (
+        f"Test leaked {len(new)} new orchestrator log(s) into repo root {PROJECT_ROOT}: "
+        f"{sorted(os.path.basename(p) for p in new)}"
+    )
+
+
+class _FakeInstanceLogger:
+    """Lightweight stand-in for AgentInstanceLogger so load_session_from_log's post-load logger
+    setup constructs NO real logger and writes NO file to CWD.
+
+    The restore path only ever calls ``rewrite_log_with_history`` on the instance and stores it in
+    ``_logger._loggers``; it never reads any real attribute. ``copy_session_file`` is intentionally
+    NOT provided — it is only reached when the log metadata carries an existing ``current_log_path``,
+    which these tests never do.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def rewrite_log_with_history(self, *args, **kwargs):
+        # No-op: the real method would write the JSONL; we must not touch the filesystem.
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_instance_logger(monkeypatch):
+    """Route load_session_from_log's AgentInstanceLogger construction to _FakeInstanceLogger.
+
+    ``load_session_from_log`` imports AgentInstanceLogger function-locally (at call time), so patching
+    the module attribute is picked up. Without this, the pool double's log_dir='.' resolves to the
+    process CWD (repo root) and a real logger writes a stray orchestrator_Maine_<ts>.jsonl there
+    (see _no_stray_orchestrator_logs).
+    """
+    import agent_cascade.logger.agent_instance_logger as ail
+    monkeypatch.setattr(ail, 'AgentInstanceLogger', _FakeInstanceLogger)
 
 
 class _PoolDouble(SessionIOMixin):
