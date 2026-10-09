@@ -18,24 +18,22 @@ Two paths:
   * SVG code in ``prompt`` → rendered locally to PNG via cairosvg (no VRAM use).
   * Text prompt → submitted to a ComfyUI server using a saved workflow JSON file.
 
-Both return ``[ContentItem(image=path), ContentItem(text=caption)]`` — the same
-shape as ``view_image`` — so the router's existing ``_caption_images`` flow adds
-an LLM caption on the next send.
+Both return ``[ContentItem(image=path), ContentItem(text=feedback)]`` with the
+image item left UNCAPTIONED — the same shape as ``view_image`` — so the router's
+return-path guard (``_has_uncaptioned_images``) auto-generates a genuine vision
+caption on demand on the next send.
 
 VRAM management (text path only): before talking to ComfyUI we save the owning
 instance's KV state and unload all models from llama-autoloader to free VRAM.
-The sequence is save → unload → ComfyUI → save media → caption → restore. The
-restore is NOT in a ``finally`` block: it is called explicitly at the end (after
-captioning, so the single model reload happens once) and also on every early
-error path (generation failure, media-save failure) so the agent's KV is never
-left dangling. The saved label must always be cleared whenever the state was
-saved, regardless of whether unload or ComfyUI succeeded.
+The sequence is save → unload → ComfyUI → save media → restore. The restore is
+NOT in a ``finally`` block: it is called explicitly at the end and also on every
+early error path (generation failure, media-save failure) so the agent's KV is
+never left dangling. The saved label must always be cleared whenever the state
+was saved, regardless of whether unload or ComfyUI succeeded.
 
-Note: ``_caption_image`` delegates to the router's ``caption_images`` flow, which
-performs its OWN KV save/restore around the caption LLM call. That inner restore
-clears the instance label, so the tool's final restore is typically a no-op — but
-it is still required as the safety net for the case where the router path never
-ran (no vision endpoint / captioning raised).
+No captioning happens inside this tool: the generated image is returned
+uncaptioned and the router's ``caption_images`` flow supplies the caption
+later, so there is no inner KV save/restore to reason about here.
 
 This tool holds NO LLM of its own and never constructs a chat model. The old
 placeholder's Change-E breaker gate and sticky-slot side-call gate are gone with
@@ -493,8 +491,9 @@ def _upload_image(url: str, local_path: Path, client: Optional[httpx.Client] = N
 class ImageGen(BaseTool):
     """Generate an image via ComfyUI (text prompt) or render SVG code to an image.
 
-    Returns ``[ContentItem(image=path), ContentItem(text=caption)]`` — same shape
-    as view_image, so the router's _caption_images flow adds an LLM caption later.
+    Returns ``[ContentItem(image=path), ContentItem(text=feedback)]`` with the
+    image item left uncaptioned — same shape as view_image, so the router's
+    return-path guard (_has_uncaptioned_images) auto-captions it on demand.
     No LLM is constructed here; config is read lazily at call time.
     """
 
@@ -557,42 +556,6 @@ class ImageGen(BaseTool):
             return pool.get_instance(inst_name)
         except Exception as e:
             logger.debug("image_gen: failed to resolve instance '%s': %s", inst_name, e)
-            return None
-
-    def _caption_image(self, image_path: str, kwargs: dict) -> Optional[str]:
-        """Generate a short alt-text caption for a generated image.
-
-        Reuses the router's vision endpoint resolution + slot/KV machinery by
-        running the existing ``caption_images`` flow over a one-shot message.
-        Returns None when no vision endpoint is available or captioning fails —
-        callers must degrade gracefully (the image is still returned, just without
-        a Caption line).
-        """
-        pool = getattr(self, 'agent_pool', None)
-        router = getattr(pool, 'api_router', None) if pool is not None else None
-        if router is None:
-            return None
-        inst_name = (
-            kwargs.get('agent_instance_name')
-            or kwargs.get('agent_name')
-            or getattr(self, 'agent_name', None)
-        )
-        try:
-            from agent_cascade.llm.schema import Message, ContentItem as _CI
-            probe = [Message(role='user', content=[_CI(image=image_path)])]
-            router.caption_images(probe, agent_type=getattr(self, 'agent_class', 'generalist'),
-                                  instance_name=inst_name)
-            # probe[0].content[0] is always the ContentItem we just constructed.
-            cap = getattr(probe[0].content[0], 'caption', None)
-            if cap and cap != '[Image]':
-                return cap
-            return None
-        except Exception as e:
-            # Deliberately catches ALL exceptions, including AgentTerminatedError:
-            # captioning is best-effort side work — a failed/terminated caption must
-            # never block returning the generated image. (A termination during this
-            # short call is rare; if it happens we simply return the image uncaptioned.)
-            logger.warning('image_gen: captioning failed (non-fatal): %s', e)
             return None
 
     def call(self, params: Union[str, dict], **kwargs) -> List[ContentItem]:
@@ -738,16 +701,14 @@ class ImageGen(BaseTool):
             workflow[load_nodes[0]]['inputs']['image'] = image_ref
             report.append(f"input_image → {load_nodes[0]} (LoadImage)")
 
-        # ── VRAM management: save → unload → (ComfyUI) → [caption] → restore ──
+        # ── VRAM management: save → unload → (ComfyUI) → restore ──
         # Restore is NOT in a finally block. It is called explicitly at the end (after
-        # captioning, so the model reload happens once, after all LLM-side work) and on
-        # every early error path so the agent's KV is never left dangling. _state_saved
+        # all LLM-side work, so the model reload happens once) and on every early
+        # error path so the agent's KV is never left dangling. _state_saved
         # stays False until save_instance_state returns True, so a failure before the
         # state was saved never triggers a spurious restore.
-        # NOTE: captioning (below) delegates to router.caption_images, which performs its
-        # OWN KV save/restore around the caption LLM call and clears the instance label on
-        # success — making this tool's final restore typically a no-op. It is still kept as
-        # the safety net for when the router path never ran (no vision endpoint / it raised).
+        # NOTE: no captioning happens here — the image is returned uncaptioned and
+        # the router's caption_images flow captions it later on the return path.
         instance = self._get_instance(kwargs)
         endpoint_cfg = getattr(instance, '_last_endpoint_config', None) if instance is not None else None
         _state_saved = False
@@ -797,23 +758,18 @@ class ImageGen(BaseTool):
         height = params.get('height') or 0
         wf_name = Path(workflow_path).name
 
-        # Caption the generated image (reusing the router's vision flow). This runs its own
-        # KV save/restore internally; doing it before our final restore keeps all LLM-side
-        # work ahead of the last state-restore call.
-        img_caption = self._caption_image(media_path, kwargs)
-
-        # Final safety-net restore now that all LLM-side work (captioning) is done. Typically
-        # a no-op because caption_images already restored + cleared the label; still required
-        # when the router path never ran. One retry with a 2s delay; non-fatal on final failure.
+        # Primary restore now that all LLM-side work is done. There is no eager
+        # captioning ahead of it (the image is returned uncaptioned), so this is the
+        # actual state-restore. One retry with a 2s delay; non-fatal on final failure.
         if _state_saved and instance is not None:
             self._restore_vram_state(instance, held)
 
         feedback = f"Generated image: {media_path} ({width}x{height}, workflow={wf_name})"
-        # Prefer the vision-generated alt-text; if none was produced (no vision endpoint /
-        # captioning failed → img_caption is None), fall back to the descriptive line so the
-        # return-path guard (_has_uncaptioned_images) never re-captions an already-described
-        # image. The separate text item is kept for text-only agents.
-        return [ContentItem(image=media_path, caption=img_caption or feedback), ContentItem(text=feedback)]
+        # The image item is intentionally left uncaptioned so the router's return-path
+        # guard (_has_uncaptioned_images) auto-generates a genuine vision caption on
+        # demand (same as the SVG path). The separate text item carries the descriptive
+        # line for text-only agents.
+        return [ContentItem(image=media_path), ContentItem(text=feedback)]
 
     @staticmethod
     def _restore_vram_state(instance, held: dict) -> None:
