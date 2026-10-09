@@ -42,9 +42,12 @@ jobs:
           AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
         run: |
           mkdir -p "$AGENT_WORKSPACE"
-          # Reuses pytest.ini addopts verbatim (same suite as the Windows default).
           # -n auto: do NOT cap on a normal runner — capping halves parallelism.
-          pytest -n auto -p no:cacheprovider
+          # The CLI -m REPLACES (does not combine with) the addopts -m, so it must
+          # repeat the FULL pytest.ini filter verbatim, plus "not fullstack_e2e": the
+          # full-stack streaming E2E test is timing-sensitive and runs ONLY in the
+          # dedicated serial tests-e2e-fullstack job (Node 24 + websocket-client).
+          pytest -n auto -m "not fullstack_e2e and not live_api and not skip_if_no_local and not extra_examples and not extra_tools and not extra_vl and not stress" -p no:cacheprovider
 
       - name: Assert Docker-gated tests PASS (not skipped)
         env:
@@ -101,7 +104,10 @@ jobs:
         run: |
           mkdir -p "$AGENT_WORKSPACE"
           # -n 2 on the constrained runner (see docs/ci_testing.md §5).
-          pytest -n 2 -p no:cacheprovider
+          # The CLI -m REPLACES the addopts -m, so repeat the FULL pytest.ini filter
+          # verbatim plus "not fullstack_e2e": this job has no Node, so it must never
+          # try to run the node-harness E2E test (that runs in tests-e2e-fullstack).
+          pytest -n 2 -m "not fullstack_e2e and not live_api and not skip_if_no_local and not extra_examples and not extra_tools and not extra_vl and not stress" -p no:cacheprovider
 
       - name: Assert Docker-gated tests SKIP (not fail)
         env:
@@ -117,3 +123,46 @@ jobs:
             echo "FAIL: Docker-gated tests FAILED instead of skipping"; exit 1
           fi
           echo "$out" | grep -qE '[1-9][0-9]* skipped'
+
+  tests-e2e-fullstack:
+    # Dedicated SERIAL job for the full-stack streaming E2E test
+    # (tests/test_streaming_fullstack_e2e.py, marker fullstack_e2e). It is
+    # timing-sensitive (asserts incremental streaming growth over a 12s window), so it
+    # must NOT run under -n auto — in-process frame capture doesn't work under xdist.
+    # It also hard-requires Node 24 (native WebSocket in the web_ui/app.js harness) and
+    # websocket-client, so it gets its own job with setup-node. fullstack_e2e is
+    # excluded from the two parallel jobs above (command-line -m override) so this is
+    # the ONLY place it runs. See docs/ci_testing.md §1.2.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node 24 (native WebSocket for the app.js harness)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full-stack E2E test (serial)
+        env:
+          # Required: without it the test falls back to a hardcoded N:\ path and
+          # hard-fails on Linux (same reason as the parallel jobs).
+          AGENT_WORKSPACE: ${{ github.workspace }}/.ci_workspace
+        run: |
+          mkdir -p "$AGENT_WORKSPACE"
+          # Serial (no -n): in-process frame capture doesn't work under xdist, and the
+          # timing-sensitive streaming assertion needs a stable single-process run.
+          # -o addopts="" is correct HERE: this job targets a single in-scope file, so
+          # we intentionally drop -n auto and the default -m filter (see §8.5 for why
+          # wiping addopts is otherwise a trap). --timeout=540 matches the test's own
+          # documented invocation (test module docstring).
+          # -s: capture the test's live [fullstack] print output in CI logs for flake debugging.
+          python -m pytest tests/test_streaming_fullstack_e2e.py -s -v --timeout=540 -o addopts="" -p no:cacheprovider

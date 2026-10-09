@@ -57,4 +57,5 @@ soundfile                  # Audio file I/O (for voice tools)
 # ── Tokenization & Text Processing ──────────────────────────
 tiktoken                   # Token counting for context management
 uvicorn                    # ASGI server for FastAPI
-websockets                 # WebSocket support
+websocket-client           # sync WebSocket client (fullstack e2e frontend harness, test_streaming_fullstack_e2e.py)
+websockets                 # async (asyncio) WebSocket library — distinct from websocket-client above

@@ -15,26 +15,31 @@ a resource the dev machine has.
 
 ## 1. What CI runs
 
-`.github/workflows/tests.yml` runs two jobs on `ubuntu-latest`, Python 3.12:
+`.github/workflows/tests.yml` runs three jobs on `ubuntu-latest`, Python 3.12:
 
-| job | Docker | command | purpose |
-|---|---|---|---|
-| `tests-normal` | available | `pytest -n auto` | Full suite should be **green**. `requires_docker` tests **PASS** (not skip); `windows_only` tests **SKIP** on Linux. |
-| `tests-no-docker` | forced off | `pytest -n 2` | Proves the capability skip-guards turn would-be failures into clean **skips**. |
+| job | Docker | Node | command | purpose |
+|---|---|---|---|---|
+| `tests-normal` | available | — | `pytest -n auto -m "not fullstack_e2e and …"` | Full suite should be **green** (minus `fullstack_e2e`). `requires_docker` tests **PASS** (not skip); `windows_only` tests **SKIP** on Linux. |
+| `tests-no-docker` | forced off | — | `pytest -n 2 -m "not fullstack_e2e and …"` | Proves the capability skip-guards turn would-be failures into clean **skips** (minus `fullstack_e2e`). |
+| `tests-e2e-fullstack` | available | **24** | `python -m pytest tests/test_streaming_fullstack_e2e.py -v --timeout=540 -o addopts=""` | The full-stack streaming E2E test, run **serially** in its own job (see §1.2). |
 
-Both jobs:
+The two parallel jobs share this shape:
 
 ```bash
 pip install -r requirements.txt          # adds the 3 pytest plugins (see §1.1)
 export AGENT_WORKSPACE="$PWD/.ci_workspace"   # REQUIRED — see §2
 mkdir -p "$AGENT_WORKSPACE"
-pytest -n <N> -p no:cacheprovider
+pytest -n <N> -m "<addopts filter> and not fullstack_e2e" -p no:cacheprovider
 ```
 
-The `pytest` invocation is **bare** — no `-m`, no `-o addopts`. The `addopts` line in
-`pytest.ini` is reused **verbatim**, which is what guarantees "no divergent test list"
-by construction. Only `-n` (worker count) is set on the command line, and it is
-allowed to override `addopts` because CLI args are appended after `addopts`.
+The `-m` filter is the **`addopts` filter from `pytest.ini` repeated verbatim, plus
+`not fullstack_e2e`** — not a divergent test list. It is set on the command line because
+the CLI `-m` **replaces** (does not combine with) the `addopts` `-m`, so the full filter
+must be restated; the only *change* from `addopts` is the added `not fullstack_e2e`
+clause, which keeps the timing-sensitive full-stack E2E test out of the parallel runs
+(it runs once, in the dedicated serial `tests-e2e-fullstack` job, §1.2). `-n` is the only
+other override and is allowed because CLI args are appended after `addopts`. The shared
+`pytest.ini` `addopts` line is left **untouched** (minimum separation).
 
 ### 1.1 The three pytest plugins
 
@@ -52,6 +57,46 @@ and the two async tests in `test_queue_warnings.py` fail with
 "async def functions are not natively supported" (2 failed, 2 passed → 4 passed with the plugin).
 
 `gradio` is **deliberately not added** here — see §4 and §8.
+
+### 1.2 The dedicated serial E2E job (`tests-e2e-fullstack`)
+
+`tests/test_streaming_fullstack_e2e.py` (marker `fullstack_e2e`) is the repo's most
+complete E2E test: a real uvicorn server + real agent loop + the **real frontend**
+`web_ui/app.js` loaded in Node over a live WebSocket. It uses a scripted local mock
+LLM (`http.server.HTTPServer`), so it needs **no** live LLM / API key / browser.
+
+It runs in its **own serial job** (not under `-n auto`) for two reasons:
+
+1. **Timing-sensitive.** It asserts incremental streaming growth over a 12s window;
+   in-process frame capture doesn't work under xdist, and parallelism would flake it.
+   So the invocation is serial and uses `-o addopts=""` — a *single in-scope file*, so
+   dropping `-n auto` and the default `-m` filter is intentional (see §8.5 for why
+   `-o addopts=""` is otherwise a trap).
+2. **Hard Node 24 requirement.** The harness does `subprocess.run(['node', ...])`
+   (`test_streaming_fullstack_e2e.py:804`, called unconditionally at `:1488`, asserted
+   at `:1490`) with **no** skipif, and the frontend uses `const WebSocket =
+   globalThis.WebSocket` (`:610`) — Node's **native** WebSocket, which requires
+   **Node 24** (not 18). The job therefore installs `actions/setup-node@v4` with
+   `node-version: '24'` before the pytest step.
+
+**Dependency:** the test does `import websocket` (`:833`), which is the package
+**`websocket-client`** (a sync WebSocket client) — **not** `websockets` (the asyncio
+library already in `requirements.txt`). `websocket-client` was added to
+`requirements.txt`; both packages are needed and both remain.
+
+**Excluded from the parallel jobs.** So the test runs exactly once, `fullstack_e2e` is
+excluded from `tests-normal` and `tests-no-docker` via a **command-line `-m` override
+only** (the shared `pytest.ini` `addopts` is untouched — minimum separation). Because
+the CLI `-m` *replaces* the `addopts` `-m`, both jobs repeat the **full** `pytest.ini`
+filter verbatim plus `not fullstack_e2e`:
+
+```
+-m "not fullstack_e2e and not live_api and not skip_if_no_local and not extra_examples and not extra_tools and not extra_vl and not stress"
+```
+
+This does **not** change the Windows dev-machine default run (`pytest`), which still
+includes `fullstack_e2e` (§3). It only stops the CI parallel jobs from trying to run a
+Node test on a runner that has no Node.
 
 ---
 
@@ -80,7 +125,7 @@ Markers registered in `pytest.ini` `[markers]`. The `addopts` `-m` filter exclud
 | `extra_tools` | tool tests needing external APIs (SERPER, langchain, image_gen, amap) | **excluded** | `pytest -m extra_tools` |
 | `extra_vl` | vision-language model tests | **excluded** | `pytest -m extra_vl` |
 | `stress` | heavy-concurrency breaker stress tests | **excluded** | `pytest -m stress` |
-| `fullstack_e2e` | full-stack E2E streaming test | **INCLUDED in the default run** (a live-server streaming test that works under xdist; timing-variable, can flake — re-run single-process to confirm a failure) | to skip it: add `"and not fullstack_e2e"` to the `-m` filter; to run alone: `pytest -m fullstack_e2e -o addopts=""` |
+| `fullstack_e2e` | full-stack E2E streaming test | **INCLUDED in the default run** (a live-server streaming test that works under xdist; timing-variable, can flake — re-run single-process to confirm a failure) | to skip it: add `"and not fullstack_e2e"` to the `-m` filter; to run alone: `pytest -m fullstack_e2e -o addopts=""`. **CI:** runs in the dedicated serial `tests-e2e-fullstack` job (§1.2) and is excluded from the two parallel jobs via a command-line `-m` override (not `pytest.ini`). |
 | `requires_docker` | constructs `CodeInterpreter` (Docker daemon required) | **included, but skipped when no Docker daemon** (capability guard, §4) | runs automatically on any Docker-capable runner |
 | `heavy_concurrency` | spawns ≥100 raw OS threads | **included, but skipped when the OS thread limit is too low** (capability guard, §4) | runs automatically when the thread limit allows |
 | `windows_only` | exercises Windows-only OS APIs (`ctypes.WINFUNCTYPE` / console Ctrl+C handler) | **included, but skipped off Windows** (capability guard, §4) | runs automatically on Windows |
@@ -249,6 +294,11 @@ Docker-capable runner and **skip** on a no-Docker runner:
    `CodeInterpreter.__init__`. See §4.
 5. **Do not wipe `addopts` in CI** (`-o addopts=""`). That silently pulls in
    `live_api` / `stress` / `extra_*` — the documented trap. Only `-n` is overridden.
+   **Exception:** the dedicated serial `tests-e2e-fullstack` job (§1.2) *does* use
+   `-o addopts=""`, but only because it targets a **single in-scope file**
+   (`test_streaming_fullstack_e2e.py`) — there is nothing to re-include, and it must
+   drop `-n auto` (in-process frame capture doesn't work under xdist). Never apply
+   `-o addopts=""` to a job that runs the whole suite.
 6. **Capping `-n` fixes thread *exhaustion* at startup, not thread *leak* crashes.**
    The xdist-worker crash from leaked `AgentPool` background threads is addressed by the
    autouse `_stop_real_agent_pools` fixture in `conftest.py`, not by `-n`.
