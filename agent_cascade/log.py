@@ -318,4 +318,15 @@ def reset_logging() -> None:
     except Exception:
         pass
 
+    # Restore the module-level logger to the base parent logger AND reset its
+    # level to NOTSET. init_logging()/setup_logger() set the (possibly per-instance
+    # child) logger's level to INFO; without resetting it, late-bound modules keep
+    # emitting through a level-INFO logger after teardown, which filters DEBUG records
+    # before they reach a handler and breaks order-dependent log-count tests (caplog
+    # sets the root level, but a logger carrying an explicit level stops propagation
+    # at that level — the rebind alone is a no-op when there is no instance id, so the
+    # base parent IS the emitter and its level must be reset too).
+    logger = logging.getLogger('agent_cascade_logger')
+    logger.setLevel(logging.NOTSET)
+
     _initialized = False

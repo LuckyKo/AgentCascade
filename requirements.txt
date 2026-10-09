@@ -35,6 +35,7 @@ pydantic>=2.3.0            # Data validation for agent configs
 
 # ── Configuration & Environment ─────────────────────────────
 python-dotenv              # .env file loading
+python-multipart           # FastAPI UploadFile/Form data support (api_server.py)
 
 # ── Telegram Bridge (optional, standalone process) ──────────
 python-telegram-bot>=22.8,<22.9   # PTB for the v1 Telegram bridge (agent_cascade/telegram_bridge)

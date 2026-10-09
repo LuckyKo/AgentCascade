@@ -224,7 +224,12 @@ class TestSessionRestoreReleaseLastReleasedEndpoint:
             router._instance_committed_endpoint['Maine'] = \
                 (normalize_api_base(SHARED_BASE), B_MODEL)
 
-        with caplog.at_level(logging.DEBUG, logger='agent_cascade_logger'):
+        # Target the ACTUAL live emitter (the shared log.logger object), not an ancestor
+        # name. init_logging() may have left it (or a per-instance child) at an explicit
+        # INFO level, which filters the marker DEBUG before it reaches caplog; setting the
+        # root level alone is not enough when the emitting logger carries its own level.
+        from agent_cascade.log import logger as app_logger
+        with caplog.at_level(logging.DEBUG, logger=app_logger.name):
             ok = release_slot_permit(holder, 'Maine', action='drop-exit')
         assert ok is True, 'release_slot_permit should have captured and released a live permit'
 

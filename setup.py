@@ -63,6 +63,7 @@ setup(
         'jsonschema',
         'openai',
         'pydantic>=2.3.0',
+        'python-multipart',
         'requests',
         'tiktoken',
         'pillow',
