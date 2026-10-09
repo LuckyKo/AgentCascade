@@ -136,6 +136,36 @@ def _reset_logging_state():
     yield
 
 
+def _repo_root_strays():
+    """Return the set of orchestrator_*.jsonl files in the repo root (the leak location).
+
+    PROJECT_ROOT is the AgentCascade repo root (NOT the workspace). A real AgentInstanceLogger
+    whose log_dir resolves to the process CWD writes orchestrator_Maine_<ts>.jsonl here.
+    """
+    import glob
+    return set(glob.glob(os.path.join(PROJECT_ROOT, 'orchestrator_*.jsonl')))
+
+
+@pytest.fixture(autouse=True)
+def _no_stray_orchestrator_logs():
+    """Regression guard: prevent a stray orchestrator_*.jsonl leaking into the repo root if the
+    startup path ever constructs a real AgentInstanceLogger with a CWD-resolving log_dir.
+
+    The logger seam is currently SKIPPED — _extract_system_message() returns empty for the fake
+    orchestrator template, so create_main_agent_instance() never runs and no real logger is
+    built. This guard makes any FUTURE regression that re-introduces an unconditional logger
+    call detectable at zero cost. Snapshot before/after so a pre-existing (stale) stray does
+    not cause a false failure, but a NEW leak does.
+    """
+    before = _repo_root_strays()
+    yield
+    new = _repo_root_strays() - before
+    assert not new, (
+        f"Test leaked {len(new)} new orchestrator log(s) into repo root {PROJECT_ROOT}: "
+        f"{sorted(os.path.basename(p) for p in new)}"
+    )
+
+
 def _run_api_server_main(tmp_path, cli_kwargs):
     """Run api_server.py's __main__ block via runpy with a controlled argv and patched deps.
 
