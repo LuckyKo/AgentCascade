@@ -105,45 +105,88 @@ class TestStripLeadingAmpersandsForCmd:
         assert _strip_leading_ampersands_for_cmd('  & echo hi') == '  & echo hi'
 
 
+def _assert_non_windows_passthrough(user: str) -> None:
+    """On non-Windows the chcp/creation-flag logic does not apply: passthrough (command, 0)."""
+    wrapped, flags = configure_windows_utf8(user)
+    assert wrapped == user
+    assert flags == 0
+
+
 class TestConfigureWindowsUtf8Shape:
-    """The wrapper output string shape (platform-independent)."""
+    """The chcp wrapper output string shape.
+
+    On Windows the command is wrapped as ``chcp 65001 > nul 2>&1 & <translated>`` with
+    creation flags set; on any other platform ``configure_windows_utf8`` is a no-op
+    passthrough returning ``(command, 0)``. The pure-string translator classes above
+    remain fully platform-independent and are tested unconditionally.
+    """
 
     def test_prefix_shape_preserved_and_translated(self):
-        wrapped, flags = configure_windows_utf8('echo A; echo B')
+        user = 'echo A; echo B'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, flags = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo A& echo B'
 
     def test_quoted_semicolon_kept_in_wrapper(self):
         user = 'python -c "print(\'a;b\')"'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
         wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & ' + user
 
     def test_chcp_prefix_untouched_for_plain_command(self):
-        wrapped, _ = configure_windows_utf8('dir /s')
+        user = 'dir /s'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & dir /s'
 
     def test_leading_single_amp_stripped_in_wrapper(self):
         # W11: `& echo hi` would otherwise wrap to a double-`&` that cmd.exe rejects.
-        wrapped, _ = configure_windows_utf8('& echo hi')
+        user = '& echo hi'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
 
     def test_leading_double_amp_stripped_in_wrapper(self):
         # `&&` at the start is a redundant operator sequence — stripped to a single wrapper `&`.
-        wrapped, _ = configure_windows_utf8('&& echo hi')
+        user = '&& echo hi'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
 
     def test_leading_amp_run_stripped_in_wrapper(self):
         # A leading run of `&` (e.g. `&&&`) is fully stripped so the wrapper's single `&` separates.
-        wrapped, _ = configure_windows_utf8('&&& echo hi')
+        user = '&&& echo hi'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
 
     def test_command_not_starting_with_amp_untouched(self):
         # A mid-command `&` is a real operator and must be preserved.
-        wrapped, _ = configure_windows_utf8('echo a & echo b')
+        user = 'echo a & echo b'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo a & echo b'
 
     def test_quoted_leading_string_not_stripped(self):
         # Quote-aware: a command starting with `"` (not literally `&`) is left untouched.
         user = '"foo & bar"'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
         wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & ' + user
 
@@ -151,15 +194,25 @@ class TestConfigureWindowsUtf8Shape:
         # Transform-ordering edge: `;` translates to a leading `&`, which the stripper
         # then removes — same valid wrap as `& echo hi`. Pinned so reordering the two
         # transforms (or changing either default) cannot silently regress this path.
-        wrapped, _ = configure_windows_utf8('; echo hi')
+        user = '; echo hi'
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough(user)
+            return
+        wrapped, _ = configure_windows_utf8(user)
         assert wrapped == 'chcp 65001 > nul 2>&1 & echo hi'
 
     def test_flags_include_new_process_group(self):
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough('echo A')
+            return
         import subprocess
         _, flags = configure_windows_utf8('echo A')
         assert flags & subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
 
     def test_flags_include_new_console_when_requested(self):
+        if not ON_WINDOWS:
+            _assert_non_windows_passthrough('echo A')
+            return
         import subprocess
         _, flags = configure_windows_utf8('echo A', create_new_console=True)
         assert flags & subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]

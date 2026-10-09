@@ -6,9 +6,10 @@ and the sync shell executor (blocking execution). Both share:
 - Pipe draining logic for stdout/stderr capture
 """
 
+import os
 import subprocess
 import threading
-from typing import List
+from typing import List, Tuple
 
 from agent_cascade.log import logger
 
@@ -156,7 +157,7 @@ def _strip_leading_ampersands_for_cmd(command: str) -> str:
     return stripped if stripped else command
 
 
-def configure_windows_utf8(command: str, create_new_console: bool = False) -> tuple:
+def configure_windows_utf8(command: str, create_new_console: bool = False) -> Tuple[str, int]:
     """Prepend chcp 65001 to force CMD into UTF-8 mode on Windows.
 
     The user command is first passed through ``_translate_semicolons_for_cmd`` so
@@ -174,7 +175,13 @@ def configure_windows_utf8(command: str, create_new_console: bool = False) -> tu
 
     Returns:
         Tuple of (modified_command, creationflags) ready for subprocess.Popen.
+        On non-Windows platforms the chcp/creation-flag logic does not apply, so the
+        command is returned unchanged with flags ``0``.
     """
+    if os.name != 'nt':
+        # Not a Windows shell — no chcp/creationflags to apply. Return the command
+        # unchanged with no creation flags so callers can use it on any platform.
+        return (command, 0)
     flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     if create_new_console:
         flags |= subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
