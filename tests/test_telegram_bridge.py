@@ -1222,6 +1222,58 @@ def test_build_application_routes_commands_to_on_message():
     assert not old_filter.check_update(update), 'test is vacuous if the old filter also matched'
 
 
+def test_build_application_registers_polling_error_handler():
+    """A polling error handler must be registered so transient network errors (e.g. a
+    502 from Telegram's edge) log one quiet line instead of PTB's default WARNING +
+    full traceback ('No error handlers are registered')."""
+    from agent_cascade.telegram_bridge.bot import build_application, on_polling_error
+
+    cfg = BridgeConfig(enabled=True, bot_token='fake-token', allowed_users=[1])
+    app = build_application(cfg, MagicMock())
+
+    assert on_polling_error in app.error_handlers, (
+        'build_application must register on_polling_error via add_error_handler'
+    )
+
+
+def test_on_polling_error_swallows_transient_network_error(caplog):
+    """A transient NetworkError is swallowed (no raise) and logged at DEBUG — the
+    self-healed-by-PTB-retry case. This is the exact 502 'Bad Gateway' from the log."""
+    import logging
+    from telegram.error import NetworkError
+    from agent_cascade.telegram_bridge.bot import on_polling_error
+
+    ctx = MagicMock()
+    ctx.error = NetworkError('Bad Gateway')
+
+    with caplog.at_level(logging.DEBUG):
+        result = _run(on_polling_error(None, ctx))   # must NOT raise
+
+    assert result is None
+    assert any(
+        'transient error' in rec.message and rec.levelno == logging.DEBUG
+        for rec in caplog.records
+    ), 'transient network error should be logged at DEBUG, not WARNING+traceback'
+
+
+def test_on_polling_error_logs_non_network_at_warning(caplog):
+    """A non-transient polling error is still surfaced (WARNING) — we only quiet the
+    transient class PTB already retries."""
+    import logging
+    from agent_cascade.telegram_bridge.bot import on_polling_error
+
+    ctx = MagicMock()
+    ctx.error = ValueError('something unexpected')
+
+    with caplog.at_level(logging.WARNING):
+        _run(on_polling_error(None, ctx))   # must NOT raise
+
+    assert any(
+        'polling error' in rec.message and rec.levelno == logging.WARNING
+        for rec in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # _token_post must send the session token as a QUERY param (the Phase 1 command
 # endpoints read `token` from the query string, not the JSON body). This test

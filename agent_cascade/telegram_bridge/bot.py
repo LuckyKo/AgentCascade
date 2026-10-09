@@ -20,6 +20,7 @@ import hashlib
 from typing import List, Optional
 
 from telegram import Update
+from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter
 
@@ -243,6 +244,27 @@ async def _safe_send(bot, chat_id: int, text: str,
         logger.error('failed to send notification to Telegram: %s', e)
 
 
+async def on_polling_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ANN001 (PTB callback sig)
+    """Error handler for polling-side exceptions forwarded by ``run_polling``.
+
+    PTB's updater retries transient network errors (stale connection, a 502 from
+    Telegram's edge, etc.) internally via its own ``network_retry_loop`` BEFORE the
+    error reaches this callback — so a ``NetworkError``/``TimedOut`` here is almost
+    always an already-recovered blip. Without a registered handler, PTB falls back to
+    ``process_error``'s catch-all and logs a full WARNING + multi-line traceback for
+    what is expected, self-healing noise. We log one concise line (DEBUG for the
+    transient network class, WARNING otherwise) and swallow it: nothing to do, and
+    if a failure is persistent enough to actually break ``run_polling``, the
+    supervisor's bounded-restart loop catches that separately.
+    """
+    err = context.error
+    if isinstance(err, (NetworkError, RetryAfter)):
+        # Transient / already-retried-by-PTB — keep it quiet.
+        logger.debug('Telegram polling transient error (self-healed by PTB retry): %s', err)
+    else:
+        logger.warning('Telegram polling error: %r', err)
+
+
 async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB callback sig)
     """Message handler: auth gate -> inject -> ack -> spawn waiter."""
     cfg: BridgeConfig = context.bot_data['config']
@@ -352,4 +374,8 @@ def build_application(cfg: BridgeConfig, ac: ACClient):
     # commands inside on_message via the COMMANDS registry. Excluding COMMAND here
     # would make /stop & co. unreachable dead code.
     app.add_handler(MessageHandler(filters.TEXT, on_message))
+    # Register a polling error handler so transient network errors (e.g. a 502 from
+    # Telegram's edge) log one quiet line instead of PTB's default WARNING + full
+    # traceback ("No error handlers are registered"). See on_polling_error.
+    app.add_error_handler(on_polling_error)
     return app
