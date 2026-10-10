@@ -3,11 +3,11 @@
   "diffusion_model": "diffusion_models/anima_baseV10.safetensors",
   "llm": "text_encoders/qwen_3_06b_base.safetensors",
   "vae": "vae/qwen_image_vae.safetensors",
-  "sampler": "euler_a",
-  "cfg_scale": 5.0,
-  "steps": 30,
+  "sampler": "er_sde",
+  "cfg_scale": 3.0,
+  "steps": 14,
   "width": 512,
   "height": 512,
   "extra_prompt_args": "<lora:Anima/anima-turbo-lora-v0.2:0.5>",
-  "notes": "VERIFIED working (full-precision checkpoint; the INT8 rowwise variant fails to load in sd-cli at commit 228c707 -- weight_scale shape mismatch). NOTE: VAE must be qwen_image_vae.safetensors -- ae.safetensors is the WRONG shape and fails. ~32s. LoRA applied via extra_prompt_args prompt tag (relative to sdcpp.extra_args --lora-model-dir); verified 1016 tensors applied at strength 0.5."
+  "notes": "Sampling params (er_sde / cfg 3 / steps 14) aligned to the ComfyUI Anima_INT8.json workflow KSampler for parity. Full-precision checkpoint (the INT8 rowwise variant fails to load in sd-cli at commit 228c707 -- weight_scale shape mismatch). NOTE: VAE must be qwen_image_vae.safetensors -- ae.safetensors is the WRONG shape and fails. LoRA applied via extra_prompt_args prompt tag (relative to sdcpp.extra_args --lora-model-dir); verified 1016 tensors applied at strength 0.5."
 }
