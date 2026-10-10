@@ -1329,8 +1329,18 @@ class ImageGen(BaseTool):
                 self._restore_vram_state(instance, _state['held'])
             return [ContentItem(text=f"ERROR: Failed to save generated image: {e}")]
 
-        width = params.get('width') or 0
-        height = params.get('height') or 0
+        # Report the ACTUAL generated dimensions, not the requested ones: the user may
+        # omit width/height and let the config file supply them (e.g. anima's 512x512),
+        # in which case params carries no width/height and we would otherwise report 0x0.
+        # Read the real size from the saved image; fall back to the requested values,
+        # then 0, if the file can't be opened for any reason. Never raises.
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(media_path) as _im:
+                width, height = _im.size
+        except Exception:
+            width = params.get('width') or 0
+            height = params.get('height') or 0
         config_name = params.get('sdcpp_config') or sdcpp_cfg.get('default_sdcpp_config', '')
 
         # Primary restore now that all LLM-side work is done. There is no eager
