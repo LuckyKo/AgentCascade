@@ -6934,6 +6934,34 @@ async function loadImageGenWorkflows(selectWorkflow) {
   }
 }
 
+// Show/hide the ComfyUI vs stable-diffusion.cpp field groups based on the type.
+function _igToggleBackendVisibility(type) {
+  const comfyBlock = document.getElementById('ig-comfyui-block');
+  const sdcppBlock = document.getElementById('ig-sdcpp-block');
+  if (comfyBlock) comfyBlock.style.display = (type === 'sdcpp') ? 'none' : '';
+  if (sdcppBlock) sdcppBlock.style.display = (type === 'sdcpp') ? '' : 'none';
+}
+
+// Repopulate the sdcpp Default Preset pulldown from the Presets JSON textarea.
+// Invalid JSON yields an empty pulldown (the — none — option only).
+function _igPopulatePresetSelect(defaultName) {
+  const sel = document.getElementById('ig-sdcpp-preset');
+  const ta = document.getElementById('ig-sdcpp-presets-json');
+  if (!sel) return;
+  let presets = {};
+  if (ta && ta.value.trim()) {
+    try {
+      const parsed = JSON.parse(ta.value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) presets = parsed;
+    } catch (e) { /* invalid JSON → empty pulldown */ }
+  }
+  const names = Object.keys(presets);
+  sel.innerHTML = '<option value="">— none —</option>' + names.map(n =>
+    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`
+  ).join('');
+  sel.value = (defaultName && names.includes(defaultName)) ? defaultName : '';
+}
+
 // Load current config from GET /api/image_gen and populate the fields.
 async function loadImageGenSettings() {
   const igType = document.getElementById('ig-type');
@@ -6958,7 +6986,23 @@ async function loadImageGenSettings() {
   igDir.value = cfg.workflow_dir || IG_DEFAULT_WORKFLOW_DIR;
   igTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
 
+  // sdcpp fields (populated only when the backend block is present).
+  const sdcpp = (cfg.sdcpp && typeof cfg.sdcpp === 'object') ? cfg.sdcpp : {};
+  const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
+  const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
+  const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
+  const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
+  if (igSdcppBinary) igSdcppBinary.value = sdcpp.binary || '';
+  if (igSdcppModelDir) igSdcppModelDir.value = sdcpp.models_dir || '';
+  if (igSdcppTimeout) igSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
+  if (igSdcppPresetsJson) {
+    igSdcppPresetsJson.value = sdcpp.presets ? JSON.stringify(sdcpp.presets, null, 2) : '';
+  }
+  _igPopulatePresetSelect(sdcpp.default_model);
+
   await loadImageGenWorkflows(cfg.default_workflow);
+
+  _igToggleBackendVisibility(igType.value);
 }
 
 // Save via POST /api/image_gen. Handles both {status:"ok"} and {ok:true},
@@ -6977,10 +7021,13 @@ async function saveImageGenSettings() {
   timeout = Math.min(600, Math.max(30, timeout));
   igTimeout.value = String(timeout);
 
+  const isSdcpp = (igType.value === 'sdcpp');
+
   const url = igUrl.value.trim();
   // Cheap client-side check mirrors the backend rule (must be http/https) so a
-  // bad URL is caught before the round-trip.
-  if (!/^https?:\/\//i.test(url)) {
+  // bad URL is caught before the round-trip. Only enforced for the ComfyUI
+  // backend; the sdcpp backend has no server URL.
+  if (!isSdcpp && !/^https?:\/\//i.test(url)) {
     _igSetStatus('✕ Server URL must start with http:// or https://', 'error');
     return;
   }
@@ -6992,6 +7039,40 @@ async function saveImageGenSettings() {
     default_workflow: igWf.value,
     timeout: timeout
   };
+
+  // sdcpp block: build only for the sdcpp backend. The sdcpp timeout has its own
+  // wider range (30-1800) than the shared fallback timeout (30-600).
+  if (isSdcpp) {
+    const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
+    const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
+    const igSdcppPreset = document.getElementById('ig-sdcpp-preset');
+    const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
+    const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
+
+    let sdcppTimeout = parseInt(igSdcppTimeout ? igSdcppTimeout.value : '', 10);
+    if (isNaN(sdcppTimeout)) sdcppTimeout = 900;
+    sdcppTimeout = Math.min(1800, Math.max(30, sdcppTimeout)); // F2: 30-1800 clamp
+    if (igSdcppTimeout) igSdcppTimeout.value = String(sdcppTimeout);
+
+    let presets = {};
+    if (igSdcppPresetsJson && igSdcppPresetsJson.value.trim()) {
+      try {
+        const parsed = JSON.parse(igSdcppPresetsJson.value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) presets = parsed;
+      } catch (e) {
+        _igSetStatus('✕ Presets JSON is not valid JSON', 'error');
+        return;
+      }
+    }
+
+    body.sdcpp = {
+      binary: (igSdcppBinary ? igSdcppBinary.value.trim() : ''),
+      models_dir: (igSdcppModelDir ? igSdcppModelDir.value.trim() : ''),
+      default_model: (igSdcppPreset ? igSdcppPreset.value : ''),
+      timeout: sdcppTimeout,
+      presets: presets
+    };
+  }
 
   try {
     const res = await fetch('/api/image_gen', {
@@ -7029,6 +7110,21 @@ function initImageGenSettings() {
     igSave.addEventListener('click', (e) => {
       e.stopPropagation(); // don't collapse the settings section
       saveImageGenSettings();
+    });
+  }
+
+  // Backend type toggle: show/hide the ComfyUI vs sdcpp field groups.
+  const igType = document.getElementById('ig-type');
+  if (igType) {
+    igType.addEventListener('change', () => _igToggleBackendVisibility(igType.value));
+  }
+
+  // Repopulate the sdcpp Default Preset pulldown when the Presets JSON changes.
+  const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
+  if (igSdcppPresetsJson) {
+    igSdcppPresetsJson.addEventListener('change', () => {
+      const presetSel = document.getElementById('ig-sdcpp-preset');
+      _igPopulatePresetSelect(presetSel ? presetSel.value : '');
     });
   }
 

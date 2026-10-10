@@ -860,31 +860,60 @@
                   <h3 class="settings-section-title">🎨 Image Generation</h3>
                   <div class="settings-section-body" id="image-gen-body">
                     <label class="setting-field">
-                      <span>Type</span>
+                      <span title="Generation backend. ComfyUI runs a live server; stable-diffusion.cpp runs a one-shot local binary.">Type</span>
                       <select id="ig-type">
                         <option value="comfyui">ComfyUI</option>
+                        <option value="sdcpp">stable-diffusion.cpp</option>
                       </select>
                     </label>
-                    <label class="setting-field">
-                      <span title="Base URL of the running ComfyUI server">Server URL</span>
-                      <input type="url" id="ig-url" placeholder="http://localhost:8188">
-                    </label>
-                    <label class="setting-field">
-                      <span title="Directory scanned for ComfyUI workflow JSON files">Workflow Directory</span>
-                      <input type="text" id="ig-workflow-dir" placeholder="<AgentCascade_root>/config/workflows">
-                    </label>
-                    <label class="setting-field">
-                      <span title="Workflow used when the agent does not specify one">Default Workflow</span>
-                      <div style="display:flex;gap:6px;align-items:center;">
-                        <select id="ig-default-workflow" style="flex:1;">
+                    <!-- ComfyUI-specific fields (hidden when type=sdcpp) -->
+                    <div id="ig-comfyui-block">
+                      <label class="setting-field">
+                        <span title="Base URL of the running ComfyUI server">Server URL</span>
+                        <input type="url" id="ig-url" placeholder="http://localhost:8188">
+                      </label>
+                      <label class="setting-field">
+                        <span title="Directory scanned for ComfyUI workflow JSON files">Workflow Directory</span>
+                        <input type="text" id="ig-workflow-dir" placeholder="<AgentCascade_root>/config/workflows">
+                      </label>
+                      <label class="setting-field">
+                        <span title="Workflow used when the agent does not specify one">Default Workflow</span>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                          <select id="ig-default-workflow" style="flex:1;">
+                            <option value="">— none —</option>
+                          </select>
+                          <button id="ig-refresh-workflows" class="btn-small" title="Re-scan workflow directory for new files">⟳</button>
+                        </div>
+                      </label>
+                    </div>
+                    <!-- stable-diffusion.cpp-specific fields (hidden when type=comfyui) -->
+                    <div id="ig-sdcpp-block" style="display:none;">
+                      <label class="setting-field">
+                        <span title="Path to the sd-cli binary (stable-diffusion.cpp)">Binary</span>
+                        <input type="text" id="ig-sdcpp-binary" placeholder="C:\...\sd-cli.exe">
+                      </label>
+                      <label class="setting-field">
+                        <span title="Directory containing model files (checkpoints, VAEs, encoders)">Models Directory</span>
+                        <input type="text" id="ig-sdcpp-model-dir" placeholder="C:\...\ComfyUI_models\models">
+                      </label>
+                      <label class="setting-field">
+                        <span title="Preset used when the agent does not specify one">Default Preset</span>
+                        <select id="ig-sdcpp-preset">
                           <option value="">— none —</option>
                         </select>
-                        <button id="ig-refresh-workflows" class="btn-small" title="Re-scan workflow directory for new files">⟳</button>
-                      </div>
-                    </label>
+                      </label>
+                      <label class="setting-field">
+                        <span title="JSON object mapping preset name → {model, vae, clip_l, ...} (model files relative to Models Directory)">Presets JSON</span>
+                        <textarea id="ig-sdcpp-presets-json" rows="5" style="font-family:monospace;font-size:11px;resize:vertical;" placeholder='{"sdxl-pony": {"model": "checkpoints/....safetensors", "vae": "vae/sdxl_vae.safetensors"}}'></textarea>
+                      </label>
+                      <label class="setting-field">
+                        <span title="Max seconds to wait for a local generation (30-1800)">Sdcli Timeout (s)</span>
+                        <input type="number" id="ig-sdcpp-timeout" min="30" max="1800" step="30" value="900">
+                      </label>
+                    </div>
                     <div style="display:flex;gap:8px;">
                       <label class="setting-field" style="flex:1;">
-                        <span title="Max seconds to wait for a generation before giving up">Timeout (s)</span>
+                        <span title="Fallback timeout in seconds (used when the backend has no specific timeout)">Timeout (s)</span>
                         <input type="number" id="ig-timeout" min="30" max="600" step="5" value="180">
                       </label>
                       <button id="ig-save" class="btn-small">Save</button>

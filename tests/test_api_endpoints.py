@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -2142,3 +2143,112 @@ class TestApplyAutoSecurityDeleted:
         source = inspect.getsource(api_server)
         assert 'apply_auto_security' not in source, \
             'api_server must not reference apply_auto_security (BUG_0029 Step 6)'
+
+
+class TestImageGenConfigSdcpp:
+    """sdcpp backend: config round-trip + F2 type-conditional timeout validation.
+
+    The config path is a closure local inside ``create_app`` (the real
+    ``config/image_gen.json``), so the POST writes there. Each test that can
+    reach the 200 path snapshots the real file first and restores it after, so
+    tests never clobber user config.
+    """
+
+    @pytest.fixture
+    def _isolate_config(self):
+        """Back up + restore the real image_gen.json, serialized across xdist workers.
+
+        The config path is a closure local inside ``create_app`` (we can't redirect
+        it), so the POST writes the real file. A portable O_EXCL lock file ensures
+        parallel workers don't clobber each other's backup/restore round-trips.
+        """
+        lock_path = Path(tempfile.gettempdir()) / 'agentcascade_image_gen_cfg_test.lock'
+        deadline = time.time() + 15
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+                break
+            except FileExistsError:
+                if time.time() > deadline:
+                    raise RuntimeError('could not acquire image_gen config test lock')
+                time.sleep(0.05)
+        real = PROJECT_ROOT / 'config' / 'image_gen.json'
+        original = real.read_text(encoding='utf-8') if real.exists() else None
+        try:
+            yield
+        finally:
+            if original is not None:
+                real.write_text(original, encoding='utf-8')
+            elif real.exists():
+                real.unlink()
+            try:
+                os.unlink(str(lock_path))
+            except OSError:
+                pass
+
+    def _post(self, client, payload):
+        return client.post('/api/image_gen', json=payload)
+
+    def test_sdcpp_round_trip(self, client, _isolate_config):
+        payload = {
+            'type': 'sdcpp',
+            'url': '',  # not required for sdcpp
+            'timeout': 180,
+            'sdcpp': {
+                'binary': r'C:\bin\sd-cli.exe',
+                'models_dir': r'C:\models',
+                'default_model': 'sdxl-pony',
+                'timeout': 900,
+                'presets': {'sdxl-pony': {'model': 'a.safetensors', 'vae': 'b.safetensors'}},
+            },
+        }
+        resp = self._post(client, payload)
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'ok'
+
+        got = client.get('/api/image_gen').json()
+        assert got['type'] == 'sdcpp'
+        assert got['sdcpp']['timeout'] == 900
+        assert got['sdcpp']['default_model'] == 'sdxl-pony'
+        assert 'sdxl-pony' in got['sdcpp']['presets']
+
+    def test_sdcpp_timeout_out_of_range_rejected(self, client, _isolate_config):
+        # F2: sdcpp.timeout must be an int in 30-1800.
+        for bad in (29, 1801, 'notanint'):
+            resp = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': 'b', 'timeout': bad}})
+            assert resp.status_code == 400, f'sdcpp.timeout={bad!r} should be rejected'
+
+    def test_sdcpp_timeout_at_bounds_accepted(self, client, _isolate_config):
+        for good in (30, 1800):
+            resp = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': 'b', 'timeout': good}})
+            assert resp.status_code == 200, f'sdcpp.timeout={good} should be accepted'
+
+    def test_comfyui_timeout_range_still_enforced(self, client, _isolate_config):
+        # F2: the 30-600 range is NOT skipped for non-sdcpp types.
+        resp = self._post(client, {'type': 'comfyui', 'url': 'http://x', 'timeout': 1801})
+        assert resp.status_code == 400
+
+    def test_sdcpp_top_level_timeout_range_skipped(self, client, _isolate_config):
+        # F2: for sdcpp, the top-level 30-600 range is skipped (a large fallback
+        # value is allowed; the real timeout lives in sdcpp.timeout).
+        payload = {'type': 'sdcpp', 'timeout': 1700, 'sdcpp': {'binary': 'b', 'timeout': 900}}
+        resp = self._post(client, payload)
+        assert resp.status_code == 200
+
+    def test_comfyui_url_still_required(self, client, _isolate_config):
+        resp = self._post(client, {'type': 'comfyui', 'url': '', 'timeout': 180})
+        assert resp.status_code == 400
+
+    def test_sdcpp_url_not_required(self, client, _isolate_config):
+        payload = {'type': 'sdcpp', 'timeout': 180, 'sdcpp': {'binary': 'b', 'timeout': 900}}
+        resp = self._post(client, payload)
+        assert resp.status_code == 200
+
+    def test_sdcpp_block_not_a_dict_rejected(self, client, _isolate_config):
+        resp = self._post(client, {'type': 'sdcpp', 'sdcpp': ['not', 'a', 'dict']})
+        assert resp.status_code == 400
+
+    def test_sdcpp_binary_must_be_nonempty_string(self, client, _isolate_config):
+        resp = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': ''}})
+        assert resp.status_code == 400

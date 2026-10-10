@@ -1730,7 +1730,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.post('/api/image_gen')
     async def save_image_gen_config(request: Request):
-        """Save image gen config. Validates URL format and timeout range."""
+        """Save image gen config. Validates URL format and timeout range.
+
+        Type-conditional: for ``type='sdcpp'`` the ``url`` is not required and the
+        top-level 30-600s timeout range check is skipped (F2) — the ``sdcpp`` block
+        carries its own 30-1800s timeout, which is validated here.
+        """
         try:
             data = await request.json()
         except Exception:
@@ -1739,13 +1744,18 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
 
-        # Validate URL (must start with http:// or https://)
-        url = data.get('url', '')
-        if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
-            return JSONResponse(status_code=400, content={'message': 'url must start with http:// or https://'})
+        gen_type = data.get('type', 'comfyui')
+        is_sdcpp = (gen_type == 'sdcpp')
 
-        # Validate timeout (30-600 seconds). Accept int or numeric string; reject
-        # floats (int() would silently truncate e.g. 180.5 → 180) and bools.
+        # Validate URL (must start with http:// or https://). Not required for sdcpp.
+        url = data.get('url', '')
+        if not is_sdcpp:
+            if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
+                return JSONResponse(status_code=400, content={'message': 'url must start with http:// or https://'})
+
+        # Validate top-level timeout. Accept int or numeric string; reject floats
+        # (int() would silently truncate e.g. 180.5 → 180). For sdcpp the 30-600s
+        # range is skipped (F2) — the sdcpp block carries its own 30-1800s timeout.
         timeout = data.get('timeout', 180)
         if isinstance(timeout, float):
             return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
@@ -1753,16 +1763,39 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             timeout = int(timeout)
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
-        if not (30 <= timeout <= 600):
+        if not is_sdcpp and not (30 <= timeout <= 600):
             return JSONResponse(status_code=400, content={'message': 'timeout must be between 30 and 600 seconds'})
 
         config = {
-            'type': data.get('type', 'comfyui'),
+            'type': gen_type,
             'url': url,
             'workflow_dir': data.get('workflow_dir', ''),
             'timeout': timeout,
             'default_workflow': data.get('default_workflow', ''),
         }
+
+        # sdcpp block: pass through + validate. The block is optional — when absent
+        # the sdcpp backend is a no-op (see image_gen.py). F2: sdcpp.timeout is
+        # validated at 30-1800s, independent of the top-level 30-600s check.
+        sdcpp = data.get('sdcpp')
+        if sdcpp is not None:
+            if not isinstance(sdcpp, dict):
+                return JSONResponse(status_code=400, content={'message': 'sdcpp block must be a JSON object'})
+            sdcpp_cfg = dict(sdcpp)
+            sdcpp_timeout = sdcpp_cfg.get('timeout')
+            if sdcpp_timeout is not None:
+                if isinstance(sdcpp_timeout, float):
+                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be an integer'})
+                try:
+                    sdcpp_cfg['timeout'] = int(sdcpp_timeout)
+                except (TypeError, ValueError):
+                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be an integer'})
+                if not (30 <= sdcpp_cfg['timeout'] <= 1800):
+                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be between 30 and 1800 seconds'})
+            binary = sdcpp_cfg.get('binary')
+            if binary is not None and (not isinstance(binary, str) or not binary):
+                return JSONResponse(status_code=400, content={'message': 'sdcpp.binary must be a non-empty string'})
+            config['sdcpp'] = sdcpp_cfg
 
         try:
             _image_gen_config_path.parent.mkdir(parents=True, exist_ok=True)

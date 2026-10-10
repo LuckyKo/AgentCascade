@@ -440,7 +440,7 @@ TOOL_METADATA = {
             'fresh':
                 'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
             'idle_timeout':
-                'Seconds of no output before the kernel is killed. Default 30. Raise for code that runs silently (blocking I/O, big-file parse, subprocess). Silence limit, not wall-clock.',
+                'Seconds of no output before the kernel is killed. Default 30. Raise for code that runs silently (blocking I/O, big-file parse, subprocess). Silence limit, it is NOT a wall-clock.',
         }
     },
     'shell_cmd': {
@@ -504,10 +504,13 @@ TOOL_METADATA = {
         }
     },
     'image_gen': {
-        'description': ('Generate an image from a text prompt via ComfyUI, or render SVG code to an image. '
+        'description': ('Generate an image from a text prompt (via ComfyUI or the local '
+                        'stable-diffusion.cpp backend), or render SVG code to an image. '
                         'Returns the image with a caption, same format as view_image. '
                         'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
-                        "Use the 'workflow' parameter (full path to JSON) to select which saved workflow to use."),
+                        "Use the 'workflow' parameter (full path to JSON) to select which saved ComfyUI workflow to use. "
+                        "With the stable-diffusion.cpp backend, use 'model' (a preset name) to pick the model, and "
+                        "'sampler'/'guidance'/'steps' to tune generation."),
         'parameters': {
             'prompt': 'Text description for image generation, or SVG code to render',
             'negative_prompt': 'Elements to exclude from the generated image (API only)',
@@ -515,7 +518,11 @@ TOOL_METADATA = {
             'width': 'Output width in pixels (overrides workflow default)',
             'height': 'Output height in pixels (overrides workflow default)',
             'seed': 'Random seed for reproducibility (random if omitted)',
-            'input_image': 'Image file path to use as reference or for editing'
+            'input_image': 'Image file path to use as reference or for editing',
+            'model': 'stable-diffusion.cpp preset name (e.g. "sdxl-pony"). Omit to use the default preset from settings.',
+            'sampler': 'stable-diffusion.cpp sampler (e.g. "euler"). Omit to use the backend default.',
+            'guidance': 'stable-diffusion.cpp guidance scale (float). Omit to use the backend default.',
+            'steps': 'stable-diffusion.cpp sampling steps (int). Omit to use the backend default.'
         }
     },
     'web_search': {

@@ -1,7 +1,19 @@
 {
-  "type": "comfyui",
-  "url": "http://127.0.0.1:8188",
-  "workflow_dir": "N:\\work\\WD\\AgentCascade\\config\\workflows",
-  "timeout": 300,
-  "default_workflow": "N:\\work\\WD\\AgentCascade\\config\\workflows\\flux2_t2i_9b_API.json"
+  "type": "sdcpp",
+  "url": "",
+  "workflow_dir": "",
+  "timeout": 180,
+  "default_workflow": "",
+  "sdcpp": {
+    "binary": "C:\\bin\\sd-cli.exe",
+    "models_dir": "C:\\models",
+    "default_model": "sdxl-pony",
+    "timeout": 900,
+    "presets": {
+      "sdxl-pony": {
+        "model": "a.safetensors",
+        "vae": "b.safetensors"
+      }
+    }
+  }
 }

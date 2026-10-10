@@ -43,8 +43,11 @@ the placeholder: there is no LLM/endpoint here to gate.
 import json
 import logging
 import mimetypes
+import os
 import random
 import re
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -437,6 +440,219 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
             client.close()
 
 
+# ── stable-diffusion.cpp (sd-cli) backend ─────────────────────────────────────
+# A one-shot local generation backend selected by ``type: "sdcpp"`` in the config.
+# The ComfyUI path above is untouched; these helpers are additive and no-ops
+# unless the config carries an ``sdcpp`` block.
+
+_SDCPP_TYPE = 'sdcpp'
+
+
+def _resolve_sdcpp_preset(cfg: dict, name: Optional[str] = None) -> dict:
+    """Pick an sdcpp preset by name and resolve its model files against models_dir.
+
+    Falls back to ``sdcpp.default_model`` when ``name`` is None/empty. Raises
+    ``RuntimeError`` naming ALL missing files up front (pre-VRAM fast-fail, §4.3)
+    so a missing VAE is not discovered only after the LLM has already been
+    unloaded. Returns a copy of the preset dict with the model-file keys
+    (``model``/``vae``/``clip_l``/``clip_g``/``t5xxl``/``llm``) rewritten to
+    absolute paths.
+    """
+    sdcpp = cfg.get(_SDCPP_TYPE) or {}
+    if not isinstance(sdcpp, dict):
+        raise RuntimeError('sdcpp config block is missing or not an object')
+
+    presets = sdcpp.get('presets') or {}
+    if not isinstance(presets, dict) or not presets:
+        raise RuntimeError(
+            'No sdcpp presets configured. Add a "presets" object to the sdcpp config block.'
+        )
+
+    preset_name = name if name else sdcpp.get('default_model')
+    if not preset_name or preset_name not in presets:
+        available = ', '.join(sorted(presets.keys()))
+        raise RuntimeError(
+            f"sdcpp preset '{preset_name}' not found. Available presets: {available}"
+        )
+
+    preset = dict(presets[preset_name])
+    models_dir = sdcpp.get('models_dir', '')
+
+    def _join(rel: str) -> str:
+        return str(Path(models_dir) / rel) if models_dir else str(rel)
+
+    missing = []
+    for key in ('model', 'vae', 'clip_l', 'clip_g', 't5xxl', 'llm'):
+        rel = preset.get(key)
+        if rel:
+            full = _join(rel)
+            if not Path(full).is_file():
+                missing.append(full)
+            preset[key] = full
+
+    if not preset.get('model'):
+        raise RuntimeError(f"sdcpp preset '{preset_name}' has no 'model' file configured")
+    if missing:
+        raise RuntimeError('sdcpp model file(s) not found: ' + ', '.join(missing))
+    return preset
+
+
+def _sdcpp_argv(cfg: dict, preset: dict, *, prompt: str, negative_prompt: str = '',
+                width: Optional[int] = None, height: Optional[int] = None,
+                seed: Optional[int] = None, steps: Optional[int] = None,
+                cfg_scale: Optional[float] = None, guidance: Optional[float] = None,
+                sampler: Optional[str] = None, output_path: str) -> List[str]:
+    """Build the sd-cli argv list. **Pure** — no I/O, no logging, no env reads.
+
+    Emission order is fixed so unit tests can assert an exact list. Model paths
+    are already absolute (resolved by ``_resolve_sdcpp_preset``); this function
+    only selects the binary and formats scalars. It NEVER builds a command
+    string — the caller runs ``subprocess.run(argv, shell=False)`` so the list
+    form does its own quoting (a shell would split a multi-word prompt).
+
+    Resolution order for every numeric/dim: tool param > preset default > fallback.
+    """
+    sdcpp = cfg.get(_SDCPP_TYPE) or {}
+
+    # F8: a prompt whose first non-space char is '-' is mis-parsed by list2cmdline
+    # (emitted unquoted) as a CLI flag. Reject with a clear error.
+    if prompt.lstrip().startswith('-'):
+        raise ValueError(
+            "prompt must not start with '-' (it would be mis-parsed as a CLI flag)"
+        )
+
+    argv: List[str] = [sdcpp.get('binary', 'sd-cli')]
+    argv += ['-M', 'img_gen']
+
+    # Model selection: -m (full checkpoint) or --diffusion-model (standalone).
+    model = preset.get('model', '')
+    if preset.get('model_arg') == 'diffusion_model':
+        argv += ['--diffusion-model', model]
+    else:
+        argv += ['-m', model]
+
+    # Text encoders + VAE — each only if non-empty, in fixed order.
+    for flag, key in (('--clip_l', 'clip_l'), ('--clip_g', 'clip_g'),
+                      ('--t5xxl', 't5xxl'), ('--llm', 'llm'), ('--vae', 'vae')):
+        val = preset.get(key)
+        if val:
+            argv += [flag, val]
+
+    vae_format = preset.get('vae_format')
+    if vae_format:
+        argv += ['--vae-format', vae_format]
+
+    # Prompt / negative prompt.
+    argv += ['-p', prompt]
+    if negative_prompt:
+        argv += ['-n', negative_prompt]
+
+    # Dimensions: tool param > preset default > 512.
+    w = width if width else (preset.get('width') or 512)
+    h = height if height else (preset.get('height') or 512)
+    argv += ['-W', str(int(w)), '-H', str(int(h))]
+
+    # Steps / cfg-scale: tool param > preset default > fallback.
+    s = steps if steps is not None else (preset.get('steps') or 20)
+    argv += ['--steps', str(int(s))]
+    c = cfg_scale if cfg_scale is not None else (preset.get('cfg_scale') or 7.0)
+    argv += ['--cfg-scale', f'{float(c):g}']
+
+    # Guidance: only emitted when resolved non-None (tool param > preset).
+    g = guidance if guidance is not None else preset.get('guidance')
+    if g is not None:
+        argv += ['--guidance', f'{float(g):g}']
+
+    # Sampling method: tool param > preset default > omit.
+    sm = sampler if sampler is not None else preset.get('sampler')
+    if sm:
+        argv += ['--sampling-method', sm]
+
+    # Seed (F3): None -> -s -1 (explicit random); >=0 -> -s <seed>; <0 -> -s -1.
+    try:
+        seed_val = int(seed)
+    except (TypeError, ValueError):
+        seed_val = None
+    if seed_val is None or seed_val < 0:
+        argv += ['-s', '-1']
+    else:
+        argv += ['-s', str(seed_val)]
+
+    # Output path (always present, absolute) + log level.
+    argv += ['-o', str(output_path)]
+    argv += ['--log-level', 'warn']
+
+    # Optional backend / offload / verbatim tail.
+    backend = sdcpp.get('backend')
+    if backend:
+        argv += [backend]
+    if sdcpp.get('offload_to_cpu'):
+        argv += ['--offload-to-cpu']
+    extra = sdcpp.get('extra_args') or []
+    if isinstance(extra, list):
+        argv.extend(extra)
+
+    return argv
+
+
+def _sdcpp_generate(argv: List[str], timeout: int = 900) -> bytes:
+    """Run sd-cli as a one-shot subprocess and return the generated image bytes.
+
+    Mirrors ``_comfyui_generate``'s error contract so the caller's existing
+    ``except (RuntimeError, TimeoutError)`` works unchanged. The ``-o`` output
+    path (emitted by ``_sdcpp_argv``) is read to bytes and then unlinked in a
+    ``finally`` — the temp-file cleanup is the one genuinely new concern the
+    sdcpp path has that the ComfyUI path does not (§5.2).
+
+    Raises:
+        RuntimeError: binary missing, non-zero exit (with stderr tail + exit code),
+            or rc==0 but no/empty output file.
+        TimeoutError: the subprocess did not finish within ``timeout`` seconds.
+    """
+    binary = argv[0]
+    if not Path(binary).is_file():
+        raise RuntimeError(
+            f'sd-cli not found at {binary}. Check the sdcpp.binary config value.'
+        )
+
+    # Locate the -o output path emitted by _sdcpp_argv.
+    out_path = None
+    for i, tok in enumerate(argv):
+        if tok == '-o' and i + 1 < len(argv):
+            out_path = argv[i + 1]
+            break
+    if not out_path:
+        raise RuntimeError('sd-cli argv is missing an -o output path')
+
+    # The temp file is cleaned up on EVERY path (success and failure) so it never
+    # leaks, even when a non-zero exit / timeout / missing output raises below.
+    try:
+        try:
+            proc = subprocess.run(argv, shell=False, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise TimeoutError(
+                f'stable-diffusion.cpp generation timed out after {timeout}s'
+            ) from e
+
+        rc = proc.returncode
+        if rc != 0:
+            stderr_tail = (proc.stderr or b'').decode('utf-8', errors='replace')[-800:]
+            raise RuntimeError(
+                f'sd-cli exited with code {rc} (argv: {argv}). stderr tail:\n{stderr_tail}'
+            )
+
+        if not Path(out_path).is_file() or Path(out_path).stat().st_size == 0:
+            raise RuntimeError(f'sd-cli exited 0 but produced no image at {out_path}')
+
+        return Path(out_path).read_bytes()
+    finally:
+        # Best-effort unlink of the temp file. A failure here is non-fatal.
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
 def _upload_image(url: str, local_path: Path, client: Optional[httpx.Client] = None) -> str:
     """Upload a local image to ComfyUI's input directory.
 
@@ -530,6 +746,25 @@ class ImageGen(BaseTool):
                     'Not used for SVG rendering.'
                 ),
             },
+            'model': {
+                'type': 'string',
+                'description': (
+                    'Name of a stable-diffusion.cpp preset to use (only when type=sdcpp). '
+                    'If omitted, uses the default_model preset from settings.'
+                ),
+            },
+            'sampler': {
+                'type': 'string',
+                'description': 'Sampling method to pass to sd-cli (overrides the preset default, e.g. "euler_a").',
+            },
+            'guidance': {
+                'type': 'number',
+                'description': 'Guidance scale for sd-cli (overrides the preset default; omit to use the preset).',
+            },
+            'steps': {
+                'type': 'integer',
+                'description': 'Number of diffusion steps for sd-cli (overrides the preset default; lower = faster).',
+            },
         },
         'required': ['prompt'],
     }
@@ -575,6 +810,13 @@ class ImageGen(BaseTool):
             return [ContentItem(text='ERROR: input_image is only supported for ComfyUI workflows, not SVG rendering.')]
         if _is_svg_code(prompt):
             return self._handle_svg(prompt, params)
+
+        # ── Backend dispatch: stable-diffusion.cpp vs ComfyUI ─────────────────
+        # Selected by the config 'type' key (default 'comfyui'). At this point
+        # 'prompt' is validated non-empty and the SVG branch has already returned,
+        # so every variable the sdcpp path needs is bound.
+        if _get_image_gen_config().get('type') == _SDCPP_TYPE:
+            return self._handle_sdcpp(params, kwargs)
 
         # ── Text prompt path (ComfyUI + VRAM management) ─────────────────────
         return self._handle_text_prompt(params, kwargs)
@@ -792,3 +1034,183 @@ class ImageGen(BaseTool):
                     logger.error(
                         '[ImageGen] State restore FAILED after ComfyUI — model may not be loaded: %s', e
                     )
+
+    # ------------------------------------------------------------------ #
+    #  stable-diffusion.cpp path                                         #
+    # ------------------------------------------------------------------ #
+
+    def _vram_release(self, instance, state: dict) -> None:
+        """Additive VRAM save+unload prologue, used ONLY by ``_handle_sdcpp`` in v1.
+
+        Reproduces the guard of ``_handle_text_prompt`` verbatim (F6) so the sdcpp
+        path frees VRAM identically to the ComfyUI path: ``getattr(instance,
+        '_last_endpoint_config', None)``, the ``isinstance(dict)`` check, the
+        ``state_save_enabled``/``api_base`` checks, the lazy ``state_ops`` import,
+        and the ``is_autoloader_endpoint`` gate. Any non-qualifying path leaves
+        ``state['saved']`` False with no state change.
+
+        ``state`` is a mutable holder dict with keys ``'saved'`` and ``'held'``.
+        ``saved`` is set to True as soon as ``save_instance_state`` succeeds —
+        BEFORE ``unload_all_models`` runs — so that a raise from unload still lets
+        the caller's except-block restore the KV (F1), exactly mirroring the
+        ComfyUI inline prologue where ``_state_saved`` is set prior to unload.
+        ``held`` is the endpoint config needed by ``_restore_vram_state``. The
+        ComfyUI path keeps its own inline block byte-identical; this seam exists
+        so a future change can adopt it without smuggling a refactor into this
+        additive change (§5.2/§11.1).
+        """
+        state['saved'] = False
+        state['held'] = None
+        if instance is None:
+            return
+        endpoint_cfg = getattr(instance, '_last_endpoint_config', None)
+        if not isinstance(endpoint_cfg, dict):
+            return
+        if not endpoint_cfg.get('state_save_enabled'):
+            return
+        api_base = endpoint_cfg.get('api_base')
+        if not api_base:
+            return
+
+        from agent_cascade.state_ops import (
+            is_autoloader_endpoint, save_instance_state, unload_all_models,
+        )
+        if not is_autoloader_endpoint(api_base):
+            return
+
+        if not save_instance_state(instance):
+            return
+        # Record success BEFORE unload so a raise from unload_all_models below
+        # still leaves state['saved'] True -> the caller restores the KV (F1).
+        state['saved'] = True
+        state['held'] = {
+            'api_base': api_base,
+            'model': endpoint_cfg.get('model', ''),
+        }
+        if not unload_all_models(api_base):
+            logger.warning(
+                '[ImageGen] VRAM may be constrained; model was not unloaded before sd-cli'
+            )
+
+    def _handle_sdcpp(self, params: dict, kwargs: dict) -> List[ContentItem]:
+        """Generate an image via a one-shot local sd-cli (stable-diffusion.cpp).
+
+        Reuses the same VRAM save/unload/restore dance as the ComfyUI path
+        (via the additive ``_vram_release`` seam + ``_restore_vram_state``).
+        Returns ``[ContentItem(image=...), ContentItem(text=...)]`` with the
+        image item left UNCAPTIONED, same as the ComfyUI/SVG paths.
+        """
+        config = _get_image_gen_config()
+        sdcpp_cfg = config.get(_SDCPP_TYPE)
+        if not isinstance(sdcpp_cfg, dict) or not sdcpp_cfg:
+            return [ContentItem(text=(
+                'ERROR: stable-diffusion.cpp backend selected (type=sdcpp) but no '
+                '"sdcpp" config block is present. Add it in UI settings '
+                '(config/image_gen.json).'
+            ))]
+
+        # sdcpp timeout: sdcpp.timeout > top-level timeout > 900 (F2).
+        try:
+            timeout = int(sdcpp_cfg.get('timeout', config.get('timeout', 900)))
+        except (TypeError, ValueError):
+            timeout = 900
+
+        # input_image is a ComfyUI-only feature; reject it for the sdcpp backend
+        # (mirrors the SVG rejection in call()).
+        if params.get('input_image'):
+            return [ContentItem(text='ERROR: input_image is not supported by the stable-diffusion.cpp backend.')]
+
+        # Resolve the preset + model files BEFORE touching VRAM, so a missing file
+        # fails fast without a wasted save/unload/restore cycle (§4.3).
+        try:
+            preset = _resolve_sdcpp_preset(config, params.get('model'))
+        except RuntimeError as e:
+            return [ContentItem(text=f"ERROR: {e}")]
+
+        # Create the temp output file (mkstemp) — the one genuinely new concern the
+        # sdcpp path has. _sdcpp_generate reads it and unlinks it in a finally (F4).
+        fd, out_path = tempfile.mkstemp(suffix='.png', prefix='sdcpp_')
+        os.close(fd)
+
+        # Build the argv (pure). A prompt whose first non-space char is '-' is
+        # rejected here (F8) so list2cmdline can't mis-parse it as a flag.
+        try:
+            argv = _sdcpp_argv(
+                config, preset,
+                prompt=params['prompt'],
+                negative_prompt=params.get('negative_prompt') or '',
+                width=params.get('width'),
+                height=params.get('height'),
+                seed=params.get('seed'),
+                steps=params.get('steps'),
+                guidance=params.get('guidance'),
+                sampler=params.get('sampler'),
+                output_path=out_path,
+            )
+        except ValueError as e:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return [ContentItem(text=f"ERROR: {e}")]
+
+        # ── VRAM management: save → unload → (sd-cli) → restore ──────────────
+        # F1 (CRITICAL): the save+unload prologue runs INSIDE the try (via the
+        # _vram_release seam, §5.2/§11.1) so a raise from unload_all_models still
+        # falls through to the restore below — the agent's KV is never left
+        # dangling. Restore is NOT in a finally: it is called explicitly on every
+        # error path and once at the end, matching the ComfyUI invariant.
+        # F7: on a timeout, process.kill() (TerminateProcess on Windows) frees
+        # CUDA VRAM only on a driver delay; _restore_vram_state's 2s retry covers
+        # this settle window.
+        instance = self._get_instance(kwargs)
+        _state = {'saved': False, 'held': None}
+
+        try:
+            self._vram_release(instance, _state)
+
+            image_bytes = _sdcpp_generate(argv, timeout=timeout)
+        except (RuntimeError, TimeoutError) as e:
+            # Generation failed — restore immediately so the KV is not left dangling.
+            if _state['saved'] and instance is not None:
+                self._restore_vram_state(instance, _state['held'])
+            return [ContentItem(text=f"ERROR: Image generation failed: {e}")]
+        except Exception as e:
+            logger.exception('Unexpected error during sdcpp image generation')
+            if _state['saved'] and instance is not None:
+                self._restore_vram_state(instance, _state['held'])
+            return [ContentItem(text=f"ERROR: Unexpected sdcpp image generation error: {e}")]
+        finally:
+            # _sdcpp_generate unlinks the temp file on every path it reaches; this
+            # covers the one path where it is never called (the VRAM prologue raised
+            # first) so the mkstemp file never leaks.
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+
+        # Save the result through the media pipeline.
+        try:
+            media_path = save_image_to_media(image_source=image_bytes, source_name='sdcpp_gen')
+        except Exception as e:
+            logger.exception('Failed to save generated sdcpp image')
+            if _state['saved'] and instance is not None:
+                self._restore_vram_state(instance, _state['held'])
+            return [ContentItem(text=f"ERROR: Failed to save generated image: {e}")]
+
+        width = params.get('width') or 0
+        height = params.get('height') or 0
+        preset_name = params.get('model') or sdcpp_cfg.get('default_model', '')
+
+        # Primary restore now that all LLM-side work is done. There is no eager
+        # captioning ahead of it (the image is returned uncaptioned), so this is
+        # the actual state-restore. One retry with a 2s delay; non-fatal on failure.
+        if _state['saved'] and instance is not None:
+            self._restore_vram_state(instance, _state['held'])
+
+        feedback = f"Generated image: {media_path} ({width}x{height}, model={preset_name}, backend=sdcpp)"
+        # The image item is intentionally left uncaptioned so the router's return-path
+        # guard (_has_uncaptioned_images) auto-generates a genuine vision caption on
+        # demand (same as the ComfyUI/SVG paths). The separate text item carries the
+        # descriptive line for text-only agents.
+        return [ContentItem(image=media_path), ContentItem(text=feedback)]
