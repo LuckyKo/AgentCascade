@@ -2,7 +2,8 @@
 
 Covers:
   * ``_sdcpp_argv`` — pure argv builder (exact-list assertions, no binary needed)
-  * ``_resolve_sdcpp_preset`` — preset selection + model-file resolution
+  * ``_resolve_sdcpp_config`` / ``_list_sdcpp_configs`` — model config-file selection
+    + model-file resolution (per-model JSON files in ``sdcpp.config_dir``)
   * ``_sdcpp_generate`` / ``_handle_sdcpp`` — subprocess runner error contract,
     VRAM ordering, error paths, temp-file cleanup (all mocked)
 
@@ -10,6 +11,7 @@ All external I/O is mocked. No binary execution, no network. The opt-in real
 smoke test lives in ``test_image_gen_sdcpp_smoke.py``.
 """
 
+import json
 import os
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -20,7 +22,8 @@ from agent_cascade.tools.image_gen import (
     ImageGen,
     _SDCPP_TYPE,
     _invalidate_image_gen_config,
-    _resolve_sdcpp_preset,
+    _list_sdcpp_configs,
+    _resolve_sdcpp_config,
     _sdcpp_argv,
 )
 
@@ -40,18 +43,17 @@ def _cfg(**sdcpp_overrides):
     sdcpp = {
         'binary': r'C:\bin\sd-cli.exe',
         'models_dir': r'C:\models',
-        'default_model': 'sdxl',
-        'presets': {},
+        'config_dir': r'C:\configs',
+        'default_sdcpp_config': 'z_image_turbo',
     }
     sdcpp.update(sdcpp_overrides)
     return {'type': _SDCPP_TYPE, 'timeout': 300, _SDCPP_TYPE: sdcpp}
 
 
-def _preset(**over):
-    """A resolved-style preset (model-file paths already absolute)."""
+def _model_cfg(**over):
+    """A resolved-style model config (model-file paths already absolute)."""
     p = {
-        'model_arg': 'model',
-        'model': r'C:\models\ckpt.safetensors',
+        'diffusion_model': r'C:\models\ckpt.safetensors',
         'vae': r'C:\models\vae.safetensors',
         'clip_l': '', 'clip_g': '', 't5xxl': '', 'llm': '',
         'sampler': 'euler_a',
@@ -75,17 +77,16 @@ def sdcpp_cfg(tmp_path):
         _SDCPP_TYPE: {
             'binary': str(bin_path),
             'models_dir': r'C:\models',
-            'default_model': 'sdxl',
+            'config_dir': r'C:\configs',
+            'default_sdcpp_config': 'z_image_turbo',
             'timeout': 900,
-            'presets': {'sdxl': {'model_arg': 'model', 'model': 'c.safetensors',
-                                 'vae': 'v.safetensors'}},
         },
     }
 
 
-def _resolved_preset():
+def _resolved_config():
     return {
-        'model_arg': 'model', 'model': r'C:\models\c.safetensors',
+        'diffusion_model': r'C:\models\c.safetensors',
         'vae': r'C:\models\v.safetensors', 'steps': 20, 'cfg_scale': 7.0,
         'width': 512, 'height': 512, 'sampler': 'euler_a', 'guidance': None,
     }
@@ -114,163 +115,239 @@ def _fake_run_write_bytes(data=b'\x89PNG-fake-bytes'):
 # ── _sdcpp_argv (pure) ───────────────────────────────────────────────────────
 
 class TestSdcppArgv:
-    def test_model_arg_selects_flag(self):
-        cfg = _cfg()
-        argv = _sdcpp_argv(cfg, _preset(model_arg='model'), prompt='x', output_path='/out.png')
-        assert '-m' in argv and '--diffusion-model' not in argv
-        argv2 = _sdcpp_argv(cfg, _preset(model_arg='diffusion_model'), prompt='x', output_path='/out.png')
-        assert '--diffusion-model' in argv2 and '-m' not in argv2
+    def test_always_diffusion_model_flag(self):
+        # The redesign always emits --diffusion-model (the -m toggle is dropped).
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', output_path='/out.png')
+        assert '--diffusion-model' in argv and '-m' not in argv
+        assert argv[argv.index('--diffusion-model') + 1] == r'C:\models\ckpt.safetensors'
 
     def test_te_flags_omitted_when_empty(self):
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', output_path='/out.png')
         for flag in ('--clip_l', '--clip_g', '--t5xxl', '--llm'):
             assert flag not in argv
 
     def test_all_te_flags_emitted_in_order(self):
-        preset = _preset(clip_l='cl', clip_g='cg', t5xxl='t5', llm='llm', vae='vae')
-        argv = _sdcpp_argv(_cfg(), preset, prompt='x', output_path='/out.png')
+        model_cfg = _model_cfg(clip_l='cl', clip_g='cg', t5xxl='t5', llm='llm', vae='vae')
+        argv = _sdcpp_argv(_cfg(), model_cfg, prompt='x', output_path='/out.png')
         idx = [argv.index(f) for f in ('--clip_l', '--clip_g', '--t5xxl', '--llm', '--vae')]
         assert idx == sorted(idx)
 
     def test_seed_none_is_explicit_random(self):
         # F3: seed=None -> -s -1 (explicit random), NOT omitted.
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', output_path='/out.png')
         assert argv[argv.index('-s') + 1] == '-1'
 
     def test_seed_negative_is_random(self):
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', seed=-1, output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', seed=-1, output_path='/out.png')
         assert argv[argv.index('-s') + 1] == '-1'
 
     def test_seed_explicit(self):
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', seed=42, output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', seed=42, output_path='/out.png')
         assert argv[argv.index('-s') + 1] == '42'
 
     def test_seed_non_numeric_is_random(self):
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', seed='garbage', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', seed='garbage', output_path='/out.png')
         assert argv[argv.index('-s') + 1] == '-1'
 
-    def test_param_overrides_preset(self):
-        argv = _sdcpp_argv(_cfg(), _preset(steps=20), prompt='x', steps=4, output_path='/out.png')
+    def test_param_overrides_config(self):
+        argv = _sdcpp_argv(_cfg(), _model_cfg(steps=20), prompt='x', steps=4, output_path='/out.png')
         assert argv[argv.index('--steps') + 1] == '4'
 
-    def test_preset_default_used(self):
-        argv = _sdcpp_argv(_cfg(), _preset(steps=20), prompt='x', output_path='/out.png')
+    def test_config_default_used(self):
+        argv = _sdcpp_argv(_cfg(), _model_cfg(steps=20), prompt='x', output_path='/out.png')
         assert argv[argv.index('--steps') + 1] == '20'
 
     def test_final_fallback(self):
-        preset = _preset()
+        model_cfg = _model_cfg()
         for k in ('steps', 'cfg_scale', 'width', 'height'):
-            del preset[k]
-        argv = _sdcpp_argv(_cfg(), preset, prompt='x', output_path='/out.png')
+            del model_cfg[k]
+        argv = _sdcpp_argv(_cfg(), model_cfg, prompt='x', output_path='/out.png')
         assert argv[argv.index('--steps') + 1] == '20'
         assert argv[argv.index('--cfg-scale') + 1] == '7'
         assert argv[argv.index('-W') + 1] == '512'
         assert argv[argv.index('-H') + 1] == '512'
 
     def test_guidance_omitted_when_none(self):
-        argv = _sdcpp_argv(_cfg(), _preset(guidance=None), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(guidance=None), prompt='x', output_path='/out.png')
         assert '--guidance' not in argv
 
     def test_guidance_emitted_when_set(self):
-        argv = _sdcpp_argv(_cfg(), _preset(guidance=3.5), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(guidance=3.5), prompt='x', output_path='/out.png')
         assert argv[argv.index('--guidance') + 1] == '3.5'
 
     def test_cfg_scale_g_formatting(self):
-        argv = _sdcpp_argv(_cfg(), _preset(cfg_scale=7.0), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(cfg_scale=7.0), prompt='x', output_path='/out.png')
         assert argv[argv.index('--cfg-scale') + 1] == '7'
+
+    def test_sampler_from_config(self):
+        # The sampler is config-file-only (the tool param was dropped).
+        argv = _sdcpp_argv(_cfg(), _model_cfg(sampler='euler'), prompt='x', output_path='/out.png')
+        assert argv[argv.index('--sampling-method') + 1] == 'euler'
 
     def test_prompt_is_single_argv_element(self):
         # Regression for the cmd /c discovery: a prompt with spaces AND commas
         # must appear as exactly one element, unmodified.
         prompt = 'a red cube, on a white background'
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt=prompt, output_path='/out.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt=prompt, output_path='/out.png')
         assert argv.count(prompt) == 1
         assert argv[argv.index('-p') + 1] == prompt
 
     def test_prompt_starting_with_dash_rejected(self):
         # F8
         with pytest.raises(ValueError):
-            _sdcpp_argv(_cfg(), _preset(), prompt='--foo', output_path='/out.png')
+            _sdcpp_argv(_cfg(), _model_cfg(), prompt='--foo', output_path='/out.png')
 
     def test_prompt_leading_space_then_dash_rejected(self):
         # F8 (first NON-space char is '-')
         with pytest.raises(ValueError):
-            _sdcpp_argv(_cfg(), _preset(), prompt='  --foo', output_path='/out.png')
+            _sdcpp_argv(_cfg(), _model_cfg(), prompt='  --foo', output_path='/out.png')
 
     def test_paths_passed_through_verbatim(self):
-        preset = _preset(model=r'C:\models\sub\ckpt.safetensors')
-        argv = _sdcpp_argv(_cfg(), preset, prompt='x', output_path='/out.png')
+        model_cfg = _model_cfg(diffusion_model=r'C:\models\sub\ckpt.safetensors')
+        argv = _sdcpp_argv(_cfg(), model_cfg, prompt='x', output_path='/out.png')
         assert r'C:\models\sub\ckpt.safetensors' in argv
 
     def test_extra_args_appended_verbatim(self):
         cfg = _cfg(extra_args=['--fa', '--split-mode', 'l'])
-        argv = _sdcpp_argv(cfg, _preset(), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(cfg, _model_cfg(), prompt='x', output_path='/out.png')
         assert argv[-3:] == ['--fa', '--split-mode', 'l']
 
     def test_offload_and_backend_flags(self):
         cfg = _cfg(backend='diffusion=CUDA0', offload_to_cpu=True)
-        argv = _sdcpp_argv(cfg, _preset(), prompt='x', output_path='/out.png')
+        argv = _sdcpp_argv(cfg, _model_cfg(), prompt='x', output_path='/out.png')
         assert 'diffusion=CUDA0' in argv and '--offload-to-cpu' in argv
-        argv2 = _sdcpp_argv(_cfg(), _preset(), prompt='x', output_path='/out.png')
+        argv2 = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', output_path='/out.png')
         assert '--offload-to-cpu' not in argv2 and 'diffusion=CUDA0' not in argv2
 
     def test_output_path_always_present(self):
-        argv = _sdcpp_argv(_cfg(), _preset(), prompt='x', output_path='/out/abs.png')
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='x', output_path='/out/abs.png')
         assert argv[argv.index('-o') + 1] == '/out/abs.png'
 
 
-# ── _resolve_sdcpp_preset ────────────────────────────────────────────────────
+# ── _list_sdcpp_configs ──────────────────────────────────────────────────────
+
+class TestListSdcppConfigs:
+    def test_empty_dir_returns_empty(self, tmp_path):
+        d = tmp_path / 'cfgs'
+        d.mkdir()
+        assert _list_sdcpp_configs(str(d)) == []
+
+    def test_missing_dir_returns_empty(self, tmp_path):
+        assert _list_sdcpp_configs(str(tmp_path / 'nope')) == []
+
+    def test_lists_json_stems_sorted(self, tmp_path):
+        d = tmp_path / 'cfgs'
+        d.mkdir()
+        (d / 'z_image_turbo.json').write_text('{}')
+        (d / 'anima.json').write_text('{}')
+        (d / 'notes.txt').write_text('ignore me')
+        (d / 'flux2_klein_9b.json.example').write_text('{}')  # non-.json, hidden
+        configs = _list_sdcpp_configs(str(d))
+        names = [c['name'] for c in configs]
+        assert names == ['anima', 'z_image_turbo']  # sorted, .txt and .example excluded
+        assert all(c['path'].endswith('.json') for c in configs)
+
+
+# ── _resolve_sdcpp_config ────────────────────────────────────────────────────
 
 class TestSdcppConfigResolution:
-    def _cfg_with_files(self, tmp_path, present):
+    def _cfg_with_files(self, tmp_path, present, config_name='z_image_turbo',
+                        config=None, global_overrides=None):
+        """Create a config_dir with one config file and a models_dir with `present`."""
+        if config is None:
+            config = {'diffusion_model': 'c.safetensors', 'vae': 'v.safetensors'}
         models = tmp_path / 'models'
+        models.mkdir(parents=True, exist_ok=True)
         for name in present:
             p = models / name
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text('x')
+        cfg_dir = tmp_path / 'sdcpp_configs'
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / f'{config_name}.json').write_text(json.dumps(config))
         sdcpp = {
             'binary': 'sd-cli',
             'models_dir': str(models),
-            'default_model': 'sdxl',
-            'presets': {'sdxl': {'model_arg': 'model', 'model': 'ckpt.safetensors',
-                                 'vae': 'vae.safetensors'}},
+            'config_dir': str(cfg_dir),
+            'default_sdcpp_config': config_name,
         }
+        if global_overrides:
+            sdcpp.update(global_overrides)
         return {'type': _SDCPP_TYPE, _SDCPP_TYPE: sdcpp}
 
-    def test_default_model_used(self, tmp_path):
-        cfg = self._cfg_with_files(tmp_path, ['ckpt.safetensors', 'vae.safetensors'])
-        preset = _resolve_sdcpp_preset(cfg, None)
-        assert preset['model'].endswith('ckpt.safetensors')
-        assert preset['vae'].endswith('vae.safetensors')
+    def test_default_config_used(self, tmp_path):
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors', 'v.safetensors'])
+        model_cfg = _resolve_sdcpp_config(cfg, None)
+        assert model_cfg['diffusion_model'].endswith('c.safetensors')
+        assert model_cfg['vae'].endswith('v.safetensors')
 
-    def test_missing_preset_raises_with_names(self, tmp_path):
-        cfg = self._cfg_with_files(tmp_path, ['ckpt.safetensors', 'vae.safetensors'])
+    def test_explicit_name_used(self, tmp_path):
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors', 'v.safetensors'])
+        model_cfg = _resolve_sdcpp_config(cfg, 'z_image_turbo')
+        assert model_cfg['diffusion_model'].endswith('c.safetensors')
+
+    def test_missing_config_raises_with_names(self, tmp_path):
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors', 'v.safetensors'])
         with pytest.raises(RuntimeError) as exc:
-            _resolve_sdcpp_preset(cfg, 'nope')
+            _resolve_sdcpp_config(cfg, 'nope')
         assert 'nope' in str(exc.value)
-        assert 'sdxl' in str(exc.value)  # available names listed
+        assert 'z_image_turbo' in str(exc.value)  # available names listed
 
     def test_missing_model_file_raises_naming_all_missing(self, tmp_path):
         # Only the checkpoint present; the VAE is missing -> named in the message.
-        cfg = self._cfg_with_files(tmp_path, ['ckpt.safetensors'])
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors'])
         with pytest.raises(RuntimeError) as exc:
-            _resolve_sdcpp_preset(cfg, 'sdxl')
+            _resolve_sdcpp_config(cfg, 'z_image_turbo')
         msg = str(exc.value)
         assert 'not found' in msg
-        assert 'vae.safetensors' in msg
+        assert 'v.safetensors' in msg
 
     def test_model_key_absent_raises(self, tmp_path):
-        cfg = self._cfg_with_files(tmp_path, ['vae.safetensors'])
-        cfg[_SDCPP_TYPE]['presets']['sdxl'] = {'model_arg': 'model', 'vae': 'vae.safetensors'}
+        cfg = self._cfg_with_files(tmp_path, ['v.safetensors'],
+                                   config={'vae': 'v.safetensors'})
         with pytest.raises(RuntimeError) as exc:
-            _resolve_sdcpp_preset(cfg, 'sdxl')
-        assert "no 'model'" in str(exc.value)
+            _resolve_sdcpp_config(cfg, 'z_image_turbo')
+        assert "no 'diffusion_model'" in str(exc.value)
 
-    def test_no_presets_raises(self):
-        cfg = {'type': _SDCPP_TYPE, _SDCPP_TYPE: {'binary': 'sd-cli'}}
+    def test_no_configs_raises(self, tmp_path):
+        cfg_dir = tmp_path / 'empty_configs'
+        cfg_dir.mkdir()
+        cfg = {'type': _SDCPP_TYPE, _SDCPP_TYPE: {
+            'binary': 'sd-cli', 'config_dir': str(cfg_dir),
+            'default_sdcpp_config': '',
+        }}
         with pytest.raises(RuntimeError) as exc:
-            _resolve_sdcpp_preset(cfg, None)
-        assert 'presets' in str(exc.value)
+            _resolve_sdcpp_config(cfg, None)
+        assert 'none' in str(exc.value)
+
+    def test_full_path_fallback(self, tmp_path):
+        # Q1: a full .json path is used directly, bypassing the dir scan.
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors', 'v.safetensors'])
+        full_path = str(tmp_path / 'sdcpp_configs' / 'z_image_turbo.json')
+        model_cfg = _resolve_sdcpp_config(cfg, full_path)
+        assert model_cfg['diffusion_model'].endswith('c.safetensors')
+
+    def test_binary_models_dir_inheritance(self, tmp_path):
+        # Inheritable values fall through to the global sdcpp block.
+        cfg = self._cfg_with_files(tmp_path, ['c.safetensors', 'v.safetensors'])
+        model_cfg = _resolve_sdcpp_config(cfg, 'z_image_turbo')
+        assert model_cfg['binary'] == 'sd-cli'  # inherited from global
+        assert model_cfg['models_dir'].endswith('models')
+
+    def test_per_file_models_dir_override(self, tmp_path):
+        # A config file that sets its own models_dir wins over the global.
+        models2 = tmp_path / 'models2'
+        models2.mkdir()
+        (models2 / 'c.safetensors').write_text('x')
+        (models2 / 'v.safetensors').write_text('x')
+        cfg = self._cfg_with_files(
+            tmp_path, ['c.safetensors', 'v.safetensors'],
+            config={'diffusion_model': 'c.safetensors', 'vae': 'v.safetensors',
+                    'models_dir': str(models2)},
+        )
+        model_cfg = _resolve_sdcpp_config(cfg, 'z_image_turbo')
+        assert model_cfg['models_dir'] == str(models2)
+        assert model_cfg['diffusion_model'].endswith('c.safetensors')
 
 
 # ── _handle_sdcpp (mocked) ───────────────────────────────────────────────────
@@ -279,14 +356,14 @@ class TestSdcppHandleMocked:
     def test_success_returns_uncaptioned_image(self, sdcpp_cfg):
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
-             patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
-             patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+              patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
             result = tool.call({'prompt': 'a red cube'})
 
         assert len(result) == 2
@@ -316,14 +393,14 @@ class TestSdcppHandleMocked:
             return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
 
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
-             patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
-             patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
+              patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
             tool.call({'prompt': 'a red cube'})
 
         assert order == ['save', 'unload', 'run', 'restore']
@@ -337,13 +414,13 @@ class TestSdcppHandleMocked:
             raise RuntimeError('unload blew up')
 
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
-             patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
-             patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
             result = tool.call({'prompt': 'a red cube'})
 
         m_restore.assert_called_once()
@@ -357,10 +434,10 @@ class TestSdcppHandleMocked:
                                                stderr=b'boom: some fatal detail')
 
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
             result = tool.call({'prompt': 'a red cube'})
 
         assert 'ERROR' in result[0].text
@@ -375,10 +452,10 @@ class TestSdcppHandleMocked:
                                                stderr=b'GGML_ASSERT(ggml_can_repeat) failed')
 
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
             result = tool.call({'prompt': 'a red cube'})
 
         assert '3221226505' in result[0].text
@@ -390,14 +467,14 @@ class TestSdcppHandleMocked:
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
-             patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
-             patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+              patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
             result = tool.call({'prompt': 'a red cube'})
 
         assert 'ERROR' in result[0].text
@@ -412,10 +489,10 @@ class TestSdcppHandleMocked:
             return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
 
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
             result = tool.call({'prompt': 'a red cube'})
 
         assert 'ERROR' in result[0].text
@@ -424,13 +501,13 @@ class TestSdcppHandleMocked:
     def test_save_state_fails_no_restore(self, sdcpp_cfg):
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', return_value=False), \
-             patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', return_value=False), \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
             result = tool.call({'prompt': 'a red cube'})
 
         assert result[0].image == '/tmp/media/out.png'
@@ -439,14 +516,14 @@ class TestSdcppHandleMocked:
     def test_media_save_failure_still_restores(self, sdcpp_cfg):
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', side_effect=OSError('disk full')), \
-             patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
-             patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
-             patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
-             patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', side_effect=OSError('disk full')), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
+              patch('agent_cascade.state_ops.unload_all_models', return_value=True), \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
             result = tool.call({'prompt': 'a red cube'})
 
         m_restore.assert_called_once()
@@ -464,11 +541,11 @@ class TestSdcppHandleMocked:
             return fd, path
 
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.tools.image_gen.tempfile.mkstemp', side_effect=_mkstemp):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.tools.image_gen.tempfile.mkstemp', side_effect=_mkstemp):
             result = tool.call({'prompt': 'a red cube'})
 
         assert result[0].image == '/tmp/media/out.png'
@@ -490,11 +567,11 @@ class TestSdcppHandleMocked:
             return subprocess.CompletedProcess(args=argv, returncode=1, stdout=b'', stderr=b'fail')
 
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
-             patch('agent_cascade.tools.image_gen.tempfile.mkstemp', side_effect=_mkstemp):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.tools.image_gen.tempfile.mkstemp', side_effect=_mkstemp):
             result = tool.call({'prompt': 'a red cube'})
 
         assert 'ERROR' in result[0].text
@@ -505,9 +582,9 @@ class TestSdcppHandleMocked:
         # F8 end-to-end: a dash-prefixed prompt is rejected cleanly, not a crash.
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._resolve_sdcpp_preset', return_value=_resolved_preset()), \
-             patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
             result = tool.call({'prompt': '--evil'})
 
         assert 'ERROR' in result[0].text
@@ -516,8 +593,8 @@ class TestSdcppHandleMocked:
     def test_input_image_rejected_for_sdcpp(self, sdcpp_cfg):
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
             result = tool.call({'prompt': 'a red cube', 'input_image': 'C:\\ref.png'})
 
         assert 'ERROR' in result[0].text
@@ -528,8 +605,8 @@ class TestSdcppHandleMocked:
         cfg = {'type': _SDCPP_TYPE, 'timeout': 300}  # no sdcpp block
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=cfg), \
-             patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
+              patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=cfg), \
+              patch('agent_cascade.tools.image_gen.subprocess.run') as m_run:
             result = tool.call({'prompt': 'a red cube'})
 
         assert 'ERROR' in result[0].text
@@ -540,17 +617,17 @@ class TestSdcppHandleMocked:
         # No 'type' key -> ComfyUI path; _sdcpp_generate never called.
         tool = ImageGen()
         with patch.object(tool, '_get_instance', return_value=None), \
-             patch('agent_cascade.tools.image_gen._get_image_gen_config',
-                   return_value={'url': 'http://comfyui:8188', 'timeout': 60,
-                                 'default_workflow': '/wf/test.json'}), \
-             patch('agent_cascade.tools.image_gen._load_workflow',
-                   return_value={'1': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}}}), \
-             patch('agent_cascade.tools.image_gen._inject_params',
-                   side_effect=lambda wf, **kw: (wf, ['prompt → 1'])), \
-             patch('agent_cascade.tools.image_gen._comfyui_generate',
-                   return_value=(b'fake_png', {'seed': 1})), \
-             patch('agent_cascade.tools.image_gen._sdcpp_generate') as m_sdcpp, \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
+              patch('agent_cascade.tools.image_gen._get_image_gen_config',
+                    return_value={'url': 'http://comfyui:8188', 'timeout': 60,
+                                  'default_workflow': '/wf/test.json'}), \
+              patch('agent_cascade.tools.image_gen._load_workflow',
+                    return_value={'1': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}}}), \
+              patch('agent_cascade.tools.image_gen._inject_params',
+                    side_effect=lambda wf, **kw: (wf, ['prompt → 1'])), \
+              patch('agent_cascade.tools.image_gen._comfyui_generate',
+                    return_value=(b'fake_png', {'seed': 1})), \
+              patch('agent_cascade.tools.image_gen._sdcpp_generate') as m_sdcpp, \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/out.png'):
             result = tool.call({'prompt': 'a red cube'})
 
         assert result[0].image == '/tmp/media/out.png'
@@ -561,9 +638,9 @@ class TestSdcppHandleMocked:
         tool = ImageGen()
         svg = '<svg width="10" height="10"><rect width="10" height="10"/></svg>'
         with patch('agent_cascade.tools.image_gen._get_image_gen_config', return_value=sdcpp_cfg), \
-             patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes', return_value=b'png'), \
-             patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/svg.png'), \
-             patch('agent_cascade.tools.image_gen._sdcpp_generate') as m_sdcpp:
+              patch('agent_cascade.tools.image_gen._render_svg_to_png_bytes', return_value=b'png'), \
+              patch('agent_cascade.tools.image_gen.save_image_to_media', return_value='/tmp/media/svg.png'), \
+              patch('agent_cascade.tools.image_gen._sdcpp_generate') as m_sdcpp:
             result = tool.call({'prompt': svg})
 
         assert result[0].image == '/tmp/media/svg.png'

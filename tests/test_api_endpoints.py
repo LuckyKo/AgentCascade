@@ -2198,9 +2198,9 @@ class TestImageGenConfigSdcpp:
             'sdcpp': {
                 'binary': r'C:\bin\sd-cli.exe',
                 'models_dir': r'C:\models',
-                'default_model': 'sdxl-pony',
+                'config_dir': r'C:\configs',
+                'default_sdcpp_config': 'z_image_turbo',
                 'timeout': 900,
-                'presets': {'sdxl-pony': {'model': 'a.safetensors', 'vae': 'b.safetensors'}},
             },
         }
         resp = self._post(client, payload)
@@ -2210,8 +2210,8 @@ class TestImageGenConfigSdcpp:
         got = client.get('/api/image_gen').json()
         assert got['type'] == 'sdcpp'
         assert got['sdcpp']['timeout'] == 900
-        assert got['sdcpp']['default_model'] == 'sdxl-pony'
-        assert 'sdxl-pony' in got['sdcpp']['presets']
+        assert got['sdcpp']['default_sdcpp_config'] == 'z_image_turbo'
+        assert got['sdcpp']['config_dir'] == r'C:\configs'
 
     def test_sdcpp_timeout_out_of_range_rejected(self, client, _isolate_config):
         # F2: sdcpp.timeout must be an int in 30-1800.
@@ -2252,3 +2252,30 @@ class TestImageGenConfigSdcpp:
     def test_sdcpp_binary_must_be_nonempty_string(self, client, _isolate_config):
         resp = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': ''}})
         assert resp.status_code == 400
+
+    def test_sdcpp_config_dir_must_be_nonempty_string(self, client, _isolate_config):
+        # config_dir, like binary, must be a non-empty string when present.
+        resp = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': 'b', 'config_dir': ''}})
+        assert resp.status_code == 400
+        resp2 = self._post(client, {'type': 'sdcpp', 'sdcpp': {'binary': 'b', 'config_dir': 123}})
+        assert resp2.status_code == 400
+
+    def test_sdcpp_configs_endpoint_lists_configs(self, client, _isolate_config, tmp_path):
+        # GET /api/image_gen/sdcpp_configs mirrors /api/image_gen/workflows: it lists
+        # the .json stems from the configured config_dir (sorted, non-.json excluded).
+        cfg_dir = tmp_path / 'sdcpp_configs'
+        cfg_dir.mkdir()
+        (cfg_dir / 'z_image_turbo.json').write_text('{}')
+        (cfg_dir / 'anima.json').write_text('{}')
+        (cfg_dir / 'notes.txt').write_text('ignore me')
+        (cfg_dir / 'flux2_klein_9b.json.example').write_text('{}')  # hidden
+        payload = {
+            'type': 'sdcpp',
+            'sdcpp': {'binary': 'b', 'config_dir': str(cfg_dir), 'timeout': 900},
+        }
+        assert self._post(client, payload).status_code == 200
+        resp = client.get('/api/image_gen/sdcpp_configs')
+        assert resp.status_code == 200
+        names = [c['name'] for c in resp.json()]
+        assert names == ['anima', 'z_image_turbo']
+        assert all(c['path'].endswith('.json') for c in resp.json())

@@ -1,0 +1,13 @@
+{
+  "name": "Z-Image-Turbo (fast)",
+  "diffusion_model": "diffusion_models/z-image-turbo-fp8-e4m3fn.safetensors",
+  "llm": "text_encoders/Qwen3-4B-Q6_K.gguf",
+  "vae": "vae/ae.safetensors",
+  "sampler": "euler_a",
+  "guidance": 1.0,
+  "cfg_scale": 1.0,
+  "steps": 6,
+  "width": 512,
+  "height": 512,
+  "notes": "VERIFIED working. Distilled turbo model: cfg=1, steps 4-8. ~17-21s at 512x512."
+}

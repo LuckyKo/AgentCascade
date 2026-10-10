@@ -5,15 +5,11 @@
   "timeout": 180,
   "default_workflow": "",
   "sdcpp": {
-    "binary": "C:\\bin\\sd-cli.exe",
-    "models_dir": "C:\\models",
-    "default_model": "sdxl-pony",
+    "binary": "N:\\work\\stuff\\Beta\\image\\sd-master-228c707-bin-win-cuda12-x64\\sd-cli.exe",
+    "models_dir": "N:\\work\\stuff\\ComfyUI_models\\models",
+    "config_dir": "N:\\work\\WD\\AgentCascade\\config\\sdcpp",
+    "default_sdcpp_config": "z_image_turbo",
     "timeout": 900,
-    "presets": {
-      "sdxl-pony": {
-        "model": "a.safetensors",
-        "vae": "b.safetensors"
-      }
-    }
+    "offload_to_cpu": false
   }
 }

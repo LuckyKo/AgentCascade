@@ -1795,6 +1795,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             binary = sdcpp_cfg.get('binary')
             if binary is not None and (not isinstance(binary, str) or not binary):
                 return JSONResponse(status_code=400, content={'message': 'sdcpp.binary must be a non-empty string'})
+            config_dir = sdcpp_cfg.get('config_dir')
+            if config_dir is not None and (not isinstance(config_dir, str) or not config_dir):
+                return JSONResponse(status_code=400, content={'message': 'sdcpp.config_dir must be a non-empty string'})
             config['sdcpp'] = sdcpp_cfg
 
         try:
@@ -1819,6 +1822,19 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # is populated even before the user has saved any settings.
             wf_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'workflows')
         return _list_workflows(wf_dir)
+
+    @app.get('/api/image_gen/sdcpp_configs')
+    async def list_image_gen_sdcpp_configs():
+        """List available sdcpp model config files from the configured config_dir."""
+        from agent_cascade.tools.image_gen import _get_image_gen_config, _list_sdcpp_configs
+        cfg = _get_image_gen_config()
+        sdcpp = cfg.get('sdcpp') or {}
+        cfg_dir = sdcpp.get('config_dir', '') if isinstance(sdcpp, dict) else ''
+        if not cfg_dir:
+            # Fall back to the default sdcpp config dir so the UI pulldown is
+            # populated even before the user has saved any settings.
+            cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'sdcpp')
+        return _list_sdcpp_configs(cfg_dir)
 
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
     def start_gen(history, runner, gen_id, loop, target=None):

@@ -209,6 +209,21 @@ def _list_workflows(workflow_dir: str) -> List[dict]:
     return workflows
 
 
+def _list_sdcpp_configs(config_dir: str) -> List[dict]:
+    """Return available sdcpp model config files as ``[{'name': ..., 'path': ...}, ...]``.
+
+    Mirrors ``_list_workflows``. ``name`` is the filename stem — the identifier the
+    ``sdcpp_config`` param resolves. Returns ``[]`` if the directory does not exist
+    or contains no JSON files.
+    """
+    d = Path(config_dir)
+    if not d.exists() or not d.is_dir():
+        return []
+    configs = [{'name': f.stem, 'path': str(f)} for f in d.glob('*.json')]
+    configs.sort(key=lambda c: (c['name'], c['path']))
+    return configs
+
+
 def _inject_params(workflow: dict, prompt: str, negative_prompt: str = '',
                    width: Optional[int] = None, height: Optional[int] = None,
                    seed: Optional[int] = None) -> Tuple[dict, List[str]]:
@@ -334,6 +349,77 @@ def _inject_params(workflow: dict, prompt: str, negative_prompt: str = '',
     return workflow, report
 
 
+def _inject_sampler_params(workflow: dict, *, guidance: Optional[float] = None,
+                           steps: Optional[int] = None) -> Tuple[dict, List[str]]:
+    """Optionally override ``cfg``/``steps`` on KSampler-family nodes (mutates in place).
+
+    Non-destructive and never-raises: only writes ``inputs['cfg']`` / ``inputs['steps']``
+    on ``KSampler``/``KSamplerAdvanced`` nodes whose current value is a plain scalar
+    (int/float, not bool). Node references (``["node_id", idx]``), ``KSamplerSelect``
+    (a sampler chooser with no cfg/steps), ``CFGGuider``/``Flux2Scheduler`` (cfg carried
+    as a node ref) and UI-format graphs (``"type"``/``"widgets_values"``) are left
+    untouched.
+
+    Ambiguity rule: if more than one matching node exists, a field is written to ALL of
+    them only when every node currently holds the same scalar value for that field;
+    otherwise the field is skipped (a multi-stage graph with differing steps is
+    intentional, and a silent overwrite would change image semantics).
+
+    Returns ``(workflow, report)``. When both ``guidance`` and ``steps`` are ``None``
+    this is a true no-op — it returns immediately and writes nothing (the
+    byte-identical ComfyUI guarantee).
+    """
+    if guidance is None and steps is None:
+        return workflow, []
+
+    report: List[str] = []
+    fields: List[Tuple[str, float]] = []
+    if guidance is not None:
+        fields.append(('cfg', float(guidance)))
+    if steps is not None:
+        fields.append(('steps', int(steps)))
+
+    # Collect scalar-capable KSampler-family nodes.
+    samplers: List[Tuple[str, dict]] = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        if node.get('class_type') in ('KSampler', 'KSamplerAdvanced'):
+            inputs = node.get('inputs')
+            if isinstance(inputs, dict):
+                samplers.append((node_id, inputs))
+
+    if not samplers:
+        logger.debug('image_gen: no injectable KSampler node — guidance/steps not applied')
+        report.append('guidance/steps → skipped (no KSampler node)')
+        return workflow, report
+
+    for key, new_val in fields:
+        # Scalar-only guard + ambiguity rule, evaluated per field.
+        existing: List[float] = []
+        ok = True
+        for _nid, inputs in samplers:
+            val = inputs.get(key)
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                ok = False  # node ref / missing / non-numeric — cannot apply
+                break
+            existing.append(val)
+        if not ok:
+            logger.debug('image_gen: %s not applied — not a scalar on every KSampler node', key)
+            report.append(f'{key} → skipped (non-scalar)')
+            continue
+        if len(existing) > 1 and len(set(existing)) > 1:
+            logger.debug('image_gen: %s not applied — %d KSampler nodes disagree (%s)',
+                         key, len(existing), existing)
+            report.append(f'{key} → skipped (ambiguous)')
+            continue
+        for nid, inputs in samplers:
+            inputs[key] = new_val
+            report.append(f'{key}={new_val} → {nid}')
+
+    return workflow, report
+
+
 # ── ComfyUI client (submit / poll / download) ──────────────────────────────────
 
 def _extract_seed(workflow: dict) -> Optional[int]:
@@ -448,69 +534,101 @@ def _comfyui_generate(url: str, workflow: dict, timeout: int = 180,
 _SDCPP_TYPE = 'sdcpp'
 
 
-def _resolve_sdcpp_preset(cfg: dict, name: Optional[str] = None) -> dict:
-    """Pick an sdcpp preset by name and resolve its model files against models_dir.
+def _resolve_sdcpp_config(cfg: dict, name: Optional[str] = None) -> dict:
+    """Resolve an sdcpp model config file by name and its model files.
 
-    Falls back to ``sdcpp.default_model`` when ``name`` is None/empty. Raises
-    ``RuntimeError`` naming ALL missing files up front (pre-VRAM fast-fail, §4.3)
-    so a missing VAE is not discovered only after the LLM has already been
-    unloaded. Returns a copy of the preset dict with the model-file keys
-    (``model``/``vae``/``clip_l``/``clip_g``/``t5xxl``/``llm``) rewritten to
-    absolute paths.
+    ``name`` is the filename stem (primary) or a full ``.json`` path (documented
+    fallback, Q1). Falls back to ``sdcpp.default_sdcpp_config`` when ``name`` is
+    None/empty. Raises ``RuntimeError`` naming ALL missing files up front
+    (pre-VRAM fast-fail) so a missing VAE is not discovered only after the LLM has
+    already been unloaded. Returns a copy of the config dict with the model-file
+    keys (``diffusion_model``/``vae``/``clip_l``/``clip_g``/``t5xxl``/``llm``)
+    rewritten to absolute paths, plus the inherited ``binary``/``models_dir``
+    (per-file value > global ``sdcpp`` value).
     """
     sdcpp = cfg.get(_SDCPP_TYPE) or {}
     if not isinstance(sdcpp, dict):
         raise RuntimeError('sdcpp config block is missing or not an object')
 
-    presets = sdcpp.get('presets') or {}
-    if not isinstance(presets, dict) or not presets:
-        raise RuntimeError(
-            'No sdcpp presets configured. Add a "presets" object to the sdcpp config block.'
-        )
+    # config_dir: the global block value, else the built-in <repo>/config/sdcpp.
+    config_dir = sdcpp.get('config_dir')
+    if not config_dir:
+        config_dir = str(Path(__file__).resolve().parent.parent.parent / 'config' / 'sdcpp')
 
-    preset_name = name if name else sdcpp.get('default_model')
-    if not preset_name or preset_name not in presets:
-        available = ', '.join(sorted(presets.keys()))
-        raise RuntimeError(
-            f"sdcpp preset '{preset_name}' not found. Available presets: {available}"
-        )
+    # Select the file: explicit name > default. Q1: a value that is an existing
+    # .json path (absolute or relative) is used directly, bypassing the dir scan.
+    cfg_name = name if name else sdcpp.get('default_sdcpp_config')
+    if cfg_name and cfg_name.endswith('.json') and Path(cfg_name).is_file():
+        cfg_path = Path(cfg_name)
+    else:
+        available = _list_sdcpp_configs(config_dir)
+        if not cfg_name:
+            names = ', '.join(c['name'] for c in available) if available else 'none'
+            raise RuntimeError(
+                'No sdcpp config specified and no default configured. '
+                f'Available configs: {names}. Pass a filename stem via the '
+                "'sdcpp_config' parameter or set default_sdcpp_config in settings."
+            )
+        match = next((c for c in available if c['name'] == cfg_name), None)
+        if match is None:
+            names = ', '.join(c['name'] for c in available) if available else 'none'
+            raise RuntimeError(
+                f"sdcpp config '{cfg_name}' not found. Available configs: {names}"
+            )
+        cfg_path = Path(match['path'])
 
-    preset = dict(presets[preset_name])
-    models_dir = sdcpp.get('models_dir', '')
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            model_cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"sdcpp config file '{cfg_path}' is not valid JSON: {e}") from e
+    except OSError as e:
+        raise RuntimeError(f"sdcpp config file '{cfg_path}' could not be read: {e}") from e
+    if not isinstance(model_cfg, dict):
+        raise RuntimeError(f"sdcpp config file '{cfg_path}' must be a JSON object")
+
+    # Inheritable values: per-file override > global sdcpp value.
+    models_dir = model_cfg.get('models_dir') or sdcpp.get('models_dir', '')
+    model_cfg['models_dir'] = models_dir
+    if model_cfg.get('binary') is None:
+        model_cfg['binary'] = sdcpp.get('binary', '')
 
     def _join(rel: str) -> str:
         return str(Path(models_dir) / rel) if models_dir else str(rel)
 
     missing = []
-    for key in ('model', 'vae', 'clip_l', 'clip_g', 't5xxl', 'llm'):
-        rel = preset.get(key)
+    for key in ('diffusion_model', 'vae', 'clip_l', 'clip_g', 't5xxl', 'llm'):
+        rel = model_cfg.get(key)
         if rel:
             full = _join(rel)
             if not Path(full).is_file():
                 missing.append(full)
-            preset[key] = full
+            model_cfg[key] = full
 
-    if not preset.get('model'):
-        raise RuntimeError(f"sdcpp preset '{preset_name}' has no 'model' file configured")
+    if not model_cfg.get('diffusion_model'):
+        raise RuntimeError(
+            f"sdcpp config '{cfg_path.name}' has no 'diffusion_model' file configured"
+        )
     if missing:
         raise RuntimeError('sdcpp model file(s) not found: ' + ', '.join(missing))
-    return preset
+    return model_cfg
 
 
-def _sdcpp_argv(cfg: dict, preset: dict, *, prompt: str, negative_prompt: str = '',
+def _sdcpp_argv(cfg: dict, model_cfg: dict, *, prompt: str, negative_prompt: str = '',
                 width: Optional[int] = None, height: Optional[int] = None,
                 seed: Optional[int] = None, steps: Optional[int] = None,
                 cfg_scale: Optional[float] = None, guidance: Optional[float] = None,
-                sampler: Optional[str] = None, output_path: str) -> List[str]:
+                output_path: str) -> List[str]:
     """Build the sd-cli argv list. **Pure** — no I/O, no logging, no env reads.
 
     Emission order is fixed so unit tests can assert an exact list. Model paths
-    are already absolute (resolved by ``_resolve_sdcpp_preset``); this function
+    are already absolute (resolved by ``_resolve_sdcpp_config``); this function
     only selects the binary and formats scalars. It NEVER builds a command
     string — the caller runs ``subprocess.run(argv, shell=False)`` so the list
     form does its own quoting (a shell would split a multi-word prompt).
 
-    Resolution order for every numeric/dim: tool param > preset default > fallback.
+    Resolution order for every numeric/dim: tool param > config-file value >
+    built-in fallback. The sampler is config-file-only (the tool param is dropped).
     """
     sdcpp = cfg.get(_SDCPP_TYPE) or {}
 
@@ -524,21 +642,18 @@ def _sdcpp_argv(cfg: dict, preset: dict, *, prompt: str, negative_prompt: str = 
     argv: List[str] = [sdcpp.get('binary', 'sd-cli')]
     argv += ['-M', 'img_gen']
 
-    # Model selection: -m (full checkpoint) or --diffusion-model (standalone).
-    model = preset.get('model', '')
-    if preset.get('model_arg') == 'diffusion_model':
-        argv += ['--diffusion-model', model]
-    else:
-        argv += ['-m', model]
+    # Model selection: always a standalone diffusion model. The redesign drops the
+    # -m full-checkpoint toggle; every shipped recipe is diffusion+TE+VAE.
+    argv += ['--diffusion-model', model_cfg.get('diffusion_model', '')]
 
     # Text encoders + VAE — each only if non-empty, in fixed order.
     for flag, key in (('--clip_l', 'clip_l'), ('--clip_g', 'clip_g'),
                       ('--t5xxl', 't5xxl'), ('--llm', 'llm'), ('--vae', 'vae')):
-        val = preset.get(key)
+        val = model_cfg.get(key)
         if val:
             argv += [flag, val]
 
-    vae_format = preset.get('vae_format')
+    vae_format = model_cfg.get('vae_format')
     if vae_format:
         argv += ['--vae-format', vae_format]
 
@@ -547,24 +662,24 @@ def _sdcpp_argv(cfg: dict, preset: dict, *, prompt: str, negative_prompt: str = 
     if negative_prompt:
         argv += ['-n', negative_prompt]
 
-    # Dimensions: tool param > preset default > 512.
-    w = width if width else (preset.get('width') or 512)
-    h = height if height else (preset.get('height') or 512)
+    # Dimensions: tool param > config-file value > 512.
+    w = width if width else (model_cfg.get('width') or 512)
+    h = height if height else (model_cfg.get('height') or 512)
     argv += ['-W', str(int(w)), '-H', str(int(h))]
 
-    # Steps / cfg-scale: tool param > preset default > fallback.
-    s = steps if steps is not None else (preset.get('steps') or 20)
+    # Steps / cfg-scale: tool param > config-file value > built-in fallback.
+    s = steps if steps is not None else (model_cfg.get('steps') or 20)
     argv += ['--steps', str(int(s))]
-    c = cfg_scale if cfg_scale is not None else (preset.get('cfg_scale') or 7.0)
+    c = cfg_scale if cfg_scale is not None else (model_cfg.get('cfg_scale') or 7.0)
     argv += ['--cfg-scale', f'{float(c):g}']
 
-    # Guidance: only emitted when resolved non-None (tool param > preset).
-    g = guidance if guidance is not None else preset.get('guidance')
+    # Guidance: only emitted when resolved non-None (tool param > config file).
+    g = guidance if guidance is not None else model_cfg.get('guidance')
     if g is not None:
         argv += ['--guidance', f'{float(g):g}']
 
-    # Sampling method: tool param > preset default > omit.
-    sm = sampler if sampler is not None else preset.get('sampler')
+    # Sampling method: config-file value only (the sampler tool param is dropped).
+    sm = model_cfg.get('sampler')
     if sm:
         argv += ['--sampling-method', sm]
 
@@ -746,24 +861,32 @@ class ImageGen(BaseTool):
                     'Not used for SVG rendering.'
                 ),
             },
-            'model': {
+            'sdcpp_config': {
                 'type': 'string',
                 'description': (
-                    'Name of a stable-diffusion.cpp preset to use (only when type=sdcpp). '
-                    'If omitted, uses the default_model preset from settings.'
+                    'Name (filename stem) of an sdcpp model config in the configured '
+                    'sdcpp config directory (e.g. "z_image_turbo"). A full path to a '
+                    '.json file is also accepted. If omitted, uses default_sdcpp_config '
+                    'from settings. (sdcpp backend only)'
                 ),
-            },
-            'sampler': {
-                'type': 'string',
-                'description': 'Sampling method to pass to sd-cli (overrides the preset default, e.g. "euler_a").',
             },
             'guidance': {
                 'type': 'number',
-                'description': 'Guidance scale for sd-cli (overrides the preset default; omit to use the preset).',
+                'description': (
+                    'Guidance scale. sdcpp: overrides the config-file value, else the '
+                    'built-in fallback (cfg_scale 7.0). ComfyUI: optionally overrides cfg '
+                    'on KSampler nodes (no-op if the workflow has no scalar cfg). Omit to '
+                    'use the default.'
+                ),
             },
             'steps': {
                 'type': 'integer',
-                'description': 'Number of diffusion steps for sd-cli (overrides the preset default; lower = faster).',
+                'description': (
+                    'Number of diffusion steps. sdcpp: overrides the config-file value, '
+                    'else the built-in fallback of 20. ComfyUI: optionally overrides steps '
+                    'on KSampler nodes (no-op if the workflow has no scalar steps). '
+                    'Lower = faster.'
+                ),
             },
         },
         'required': ['prompt'],
@@ -900,6 +1023,15 @@ class ImageGen(BaseTool):
                 height=params.get('height'),
                 seed=params.get('seed'),
             )
+            # Optional non-destructive cfg/steps override on KSampler-family nodes.
+            # A true no-op (writes nothing) when both guidance and steps are None, so
+            # the ComfyUI path stays byte-identical (see _inject_sampler_params).
+            _, sampler_report = _inject_sampler_params(
+                workflow,
+                guidance=params.get('guidance'),
+                steps=params.get('steps'),
+            )
+            report.extend(sampler_report)
         except ValueError as e:
             return [ContentItem(text=f"ERROR: {e}")]
         logger.info('image_gen injection for %s: %s', Path(workflow_path).name, '; '.join(report))
@@ -1120,10 +1252,10 @@ class ImageGen(BaseTool):
         if params.get('input_image'):
             return [ContentItem(text='ERROR: input_image is not supported by the stable-diffusion.cpp backend.')]
 
-        # Resolve the preset + model files BEFORE touching VRAM, so a missing file
-        # fails fast without a wasted save/unload/restore cycle (§4.3).
+        # Resolve the model config + model files BEFORE touching VRAM, so a missing
+        # file fails fast without a wasted save/unload/restore cycle.
         try:
-            preset = _resolve_sdcpp_preset(config, params.get('model'))
+            model_cfg = _resolve_sdcpp_config(config, params.get('sdcpp_config'))
         except RuntimeError as e:
             return [ContentItem(text=f"ERROR: {e}")]
 
@@ -1136,7 +1268,7 @@ class ImageGen(BaseTool):
         # rejected here (F8) so list2cmdline can't mis-parse it as a flag.
         try:
             argv = _sdcpp_argv(
-                config, preset,
+                config, model_cfg,
                 prompt=params['prompt'],
                 negative_prompt=params.get('negative_prompt') or '',
                 width=params.get('width'),
@@ -1144,7 +1276,6 @@ class ImageGen(BaseTool):
                 seed=params.get('seed'),
                 steps=params.get('steps'),
                 guidance=params.get('guidance'),
-                sampler=params.get('sampler'),
                 output_path=out_path,
             )
         except ValueError as e:
@@ -1200,7 +1331,7 @@ class ImageGen(BaseTool):
 
         width = params.get('width') or 0
         height = params.get('height') or 0
-        preset_name = params.get('model') or sdcpp_cfg.get('default_model', '')
+        config_name = params.get('sdcpp_config') or sdcpp_cfg.get('default_sdcpp_config', '')
 
         # Primary restore now that all LLM-side work is done. There is no eager
         # captioning ahead of it (the image is returned uncaptioned), so this is
@@ -1208,7 +1339,7 @@ class ImageGen(BaseTool):
         if _state['saved'] and instance is not None:
             self._restore_vram_state(instance, _state['held'])
 
-        feedback = f"Generated image: {media_path} ({width}x{height}, model={preset_name}, backend=sdcpp)"
+        feedback = f"Generated image: {media_path} ({width}x{height}, config={config_name}, backend=sdcpp)"
         # The image item is intentionally left uncaptioned so the router's return-path
         # guard (_has_uncaptioned_images) auto-generates a genuine vision caption on
         # demand (same as the ComfyUI/SVG paths). The separate text item carries the

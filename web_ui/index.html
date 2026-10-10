@@ -897,14 +897,17 @@
                         <input type="text" id="ig-sdcpp-model-dir" placeholder="C:\...\ComfyUI_models\models">
                       </label>
                       <label class="setting-field">
-                        <span title="Preset used when the agent does not specify one">Default Preset</span>
-                        <select id="ig-sdcpp-preset">
-                          <option value="">— none —</option>
-                        </select>
+                        <span title="Directory scanned for per-model sdcpp config JSON files">Config Directory</span>
+                        <input type="text" id="ig-sdcpp-config-dir" placeholder="<AgentCascade_root>/config/sdcpp">
                       </label>
                       <label class="setting-field">
-                        <span title="JSON object mapping preset name → {model, vae, clip_l, ...} (model files relative to Models Directory)">Presets JSON</span>
-                        <textarea id="ig-sdcpp-presets-json" rows="5" style="font-family:monospace;font-size:11px;resize:vertical;" placeholder='{"sdxl-pony": {"model": "checkpoints/....safetensors", "vae": "vae/sdxl_vae.safetensors"}}'></textarea>
+                        <span title="Model config used when the agent does not specify one">Default Config</span>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                          <select id="ig-sdcpp-default-config" style="flex:1;">
+                            <option value="">— none —</option>
+                          </select>
+                          <button id="ig-refresh-sdcpp-configs" class="btn-small" title="Re-scan config directory for new files">⟳</button>
+                        </div>
                       </label>
                       <label class="setting-field">
                         <span title="Max seconds to wait for a local generation (30-1800)">Sdcli Timeout (s)</span>

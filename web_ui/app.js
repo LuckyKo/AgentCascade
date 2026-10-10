@@ -6885,6 +6885,9 @@ function renderAgentApiAssignments() {
 const IG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
 let igWorkflowsTimer = null;  // debounce handle for workflow-dir → re-fetch
 let igWorkflowsSeq = 0;       // discard stale async responses (rapid dir changes)
+const IG_DEFAULT_SDCPP_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/sdcpp';
+let igSdcppConfigsTimer = null;  // debounce handle for config-dir → re-fetch
+let igSdcppConfigsSeq = 0;       // discard stale async responses (rapid dir changes)
 let igInitialLoadDone = false; // one-shot guard: populate fields on first load only
 
 function _igSetStatus(msg, type) {
@@ -6942,24 +6945,35 @@ function _igToggleBackendVisibility(type) {
   if (sdcppBlock) sdcppBlock.style.display = (type === 'sdcpp') ? '' : 'none';
 }
 
-// Repopulate the sdcpp Default Preset pulldown from the Presets JSON textarea.
-// Invalid JSON yields an empty pulldown (the — none — option only).
-function _igPopulatePresetSelect(defaultName) {
-  const sel = document.getElementById('ig-sdcpp-preset');
-  const ta = document.getElementById('ig-sdcpp-presets-json');
+// Populate the sdcpp Default Config pulldown from GET /api/image_gen/sdcpp_configs.
+// Each option's value is the filename stem (what the tool resolves via sdcpp_config).
+// A sequence guard discards stale responses when the config dir is changed rapidly.
+async function loadImageGenSdcppConfigs(selectConfig) {
+  const sel = document.getElementById('ig-sdcpp-default-config');
   if (!sel) return;
-  let presets = {};
-  if (ta && ta.value.trim()) {
-    try {
-      const parsed = JSON.parse(ta.value);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) presets = parsed;
-    } catch (e) { /* invalid JSON → empty pulldown */ }
+  const seq = ++igSdcppConfigsSeq;
+  let configs = [];
+  try {
+    const res = await fetch('/api/image_gen/sdcpp_configs');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) configs = data;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch image gen sdcpp configs:', err);
   }
-  const names = Object.keys(presets);
-  sel.innerHTML = '<option value="">— none —</option>' + names.map(n =>
-    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`
+  if (seq !== igSdcppConfigsSeq) return; // a newer request superseded this one
+
+  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
   ).join('');
-  sel.value = (defaultName && names.includes(defaultName)) ? defaultName : '';
+
+  if (selectConfig) {
+    const match = [...sel.options].some(o => o.value === selectConfig);
+    sel.value = match ? selectConfig : '';
+  } else {
+    sel.value = '';
+  }
 }
 
 // Load current config from GET /api/image_gen and populate the fields.
@@ -6990,17 +7004,15 @@ async function loadImageGenSettings() {
   const sdcpp = (cfg.sdcpp && typeof cfg.sdcpp === 'object') ? cfg.sdcpp : {};
   const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
   const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
+  const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
   const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
-  const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
   if (igSdcppBinary) igSdcppBinary.value = sdcpp.binary || '';
   if (igSdcppModelDir) igSdcppModelDir.value = sdcpp.models_dir || '';
+  if (igSdcppConfigDir) igSdcppConfigDir.value = sdcpp.config_dir || IG_DEFAULT_SDCPP_CONFIG_DIR;
   if (igSdcppTimeout) igSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
-  if (igSdcppPresetsJson) {
-    igSdcppPresetsJson.value = sdcpp.presets ? JSON.stringify(sdcpp.presets, null, 2) : '';
-  }
-  _igPopulatePresetSelect(sdcpp.default_model);
 
   await loadImageGenWorkflows(cfg.default_workflow);
+  await loadImageGenSdcppConfigs(sdcpp.default_sdcpp_config);
 
   _igToggleBackendVisibility(igType.value);
 }
@@ -7045,32 +7057,21 @@ async function saveImageGenSettings() {
   if (isSdcpp) {
     const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
     const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
-    const igSdcppPreset = document.getElementById('ig-sdcpp-preset');
+    const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
+    const igSdcppDefaultConfig = document.getElementById('ig-sdcpp-default-config');
     const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
-    const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
 
     let sdcppTimeout = parseInt(igSdcppTimeout ? igSdcppTimeout.value : '', 10);
     if (isNaN(sdcppTimeout)) sdcppTimeout = 900;
     sdcppTimeout = Math.min(1800, Math.max(30, sdcppTimeout)); // F2: 30-1800 clamp
     if (igSdcppTimeout) igSdcppTimeout.value = String(sdcppTimeout);
 
-    let presets = {};
-    if (igSdcppPresetsJson && igSdcppPresetsJson.value.trim()) {
-      try {
-        const parsed = JSON.parse(igSdcppPresetsJson.value);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) presets = parsed;
-      } catch (e) {
-        _igSetStatus('✕ Presets JSON is not valid JSON', 'error');
-        return;
-      }
-    }
-
     body.sdcpp = {
       binary: (igSdcppBinary ? igSdcppBinary.value.trim() : ''),
       models_dir: (igSdcppModelDir ? igSdcppModelDir.value.trim() : ''),
-      default_model: (igSdcppPreset ? igSdcppPreset.value : ''),
-      timeout: sdcppTimeout,
-      presets: presets
+      config_dir: (igSdcppConfigDir ? igSdcppConfigDir.value.trim() : ''),
+      default_sdcpp_config: (igSdcppDefaultConfig ? igSdcppDefaultConfig.value : ''),
+      timeout: sdcppTimeout
     };
   }
 
@@ -7119,12 +7120,22 @@ function initImageGenSettings() {
     igType.addEventListener('change', () => _igToggleBackendVisibility(igType.value));
   }
 
-  // Repopulate the sdcpp Default Preset pulldown when the Presets JSON changes.
-  const igSdcppPresetsJson = document.getElementById('ig-sdcpp-presets-json');
-  if (igSdcppPresetsJson) {
-    igSdcppPresetsJson.addEventListener('change', () => {
-      const presetSel = document.getElementById('ig-sdcpp-preset');
-      _igPopulatePresetSelect(presetSel ? presetSel.value : '');
+  // Debounced re-fetch of the sdcpp config pulldown when the config directory changes.
+  const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
+  if (igSdcppConfigDir) {
+    igSdcppConfigDir.addEventListener('change', () => {
+      clearTimeout(igSdcppConfigsTimer);
+      igSdcppConfigsTimer = setTimeout(() => loadImageGenSdcppConfigs(), 400);
+    });
+  }
+
+  // Manual refresh button — re-scans the sdcpp config directory on demand.
+  const igRefreshSdcpp = document.getElementById('ig-refresh-sdcpp-configs');
+  if (igRefreshSdcpp) {
+    igRefreshSdcpp.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sel = document.getElementById('ig-sdcpp-default-config');
+      loadImageGenSdcppConfigs(sel ? sel.value : '');
     });
   }
 

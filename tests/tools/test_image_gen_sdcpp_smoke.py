@@ -44,9 +44,8 @@ class TestSdcppSmoke:
         if not binary or not Path(binary).is_file():
             pytest.skip(f'sd-cli binary not found at {binary!r}')
 
-        default_model = sdcpp.get('default_model', '')
-        presets = sdcpp.get('presets') or {}
-        assert default_model in presets, 'default_model preset missing from config'
+        default_config = sdcpp.get('default_sdcpp_config', '')
+        assert default_config, 'default_sdcpp_config missing from config'
 
         # ── Fake instance with a qualifying endpoint config ──────────────────
         inst = MagicMock()
@@ -95,7 +94,7 @@ class TestSdcppSmoke:
              patch('agent_cascade.tools.image_gen.tempfile.mkstemp', side_effect=_mkstemp):
             result = tool.call({
                 'prompt': 'a red cube on white background',
-                'model': default_model,
+                'sdcpp_config': default_config,
                 'width': 512, 'height': 512, 'steps': 4, 'seed': 42,
             })
 

@@ -506,11 +506,11 @@ TOOL_METADATA = {
     'image_gen': {
         'description': ('Generate an image from a text prompt (via ComfyUI or the local '
                         'stable-diffusion.cpp backend), or render SVG code to an image. '
-                        'Returns the image with a caption, same format as view_image. '
+                        'Returns the image uncaptioned, same format as view_image (the router auto-captions on return). '
                         'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
-                        "Use the 'workflow' parameter (full path to JSON) to select which saved ComfyUI workflow to use. "
-                        "With the stable-diffusion.cpp backend, use 'model' (a preset name) to pick the model, and "
-                        "'sampler'/'guidance'/'steps' to tune generation."),
+                        "ComfyUI: use the 'workflow' parameter (full path to JSON) to select a saved workflow. "
+                        "stable-diffusion.cpp: use 'sdcpp_config' (a config filename stem, e.g. \"z_image_turbo\") to pick a model config; "
+                        "'guidance' and 'steps' optionally override the config-file values on either backend."),
         'parameters': {
             'prompt': 'Text description for image generation, or SVG code to render',
             'negative_prompt': 'Elements to exclude from the generated image (API only)',
@@ -519,10 +519,9 @@ TOOL_METADATA = {
             'height': 'Output height in pixels (overrides workflow default)',
             'seed': 'Random seed for reproducibility (random if omitted)',
             'input_image': 'Image file path to use as reference or for editing',
-            'model': 'stable-diffusion.cpp preset name (e.g. "sdxl-pony"). Omit to use the default preset from settings.',
-            'sampler': 'stable-diffusion.cpp sampler (e.g. "euler"). Omit to use the backend default.',
-            'guidance': 'stable-diffusion.cpp guidance scale (float). Omit to use the backend default.',
-            'steps': 'stable-diffusion.cpp sampling steps (int). Omit to use the backend default.'
+            'sdcpp_config': 'stable-diffusion.cpp model config filename stem (e.g. "z_image_turbo"); a full .json path is also accepted. Omit to use the default from settings.',
+            'guidance': 'Guidance scale (float). sdcpp: overrides the config-file value. ComfyUI: optionally overrides cfg on KSampler nodes (no-op if none). Omit to use the default.',
+            'steps': 'Diffusion steps (int). sdcpp: overrides the config-file value. ComfyUI: optionally overrides steps on KSampler nodes (no-op if none). Lower = faster. Omit to use the default.'
         }
     },
     'web_search': {
