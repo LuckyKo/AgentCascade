@@ -14,6 +14,13 @@ The VRAM save/unload/restore seams are mocked (call-recording side effects) so t
 ordering can be asserted without a live autoloader; the subprocess.run is the REAL
 binary. This file is kept separate from the always-run unit suite so the skip
 logic cannot contaminate it.
+
+EXCLUDED FROM THE DEFAULT REGRESSION RUN: it loads external model files that are
+NOT part of AgentCascade (a 5-7 GB diffusion checkpoint + TE + VAE) and requires a
+specific sd-cli binary + GPU. It is marked ``extra_tools`` (excluded by the default
+``-m`` filter in pytest.ini) AND gated on ``AGENTCASCADE_SDCPP_SMOKE=1``, so it never
+runs as a side-effect of ``pytest``. Run it explicitly:
+    AGENTCASCADE_SDCPP_SMOKE=1 pytest -m extra_tools tests/tools/test_image_gen_sdcpp_smoke.py
 """
 
 import os
@@ -32,6 +39,12 @@ from agent_cascade.tools.image_gen import (
 
 
 class TestSdcppSmoke:
+    # Excluded from the default regression run (see module docstring): this test
+    # loads external model files that are not part of AgentCascade and requires a
+    # specific sd-cli binary + GPU. The extra_tools marker drops it from the default
+    # -m filter; AGENTCASCADE_SDCPP_SMOKE=1 is the second, explicit opt-in gate.
+    pytestmark = pytest.mark.extra_tools
+
     def test_end_to_end_proven_preset(self):
         # ── Skip guards ──────────────────────────────────────────────────────
         if os.environ.get('AGENTCASCADE_SDCPP_SMOKE') != '1':
