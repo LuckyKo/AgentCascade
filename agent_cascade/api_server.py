@@ -1836,6 +1836,104 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'sdcpp')
         return _list_sdcpp_configs(cfg_dir)
 
+    # ── Media Gen Config Endpoints ─────────────────────────────────────────
+    # Config lives at <AgentCascade_root>/config/media_gen/media_gen.json. api_server.py is
+    # inside agent_cascade/, so the project root is two levels up (parent.parent).
+    _media_gen_config_path = Path(__file__).resolve().parent.parent / 'config' / 'media_gen' / 'media_gen.json'
+
+    @app.get('/api/media_gen')
+    async def get_media_gen_config():
+        """Return the current media_gen settings (full object)."""
+        from agent_cascade.tools.media_gen import _get_media_gen_config
+        return _get_media_gen_config()
+
+    @app.post('/api/media_gen')
+    async def save_media_gen_config(request: Request):
+        """Save media_gen settings. Must bust the config cache so the running
+        tool picks the new values up immediately (same contract as image_gen)."""
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={'message': 'Invalid JSON body'})
+
+        if not isinstance(data, dict):
+            return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
+
+        # Each backend block must be an object; a non-dict would break the tool's
+        # .get() calls at load time.
+        for _block_key in ('comfyui', 'sdcpp', 'kobold_tts'):
+            if _block_key in data and not isinstance(data[_block_key], dict):
+                return JSONResponse(status_code=400, content={'message': f'Invalid {_block_key} block'})
+
+        try:
+            _media_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
+            # Preserve the load-bearing media_types ownership (the resolver's reverse
+            # index) from the existing config: the UI never edits it, and a naive
+            # overwrite would silently break AUTO resolution.
+            existing = {}
+            try:
+                with open(_media_gen_config_path, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                existing = {}
+            if isinstance(existing, dict):
+                for block_key, block_val in data.items():
+                    old_block = existing.get(block_key)
+                    if isinstance(block_val, dict) and isinstance(old_block, dict):
+                        if 'media_types' not in block_val and 'media_types' in old_block:
+                            block_val['media_types'] = old_block['media_types']
+            with open(_media_gen_config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            return JSONResponse(status_code=500, content={'message': f"Failed to write config: {e}"})
+
+        from agent_cascade.tools.media_gen import _invalidate_media_gen_config
+        _invalidate_media_gen_config()
+        return {'status': 'ok'}
+
+    @app.get('/api/media_gen/workflows')
+    async def list_media_gen_workflows():
+        """List ComfyUI workflow stems grouped by media type ({image,video,audio}).
+
+        The grouping is the config's declared ownership (the same reverse index the
+        AUTO resolver uses), so the UI pulldown stays in lockstep with resolve_backend.
+        """
+        from agent_cascade.tools.media_gen import _get_media_gen_config
+        cfg = _get_media_gen_config()
+        block = cfg.get('comfyui') or {}
+        media_types = block.get('media_types') if isinstance(block, dict) else None
+        grouped = {'image': [], 'video': [], 'audio': []}
+        if isinstance(media_types, dict):
+            for mtype in ('image', 'video', 'audio'):
+                names = media_types.get(mtype)
+                if isinstance(names, list):
+                    grouped[mtype] = [n for n in names if isinstance(n, str)]
+        return grouped
+
+    @app.get('/api/media_gen/sdcpp_configs')
+    async def list_media_gen_sdcpp_configs():
+        """List sdcpp per-model config stems (mirrors /api/image_gen/sdcpp_configs)."""
+        from agent_cascade.tools.image_gen import _list_sdcpp_configs
+        from agent_cascade.tools.media_gen import _get_media_gen_config
+        cfg = _get_media_gen_config()
+        sdcpp = cfg.get('sdcpp') or {}
+        cfg_dir = sdcpp.get('config_dir', '') if isinstance(sdcpp, dict) else ''
+        if not cfg_dir:
+            cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'sdcpp')
+        return _list_sdcpp_configs(cfg_dir)
+
+    @app.get('/api/media_gen/tts_configs')
+    async def list_media_gen_tts_configs():
+        """List TTS voice-config stems (kokoro_default, outetts_default, ...)."""
+        from agent_cascade.tools.image_gen import _list_sdcpp_configs
+        from agent_cascade.tools.media_gen import _get_media_gen_config
+        cfg = _get_media_gen_config()
+        tts = cfg.get('kobold_tts') or {}
+        cfg_dir = tts.get('config_dir', '') if isinstance(tts, dict) else ''
+        if not cfg_dir:
+            cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'media_gen' / 'tts')
+        return _list_sdcpp_configs(cfg_dir)
+
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
     def start_gen(history, runner, gen_id, loop, target=None):
         threading.Thread(target=run_agent_thread, args=(history, runner, gen_id, loop, target), daemon=True).start()

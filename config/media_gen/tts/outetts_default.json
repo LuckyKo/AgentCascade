@@ -1,0 +1,8 @@
+{
+  "engine": "outetts",
+  "model": "OuteTTS-0.3-1B-Q4_0.gguf",
+  "companion_model": "WavTokenizer-Large-75-Q4_0.gguf",
+  "voice": null,
+  "speed": 1.0,
+  "reference_audio": null
+}

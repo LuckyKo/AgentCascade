@@ -13,8 +13,12 @@
         "flux2_t2i_9b_API",
         "zimg_turbo_API"
       ],
-      "video": [],
-      "audio": []
+      "video": [
+        "video_wan2_2_14B_i2v"
+      ],
+      "audio": [
+        "yue2_full"
+      ]
     }
   },
   "sdcpp": {
@@ -32,13 +36,15 @@
     }
   },
   "kobold_tts": {
-    "url": "http://127.0.0.1:8080",
     "binary": "C:/work/stuff/Beta/koboldcpp.exe",
     "models_dir": "C:/work/stuff/Beta/audio",
-    "timeout": 300,
+    "config_dir": "N:/work/WD/AgentCascade/config/media_gen/tts",
+    "default_config": "kokoro_default",
+    "timeout": 600,
     "media_types": {
       "audio": [
-        "kokoro_default"
+        "kokoro_default",
+        "outetts_default"
       ]
     }
   }

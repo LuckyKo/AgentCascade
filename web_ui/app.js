@@ -7160,13 +7160,363 @@ function initImageGenSettings() {
   }
 }
 
+// ── Media Generation Settings (image/video/music/TTS; separate REST resource) ──
+// Config lives server-side at <AgentCascade_root>/config/media_gen/media_gen.json and is
+// read/written via /api/media_gen — independent of the localStorage settings blob.
+// Mirrors the image-gen JS above: a backend visibility toggle, pulldowns populated
+// from the REST endpoints, and load/save.
+
+const MG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
+const MG_DEFAULT_SDCPP_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/sdcpp';
+const MG_DEFAULT_TTS_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/media_gen/tts';
+let mgWorkflowsTimer = null;
+let mgWorkflowsSeq = 0;
+let mgSdcppConfigsTimer = null;
+let mgSdcppConfigsSeq = 0;
+let mgTtsConfigsTimer = null;
+let mgTtsConfigsSeq = 0;
+let mgInitialLoadDone = false;
+
+function _mgSetStatus(msg, type) {
+  const el = document.getElementById('mg-status');
+  if (!el) return;
+  const colors = { ok: 'var(--accent)', error: '#ff6b6b', info: 'var(--text-muted)' };
+  el.style.color = colors[type] || colors.info;
+  el.textContent = msg || '';
+}
+
+function _mgShowSaved() {
+  _mgSetStatus('✓ Saved', 'ok');
+  clearTimeout(_mgShowSaved._t);
+  _mgShowSaved._t = setTimeout(() => _mgSetStatus('', 'info'), 2500);
+}
+
+// Populate the three default-workflow pulldowns from GET /api/media_gen/workflows,
+// which returns {image:[stems], video:[stems], audio:[stems]} (config ownership).
+// Option values are the bare stems (what the resolver + preflight accept).
+async function loadMediaGenWorkflows(savedImage, savedVideo, savedMusic) {
+  const selImage = document.getElementById('mg-default-image');
+  const selVideo = document.getElementById('mg-default-video');
+  const selMusic = document.getElementById('mg-default-music');
+  if (!selImage && !selVideo && !selMusic) return;
+  const seq = ++mgWorkflowsSeq;
+  let grouped = { image: [], video: [], audio: [] };
+  try {
+    const res = await fetch('/api/media_gen/workflows');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object') grouped = data;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch media gen workflows:', err);
+  }
+  if (seq !== mgWorkflowsSeq) return; // a newer request superseded this one
+
+  const fill = (sel, names, saved) => {
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— none —</option>' + (names || []).map(stem =>
+      `<option value="${escapeHtml(stem)}">${escapeHtml(stem)}</option>`
+    ).join('');
+    const match = saved && [...sel.options].some(o => o.value === saved);
+    sel.value = match ? saved : '';
+  };
+  fill(selImage, grouped.image, savedImage);
+  fill(selVideo, grouped.video, savedVideo);
+  fill(selMusic, grouped.audio, savedMusic);
+}
+
+// Populate the sdcpp Default Config pulldown from GET /api/media_gen/sdcpp_configs.
+async function loadMediaGenSdcppConfigs(selectConfig) {
+  const sel = document.getElementById('mg-sdcpp-default-config');
+  if (!sel) return;
+  const seq = ++mgSdcppConfigsSeq;
+  let configs = [];
+  try {
+    const res = await fetch('/api/media_gen/sdcpp_configs');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) configs = data;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch media gen sdcpp configs:', err);
+  }
+  if (seq !== mgSdcppConfigsSeq) return;
+  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
+  ).join('');
+  if (selectConfig) {
+    const match = [...sel.options].some(o => o.value === selectConfig);
+    sel.value = match ? selectConfig : '';
+  } else {
+    sel.value = '';
+  }
+}
+
+// Populate the TTS Default Voice pulldown from GET /api/media_gen/tts_configs.
+async function loadMediaGenTtsConfigs(selectConfig) {
+  const sel = document.getElementById('mg-tts-default-config');
+  if (!sel) return;
+  const seq = ++mgTtsConfigsSeq;
+  let configs = [];
+  try {
+    const res = await fetch('/api/media_gen/tts_configs');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) configs = data;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch media gen tts configs:', err);
+  }
+  if (seq !== mgTtsConfigsSeq) return;
+  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
+  ).join('');
+  if (selectConfig) {
+    const match = [...sel.options].some(o => o.value === selectConfig);
+    sel.value = match ? selectConfig : '';
+  } else {
+    sel.value = '';
+  }
+}
+
+// Show/hide the ComfyUI / sdcpp / TTS field groups based on the backend selector.
+// AUTO and ComfyUI both show the ComfyUI block (ComfyUI serves image/video/music).
+function _mgToggleBackendVisibility(backend) {
+  const comfyBlock = document.getElementById('mg-comfyui-block');
+  const sdcppBlock = document.getElementById('mg-sdcpp-block');
+  const ttsBlock = document.getElementById('mg-tts-block');
+  if (comfyBlock) comfyBlock.style.display = (backend === 'sdcpp' || backend === 'kobold_tts') ? 'none' : '';
+  if (sdcppBlock) sdcppBlock.style.display = (backend === 'sdcpp') ? '' : 'none';
+  if (ttsBlock) ttsBlock.style.display = (backend === 'kobold_tts') ? '' : 'none';
+}
+
+// Load current config from GET /api/media_gen and populate the fields.
+async function loadMediaGenSettings() {
+  const mgBackend = document.getElementById('mg-backend');
+  const mgUrl = document.getElementById('mg-url');
+  const mgDir = document.getElementById('mg-workflow-dir');
+  const mgTimeout = document.getElementById('mg-timeout');
+  if (!mgBackend || !mgUrl || !mgDir || !mgTimeout) return;
+
+  let cfg = {};
+  try {
+    const res = await fetch('/api/media_gen');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object') cfg = data;
+    }
+  } catch (err) {
+    console.warn('Failed to load media gen settings:', err);
+  }
+
+  mgBackend.value = cfg.default_backend || 'AUTO';
+  const comfy = (cfg.comfyui && typeof cfg.comfyui === 'object') ? cfg.comfyui : {};
+  mgUrl.value = comfy.url || '';
+  mgDir.value = comfy.workflow_dir || MG_DEFAULT_WORKFLOW_DIR;
+  const mgOutputDir = document.getElementById('mg-output-dir');
+  if (mgOutputDir) mgOutputDir.value = comfy.output_dir || '';
+  mgTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
+
+  const sdcpp = (cfg.sdcpp && typeof cfg.sdcpp === 'object') ? cfg.sdcpp : {};
+  const mgSdcppBinary = document.getElementById('mg-sdcpp-binary');
+  const mgSdcppModelDir = document.getElementById('mg-sdcpp-model-dir');
+  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
+  const mgSdcppTimeout = document.getElementById('mg-sdcpp-timeout');
+  if (mgSdcppBinary) mgSdcppBinary.value = sdcpp.binary || '';
+  if (mgSdcppModelDir) mgSdcppModelDir.value = sdcpp.models_dir || '';
+  if (mgSdcppConfigDir) mgSdcppConfigDir.value = sdcpp.config_dir || MG_DEFAULT_SDCPP_CONFIG_DIR;
+  if (mgSdcppTimeout) mgSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
+
+  const tts = (cfg.kobold_tts && typeof cfg.kobold_tts === 'object') ? cfg.kobold_tts : {};
+  const mgTtsBinary = document.getElementById('mg-tts-binary');
+  const mgTtsModelDir = document.getElementById('mg-tts-model-dir');
+  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
+  const mgTtsTimeout = document.getElementById('mg-tts-timeout');
+  if (mgTtsBinary) mgTtsBinary.value = tts.binary || '';
+  if (mgTtsModelDir) mgTtsModelDir.value = tts.models_dir || '';
+  if (mgTtsConfigDir) mgTtsConfigDir.value = tts.config_dir || MG_DEFAULT_TTS_CONFIG_DIR;
+  if (mgTtsTimeout) mgTtsTimeout.value = (tts.timeout != null) ? tts.timeout : 600;
+
+  await loadMediaGenWorkflows(comfy.default_image_workflow, comfy.default_video_workflow, comfy.default_music_workflow);
+  await loadMediaGenSdcppConfigs(sdcpp.default_sdcpp_config);
+  await loadMediaGenTtsConfigs(tts.default_config);
+
+  _mgToggleBackendVisibility(mgBackend.value);
+}
+
+// Save via POST /api/media_gen.
+async function saveMediaGenSettings() {
+  const mgBackend = document.getElementById('mg-backend');
+  const mgUrl = document.getElementById('mg-url');
+  const mgDir = document.getElementById('mg-workflow-dir');
+  const mgOutputDir = document.getElementById('mg-output-dir');
+  const mgImage = document.getElementById('mg-default-image');
+  const mgVideo = document.getElementById('mg-default-video');
+  const mgMusic = document.getElementById('mg-default-music');
+  const mgTimeout = document.getElementById('mg-timeout');
+  if (!mgBackend || !mgUrl || !mgDir || !mgTimeout) return;
+
+  let timeout = parseInt(mgTimeout.value, 10);
+  if (isNaN(timeout)) timeout = 180;
+  timeout = Math.min(600, Math.max(30, timeout));
+  mgTimeout.value = String(timeout);
+
+  const backend = mgBackend.value;
+  const url = mgUrl.value.trim();
+  // ComfyUI needs an http(s) URL; sdcpp/TTS do not. AUTO may resolve to ComfyUI,
+  // so validate whenever the ComfyUI block is the visible/active one.
+  if ((backend === 'comfyui' || backend === 'AUTO') && !/^https?:\/\//i.test(url)) {
+    _mgSetStatus('✕ Server URL must start with http:// or https://', 'error');
+    return;
+  }
+
+  const body = { default_backend: backend, timeout: timeout };
+
+  body.comfyui = {
+    url: url,
+    workflow_dir: mgDir.value.trim(),
+    output_dir: (mgOutputDir ? mgOutputDir.value.trim() : ''),
+    default_image_workflow: (mgImage ? mgImage.value : ''),
+    default_video_workflow: (mgVideo ? mgVideo.value : ''),
+    default_music_workflow: (mgMusic ? mgMusic.value : ''),
+  };
+
+  const mgSdcppBinary = document.getElementById('mg-sdcpp-binary');
+  const mgSdcppModelDir = document.getElementById('mg-sdcpp-model-dir');
+  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
+  const mgSdcppDefaultConfig = document.getElementById('mg-sdcpp-default-config');
+  const mgSdcppTimeout = document.getElementById('mg-sdcpp-timeout');
+  let sdcppTimeout = parseInt(mgSdcppTimeout ? mgSdcppTimeout.value : '', 10);
+  if (isNaN(sdcppTimeout)) sdcppTimeout = 900;
+  sdcppTimeout = Math.min(1800, Math.max(30, sdcppTimeout));
+  body.sdcpp = {
+    binary: (mgSdcppBinary ? mgSdcppBinary.value.trim() : ''),
+    models_dir: (mgSdcppModelDir ? mgSdcppModelDir.value.trim() : ''),
+    config_dir: (mgSdcppConfigDir ? mgSdcppConfigDir.value.trim() : ''),
+    default_sdcpp_config: (mgSdcppDefaultConfig ? mgSdcppDefaultConfig.value : ''),
+    timeout: sdcppTimeout,
+  };
+
+  const mgTtsBinary = document.getElementById('mg-tts-binary');
+  const mgTtsModelDir = document.getElementById('mg-tts-model-dir');
+  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
+  const mgTtsDefaultConfig = document.getElementById('mg-tts-default-config');
+  const mgTtsTimeout = document.getElementById('mg-tts-timeout');
+  let ttsTimeout = parseInt(mgTtsTimeout ? mgTtsTimeout.value : '', 10);
+  if (isNaN(ttsTimeout)) ttsTimeout = 600;
+  ttsTimeout = Math.min(3600, Math.max(60, ttsTimeout));
+  body.kobold_tts = {
+    binary: (mgTtsBinary ? mgTtsBinary.value.trim() : ''),
+    models_dir: (mgTtsModelDir ? mgTtsModelDir.value.trim() : ''),
+    config_dir: (mgTtsConfigDir ? mgTtsConfigDir.value.trim() : ''),
+    default_config: (mgTtsDefaultConfig ? mgTtsDefaultConfig.value : ''),
+    timeout: ttsTimeout,
+  };
+
+  try {
+    const res = await fetch('/api/media_gen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+
+    if (res.ok && (data.status === 'ok' || data.ok === true)) {
+      _mgShowSaved();
+    } else {
+      const msg = data.message || data.error || `Save failed (${res.status})`;
+      _mgSetStatus('✕ ' + msg, 'error');
+    }
+  } catch (err) {
+    _mgSetStatus('✕ Save failed: ' + err.message, 'error');
+  }
+}
+
+function initMediaGenSettings() {
+  if (!mgInitialLoadDone && document.getElementById('mg-backend')) {
+    mgInitialLoadDone = true;
+    loadMediaGenSettings();
+  }
+
+  const mgSave = document.getElementById('mg-save');
+  if (mgSave) {
+    mgSave.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveMediaGenSettings();
+    });
+  }
+
+  // Backend selector toggle: show/hide the ComfyUI / sdcpp / TTS field groups.
+  const mgBackend = document.getElementById('mg-backend');
+  if (mgBackend) {
+    mgBackend.addEventListener('change', () => _mgToggleBackendVisibility(mgBackend.value));
+  }
+
+  // Debounced re-fetch of the workflow pulldowns when the workflow dir changes.
+  const mgDir = document.getElementById('mg-workflow-dir');
+  if (mgDir) {
+    mgDir.addEventListener('change', () => {
+      clearTimeout(mgWorkflowsTimer);
+      mgWorkflowsTimer = setTimeout(() => loadMediaGenWorkflows(), 400);
+    });
+  }
+
+  // Manual refresh button — re-scans workflows on demand.
+  const mgRefreshWf = document.getElementById('mg-refresh-workflows');
+  if (mgRefreshWf) {
+    mgRefreshWf.addEventListener('click', (e) => {
+      e.stopPropagation();
+      loadMediaGenWorkflows(
+        document.getElementById('mg-default-image')?.value || '',
+        document.getElementById('mg-default-video')?.value || '',
+        document.getElementById('mg-default-music')?.value || ''
+      );
+    });
+  }
+
+  // Debounced re-fetch of the sdcpp config pulldown when the config dir changes.
+  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
+  if (mgSdcppConfigDir) {
+    mgSdcppConfigDir.addEventListener('change', () => {
+      clearTimeout(mgSdcppConfigsTimer);
+      mgSdcppConfigsTimer = setTimeout(() => loadMediaGenSdcppConfigs(), 400);
+    });
+  }
+  const mgRefreshSdcpp = document.getElementById('mg-refresh-sdcpp-configs');
+  if (mgRefreshSdcpp) {
+    mgRefreshSdcpp.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sel = document.getElementById('mg-sdcpp-default-config');
+      loadMediaGenSdcppConfigs(sel ? sel.value : '');
+    });
+  }
+
+  // Debounced re-fetch of the TTS voice pulldown when the voice-config dir changes.
+  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
+  if (mgTtsConfigDir) {
+    mgTtsConfigDir.addEventListener('change', () => {
+      clearTimeout(mgTtsConfigsTimer);
+      mgTtsConfigsTimer = setTimeout(() => loadMediaGenTtsConfigs(), 400);
+    });
+  }
+  const mgRefreshTts = document.getElementById('mg-refresh-tts-configs');
+  if (mgRefreshTts) {
+    mgRefreshTts.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sel = document.getElementById('mg-tts-default-config');
+      loadMediaGenTtsConfigs(sel ? sel.value : '');
+    });
+  }
+}
+
 // Reload config whenever the Agent & Tools → System sub-tab is shown so edits
-// made elsewhere (another agent, a direct file edit) are always reflected. The
-// GET is cheap and idempotent, so re-fetching on every tab switch is fine.
+// made elsewhere are always reflected.
 document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     if (btn.dataset.target === 'subtab-system') {
       loadImageGenSettings();
+      loadMediaGenSettings();
     }
   });
 });
