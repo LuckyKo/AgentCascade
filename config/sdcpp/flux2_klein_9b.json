@@ -1,0 +1,12 @@
+{
+  "name": "FLUX.2 Klein 9B (t2i)",
+  "diffusion_model": "diffusion_models/flux-2-klein-9b-fp8.safetensors",
+  "llm": "text_encoders/qwen3vl_8b_int8_convrot_heretic.safetensors",
+  "vae": "vae/flux2-vae.safetensors",
+  "sampler": "euler",
+  "cfg_scale": 1.0,
+  "steps": 15,
+  "width": 1024,
+  "height": 1024,
+  "notes": "Recipe mirrored from the working ComfyUI workflow config/workflows/flux2_t2i_9b_API.json (euler / cfg 1 / 15 steps / 1024x1024). TE is qwen3vl_8b_int8_convrot_heretic.safetensors: VERIFIED to load + sample in sd-cli build 228c707. NOTE: the 'canonical' plain qwen_3_8b.safetensors (Comfy-Org) is ABSENT locally, and the fp8mixed variant CRASHES this build at TE load (GGML_ASSERT scale_nelements, exit 0xC0000409) -- verified 2026-10-10. The qwen3vl_8b int8 heretic variant is the locally-present encoder that actually runs; confirm output quality visually before treating as final."
+}
