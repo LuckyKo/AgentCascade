@@ -614,6 +614,22 @@ def _resolve_sdcpp_config(cfg: dict, name: Optional[str] = None) -> dict:
     return model_cfg
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    """Format a generation duration for the feedback string.
+
+    Seconds with one decimal (``12.3s``); minutes + seconds once past 60s
+    (``2m 5.0s``). Never raises — a bad value falls back to ``0.0s``.
+    """
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return '0.0s'
+    if s < 60:
+        return f'{s:.1f}s'
+    m = int(s // 60)
+    return f'{m}m {s - m * 60:.1f}s'
+
+
 def _sdcpp_argv(cfg: dict, model_cfg: dict, *, prompt: str, negative_prompt: str = '',
                 width: Optional[int] = None, height: Optional[int] = None,
                 seed: Optional[int] = None, steps: Optional[int] = None,
@@ -1114,7 +1130,11 @@ class ImageGen(BaseTool):
                                 '[ImageGen] VRAM may be constrained; model was not unloaded before ComfyUI'
                             )
 
+            # Time only the actual generation call (not the VRAM save/unload/restore
+            # dance around it) — same rationale as the sdcpp path.
+            _gen_start = time.monotonic()
             image_bytes, _meta = _comfyui_generate(url, workflow, timeout=timeout)
+            _gen_elapsed = time.monotonic() - _gen_start
         except (RuntimeError, TimeoutError) as e:
             # Generation failed — restore immediately so the agent's KV is not left dangling.
             if _state_saved and instance is not None:
@@ -1155,7 +1175,8 @@ class ImageGen(BaseTool):
         if _state_saved and instance is not None:
             self._restore_vram_state(instance, held)
 
-        feedback = f"Generated image: {media_path} ({width}x{height}, workflow={wf_name})"
+        feedback = (f"Generated image: {media_path} ({width}x{height}, "
+                    f"workflow={wf_name}, {_fmt_elapsed(_gen_elapsed)})")
         # The image item is intentionally left uncaptioned so the router's return-path
         # guard (_has_uncaptioned_images) auto-generates a genuine vision caption on
         # demand (same as the SVG path). The separate text item carries the descriptive
@@ -1317,7 +1338,11 @@ class ImageGen(BaseTool):
         try:
             self._vram_release(instance, _state)
 
+            # Time only the actual generation subprocess (not the VRAM save/unload/restore
+            # dance around it) — that's the number a user tuning steps/sampler cares about.
+            _gen_start = time.monotonic()
             image_bytes = _sdcpp_generate(argv, timeout=timeout)
+            _gen_elapsed = time.monotonic() - _gen_start
         except (RuntimeError, TimeoutError) as e:
             # Generation failed — restore immediately so the KV is not left dangling.
             if _state['saved'] and instance is not None:
@@ -1366,7 +1391,8 @@ class ImageGen(BaseTool):
         if _state['saved'] and instance is not None:
             self._restore_vram_state(instance, _state['held'])
 
-        feedback = f"Generated image: {media_path} ({width}x{height}, config={config_name}, backend=sdcpp)"
+        feedback = (f"Generated image: {media_path} ({width}x{height}, "
+                    f"config={config_name}, backend=sdcpp, {_fmt_elapsed(_gen_elapsed)})")
         # The image item is intentionally left uncaptioned so the router's return-path
         # guard (_has_uncaptioned_images) auto-generates a genuine vision caption on
         # demand (same as the ComfyUI/SVG paths). The separate text item carries the

@@ -21,6 +21,7 @@ import pytest
 from agent_cascade.tools.image_gen import (
     ImageGen,
     _SDCPP_TYPE,
+    _fmt_elapsed,
     _invalidate_image_gen_config,
     _list_sdcpp_configs,
     _resolve_sdcpp_config,
@@ -110,6 +111,24 @@ def _fake_run_write_bytes(data=b'\x89PNG-fake-bytes'):
             f.write(data)
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
     return _run
+
+
+# ── _fmt_elapsed (pure) ──────────────────────────────────────────────────────
+
+class TestFmtElapsed:
+    def test_seconds_under_60(self):
+        assert _fmt_elapsed(12.345) == '12.3s'
+
+    def test_zero(self):
+        assert _fmt_elapsed(0) == '0.0s'
+
+    def test_minutes_and_seconds(self):
+        # 125.0s -> 2m 5.0s
+        assert _fmt_elapsed(125.0) == '2m 5.0s'
+
+    def test_bad_value_falls_back(self):
+        assert _fmt_elapsed(None) == '0.0s'
+        assert _fmt_elapsed('n/a') == '0.0s'
 
 
 # ── _sdcpp_argv (pure) ───────────────────────────────────────────────────────
@@ -397,6 +416,10 @@ class TestSdcppHandleMocked:
         assert result[0].image == '/tmp/media/out.png'
         assert not result[0].caption
         assert 'backend=sdcpp' in result[1].text
+        # The feedback now reports how long generation took (a trailing time field).
+        import re
+        assert re.search(r'\d+m \d+\.\ds|\d+\.\ds\)$', result[1].text), \
+            f"no elapsed-time field in feedback: {result[1].text!r}"
         m_restore.assert_called_once()
 
     def test_vram_order_save_unload_run_restore(self, sdcpp_cfg):
