@@ -65,6 +65,10 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             from agent_cascade.tools.image_gen import ImageGen
             t = ImageGen()
             tools_to_register[tool_name] = (t, True, False)
+        elif tool_name == 'media_gen':
+            from agent_cascade.tools.media_gen import MediaGen
+            t = MediaGen()
+            tools_to_register[tool_name] = (t, True, False)
         elif tool_name == 'list_dir':
             t = ListDir()
             tools_to_register[tool_name] = (t, True, False)

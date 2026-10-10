@@ -50,6 +50,9 @@ AVAILABLE_TOOLS: List[str] = [
     'propose_skill',  # Propose a new reusable skill for future tasks
     'load_skill',  # Load registered skill instructions into current context at runtime
 
+    # Media generation (image/video/music/TTS via a pluggable backend registry)
+    'media_gen',  # Generate image/video/audio via a backend registry (AUTO backend selector)
+
     # Image generation (ComfyUI text-to-image / SVG rendering)
     'image_gen',  # Generate an image from a text prompt or render SVG code
 ]
@@ -504,7 +507,9 @@ TOOL_METADATA = {
         }
     },
     'image_gen': {
-        'description': ('Generate an image from a text prompt (via ComfyUI or the local '
+        'description': ('⚠ DEPRECATED — use media_gen instead, which supports image/video/music/TTS and an '
+                        'AUTO backend selector. This tool still works and is kept for backward compatibility. '
+                        'Generate an image from a text prompt (via ComfyUI or the local '
                         'stable-diffusion.cpp backend), or render SVG code to an image. '
                         'Returns the image uncaptioned, same format as view_image (the router auto-captions on return). '
                         'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
@@ -522,6 +527,36 @@ TOOL_METADATA = {
             'sdcpp_config': 'stable-diffusion.cpp model config filename stem (e.g. "z_image_turbo"); a full .json path is also accepted. Omit to use the default from settings.',
             'guidance': 'Guidance scale (float). sdcpp: overrides the config-file value. ComfyUI: optionally overrides cfg on KSampler nodes (no-op if none). Omit to use the default.',
             'steps': 'Diffusion steps (int). sdcpp: overrides the config-file value. ComfyUI: optionally overrides steps on KSampler nodes (no-op if none). Lower = faster. Omit to use the default.'
+        }
+    },
+    'media_gen': {
+        'description': (
+            'Generate image / video / audio via a pluggable backend registry. '
+            'Backends: comfyui (ComfyUI server, image/video/music), sdcpp (local stable-diffusion.cpp, image), '
+            'kobold_tts (Kobold TTS GGUF, speech). '
+            "backend defaults to 'AUTO': the config filename stem is the primary discriminator (config ownership), "
+            'never dict-order; an explicit backend always wins. '
+            "Pass 'config' (a filename stem) as the primary path — everything else is derived from it; "
+            'if omitted, the resolved backend\'s configured default is used. '
+            'media_type is image|video|audio (music and TTS are both audio). '
+            'reference_file is a reference/edit image (image-edit, i2v first-frame) or reference audio (TTS voice-clone); '
+            'it is resolved through the path sandbox before any upload/subprocess. '
+            'media_size is a generalized size object (image→width/height; video→+duration/fps; audio→duration). '
+            'Captioning: the generated IMAGE is returned uncaptioned (the router auto-captions it on return); '
+            'video and audio are NEVER sent to the vision guard — their descriptive text line is the contract. '
+            'Migration: backend=comfyui + a workflow name reproduces image_gen exactly.'
+        ),
+        'parameters': {
+            'prompt': 'Text prompt for generation (or the text to speak for TTS).',
+            'backend': "Backend id: 'AUTO' (default) | 'comfyui' | 'sdcpp' | 'kobold_tts'.",
+            'config': 'Config name (filename stem) or full .json path. The primary path; everything else is derived from it.',
+            'media_type': 'Optional hint — image | video | audio; used only to disambiguate AUTO (music & tts both = audio).',
+            'negative_prompt': 'Elements to exclude (image backends).',
+            'server_url': 'Optional override for server-backed backends (ComfyUI).',
+            'backend_dir': 'Optional override for local-binary backend working dir.',
+            'reference_file': 'Reference/edit image or reference audio; resolved through the path sandbox before any upload/subprocess.',
+            'media_size': 'Generalized size object: image→{width,height}; video→+{duration,fps}; audio→{duration}.',
+            'overrides': 'Scalar overrides merged over the loaded config (e.g. seed, steps, guidance).',
         }
     },
     'web_search': {

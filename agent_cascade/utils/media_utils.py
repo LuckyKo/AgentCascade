@@ -39,6 +39,27 @@ def _get_media_root() -> Path:
     return Path(instance_logs) / 'media'
 
 
+def _get_type_dir(kind: str) -> str:
+    """Return the absolute path to a media-type subdirectory, creating it if needed.
+
+    ``kind`` is the on-disk subdirectory name (e.g. 'images', 'audio', 'video').
+    The public :func:`get_images_dir` is a thin wrapper over this so the image
+    path stays byte-identical while other media types reuse the same logic.
+
+    Returns:
+        Absolute path with forward slashes.
+
+    Raises:
+        MediaStorageError: If directory creation fails.
+    """
+    try:
+        target_dir = _get_media_root() / kind
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return os.path.abspath(str(target_dir)).replace('\\', '/')
+    except OSError as e:
+        raise MediaStorageError(f"Failed to create {kind} directory: {e}") from e
+
+
 def get_images_dir() -> str:
     """Return the absolute path to the images subdirectory, creating it if needed.
 
@@ -48,12 +69,7 @@ def get_images_dir() -> str:
     Raises:
         MediaStorageError: If directory creation fails.
     """
-    try:
-        images_dir = _get_media_root() / 'images'
-        images_dir.mkdir(parents=True, exist_ok=True)
-        return os.path.abspath(str(images_dir)).replace('\\', '/')
-    except OSError as e:
-        raise MediaStorageError(f"Failed to create images directory: {e}") from e
+    return _get_type_dir('images')
 
 
 def _generate_media_filename(prefix: str, extension: str) -> str:
@@ -199,6 +215,75 @@ def save_image_from_data_uri(data_uri: str) -> str:
         raise MediaStorageError(f"Failed to decode base64 from data URI: {e}") from e
 
     return save_image_to_media(image_source=image_bytes, source_name='data_uri')
+
+
+def save_media_to_media(
+    source: Union[str, Path, bytes, io.BytesIO],
+    media_type: str,
+    source_name: Optional[str] = None,
+) -> str:
+    """Save generated media of any supported type and return its absolute path.
+
+    This is the generic entry point used by ``media_gen``. The canonical media-type
+    vocabulary is exactly three types (image / video / audio); TTS and music are both
+    *audio* (a backend/config distinction, not an output type).
+
+    - ``media_type == 'image'`` delegates VERBATIM to :func:`save_image_to_media`, so
+      the image path is byte-identical to the existing image pipeline (same resize/
+      encode/size-check/filename logic, same ``img_*.jpg`` output).
+    - ``media_type in ('audio', 'video', 'music')`` writes the raw bytes to the
+      matching subdirectory with an ``aud_``/``vid_`` filename. ``music`` shares the
+      ``audio`` directory (it is audio output).
+
+    Args:
+        source: Raw bytes (audio/video) or an image source (path/bytes/BytesIO).
+        media_type: One of 'image', 'audio', 'video', 'music'.
+        source_name: Optional hint for logging; not used in the filename.
+
+    Returns:
+        Absolute path with forward slashes.
+
+    Raises:
+        MediaStorageError: If the media type is unknown or writing fails.
+    """
+    if media_type == 'image':
+        # Byte-identical to the existing image pipeline.
+        return save_image_to_media(image_source=source, source_name=source_name)
+
+    # On-disk subdirectory per media type. 'music' is audio output → audio dir.
+    dir_map = {'audio': 'audio', 'video': 'video', 'music': 'audio'}
+    if media_type not in dir_map:
+        raise MediaStorageError(f"Unsupported media_type: {media_type}")
+
+    # Determine extension + filename prefix from the source or an explicit hint.
+    if isinstance(source, (bytes, bytearray)):
+        data = bytes(source)
+    elif isinstance(source, io.BytesIO):
+        data = source.getvalue()
+    elif isinstance(source, (str, Path)):
+        try:
+            data = Path(source).read_bytes()
+        except OSError as e:
+            raise MediaStorageError(f"Failed to read media source: {e}") from e
+    else:
+        raise MediaStorageError(f"Unsupported source type: {type(source)}")
+
+    prefix = 'aud' if media_type in ('audio', 'music') else 'vid'
+    extension = 'mp3' if media_type in ('audio', 'music') else 'mp4'
+    target_dir = _get_type_dir(dir_map[media_type])
+    filename = _generate_media_filename(prefix, extension)
+    dest_path = Path(target_dir) / filename
+
+    try:
+        dest_path.write_bytes(data)
+        return os.path.abspath(str(dest_path)).replace('\\', '/')
+    except OSError as e:
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except OSError:
+                pass
+        raise MediaStorageError(f"Failed to save {media_type} media: {e}") from e
 
 
 def cleanup_old_media(max_age_days: int = 30) -> dict:

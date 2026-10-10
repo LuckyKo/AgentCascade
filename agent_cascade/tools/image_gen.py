@@ -845,6 +845,11 @@ def _upload_image(url: str, local_path: Path, client: Optional[httpx.Client] = N
 class ImageGen(BaseTool):
     """Generate an image via ComfyUI (text prompt) or render SVG code to an image.
 
+    @deprecated: use :class:`agent_cascade.tools.media_gen.MediaGen` instead, which
+    supports image/video/music/TTS and an AUTO backend selector. ``media_gen`` with
+    ``backend='comfyui'`` + a workflow name reproduces this tool exactly. This tool
+    still works and is kept for backward compatibility (behaviour is unchanged).
+
     Returns ``[ContentItem(image=path), ContentItem(text=feedback)]`` with the
     image item left uncaptioned — same shape as view_image, so the router's
     return-path guard (_has_uncaptioned_images) auto-captions it on demand.

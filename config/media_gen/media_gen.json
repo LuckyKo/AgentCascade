@@ -1,0 +1,45 @@
+{
+  "default_backend": "AUTO",
+  "comfyui": {
+    "url": "http://127.0.0.1:8188",
+    "workflow_dir": "N:/work/WD/AgentCascade/config/workflows",
+    "output_dir": "N:/work/stuff/ComfyUI_models/user/default/output",
+    "timeout": 180,
+    "default_workflow": "N:\\work\\WD\\AgentCascade\\config\\workflows\\flux2_t2i_9b_API.json",
+    "media_types": {
+      "image": [
+        "Anima_INT8",
+        "flux2_edit_9b_API",
+        "flux2_t2i_9b_API",
+        "zimg_turbo_API"
+      ],
+      "video": [],
+      "audio": []
+    }
+  },
+  "sdcpp": {
+    "binary": "C:/work/stuff/Beta/sd-cli/sd-cli.exe",
+    "models_dir": "N:/work/stuff/ComfyUI_models/models",
+    "config_dir": "N:/work/WD/AgentCascade/config/sdcpp",
+    "default_sdcpp_config": "z_image_turbo",
+    "timeout": 900,
+    "media_types": {
+      "image": [
+        "anima",
+        "flux2_klein_9b",
+        "z_image_turbo"
+      ]
+    }
+  },
+  "kobold_tts": {
+    "url": "http://127.0.0.1:8080",
+    "binary": "C:/work/stuff/Beta/koboldcpp.exe",
+    "models_dir": "C:/work/stuff/Beta/audio",
+    "timeout": 300,
+    "media_types": {
+      "audio": [
+        "kokoro_default"
+      ]
+    }
+  }
+}
