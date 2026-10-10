@@ -192,6 +192,33 @@ class TestSdcppArgv:
         assert argv.count(prompt) == 1
         assert argv[argv.index('-p') + 1] == prompt
 
+    def test_extra_prompt_args_appended_to_prompt(self):
+        # extra_prompt_args (e.g. an sd-cli LoRA tag) is appended to the user prompt,
+        # space-separated, and still emitted as a single -p element.
+        tag = '<lora:Anima/anima-turbo-lora-v0.2:0.5>'
+        argv = _sdcpp_argv(_cfg(), _model_cfg(extra_prompt_args=tag),
+                           prompt='a fox', output_path='/out.png')
+        assert argv[argv.index('-p') + 1] == 'a fox <lora:Anima/anima-turbo-lora-v0.2:0.5>'
+
+    def test_extra_prompt_args_global_fallback(self):
+        # Per-file value wins; with none, the global sdcpp block value is used.
+        tag = '<lora:x/y:0.3>'
+        argv = _sdcpp_argv(_cfg(extra_prompt_args=tag), _model_cfg(),
+                           prompt='a cat', output_path='/out.png')
+        assert argv[argv.index('-p') + 1] == 'a cat <lora:x/y:0.3>'
+
+    def test_extra_prompt_args_per_file_beats_global(self):
+        per = '<lora:a:0.5>'
+        glob = '<lora:b:0.9>'
+        argv = _sdcpp_argv(_cfg(extra_prompt_args=glob), _model_cfg(extra_prompt_args=per),
+                           prompt='p', output_path='/out.png')
+        assert argv[argv.index('-p') + 1] == 'p <lora:a:0.5>'
+
+    def test_extra_prompt_args_absent_leaves_prompt_unchanged(self):
+        # No extra_prompt_args anywhere -> the prompt is byte-identical (no trailing space).
+        argv = _sdcpp_argv(_cfg(), _model_cfg(), prompt='a fox', output_path='/out.png')
+        assert argv[argv.index('-p') + 1] == 'a fox'
+
     def test_prompt_starting_with_dash_rejected(self):
         # F8
         with pytest.raises(ValueError):

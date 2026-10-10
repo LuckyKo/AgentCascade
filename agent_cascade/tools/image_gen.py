@@ -657,7 +657,14 @@ def _sdcpp_argv(cfg: dict, model_cfg: dict, *, prompt: str, negative_prompt: str
     if vae_format:
         argv += ['--vae-format', vae_format]
 
-    # Prompt / negative prompt.
+    # Prompt / negative prompt. ``extra_prompt_args`` (per-model config, with an optional
+    # global sdcpp-block fallback) is a verbatim string appended to the prompt — used for
+    # sd-cli prompt tags such as LoRAs: <lora:REL_PATH:STRENGTH>. sd-cli strips these tags
+    # before the text encoder sees them, so the user's real prompt stays clean. It is
+    # appended AFTER the user prompt and space-separated so it never alters existing words.
+    extra_prompt = model_cfg.get('extra_prompt_args') or sdcpp.get('extra_prompt_args') or ''
+    if extra_prompt:
+        prompt = f"{prompt} {extra_prompt}".strip()
     argv += ['-p', prompt]
     if negative_prompt:
         argv += ['-n', negative_prompt]

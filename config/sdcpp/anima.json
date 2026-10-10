@@ -8,5 +8,6 @@
   "steps": 30,
   "width": 512,
   "height": 512,
-  "notes": "VERIFIED working. NOTE: VAE must be qwen_image_vae.safetensors -- ae.safetensors is the WRONG shape and fails. ~32s."
+  "extra_prompt_args": "<lora:Anima/anima-turbo-lora-v0.2:0.5>",
+  "notes": "VERIFIED working (full-precision checkpoint; the INT8 rowwise variant fails to load in sd-cli at commit 228c707 -- weight_scale shape mismatch). NOTE: VAE must be qwen_image_vae.safetensors -- ae.safetensors is the WRONG shape and fails. ~32s. LoRA applied via extra_prompt_args prompt tag (relative to sdcpp.extra_args --lora-model-dir); verified 1016 tensors applied at strength 0.5."
 }
