@@ -1,11 +1,13 @@
 {
   "default_backend": "AUTO",
+  "timeout": 180,
   "comfyui": {
     "url": "http://127.0.0.1:8188",
     "workflow_dir": "N:/work/WD/AgentCascade/config/workflows",
-    "output_dir": "N:/work/stuff/ComfyUI_models/user/default/output",
-    "timeout": 180,
-    "default_workflow": "N:\\work\\WD\\AgentCascade\\config\\workflows\\flux2_t2i_9b_API.json",
+    "output_dir": "N:/work/stuff/ComfyUI_models/output",
+    "default_image_workflow": "Anima_INT8",
+    "default_video_workflow": "video_wan2_2_14B_i2v",
+    "default_music_workflow": "yue2_full",
     "media_types": {
       "image": [
         "Anima_INT8",
@@ -22,7 +24,7 @@
     }
   },
   "sdcpp": {
-    "binary": "C:/work/stuff/Beta/sd-cli/sd-cli.exe",
+    "binary": "N:/work/stuff/Beta/image/sd-master-228c707-bin-win-cuda12-x64/sd-cli.exe",
     "models_dir": "N:/work/stuff/ComfyUI_models/models",
     "config_dir": "N:/work/WD/AgentCascade/config/sdcpp",
     "default_sdcpp_config": "z_image_turbo",

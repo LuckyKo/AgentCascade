@@ -974,9 +974,9 @@ def serialize_message(
                     else:
                         parts.append(f"![image]({item['image']})")
                 elif 'audio' in item:
-                    parts.append(f"[Audio: {item['audio']}]")
+                    parts.append(f"![audio]({item['audio']})")
                 elif 'video' in item:
-                    parts.append(f"[Video: {item['video']}]")
+                    parts.append(f"![video]({item['video']})")
                 elif 'file' in item:
                     parts.append(f"[File: {item['file']}]")
             elif isinstance(item, str):
@@ -989,6 +989,10 @@ def serialize_message(
                     parts.append(f"![image]({item.image})\nCaption: {cap}")
                 else:
                     parts.append(f"![image]({item.image})")
+            elif hasattr(item, 'audio') and item.audio:
+                parts.append(f"![audio]({item.audio})")
+            elif hasattr(item, 'video') and item.video:
+                parts.append(f"![video]({item.video})")
         content = '\n'.join(parts)
 
     # Keep content intact — frontend handles truncation via renderToolResult()

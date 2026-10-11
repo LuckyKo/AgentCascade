@@ -1412,6 +1412,13 @@ body {
   word-break: break-word;
 }
 
+/* Plain-text tool results (non-media tools) — escaped machine text, never markdown-rendered.
+   The .tool-result pre rule above supplies padding/scroll/wrapping; this adds background + line-height. */
+.tool-result .tool-plain-text {
+  background: var(--bg-secondary);
+  line-height: 1.5;
+}
+
 /* Markdown-rendered tool results (prose tools like web_extractor, ddg_search)
    — scoped to .tool-rendered-content wrapper so they don't affect code-tool <pre><code> */
 .tool-result .tool-rendered-content p {
@@ -2391,6 +2398,9 @@ body {
 }
 
 .tool-image-wrapper img { max-width: 100%; max-height: 400px; border-radius: 4px; display: block; margin: 4px 0; }
+
+.tool-image-wrapper video, .msg-content video { max-width: 100%; max-height: 400px; border-radius: 4px; display: block; margin: 4px 0; background: #000; }
+.tool-image-wrapper audio, .msg-content audio { width: 100%; max-width: 420px; display: block; margin: 4px 0; }
 
 /* ─── Telemetry Dashboard ─────────────────────────────────────────────────── */
 

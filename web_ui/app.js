@@ -32,9 +32,9 @@ if (typeof DOMPurify !== 'undefined') {
   DOMPurify.setConfig({
     ALLOWED_TAGS: ['b','i','u','em','strong','a','code','pre','blockquote',
                    'p','br','hr','ul','ol','li','table','thead','tbody',
-                   'tr','th','td','img','details','summary','span','h1','h2','h3',
+                   'tr','th','td','img','video','audio','source','details','summary','span','h1','h2','h3',
                    'h4','h5','h6','div','section','article','mark','del'],
-    ALLOWED_ATTR: ['href','src','title','class','open','style','alt'],
+    ALLOWED_ATTR: ['href','src','title','class','open','style','alt','controls','playsinline','loop','muted','autoplay','poster','preload'],
     ALLOW_DATA_ATTR: true,
   });
 }
@@ -1374,8 +1374,13 @@ function loadSettings() {
       settingSoundNotification.checked = s['setting-sound-notification'];
     }
 
-    if (settingTruncateTools && _present(s['truncate-tools'])) {
-      settingTruncateTools.checked = s['truncate-tools'];
+    // Frontend-only toggle — always normalize into localStorage so reloads are deterministic.
+    // When absent from the blob, the checkbox keeps its index.html default (checked=true).
+    if (settingTruncateTools) {
+      settingTruncateTools.checked = _present(s['truncate-tools']) ? !!s['truncate-tools'] : true;
+      s['truncate-tools'] = settingTruncateTools.checked;
+      localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
+      settingTruncateTools.dispatchEvent(new Event('change'));
     }
 
     // Load Auto Agent Tab Focus toggle state
@@ -1668,6 +1673,18 @@ function debouncedSaveSettings() {
 if (sidePanel) {
   sidePanel.addEventListener('change', saveSettings);
   sidePanel.addEventListener('input', debouncedSaveSettings);
+}
+
+// Re-render all agent panels when the truncate toggle flips, so already-rendered tool
+// results reflect the new setting immediately (renderToolResult reads the checkbox live).
+// Reuses the existing force-rerender mechanism (invalidateAllPanelCaches + renderSubAgents),
+// the same path used on WS 'state' messages (line ~2236). Both are safe no-ops when no
+// panels exist yet (loadSettings dispatch fires before panels are created).
+if (settingTruncateTools) {
+  settingTruncateTools.addEventListener('change', () => {
+    invalidateAllPanelCaches();
+    renderSubAgents();
+  });
 }
 
 // ── Skill Invalidation: read-only "current threshold" preview ──────────────
@@ -3541,7 +3558,7 @@ function renderMarkdown(text, allowThinking = true) {
   if (!allowThinking) {
     try {
       // Rewrite local file paths to use /api/file proxy so browser can load them
-      text = proxyLocalImagePaths(text);
+      text = proxyLocalMediaPaths(text);
       // Sanitize HTML output from marked to prevent XSS from LLM-generated content
       return DOMPurify.sanitize(marked.parse(text));
     } catch {
@@ -3591,7 +3608,7 @@ function renderMarkdown(text, allowThinking = true) {
 
   try {
     // Rewrite local file paths to use /api/file proxy so browser can load them
-    text = proxyLocalImagePaths(text);
+    text = proxyLocalMediaPaths(text);
     // Sanitize HTML output from marked to prevent XSS from LLM-generated content
     return DOMPurify.sanitize(marked.parse(text));
   } catch {
@@ -3678,31 +3695,40 @@ function renderToolResult(msg) {
   const icon = isFail ? '❌' : '📋';
   const shouldTruncate = settingTruncateTools ? settingTruncateTools.checked : true;
 
-  // Determine rendering strategy based on tool type and content characteristics.
-  // Some tools return prose/markdown (web_extractor, ddg_search, calculate) that should be formatted.
-  // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file) that should stay in <pre><code>.
-  const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file'].includes(msg.name);
+  // Rendering strategy: media results render through markdown (image/video/audio players);
+  // everything else is machine text — escaped plain text in <pre><code>, never markdown.
 
   let contentHtml;
-  if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
+  if (msg.name === 'view_image' ||
+      content.match(_MEDIA_LINK_RE) ||
+      content.match(/!\[.*?\]\(.*?\)/)) {
     // Image content: process through markdown to render images, rewriting local paths via backend proxy
-    const truncatedForImage = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
-    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxyLocalImagePaths(truncatedForImage), false)}</div>`;
-  } else if (!isCodeTool) {
-    // Prose/markdown tools: process through renderMarkdown for proper formatting.
-    // Do NOT truncate before rendering — truncating raw markdown mid-block produces malformed HTML.
-    // The <details> element naturally keeps large content collapsed until expanded by the user.
-    // If rendering fails (e.g., extremely large content), fall back to truncated <pre><code>.
-    try {
-      contentHtml = `<div class="tool-rendered-content">${renderMarkdown(content, false)}</div>`;
-    } catch {
-      const truncatedFallback = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
-      contentHtml = `<pre><code>${escapeHtml(truncatedFallback)}</code></pre>`;
+    let truncatedForImage = content;
+    const TOOL_TRUNCATE_AT = 2000;   // base truncation threshold for tool results (chars)
+    const TOOL_TRUNCATE_MAX = 4000;  // hard cap when extending past an unclosed media link
+    if (shouldTruncate && content.length > TOOL_TRUNCATE_AT) {
+      let cut = TOOL_TRUNCATE_AT;
+      // If the cut lands inside an unclosed markdown link, extend past its closing ')' (cap TOOL_TRUNCATE_MAX).
+      const lastOpen = content.lastIndexOf('![', cut);
+      if (lastOpen !== -1 && !content.slice(lastOpen, cut).includes(')')) {
+        const closeParen = content.indexOf(')', lastOpen);
+        if (closeParen !== -1 && closeParen + 1 <= TOOL_TRUNCATE_MAX) {
+          cut = closeParen + 1;
+        } else {
+          // Link too long or unterminated — back up to the last newline before 2000.
+          const nl = content.lastIndexOf('\n', cut);
+          cut = (nl > 0) ? nl : cut;
+        }
+      }
+      truncatedForImage = content.substring(0, cut) + '\n\n... (truncated)';
     }
+    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxyLocalMediaPaths(truncatedForImage), false)}</div>`;
   } else {
-    // Code-like tools: truncate before escaping to keep <pre><code> from bloating
+    // Tool results are machine text, not prose — render as escaped plain text so
+    // markdown-like syntax in outputs ([verse], <tags>, JSON) is never mangled.
+    // Truncate before escaping to keep <pre><code> from bloating.
     const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
-    contentHtml = `<pre><code>${escapeHtml(truncated)}</code></pre>`;
+    contentHtml = `<pre class="tool-plain-text"><code>${escapeHtml(truncated)}</code></pre>`;
   }
 
   return `
@@ -5579,42 +5605,72 @@ if (inputArea) {
 }
 
 /**
- * Rewrite local file paths in markdown image syntax to use /api/file proxy.
+ * Rewrite local file paths in markdown media syntax to use /api/file proxy.
  * Handles: file:// URIs, Windows absolute paths (N:/...), POSIX absolute paths (/workspace/...).
  * Preserves URLs starting with http://, https://, data:, and already-proxied /api/* paths.
  */
-function proxyLocalImagePaths(text) {
+// Single source of truth for media file extensions (used by proxyLocalMediaPaths
+// routing AND the renderToolResult wrapper detection — keep in sync via these consts).
+const _MEDIA_VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'ogv'];
+const _MEDIA_AUDIO_EXTS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'];
+const _VIDEO_EXT_RE = new RegExp(`\\.(${_MEDIA_VIDEO_EXTS.join('|')})(?:[?#].*)?$`, 'i');
+const _AUDIO_EXT_RE = new RegExp(`\\.(${_MEDIA_AUDIO_EXTS.join('|')})(?:[?#].*)?$`, 'i');
+// Combined detector for markdown media links (renderToolResult wrapper condition).
+const _MEDIA_LINK_RE = new RegExp(`!\\[[^\\]]*\\]\\([^)]*\\.(?:${[..._MEDIA_VIDEO_EXTS, ..._MEDIA_AUDIO_EXTS].join('|')})[^)]*\\)`, 'i');
+
+// Shared proxy helper: return the /api/file-proxied URL for a local path, or null
+// if the URL is already proxied / external / data: / unrecognizable (leave untouched).
+function _proxyMediaUrl(url) {
+    // Already proxied or external — leave as-is
+    if (url.startsWith('/api/') || url.startsWith('/media/') ||
+        url.startsWith('http://') || url.startsWith('https://') ||
+        url.startsWith('data:')) {
+        return null;
+    }
+
+    // file:// URI → extract path, proxy it
+    let filePath = url;
+    if (url.startsWith('file:///')) {
+        filePath = url.slice(8);
+    } else if (url.startsWith('file://')) {
+        filePath = url.slice(7);
+    }
+
+    // Windows absolute path: N:/... or N:\...
+    if (/^[A-Za-z]:[\\/]/.test(filePath)) {
+        return `/api/file?path=${encodeURIComponent(filePath)}`;
+    }
+
+    // POSIX absolute path: /workspace/..., /logs/..., etc. (but not relative like ./foo)
+    if (/^\//.test(filePath) && !filePath.startsWith('/.')) {
+        return `/api/file?path=${encodeURIComponent(filePath)}`;
+    }
+
+    // Unknown format — leave as-is to avoid breaking things
+    return null;
+}
+
+// Rewrite local media links (images, video, audio) to use the /api/file proxy.
+// Images keep markdown syntax; local video/audio are emitted as raw HTML players
+// (trusted content we built — survives DOMPurify once the tags are whitelisted).
+function proxyLocalMediaPaths(text) {
     if (typeof text !== 'string') return text;
 
     // Strategy: match ![alt](url) and rewrite the URL portion based on its type
     return text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
-        // Already proxied or external — leave as-is
-        if (url.startsWith('/api/') || url.startsWith('/media/') ||
-            url.startsWith('http://') || url.startsWith('https://') ||
-            url.startsWith('data:')) {
-            return match;
+        const proxied = _proxyMediaUrl(url);
+        if (proxied === null) return match;
+
+        // Route by extension: emit raw HTML players for local video/audio
+        if (_VIDEO_EXT_RE.test(url)) {
+            return `<video src="${proxied.replace(/"/g, '&quot;')}" controls playsinline></video>`;
+        }
+        if (_AUDIO_EXT_RE.test(url)) {
+            return `<audio src="${proxied.replace(/"/g, '&quot;')}" controls></audio>`;
         }
 
-        // file:// URI → extract path, proxy it
-        let filePath = url;
-        if (url.startsWith('file:///')) {
-            filePath = url.slice(8);
-        } else if (url.startsWith('file://')) {
-            filePath = url.slice(7);
-        }
-
-        // Windows absolute path: N:/... or N:\...
-        if (/^[A-Za-z]:[\\/]/.test(filePath)) {
-            return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
-        }
-
-        // POSIX absolute path: /workspace/..., /logs/..., etc. (but not relative like ./foo)
-        if (/^\//.test(filePath) && !filePath.startsWith('/.')) {
-            return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
-        }
-
-        // Unknown format — leave as-is to avoid breaking things
-        return match;
+        // Images and unknown extensions — keep existing markdown image behavior
+        return `![${alt}](${proxied})`;
     });
 }
 
@@ -7522,6 +7578,7 @@ document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
 });
 
 initImageGenSettings();
+initMediaGenSettings();
 
 function sendApiRouterUpdate() {
   if (!state.api_router) return;
