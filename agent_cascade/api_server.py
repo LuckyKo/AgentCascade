@@ -1843,9 +1843,20 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.get('/api/media_gen')
     async def get_media_gen_config():
-        """Return the current media_gen settings (full object)."""
+        """Return the current media_gen settings (full object).
+
+        Adds a read-only ``project_root`` key (the AgentCascade install dir, NOT the
+        agent workspace — the two are different directories on a normal install). The
+        UI seeds its workflow_dir / sdcpp config_dir / TTS config_dir fallbacks from
+        this so a fresh install is portable instead of hardcoding one machine's layout.
+        The key is stripped on POST so it can never be persisted into media_gen.json.
+        """
         from agent_cascade.tools.media_gen import _get_media_gen_config
-        return _get_media_gen_config()
+        cfg = dict(_get_media_gen_config())
+        # _media_gen_config_path is <root>/config/media_gen/media_gen.json, so three
+        # parents up is the install root itself (config → media_gen → root).
+        cfg['project_root'] = str(_media_gen_config_path.parent.parent.parent)
+        return cfg
 
     @app.post('/api/media_gen')
     async def save_media_gen_config(request: Request):
@@ -1858,6 +1869,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
+
+        # project_root is a read-only view field (see GET above); never persist it.
+        data.pop('project_root', None)
 
         # Each backend block must be an object; a non-dict would break the tool's
         # .get() calls at load time.

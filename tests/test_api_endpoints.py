@@ -2279,3 +2279,82 @@ class TestImageGenConfigSdcpp:
         names = [c['name'] for c in resp.json()]
         assert names == ['anima', 'z_image_turbo']
         assert all(c['path'].endswith('.json') for c in resp.json())
+
+
+class TestMediaGenProjectRoot:
+    """GET /api/media_gen exposes a read-only ``project_root`` for UI fallbacks.
+
+    The web UI seeds its workflow_dir / sdcpp config_dir / TTS config_dir from this
+    key instead of hardcoding one machine's absolute layout. The anchor is the
+    AgentCascade install dir — NOT ``DEFAULT_WORKSPACE``, which on a normal install
+    is a sibling ``AgentWorkspace/`` holding no ``config/`` tree at all.
+    """
+
+    @pytest.fixture
+    def _isolate_config(self):
+        """Back up + restore the real media_gen.json, serialized across xdist workers.
+
+        The config path is a closure local inside ``create_app`` (we can't redirect
+        it), so a POST reaches the real file. Same O_EXCL lock pattern as the
+        image_gen fixture above so parallel workers can't clobber each other.
+        """
+        lock_path = Path(tempfile.gettempdir()) / 'agentcascade_media_gen_cfg_test.lock'
+        deadline = time.time() + 15
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+                break
+            except FileExistsError:
+                if time.time() > deadline:
+                    raise RuntimeError('could not acquire media_gen config test lock')
+                time.sleep(0.05)
+        real = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        original = real.read_text(encoding='utf-8') if real.exists() else None
+        try:
+            yield
+        finally:
+            if original is not None:
+                real.write_text(original, encoding='utf-8')
+            elif real.exists():
+                real.unlink()
+            try:
+                os.unlink(str(lock_path))
+            except OSError:
+                pass
+
+    def test_project_root_is_the_install_dir_not_the_workspace(self, client):
+        cfg = client.get('/api/media_gen').json()
+        assert 'project_root' in cfg, 'GET /api/media_gen must expose project_root'
+
+        root = Path(cfg['project_root'])
+        assert root.is_absolute()
+        # The install dir is the parent of the package holding api_server.py.
+        assert root == PROJECT_ROOT
+
+        # The workspace is a different directory and holds none of these.
+        from agent_cascade.settings import DEFAULT_WORKSPACE
+        ws = Path(DEFAULT_WORKSPACE)
+        if ws != root:
+            assert not (ws / 'config' / 'workflows').exists(), \
+                'guard assumption: workspace must NOT contain config/workflows, ' \
+                'otherwise the UI could validly anchor on the workspace instead'
+
+    def test_derived_config_dirs_exist_under_project_root(self, client):
+        """The whole point: fallback dirs joined to project_root must really exist."""
+        root = Path(client.get('/api/media_gen').json()['project_root'])
+        for rel in ('config/workflows', 'config/sdcpp', 'config/media_gen/tts'):
+            assert (root / rel).is_dir(), f'{root / rel} must exist for the UI fallback to work'
+
+    def test_project_root_is_never_persisted(self, client, _isolate_config):
+        """POST must strip project_root so it cannot leak into media_gen.json."""
+        resp = client.post('/api/media_gen', json={'timeout': 180, 'project_root': 'C:/evil'})
+        assert resp.status_code == 200
+        stored = client.get('/api/media_gen').json()
+        # Still served (injected on read)...
+        assert stored['project_root'] == str(PROJECT_ROOT)
+        # ...but never written to disk by the POST that supplied it.
+        cfg_file = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        assert 'project_root' not in on_disk
+        assert 'evil' not in json.dumps(on_disk)

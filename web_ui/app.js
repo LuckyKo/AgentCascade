@@ -6931,307 +6931,39 @@ function renderAgentApiAssignments() {
   });
 }
 
-// ── Image Generation Settings (separate REST resource, not per-endpoint) ─────
-// Config lives server-side at <AgentCascade_root>/config/image_gen.json and is
-// read/written via /api/image_gen — independent of the localStorage settings blob.
-
-// Fallback directory used only to seed the workflow pulldown on the very first
-// load when no config exists yet (the backend has no server-side default). Once
-// a config is saved, the real path always comes from GET /api/image_gen.
-const IG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
-let igWorkflowsTimer = null;  // debounce handle for workflow-dir → re-fetch
-let igWorkflowsSeq = 0;       // discard stale async responses (rapid dir changes)
-const IG_DEFAULT_SDCPP_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/sdcpp';
-let igSdcppConfigsTimer = null;  // debounce handle for config-dir → re-fetch
-let igSdcppConfigsSeq = 0;       // discard stale async responses (rapid dir changes)
-let igInitialLoadDone = false; // one-shot guard: populate fields on first load only
-
-function _igSetStatus(msg, type) {
-  const el = document.getElementById('ig-status');
-  if (!el) return;
-  const colors = { ok: 'var(--accent)', error: '#ff6b6b', info: 'var(--text-muted)' };
-  el.style.color = colors[type] || colors.info;
-  el.textContent = msg || '';
-}
-
-function _igShowSaved() {
-  _igSetStatus('✓ Saved', 'ok');
-  clearTimeout(_igShowSaved._t);
-  _igShowSaved._t = setTimeout(() => _igSetStatus('', 'info'), 2500);
-}
-
-// Populate the Default Workflow pulldown from GET /api/image_gen/workflows.
-// Each option's value is the full path; display text is just the filename (stem).
-async function loadImageGenWorkflows(selectWorkflow) {
-  const sel = document.getElementById('ig-default-workflow');
-  if (!sel) return;
-  // Bump the sequence so a stale response from an earlier (now-superseded)
-  // fetch can't overwrite a newer one after rapid directory changes.
-  const seq = ++igWorkflowsSeq;
-  let workflows = [];
-  try {
-    const res = await fetch('/api/image_gen/workflows');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) workflows = data;
-    }
-  } catch (err) {
-    console.warn('Failed to fetch image gen workflows:', err);
-  }
-  if (seq !== igWorkflowsSeq) return; // a newer request superseded this one
-
-  sel.innerHTML = '<option value="">— none —</option>' + workflows.map(w =>
-    `<option value="${escapeHtml(w.path)}">${escapeHtml(w.name)}</option>`
-  ).join('');
-
-  // Restore the saved selection if it is still present in the list.
-  if (selectWorkflow) {
-    const match = [...sel.options].some(o => o.value === selectWorkflow);
-    sel.value = match ? selectWorkflow : '';
-  } else {
-    sel.value = '';
-  }
-}
-
-// Show/hide the ComfyUI vs stable-diffusion.cpp field groups based on the type.
-function _igToggleBackendVisibility(type) {
-  const comfyBlock = document.getElementById('ig-comfyui-block');
-  const sdcppBlock = document.getElementById('ig-sdcpp-block');
-  if (comfyBlock) comfyBlock.style.display = (type === 'sdcpp') ? 'none' : '';
-  if (sdcppBlock) sdcppBlock.style.display = (type === 'sdcpp') ? '' : 'none';
-}
-
-// Populate the sdcpp Default Config pulldown from GET /api/image_gen/sdcpp_configs.
-// Each option's value is the filename stem (what the tool resolves via sdcpp_config).
-// A sequence guard discards stale responses when the config dir is changed rapidly.
-async function loadImageGenSdcppConfigs(selectConfig) {
-  const sel = document.getElementById('ig-sdcpp-default-config');
-  if (!sel) return;
-  const seq = ++igSdcppConfigsSeq;
-  let configs = [];
-  try {
-    const res = await fetch('/api/image_gen/sdcpp_configs');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) configs = data;
-    }
-  } catch (err) {
-    console.warn('Failed to fetch image gen sdcpp configs:', err);
-  }
-  if (seq !== igSdcppConfigsSeq) return; // a newer request superseded this one
-
-  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
-    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
-  ).join('');
-
-  if (selectConfig) {
-    const match = [...sel.options].some(o => o.value === selectConfig);
-    sel.value = match ? selectConfig : '';
-  } else {
-    sel.value = '';
-  }
-}
-
-// Load current config from GET /api/image_gen and populate the fields.
-async function loadImageGenSettings() {
-  const igType = document.getElementById('ig-type');
-  const igUrl = document.getElementById('ig-url');
-  const igDir = document.getElementById('ig-workflow-dir');
-  const igTimeout = document.getElementById('ig-timeout');
-  if (!igType || !igUrl || !igDir || !igTimeout) return;
-
-  let cfg = {};
-  try {
-    const res = await fetch('/api/image_gen');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === 'object') cfg = data;
-    }
-  } catch (err) {
-    console.warn('Failed to load image gen settings:', err);
-  }
-
-  igType.value = cfg.type || 'comfyui';
-  igUrl.value = cfg.url || '';
-  igDir.value = cfg.workflow_dir || IG_DEFAULT_WORKFLOW_DIR;
-  igTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
-
-  // sdcpp fields (populated only when the backend block is present).
-  const sdcpp = (cfg.sdcpp && typeof cfg.sdcpp === 'object') ? cfg.sdcpp : {};
-  const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
-  const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
-  const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
-  const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
-  if (igSdcppBinary) igSdcppBinary.value = sdcpp.binary || '';
-  if (igSdcppModelDir) igSdcppModelDir.value = sdcpp.models_dir || '';
-  if (igSdcppConfigDir) igSdcppConfigDir.value = sdcpp.config_dir || IG_DEFAULT_SDCPP_CONFIG_DIR;
-  if (igSdcppTimeout) igSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
-
-  await loadImageGenWorkflows(cfg.default_workflow);
-  await loadImageGenSdcppConfigs(sdcpp.default_sdcpp_config);
-
-  _igToggleBackendVisibility(igType.value);
-}
-
-// Save via POST /api/image_gen. Handles both {status:"ok"} and {ok:true},
-// and surfaces server errors ({message}/{error}).
-async function saveImageGenSettings() {
-  const igType = document.getElementById('ig-type');
-  const igUrl = document.getElementById('ig-url');
-  const igDir = document.getElementById('ig-workflow-dir');
-  const igWf = document.getElementById('ig-default-workflow');
-  const igTimeout = document.getElementById('ig-timeout');
-  if (!igType || !igUrl || !igDir || !igWf || !igTimeout) return;
-
-  // Clamp timeout to the allowed range so we don't rely solely on server validation.
-  let timeout = parseInt(igTimeout.value, 10);
-  if (isNaN(timeout)) timeout = 180;
-  timeout = Math.min(600, Math.max(30, timeout));
-  igTimeout.value = String(timeout);
-
-  const isSdcpp = (igType.value === 'sdcpp');
-
-  const url = igUrl.value.trim();
-  // Cheap client-side check mirrors the backend rule (must be http/https) so a
-  // bad URL is caught before the round-trip. Only enforced for the ComfyUI
-  // backend; the sdcpp backend has no server URL.
-  if (!isSdcpp && !/^https?:\/\//i.test(url)) {
-    _igSetStatus('✕ Server URL must start with http:// or https://', 'error');
-    return;
-  }
-
-  const body = {
-    type: igType.value,
-    url: url,
-    workflow_dir: igDir.value.trim(),
-    default_workflow: igWf.value,
-    timeout: timeout
-  };
-
-  // sdcpp block: build only for the sdcpp backend. The sdcpp timeout has its own
-  // wider range (30-1800) than the shared fallback timeout (30-600).
-  if (isSdcpp) {
-    const igSdcppBinary = document.getElementById('ig-sdcpp-binary');
-    const igSdcppModelDir = document.getElementById('ig-sdcpp-model-dir');
-    const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
-    const igSdcppDefaultConfig = document.getElementById('ig-sdcpp-default-config');
-    const igSdcppTimeout = document.getElementById('ig-sdcpp-timeout');
-
-    let sdcppTimeout = parseInt(igSdcppTimeout ? igSdcppTimeout.value : '', 10);
-    if (isNaN(sdcppTimeout)) sdcppTimeout = 900;
-    sdcppTimeout = Math.min(1800, Math.max(30, sdcppTimeout)); // F2: 30-1800 clamp
-    if (igSdcppTimeout) igSdcppTimeout.value = String(sdcppTimeout);
-
-    body.sdcpp = {
-      binary: (igSdcppBinary ? igSdcppBinary.value.trim() : ''),
-      models_dir: (igSdcppModelDir ? igSdcppModelDir.value.trim() : ''),
-      config_dir: (igSdcppConfigDir ? igSdcppConfigDir.value.trim() : ''),
-      default_sdcpp_config: (igSdcppDefaultConfig ? igSdcppDefaultConfig.value : ''),
-      timeout: sdcppTimeout
-    };
-  }
-
-  try {
-    const res = await fetch('/api/image_gen', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    let data = {};
-    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
-
-    if (res.ok && (data.status === 'ok' || data.ok === true)) {
-      _igShowSaved();
-    } else {
-      const msg = data.message || data.error || `Save failed (${res.status})`;
-      _igSetStatus('✕ ' + msg, 'error');
-    }
-  } catch (err) {
-    _igSetStatus('✕ Save failed: ' + err.message, 'error');
-  }
-}
-
-function initImageGenSettings() {
-  // Populate fields + workflow pulldown on initial page load. The System sub-tab is
-  // active by default, but its click handler only fires on an explicit click — so after a
-  // restart the pulldown/fields stayed empty until the user clicked or hit refresh. This
-  // one-shot guard fixes that; later state pushes are handled by the sub-tab click handler
-  // (which re-syncs) and must not clobber in-progress edits here.
-  if (!igInitialLoadDone && document.getElementById('ig-default-workflow')) {
-    igInitialLoadDone = true;
-    loadImageGenSettings();
-  }
-
-  const igSave = document.getElementById('ig-save');
-  if (igSave) {
-    igSave.addEventListener('click', (e) => {
-      e.stopPropagation(); // don't collapse the settings section
-      saveImageGenSettings();
-    });
-  }
-
-  // Backend type toggle: show/hide the ComfyUI vs sdcpp field groups.
-  const igType = document.getElementById('ig-type');
-  if (igType) {
-    igType.addEventListener('change', () => _igToggleBackendVisibility(igType.value));
-  }
-
-  // Debounced re-fetch of the sdcpp config pulldown when the config directory changes.
-  const igSdcppConfigDir = document.getElementById('ig-sdcpp-config-dir');
-  if (igSdcppConfigDir) {
-    igSdcppConfigDir.addEventListener('change', () => {
-      clearTimeout(igSdcppConfigsTimer);
-      igSdcppConfigsTimer = setTimeout(() => loadImageGenSdcppConfigs(), 400);
-    });
-  }
-
-  // Manual refresh button — re-scans the sdcpp config directory on demand.
-  const igRefreshSdcpp = document.getElementById('ig-refresh-sdcpp-configs');
-  if (igRefreshSdcpp) {
-    igRefreshSdcpp.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const sel = document.getElementById('ig-sdcpp-default-config');
-      loadImageGenSdcppConfigs(sel ? sel.value : '');
-    });
-  }
-
-  // Debounced re-fetch of the workflow pulldown when the directory changes.
-  const igDir = document.getElementById('ig-workflow-dir');
-  if (igDir) {
-    igDir.addEventListener('change', () => {
-      clearTimeout(igWorkflowsTimer);
-      igWorkflowsTimer = setTimeout(() => loadImageGenWorkflows(), 400);
-    });
-  }
-
-  // Manual refresh button — re-scans the directory on demand.
-  const igRefresh = document.getElementById('ig-refresh-workflows');
-  if (igRefresh) {
-    igRefresh.addEventListener('click', (e) => {
-      e.stopPropagation(); // don't collapse the settings section
-      loadImageGenWorkflows(
-        document.getElementById('ig-default-workflow')?.value || ''
-      );
-    });
-  }
-}
-
 // ── Media Generation Settings (image/video/music/TTS; separate REST resource) ──
 // Config lives server-side at <AgentCascade_root>/config/media_gen/media_gen.json and is
 // read/written via /api/media_gen — independent of the localStorage settings blob.
-// Mirrors the image-gen JS above: a backend visibility toggle, pulldowns populated
-// from the REST endpoints, and load/save.
+// (Supersedes the deprecated image_gen UI, which was removed.)
 
-const MG_DEFAULT_WORKFLOW_DIR = 'N:/work/WD/AgentCascade/config/workflows';
-const MG_DEFAULT_SDCPP_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/sdcpp';
-const MG_DEFAULT_TTS_CONFIG_DIR = 'N:/work/WD/AgentCascade/config/media_gen/tts';
+// Fallback directories used only to seed the pulldowns on the very first load, when
+// no config exists yet. They are derived from the install dir the server reports in
+// GET /api/media_gen as `project_root` — NOT from the agent workspace, which is a
+// different directory (AgentWorkspace) that holds no config/ tree at all.
+// Until the first load resolves, fall back to relative segments so the fields are
+// never seeded with another machine's absolute path.
+let mgProjectRoot = null;       // set from the server on first successful load
+let mgRootResolved = false;
+const MG_DEFAULT_WORKFLOW_DIR = 'config/workflows';
 let mgWorkflowsTimer = null;
 let mgWorkflowsSeq = 0;
+const MG_DEFAULT_SDCPP_CONFIG_DIR = 'config/sdcpp';
 let mgSdcppConfigsTimer = null;
 let mgSdcppConfigsSeq = 0;
+const MG_DEFAULT_TTS_CONFIG_DIR = 'config/media_gen/tts';
 let mgTtsConfigsTimer = null;
 let mgTtsConfigsSeq = 0;
 let mgInitialLoadDone = false;
+
+// Join the server-reported install root with a config-relative path. Falls back to
+// the bare relative segment when the root is unknown, so we never emit a stale
+// hardcoded absolute path from this machine.
+function _mgRootedDir(rel) {
+  if (mgProjectRoot) {
+    return mgProjectRoot.replace(/[\\/]+$/, '') + '/' + rel;
+  }
+  return rel;
+}
 
 function _mgSetStatus(msg, type) {
   const el = document.getElementById('mg-status');
@@ -7365,10 +7097,17 @@ async function loadMediaGenSettings() {
     console.warn('Failed to load media gen settings:', err);
   }
 
+  // The server reports the install dir so fallbacks stay portable across machines.
+  // Recorded before any field is seeded below.
+  if (!mgRootResolved && typeof cfg.project_root === 'string' && cfg.project_root) {
+    mgProjectRoot = cfg.project_root;
+    mgRootResolved = true;
+  }
+
   mgBackend.value = cfg.default_backend || 'AUTO';
   const comfy = (cfg.comfyui && typeof cfg.comfyui === 'object') ? cfg.comfyui : {};
   mgUrl.value = comfy.url || '';
-  mgDir.value = comfy.workflow_dir || MG_DEFAULT_WORKFLOW_DIR;
+  mgDir.value = comfy.workflow_dir || _mgRootedDir(MG_DEFAULT_WORKFLOW_DIR);
   const mgOutputDir = document.getElementById('mg-output-dir');
   if (mgOutputDir) mgOutputDir.value = comfy.output_dir || '';
   mgTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
@@ -7380,7 +7119,7 @@ async function loadMediaGenSettings() {
   const mgSdcppTimeout = document.getElementById('mg-sdcpp-timeout');
   if (mgSdcppBinary) mgSdcppBinary.value = sdcpp.binary || '';
   if (mgSdcppModelDir) mgSdcppModelDir.value = sdcpp.models_dir || '';
-  if (mgSdcppConfigDir) mgSdcppConfigDir.value = sdcpp.config_dir || MG_DEFAULT_SDCPP_CONFIG_DIR;
+  if (mgSdcppConfigDir) mgSdcppConfigDir.value = sdcpp.config_dir || _mgRootedDir(MG_DEFAULT_SDCPP_CONFIG_DIR);
   if (mgSdcppTimeout) mgSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
 
   const tts = (cfg.kobold_tts && typeof cfg.kobold_tts === 'object') ? cfg.kobold_tts : {};
@@ -7390,7 +7129,7 @@ async function loadMediaGenSettings() {
   const mgTtsTimeout = document.getElementById('mg-tts-timeout');
   if (mgTtsBinary) mgTtsBinary.value = tts.binary || '';
   if (mgTtsModelDir) mgTtsModelDir.value = tts.models_dir || '';
-  if (mgTtsConfigDir) mgTtsConfigDir.value = tts.config_dir || MG_DEFAULT_TTS_CONFIG_DIR;
+  if (mgTtsConfigDir) mgTtsConfigDir.value = tts.config_dir || _mgRootedDir(MG_DEFAULT_TTS_CONFIG_DIR);
   if (mgTtsTimeout) mgTtsTimeout.value = (tts.timeout != null) ? tts.timeout : 600;
 
   await loadMediaGenWorkflows(comfy.default_image_workflow, comfy.default_video_workflow, comfy.default_music_workflow);
@@ -7571,13 +7310,11 @@ function initMediaGenSettings() {
 document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     if (btn.dataset.target === 'subtab-system') {
-      loadImageGenSettings();
       loadMediaGenSettings();
     }
   });
 });
 
-initImageGenSettings();
 initMediaGenSettings();
 
 function sendApiRouterUpdate() {
