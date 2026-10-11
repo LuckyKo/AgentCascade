@@ -371,35 +371,29 @@ class ConfigPersistMixin:
                 f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
 
     def _apply_loaded_disabled_tools(self, disabled_tools_raw):
-        """Apply loaded disabled_tools config with backwards-compatible validation.
+        """Apply loaded disabled_tools config.
 
-        Silently ignores references to tools that no longer exist in the registry.
+        Tool names are stored as-is (normalized only) WITHOUT filtering against the
+        tool registry. Filtering unknown tools must happen at USE-time, not load-time:
+        lazily-registered tools (send_message, media_gen, compress_context — registered
+        by agent_factory.py) are not in the registry yet at boot, so load-time filtering
+        would incorrectly drop them. The use-time resolver
+        (utils.disabled_tools.resolve_disabled_tools_for_agent) filters against the fully
+        populated registry once agents have been created.
         """
-        from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
-        from agent_cascade.tools.base import TOOL_REGISTRY
         from agent_cascade.utils.disabled_tools import normalize_disabled_tools
-
-        known_tools = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
 
         try:
             if isinstance(disabled_tools_raw, dict):
                 validated_dict = {}
                 for agent_key, agent_tools in disabled_tools_raw.items():
-                    normalized = normalize_disabled_tools(agent_tools)
-                    valid_tools = [t for t in normalized if t in known_tools]
-                    ignored = set(normalized) - set(valid_tools)
-                    if ignored:
-                        logger.debug(
-                            f"[disabled_tools] Ignoring unknown tools from saved config for '{agent_key}': {ignored}")
-                    validated_dict[agent_key] = valid_tools
+                    # Store as a list (not a set): matches the migration's sorted-list format and
+                    # keeps the value JSON-serializable for _save_pool_settings(). Downstream
+                    # resolvers normalize either format via normalize_disabled_tools().
+                    validated_dict[agent_key] = list(normalize_disabled_tools(agent_tools))
                 self.set_ui_disabled_tools(validated_dict)
             elif isinstance(disabled_tools_raw, list):
-                normalized = normalize_disabled_tools(disabled_tools_raw)
-                valid_tools = [t for t in normalized if t in known_tools]
-                ignored = set(normalized) - set(valid_tools)
-                if ignored:
-                    logger.debug(f"[disabled_tools] Ignoring unknown tools from saved config (global): {ignored}")
-                self.set_ui_disabled_tools(valid_tools)
+                self.set_ui_disabled_tools(normalize_disabled_tools(disabled_tools_raw))
         except Exception as e:
             logger.warning(f"[disabled_tools] Failed to apply loaded disabled tools config: {e}")
 

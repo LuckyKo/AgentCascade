@@ -141,6 +141,21 @@ def resolve_disabled_tools_for_agent(
                                                         'reviewer', 'writer'):
         disabled |= DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
+    # ── Use-time registry filter ─────────────────────────────────────────────
+    # Load-time (pool/config_persist._apply_loaded_disabled_tools) no longer
+    # filters unknown tool names, because lazily-registered tools (send_message,
+    # media_gen, compress_context — registered by agent_factory.py) are not in
+    # the registry yet at boot. Filter here, at use-time, when the registry is
+    # fully populated (agents have been created).
+    if disabled:
+        from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+        from agent_cascade.tools.base import TOOL_REGISTRY
+        known_tools = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
+        dropped = disabled - known_tools
+        if dropped:
+            logger.debug('Dropping unknown disabled_tools at use-time: %s', sorted(dropped))
+        disabled = disabled & known_tools
+
     return disabled
 
 

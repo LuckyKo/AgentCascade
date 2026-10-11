@@ -149,6 +149,13 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # so the load path can write through it.
         self.auto_security = True
         self._loaded_auto_security = None  # persistence shadow (None = no persisted value on disk)
+        # ── Live UI disabled_tools cache (real-time tool assignment) ─────────
+        # Stores the current per-agent disabled_tools dict from the UI settings panel.
+        # All agent instances read from this during each turn for real-time updates.
+        # Must be created BEFORE _load_pool_settings(): the load path calls
+        # _apply_loaded_disabled_tools() → set_ui_disabled_tools() which acquires this lock.
+        self._ui_disabled_tools: Dict[str, Any] = {}
+        self._ui_disabled_tools_lock = threading.RLock()
         self._load_pool_settings()  # load persisted values, overriding defaults
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
 
@@ -216,12 +223,6 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # Incremented when global config changes (workspace dir, extra folders, refresh_agents).
         # Used by ExecutionEngine._setup_turn() to detect if system prompt needs rebuild.
         self._config_version = 0
-
-        # ── Live UI disabled_tools cache (real-time tool assignment) ─────────
-        # Stores the current per-agent disabled_tools dict from the UI settings panel.
-        # All agent instances read from this during each turn for real-time updates.
-        self._ui_disabled_tools: Dict[str, Any] = {}
-        self._ui_disabled_tools_lock = threading.RLock()
 
         # One-time migration: seed per-class tool defaults into UI config so the UI is the single
         # source of truth after Layer 3 removal. Must run after _ui_disabled_tools_lock exists.
