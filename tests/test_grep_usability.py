@@ -321,6 +321,35 @@ def test_grep_fast_path_truncation_surfaces_spillover():
         print('[PASS] test_grep_fast_path_truncation_surfaces_spillover')
 
 
+def test_grep_fast_path_truncation_has_end_of_body_marker():
+    """BUG_0070: fast-path truncation must be signalled in the body, not only the header.
+
+    The header notice ([TRUNCATED ...]) alone lets the already-truncated body read as
+    complete. After the fix, an end-of-body marker is appended at the point where the
+    evidence stops. Skips gracefully when no subprocess grep tool (rg/grep) is available.
+    """
+    from agent_cascade.operation_manager import OperationManager
+    if not _require_subprocess_grep('test_grep_fast_path_truncation_has_end_of_body_marker'):
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 60 lines, each ~50 chars → well over the default char_limit of 2000.
+        content = ''.join(f"line{i:03d} " + ('x' * 40) + '\n' for i in range(60))
+        Path(tmpdir, 'big.txt').write_text(content)
+        om = OperationManager(base_dir=tmpdir)
+        result = om.grep(pattern='line', path='.')
+        # Header marker (pre-existing behaviour) must still be present.
+        assert '[TRUNCATED' in result, f"Expected header truncation marker: {result[:300]}"
+        # End-of-body marker (BUG_0070 fix) must also be present in the body.
+        body = _body_after_summary(result)
+        assert 'more line(s) omitted' in body, \
+            f"End-of-body truncation marker missing from fast-path grep body: {result[:400]}"
+        # The marker must sit in the body, NOT leak into the header line.
+        header_line = result.split('\n', 1)[0]
+        assert 'more line(s) omitted' not in header_line, \
+            f"End-of-body marker leaked into the header line: {header_line}"
+        print('[PASS] test_grep_fast_path_truncation_has_end_of_body_marker')
+
+
 def _require_subprocess_grep(test_name):
     """Return True if a subprocess grep tool (rg/grep) is available, else print a skip note."""
     from agent_cascade.operation_manager.grep import _check_tool_availability

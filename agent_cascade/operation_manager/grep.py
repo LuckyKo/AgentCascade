@@ -829,6 +829,18 @@ class GrepMixin:
                             output_text = result
                             summary += ' [TRUNCATED]'
 
+                    if _sub_truncated:
+                        # BUG_0070: append an end-of-body marker so the truncation is visible at
+                        # the point where the evidence stops, not only in the header. The header
+                        # notice alone lets the (already line-truncated) body read as complete.
+                        omitted = (_sub_total_lines or 0) - (_sub_shown_lines or 0)
+                        if omitted > 0:
+                            _marker = f"\n\n[… {omitted} more line(s) omitted — "
+                            if _sub_spill_rel:
+                                output_text += _marker + f"re-run with a narrower pattern or read the spillover file {_sub_spill_rel}]"
+                            else:
+                                output_text += _marker + 're-run with a narrower pattern to avoid truncation]'
+
                     return f"{summary}:\n\n" + output_text
 
             # ── Slow path: pure Python fallback ──
