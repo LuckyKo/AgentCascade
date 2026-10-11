@@ -319,6 +319,62 @@ def test_heuristic_added_nested_lines_indentation():
             f"Blank: {fblank.read_text(encoding='utf-8')!r}"
 
 
+@pytest.mark.xfail(
+    reason='BUG_0069: heuristic_agnostic re-anchoring shifts YAML sibling block indent',
+    strict=False,
+)
+def test_heuristic_agnostic_yaml_append_preserves_indent():
+    """BUG_0069: heuristic_agnostic must not mangle indentation when appending a
+    sibling block to an indentation-sensitive file (YAML).
+
+    The re-anchoring logic re-bases new_content onto the matched block's indent. For an
+    APPEND of a shallower sibling block (a new job at 2-space indent after a 10-space
+    ``run: |`` block), that would shift the new content's base indent and break the YAML.
+    If the fix is in-tree, the file must still parse as valid YAML with 2 jobs.
+    """
+    import yaml
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        fy = Path(tmpdir) / 'workflow.yml'
+        fy.write_text(
+            'name: tests\n'
+            'on: [push]\n'
+            'jobs:\n'
+            '  tests-no-docker:\n'
+            '    runs-on: ubuntu-latest\n'
+            '    steps:\n'
+            '      - name: Run tests\n'
+            '        run: |\n'
+            '          echo hello\n'
+            '          echo world\n',
+            encoding='utf-8')
+        op_mgr._own(fy.resolve(), 'test_agent')
+
+        # old_content is the last two lines of the existing job (10-space indent).
+        old = 'echo hello\n          echo world'
+        # new_content repeats those lines then appends a sibling job at 2-space indent.
+        new = (
+            'echo hello\n'
+            '          echo world\n'
+            '  tests-e2e-fullstack:\n'
+            '    runs-on: ubuntu-latest\n'
+            '    steps:\n'
+            '      - name: Run e2e\n'
+            '        run: |\n'
+            '          echo e2e\n'
+        )
+
+        result = op_mgr.edit_file(
+            path='workflow.yml', agent_name='test_agent',
+            old_content=old, new_content=new,
+            match_mode='heuristic_agnostic')
+        assert 'OK:' in result, result
+        parsed = yaml.safe_load(fy.read_text(encoding='utf-8'))
+        assert len(parsed['jobs']) == 2, f"Expected 2 jobs, got {len(parsed['jobs'])}: {parsed}"
+
+
 def test_delete_and_insert_mode():
     """Test all 20 scenarios for the delete_and_insert match_mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
