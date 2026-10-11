@@ -492,6 +492,10 @@ class ShellCmd(BaseTool):
         if timeout_error is not None:
             return timeout_error
 
+        # Default timeout for async mode is much longer (ASYNC_SHELL_DEFAULT_TIMEOUT, 1 hour).
+        # Computed before the approval gate so tool_args can expose it to the security guard.
+        effective_timeout = timeout if timeout else ASYNC_SHELL_DEFAULT_TIMEOUT
+
         # ── Approval gate: mirror sync mode logic ────────────────────
         is_safe = ShellMixin._is_safe_readonly_shell_command(command)
 
@@ -515,7 +519,8 @@ class ShellCmd(BaseTool):
                     'command': command,
                     'justification': justification,
                     'cwd': cwd,
-                    'execution_mode': 'async'
+                    'execution_mode': 'async',
+                    'timeout': effective_timeout,
                 },
                 description=description,
             )
@@ -529,9 +534,6 @@ class ShellCmd(BaseTool):
         tracker = self._get_tracker()
         if tracker is None:
             return '[shell_cmd] Async shell not available (tracker not initialized).'
-
-        # Default timeout for async mode is much longer (ASYNC_SHELL_DEFAULT_TIMEOUT, 1 hour)
-        effective_timeout = timeout if timeout else ASYNC_SHELL_DEFAULT_TIMEOUT
 
         # Respect user toggle for console window popup
         console_window = True

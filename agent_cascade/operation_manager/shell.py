@@ -606,7 +606,9 @@ class ShellMixin:
                 tool_args={
                     'command': command,
                     'justification': justification,
-                    'cwd': cwd
+                    'cwd': cwd,
+                    'execution_mode': 'sync',
+                    'timeout': effective_timeout,
                 },
                 description=description,
             )

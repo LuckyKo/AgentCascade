@@ -409,6 +409,38 @@ def test_strip_cd_prefix():
     assert not failed, f"{len(failed)} _strip_cd_prefix tests failed: {failed}"
 
 
+def test_approval_tool_args_include_execution_mode_and_timeout():
+    """BUG_0071: the security guard must see execution_mode and timeout in tool_args.
+
+    The approval gate is the observable side effect: mock request_user_approval to
+    capture the tool_args it receives, then assert the sync path exposes both
+    execution_mode and timeout (previously it only sent command/justification/cwd).
+    Denying approval keeps the test from executing any real shell command.
+    """
+    import tempfile
+    from unittest.mock import patch
+
+    om = OperationManager(base_dir=tempfile.mkdtemp())
+    captured = {}
+
+    def fake_approval(self, agent_name, tool_name, tool_args, description, **kwargs):
+        captured['tool_args'] = tool_args
+        return (False, 'denied-for-test')
+
+    with patch.object(OperationManager, 'request_user_approval', fake_approval):
+        result = om.execute_shell_command(
+            command='rm -rf /tmp/does_not_matter',
+            justification='test',
+            agent_name='test_agent',
+            timeout=180,
+        )
+
+    assert 'tool_args' in captured, f"request_user_approval was not reached: {result}"
+    tool_args = captured['tool_args']
+    assert tool_args.get('execution_mode') == 'sync', f"execution_mode missing/wrong: {tool_args}"
+    assert tool_args.get('timeout') == 180, f"timeout missing/wrong: {tool_args}"
+
+
 if __name__ == '__main__':
     # Run the three test functions; each asserts internally and raises on failure.
     try:
