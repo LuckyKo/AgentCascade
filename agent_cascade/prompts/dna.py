@@ -344,7 +344,8 @@ TOOL_METADATA = {
         'description': (
             'Lists files and subdirectories within a specified directory path. '
             'Supports recursive traversal, glob-based filtering (single or comma-separated patterns), '
-            'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search.'
+            'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search. '
+            'By default (skip_vcs=true) common VCS/build dirs (.git, node_modules, __pycache__, etc.) are pruned from recursive listings; set skip_vcs=false to include them.'
         ),
         'parameters': {
             'path':
@@ -374,7 +375,9 @@ TOOL_METADATA = {
             'files_only':
                 'When true, show only files (suppress all directory entries). Useful for pure file-finding to reduce noise. Mutually exclusive with dirs_only. Default: false.',
             'dirs_only':
-                'When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false.'
+                'When true, show only directories (suppress all file entries). Mutually exclusive with files_only. Default: false.',
+            'skip_vcs':
+                'When true (default), prune common VCS/build directories from recursive traversal: .git, node_modules, __pycache__, *.egg-info, .venv, venv, dist, build, .tox (mirrors grep\'s ignore_vcs default). Set false to list them.'
         }
     },
     'grep': {

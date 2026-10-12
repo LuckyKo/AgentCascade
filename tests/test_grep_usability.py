@@ -459,6 +459,134 @@ def test_grep_comma_glob_supported():
     print('[PASS] test_grep_comma_glob_supported')
 
 
+# ─── BUG_0049 / BUG_0047: list_dir exclude pruning + relative-path matching + skip_vcs ───
+
+def test_list_exclude_prunes_git_subtree():
+    """BUG_0049: exclude='.git' (bare) must suppress the WHOLE .git subtree, not just
+    its header. Fixture .git/{HEAD,config} + src/main.py; recursive=True, exclude='.git'
+    -> no .git header, no .git/HEAD, no .git/config; src/main.py present."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        git = Path(tmpdir, '.git')
+        git.mkdir()
+        (git / 'HEAD').write_text('a')
+        (git / 'config').write_text('b')
+        src = Path(tmpdir, 'src')
+        src.mkdir()
+        (src / 'main.py').write_text('c')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, exclude='.git')
+        assert '.git' not in result, f".git subtree must be fully suppressed: {result}"
+        assert 'HEAD' not in result, f".git/HEAD must not appear: {result}"
+        assert 'config' not in result, f".git/config must not appear: {result}"
+        assert 'main.py' in result, f"src/main.py must still be listed: {result}"
+    print('[PASS] test_list_exclude_prunes_git_subtree')
+
+
+def test_list_exclude_git_glob_form():
+    """BUG_0049: exclude='.git/*' (slash-bearing) must suppress the whole .git subtree.
+    Proves relative-path matching (basename '.git' never matches '.git/*')."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        git = Path(tmpdir, '.git')
+        git.mkdir()
+        (git / 'HEAD').write_text('a')
+        (git / 'config').write_text('b')
+        src = Path(tmpdir, 'src')
+        src.mkdir()
+        (src / 'main.py').write_text('c')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, exclude='.git/*')
+        assert '.git' not in result, f".git subtree must be fully suppressed: {result}"
+        assert 'HEAD' not in result, f".git/HEAD must not appear: {result}"
+        assert 'config' not in result, f".git/config must not appear: {result}"
+        assert 'main.py' in result, f"src/main.py must still be listed: {result}"
+    print('[PASS] test_list_exclude_git_glob_form')
+
+
+def test_list_skip_vcs_default():
+    """skip_vcs defaults True (mirrors grep ignore_vcs): .git/, __pycache__/, node_modules/
+    subtrees are absent by default; skip_vcs=False lists them."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for d in ('.git', '__pycache__', 'node_modules'):
+            dd = Path(tmpdir, d)
+            dd.mkdir()
+            (dd / 'marker.txt').write_text('x')
+        Path(tmpdir, 'keep.py').write_text('y')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True)
+        assert '.git' not in result, f".git must be pruned by default: {result}"
+        assert '__pycache__' not in result, f"__pycache__ must be pruned by default: {result}"
+        assert 'node_modules' not in result, f"node_modules must be pruned by default: {result}"
+        assert 'keep.py' in result, f"keep.py must still be listed: {result}"
+        # Opt-out: skip_vcs=False restores the VCS/build subtrees.
+        result2 = om.list_directory('.', recursive=True, skip_vcs=False)
+        assert '.git' in result2, f".git must appear when skip_vcs=False: {result2}"
+        assert '__pycache__' in result2, f"__pycache__ must appear when skip_vcs=False: {result2}"
+        assert 'node_modules' in result2, f"node_modules must appear when skip_vcs=False: {result2}"
+    print('[PASS] test_list_skip_vcs_default')
+
+
+def test_list_include_multi_pattern_recursive():
+    """BUG_0047 lock-in: comma-separated multi-pattern include is an OR over patterns and
+    works in recursive mode. NOTE: the plan specified files_only=True, but files_only +
+    recursive is a separate pre-existing limitation (dir entries are skipped so the tree
+    never descends); it is orthogonal to this fix, so this test omits files_only."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for d, f in (('a', 'Qwen3.8-27B.gguf'), ('b', 'qwen3.8-27b.gguf'),
+                     ('c', 'other.gguf'), ('d', 'notes.txt')):
+            dd = Path(tmpdir, d)
+            dd.mkdir()
+            (dd / f).write_text('x')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True,
+                                   include='*Qwen3.8*,*qwen3.8*,*3.8-27B*')
+        assert 'Qwen3.8-27B.gguf' in result, f"matching .gguf must be present: {result}"
+        assert 'qwen3.8-27b.gguf' in result, f"matching .gguf must be present: {result}"
+        assert 'other.gguf' not in result, f"non-matching .gguf must be absent: {result}"
+        assert 'notes.txt' not in result, f"non-matching .txt must be absent: {result}"
+    print('[PASS] test_list_include_multi_pattern_recursive')
+
+
+def test_list_include_relative_path_pattern():
+    """BUG_0047 latent half: a path-qualified include ('sub/*.gguf') matches only files
+    under sub/ via relative-path matching (basename-only matching could never match it)."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sub = Path(tmpdir, 'sub')
+        sub.mkdir()
+        (sub / 'a.gguf').write_text('x')
+        (sub / 'b.txt').write_text('x')
+        Path(tmpdir, 'top.gguf').write_text('x')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, include='sub/*.gguf')
+        assert 'sub/a.gguf' in result, f"sub/a.gguf must match 'sub/*.gguf': {result}"
+        assert 'b.txt' not in result, f"sub/b.txt must not match: {result}"
+        assert 'top.gguf' not in result, f"top-level top.gguf must not match: {result}"
+    print('[PASS] test_list_include_relative_path_pattern')
+
+
+def test_list_exclude_path_qualified_keeps_siblings():
+    """A path-qualified exclude ('sub/*.gguf') must drop only the matching files under
+    sub/, NOT the whole sub/ subtree — sub/other.txt (a sibling that does not match)
+    must survive. Guards against over-pruning a parent by a deeper-only pattern."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sub = Path(tmpdir, 'sub')
+        sub.mkdir()
+        (sub / 'a.gguf').write_text('x')
+        (sub / 'other.txt').write_text('y')
+        Path(tmpdir, 'keep.py').write_text('z')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, exclude='sub/*.gguf')
+        assert 'a.gguf' not in result, f"sub/a.gguf must be excluded: {result}"
+        assert 'other.txt' in result, f"sub/other.txt (non-matching sibling) must survive: {result}"
+        assert 'keep.py' in result, f"keep.py must survive: {result}"
+    print('[PASS] test_list_exclude_path_qualified_keeps_siblings')
+
+
 if __name__ == '__main__':
     tests = [
         test_compile_grep_pattern_flags,
@@ -483,6 +611,12 @@ if __name__ == '__main__':
         test_grep_fast_path_no_blank_lines_between_matches,
         test_grep_fast_path_context_no_blank_lines,
         test_grep_comma_glob_supported,
+        test_list_exclude_prunes_git_subtree,
+        test_list_exclude_git_glob_form,
+        test_list_skip_vcs_default,
+        test_list_include_multi_pattern_recursive,
+        test_list_include_relative_path_pattern,
+        test_list_exclude_path_qualified_keeps_siblings,
     ]
     passed = 0
     failed = 0

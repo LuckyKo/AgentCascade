@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from agent_cascade.operation_manager.approval_provenance import APPROVER_REASON_LABEL
+from agent_cascade.operation_manager.grep_ignore import DEFAULT_IGNORED_DIRS
 from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── list_dir filter helpers ──────────────────────────────────────────────
@@ -121,14 +122,23 @@ def _parse_time(s: Optional[str]) -> Optional[float]:
         return None
 
 
+def _parse_patterns(patterns_str: Optional[str]) -> Tuple[str, ...]:
+    """Split a comma-separated glob string into a tuple of patterns (empty if none)."""
+    if not patterns_str or not patterns_str.strip():
+        return ()
+    return tuple(p.strip() for p in patterns_str.split(',') if p.strip())
+
+
+def _build_pattern_fn_from_patterns(patterns: Tuple[str, ...]) -> Optional[Callable]:
+    """Build a name-matching callable from an already-parsed pattern tuple."""
+    if not patterns:
+        return None
+    return lambda name: any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
 def _build_pattern_fn(patterns_str: Optional[str]) -> Optional[Callable]:
     """Build a name-matching callable from a comma-separated glob string."""
-    if not patterns_str or not patterns_str.strip():
-        return None
-    patterns = [p.strip() for p in patterns_str.split(',') if p.strip()]
-    if not patterns:
-        return None  # empty after splitting → no filter
-    return lambda name: any(fnmatch.fnmatch(name, p) for p in patterns)
+    return _build_pattern_fn_from_patterns(_parse_patterns(patterns_str))
 
 
 @dataclass
@@ -136,6 +146,15 @@ class FilterContext:
     """Bundle of all list_dir filters threaded through the listing call chain."""
     include_fn: Optional[Callable] = None
     exclude_fn: Optional[Callable] = None
+    # Raw exclude pattern list, so directory-level pruning can match against the
+    # path RELATIVE to the listed root (slash-bearing globs like '.git/*'), not
+    # just the bare basename. Kept separate from exclude_fn on purpose: the name
+    # filter stays basename-only (BUG_0008 invariant), only dir PRUNING widens.
+    exclude_patterns: Tuple[str, ...] = ()
+    # When True, prune any subdir whose name is in grep's DEFAULT_IGNORED_DIRS
+    # (mirrors grep's ignore_vcs=True default). Default False so the raw
+    # _list_recursive/_list_flat helpers stay behavior-neutral; list_directory opts in.
+    skip_vcs: bool = False
     min_size: Optional[int] = None  # bytes, or None
     max_size: Optional[int] = None  # bytes, or None
     modified_after: Optional[float] = None  # epoch, or None
@@ -342,20 +361,26 @@ class FileOpsMixin:
         size: Optional[int],
         mtime: Optional[float],
         ctx: 'FilterContext',
+        rel: Optional[str] = None,
     ) -> bool:
         """Check if an entry passes all filters in *ctx*.
 
-        Name filter (include/exclude) applies to every entry. Size and date
+        Name filter (include/exclude) applies to every entry. When *rel* (the entry's
+        path relative to the listed root, forward-slashes) is supplied, a slash-bearing
+        pattern like 'sub/*.gguf' or '.git/*' can match it too — the relative-path
+        extension that makes path-qualified patterns work (the latent half of BUG_0047).
+        Basename matching is always tried first and is never replaced, so the common
+        cases (exclude='*.tmp', include='*.py') keep working. Size and date
         filters apply ONLY to files (directories are unaffected). Files whose
         stat failed (size/mtime = None) are excluded when a size or date
         filter is active, since we cannot verify they meet the criteria.
         """
-        if ctx.include_fn and not ctx.include_fn(name):
+        if ctx.include_fn and not (ctx.include_fn(name) or (rel is not None and ctx.include_fn(rel))):
             return False
         # Exclude drops any name that MATCHES the pattern. (This direction is easy
         # to get backwards: an inverted check would keep only the excluded names
         # and drop everything else.)
-        if ctx.exclude_fn and ctx.exclude_fn(name):
+        if ctx.exclude_fn and (ctx.exclude_fn(name) or (rel is not None and ctx.exclude_fn(rel))):
             return False
 
         if is_dir:
@@ -370,6 +395,40 @@ class FileOpsMixin:
         if ctx.modified_before is not None and (mtime is None or mtime >= ctx.modified_before):
             return False
         return True
+
+    @staticmethod
+    def _dir_is_excluded(current_dir: Path, d_name: str, root: Path, ctx: 'FilterContext') -> bool:
+        """True if subdir *d_name* (under *current_dir*) should be PRUNED from traversal.
+
+        Asymmetric with the name filter on purpose: include never prunes (BUG_0008 —
+        a matching file must be found even under a name-filter-failing dir), but an
+        exclude that NAMES a directory means "drop this whole subtree". Prunes when
+        ANY of: (a) the bare name matches an exclude pattern ('.git', '__pycache__');
+        (b) the dir's path relative to *root* matches an exclude pattern (slash-bearing
+        globs like 'sub/deep', pruned at the correct depth); (c) the pattern names THIS
+        dir or globs its whole subtree ('.git', '.git/*', 'sub/**' — via rstrip('/*')).
+        "Everything under a bare dir" is achieved by pruning the dir itself via (a), not
+        a prefix match. When ctx.skip_vcs is set, also prunes any dir whose name is in
+        grep's DEFAULT_IGNORED_DIRS.
+        """
+        if ctx.skip_vcs and any(fnmatch.fnmatch(d_name, pat) for pat in DEFAULT_IGNORED_DIRS):
+            return True
+        if ctx.exclude_fn is None:
+            return False
+        if ctx.exclude_fn(d_name):  # bare name: ".git", "__pycache__"
+            return True
+        rel = os.path.relpath(str(current_dir / d_name), str(root)).replace('\\', '/')
+        for pat in ctx.exclude_patterns:
+            # fnmatch(rel, pat): the dir's own relative path matches the pattern
+            #   (e.g. 'sub/deep' prunes the 'deep' dir at the right depth).
+            # pat.rstrip('/*') == rel: the pattern names THIS dir / globs its whole
+            #   subtree ('.git', '.git/*', 'sub/**').
+            # Deliberately NO 'pat.startswith(rel + "/")' clause: that over-prunes a
+            #   parent whose only matching descendant is deeper (e.g. exclude='sub/*.gguf'
+            #   must NOT drop sub/other.txt); the deeper dir is pruned at its own depth.
+            if fnmatch.fnmatch(rel, pat) or pat.rstrip('/*') == rel:
+                return True
+        return False
 
     @staticmethod
     def _make_entry(name: str, is_dir: bool, stat_info) -> dict:
@@ -510,6 +569,14 @@ class FileOpsMixin:
             # still descend into it so its matching files are rendered (indented under
             # the omitted parent). An empty/leaf dir whose name passes renders as
             # "[DIR] name/ (empty)".
+            #
+            # Directory-level EXCLUDE pruning. Asymmetric with INCLUDE on purpose:
+            # include never prunes traversal (BUG_0008: a matching file must be found
+            # even under a name-filter-failing dir), but an exclude that NAMES a
+            # directory means "drop this whole subtree" — so prune it here. This is
+            # what makes exclude='.git' (bare) and exclude='.git/*' suppress the whole
+            # .git subtree instead of only its header.
+            subdirs[:] = [d for d in subdirs if not self._dir_is_excluded(current_dir, d, resolved, ctx)]
 
             dir_entries = []
             for d_name in sorted(subdirs):
@@ -536,12 +603,16 @@ class FileOpsMixin:
                 except OSError:
                     stat_info = None
                 # Full filter (name + size + date) via context, after stat is available.
+                # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
+                # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
+                rel = os.path.relpath(str(current_dir / f_name), str(resolved)).replace('\\', '/')
                 if not self._matches_filters(
                         f_name,
                         False,
                         size=stat_info.st_size if stat_info else None,
                         mtime=stat_info.st_mtime if stat_info else None,
                         ctx=ctx,
+                        rel=rel,
                 ):
                     continue
                 f_entry = self._make_entry(f_name, False, stat_info)
@@ -665,6 +736,7 @@ class FileOpsMixin:
         modified_before: Optional[str] = None,
         files_only: bool = False,
         dirs_only: bool = False,
+        skip_vcs: bool = True,
     ) -> str:
         """List contents of a directory with optional recursive traversal, filtering, sorting, and summary.
 
@@ -700,9 +772,14 @@ class FileOpsMixin:
                 warnings.append(
                     f"[warning] modified_before='{modified_before}' not recognized; no date filter applied.")
 
+            # Parse exclude once: the pattern tuple feeds both the name filter and the
+            # directory-pruning helper (avoids splitting the string twice).
+            ex_patterns = _parse_patterns(exclude)
             ctx = FilterContext(
                 include_fn=_build_pattern_fn(include),
-                exclude_fn=_build_pattern_fn(exclude),
+                exclude_fn=_build_pattern_fn_from_patterns(ex_patterns),
+                exclude_patterns=ex_patterns,
+                skip_vcs=skip_vcs,
                 min_size=ctx_min_size,
                 max_size=ctx_max_size,
                 modified_after=ctx_modified_after,

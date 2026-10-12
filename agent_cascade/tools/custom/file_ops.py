@@ -1187,6 +1187,11 @@ class ListDir(BaseTool):
                 'type': 'boolean',
                 'default': False,
                 'description': TOOL_METADATA['list_dir']['parameters']['dirs_only']
+            },
+            'skip_vcs': {
+                'type': 'boolean',
+                'default': True,
+                'description': TOOL_METADATA['list_dir']['parameters']['skip_vcs']
             }
         },
         'required': ['path'],
@@ -1223,6 +1228,7 @@ class ListDir(BaseTool):
         modified_before = params.get('modified_before')
         files_only = bool(params.get('files_only', False))
         dirs_only = bool(params.get('dirs_only', False))
+        skip_vcs = bool(params.get('skip_vcs', True))
 
         if files_only and dirs_only:
             return 'Error: files_only and dirs_only are mutually exclusive. Use only one.'
@@ -1264,6 +1270,7 @@ class ListDir(BaseTool):
             modified_before=modified_before,
             files_only=files_only,
             dirs_only=dirs_only,
+            skip_vcs=skip_vcs,
         )
 
 
