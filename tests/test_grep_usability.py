@@ -628,6 +628,61 @@ def test_list_files_only_recursive_respects_skip_vcs():
     print('[PASS] test_list_files_only_recursive_respects_skip_vcs')
 
 
+def test_list_files_only_recursive_three_level_depth():
+    """BUG_0075 coverage: descent must work at depth >= 3, not just one level.
+    Fixture root/a.txt + root/sub/b.txt + root/sub/deep/c.txt -> all three present."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, 'a.txt').write_text('a')
+        sub = Path(tmpdir, 'sub')
+        sub.mkdir()
+        (sub / 'b.txt').write_text('b')
+        deep = sub / 'deep'
+        deep.mkdir()
+        (deep / 'c.txt').write_text('c')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, files_only=True)
+        assert 'a.txt' in result, f"root a.txt must be listed: {result}"
+        assert 'b.txt' in result, f"sub/b.txt must be listed: {result}"
+        assert 'c.txt' in result, f"sub/deep/c.txt must be listed (depth>=3): {result}"
+    print('[PASS] test_list_files_only_recursive_three_level_depth')
+
+
+def test_list_files_only_recursive_max_entries_truncation():
+    """BUG_0075 coverage: max_entries truncation must still take effect under
+    files_only+recursive (the new descent path must respect the entry_count break).
+    Fixture 10 .txt files across root + sub; max_entries=3 -> truncation notice present
+    and NOT all 10 files rendered."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i in range(5):
+            Path(tmpdir, f'f{i}.txt').write_text('x')
+        sub = Path(tmpdir, 'sub')
+        sub.mkdir()
+        for i in range(5):
+            (sub / f'g{i}.txt').write_text('x')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, files_only=True, max_entries=3)
+        assert 'listing stopped at' in result, f"truncation notice must appear: {result}"
+        assert result.count('.txt') < 10, f"truncation must drop files (got {result.count('.txt')}): {result}"
+    print('[PASS] test_list_files_only_recursive_max_entries_truncation')
+
+
+def test_list_files_only_recursive_empty_subdir_no_spurious_output():
+    """BUG_0075 coverage: an empty subdir under files_only must produce NO spurious
+    output (no dir header, no (empty) marker). Fixture root/real.txt + empty root/emptydir/."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, 'real.txt').write_text('a')
+        (Path(tmpdir, 'emptydir')).mkdir()
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, files_only=True)
+        assert 'real.txt' in result, f"root real.txt must be listed: {result}"
+        assert 'emptydir' not in result, f"empty dir must not appear under files_only: {result}"
+        assert '(empty)' not in result, f"empty marker must not appear under files_only: {result}"
+    print('[PASS] test_list_files_only_recursive_empty_subdir_no_spurious_output')
+
+
 if __name__ == '__main__':
     tests = [
         test_compile_grep_pattern_flags,
@@ -660,6 +715,9 @@ if __name__ == '__main__':
         test_list_exclude_path_qualified_keeps_siblings,
         test_list_files_only_recursive_nested,
         test_list_files_only_recursive_respects_skip_vcs,
+        test_list_files_only_recursive_three_level_depth,
+        test_list_files_only_recursive_max_entries_truncation,
+        test_list_files_only_recursive_empty_subdir_no_spurious_output,
     ]
     passed = 0
     failed = 0
