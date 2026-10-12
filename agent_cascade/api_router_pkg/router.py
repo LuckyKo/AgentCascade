@@ -655,15 +655,20 @@ class APIRouter:
             pass
 
     def _base_actively_held(self, base_key: tuple) -> bool:
-        """True if ANY instance currently holds this (normalized_base, model) endpoint.
+        """True if ANY instance currently holds the SLOT for this (normalized_base, model).
 
-        Used by the sanity-probe fast path: a base held by any instance is demonstrably
-        reachable (it was just acquired), so a probe 'failure' against it under load is a
-        false negative — skip the probe instead of cooldown+demote. Distinct from
-        _instance_committed_endpoint, which is per-instance (only protects the SAME
-        instance re-acquiring). Self-limiting: if nobody holds the base, the dict won't
-        contain the key → no skip → normal probe. Acquires self._lock; do NOT call it
-        while already holding self._lock.
+        Used by the sanity-probe fast path: a base whose slot is held by some instance was
+        just acquired, so under load a probe 'failure' against it is most likely a false
+        negative (busy server mid-stream) — skip the probe instead of cooldown+demote.
+        NOTE: this reflects SLOT ownership, not live reachability — the connection-death path
+        clears _instance_committed_endpoint but leaves _instance_held_endpoint until the slot
+        is released, so a just-dead base can still be reported held here. That is acceptable:
+        the real call then hits the connection error and falls back without a spurious 60s
+        cooldown (strictly better than the pre-fix false-negative demotion). Distinct from
+        _instance_committed_endpoint, which is per-instance (only protects the SAME instance
+        re-acquiring). Self-limiting: if nobody holds the base, the dict won't contain the key
+        → no skip → normal probe. Acquires self._lock; do NOT call it while already holding
+        self._lock.
         """
         with self._lock:
             held = getattr(self, '_instance_held_endpoint', {})

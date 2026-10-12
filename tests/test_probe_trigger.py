@@ -254,6 +254,27 @@ class TestFreshAcquisitionProbesOnce:
         assert stubs['head_ref']['probes'] == 2, \
             'live-connection state must be per-instance, not global'
 
+    def test_main_gate_skips_probe_when_shared_holder_active(self, router, stubs):
+        """todo #178 Incident A on the MAIN gate (call_with_fallback), not just pre_validate:
+        a fresh instance acquiring a base that another instance HOLDS (via
+        _instance_held_endpoint) must NOT probe it — the held base is demonstrably reachable.
+        This drives the exact production path that false-failed in the incident."""
+        from agent_cascade.api_router_pkg.normalization import normalize_api_base
+        _wire(router, stubs)
+        head_key = (normalize_api_base(stubs['head'].base), 'head-model')
+        with router._lock:
+            router._instance_held_endpoint['Maine'] = head_key  # another instance holds head
+            assert 'instFresh' not in router._instance_committed_endpoint
+        try:
+            r = router.call_with_fallback('coder', _http_call, agent_instance_name='instFresh')
+            assert r == 'head-model'
+            assert stubs['head_ref']['probes'] == 0, \
+                'a base held by any instance must NOT be probed on the main acquire gate (Incident A)'
+            assert stubs['head_ref']['posts'] == 1, 'the real call still fires'
+        finally:
+            with router._lock:
+                router._instance_held_endpoint.pop('Maine', None)
+
 
 # ============================================================================
 # Walk-until-live: head unreachable → second probed once → commit to second

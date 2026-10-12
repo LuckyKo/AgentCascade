@@ -622,12 +622,18 @@ class TestSharedHolderProbeSkip:
     def test_probe_timeout_default_is_10(self, monkeypatch):
         """Pin the new default: with the env var unset, the probe READ timeout is 10.0s
         (raised from 5.0 to survive a busy local server mid-stream on another request —
-        todo #178, Incident A)."""
-        import importlib
-        import agent_cascade.settings as s
+        todo #178, Incident A).
+
+        Loads a throwaway copy of settings.py in an isolated module namespace so we read the
+        raw default WITHOUT mutating the global agent_cascade.settings module (importlib.reload
+        would leak across parallel tests and its 'restore' reload still pins the value)."""
+        import importlib.util
+        import os as _os
         monkeypatch.delenv('AGENT_CASCADE_SANITY_PROBE_TIMEOUT_SECONDS', raising=False)
-        importlib.reload(s)
-        try:
-            assert s.SANITY_PROBE_TIMEOUT_SECONDS == 10.0
-        finally:
-            importlib.reload(s)  # restore module state for other tests
+        _settings_path = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+            'agent_cascade', 'settings.py')
+        spec = importlib.util.spec_from_file_location('_settings_probe_copy', _settings_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.SANITY_PROBE_TIMEOUT_SECONDS == 10.0
