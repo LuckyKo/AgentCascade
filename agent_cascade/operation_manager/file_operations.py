@@ -694,10 +694,9 @@ class FileOpsMixin:
         # max_entries truncation, which clear subdirs before descent.
         children_by_parent: dict = {}
         if ctx.files_only:
-            norm_to_key = {str(Path(p)): p for p in entries_by_dir}
             for k in entries_by_dir:
-                parent_key = norm_to_key.get(str(Path(k).parent))
-                if parent_key is not None and parent_key != k:
+                parent_key = str(Path(k).parent)
+                if parent_key in entries_by_dir and parent_key != k:
                     children_by_parent.setdefault(parent_key, set()).add(k)
 
         def render_dir(dirpath: str, depth: int):

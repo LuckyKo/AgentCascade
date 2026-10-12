@@ -664,7 +664,7 @@ def test_list_files_only_recursive_max_entries_truncation():
         om = OperationManager(base_dir=tmpdir)
         result = om.list_directory('.', recursive=True, files_only=True, max_entries=3)
         assert 'listing stopped at' in result, f"truncation notice must appear: {result}"
-        assert result.count('.txt') < 10, f"truncation must drop files (got {result.count('.txt')}): {result}"
+        assert result.count('.txt') <= 3, f"max_entries=3 must cap rendered files at 3, got {result.count('.txt')}: {result}"
     print('[PASS] test_list_files_only_recursive_max_entries_truncation')
 
 
