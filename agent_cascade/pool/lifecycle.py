@@ -343,12 +343,17 @@ class LifecycleMixin:
         except Exception as e:
             logger.debug(f"Clearing state label for {inst.instance_name} failed (non-critical): {e}")
 
-    def dismiss_instance(self, instance_name: str):
+    def dismiss_instance(self, instance_name: str, _dismissing: frozenset = frozenset()):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
         Cascade-dismisses children first (Bug41). Does not set global _stopped_event — only this instance is terminated (Bug5 fix).
+
+        ``_dismissing`` is the set of instances already on the current dismiss stack (the node being
+        dismissed plus its ancestors). It lets the t174 spawner-notification block skip a parent that
+        is itself about to be torn down by the cascade (no point queueing/relaunching a doomed parent).
         """
         instance_name = instance_name.strip()
+        dismissing = _dismissing | {instance_name}
         # First dismiss all children (recursive cascade, Fix Bug41).
         # Snapshot child list under lock, then release before recursing to avoid deadlock.
         with self._children_lock:
@@ -357,7 +362,7 @@ class LifecycleMixin:
             with self._pool_lock:
                 child_exists = child_name in self.instances
             if child_exists:
-                self.dismiss_instance(child_name)  # Recursive — handles nested trees
+                self.dismiss_instance(child_name, dismissing)  # Recursive — handles nested trees
 
         # Get instance and check active state atomically under _pool_lock
         with self._pool_lock:
@@ -425,6 +430,41 @@ class LifecycleMixin:
                                 logger.debug(
                                     f"[ASYNC_WAKEUP] Idle relaunch failed for parent '{parent_name}' (non-critical): {e}"
                                 )
+
+        # ── t174: in_tool_result dismissal notification to the spawner ──
+        # Independent of the async abandon_child branch above: tell the spawner its child is gone,
+        # via the same _tool_warnings / [SYSTEM NOTIFICATIONS] channel used for truncation warnings
+        # & memory hints. Fires for EVERY non-system child that has a parent, regardless of whether
+        # an async handle resolved (this covers the idle-completed case the branch above misses).
+        # NOTE: when a child has a live async handle, the parent intentionally receives BOTH the
+        # abandon_child enqueue_message above AND this _tool_warning — different channels/semantics,
+        # co-firing is by design; do not remove either.
+        # Skip when the parent is itself on the current dismiss stack (about to be torn down by the
+        # cascade): queueing a never-drained warning and relaunching a doomed parent is pointless.
+        if inst and inst.parent_instance and inst.parent_instance not in dismissing:
+            from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
+            from agent_cascade.operation_manager.path_security import _queue_tool_warning
+            child_class = (getattr(inst, 'agent_class', '') or '').lower()
+            if child_class not in STABLE_SYSTEM_PROMPT_CLASSES:
+                parent_name = inst.parent_instance
+                _queue_tool_warning(
+                    self, parent_name,
+                    f"[Agent '{instance_name}' dismissed]: A sub-agent you spawned was dismissed "
+                    f"(idle or user) and is no longer available. Do not wait for its result; "
+                    f"re-dispatch the task if still needed.",
+                )
+                # Wake an IDLE spawner so it actually drains the queued notification (mirrors Fix B above).
+                parent = self.get_instance(parent_name)
+                if parent is not None:
+                    from agent_cascade.agent_instance import AgentState
+                    with parent._state_lock:
+                        pstate = parent.state
+                    if pstate == AgentState.IDLE:
+                        try:
+                            from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
+                            relaunch_idle_agent(self, parent_name)
+                        except Exception as e:
+                            logger.debug(f"[t174] idle-spawner relaunch failed for '{parent_name}': {e}")
 
         # ── Sticky slot cleanup on dismiss (plan change #14 / §3.11, G8). ──
         # The old thread may still hold the shared sequential slot (mid-LLM-call, mid-tool,

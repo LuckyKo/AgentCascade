@@ -176,6 +176,157 @@ class TestDismissal:
 
 
 # ===========================================================================
+# t174: in_tool_result dismissal notification to the spawner
+# ===========================================================================
+
+
+class TestDismissalNotification:
+    """t174: dismissing a non-system child queues a [SYSTEM NOTIFICATIONS] entry
+    on the spawner's _tool_warnings (the in_tool_result channel), skips system
+    agents, guards no-parent, and relaunches only an IDLE spawner."""
+
+    def _make_instance(self, name, *, agent_class='coder', parent_instance=None,
+                      state=None):
+        """Build a minimal AgentInstance (default state is IDLE)."""
+        import time
+        from agent_cascade.agent_instance import AgentInstance, AgentState
+        kw = {}
+        if state is not None:
+            kw['state'] = state
+        return AgentInstance(
+            instance_name=name,
+            agent_class=agent_class,
+            conversation=[],
+            max_turns=None,
+            parent_instance=parent_instance,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
+            **kw,
+        )
+
+    def test_non_system_child_notifies_spawner(self, agent_pool):
+        """A non-system child with a parent → parent's _tool_warnings gets the dismissal entry."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+
+        agent_pool.dismiss_instance('worker1')
+
+        assert any('worker1' in w for w in parent._tool_warnings), \
+            'expected a dismissal notification on the spawner _tool_warnings'
+        assert any('dismissed' in w for w in parent._tool_warnings)
+
+    def test_system_agent_security_skipped(self, agent_pool):
+        """A 'security' child produces NO spawner notification."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('sec1', agent_class='security', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['sec1'] = child
+
+        agent_pool.dismiss_instance('sec1')
+        assert parent._tool_warnings == [], 'system agent dismissal must not notify the spawner'
+
+    def test_system_agent_compressor_skipped(self, agent_pool):
+        """A 'compressor' child produces NO spawner notification."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('comp1', agent_class='compressor', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['comp1'] = child
+
+        agent_pool.dismiss_instance('comp1')
+        assert parent._tool_warnings == [], 'system agent dismissal must not notify the spawner'
+
+    def test_no_parent_no_crash(self, agent_pool):
+        """A root child (parent_instance=None) dismisses cleanly and queues nothing anywhere."""
+        child = self._make_instance('root_child', agent_class='coder', parent_instance=None)
+        agent_pool.instances['root_child'] = child
+
+        agent_pool.dismiss_instance('root_child')  # must not raise
+        assert 'root_child' not in agent_pool.instances
+        # No spawner exists, so no _tool_warning may land on any remaining instance.
+        for inst in agent_pool.instances.values():
+            assert inst._tool_warnings == []
+
+    def test_no_async_handle_still_notifies(self, agent_pool):
+        """The case the old code missed: abandon_child returns resolved=False (a tracked child
+        whose worker already delivered / no live pending handle) must STILL notify the spawner."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('done1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['done1'] = child
+        # Register a child→parent mapping with NO live _pending entry, so abandon_child() pops it
+        # and reports resolved=False (the exact case the old enqueue_message path skipped).
+        agent_pool._async_registry._child_to_parent['done1'] = ('spawner', 'fake-fid')
+
+        agent_pool.dismiss_instance('done1')
+        assert any('done1' in w for w in parent._tool_warnings), \
+            'resolved=False child must still notify the spawner via _tool_warnings'
+
+    def test_two_children_both_notified(self, agent_pool):
+        """Two distinct children of the same parent → BOTH entries present (dedup must not collapse)."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        agent_pool.instances['spawner'] = parent
+        for name in ('worker1', 'worker2'):
+            agent_pool.instances[name] = self._make_instance(
+                name, agent_class='coder', parent_instance='spawner')
+
+        agent_pool.dismiss_instance('worker1')
+        agent_pool.dismiss_instance('worker2')
+
+        assert any('worker1' in w for w in parent._tool_warnings)
+        assert any('worker2' in w for w in parent._tool_warnings)
+        assert len(parent._tool_warnings) == 2
+
+    def test_idle_spawner_relaunch_invoked(self, agent_pool):
+        """An IDLE spawner gets relaunch_idle_agent invoked (best-effort)."""
+        from unittest.mock import patch
+        parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+
+        with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
+            agent_pool.dismiss_instance('worker1')
+            mock_relaunch.assert_called_once()
+
+    def test_running_spawner_not_relaunched(self, agent_pool):
+        """A RUNNING spawner must NOT be relaunched (it drains its own queue)."""
+        from unittest.mock import patch
+        from agent_cascade.agent_instance import AgentState
+        parent = self._make_instance('spawner', agent_class='orchestrator', state=AgentState.RUNNING)
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+
+        with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
+            agent_pool.dismiss_instance('worker1')
+            mock_relaunch.assert_not_called()
+        # Notification is still queued regardless of parent state.
+        assert any('worker1' in w for w in parent._tool_warnings)
+
+    def test_cascade_dismissal_does_not_relaunch_doomed_parent(self, agent_pool):
+        """Dismissing a parent P that has an IDLE child C: the cascade dismisses C first, but
+        C's t174 block must NOT queue a never-drained warning on P nor relaunch P (P is about to
+        be torn down). The dismiss stack (``_dismissing``) suppresses both."""
+        from unittest.mock import patch
+        parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+        # Register the parent→child edge so the cascade visits the child first.
+        agent_pool.children['spawner'] = ['worker1']
+
+        with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
+            agent_pool.dismiss_instance('spawner')
+            mock_relaunch.assert_not_called()
+        assert parent._tool_warnings == [], \
+            'doomed parent must not receive a spawner notification'
+
+
+# ===========================================================================
 # Halt / resume lifecycle
 # ===========================================================================
 
