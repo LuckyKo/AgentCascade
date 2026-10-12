@@ -587,6 +587,47 @@ def test_list_exclude_path_qualified_keeps_siblings():
     print('[PASS] test_list_exclude_path_qualified_keeps_siblings')
 
 
+def test_list_files_only_recursive_nested():
+    """BUG_0075: files_only=True + recursive=True must render files in SUBDIRECTORIES,
+    not just root-level ones. Root files_only suppresses [DIR] entries, which previously
+    broke render_dir's descent. Fixture: top.txt at root + sub/nested.txt -> both present,
+    no [DIR] header lines."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, 'top.txt').write_text('a')
+        sub = Path(tmpdir, 'sub')
+        sub.mkdir()
+        (sub / 'nested.txt').write_text('b')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, files_only=True)
+        assert 'top.txt' in result, f"root top.txt must be listed: {result}"
+        assert 'nested.txt' in result, f"sub/nested.txt must be listed (BUG_0075): {result}"
+        assert '[DIR]' not in result, f"files_only must suppress [DIR] headers: {result}"
+    print('[PASS] test_list_files_only_recursive_nested')
+
+
+def test_list_files_only_recursive_respects_skip_vcs():
+    """BUG_0075 fix must NOT resurrect excluded subtrees: files_only descent is derived
+    from entries_by_dir keys, which already exclude .git (skip_vcs default True).
+    Fixture .git/{HEAD,config} + src/main.py -> main.py present, no .git content."""
+    from agent_cascade.operation_manager import OperationManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        git = Path(tmpdir, '.git')
+        git.mkdir()
+        (git / 'HEAD').write_text('a')
+        (git / 'config').write_text('b')
+        src = Path(tmpdir, 'src')
+        src.mkdir()
+        (src / 'main.py').write_text('c')
+        om = OperationManager(base_dir=tmpdir)
+        result = om.list_directory('.', recursive=True, files_only=True)
+        assert 'main.py' in result, f"src/main.py must be listed: {result}"
+        assert '.git' not in result, f".git subtree must be pruned by skip_vcs: {result}"
+        assert 'HEAD' not in result, f".git/HEAD must not appear: {result}"
+        assert 'config' not in result, f".git/config must not appear: {result}"
+    print('[PASS] test_list_files_only_recursive_respects_skip_vcs')
+
+
 if __name__ == '__main__':
     tests = [
         test_compile_grep_pattern_flags,
@@ -617,6 +658,8 @@ if __name__ == '__main__':
         test_list_include_multi_pattern_recursive,
         test_list_include_relative_path_pattern,
         test_list_exclude_path_qualified_keeps_siblings,
+        test_list_files_only_recursive_nested,
+        test_list_files_only_recursive_respects_skip_vcs,
     ]
     passed = 0
     failed = 0

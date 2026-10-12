@@ -679,6 +679,27 @@ class FileOpsMixin:
             except ValueError:  # cross-drive on Windows (shouldn't happen under walk)
                 return Path(dirpath).name
 
+        # Descent set for files_only. Under files_only no [DIR] entries are created
+        # (L584 skips them), so render_dir's "if e['is_dir']" branch never fires and
+        # nested files would be collected into entries_by_dir but never rendered.
+        # Derive the descent set from the keys of entries_by_dir (every walked dir)
+        # instead of from [DIR] entries. Build a parent->children map in a SINGLE O(n)
+        # pass so render_dir stays linear (the old per-dir rescan of entries_by_dir
+        # was O(n^2), a regression BUG_0049 deliberately removed).
+        #
+        # This automatically respects the exclude/skip_vcs prune: excluded subtrees
+        # are removed from subdirs[:] at L579 BEFORE os.walk descends, so they are
+        # never yielded as a dirpath and therefore never become keys of entries_by_dir.
+        # Hence they cannot appear in children_by_parent either. Same for max_depth /
+        # max_entries truncation, which clear subdirs before descent.
+        children_by_parent: dict = {}
+        if ctx.files_only:
+            norm_to_key = {str(Path(p)): p for p in entries_by_dir}
+            for k in entries_by_dir:
+                parent_key = norm_to_key.get(str(Path(k).parent))
+                if parent_key is not None and parent_key != k:
+                    children_by_parent.setdefault(parent_key, set()).add(k)
+
         def render_dir(dirpath: str, depth: int):
             nonlocal output, rendered_files, rendered_size
             group = entries_by_dir.get(dirpath, [])
@@ -701,6 +722,12 @@ class FileOpsMixin:
                     output += f"{prefix}{rel_name} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
                     rendered_files += 1
                     rendered_size += e['size'] or 0
+
+            # Under files_only there are no [DIR] entries to drive descent, so recurse
+            # into every walked child dir (derived from entries_by_dir keys above).
+            if ctx.files_only:
+                for child in sorted(children_by_parent.get(dirpath, set())):
+                    render_dir(child, depth + 1)
 
         output = ''
         render_dir(dirpath=str(resolved), depth=0)
