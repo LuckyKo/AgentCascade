@@ -654,6 +654,21 @@ class APIRouter:
         except Exception:
             pass
 
+    def _base_actively_held(self, base_key: tuple) -> bool:
+        """True if ANY instance currently holds this (normalized_base, model) endpoint.
+
+        Used by the sanity-probe fast path: a base held by any instance is demonstrably
+        reachable (it was just acquired), so a probe 'failure' against it under load is a
+        false negative — skip the probe instead of cooldown+demote. Distinct from
+        _instance_committed_endpoint, which is per-instance (only protects the SAME
+        instance re-acquiring). Self-limiting: if nobody holds the base, the dict won't
+        contain the key → no skip → normal probe. Acquires self._lock; do NOT call it
+        while already holding self._lock.
+        """
+        with self._lock:
+            held = getattr(self, '_instance_held_endpoint', {})
+            return any(k == base_key for k in held.values())
+
     def _endpoint_id_for_key(self, base: str, model: str) -> Optional[str]:
         """Find the endpoint ID matching (normalized_base, model). Returns None if no match.
 
@@ -1431,12 +1446,20 @@ class APIRouter:
                     blacklisted = key in blacklist and blacklist[key] > now
                 is_live = False
 
-            # Fast path only when committed AND not currently blacklisted. A committed endpoint
-            # that was just bad enough to be blacklisted (and whose window has since expired) is no
-            # longer a trustworthy "live" connection — fall through and probe it. The blacklist
-            # expiry timeout already bounds how long this matters, and a genuinely dead endpoint is
-            # caught by the next real call's connection timeout.
-            if is_live and not blacklisted:
+            # Shared-pool holder check (separate lock pass — _base_actively_held acquires
+            # self._lock): True if ANY instance currently holds this endpoint. A base some
+            # instance holds right now is demonstrably reachable, so a probe 'failure' under
+            # load is a false negative — skip the probe. Self-limiting: if nobody holds it,
+            # the dict won't contain the key → no skip → normal probe.
+            shared_held = self._base_actively_held(key)
+
+            # Fast path only when (committed OR shared-pool-held) AND not currently blacklisted.
+            # A committed/shared endpoint that was just bad enough to be blacklisted (and whose
+            # window has since expired) is no longer a trustworthy "live" connection — fall
+            # through and probe it. The blacklist expiry timeout already bounds how long this
+            # matters, and a genuinely dead endpoint is caught by the next real call's
+            # connection timeout.
+            if (is_live or shared_held) and not blacklisted:
                 # logger.debug(f"[APIRouter] Skipping sanity probe for '{model}' @ {cfg_base} "
                 #              f"(instance '{instance_name}' holds a live connection — fast path)")
                 validated.append(cfg)
@@ -2042,10 +2065,22 @@ class APIRouter:
                             _blacklisted = _probe_key in _blacklist and _blacklist[_probe_key] > _now_probe
                         _is_live = False
 
+                    # Shared-pool holder check (separate lock pass — _base_actively_held acquires
+                    # self._lock): True if ANY instance currently holds this endpoint. A base some
+                    # instance holds right now is demonstrably reachable, so a probe 'failure'
+                    # under load (e.g. a busy local server mid-stream on another agent's request)
+                    # is a false negative — skip the probe instead of cooldown+demote.
+                    # Self-limiting: if nobody holds it, the dict won't contain the key → no skip.
+                    _shared_held = self._base_actively_held(_probe_key)
+
                     if _is_live and not _blacklisted:
                         logger.debug(
                             f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
                             f"(instance '{_inst_name}' holds a live connection — fast path)")
+                    elif _shared_held and not _blacklisted:
+                        logger.debug(
+                            f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
+                            f"(shared-pool holder active — base demonstrably reachable)")
                     elif _blacklisted:
                         logger.debug(f"[APIRouter] Skipping endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
                                      f"(blacklisted — no sanity probe)")

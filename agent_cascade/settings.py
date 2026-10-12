@@ -330,7 +330,10 @@ SANITY_PROBE_ENABLED: bool = os.getenv('AGENT_CASCADE_SANITY_PROBE_ENABLED',
                                        'true').lower() in ('1', 'true', 'yes', 'on'
                                                           )  # Master toggle for the pre-allocation sanity probe
 SANITY_PROBE_TIMEOUT_SECONDS: float = float(os.getenv(
-    'AGENT_CASCADE_SANITY_PROBE_TIMEOUT_SECONDS', 5.0))  # HTTP timeout (seconds) for the lightweight probe GET request
+    'AGENT_CASCADE_SANITY_PROBE_TIMEOUT_SECONDS', 10.0))  # HTTP READ timeout (seconds) for the lightweight probe GET
+    # request. Sized for a BUSY local server (may be mid-stream on another agent's request),
+    # not an idle probe — a 5.0s read timeout false-failed a healthy busy llama.cpp server
+    # mid-stream and triggered a spurious cooldown + model demotion (todo #178, Incident A).
 
 # Phase 2: Fix B1 — endpoint blacklist for deterministic failures.
 # An endpoint that fails ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD consecutive times

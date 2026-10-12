@@ -538,3 +538,96 @@ class TestProbeTransientCooldown:
         assert getattr(router_mod._probe_err_class_local, 'value', None) == 'transient', \
             'precondition: the thread-local is intentionally NOT reset on the HTTP-error path — ' \
             'the fix relies on call_with_fallback gating its read on _probe_conn_err'
+
+
+# ============================================================================
+# Shared-pool holder-aware probe skip (todo #178, Incident A): a base held by
+# ANY instance is demonstrably reachable, so a fresh acquire by a DIFFERENT
+# instance skips the probe. A busy local llama.cpp server mid-stream on
+# another agent's request must not false-fail the probe → cooldown → demote
+# the fresh instance. Driven through pre_validate_endpoint_chain, patching
+# router._sanity_probe (the gate calls it directly) and seeding
+# router._instance_held_endpoint (the per-instance held marker).
+# ============================================================================
+
+class TestSharedHolderProbeSkip:
+    """The _base_actively_held fast path in the sanity-probe gates."""
+
+    @pytest.fixture(autouse=True)
+    def enable_probe(self, monkeypatch):
+        monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', True)
+
+    def test_fresh_instance_skips_probe_when_shared_holder_active(self, router):
+        """Exact incident scenario: Security_guard (a fresh instance, NO committed marker)
+        acquires a base that another instance (Maine) holds via _instance_held_endpoint →
+        the probe is NOT fired. Only the new shared-holder check can skip it here (the
+        per-instance committed fast path does not, since Security_guard has no marker)."""
+        cfg = _cfg()
+        key = _key(cfg['api_base'], cfg['model'])
+        with router._lock:
+            router._instance_held_endpoint['Maine'] = key
+            assert 'Security_guard' not in router._instance_committed_endpoint
+        try:
+            with patch.object(router, '_sanity_probe', return_value=(True, False)) as mock_probe:
+                result = router.pre_validate_endpoint_chain([cfg], instance_name='Security_guard')
+            assert result == [cfg]
+            assert mock_probe.call_count == 0, \
+                'a base held by any instance must NOT be probed by a fresh acquire (incident A)'
+        finally:
+            with router._lock:
+                router._instance_held_endpoint.pop('Maine', None)
+
+    def test_no_holder_still_probes(self, router):
+        """Nobody holds THIS base → the shared-holder check is self-limiting → the probe fires
+        once. Guards against over-broad skipping (holding a DIFFERENT base must not skip this)."""
+        cfg = _cfg()
+        other_key = _key('http://127.0.0.1:9999/v1', 'other-model')
+        with router._lock:
+            router._instance_held_endpoint['Maine'] = other_key
+        try:
+            with patch.object(router, '_sanity_probe', return_value=(True, False)) as mock_probe:
+                result = router.pre_validate_endpoint_chain([cfg], instance_name='Security_guard')
+            assert result == [cfg]
+            assert mock_probe.call_count == 1, \
+                'no holder of THIS base → the probe must still fire (no false skip)'
+        finally:
+            with router._lock:
+                router._instance_held_endpoint.pop('Maine', None)
+
+    def test_blacklisted_base_not_fast_pathed_even_if_held(self, router):
+        """Finding #3 invariant: a base that is BOTH held AND blacklisted is dropped via the
+        blacklist branch — it is NEVER fast-pathed, and the probe is NOT fired. A second healthy
+        (unheld, unblacklisted) endpoint is kept after a real probe, proving the held+blacklisted
+        one was dropped by the blacklist branch (not fast-pathed)."""
+        bad = _cfg(base='http://127.0.0.1:1235/v1', model='bad-model')
+        good = _cfg()
+        bad_key = _key(bad['api_base'], bad['model'])
+        with router._lock:
+            router._instance_held_endpoint['Maine'] = bad_key
+            router._endpoint_blacklist = {bad_key: time.time() + 7200}
+        try:
+            with patch.object(router, '_sanity_probe', return_value=(True, False)) as mock_probe:
+                result = router.pre_validate_endpoint_chain([bad, good], instance_name='Security_guard')
+            # Blacklist takes precedence over the shared-holder fast path → bad is dropped,
+            # good (unheld, unblacklisted) is kept after a real probe.
+            assert result == [good], \
+                'a blacklisted base must be dropped even if held (Finding #3 invariant)'
+            assert mock_probe.call_count == 1, \
+                'only the healthy endpoint is probed; the held+blacklisted one must NOT be probed'
+        finally:
+            with router._lock:
+                router._instance_held_endpoint.pop('Maine', None)
+                router._endpoint_blacklist.pop(bad_key, None)
+
+    def test_probe_timeout_default_is_10(self, monkeypatch):
+        """Pin the new default: with the env var unset, the probe READ timeout is 10.0s
+        (raised from 5.0 to survive a busy local server mid-stream on another request —
+        todo #178, Incident A)."""
+        import importlib
+        import agent_cascade.settings as s
+        monkeypatch.delenv('AGENT_CASCADE_SANITY_PROBE_TIMEOUT_SECONDS', raising=False)
+        importlib.reload(s)
+        try:
+            assert s.SANITY_PROBE_TIMEOUT_SECONDS == 10.0
+        finally:
+            importlib.reload(s)  # restore module state for other tests
