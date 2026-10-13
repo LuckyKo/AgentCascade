@@ -16,7 +16,7 @@ import time
 from collections import deque  # NEW: rolling buffer for cache pool
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.settings import (
@@ -254,6 +254,17 @@ class AgentInstance:
     # the state machine.
     _last_llm_activity: float = field(default=0.0)  # time.monotonic() of last LLM stream chunk (or LLM call start)
     _llm_call_active: bool = field(default=False)  # True between LLM call start and end
+
+    # Holder-side DMS blocking-tool marker (plan t220 §3.4). Set to a 3-tuple
+    # (tool_name, start_monotonic, bound_seconds) while the instance is inside a
+    # legitimately-bounded blocking tool (shell_cmd / media_gen / image_gen); None otherwise.
+    # The idle-checker's DMS pass reads it getattr-guarded and excludes the holder from
+    # preemption while (now - start_monotonic) < bound_seconds. MUST be declared here — the
+    # write sites (operation_manager/shell.py, tools/media_gen.py, tools/image_gen.py) assign to
+    # it directly, so an undeclared attribute raises AttributeError on the first blocking tool.
+    _in_blocking_tool: Optional[Tuple[str, float, float]] = field(
+        default=None
+    )  # (tool_name, start_monotonic, bound_seconds) while in a bounded blocking tool; None otherwise
 
     # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)

@@ -363,5 +363,80 @@ class TestTurnProgressKey:
         assert ctx['turn_progress_age_s'] == -1.0
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Real-AgentInstance regression (the gap that let the missing-field bug ship)
+# ──────────────────────────────────────────────────────────────────────────────
+# Every DMS test above uses _FakeInst, which manually sets self._in_blocking_tool
+# in its constructor. That is exactly why the production AttributeError — caused by
+# _in_blocking_tool never being declared on the real AgentInstance dataclass — was
+# not caught: the fakes always had the attribute, the real instances did not. These
+# tests drive a REAL AgentInstance through the same _build/_run_holder_dms path to
+# prove the attribute exists and the shell_cmd write/clear pattern works without
+# AttributeError. Revert-proof: FAIL if the field is removed from agent_instance.py.
+
+def _make_real_inst(name='H', last_activity=0.0, running=True):
+    """A REAL AgentInstance (not a fake) with only the DMS-relevant state set.
+
+    ``running`` defaults True because the DMS predicate only acts on RUNNING holders
+    (idle_manager.py:316); a fresh dataclass instance is IDLE and would be skipped.
+    """
+    from agent_cascade.agent_instance import AgentInstance, AgentState
+    now = time.monotonic()
+    inst = AgentInstance(
+        instance_name=name,
+        agent_class='coder',
+        conversation=[],
+        created_at=now,
+        last_activity=last_activity or now,
+        latest_marker_index=0,
+        state=AgentState.RUNNING if running else AgentState.IDLE,
+    )
+    # The DMS reads these getattr-guarded; set them to the "stuck holder" baseline.
+    inst._last_llm_activity = last_activity or now
+    inst._llm_call_active = False
+    return inst
+
+
+class TestRealAgentInstanceMarker:
+    """The DMS marker must exist on a real AgentInstance, not just the test fakes."""
+
+    def test_field_declared_with_none_default(self):
+        """A fresh real instance carries _in_blocking_tool defaulting to None. Fails if
+        the field is removed from the dataclass (the exact production AttributeError)."""
+        inst = _make_real_inst()
+        assert hasattr(inst, '_in_blocking_tool'), '_in_blocking_tool must be declared on AgentInstance'
+        assert inst._in_blocking_tool is None
+
+    def test_shell_write_clear_roundtrip_on_real_instance(self):
+        """The exact set/clear pattern from operation_manager/shell.py (lines 641 & 785)
+        works on a real instance without AttributeError. Line 785 is the finally-clear
+        that crashed in production."""
+        inst = _make_real_inst()
+        inst._in_blocking_tool = ('shell_cmd', time.monotonic(), float(120.0))  # shell.py:641
+        assert inst._in_blocking_tool[0] == 'shell_cmd'
+        assert inst._in_blocking_tool[2] == 120.0
+        inst._in_blocking_tool = None  # shell.py:785 — the line that raised AttributeError
+        assert inst._in_blocking_tool is None
+
+    def test_real_holder_with_live_marker_not_terminated(self):
+        """End-to-end through the real DMS pass: a REAL AgentInstance holder with a live
+        in-bound marker is excluded from termination. Uses _build (real SlotPool + mock
+        AgentPool) exactly like the fake-based tests, but with a real instance."""
+        inst = _make_real_inst('H', last_activity=_old())  # far past the window
+        inst._in_blocking_tool = ('shell_cmd', time.monotonic(), float(120.0))  # actively bounded
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"real holder with live marker wrongly terminated: {pool.terminated}"
+
+    def test_real_wedged_holder_is_terminated(self):
+        """The symmetric real-instance case: a REAL AgentInstance stuck past the window with
+        NO marker is terminated — proving the real instance flows through the DMS predicate
+        (not just fakes)."""
+        inst = _make_real_inst('H', last_activity=_old())  # far past the window, no marker
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"real wedged holder not terminated: {pool.terminated}"
+
+
 if __name__ == '__main__':
     unittest.main()
