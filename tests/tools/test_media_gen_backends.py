@@ -2,7 +2,7 @@
 
 Covers:
   * ``MediaRequest`` / ``MediaResult`` dataclass defaults and ``as_dict``
-  * ``MediaBackend`` ABC (abstract methods raise NotImplementedError; is_available False)
+  * ``MediaBackend`` ABC (abstract methods raise NotImplementedError)
   * ``save_media_to_media`` — the image path must be BYTE-IDENTICAL to the existing
     ``save_image_to_media`` (the plan's whole safety case for not regressing images).
 
@@ -38,7 +38,7 @@ from agent_cascade.tools.media_backends.base import (
 class TestMediaRequestDefaults:
     def test_defaults(self):
         req = MediaRequest()
-        assert req.backend_id == 'AUTO'
+        assert req.backend_id == ''
         assert req.media_type == ''
         assert req.reference_file is None
         assert req.media_size is None
@@ -51,7 +51,7 @@ class TestMediaRequestDefaults:
         assert d['media_type'] == 'image'
         assert set(d) == {
             'media_type', 'backend_id', 'config_name', 'prompt', 'negative_prompt',
-            'server_url', 'backend_dir', 'reference_file', 'media_size', 'overrides',
+            'server_url', 'reference_file', 'media_size', 'overrides',
         }
 
     def test_media_size_is_a_dict(self):
@@ -80,13 +80,6 @@ class TestMediaBackendABC:
             b.preflight(MediaRequest())
         with pytest.raises(NotImplementedError):
             b.run(MediaRequest())
-
-    def test_is_available_defaults_false(self):
-        class Bare(MediaBackend):
-            id = 'bare'
-            media_types = ('image',)
-
-        assert Bare().is_available(MediaRequest()) is False
 
     def test_media_types_vocabulary(self):
         assert MEDIA_TYPES == ('image', 'video', 'audio')

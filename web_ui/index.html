@@ -860,10 +860,9 @@
                   <h3 class="settings-section-title">🎬 Media Generation</h3>
                   <div class="settings-section-body" id="mg-body">
                     <label class="setting-field">
-                      <span title="Default backend used when the agent does not specify one. AUTO picks by the config name.">Backend</span>
+                      <span title="Select which backend's settings to edit. The agent picks the actual backend per-call via the media_gen tool's backend param; this only switches which config block is shown below.">Backend</span>
                       <select id="mg-backend">
-                        <option value="AUTO">AUTO (by config)</option>
-                        <option value="comfyui">ComfyUI (image/video/music)</option>
+                        <option value="comfyui" selected>ComfyUI (image/video/music)</option>
                         <option value="sdcpp">stable-diffusion.cpp (image)</option>
                         <option value="kobold_tts">Kobold TTS (voice)</option>
                       </select>

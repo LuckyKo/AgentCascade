@@ -68,7 +68,7 @@ def _video_cfg(**over):
 
 def _req(**over):
     req = MediaRequest(
-        media_type='', backend_id='AUTO', config_name=None,
+        media_type='', backend_id='', config_name=None,
         prompt='the camera orbits around the face', negative_prompt='',
         config=_video_cfg(), agent_pool=None,
     )

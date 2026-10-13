@@ -7068,7 +7068,8 @@ async function loadMediaGenTtsConfigs(selectConfig) {
 }
 
 // Show/hide the ComfyUI / sdcpp / TTS field groups based on the backend selector.
-// AUTO and ComfyUI both show the ComfyUI block (ComfyUI serves image/video/music).
+// The selector is a config-tab switcher (the agent picks the real backend per-call),
+// so each option shows exactly its own block; anything unexpected defaults to ComfyUI.
 function _mgToggleBackendVisibility(backend) {
   const comfyBlock = document.getElementById('mg-comfyui-block');
   const sdcppBlock = document.getElementById('mg-sdcpp-block');
@@ -7104,7 +7105,9 @@ async function loadMediaGenSettings() {
     mgRootResolved = true;
   }
 
-  mgBackend.value = cfg.default_backend || 'AUTO';
+  // default_backend is vestigial (the agent picks the backend per-call); fall back to
+  // comfyui so a config block is always shown on load.
+  mgBackend.value = ['comfyui', 'sdcpp', 'kobold_tts'].includes(cfg.default_backend) ? cfg.default_backend : 'comfyui';
   const comfy = (cfg.comfyui && typeof cfg.comfyui === 'object') ? cfg.comfyui : {};
   mgUrl.value = comfy.url || '';
   mgDir.value = comfy.workflow_dir || _mgRootedDir(MG_DEFAULT_WORKFLOW_DIR);
@@ -7158,14 +7161,16 @@ async function saveMediaGenSettings() {
 
   const backend = mgBackend.value;
   const url = mgUrl.value.trim();
-  // ComfyUI needs an http(s) URL; sdcpp/TTS do not. AUTO may resolve to ComfyUI,
-  // so validate whenever the ComfyUI block is the visible/active one.
-  if ((backend === 'comfyui' || backend === 'AUTO') && !/^https?:\/\//i.test(url)) {
+  // ComfyUI needs an http(s) URL; sdcpp/TTS do not. Validate whenever the ComfyUI
+  // block is the visible/active one (the selector is a config-tab switcher).
+  if (backend === 'comfyui' && !/^https?:\/\//i.test(url)) {
     _mgSetStatus('✕ Server URL must start with http:// or https://', 'error');
     return;
   }
 
-  const body = { default_backend: backend, timeout: timeout };
+  // default_backend is vestigial — the agent selects the backend per-call via the tool
+  // param, and nothing in the resolver reads it. Keep the key out of the persisted body.
+  const body = { timeout: timeout };
 
   body.comfyui = {
     url: url,

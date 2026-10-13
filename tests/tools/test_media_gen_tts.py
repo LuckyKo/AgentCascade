@@ -59,7 +59,7 @@ def _tts_cfg(**over):
 
 def _req(**over):
     req = MediaRequest(
-        media_type='', backend_id='AUTO', config_name=None,
+        media_type='', backend_id='', config_name=None,
         prompt='Hello there, this is a test.', negative_prompt='',
         config=_tts_cfg(), agent_pool=None,
     )

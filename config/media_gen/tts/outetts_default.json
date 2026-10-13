@@ -1,4 +1,5 @@
 {
+  "description": "text→speech (OuteTTS-0.3-1B; uses a WavTokenizer companion model)",
   "engine": "outetts",
   "model": "OuteTTS-0.3-1B-Q4_0.gguf",
   "companion_model": "WavTokenizer-Large-75-Q4_0.gguf",

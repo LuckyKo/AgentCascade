@@ -32,10 +32,6 @@ class SdcppBackend(MediaBackend):
     def describe(self) -> str:
         return 'stable-diffusion.cpp (local sd-cli)'
 
-    def is_available(self, req: MediaRequest) -> bool:
-        sdcpp = (req.config or {}).get('sdcpp')
-        return isinstance(sdcpp, dict) and bool(sdcpp)
-
     def preflight(self, req: MediaRequest) -> None:
         # reference_file is a ComfyUI-only feature (LoadImage node); reject it for
         # the local sd-cli backend, mirroring image_gen's input_image rejection.

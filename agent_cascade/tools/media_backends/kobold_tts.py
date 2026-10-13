@@ -55,9 +55,9 @@ def _resolve_tts_config(config: dict, name: str | None) -> dict:
     # config_dir may be project-root-relative or absolute; join then resolve.
     cfg_path = Path(cfg_dir)
     if not cfg_path.is_absolute():
-        # Project root is three levels up from this module (media_backends →
-        # media_backends pkg → tools → agent_cascade → root). Match media_gen.py.
-        root = Path(__file__).resolve().parents[4]
+        # Project root is 3 levels up from this module (media_backends → tools →
+        # agent_cascade → AgentCascade). A relative config_dir resolves against it.
+        root = Path(__file__).resolve().parents[3]
         cfg_path = root / cfg_path
     cfg_path = cfg_path / f"{cfg_name}.json"
     if not cfg_path.is_file():
@@ -82,15 +82,6 @@ class KoboldTTSBackend(MediaBackend):
     def describe(self) -> str:
         return 'Kobold TTS (koboldcpp one-shot GGUF)'
 
-    def is_available(self, req: MediaRequest) -> bool:
-        # Capability gate (cheap, non-IO): the block declares it can produce audio.
-        # Existence of the binary/model is enforced in preflight (I1), not here.
-        block = (req.config or {}).get('kobold_tts')
-        if not isinstance(block, dict):
-            return False
-        mt = block.get('media_types')
-        return isinstance(mt, dict) and bool(mt.get('audio'))
-
     def preflight(self, req: MediaRequest) -> None:
         block = (req.config or {}).get('kobold_tts') or {}
 
@@ -103,7 +94,7 @@ class KoboldTTSBackend(MediaBackend):
             )
         binary_path = Path(binary)
         if not binary_path.is_absolute():
-            root = Path(__file__).resolve().parents[4]
+            root = Path(__file__).resolve().parents[3]
             binary_path = root / binary_path
         if not binary_path.is_file():
             raise RuntimeError(f"koboldcpp binary not found: {binary_path}")
@@ -116,7 +107,7 @@ class KoboldTTSBackend(MediaBackend):
         models_dir = block.get('models_dir') or ''
         model_path = Path(models_dir) / model_name
         if not model_path.is_absolute():
-            root = Path(__file__).resolve().parents[4]
+            root = Path(__file__).resolve().parents[3]
             model_path = root / model_path
         if not model_path.is_file():
             raise RuntimeError(f"TTS model GGUF not found: {model_path}")
@@ -126,7 +117,7 @@ class KoboldTTSBackend(MediaBackend):
         if companion_name and isinstance(companion_name, str):
             companion_path = Path(models_dir) / companion_name
             if not companion_path.is_absolute():
-                root = Path(__file__).resolve().parents[4]
+                root = Path(__file__).resolve().parents[3]
                 companion_path = root / companion_path
             if not companion_path.is_file():
                 raise RuntimeError(f"TTS companion GGUF not found: {companion_path}")

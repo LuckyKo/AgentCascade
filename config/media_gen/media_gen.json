@@ -1,10 +1,9 @@
 {
-  "default_backend": "AUTO",
-  "timeout": 180,
+  "timeout": 600,
   "comfyui": {
     "url": "http://127.0.0.1:8188",
     "workflow_dir": "N:/work/WD/AgentCascade/config/workflows",
-    "output_dir": "N:/work/stuff/ComfyUI_models/output",
+    "output_dir": "n:\\work\\WD\\AgentWorkspace\\logs\\media",
     "default_image_workflow": "Anima_INT8",
     "default_video_workflow": "video_wan2_2_14B_i2v",
     "default_music_workflow": "yue2_full",

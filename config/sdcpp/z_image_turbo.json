@@ -1,4 +1,5 @@
 {
+  "description": "text→image (Z-Image-Turbo, fast distilled model; ~17-21s at 512x512)",
   "name": "Z-Image-Turbo (fast)",
   "diffusion_model": "diffusion_models/z-image-turbo-fp8-e4m3fn.safetensors",
   "llm": "text_encoders/Qwen3-4B-Q6_K.gguf",

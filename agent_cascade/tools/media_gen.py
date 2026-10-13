@@ -297,6 +297,28 @@ class MediaGen(BaseTool):
 
     # ── The single choke point ────────────────────────────────────────────────
 
+    def dms_bound(self, tool_args, instance):
+        """Holder-DMS bound for media_gen: the resolved generation timeout for the named backend.
+
+        Backend selection is explicit (no AUTO), so the backend id is known from the tool args and
+        this resolves to EXACTLY the timeout the backend's preflight stashes in req.prepared['timeout']
+        — resolve_media_timeout(config, config.get(backend_id)) — the same value the old scattered
+        marker carried (t292: replaced by the single dispatch-boundary write).
+        """
+        params = tool_args
+        if isinstance(params, str):
+            try:
+                parsed = json.loads(params)
+                if isinstance(parsed, dict):
+                    params = parsed
+            except Exception:
+                params = {}
+        if not isinstance(params, dict):
+            params = {}
+        config = _get_media_gen_config()
+        backend_id = params.get('backend') or ''
+        return resolve_media_timeout(config, (config or {}).get(backend_id))
+
     def call(self, params, **kwargs) -> List[ContentItem]:
         try:
             params = self._verify_json_format_args(params)
@@ -343,24 +365,6 @@ class MediaGen(BaseTool):
 
         # ── VRAM + GENERATE ──
         try:
-            # ── Decision D marker (plan t220 §3.4) ──────────────────────────────
-            # FIRST statement inside the try: mark this instance as mid a
-            # legitimately-bounded blocking tool so the holder-side DMS excludes it
-            # while (now - start) < the resolved bound. The bound is the SAME unified
-            # timeout the backends use (base.resolve_media_timeout), carried WITH the
-            # marker (3-tuple). We read the bound the backend actually resolved
-            # (req.prepared['timeout'], set in preflight) so the DMS window matches the
-            # real generation timeout exactly; the resolver is only a defensive
-            # fallback if a backend ever omits it. Set INSIDE the try so no exception
-            # can leak a stale marker; cleared unconditionally in the finally below.
-            # time.monotonic() to match the DMS clock.
-            if instance is not None:
-                _prepared_timeout = (req.prepared or {}).get('timeout')
-                _dms_bound = (float(_prepared_timeout)
-                              if _prepared_timeout is not None
-                              else resolve_media_timeout(req.config, (req.config or {}).get(req.backend_id)))
-                instance._in_blocking_tool = ('media_gen', time.monotonic(), _dms_bound)
-
             self._vram_release(instance, state)  # save → unload (INSIDE try, deliberately — V2)
 
             # Time only the actual generation call (not the VRAM dance) — V7.
@@ -377,10 +381,6 @@ class MediaGen(BaseTool):
                 self._restore_vram_state(instance, state['held'])
             return [ContentItem(text=f"ERROR: Unexpected media generation error: {e}")]
         finally:
-            # Decision D: clear the marker on EVERY exit path (success, timeout, or
-            # exception) so a stale/uncleared marker can never defeat the DMS.
-            if instance is not None:
-                instance._in_blocking_tool = None
             # V8: unlink the temp output file on EVERY path, including the pre-run
             # raise (where run() is never reached). run() also unlinks on its own
             # paths; double-unlink is guarded by try/except OSError.

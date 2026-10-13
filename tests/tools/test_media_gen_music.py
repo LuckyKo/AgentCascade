@@ -60,7 +60,7 @@ def _music_cfg(**over):
 
 def _req(**over):
     req = MediaRequest(
-        media_type='', backend_id='AUTO', config_name=None,
+        media_type='', backend_id='', config_name=None,
         prompt='violin with girl singing jpop anime', negative_prompt='',
         config=_music_cfg(), agent_pool=None,
     )
@@ -187,6 +187,36 @@ class TestMusicPreflight:
             ComfyUIBackend().preflight(req)
         # No LoadImage wiring attempted (music branch skips it).
         assert '97' not in req.prepared['workflow']
+
+    def test_preflight_warns_when_lyrics_omitted(self):
+        # prompt-only (no overrides.lyrics): still succeeds (style-only), but the
+        # silent-drop is made visible via a logger warning.
+        req = _req(config_name=r'C:\workflows\yue2_full.json', backend_id='comfyui')
+        wf = json.loads(json.dumps(_YUE2_WF))
+        with patch('agent_cascade.tools.media_backends.comfyui._load_workflow',
+                   return_value=wf), \
+              patch('agent_cascade.tools.media_backends.comfyui._inject_music_params',
+                    wraps=_inject_music_params), \
+              patch('agent_cascade.tools.media_backends.comfyui.logger') as lg:
+            ComfyUIBackend().preflight(req)
+        lg.warning.assert_called_once()
+        assert 'no lyrics were provided' in lg.warning.call_args[0][0]
+        # style came from the prompt; lyrics left untouched (None → not written).
+        assert req.prepared['workflow']['22']['inputs']['style'] == req.prompt
+        assert req.prepared['workflow']['22']['inputs']['lyrics'] == 'OLD LYRICS'
+
+    def test_preflight_writes_lyrics_to_both_nodes(self):
+        # WITH overrides.lyrics → lyrics written to BOTH YuE2 text nodes (22 + 23).
+        req = _req(config_name=r'C:\workflows\yue2_full.json', backend_id='comfyui',
+                   overrides={'style': 'dark synth', 'lyrics': '[verse]\nla la'})
+        wf = json.loads(json.dumps(_YUE2_WF))
+        with patch('agent_cascade.tools.media_backends.comfyui._load_workflow',
+                   return_value=wf), \
+              patch('agent_cascade.tools.media_backends.comfyui._inject_music_params',
+                    wraps=_inject_music_params):
+            ComfyUIBackend().preflight(req)
+        assert req.prepared['workflow']['22']['inputs']['lyrics'] == '[verse]\nla la'
+        assert req.prepared['workflow']['23']['inputs']['lyrics'] == '[verse]\nla la'
 
 
 # ── output extraction (audio, runtime ext) ───────────────────────────────────

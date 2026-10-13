@@ -1,0 +1,587 @@
+{
+  "97": {
+    "inputs": {
+      "image": "Anima_00001_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "108": {
+    "inputs": {
+      "filename_prefix": "video/Wan2.2_i2v",
+      "format": "auto",
+      "format.codec": "auto",
+      "codec": "auto",
+      "video": [
+        "129_170",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    }
+  },
+  "110": {
+    "inputs": {
+      "seed": 2148
+    },
+    "class_type": "SeedNode",
+    "_meta": {
+      "title": "Seed"
+    }
+  },
+  "129_128": {
+    "inputs": {
+      "value": 20
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Steps)"
+    }
+  },
+  "129_131": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "Enable 4steps LoRA?"
+    }
+  },
+  "129_90": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "129_84": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "129_96": {
+    "inputs": {
+      "unet_name": "DasiwaWAN22I2V14BLightspeed_synthseductionLowV9.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "129_95": {
+    "inputs": {
+      "unet_name": "DasiwaWAN22I2V14BLightspeed_synthseductionHighV9.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "129_127": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (split_step)"
+    }
+  },
+  "129_126": {
+    "inputs": {
+      "value": 3.5
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (CFG)"
+    }
+  },
+  "129_122": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (CFG)"
+    }
+  },
+  "129_124": {
+    "inputs": {
+      "value": 2
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (split_step)"
+    }
+  },
+  "129_118": {
+    "inputs": {
+      "value": 4
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Steps)"
+    }
+  },
+  "129_161": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "129_162": {
+    "inputs": {
+      "value": 16
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (FPS)"
+    }
+  },
+  "129_169": {
+    "inputs": {
+      "value": 2
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Interpolation multiplier (FPS)"
+    }
+  },
+  "129_89": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+      "clip": [
+        "129_84",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "129_93": {
+    "inputs": {
+      "text": "the camera orbits aroudn the face",
+      "clip": [
+        "129_84",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "129_102": {
+    "inputs": {
+      "lora_name": "wan\\WAN2.2-LowNoise_SmartphoneSnapshotPhotoReality_v2_by-AI_Characters.safetensors",
+      "strength_model": 0,
+      "model": [
+        "129_96",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "129_101": {
+    "inputs": {
+      "lora_name": "wan\\WAN2.2-HighNoise_SmartphoneSnapshotPhotoReality_v2_by-AI_Characters.safetensors",
+      "strength_model": 0,
+      "model": [
+        "129_95",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "129_120": {
+    "inputs": {
+      "switch": [
+        "129_131",
+        0
+      ],
+      "on_false": [
+        "129_126",
+        0
+      ],
+      "on_true": [
+        "129_122",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch (CFG)"
+    }
+  },
+  "129_125": {
+    "inputs": {
+      "switch": [
+        "129_131",
+        0
+      ],
+      "on_false": [
+        "129_127",
+        0
+      ],
+      "on_true": [
+        "129_124",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch (Split Step)"
+    }
+  },
+  "129_119": {
+    "inputs": {
+      "switch": [
+        "129_131",
+        0
+      ],
+      "on_false": [
+        "129_128",
+        0
+      ],
+      "on_true": [
+        "129_118",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch (Steps)"
+    }
+  },
+  "129_163": {
+    "inputs": {
+      "expression": "floor (a * b + 1)",
+      "values.a": [
+        "129_161",
+        0
+      ],
+      "values.b": [
+        "129_162",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression"
+    }
+  },
+  "129_167": {
+    "inputs": {
+      "expression": "a * b",
+      "values.a": [
+        "129_162",
+        0
+      ],
+      "values.b": [
+        "129_169",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression"
+    }
+  },
+  "129_117": {
+    "inputs": {
+      "switch": [
+        "129_131",
+        0
+      ],
+      "on_false": [
+        "129_96",
+        0
+      ],
+      "on_true": [
+        "129_102",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch (Model)"
+    }
+  },
+  "129_116": {
+    "inputs": {
+      "switch": [
+        "129_131",
+        0
+      ],
+      "on_false": [
+        "129_95",
+        0
+      ],
+      "on_true": [
+        "129_101",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch (Model)"
+    }
+  },
+  "129_98": {
+    "inputs": {
+      "width": 640,
+      "height": 640,
+      "length": [
+        "129_163",
+        1
+      ],
+      "batch_size": 1,
+      "positive": [
+        "129_93",
+        0
+      ],
+      "negative": [
+        "129_89",
+        0
+      ],
+      "vae": [
+        "129_90",
+        0
+      ],
+      "start_image": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "WanImageToVideo",
+    "_meta": {
+      "title": "WanImageToVideo"
+    }
+  },
+  "129_103": {
+    "inputs": {
+      "shift": 5,
+      "model": [
+        "129_117",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "ModelSamplingSD3"
+    }
+  },
+  "129_104": {
+    "inputs": {
+      "shift": 5,
+      "model": [
+        "129_116",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "ModelSamplingSD3"
+    }
+  },
+  "129_86": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": [
+        "110",
+        0
+      ],
+      "steps": [
+        "129_119",
+        0
+      ],
+      "cfg": [
+        "129_120",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": [
+        "129_125",
+        0
+      ],
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "129_104",
+        0
+      ],
+      "positive": [
+        "129_98",
+        0
+      ],
+      "negative": [
+        "129_98",
+        1
+      ],
+      "latent_image": [
+        "129_98",
+        2
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Advanced)"
+    }
+  },
+  "129_85": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": [
+        "110",
+        0
+      ],
+      "steps": [
+        "129_119",
+        0
+      ],
+      "cfg": [
+        "129_120",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": [
+        "129_125",
+        0
+      ],
+      "end_at_step": [
+        "129_119",
+        0
+      ],
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "129_103",
+        0
+      ],
+      "positive": [
+        "129_98",
+        0
+      ],
+      "negative": [
+        "129_98",
+        1
+      ],
+      "latent_image": [
+        "129_86",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Advanced)"
+    }
+  },
+  "129_87": {
+    "inputs": {
+      "samples": [
+        "129_85",
+        0
+      ],
+      "vae": [
+        "129_90",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "129_165": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.scale": 2,
+      "quality": "ULTRA",
+      "images": [
+        "129_87",
+        0
+      ]
+    },
+    "class_type": "RTXVideoSuperResolution",
+    "_meta": {
+      "title": "RTX Video Super Resolution"
+    }
+  },
+  "129_166": {
+    "inputs": {
+      "ckpt_name": "rife49.pth",
+      "clear_cache_after_n_frames": 30,
+      "multiplier": [
+        "129_169",
+        0
+      ],
+      "fast_mode": false,
+      "ensemble": true,
+      "scale_factor": 1,
+      "frames": [
+        "129_165",
+        0
+      ]
+    },
+    "class_type": "RIFE VFI",
+    "_meta": {
+      "title": "Frame Interpolation (RIFE)"
+    }
+  },
+  "129_94": {
+    "inputs": {
+      "fps": [
+        "129_167",
+        0
+      ],
+      "bit_depth": 8,
+      "color_space": "sRGB",
+      "codec": "none",
+      "images": [
+        "129_166",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "129_170": {
+    "inputs": {
+      "anything": [
+        "129_94",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  }
+}

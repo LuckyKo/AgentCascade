@@ -1,4 +1,5 @@
 {
+  "description": "text→speech (Kokoro voice af_bella)",
   "engine": "kokoro",
   "model": "Kokoro_no_espeak_Q4.gguf",
   "companion_model": null,

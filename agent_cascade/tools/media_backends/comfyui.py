@@ -262,12 +262,6 @@ class ComfyUIBackend(MediaBackend):
     def describe(self) -> str:
         return 'ComfyUI server workflow'
 
-    def is_available(self, req: MediaRequest) -> bool:
-        block = (req.config or {}).get('comfyui')
-        if not isinstance(block, dict):
-            return False
-        return bool(req.server_url or block.get('url'))
-
     def preflight(self, req: MediaRequest) -> None:
         block = (req.config or {}).get('comfyui') or {}
         url = req.server_url or block.get('url')

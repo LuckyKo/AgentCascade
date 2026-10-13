@@ -7,8 +7,7 @@ generation backend implements:
 
 - ``MediaRequest``  — a normalised, backend-agnostic request built from tool params.
 - ``MediaResult``   — a normalised result (raw bytes + extension + metadata).
-- ``MediaBackend``  — the ABC a backend subclasses (preflight / run / describe /
-                      is_available).
+- ``MediaBackend``  — the ABC a backend subclasses (preflight / run / describe).
 
 Design notes (see plans/t167_media_gen_PLAN.md §2.2):
 
@@ -18,8 +17,10 @@ Design notes (see plans/t167_media_gen_PLAN.md §2.2):
   so the caller never saves/unloads model state for a request that cannot run.
 - ``run(req)`` does the actual generation (subprocess / HTTP) and returns a
   ``MediaResult``. It uses whatever the backend stashed in ``req.prepared``.
-- ``is_available(req)`` is a cheap, non-raising check used by the AUTO resolver
-  to filter backends that cannot serve the request.
+
+Backend selection is explicit (the agent names the backend per-call); there is no
+AUTO resolver, so availability is validated inside each backend's ``preflight``
+(fast-fail, pre-VRAM) rather than by a separate candidate-filtering step.
 
 The canonical media-type vocabulary is exactly three types. TTS and music are
 *audio* (a backend/config distinction, not an output type), so both return
@@ -151,14 +152,6 @@ class MediaBackend(ABC):
     def run(self, req: MediaRequest) -> MediaResult:
         """Execute the generation using ``req.prepared``; return a MediaResult."""
         raise NotImplementedError
-
-    def is_available(self, req: MediaRequest) -> bool:
-        """Cheap, non-raising check: can this backend serve ``req`` right now?
-
-        Used by the AUTO resolver to filter live candidates. Must not raise and
-        must not perform expensive I/O (no subprocess, no network).
-        """
-        return False
 
     def describe(self) -> str:
         """Human-readable one-line description for error listings."""

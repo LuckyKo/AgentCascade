@@ -1,4 +1,5 @@
 {
+  "description": "text→image (Anima, higher-quality checkpoint; er_sde / cfg 3 / 14 steps)",
   "name": "Anima (quality)",
   "diffusion_model": "diffusion_models/anima_baseV10.safetensors",
   "llm": "text_encoders/qwen_3_06b_base.safetensors",

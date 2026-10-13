@@ -945,6 +945,19 @@ class ImageGen(BaseTool):
             logger.debug("image_gen: failed to resolve instance '%s': %s", inst_name, e)
             return None
 
+    def dms_bound(self, tool_args, instance):
+        """Holder-DMS bound for image_gen: the resolved sdcpp generation timeout.
+
+        Identical to the timeout the sdcpp path enforces (resolve_media_timeout(config, sdcpp_cfg)),
+        so the boundary carries the real config-driven bound with the marker and the DMS shields the
+        render for exactly its real timeout (t292 — replaces the old scattered marker write). The
+        media_backends import is lazy to avoid the known circular-import cycle (see call()).
+        """
+        from agent_cascade.tools.media_backends.base import resolve_media_timeout
+        config = _get_image_gen_config()
+        sdcpp_cfg = config.get(_SDCPP_TYPE)
+        return resolve_media_timeout(config, sdcpp_cfg)
+
     def call(self, params: Union[str, dict], **kwargs) -> List[ContentItem]:
         try:
             params = self._verify_json_format_args(params)
@@ -1344,16 +1357,6 @@ class ImageGen(BaseTool):
         _state = {'saved': False, 'held': None}
 
         try:
-            # ── Decision D marker (plan t220 §3.4) ──────────────────────────────
-            # FIRST statement inside the try: mark this instance as mid a
-            # legitimately-bounded blocking tool so the holder-side DMS excludes it
-            # while (now - start) < the resolved bound. The bound is the SAME unified
-            # timeout used by _sdcpp_generate below, carried WITH the marker (3-tuple).
-            # Set INSIDE the try so no exception can leak a stale marker; cleared
-            # unconditionally in the finally. time.monotonic() to match the DMS clock.
-            if instance is not None:
-                instance._in_blocking_tool = ('image_gen', time.monotonic(), float(timeout))
-
             self._vram_release(instance, _state)
 
             # Time only the actual generation subprocess (not the VRAM save/unload/restore
@@ -1372,10 +1375,6 @@ class ImageGen(BaseTool):
                 self._restore_vram_state(instance, _state['held'])
             return [ContentItem(text=f"ERROR: Unexpected sdcpp image generation error: {e}")]
         finally:
-            # Decision D: clear the marker on EVERY exit path (success, timeout, or
-            # exception) so a stale/uncleared marker can never defeat the DMS.
-            if instance is not None:
-                instance._in_blocking_tool = None
             # _sdcpp_generate unlinks the temp file on every path it reaches; this
             # covers the one path where it is never called (the VRAM prologue raised
             # first) so the mkstemp file never leaks.

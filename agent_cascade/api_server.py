@@ -1881,9 +1881,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         try:
             _media_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
-            # Preserve the load-bearing media_types ownership (the resolver's reverse
-            # index) from the existing config: the UI never edits it, and a naive
-            # overwrite would silently break AUTO resolution.
+            # Preserve the media_types ownership lists from the existing config: the UI
+            # never edits them, and they feed the /api/media_gen/workflows pulldowns. A
+            # naive overwrite would drop them, so re-attach any that the posted block omits.
             existing = {}
             try:
                 with open(_media_gen_config_path, 'r', encoding='utf-8') as f:

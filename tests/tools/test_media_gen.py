@@ -3,7 +3,7 @@
 Mirrors ``test_image_gen_sdcpp.py`` for the new backend-registry architecture.
 Covers:
   * the backend registry (explicit dict, ``get_backend``/``resolve_backend``)
-  * the AUTO resolver's config-ownership PRIMARY discriminator (audit defect 2)
+  * explicit-backend selection (no AUTO; single-type backends derive media_type)
   * the sdcpp backend wiring (preflight builds argv, run calls ``_sdcpp_generate``)
   * the VRAM ordering invariants V1-V9 (preflight strictly before VRAM; save→unload
     →run→restore; restore on every error path, NOT in finally; retry once after 2s)
@@ -32,7 +32,7 @@ from agent_cascade.tools.media_backends import (
 )
 from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest
 from agent_cascade.tools.media_backends.sdcpp import SdcppBackend
-from agent_cascade.tools.media_backends.comfyui import ComfyUIBackend
+from agent_cascade.tools.media_backends.comfyui import ComfyUIBackend, _infer_media_type
 from agent_cascade.tools.media_backends.kobold_tts import KoboldTTSBackend
 from agent_cascade.tools.image_gen import _fmt_elapsed
 
@@ -50,7 +50,6 @@ def _bust_config_cache():
 def _mg_cfg(**over):
     """A full media_gen config (all three backend blocks + media_types ownership)."""
     cfg = {
-        'default_backend': 'AUTO',
         'comfyui': {
             'url': 'http://127.0.0.1:8188',
             'workflow_dir': r'C:\workflows',
@@ -108,7 +107,7 @@ def _fake_run_write_bytes(data=b'\x89PNG-fake-bytes'):
 def _req(**over):
     """Build a MediaRequest with the full config baked in."""
     req = MediaRequest(
-        media_type='', backend_id='AUTO', config_name=None,
+        media_type='', backend_id='', config_name=None,
         prompt='a red cube', negative_prompt='',
         config=_mg_cfg(), agent_pool=None,
     )
@@ -128,7 +127,7 @@ def sdcpp_cfg(tmp_path):
     return cfg
 
 
-# ── registry + AUTO resolver (pure, no VRAM) ─────────────────────────────────
+# ── registry + explicit-backend selection (pure, no VRAM) ────────────────────
 
 class TestMediaGenRegistry:
     def test_registry_populated(self):
@@ -154,30 +153,22 @@ class TestMediaGenRegistry:
             resolve_backend(req)
         assert 'unknown backend' in str(e.value)
 
-    # ── audit defect 2: config ownership is the PRIMARY discriminator ──
-    def test_auto_config_ownership_kokoro_to_kobold_tts(self):
-        # REGRESSION: AUTO + config='kokoro_default' must resolve to kobold_tts,
-        # NOT to whatever happens to be first in dict order (comfyui/sdcpp).
-        req = _req(config_name='kokoro_default')
+    # ── explicit backend is required; single-type backends derive media_type ──
+    def test_explicit_backend_kobold_tts(self):
+        req = _req(backend_id='kobold_tts')
         assert resolve_backend(req).id == 'kobold_tts'
         assert req.media_type == 'audio'
 
-    def test_auto_config_ownership_sdcpp_stem(self):
-        req = _req(config_name='z_image_turbo')
+    def test_explicit_backend_sdcpp_derives_image(self):
+        req = _req(backend_id='sdcpp')
         assert resolve_backend(req).id == 'sdcpp'
         assert req.media_type == 'image'
 
-    def test_auto_config_not_declared_errors(self):
-        req = _req(config_name='not_a_real_config')
-        with pytest.raises(RuntimeError) as e:
-            resolve_backend(req)
-        assert 'not declared by any backend' in str(e.value)
-
-    def test_auto_no_config_no_type_errors(self):
+    def test_no_backend_errors(self):
         req = _req()
         with pytest.raises(RuntimeError) as e:
             resolve_backend(req)
-        assert 'media type could not be determined' in str(e.value)
+        assert 'no backend specified' in str(e.value)
 
     def test_media_type_vocabulary_is_three(self):
         assert MEDIA_TYPES == ('image', 'video', 'audio')
@@ -319,6 +310,61 @@ class TestMediaGenVRAM:
         assert 'ERROR' in result[0].text
 
 
+# ── DMS bound declaration (plan t292 — single dispatch-boundary writer) ────────
+# media_gen no longer writes _in_blocking_tool itself; the boundary (ToolDispatcher)
+# is the single writer. media_gen's contribution is dms_bound(): the resolved backend
+# timeout the boundary carries. The set/clear behaviour is covered generically by
+# tests/test_holder_dms.py::TestDispatchBoundary.
+
+class TestMediaGenDmsBound:
+    def test_dms_bound_returns_resolved_backend_timeout(self, sdcpp_cfg):
+        """t292: MediaGen.dms_bound() returns the resolved backend timeout (the value the
+        boundary carries). For sdcpp the resolved timeout is 900.0 — the same value the old
+        scattered marker carried, now exposed as the tool's declared bound."""
+        tool = MediaGen()
+        inst = MagicMock()
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg):
+            bound = tool.dms_bound({'prompt': 'a red cube', 'backend': 'sdcpp'}, inst)
+        assert bound == 900.0, f"dms_bound must return the resolved sdcpp timeout, got {bound!r}"
+
+    def test_dms_bound_parses_json_string_args(self, sdcpp_cfg):
+        """dms_bound accepts the raw JSON-string tool args the boundary may pass through."""
+        tool = MediaGen()
+        inst = MagicMock()
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg):
+            bound = tool.dms_bound('{"backend": "sdcpp"}', inst)
+        assert bound == 900.0, f"dms_bound must parse JSON-string args, got {bound!r}"
+
+    def test_call_does_not_write_marker_boundary_owns_it(self, sdcpp_cfg):
+        """t292: media_gen.call() no longer writes _in_blocking_tool — the dispatch boundary
+        is the single writer. A plain (non-MagicMock) instance proves call() leaves the marker
+        untouched across the whole generation path."""
+        class _PlainInst:
+            _in_blocking_tool = 'SENTINEL'
+        inst = _PlainInst()
+        tool = MediaGen()
+
+        def _gen(argv, timeout=None):
+            # During generation the marker must still be the untouched sentinel.
+            assert inst._in_blocking_tool == 'SENTINEL', 'call() wrote the marker — boundary must own it'
+            out = argv[argv.index('-o') + 1]
+            with open(out, 'wb') as f:
+                f.write(b'png')
+            return b'\x89PNG-fake'
+
+        with patch.object(tool, '_get_instance', return_value=inst), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config',
+                    return_value=_resolved_config()), \
+              patch('agent_cascade.tools.media_backends.sdcpp._sdcpp_generate', side_effect=_gen), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media',
+                    return_value='/tmp/media/out.png'):
+            result = tool.call({'prompt': 'a red cube', 'backend': 'sdcpp'})
+
+        assert result[0].image == '/tmp/media/out.png'
+        assert inst._in_blocking_tool == 'SENTINEL', 'call() must not mutate the marker'
+
+
 # ── reference_file security seam (resolve BEFORE upload/subprocess) ───────────
 
 class TestReferenceFileSecurity:
@@ -427,3 +473,42 @@ class TestFeedbackContract:
 
     def test_elapsed_format_in_feedback(self):
         assert _fmt_elapsed(12.345) == '12.3s'
+
+
+# ── comfyui media-type inference (no caller media_type param) ─────────────────
+
+class TestMediaInference:
+    """comfyui derives media_type from the loaded workflow: YuE2→audio, SaveVideo→video, else image."""
+    def test_infer_music(self):
+        wf = {'22': {'class_type': 'YuE2GenerateMusic', 'inputs': {}},
+              '10': {'class_type': 'SaveAudioAdvanced', 'inputs': {}}}
+        assert _infer_media_type(wf) == 'audio'
+
+    def test_infer_video(self):
+        wf = {'1': {'class_type': 'KSampler', 'inputs': {}},
+              '9': {'class_type': 'SaveVideo', 'inputs': {}}}
+        assert _infer_media_type(wf) == 'video'
+
+    def test_infer_image(self):
+        wf = {'1': {'class_type': 'KSampler', 'inputs': {}},
+              '9': {'class_type': 'SaveImage', 'inputs': {}}}
+        assert _infer_media_type(wf) == 'image'
+
+    def test_music_wins_over_video(self):
+        # A YuE2 graph also has a SaveAudio node; music must be detected FIRST.
+        wf = {'22': {'class_type': 'YuE2GenerateMusic', 'inputs': {}},
+              '9': {'class_type': 'SaveVideo', 'inputs': {}}}
+        assert _infer_media_type(wf) == 'audio'
+
+
+# ── __help self-documentation ────────────────────────────────────────────────
+
+class TestHelpCommand:
+    def test_help_returns_text_without_generating(self):
+        cfg = {'comfyui': {'workflow_dir': 'x', 'media_types': {'image': ['a'], 'audio': ['yue2_full']}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        assert len(result) == 1
+        assert result[0].image is None and result[0].audio is None and result[0].video is None
+        assert 'backend: comfyui' in result[0].text
+        assert 'yue2_full' in result[0].text
