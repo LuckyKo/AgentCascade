@@ -16,6 +16,8 @@ pathspec
 Pillow
 pydantic>=2.3.0
 pytest
+pytest-timeout
+pytest-xdist
 python-dotenv
 pyyaml
 regex

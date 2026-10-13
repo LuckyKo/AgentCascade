@@ -617,29 +617,7 @@ class ShellMixin:
                 return f"REJECTED: {reason}"
             justification_text = reason
 
-        # Decision D (plan t220 §3.4): resolve the instance via the agent_pool back-ref so the
-        # marker can be set/cleared. Initialized to None BEFORE the try (this does NOT set the
-        # marker) so the finally below never references an unbound name.
-        _dms_inst = None
-        _dms_pool = getattr(self, 'agent_pool', None)
-        if _dms_pool is not None:
-            _dms_get = getattr(_dms_pool, 'get_instance', None)
-            if callable(_dms_get):
-                _dms_inst = _dms_get(agent_name)
-
         try:
-            # ── Decision D marker (plan t220 §3.4) ──────────────────────────────
-            # FIRST statement inside the try: mark this instance as mid a legitimately-bounded
-            # blocking tool so the holder-side DMS excludes it while (now - start) < the tool's
-            # bound. Set INSIDE the try (never before it) so no exception between set and try can
-            # leak a stale marker; cleared unconditionally in the finally. Uses time.monotonic() to
-            # match the DMS clock — NOT the time.time() exec_start below (different clock).
-            if _dms_inst is not None:
-                # 3-tuple: carry the bound (MAX_SHELL_TIMEOUT) WITH the marker, consistent
-                # with media_gen/image_gen. The DMS predicate prefers the carried bound and
-                # falls back to the registry for legacy 2-tuple markers.
-                _dms_inst._in_blocking_tool = ('shell_cmd', time.monotonic(), float(MAX_SHELL_TIMEOUT))
-
             # ── Platform-specific setup ──────────────────────────────
             original_command = command  # keep for multi-line detection hint
             if ON_WINDOWS:
@@ -778,8 +756,3 @@ class ShellMixin:
 
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
-        finally:
-            # Decision D: clear the marker on EVERY exit path (success, timeout, or exception) so a
-            # stale/uncleared marker can never become a permanent escape hatch that defeats the DMS.
-            if _dms_inst is not None:
-                _dms_inst._in_blocking_tool = None

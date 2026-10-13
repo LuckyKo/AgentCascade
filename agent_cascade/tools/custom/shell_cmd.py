@@ -5,7 +5,7 @@ import time
 from typing import Union
 
 from agent_cascade.async_shell import _elapsed_for_task
-from agent_cascade.operation_manager.shell import ShellMixin
+from agent_cascade.operation_manager.shell import MAX_SHELL_TIMEOUT, ShellMixin
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIMEOUT_THRESHOLD,
                                     DEFAULT_AUTO_ASYNC_HEARTBEAT, WAIT_CMD_DEFAULT_TIMEOUT, WAIT_CMD_MAX_TIMEOUT,
@@ -202,6 +202,17 @@ class ShellCmd(BaseTool):
         except Exception as e:
             logger.debug(f"[shell_cmd] _truncate_shell_message failed for {agent_name}: {e}")
         return text
+
+    def dms_bound(self, tool_args, instance):
+        """Holder-DMS bound for shell_cmd: the hard ceiling MAX_SHELL_TIMEOUT.
+
+        The sync path blocks up to this bound (operation_manager/shell.py proc.wait). The boundary
+        carries it with the marker so the holder-side DMS shields a legitimately-bounded sync shell
+        for exactly its real ceiling and no longer (t292 — replaces the old scattered marker write).
+        Async shell_cmd returns from _call_tool immediately (the holder parks in SLEEPING, excluded by
+        state), so this bound only ever applies to the genuinely-blocking sync path.
+        """
+        return float(MAX_SHELL_TIMEOUT)
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads

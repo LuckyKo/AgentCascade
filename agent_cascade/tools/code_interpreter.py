@@ -767,6 +767,54 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 pass  # non-numeric — keep scanning / fall back to the 30s default
         return iopub_idle
 
+    def _resolve_execution_budget(self, pool, timeout: Optional[int] = None, *param_sources) -> tuple:
+        """Resolve (exec_timeout, iopub_idle) — the wall-clock budget and IOPub silence window.
+
+        SINGLE source of truth for the code_interpreter timeout, used by BOTH call() (to enforce
+        the wall-clock budget) and dms_bound() (to shield the holder-side DMS for the same budget).
+        Deriving the DMS bound from this helper guarantees the shield equals the enforced budget and
+        the two cannot drift (see [[safety-shield-bound-must-be-tail-inclusive]]).
+
+        exec_timeout precedence: explicit param > cfg['execution_timeout'] >
+        pool.settings.ci_execution_timeout > CODE_EXECUTION_TIMEOUT. iopub_idle: per-call
+        `idle_timeout` override (first dict source) > IOPUB_IDLE_TIMEOUT default (BUG_0046).
+        """
+        exec_timeout = timeout
+        if exec_timeout is None:
+            exec_timeout = self.cfg.get('execution_timeout')
+        if pool is not None and hasattr(pool, 'settings') and exec_timeout is None:
+            exec_timeout = pool.settings.ci_execution_timeout
+        exec_timeout = exec_timeout or CODE_EXECUTION_TIMEOUT
+        iopub_idle = self._resolve_iopub_idle_timeout(*param_sources)
+        return exec_timeout, iopub_idle
+
+    def dms_bound(self, tool_args, instance) -> Optional[float]:
+        """Holder-DMS bound for code_interpreter: the enforced wall-clock budget PLUS the IOPub
+        silence tail (see [[safety-shield-bound-must-be-tail-inclusive]]).
+
+        The wall-clock check in _execute_code runs at the TOP of each loop iteration, then
+        get_iopub_msg(timeout=per_message_timeout) blocks AFTER it, where
+        per_message_timeout = min(iopub_idle, exec_timeout). So the real worst-case overrun is
+        exec_timeout + min(iopub_idle, exec_timeout) — a shield of exec_timeout alone would kill a
+        healthy run in its final silence window. Derived from _resolve_execution_budget so the shield
+        equals the enforced budget exactly.
+        """
+        params = tool_args
+        if isinstance(params, str):
+            # Mirror call(): the LLM may send a JSON string, in which case the idle_timeout override
+            # only exists after parsing. Parse defensively so the bound matches the enforced budget.
+            try:
+                parsed = json_loads(params)
+                if isinstance(parsed, dict):
+                    params = parsed
+            except Exception:
+                params = {}
+        if not isinstance(params, dict):
+            params = {}
+        pool = getattr(instance, '_pool_ref', None) if instance is not None else None
+        exec_timeout, iopub_idle = self._resolve_execution_budget(pool, None, params)
+        return float(exec_timeout + min(iopub_idle, exec_timeout))
+
     def call(self, params: Union[str, dict], files: List[str] = None, timeout: Optional[int] = None, **kwargs) -> str:
         super().call(params=params, files=files)  # copy remote files to work_dir
 
@@ -816,39 +864,24 @@ class CodeInterpreter(BaseToolWithFileAccess):
             fresh = bool(validated_params.get('fresh', False)) or fresh
 
         # ── Resolve timeouts: explicit param > config > pool settings > module default ──
-        exec_timeout = timeout
-        if exec_timeout is None:
-            exec_timeout = self.cfg.get('execution_timeout')
-
-        wd_timeout = self.cfg.get('wd_timeout')
-        stale_ttl = self.cfg.get('stale_ttl')
-
-        # Try pool settings (UI-configured overrides)
+        # Shared with dms_bound() via _resolve_execution_budget so the holder-DMS shield equals
+        # the enforced wall-clock budget and the two cannot drift (t292).
         agent_obj = kwargs.get('agent_obj')
-        if agent_obj is not None:
-            pool = getattr(agent_obj, 'pool', None)
-            if pool is not None and hasattr(pool, 'settings'):
-                if exec_timeout is None:
-                    exec_timeout = pool.settings.ci_execution_timeout
-                if wd_timeout is None:
-                    wd_timeout = pool.settings.ci_watchdog_timeout
-                if stale_ttl is None:
-                    stale_ttl = pool.settings.ci_stale_container_ttl
-
-        # Fall back to module-level defaults
-        exec_timeout = exec_timeout or CODE_EXECUTION_TIMEOUT
-        wd_timeout = wd_timeout or CONTAINER_WATCHDOG_TIMEOUT
-        stale_ttl = stale_ttl or STALE_CONTAINER_TTL
-
-        # ── Resolve IOPub silence window (BUG_0046): per-call `idle_timeout` > 30s default ──
-        # Optional per-call override so the agent can raise the silence window for a single
-        # call (long blocking I/O, sleeps, big-file parsing). Default stays IOPUB_IDLE_TIMEOUT;
-        # no settings/cfg wiring. Check both raw params and parsed validated_params (the LLM may
-        # send a JSON string, in which case only validated_params carries the override).
+        pool = getattr(agent_obj, 'pool', None) if agent_obj is not None else None
         iopub_sources = [params]
         if 'validated_params' in dir():
             iopub_sources.append(validated_params)
-        iopub_idle = self._resolve_iopub_idle_timeout(*iopub_sources)
+        exec_timeout, iopub_idle = self._resolve_execution_budget(pool, timeout, *iopub_sources)
+
+        wd_timeout = self.cfg.get('wd_timeout')
+        stale_ttl = self.cfg.get('stale_ttl')
+        if pool is not None and hasattr(pool, 'settings'):
+            if wd_timeout is None:
+                wd_timeout = pool.settings.ci_watchdog_timeout
+            if stale_ttl is None:
+                stale_ttl = pool.settings.ci_stale_container_ttl
+        wd_timeout = wd_timeout or CONTAINER_WATCHDOG_TIMEOUT
+        stale_ttl = stale_ttl or STALE_CONTAINER_TTL
 
         # ── Build session-scoped kernel_id (all agents in same session share one container) ──
         # Sanitize session_name: replace non-alphanumeric chars with underscores for safe Docker naming
