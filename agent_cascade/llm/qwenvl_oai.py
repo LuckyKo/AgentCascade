@@ -48,6 +48,19 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                 if t == 'text' and v:
                     new_content.append({'type': 'text', 'text': v})
                 if t in ['image', 'video', 'audio']:
+                    # Only translate a modality into a multimodal content part if the
+                    # model actually supports it. This adapter (QwenVL via llama.cpp mmproj)
+                    # is image-only: audio/video have no model support, so we must NOT emit
+                    # input_audio/video_url (the server errors "audio input is not supported"
+                    # and the call loops). Instead keep the media as a TEXT path-reference so
+                    # the agent still sees the file the tool produced (it can open it later).
+                    if t == 'audio' and not self.support_audio_input:
+                        new_content.append({'type': 'text', 'text': f'[Audio file: {v}]'})
+                        continue
+                    if t == 'video':
+                        # No video-input support is modeled for this adapter (image-only mmproj).
+                        new_content.append({'type': 'text', 'text': f'[Video file: {v}]'})
+                        continue
                     try:
                         if isinstance(v, str):
                             v = conv_multimodel_value(t, v)
