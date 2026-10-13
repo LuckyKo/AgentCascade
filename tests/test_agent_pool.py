@@ -309,9 +309,7 @@ class TestDismissalNotification:
 
         NOTE: this does NOT exercise the t174 gate — abandon_child() (lifecycle.py:399) clears
         this child's own handle BEFORE the t174 block reads has_pending, so at the t174 site
-        has_pending is already False. The single relaunch here comes from :425, not the gate.
-        (Kept from the pre-fix test that asserted the buggy no-handle relaunch; repurposed per
-        the plan rather than weakened/deleted.)"""
+        has_pending is already False. The single relaunch here comes from :425, not the gate."""
         from unittest.mock import patch
         from agent_cascade.async_tools import BackgroundToolEntry
         parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
