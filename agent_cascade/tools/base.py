@@ -135,6 +135,28 @@ class BaseTool(ABC):
         """
         raise NotImplementedError
 
+    def dms_bound(self, tool_args, instance) -> Optional[float]:
+        """This tool's effective holder-DMS bound in seconds, or None if it has none.
+
+        Called by the single dispatch boundary (ToolDispatcher.execute_tool) BEFORE a
+        synchronous tool call, to decide how long the holder-side dead-man's-switch should
+        shield this holder before treating it as a genuine wedge (plan t292).
+
+        Tools with a real, config-driven finite timeout override this to return that bound
+        (e.g. shell_cmd -> MAX_SHELL_TIMEOUT, code_interpreter -> its wall-clock budget +
+        IOPub silence tail). Tools with no finite bound return None; the boundary then falls
+        back to the settings cap (holder_dms_max_bound_s) so an unbounded marker can never
+        shield a holder forever.
+
+        Args:
+            tool_args: The resolved tool arguments (dict, or the raw string the LLM sent).
+            instance: The calling AgentInstance (may be None in unusual paths).
+
+        Returns:
+            Bound in seconds, or None to defer to the settings cap.
+        """
+        return None
+
     def _get_agent_name(self, kwargs: dict) -> str:
         """Resolve runtime agent instance name from tool call kwargs or instance attribute."""
         return (kwargs.get('agent_instance_name') or kwargs.get('agent_name') or getattr(self, 'agent_name', None) or

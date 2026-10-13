@@ -21,7 +21,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.settings import (
     AGENT_IDLE_CHECK_INTERVAL, AGENT_IDLE_TIMEOUT, AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
-    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS, HOLDER_DMS_WINDOW_S,
+    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS, HOLDER_DMS_WINDOW_S, HOLDER_DMS_MAX_BOUND_S,
     CI_EXECUTION_TIMEOUT, CI_STALE_CONTAINER_TTL, CI_WATCHDOG_TIMEOUT, COMPRESSION_FORCE_THRESHOLD,
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
@@ -339,7 +339,7 @@ class AgentInstance:
     _slot_release: Optional[Callable[
         [], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
     _slot_key: Optional[
-        str] = None  # Slot key of currently held SlotPool slot (e.g., '_shared_sequential_slot_' or api_base)
+        str] = None  # Slot key of currently held SlotPool slot ('_shared_sequential_slot_' for conc=0, or normalized api_base)
     _compression_suspended_at: float = field(
         default=0.0)  # Monotonic timestamp of last compression-halt wait entry (0.0 = never suspended this run)
 
@@ -860,6 +860,9 @@ class PoolSettings:
     idle_check_interval: float = AGENT_IDLE_CHECK_INTERVAL  # Check every N seconds
     # Holder-side dead-man's-switch window (plan t220_holder_dms_PLAN §3.4). 0 disables the watchdog.
     holder_dms_window_s: float = HOLDER_DMS_WINDOW_S
+    # Fallback DMS bound for a sync tool that declares no finite dms_bound() (plan t292 §2). The
+    # dispatch boundary carries this as the marker bound so an unbounded marker never shields forever.
+    holder_dms_max_bound_s: float = HOLDER_DMS_MAX_BOUND_S
     compression_force_threshold: float = COMPRESSION_FORCE_THRESHOLD  # Force compress at X% usage
     compression_warning_threshold: float = COMPRESSION_WARNING_THRESHOLD  # Warn at X% usage
     compression_proactive_threshold: float = DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD  # Proactive compress at X% (post-tool, async drain)

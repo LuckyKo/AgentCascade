@@ -5,7 +5,7 @@ Replaces semaphore-based blocking with a ticket-based FIFO wait queue per slot p
 Semaphores are removed; capacity is checked via len(_running) < capacity under a threading.Condition.
 
 Key design decisions:
-- One SlotPool per slot_key (e.g., '_shared_sequential_slot_' or api_base).
+- One SlotPool per slot_key ('_shared_sequential_slot_' for all conc=0 endpoints, or the normalized api_base otherwise).
 - OrderedDict[ticket_id → QueueTicket] for _waiters: FIFO by insertion, O(1) removal.
 - Single threading.Condition per pool — ALL mutations under this lock.
 - Strict FIFO: only head waiter can be granted (must be next(iter(_waiters))).
@@ -169,8 +169,8 @@ class SlotHolder:
 class SlotPool:
     """FIFO slot pool.
 
-    Manages a queue of waiters for a specific slot key (e.g., '_shared_sequential_slot_'
-    or an api_base). Provides strict FIFO ordering and thread-safe acquire/release/cancel.
+    Manages a queue of waiters for a specific slot key ('_shared_sequential_slot_' for all
+    conc=0 endpoints, or the normalized api_base otherwise). Provides strict FIFO ordering and thread-safe acquire/release/cancel.
 
     Thread-safety: ALL mutations to _waiters and _running occur under
     the single threading.Condition (_cond).

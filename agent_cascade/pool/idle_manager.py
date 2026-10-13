@@ -14,18 +14,19 @@ from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 from ..agent_instance import AgentState
 from ..slot_queue import _holder_activity_context
 
-# ── Holder-side dead-man's-switch: bounded-blocking-tool bounds (plan t220 §3.4) ──
-# Tools whose LEGITIMATE runtime can exceed the DMS window. A holder carrying an
-# ``_in_blocking_tool`` marker for one of these is EXCLUDED from auto-preempt while
-# (now - start) < bound. Tools NOT listed here are NOT protected by a marker — their
-# real bounds are already < the window (code_interpreter 120s, web_search 15s, ...),
-# so a stale marker for them must not shield a genuine wedge. To support a new long
-# tool: set the marker in that tool AND add its bound here.
+# ── Holder-side dead-man's-switch: bounded-blocking-tool bounds (plan t220 §3.4, generalized t292) ──
+# A holder carrying an ``_in_blocking_tool`` marker is EXCLUDED from auto-preempt while
+# (now - start) < bound. As of t292 the SINGLE producer of that marker is the dispatch
+# boundary (ToolDispatcher.execute_tool), which writes a 3-tuple carrying the tool's
+# ``BaseTool.dms_bound()`` value (or the settings cap ``holder_dms_max_bound_s`` when the
+# tool declares no finite bound). So supporting a new long tool means implementing its
+# ``dms_bound()`` — NOT editing this registry and NOT writing the marker by hand.
 #
-# The entries below are FALLBACK bounds only. media_gen/image_gen now carry their
-# real (config-driven, base.resolve_media_timeout) timeout WITH the marker (3-tuple),
-# so the DMS prefers the carried bound and uses these values only if a marker ever
-# lacks one. There are no more per-backend magic numbers — the timeout is one UI value.
+# The entries below are DEFENSIVE FALLBACK bounds only, consulted when a marker lacks a
+# carried bound (legacy 2-tuple). The carried bound is authoritative. media_gen/image_gen
+# carry their real (config-driven, base.resolve_media_timeout) timeout WITH the marker, so
+# these values are not the primary source. There are no per-backend magic numbers — the
+# timeout is one UI value.
 _BLOCKING_TOOL_BOUNDS: dict[str, float] = {
     'media_gen': 900.0,  # fallback when a marker carries no bound (carried bound is authoritative)
     'image_gen': 900.0,
@@ -341,13 +342,13 @@ class IdleManager:
         # In-bounded-blocking-tool exclusion (Decision D): a holder mid a legitimately-bounded long
         # tool (e.g. an approved sync shell_cmd within MAX_SHELL_TIMEOUT) is not a wedge.
         #
-        # Marker shape: (tool_name, start_monotonic[, bound_seconds]). All current producers
-        # (shell_cmd / media_gen / image_gen) write a well-formed 2- or 3-tuple, so no
-        # try/except is needed to unpack — a single isinstance+length guard rejects any
-        # malformed marker (non-tuple / too short) and fails safe toward termination,
-        # matching the pre-change behaviour for a bad marker. The carried bound (3rd
-        # element) is authoritative when present; otherwise we fall back to the registry
-        # so legacy 2-tuple markers (e.g. shell_cmd) keep working unchanged.
+        # Marker shape: (tool_name, start_monotonic[, bound_seconds]). The SINGLE producer is the
+        # dispatch boundary (ToolDispatcher.execute_tool), which writes a well-formed 3-tuple for
+        # every generic sync tool, carrying the tool's dms_bound() or the settings cap (t292). So no
+        # try/except is needed to unpack — a single isinstance+length guard rejects any malformed
+        # marker (non-tuple / too short) and fails safe toward termination. The carried bound (3rd
+        # element) is authoritative when present; the registry fallback (_blocking_tool_bound) is kept
+        # only for defensive/legacy 2-tuple markers and is no longer the primary source.
         inst = self.pool.get_instance(holder_name)
         if inst is not None:
             marker = getattr(inst, '_in_blocking_tool', None)

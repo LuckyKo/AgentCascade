@@ -119,6 +119,33 @@ class ToolDispatcher:
         is_sequential = (concurrency == 0)
         return '_shared_sequential_slot_' if is_sequential else api_base
 
+    # ── Holder-DMS Bound Resolution (t292) ────────────────────────────────────
+
+    def _dms_cap_bound(self) -> float:
+        """Settings fallback cap for a marker whose tool declares no finite bound.
+
+        Guarantees every carried marker bound is finite, so the DMS can still terminate a
+        genuine wedge past it (never an infinite escape hatch).
+        """
+        return float(getattr(self.pool.settings, 'holder_dms_max_bound_s', 900.0) or 900.0)
+
+    def _resolve_dms_bound(self, tool_obj, tool_name: str, resolved, instance) -> float:
+        """Resolve a sync tool's DMS bound at the dispatch boundary (t292).
+
+        Prefers the tool's own config-driven ``dms_bound()``; falls back to the settings cap
+        when the tool declares no finite bound or ``dms_bound()`` raises. The returned bound is
+        always finite so the carried marker can never shield a holder forever.
+        """
+        if tool_obj is not None:
+            try:
+                bound = tool_obj.dms_bound(resolved, instance)
+            except Exception as e:
+                logger.debug('[dms_bound] %s.dms_bound() raised: %s — using cap', tool_name, e)
+                bound = None
+            if bound is not None:
+                return float(bound)
+        return self._dms_cap_bound()
+
     # ── Main Tool Execution Entry Point ──────────────────────────────────────
 
     def execute_tool(self,
@@ -162,7 +189,15 @@ class ToolDispatcher:
             return result
         elif tool_name == 'compress_context':
             resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
-            result = self.engine.compression_handler.handle_compress_tool(resolved, instance, instance.instance_name)
+            # compress_context runs synchronously inline (compression/handler.py) and does NOT set
+            # _llm_call_active on the holder, so a long forced compression is otherwise DMS-vulnerable
+            # (plan t292 — same defect class). Mark it with the settings cap (compression is bounded by
+            # its own LLM call, not a tool-declared bound) and clear in finally.
+            instance._in_blocking_tool = ('compress_context', time.monotonic(), self._dms_cap_bound())
+            try:
+                result = self.engine.compression_handler.handle_compress_tool(resolved, instance, instance.instance_name)
+            finally:
+                instance._in_blocking_tool = None
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         else:
@@ -175,14 +210,29 @@ class ToolDispatcher:
             if resolved is None:
                 return f"Error: Invalid JSON arguments for tool '{tool_name}'."
 
-            result = template._call_tool(
-                tool_name,
-                resolved,
-                agent_instance_name=instance.instance_name,
-                agent_obj=self.engine,
-                messages=llm_messages,
-                session_name=self._resolve_session_name(instance),
-            )
+            # ── Holder-DMS bounded-tool exclusion (t292): SINGLE WRITER at the dispatch boundary ──
+            # Every generic sync tool flows through this one branch. Mark the holder as mid a
+            # legitimately-bounded sync tool so the holder-side DMS excludes it while
+            # (now - start) < bound. The bound is the tool's config-driven dms_bound(); tools that
+            # declare no finite bound fall back to the settings cap so an unbounded marker can never
+            # shield forever. Set BEFORE the call, cleared in finally (ALWAYS, even on exception) —
+            # this replaces the scattered per-tool marker sites (shell/media/image) that were
+            # AttributeError-prone. The marker exists ONLY while actually inside _call_tool, so it
+            # never fires between LLM attempts (the retry-loop wedge stays terminated).
+            tool_obj = getattr(template, 'function_map', {}).get(tool_name)
+            bound = self._resolve_dms_bound(tool_obj, tool_name, resolved, instance)
+            instance._in_blocking_tool = (tool_name, time.monotonic(), bound)
+            try:
+                result = template._call_tool(
+                    tool_name,
+                    resolved,
+                    agent_instance_name=instance.instance_name,
+                    agent_obj=self.engine,
+                    messages=llm_messages,
+                    session_name=self._resolve_session_name(instance),
+                )
+            finally:
+                instance._in_blocking_tool = None
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
 

@@ -226,6 +226,11 @@ AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INT
 # is terminated by the idle-checker to free the wedged slot. Default 300s, validated against measured
 # last_activity gaps; must stay >= the largest un-excluded tool bound (see plan bound table).
 HOLDER_DMS_WINDOW_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_WINDOW_S', 300.0))
+# Fallback DMS bound for a synchronous tool that declares NO finite bound (BaseTool.dms_bound()
+# returns None). The dispatch boundary carries this as the marker bound so an unbounded marker can
+# never shield a holder forever (plan t292 §2). Default 900s == the current media/image fallback
+# ceiling; must stay >= any legitimate sync tool's max bound or genuine long ops get killed.
+HOLDER_DMS_MAX_BOUND_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_MAX_BOUND_S', 900.0))
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 # ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md §5.3) ──
 # Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.

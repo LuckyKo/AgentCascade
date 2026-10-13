@@ -7,6 +7,8 @@ from __future__ import annotations
 import datetime
 import json
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -232,6 +234,32 @@ class SessionIOMixin:
                         held_count += 1
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
+
+        # ── Step 3.5: Best-effort generator process interrupt ─────────────────
+        # There is no fast LLM cancellation below the process level in the available
+        # llama-server builds, so unloading/terminating the active model's resident
+        # process is the reliable way to halt generation during Stop. It may cause a
+        # fresh JIT load on resume, but it never blocks the normal Stop path.
+        try:
+            _held_map = getattr(self.api_router, '_instance_held_endpoint', {}) if self.api_router else {}
+            for inst_name, instance in list(self.instances.items()):
+                if not getattr(instance, '_llm_call_active', False):
+                    continue
+                _held = _held_map.get(inst_name)
+                if not _held:
+                    continue
+                _base, _model = (tuple(_held) + ('',))[:2]
+                if not _base or not _model:
+                    continue
+                _url = f"{str(_base).rstrip('/')}/models/{urllib.parse.quote(str(_model), safe='')}/interrupt"
+                try:
+                    _req = urllib.request.Request(_url, data=b'{}', method='POST', headers={'Content-Type': 'application/json'})
+                    with urllib.request.urlopen(_req, timeout=3.0) as _resp:
+                        logger.debug(f"[STOP_SESSION] interrupt {inst_name} model={_model} status={_resp.getcode()}")
+                except Exception as _e:
+                    logger.debug(f"[STOP_SESSION] interrupt unavailable for {inst_name} model={_model}: {_e}")
+        except Exception as e:
+            logger.debug(f"generator_interrupt failed during stop_session (non-critical): {e}")
 
         # ── Step 4: Clear cached message sets, message queues, and async results ──
         # After stop, the cached working sets may be stale (from interrupted turns).

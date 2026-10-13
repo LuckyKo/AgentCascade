@@ -74,8 +74,9 @@ class _FakeApiRouter:
 
 
 class _FakeSettings:
-    def __init__(self, window):
+    def __init__(self, window, cap=900.0):
         self.holder_dms_window_s = window
+        self.holder_dms_max_bound_s = cap
 
 
 class _MockPool:
@@ -204,13 +205,35 @@ class TestBoundedBlockingTool:
         assert pool.terminated == [], f"2-tuple media_gen marker not excluded: {pool.terminated}"
 
     def test_unbounded_tool_marker_does_not_shield(self):
-        """A marker for a tool with NO registered bound (real bound < window) must NOT
-        shield a genuine wedge — otherwise a stale marker is a permanent escape hatch."""
+        """A malformed marker with NO carried bound AND no registry bound (e.g. a legacy
+        2-tuple code_interpreter marker) must NOT shield a genuine wedge — otherwise a stale
+        marker is a permanent escape hatch. The boundary always writes a 3-tuple, so a 2-tuple
+        here represents a malformed/legacy marker the read side must still fail-safe on."""
         inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
-        inst._in_blocking_tool = ('code_interpreter', time.monotonic() - 10.0)
+        inst._in_blocking_tool = ('code_interpreter', time.monotonic() - 10.0)  # 2-tuple, no carried bound
         im, pool, _, _ = _build(inst)
         im._run_holder_dms()
-        assert pool.terminated == ['H'], f"unbounded marker wrongly shielded: {pool.terminated}"
+        assert pool.terminated == ['H'], f"unbounded (no carried bound) marker wrongly shielded: {pool.terminated}"
+
+    def test_code_interpreter_carried_bound_within_bound_not_terminated(self):
+        """t292: a code_interpreter marker carrying its real (config-driven) bound within that
+        bound is a legitimately-bounded long tool and must NOT be terminated. This is the exact
+        case the old allowlist missed — code_interpreter is now covered by the dispatch boundary."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        # 3-tuple: carried bound 150s (e.g. exec 120 + iopub tail 30); age 10s < 150s.
+        inst._in_blocking_tool = ('code_interpreter', time.monotonic() - 10.0, 150.0)
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"code_interpreter within carried bound wrongly terminated: {pool.terminated}"
+
+    def test_code_interpreter_past_carried_bound_is_terminated(self):
+        """Symmetric case: a code_interpreter marker whose age exceeds its carried bound is a
+        genuine wedge and IS terminated (the carried bound is authoritative, not infinite)."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('code_interpreter', time.monotonic() - 200.0, 150.0)  # age 200 > bound 150
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"code_interpreter past carried bound not terminated: {pool.terminated}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -436,6 +459,211 @@ class TestRealAgentInstanceMarker:
         im, pool, _, _ = _build(inst)
         im._run_holder_dms()
         assert pool.terminated == ['H'], f"real wedged holder not terminated: {pool.terminated}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# t292 — Dispatch-boundary single-writer marker (ToolDispatcher.execute_tool)
+# ──────────────────────────────────────────────────────────────────────────────
+# Drive the REAL ToolDispatcher.execute_tool with minimal pool/engine/template
+# doubles to prove the boundary is the SINGLE writer: it sets a 3-tuple marker
+# carrying the tool's dms_bound() (or the settings cap when the tool declares no
+# finite bound), and clears it in finally on EVERY exit path (success or exception).
+# Revert-proof: FAIL if the boundary's set/finally is removed.
+
+class _FakeTool:
+    def __init__(self, name, bound=None, raise_on_bound=False):
+        self.name = name
+        self._bound = bound
+        self._raise = raise_on_bound
+
+    def dms_bound(self, tool_args, instance):
+        if self._raise:
+            raise RuntimeError('dms_bound exploded')
+        return self._bound
+
+
+class _FakeTemplate:
+    def __init__(self, function_map, on_call=None, raise_call=False):
+        self.function_map = function_map
+        self._on_call = on_call
+        self._raise_call = raise_call
+
+    def _call_tool(self, tool_name, tool_args, **kwargs):
+        if self._on_call:
+            self._on_call(tool_name, tool_args, kwargs)
+        if self._raise_call:
+            raise RuntimeError('tool exploded')
+        return 'ok'
+
+
+class _FakeCompressionHandler:
+    def __init__(self, on_call=None):
+        self._on_call = on_call
+
+    def handle_compress_tool(self, resolved, instance, name):
+        if self._on_call:
+            self._on_call(instance)
+        return 'compressed'
+
+
+class _FakeEngine:
+    def __init__(self, compression_handler=None):
+        self.compression_handler = compression_handler or _FakeCompressionHandler()
+        self.cached = []
+
+    def _resolve_placeholders(self, tool_args, instance_name, tool_name):
+        return tool_args  # pass-through (no placeholders in these tests)
+
+    def _cache_tool_args(self, instance_name, tool_name, resolved):
+        self.cached.append((instance_name, tool_name))
+
+
+class _BoundaryPool:
+    def __init__(self, instance, template, cap=900.0):
+        self._instance = instance
+        self._template = template
+        self.settings = _FakeSettings(WINDOW, cap)
+
+    def get_instance(self, name):
+        return self._instance if name == self._instance.instance_name else None
+
+    def get_template(self, agent_class):
+        return self._template
+
+
+def _build_dispatcher(inst, tool_obj, on_call=None, raise_call=False, cap=900.0, compression_handler=None):
+    from agent_cascade.tool_dispatcher import ToolDispatcher
+    fmap = {tool_obj.name: tool_obj} if tool_obj is not None else {}
+    template = _FakeTemplate(fmap, on_call=on_call, raise_call=raise_call)
+    pool = _BoundaryPool(inst, template, cap=cap)
+    d = ToolDispatcher(pool)
+    d.set_engine(_FakeEngine(compression_handler=compression_handler))
+    return d, pool, template
+
+
+class TestDispatchBoundary:
+    def test_sync_tool_marker_set_with_dms_bound(self):
+        """The boundary sets a 3-tuple marker carrying the tool's dms_bound() BEFORE the call."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        seen = {}
+
+        def on_call(tool_name, tool_args, kwargs):
+            seen['marker'] = inst._in_blocking_tool
+
+        tool = _FakeTool('mytool', bound=500.0)
+        d, _, _ = _build_dispatcher(inst, tool, on_call=on_call)
+        result = d.execute_tool(inst, 'mytool', {'a': 1}, [])
+        assert result == 'ok'
+        m = seen.get('marker')
+        assert isinstance(m, tuple) and len(m) == 3, f"expected 3-tuple marker, got {m}"
+        assert m[0] == 'mytool'
+        assert m[2] == 500.0, f"carried bound must be the tool's dms_bound(), got {m[2]}"
+
+    def test_sync_tool_marker_cleared_after_call(self):
+        """The boundary clears the marker in finally after a successful call."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        tool = _FakeTool('mytool', bound=500.0)
+        d, _, _ = _build_dispatcher(inst, tool)
+        d.execute_tool(inst, 'mytool', {'a': 1}, [])
+        assert inst._in_blocking_tool is None, 'marker not cleared after call'
+
+    def test_sync_tool_marker_cleared_on_exception(self):
+        """(c) The boundary clears the marker even when the tool raises (finally)."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        tool = _FakeTool('mytool', bound=500.0)
+        d, _, _ = _build_dispatcher(inst, tool, raise_call=True)
+        try:
+            d.execute_tool(inst, 'mytool', {'a': 1}, [])
+        except RuntimeError:
+            pass
+        assert inst._in_blocking_tool is None, 'marker not cleared after exception'
+
+    def test_unbounded_tool_uses_settings_cap(self):
+        """A tool whose dms_bound() returns None carries the settings cap (never infinite)."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        seen = {}
+
+        def on_call(tool_name, tool_args, kwargs):
+            seen['marker'] = inst._in_blocking_tool
+
+        tool = _FakeTool('mystery', bound=None)
+        d, _, _ = _build_dispatcher(inst, tool, on_call=on_call, cap=777.0)
+        d.execute_tool(inst, 'mystery', {'a': 1}, [])
+        assert seen['marker'][2] == 777.0, f"unbounded tool must carry the cap, got {seen['marker'][2]}"
+
+    def test_dms_bound_exception_falls_back_to_cap(self):
+        """If dms_bound() raises, the boundary uses the cap and the tool call still runs."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        seen = {}
+
+        def on_call(tool_name, tool_args, kwargs):
+            seen['marker'] = inst._in_blocking_tool
+
+        tool = _FakeTool('flaky', bound=None, raise_on_bound=True)
+        d, _, _ = _build_dispatcher(inst, tool, on_call=on_call, cap=650.0)
+        result = d.execute_tool(inst, 'flaky', {'a': 1}, [])
+        assert result == 'ok'
+        assert seen['marker'][2] == 650.0
+
+    def test_compress_context_marker_set_and_cleared(self):
+        """(f) The compress_context branch sets a marker with the cap and clears it in finally."""
+        inst = _make_real_inst('H', last_activity=_recent())
+        seen = {}
+
+        def on_call(instance):
+            seen['marker'] = instance._in_blocking_tool
+
+        chandler = _FakeCompressionHandler(on_call=on_call)
+        d, _, _ = _build_dispatcher(inst, None, cap=888.0, compression_handler=chandler)
+        result = d.execute_tool(inst, 'compress_context', {'a': 1}, [])
+        assert result == 'compressed'
+        m = seen.get('marker')
+        assert isinstance(m, tuple) and m[0] == 'compress_context' and m[2] == 888.0, f"compress marker wrong: {m}"
+        assert inst._in_blocking_tool is None, 'compress marker not cleared'
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# t292 — DMS read side: a generic sync tool carrying a finite bound is excluded
+# within its bound and terminated past it (the boundary's marker contract).
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestSyncToolDMS:
+    def test_long_sync_tool_within_bound_not_terminated(self):
+        """(a) A generic sync tool (no registry bound) carrying a finite bound within that
+        bound is a legitimately-bounded long op — NOT terminated. This is the generalized
+        case the old 3-tool allowlist could not express."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('some_generic_tool', time.monotonic() - 10.0, 500.0)  # age 10 < 500
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"generic sync tool within carried bound wrongly terminated: {pool.terminated}"
+
+    def test_sync_tool_past_cap_terminated(self):
+        """(b) A marker whose age exceeds its carried bound (the cap) with no progress is a
+        genuine wedge — terminated. Proves the carried bound is finite, not an escape hatch."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('some_generic_tool', time.monotonic() - 600.0, 500.0)  # age 600 > 500
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"past-cap generic sync tool not terminated: {pool.terminated}"
+
+    def test_sleeping_holder_excluded_by_state(self):
+        """(d) An async tool parks the holder in SLEEPING; the state guard excludes it
+        regardless of any marker. The boundary must never mark a SLEEPING holder."""
+        inst = _FakeInst('H', last_activity=_old(), llm_active=False, state_name='SLEEPING')
+        inst._in_blocking_tool = ('shell_cmd', time.monotonic() - 4000.0, 3600.0)  # past bound, but SLEEPING
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"SLEEPING holder wrongly terminated: {pool.terminated}"
+
+    def test_compress_context_within_bound_not_terminated(self):
+        """(f) A compress_context marker carrying the cap within that bound is excluded — the
+        compress gap (same defect class) is closed."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('compress_context', time.monotonic() - 10.0, 900.0)  # age 10 < 900
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"compress_context within bound wrongly terminated: {pool.terminated}"
 
 
 if __name__ == '__main__':
