@@ -421,11 +421,15 @@ class TestDismissWiring:
         # Surface touched by the post-wakeup tail of dismiss_instance.
         pool.api_router = None
         pool.remove_instance = MagicMock()
-
+        # dismiss_instance's t174 gate (lifecycle.py) calls self.has_pending(parent_name). On the real
+        # AgentPool this resolves via MessageQueueMixin; the bare LifecycleMixin double must expose it
+        # too or the IDLE-relaunch path raises AttributeError. This test's scenario is "parent has
+        # pending work -> relaunch", so return True (the gate's positive branch).
+        pool.has_pending = lambda name: True
         mixin = LifecycleMixin.__new__(LifecycleMixin)
         for attr in ('children', '_children_lock', 'instances', '_pool_lock', 'terminated_instances',
-                     '_instance_threads', '_instance_threads_lock', 'settings', 'get_instance', 'enqueue_message',
-                     'is_instance_terminated', '_async_registry', 'api_router', 'remove_instance'):
+                      '_instance_threads', '_instance_threads_lock', 'settings', 'get_instance', 'enqueue_message',
+                      'is_instance_terminated', '_async_registry', 'api_router', 'remove_instance', 'has_pending'):
             setattr(mixin, attr, getattr(pool, attr))
         mixin._clear_state_label = lambda inst: None
         return mixin, pool
