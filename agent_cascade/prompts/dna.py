@@ -51,10 +51,10 @@ AVAILABLE_TOOLS: List[str] = [
     'load_skill',  # Load registered skill instructions into current context at runtime
 
     # Media generation (image/video/music/TTS via a pluggable backend registry)
-    'media_gen',  # Generate image/video/audio via a backend registry (AUTO backend selector)
+    'media_gen',  # Generate image/video/audio via a backend registry (explicit backend; __help lists options)
 
-    # Image generation (ComfyUI text-to-image / SVG rendering)
-    'image_gen',  # Generate an image from a text prompt or render SVG code
+    # Image generation (ComfyUI text-to-image / SVG rendering) DEPRECATED
+    # 'image_gen',  # Generate an image from a text prompt or render SVG code
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
@@ -510,8 +510,8 @@ TOOL_METADATA = {
         }
     },
     'image_gen': {
-        'description': ('⚠ DEPRECATED — use media_gen instead, which supports image/video/music/TTS and an '
-                        'AUTO backend selector. This tool still works and is kept for backward compatibility. '
+        'description': ('⚠ DEPRECATED — use media_gen instead, which supports image/video/music/TTS with an '
+                        'explicit backend selector (run media_gen with prompt=__help to list options). This tool still works and is kept for backward compatibility. '
                         'Generate an image from a text prompt (via ComfyUI or the local '
                         'stable-diffusion.cpp backend), or render SVG code to an image. '
                         'Returns the image uncaptioned, same format as view_image (the router auto-captions on return). '
@@ -537,11 +537,15 @@ TOOL_METADATA = {
             'Generate image / video / audio via a pluggable backend registry. '
             'Backends: comfyui (ComfyUI server, image/video/music), sdcpp (local stable-diffusion.cpp, image), '
             'kobold_tts (Kobold TTS GGUF, speech). '
-            "backend defaults to 'AUTO': the config filename stem is the primary discriminator (config ownership), "
-            'never dict-order; an explicit backend always wins. '
+            'backend is REQUIRED and EXPLICIT (no AUTO): name comfyui | sdcpp | kobold_tts. '
             "Pass 'config' (a filename stem) as the primary path — everything else is derived from it; "
-            'if omitted, the resolved backend\'s configured default is used. '
-            'media_type is image|video|audio (music and TTS are both audio). '
+            'if omitted, the backend\'s configured default is used. '
+            "Call with prompt='__help' (no other args) to list every backend, its available configs, "
+            'what each produces, and the exact params for each case. '
+            'media_type is NOT a parameter — it is derived (single-type backends take their only type; '
+            'comfyui infers from the loaded workflow: YuE2 nodes→audio, SaveVideo→video, else image). '
+            'Music generation uses two fields — style and lyrics (via overrides) — not a single prompt; '
+            'the prompt alone only sets style and lyrics is dropped if omitted. '
             'reference_file is a reference/edit image (image-edit, i2v first-frame) or reference audio (TTS voice-clone); '
             'it is resolved through the path sandbox before any upload/subprocess. '
             'media_size is a generalized size object (image→width/height; video→+duration/fps; audio→duration). '
@@ -550,16 +554,14 @@ TOOL_METADATA = {
             'Migration: backend=comfyui + a workflow name reproduces image_gen exactly.'
         ),
         'parameters': {
-            'prompt': 'Text prompt for generation (or the text to speak for TTS).',
-            'backend': "Backend id: 'AUTO' (default) | 'comfyui' | 'sdcpp' | 'kobold_tts'.",
-            'config': 'Config name (filename stem) or full .json path. The primary path; everything else is derived from it.',
-            'media_type': 'Optional hint — image | video | audio; used only to disambiguate AUTO (music & tts both = audio).',
+            'prompt': "Text prompt for generation (or the text to speak for TTS). Pass prompt='__help' to list all backends/configs and exact usage.",
+            'backend': 'REQUIRED for generation. Backend id: comfyui | sdcpp | kobold_tts (no AUTO). Omit only for the __help command.',
+            'config': 'Config name (filename stem) or full .json path. The primary path; everything else is derived from it. See __help for the exact stems each backend accepts.',
             'negative_prompt': 'Elements to exclude (image backends).',
             'server_url': 'Optional override for server-backed backends (ComfyUI).',
-            'backend_dir': 'Optional override for local-binary backend working dir.',
-            'reference_file': 'Reference/edit image or reference audio; resolved through the path sandbox before any upload/subprocess.',
+            'reference_file': 'Reference/edit image or reference audio; resolved through the path sandbox before any upload/subprocess. NOT supported by the sdcpp backend (image-only) — use comfyui for edits.',
             'media_size': 'Generalized size object: image→{width,height}; video→+{duration,fps}; audio→{duration}.',
-            'overrides': 'Scalar overrides merged over the loaded config (e.g. seed, steps, guidance).',
+            'overrides': 'Scalar overrides merged over the loaded config (e.g. seed, steps, guidance). For MUSIC (YuE2 audio) pass overrides.style and overrides.lyrics — the prompt alone only sets style; lyrics is dropped if omitted.',
         }
     },
     'web_search': {
