@@ -2975,13 +2975,14 @@ class TestProposeSkillOverlapGate:
             assert m.register_skill_from_content(content, task_text='docker compose workflow')[0]
 
         # Propose a NEW skill whose keywords/triggers overlap all three incumbents. The extra
-        # distinct tokens ("and deployment pipelines") keep the difflib similarity under 0.95 so it
-        # passes the HARD gate, while the shared keyword cluster still scores >= SKILL_MATCH_THRESHOLD
-        # in the soft overlap gate (verified: difflib ~0.86, match-score ~0.67).
+        # distinct tokens ("and deployment pipelines plus observability tracing") keep the difflib
+        # similarity under SKILL_DUP_SIM_THRESHOLD (0.8) so it passes the HARD gate, while the shared
+        # keyword cluster still scores >= SKILL_MATCH_THRESHOLD in the soft overlap gate
+        # (verified: difflib ~0.77, match-score ~0.53).
         new_name = f"overlap-new-{base}"
         new_content = _make_skill_content(
             name=new_name,
-            description='Shared cluster topic about docker compose orchestration workflows and deployment pipelines',
+            description='Shared cluster topic about docker compose orchestration workflows and deployment pipelines plus observability tracing',
             triggers=['docker', 'compose'],
             generated_from_task='docker compose workflow')
         tool, pool = self._make_tool(m)
@@ -3021,12 +3022,13 @@ class TestProposeSkillOverlapGate:
         assert m.is_skill_disabled(inc_name) is True
 
         # The proposal shares the keyword cluster with the (disabled) incumbent but adds distinct
-        # tokens so it passes the HARD similarity gate (<0.95); the shared cluster keeps the soft
-        # overlap score >= SKILL_MATCH_THRESHOLD (verified: difflib ~0.90, match-score ~0.67).
+        # tokens so it passes the HARD similarity gate (< SKILL_DUP_SIM_THRESHOLD, 0.8); the shared
+        # cluster keeps the soft overlap score >= SKILL_MATCH_THRESHOLD
+        # (verified: difflib ~0.77, match-score ~0.53).
         new_name = f"overlap-inactive-new-{base}"
         new_content = _make_skill_content(
             name=new_name,
-            description='Specialized topic about kubernetes helm chart templating patterns and rollout strategy',
+            description='Specialized topic about kubernetes helm chart templating patterns and rollout strategy plus progressive delivery observability',
             triggers=['kubernetes', 'helm'],
             generated_from_task='kubernetes helm')
         tool, pool = self._make_tool(m)
@@ -3062,13 +3064,14 @@ class TestProposeSkillOverlapGate:
         assert m.register_skill_from_content(other_content, task_text='redis cache')[0]
 
         # The incumbent being updated. Its description carries extra distinct tokens ("and session
-        # storage") so the re-proposal passes the HARD gate (<0.95) against BOTH its own name and the
-        # other incumbent, while the shared cluster keeps the soft overlap score >= floor (verified:
-        # difflib ~0.87 vs other, match-score ~0.75).
+        # storage plus persistence tuning") so the re-proposal passes the HARD gate
+        # (< SKILL_DUP_SIM_THRESHOLD, 0.8) against BOTH its own name and the other incumbent, while
+        # the shared cluster keeps the soft overlap score >= floor (verified: difflib ~0.77 vs other,
+        # match-score ~0.60).
         name = f"overlap-self-{base}"
         content = _make_skill_content(
             name=name,
-            description='Shared topic about redis caching and eviction strategies and session storage',
+            description='Shared topic about redis caching and eviction strategies and session storage plus persistence tuning',
             triggers=['redis', 'cache'],
             generated_from_task='redis cache')
         assert m.register_skill_from_content(content, task_text='redis cache')[0]

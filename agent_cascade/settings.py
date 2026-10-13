@@ -616,7 +616,7 @@ MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skil
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly
 # 0.95 PASSES (is not rejected); only scores strictly greater than 0.95 are rejected.
 # Frontmatter fields only (name + description + triggers); the body is excluded for speed.
-SKILL_DUP_SIM_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_DUP_SIM_THRESHOLD', '0.95'))
+SKILL_DUP_SIM_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_DUP_SIM_THRESHOLD', '0.8'))
 SKILL_CACHE_TTL_SECONDS: float = float(os.getenv('AGENT_CASCADE_SKILL_CACHE_TTL',
                                                  30.0))  # Cache TTL for mtime-based discovery cache
 
