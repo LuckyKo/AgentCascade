@@ -33,7 +33,7 @@ import os
 import time
 from pathlib import Path
 
-from .base import MediaBackend, MediaRequest, MediaResult
+from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
 
 from agent_cascade.tools.image_gen import (
     _load_workflow,
@@ -45,11 +45,32 @@ from agent_cascade.tools.image_gen import (
 )
 from agent_cascade.utils.tool_path_resolver import resolve_tool_path
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Save-node class types that write a file to disk (video / audio) rather than
 # returning bytes in the /history outputs.
 _DISK_SAVE_NODES = ('SaveVideo', 'SaveAudioAdvanced', 'SaveAudio')
 # YuE2 text-bearing nodes (music): style + lyrics live on these.
 _MUSIC_TEXT_NODES = ('YuE2GenerateMusic', 'YuE2GenerateABC')
+
+
+def _infer_media_type(workflow: dict) -> str:
+    """Derive the media type from the loaded workflow (no caller media_type param).
+
+    Order matters: a YuE2 music graph also has a SaveAudio node, so music is
+    detected FIRST by its text nodes; then video by its ``SaveVideo`` node;
+    otherwise it is an image graph. Verified against the real workflows in
+    ``config/workflows`` (only ``yue2_full`` has YuE2 nodes; only
+    ``video_wan2_2_14B_i2v`` has ``SaveVideo``; no image workflow has either).
+    """
+    nodes = [n for n in workflow.values() if isinstance(n, dict)]
+    if any(n.get('class_type') in _MUSIC_TEXT_NODES for n in nodes):
+        return 'audio'
+    if any(n.get('class_type') == 'SaveVideo' for n in nodes):
+        return 'video'
+    return 'image'
 
 
 def _find_save_node_prefix(workflow: dict) -> str | None:
@@ -255,10 +276,8 @@ class ComfyUIBackend(MediaBackend):
                 'No ComfyUI server configured. Set the image generation server URL '
                 'in UI settings (config/media_gen/media_gen.json).'
             )
-        try:
-            timeout = int(block.get('timeout', (req.config or {}).get('timeout', 180)))
-        except (TypeError, ValueError):
-            timeout = 180
+        # Timeout: unified resolver (comfyui.timeout > top-level timeout > 900).
+        timeout = resolve_media_timeout(req.config, block)
 
         # Resolve the workflow path: param > config default > error listing available.
         workflow_path = req.config_name or block.get('default_workflow')
@@ -294,12 +313,26 @@ class ComfyUIBackend(MediaBackend):
 
         size = req.media_size or {}
         overrides = req.overrides or {}
-        media_type = req.media_type
+        # media_type is DERIVED from the workflow (no caller param): music → audio,
+        # SaveVideo → video, else image. Set on req so the caller's save/feedback path
+        # sees the real type.
+        media_type = _infer_media_type(workflow)
+        req.media_type = media_type
 
         if media_type == 'audio':
             # ── MUSIC (YuE2): three ordered changes, NOT _inject_params. ──
             style = overrides.get('style') or req.prompt
             lyrics = overrides.get('lyrics')
+            if lyrics is None and any(
+                isinstance(n, dict) and n.get('class_type') in _MUSIC_TEXT_NODES
+                for n in workflow.values()
+            ):
+                # YuE2 can generate from style alone, so this is a warning, not an
+                # error — but make the silent-drop visible to the caller.
+                logger.warning(
+                    'music prompt was placed in style only; no lyrics were provided '
+                    '(pass overrides.lyrics)'
+                )
             workflow, report = _inject_music_params(
                 workflow, style=style, lyrics=lyrics, seed=overrides.get('seed'),
             )

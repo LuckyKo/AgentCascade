@@ -22,13 +22,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .base import MediaBackend, MediaRequest, MediaResult
+from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
 
 from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-
-# One-shot TTS is slow (model load + GPU warmup dominate a short clip). The
-# default budget is generous; a per-config ``timeout`` may override it.
-_DEFAULT_TTS_TIMEOUT = 600
 
 # RIFF/WAVE header magic (bytes 0-3 'RIFF', bytes 8-11 'WAVE').
 _RIFF_MAGIC = b'RIFF'
@@ -151,15 +147,11 @@ class KoboldTTSBackend(MediaBackend):
             # koboldcpp voice-cloning takes a directory (--ttsdir).
             ref_dir = str(ref_path.parent)
 
-        # ── Timeout: kobold_tts.timeout > top-level timeout > 600. ──
-        try:
-            timeout = int(block.get('timeout', (req.config or {}).get('timeout',
-                                               _DEFAULT_TTS_TIMEOUT)))
-        except (TypeError, ValueError):
-            timeout = _DEFAULT_TTS_TIMEOUT
-        if timeout < _DEFAULT_TTS_TIMEOUT:
-            # One-shot TTS is slow; never let a short config timeout truncate it.
-            timeout = max(timeout, _DEFAULT_TTS_TIMEOUT)
+        # ── Timeout: unified resolver (kobold_tts.timeout > top-level timeout > 900). ──
+        # One UI value (config['timeout']) is respected identically across all backends
+        # (see base.resolve_media_timeout); the old clamp-up-to-600 is gone so a short
+        # UI value is honoured uniformly.
+        timeout = resolve_media_timeout(req.config, block)
 
         # ── Build argv (pure; never shell=True). ──
         argv = [str(binary_path), '--ttsmodel', str(model_path)]

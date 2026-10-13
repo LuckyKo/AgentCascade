@@ -13,7 +13,7 @@ the same keys (``binary``/``models_dir``/``config_dir``/``default_sdcpp_config``
 import os
 import tempfile
 
-from .base import MediaBackend, MediaRequest, MediaResult
+from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
 
 from agent_cascade.tools.image_gen import (
     _resolve_sdcpp_config,
@@ -48,12 +48,9 @@ class SdcppBackend(MediaBackend):
         # file fails fast without a wasted save/unload/restore cycle.
         model_cfg = _resolve_sdcpp_config(req.config, req.config_name)
 
-        # Timeout precedence: sdcpp.timeout > top-level timeout > 900.
+        # Timeout: unified resolver (sdcpp.timeout > top-level timeout > 900).
         sdcpp_block = req.config.get('sdcpp') or {}
-        try:
-            timeout = int(sdcpp_block.get('timeout', req.config.get('timeout', 900)))
-        except (TypeError, ValueError):
-            timeout = 900
+        timeout = resolve_media_timeout(req.config, sdcpp_block)
 
         # Create the temp output file. The caller's finally unlinks it on the path
         # where run() is never reached; _sdcpp_generate unlinks it on every path it

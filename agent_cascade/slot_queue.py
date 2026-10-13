@@ -908,7 +908,8 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
     supposed to be releasing permits (lock-order inversion, plan §3.3.1).
 
     Returns a dict with: holder_name, holder_class, holder_state, held_s,
-    last_activity_age_s, llm_active, streaming, context_available, progress_ts.
+    last_activity_age_s, llm_active, streaming, context_available, progress_ts,
+    turn_progress_age_s.
 
     ``streaming`` is the ONLY suppression predicate (§3.2.1): the holder stamped
     an LLM call start or a stream chunk within SLOT_HEAD_STALL_ACTIVE_S. Read by
@@ -924,6 +925,7 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
         'streaming': False,
         'context_available': resolver is not None,
         'progress_ts': 0.0,   # dead-man's switch input (plan §3 A0) — 0.0 until resolved
+        'turn_progress_age_s': -1.0,  # holder-side DMS input (plan t220 §3.1) — keyed on inst.last_activity; -1.0 until resolved
     }
     holders = list(pool._running.values())
     if not holders:
@@ -971,6 +973,15 @@ def _holder_activity_context(pool: 'SlotPool', now_mono: float,
         _la = getattr(inst, 'last_activity', 0.0)
         _llm = getattr(inst, '_last_llm_activity', 0.0)
         ctx['progress_ts'] = _la if _la > _llm else _llm
+
+        # ── ADDITIVE (plan t220_holder_dms_PLAN §3.1) — holder-side dead-man's-switch input. ──
+        # Age keyed on inst.last_activity (turn/commit progress) ONLY — deliberately NOT _last_llm_activity.
+        # The per-attempt _last_llm_activity (which feeds `last_activity_age_s` and `progress_ts` above)
+        # advances on every LLM retry attempt, so keying the DMS on it would make it a NO-OP for the
+        # retry-loop wedge it targets (memory: dead-mans-switch-timeout-is-activity-relative, Trap 1).
+        # This key is FULLY ISOLATED from `last_activity_age_s` and `streaming` (the head-stall ALARM's
+        # sole suppression predicate, zero test coverage) — it cannot perturb the alarm. -1.0 when never stamped.
+        ctx['turn_progress_age_s'] = (now_mono - _la) if _la > 0 else -1.0
     return ctx
 
 

@@ -846,7 +846,8 @@ class ImageGen(BaseTool):
     """Generate an image via ComfyUI (text prompt) or render SVG code to an image.
 
     @deprecated: use :class:`agent_cascade.tools.media_gen.MediaGen` instead, which
-    supports image/video/music/TTS and an AUTO backend selector. ``media_gen`` with
+    supports image/video/music/TTS with an explicit backend selector (run ``media_gen``
+    with ``prompt='__help'`` to list options). ``media_gen`` with
     ``backend='comfyui'`` + a workflow name reproduces this tool exactly. This tool
     still works and is kept for backward compatibility (behaviour is unchanged).
 
@@ -1284,11 +1285,13 @@ class ImageGen(BaseTool):
                 '(config/image_gen.json).'
             ))]
 
-        # sdcpp timeout: sdcpp.timeout > top-level timeout > 900 (F2).
-        try:
-            timeout = int(sdcpp_cfg.get('timeout', config.get('timeout', 900)))
-        except (TypeError, ValueError):
-            timeout = 900
+        # sdcpp timeout: unified resolver (sdcpp.timeout > top-level timeout > 900) (F2).
+        # Lazy import: image_gen is loaded before the media_backends package, so a
+        # top-level `from ...media_backends.base import ...` would trigger a circular
+        # import (media_backends/__init__ → sdcpp → image_gen). Imported here, after
+        # all modules are loaded.
+        from agent_cascade.tools.media_backends.base import resolve_media_timeout
+        timeout = resolve_media_timeout(config, sdcpp_cfg)
 
         # input_image is a ComfyUI-only feature; reject it for the sdcpp backend
         # (mirrors the SVG rejection in call()).
@@ -1341,6 +1344,16 @@ class ImageGen(BaseTool):
         _state = {'saved': False, 'held': None}
 
         try:
+            # ── Decision D marker (plan t220 §3.4) ──────────────────────────────
+            # FIRST statement inside the try: mark this instance as mid a
+            # legitimately-bounded blocking tool so the holder-side DMS excludes it
+            # while (now - start) < the resolved bound. The bound is the SAME unified
+            # timeout used by _sdcpp_generate below, carried WITH the marker (3-tuple).
+            # Set INSIDE the try so no exception can leak a stale marker; cleared
+            # unconditionally in the finally. time.monotonic() to match the DMS clock.
+            if instance is not None:
+                instance._in_blocking_tool = ('image_gen', time.monotonic(), float(timeout))
+
             self._vram_release(instance, _state)
 
             # Time only the actual generation subprocess (not the VRAM save/unload/restore
@@ -1359,6 +1372,10 @@ class ImageGen(BaseTool):
                 self._restore_vram_state(instance, _state['held'])
             return [ContentItem(text=f"ERROR: Unexpected sdcpp image generation error: {e}")]
         finally:
+            # Decision D: clear the marker on EVERY exit path (success, timeout, or
+            # exception) so a stale/uncleared marker can never defeat the DMS.
+            if instance is not None:
+                instance._in_blocking_tool = None
             # _sdcpp_generate unlinks the temp file on every path it reaches; this
             # covers the one path where it is never called (the VRAM prologue raised
             # first) so the mkstemp file never leaks.

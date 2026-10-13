@@ -33,6 +33,43 @@ from typing import Optional
 # Canonical media-type vocabulary. Exactly three types.
 MEDIA_TYPES = ('image', 'video', 'audio')
 
+# ── Unified media-gen timeout ─────────────────────────────────────────────────
+# The single source of truth for a render's timeout is the top-level UI value
+# (config['timeout']). Every backend resolves it identically through
+# resolve_media_timeout() so ONE UI setting is respected uniformly across all
+# modes (image / video / audio / TTS). This shared default replaces the old
+# per-backend magic numbers (600 / 900 / 180) and the kobold_tts clamp-up.
+# 900s is the largest previous per-backend default — a safe floor so slow
+# TTS/image renders still work when the user has not set an explicit value.
+DEFAULT_MEDIA_TIMEOUT = 900.0
+
+
+def resolve_media_timeout(config: Optional[dict], block: Optional[dict] = None) -> float:
+    """Resolve the effective media-gen timeout (seconds), identically for every backend.
+
+    Precedence (documented, applied in every backend):
+      1. per-backend ``block['timeout']`` — a user-settable config key
+         (e.g. ``comfyui.timeout`` / ``sdcpp.timeout`` / ``kobold_tts.timeout``).
+      2. top-level ``config['timeout']`` — the single UI value (source of truth).
+      3. ``DEFAULT_MEDIA_TIMEOUT`` — ONE shared fallback (900s), so slow TTS/image
+         renders still work when the user has not set an explicit value.
+
+    A value that fails ``int()`` coercion (None, non-numeric) falls to the shared
+    default. Note the precedence is via ``dict.get``'s default argument: a *missing*
+    key falls through to the next level, but a key present with a ``None`` value does
+    NOT — it resolves to the shared default (e.g. ``block={'timeout': None}`` → 900,
+    skipping ``config['timeout']``). No clamping is applied — the user's value is
+    respected as-is (the old kobold_tts clamp-up-to-600 is gone, so a short UI value
+    is honoured uniformly across all backends).
+    """
+    block = block or {}
+    cfg = config or {}
+    candidate = block.get('timeout', cfg.get('timeout', DEFAULT_MEDIA_TIMEOUT))
+    try:
+        return float(int(candidate))
+    except (TypeError, ValueError):
+        return float(DEFAULT_MEDIA_TIMEOUT)
+
 
 @dataclass
 class MediaRequest:
@@ -44,8 +81,8 @@ class MediaRequest:
     """
 
     # ── Identity / selection ────────────────────────────────────────────────
-    media_type: str = ''                 # one of MEDIA_TYPES
-    backend_id: str = 'AUTO'             # explicit backend id, or 'AUTO'
+    media_type: str = ''                 # one of MEDIA_TYPES (derived, not caller-supplied)
+    backend_id: str = ''                 # explicit backend id (required; no AUTO)
     config_name: Optional[str] = None    # config/workflow/model filename stem
 
     # ── Content ─────────────────────────────────────────────────────────────
@@ -54,7 +91,6 @@ class MediaRequest:
 
     # ── Per-call overrides (D7: reference_file + media_size are core) ──────
     server_url: Optional[str] = None     # override comfyui.url / endpoint base
-    backend_dir: Optional[str] = None    # override workflow_dir / models_dir
     reference_file: Optional[str] = None  # SECURITY seam: resolved via resolve_tool_path
     media_size: Optional[dict] = None    # {'width': int, 'height': int, ...}
     overrides: Optional[dict] = None     # free-form backend-specific overrides
@@ -74,7 +110,6 @@ class MediaRequest:
             'prompt': self.prompt,
             'negative_prompt': self.negative_prompt,
             'server_url': self.server_url,
-            'backend_dir': self.backend_dir,
             'reference_file': self.reference_file,
             'media_size': self.media_size,
             'overrides': self.overrides,

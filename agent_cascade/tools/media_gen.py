@@ -25,9 +25,11 @@ The canonical media-type vocabulary is exactly three types (image / video / audi
 TTS and music are both *audio* (a backend/config distinction, not an output type),
 so both return ``ContentItem(audio=...)``.
 
-Backend selection is ``AUTO`` by default: the config filename stem is the PRIMARY
-discriminator (config ownership), never dict-order. An explicit ``backend`` always
-wins.
+Backend selection is EXPLICIT: the caller must name a backend (``comfyui`` /
+``sdcpp`` / ``kobold_tts``) — there is no AUTO. For ComfyUI, the media type
+(image/video/audio) is inferred from the loaded workflow, so the caller only needs
+the backend + config stem. Run with ``prompt='__help'`` to list every backend,
+config, what it produces, and the exact params to pass for each case.
 
 VRAM management (every backend): before generation we save the owning instance's
 KV state and unload all models from llama-autoloader to free VRAM. The sequence is
@@ -57,7 +59,7 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
-from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest
+from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest, resolve_media_timeout
 
 from agent_cascade.tools.image_gen import _fmt_elapsed
 
@@ -133,30 +135,27 @@ class MediaGen(BaseTool):
             'prompt': {
                 'type': 'string',
                 'description': (
-                    'Text prompt for generation (or the text to speak for TTS).'
+                    'Text prompt for generation (or the text to speak for TTS). '
+                    "Pass prompt='__help' (no other args) to list every backend, its "
+                    'available workflows/configs, and the exact params for each case.'
                 ),
             },
             'backend': {
                 'type': 'string',
+                'enum': ['comfyui', 'sdcpp', 'kobold_tts'],
                 'description': (
-                    "Backend id: 'AUTO' (default) | 'comfyui' | 'sdcpp' | 'kobold_tts'. "
-                    'AUTO resolves the config stem to its owning backend.'
+                    'REQUIRED for generation. Backend id: comfyui (ComfyUI server: image/video/music) '
+                    '| sdcpp (local stable-diffusion.cpp: image) | kobold_tts (Kobold TTS GGUF: speech). '
+                    'No AUTO — you must name the backend. Omit only for the __help command.'
                 ),
             },
             'config': {
                 'type': 'string',
                 'description': (
                     'Config name (filename stem) or full .json path. The primary path: '
-                    'everything else is derived from it. If omitted, the resolved backend\'s '
-                    'configured default is used.'
-                ),
-            },
-            'media_type': {
-                'type': 'string',
-                'enum': list(MEDIA_TYPES),
-                'description': (
-                    'Optional hint — image | video | audio; used only to disambiguate AUTO '
-                    '(music & tts both = audio).'
+                    'everything else is derived from it. If omitted, the backend\'s '
+                    'configured default is used. See the __help command for the exact '
+                    'config stems each backend accepts.'
                 ),
             },
             'negative_prompt': {
@@ -167,16 +166,13 @@ class MediaGen(BaseTool):
                 'type': 'string',
                 'description': 'Optional override for server-backed backends (ComfyUI).',
             },
-            'backend_dir': {
-                'type': 'string',
-                'description': 'Optional override for local-binary backend working dir.',
-            },
             'reference_file': {
                 'type': 'string',
                 'description': (
                     'Reference/edit image for image-edit & i2v video first-frame; reference '
                     'audio for TTS voice-cloning. Generalizes image_gen input_image. Resolved '
-                    'through the path sandbox before any upload/subprocess.'
+                    'through the path sandbox before any upload/subprocess. NOT supported by the '
+                    'sdcpp backend (image-only, no LoadImage) — use comfyui for edits.'
                 ),
             },
             'media_size': {
@@ -196,7 +192,9 @@ class MediaGen(BaseTool):
                 'type': 'object',
                 'description': (
                     'Scalar overrides merged over the loaded config before injection '
-                    '(e.g. seed, steps, guidance). Backend-namespaced objects cover extras.'
+                    '(e.g. seed, steps, guidance). Backend-namespaced objects cover extras. '
+                    'For MUSIC (YuE2 audio) pass overrides.style and overrides.lyrics — '
+                    'the prompt alone only sets style; lyrics is dropped if omitted.'
                 ),
             },
         },
@@ -306,19 +304,24 @@ class MediaGen(BaseTool):
             return [ContentItem(text=f"ERROR: Invalid media_gen parameters: {e}")]
 
         prompt = params.get('prompt')
+
+        # ── __help: informational, works for ALL agents (incl. restricted). ──
+        # Checked before prompt validation and before backend resolution so it needs
+        # no backend/config and is unambiguous. Lists every backend + its configs.
+        if isinstance(prompt, str) and prompt.strip().lower() == '__help':
+            return [ContentItem(text=self._format_media_help(_get_media_gen_config()))]
+
         if not isinstance(prompt, str) or not prompt.strip():
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
 
-        # Build the normalised request. media_type may be unset; the resolver derives
-        # it from config ownership (or the explicit hint).
+        # Build the normalised request. media_type is DERIVED (single-type backends
+        # in the resolver; comfyui from the workflow in preflight) — not caller-supplied.
         req = MediaRequest(
-            media_type=params.get('media_type') or '',
-            backend_id=params.get('backend') or 'AUTO',
+            backend_id=params.get('backend') or '',
             config_name=params.get('config'),
             prompt=prompt,
             negative_prompt=params.get('negative_prompt') or '',
             server_url=params.get('server_url'),
-            backend_dir=params.get('backend_dir'),
             reference_file=params.get('reference_file'),
             media_size=params.get('media_size'),
             overrides=params.get('overrides'),
@@ -340,6 +343,24 @@ class MediaGen(BaseTool):
 
         # ── VRAM + GENERATE ──
         try:
+            # ── Decision D marker (plan t220 §3.4) ──────────────────────────────
+            # FIRST statement inside the try: mark this instance as mid a
+            # legitimately-bounded blocking tool so the holder-side DMS excludes it
+            # while (now - start) < the resolved bound. The bound is the SAME unified
+            # timeout the backends use (base.resolve_media_timeout), carried WITH the
+            # marker (3-tuple). We read the bound the backend actually resolved
+            # (req.prepared['timeout'], set in preflight) so the DMS window matches the
+            # real generation timeout exactly; the resolver is only a defensive
+            # fallback if a backend ever omits it. Set INSIDE the try so no exception
+            # can leak a stale marker; cleared unconditionally in the finally below.
+            # time.monotonic() to match the DMS clock.
+            if instance is not None:
+                _prepared_timeout = (req.prepared or {}).get('timeout')
+                _dms_bound = (float(_prepared_timeout)
+                              if _prepared_timeout is not None
+                              else resolve_media_timeout(req.config, (req.config or {}).get(req.backend_id)))
+                instance._in_blocking_tool = ('media_gen', time.monotonic(), _dms_bound)
+
             self._vram_release(instance, state)  # save → unload (INSIDE try, deliberately — V2)
 
             # Time only the actual generation call (not the VRAM dance) — V7.
@@ -356,6 +377,10 @@ class MediaGen(BaseTool):
                 self._restore_vram_state(instance, state['held'])
             return [ContentItem(text=f"ERROR: Unexpected media generation error: {e}")]
         finally:
+            # Decision D: clear the marker on EVERY exit path (success, timeout, or
+            # exception) so a stale/uncleared marker can never defeat the DMS.
+            if instance is not None:
+                instance._in_blocking_tool = None
             # V8: unlink the temp output file on EVERY path, including the pre-run
             # raise (where run() is never reached). run() also unlinks on its own
             # paths; double-unlink is guarded by try/except OSError.
@@ -426,3 +451,101 @@ class MediaGen(BaseTool):
 
         return (f"Generated media: {media_path} "
                 f"(config={config_name}, backend={backend_id}, {elapsed_str})")
+
+    # ── __help self-documentation ─────────────────────────────────────────────
+
+    # Curated one-line descriptions keyed by config/workflow stem. Used only as a
+    # fallback when the config/workflow JSON has no 'description' field. New configs
+    # need no code change: add a "description" key to their JSON and it is used
+    # automatically; otherwise a generic fallback is shown.
+    _CONFIG_DESCRIPTIONS = {
+        'Anima_INT8': 'text→image (Anima INT8 checkpoint)',
+        'flux2_edit_9b_API': 'image edit (flux2 9B) — pass reference_file as the image to edit',
+        'flux2_t2i_9b_API': 'text→image (flux2 9B text-to-image)',
+        'zimg_turbo_API': 'text→image (z-image turbo, fast)',
+        'video_wan2_2_14B_i2v': 'image→video (Wan2.2 14B i2v) — pass reference_file as the FIRST FRAME',
+        'yue2_full': 'text→music (YuE2) — pass overrides.style + overrides.lyrics',
+        'anima': 'text→image (stable-diffusion.cpp, Anima model)',
+        'flux2_klein_9b': 'text→image (stable-diffusion.cpp, flux2 klein 9B)',
+        'z_image_turbo': 'text→image (stable-diffusion.cpp, z-image turbo)',
+        'kokoro_default': 'text→speech (Kokoro TTS voice)',
+        'outetts_default': 'text→speech (OuteTTS voice)',
+    }
+
+    def _format_media_help(self, config: dict) -> str:
+        """Render the __help self-documentation. Never raises."""
+        lines = [
+            'media_gen — generate image / video / audio. You MUST name a backend '
+            '(no AUTO). Below: each backend, the configs it accepts, what each '
+            'produces, and the exact params to pass.',
+            '',
+        ]
+        backend_notes = {
+            'comfyui': 'ComfyUI server — image / video / music. Needs the server running.',
+            'sdcpp': 'stable-diffusion.cpp local CLI — image only.',
+            'kobold_tts': 'Kobold TTS one-shot GGUF — speech. SLOW (can take minutes).',
+        }
+        for backend_id in ('comfyui', 'sdcpp', 'kobold_tts'):
+            block = (config or {}).get(backend_id)
+            if not isinstance(block, dict):
+                continue
+            lines.append(f"== backend: {backend_id} ==")
+            lines.append(f"  note: {backend_notes.get(backend_id, '')}")
+            media_types = block.get('media_types') or {}
+            for mtype, stems in media_types.items():
+                if not isinstance(stems, list):
+                    continue
+                for stem in stems:
+                    if not isinstance(stem, str):
+                        continue
+                    desc = self._describe_config(backend_id, stem, config)
+                    usage = self._usage_for(backend_id, mtype, stem)
+                    lines.append(f"  - config={stem}")
+                    lines.append(f"      produces: {desc}")
+                    lines.append(f"      usage:    {usage}")
+            lines.append('')
+        lines.append(
+            'Music (comfyui audio) uses TWO fields: overrides.style (mood/instrumentation) '
+            'and overrides.lyrics (with [verse]/[chorus] tags). The prompt alone only sets '
+            'style; lyrics is dropped if omitted.'
+        )
+        return '\n'.join(lines)
+
+    def _describe_config(self, backend_id: str, stem: str, config: dict) -> str:
+        """One-line description for a config/workflow stem. Never raises."""
+        path = self._config_json_path(backend_id, stem, config)
+        if path:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get('description'), str):
+                    return data['description']
+            except (OSError, ValueError):
+                pass
+        return self._CONFIG_DESCRIPTIONS.get(stem) or f"{stem} ({backend_id})"
+
+    def _config_json_path(self, backend_id: str, stem: str, config: dict) -> str | None:
+        """Absolute path to a config/workflow JSON for a stem, or None."""
+        block = (config or {}).get(backend_id) or {}
+        d = block.get('workflow_dir') if backend_id == 'comfyui' else block.get('config_dir')
+        if not d or not isinstance(d, str):
+            return None
+        p = Path(d)
+        if not p.is_absolute():
+            root = Path(__file__).resolve().parent.parent.parent
+            p = root / p
+        return str(p / f"{stem}.json")
+
+    def _usage_for(self, backend_id: str, mtype: str, stem: str) -> str:
+        """Exact params to pass for one (backend, media-type, config) case."""
+        if mtype == 'video':
+            return (f'backend=comfyui, config={stem}, prompt="<motion description>", '
+                    'reference_file="<first-frame.png>"')
+        if mtype == 'audio' and backend_id == 'comfyui':
+            return (f'backend=comfyui, config={stem}, prompt="<style/mood>", '
+                    'overrides={"style": "<style>", "lyrics": "[verse]\\n<lyrics>"}')
+        if mtype == 'audio':  # kobold_tts speech
+            return f'backend=kobold_tts, config={stem}, prompt="<text to speak>"'
+        # image (comfyui or sdcpp)
+        return (f'backend={backend_id}, config={stem}, prompt="<image description>", '
+                'media_size={"width": 1024, "height": 1024}')

@@ -220,6 +220,12 @@ AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT',
 SYSTEM_AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT',
                                                     300.0))  # Auto-dismiss Compressor/Security after X seconds inactivity (5 min)
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
+# Holder-side dead-man's-switch window (todo #220 follow-up, plan t220_holder_dms_PLAN §3.4).
+# A conc=0 slot holder with NO turn-progress (last_activity) for >= this many seconds while NOT in a
+# legitimately-bounded operation (approval / media-gen / in-bounded blocking tool / in-flight LLM call)
+# is terminated by the idle-checker to free the wedged slot. Default 300s, validated against measured
+# last_activity gaps; must stay >= the largest un-excluded tool bound (see plan bound table).
+HOLDER_DMS_WINDOW_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_WINDOW_S', 300.0))
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 # ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md §5.3) ──
 # Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.
