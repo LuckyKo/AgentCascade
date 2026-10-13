@@ -459,7 +459,13 @@ class LifecycleMixin:
                     from agent_cascade.agent_instance import AgentState
                     with parent._state_lock:
                         pstate = parent.state
-                    if pstate == AgentState.IDLE:
+                    # IDLE alone is ambiguous — it is both "waiting for child" and "already
+                    # completed". A parent that completed has no pending work (cleared at the
+                    # engine/core.py exit block), so gate the relaunch on has_pending to avoid
+                    # resurrecting a finished parent into a stuck no-op turn (Incident B /
+                    # todo #220 Hang 2). The notification enqueue above is preserved so it
+                    # drains on the next legitimate activation.
+                    if pstate == AgentState.IDLE and self.has_pending(parent_name):
                         try:
                             from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
                             relaunch_idle_agent(self, parent_name)

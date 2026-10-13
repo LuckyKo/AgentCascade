@@ -280,13 +280,75 @@ class TestDismissalNotification:
         assert any('worker2' in w for w in parent._tool_warnings)
         assert len(parent._tool_warnings) == 2
 
-    def test_idle_spawner_relaunch_invoked(self, agent_pool):
-        """An IDLE spawner gets relaunch_idle_agent invoked (best-effort)."""
+    def test_completed_idle_spawner_not_relaunched(self, agent_pool):
+        """Incident B / todo #220 Hang 2: an IDLE spawner with NO pending work is an ALREADY
+        COMPLETED parent. Dismissing its child must NOT relaunch it (that resurrection is what
+        re-entered engine.run() with only the no-op dismissal notification and held the slot).
+        The notification enqueue is PRESERVED so it drains on the next legitimate activation."""
         from unittest.mock import patch
         parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
         child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
         agent_pool.instances['spawner'] = parent
         agent_pool.instances['worker1'] = child
+        # No _async_registry entry / no pending work → has_pending('spawner') is False.
+
+        with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
+            agent_pool.dismiss_instance('worker1')
+            mock_relaunch.assert_not_called()
+        # The warning was still queued (the enqueue is unconditional, only the relaunch is gated).
+        assert any('worker1' in w for w in parent._tool_warnings), \
+            'completed parent must still receive the dismissal notification'
+
+    def test_idle_spawner_relaunch_invoked(self, agent_pool):
+        """REGRESSION GUARD FOR THE ASYNC PATH (lifecycle.py:425), NOT the t174 gate.
+
+        A parent that has a LIVE async handle for the child being dismissed is genuinely
+        waiting (not completed): abandon_child() resolves it (resolved=True) and the async
+        path at :425 relaunches the IDLE parent. This is the real owner of the legitimate
+        wake.
+
+        NOTE: this does NOT exercise the t174 gate — abandon_child() (lifecycle.py:399) clears
+        this child's own handle BEFORE the t174 block reads has_pending, so at the t174 site
+        has_pending is already False. The single relaunch here comes from :425, not the gate.
+        (Kept from the pre-fix test that asserted the buggy no-handle relaunch; repurposed per
+        the plan rather than weakened/deleted.)"""
+        from unittest.mock import patch
+        from agent_cascade.async_tools import BackgroundToolEntry
+        parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+        # Register a LIVE handle for the SAME child being dismissed so abandon_child resolves it.
+        agent_pool._async_registry._pending['spawner'] = [
+            BackgroundToolEntry(tool_call=lambda: '', agent_instance_name='spawner',
+                                child_instance_name='worker1', completed=False)]
+        agent_pool._async_registry._child_to_parent['worker1'] = ('spawner', None)
+
+        with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
+            agent_pool.dismiss_instance('worker1')
+            mock_relaunch.assert_called_once()
+
+    def test_t174_gate_positive_branch_other_child_live(self, agent_pool):
+        """SYNTHETIC unit-level exercise of the t174 gate's POSITIVE branch only.
+
+        Give the IDLE parent a live handle for a DIFFERENT child (worker2) than the one being
+        dismissed (worker1). abandon_child('worker1') leaves worker2's entry live, so at the
+        t174 site has_pending('spawner') is True and the gate fires the relaunch.
+
+        This state is NOT naturally reachable in production — a real IDLE parent has its pending
+        work cleared on completion (engine/core.py exit block) — so the test exists to pin the
+        gate's logic, not to model production behavior."""
+        from unittest.mock import patch
+        from agent_cascade.async_tools import BackgroundToolEntry
+        parent = self._make_instance('spawner', agent_class='orchestrator')  # default IDLE
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+        # A live handle for a DIFFERENT child survives abandon_child('worker1').
+        agent_pool._async_registry._pending['spawner'] = [
+            BackgroundToolEntry(tool_call=lambda: '', agent_instance_name='spawner',
+                                child_instance_name='worker2', completed=False)]
+        agent_pool._async_registry._child_to_parent['worker2'] = ('spawner', None)
 
         with patch('agent_cascade.utils.wakeup_helpers.relaunch_idle_agent') as mock_relaunch:
             agent_pool.dismiss_instance('worker1')
