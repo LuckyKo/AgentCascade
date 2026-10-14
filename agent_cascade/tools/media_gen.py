@@ -134,46 +134,28 @@ class MediaGen(BaseTool):
         'properties': {
             'prompt': {
                 'type': 'string',
-                'description': (
-                    'Text prompt for generation (or the text to speak for TTS). '
-                    "Pass prompt='__help' (no other args) to list every backend, its "
-                    'available workflows/configs, and the exact params for each case.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['prompt'],
             },
             'backend': {
                 'type': 'string',
                 'enum': ['comfyui', 'sdcpp', 'kobold_tts'],
-                'description': (
-                    'REQUIRED for generation. Backend id: comfyui (ComfyUI server: image/video/music) '
-                    '| sdcpp (local stable-diffusion.cpp: image) | kobold_tts (Kobold TTS GGUF: speech). '
-                    'No AUTO — you must name the backend. Omit only for the __help command.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['backend'],
             },
             'config': {
                 'type': 'string',
-                'description': (
-                    'Config name (filename stem) or full .json path. The primary path: '
-                    'everything else is derived from it. If omitted, the backend\'s '
-                    'configured default is used. See the __help command for the exact '
-                    'config stems each backend accepts.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['config'],
             },
             'negative_prompt': {
                 'type': 'string',
-                'description': 'Negative prompt to exclude elements (image backends).',
+                'description': TOOL_METADATA['media_gen']['parameters']['negative_prompt'],
             },
             'server_url': {
                 'type': 'string',
-                'description': 'Optional override for server-backed backends (ComfyUI).',
+                'description': TOOL_METADATA['media_gen']['parameters']['server_url'],
             },
             'reference_file': {
                 'type': 'string',
-                'description': (
-                    'Reference/edit image for image-edit & i2v video first-frame; reference '
-                    'audio for TTS voice-cloning. Generalizes image_gen input_image. Resolved '
-                    'through the path sandbox before any upload/subprocess. NOT supported by the '
-                    'sdcpp backend (image-only, no LoadImage) — use comfyui for edits.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['reference_file'],
             },
             'media_size': {
                 'type': 'object',
@@ -183,19 +165,11 @@ class MediaGen(BaseTool):
                     'duration': {'type': 'number', 'description': 'Duration in seconds (video/audio).'},
                     'fps': {'type': 'integer', 'description': 'Frames per second (video only).'},
                 },
-                'description': (
-                    'Generalized size. Backend picks the fields it uses: image→width/height; '
-                    'video→width/height/duration/fps; audio→duration.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['media_size'],
             },
             'overrides': {
                 'type': 'object',
-                'description': (
-                    'Scalar overrides merged over the loaded config before injection '
-                    '(e.g. seed, steps, guidance). Backend-namespaced objects cover extras. '
-                    'For MUSIC (YuE2 audio) pass overrides.style and overrides.lyrics — '
-                    'the prompt alone only sets style; lyrics is dropped if omitted.'
-                ),
+                'description': TOOL_METADATA['media_gen']['parameters']['overrides'],
             },
         },
         'required': ['prompt'],

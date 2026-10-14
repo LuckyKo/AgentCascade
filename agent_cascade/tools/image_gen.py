@@ -864,58 +864,34 @@ class ImageGen(BaseTool):
         'properties': {
             'prompt': {
                 'type': 'string',
-                'description': (
-                    'Text prompt for image generation, or SVG code to render to an image.'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['prompt'],
             },
             'negative_prompt': {
                 'type': 'string',
-                'description': 'Negative prompt to exclude elements (API generation only).',
+                'description': TOOL_METADATA['image_gen']['parameters']['negative_prompt'],
             },
             'workflow': {
                 'type': 'string',
-                'description': (
-                    'Full path to a ComfyUI workflow JSON file. If omitted, uses the '
-                    'default workflow selected in UI settings.'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['workflow'],
             },
-            'width': {'type': 'integer', 'description': 'Output width in pixels (overrides workflow default).'},
-            'height': {'type': 'integer', 'description': 'Output height in pixels (overrides workflow default).'},
-            'seed': {'type': 'integer', 'description': 'Random seed for reproducibility (random if omitted).'},
+            'width': {'type': 'integer', 'description': TOOL_METADATA['image_gen']['parameters']['width']},
+            'height': {'type': 'integer', 'description': TOOL_METADATA['image_gen']['parameters']['height']},
+            'seed': {'type': 'integer', 'description': TOOL_METADATA['image_gen']['parameters']['seed']},
             'input_image': {
                 'type': 'string',
-                'description': (
-                    'Optional local image file path to upload into ComfyUI for workflows that '
-                    'contain exactly one standard LoadImage node. Use for image editing/reference. '
-                    'Not used for SVG rendering.'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['input_image'],
             },
             'sdcpp_config': {
                 'type': 'string',
-                'description': (
-                    'Name (filename stem) of an sdcpp model config in the configured '
-                    'sdcpp config directory (e.g. "z_image_turbo"). A full path to a '
-                    '.json file is also accepted. If omitted, uses default_sdcpp_config '
-                    'from settings. (sdcpp backend only)'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['sdcpp_config'],
             },
             'guidance': {
                 'type': 'number',
-                'description': (
-                    'Guidance scale. sdcpp: overrides the config-file value, else the '
-                    'built-in fallback (cfg_scale 7.0). ComfyUI: optionally overrides cfg '
-                    'on KSampler nodes (no-op if the workflow has no scalar cfg). Omit to '
-                    'use the default.'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['guidance'],
             },
             'steps': {
                 'type': 'integer',
-                'description': (
-                    'Number of diffusion steps. sdcpp: overrides the config-file value, '
-                    'else the built-in fallback of 20. ComfyUI: optionally overrides steps '
-                    'on KSampler nodes (no-op if the workflow has no scalar steps). '
-                    'Lower = faster.'
-                ),
+                'description': TOOL_METADATA['image_gen']['parameters']['steps'],
             },
         },
         'required': ['prompt'],

@@ -38,10 +38,8 @@ class SystemInfo(BaseTool):
         'type': 'object',
         'properties': {
             'help': {
-                'type':
-                    'string',
-                'description':
-                    "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information.",
+                'type': 'string',
+                'description': TOOL_METADATA['system_info']['parameters']['help'],
             },
         },
         'required': [],

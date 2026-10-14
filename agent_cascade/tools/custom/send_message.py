@@ -25,14 +25,12 @@ class SendMessage(BaseTool):
         'type': 'object',
         'properties': {
             'destination': {
-                'type':
-                    'string',
-                'description':
-                    "Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."
+                'type': 'string',
+                'description': TOOL_METADATA['send_message']['parameters']['destination']
             },
             'message': {
                 'type': 'string',
-                'description': 'The message content to send.'
+                'description': TOOL_METADATA['send_message']['parameters']['message']
             }
         },
         'required': ['destination', 'message']

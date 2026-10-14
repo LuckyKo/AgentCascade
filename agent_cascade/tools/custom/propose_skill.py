@@ -10,6 +10,7 @@ mode (name + rating, no content) records a rating without modifying content.
 import logging
 import re
 
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
 from agent_cascade.skills.parser import normalize_version, parse_frontmatter, strict_frontmatter_check
 from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
@@ -47,45 +48,23 @@ class ProposeSkill(BaseTool):
     """Tool to propose a new reusable skill for future tasks."""
 
     name = 'propose_skill'
-    description = ('Propose a new reusable skill for future tasks, or rate an existing one. '
-                   '`name` is always required. To CREATE/UPDATE: provide `name` plus the full '
-                   'SKILL.md content (YAML frontmatter + body); if the name already exists this is '
-                   'an update (patch version auto-incremented). To RATE ONLY (no content change): '
-                   'provide just `name` and `rating` — no skill_content needed and no approval is '
-                   'requested, because rating is not a content modification.')
+    description = TOOL_METADATA['propose_skill']['description']
     parameters = {
         'type': 'object',
         'properties': {
             'name': {
-                'type':
-                    'string',
-                'description': ('REQUIRED. The skill name (snake_case). For new skills it becomes the '
-                                'registered name; for existing names with content it targets an update; '
-                                'with `rating` and no content it records a rating for that skill.'),
+                'type': 'string',
+                'description': TOOL_METADATA['propose_skill']['parameters']['name'],
             },
             'skill_content': {
-                'type':
-                    'string',
-                'description':
-                    'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
+                'type': 'string',
+                'description': TOOL_METADATA['propose_skill']['parameters']['skill_content'],
             },
             'justification': {
-                'type':
-                    'string',
-                'description':
-                    'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
+                'type': 'string',
+                'description': TOOL_METADATA['propose_skill']['parameters']['justification'],
             },
-            'rating': {
-                'type':
-                    'number',
-                'minimum':
-                    0,
-                'maximum':
-                    10,
-                'description': ('Optional quality rating (0-10, 0.5 steps) for an existing skill. '
-                                'Use with `name` for rating-only mode, or alongside `skill_content` to '
-                                'record a rating after registration/update.'),
-            },
+            'rating': TOOL_METADATA['propose_skill']['parameters']['rating'],
         },
         'required': ['name'],
     }

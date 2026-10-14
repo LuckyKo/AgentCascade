@@ -2165,6 +2165,70 @@ class TestScanSkillsIncludeDisabled:
         assert 're-activates' in load_desc or 're-enable' in load_desc
 
 
+class TestToolMetadataSingleSourceOfTruth:
+    """Single-source-of-truth snapshot: TOOL_METADATA (dna.py) is the canonical text for tool schemas.
+
+    Locks the invariant that a tool's live description and each parameter's description
+    text match the dna.py TOOL_METADATA entry, so future drift (a tool hardcoding stale
+    text again, or a dna.py edit a class forgets to pick up) fails loudly. Covers one
+    registered tool (scan_skills, which builds its JSON schema in-class from TOOL_METADATA)
+    and one proxy tool (call_agent, whose schema the instance proxy builds from
+    TOOL_METADATA). The text invariant (not naive dict equality) is asserted because the
+    class wraps each param's description in a JSON-schema node (type/properties/required).
+    """
+
+    def _assert_schema_text_matches(self, tool_name, tool):
+        from agent_cascade.prompts.dna import TOOL_METADATA
+        meta = TOOL_METADATA[tool_name]
+        # Top-level description must match byte-for-byte.
+        assert meta['description'] == tool.description, (
+            f"{tool_name}: live description diverged from TOOL_METADATA")
+        # Every param's description text must match (string param, or the
+        # 'description' field of a structured dict).
+        meta_params = meta['parameters']
+        props = tool.parameters['properties']
+        for pname, mval in meta_params.items():
+            meta_text = mval['description'] if isinstance(mval, dict) else mval
+            assert pname in props, f"{tool_name}: param '{pname}' missing from live schema"
+            class_text = props[pname]['description']
+            assert meta_text == class_text, (
+                f"{tool_name}.{pname}: live description diverged from TOOL_METADATA\n"
+                f"  dna.py: {meta_text!r}\n  class : {class_text!r}")
+        # Reverse direction (single-source invariant): a param present in the LIVE schema but
+        # absent from TOOL_METADATA means the class defines text dna.py doesn't own — drift the
+        # forward loop above cannot see. Fail loudly so dna.py stays the single source of truth.
+        for pname in props:
+            assert pname in meta_params, (
+                f"{tool_name}: live schema has param '{pname}' with no TOOL_METADATA entry "
+                f"(class defines text dna.py does not own — add it to TOOL_METADATA)")
+
+    # The 8 tools migrated to source their schema TEXT from TOOL_METADATA (t300). Each is guarded
+    # individually so re-hardcoding text in ANY of them fails loudly, not just the representative.
+    _MIGRATED_TOOLS = [
+        ('image_gen', 'agent_cascade.tools.image_gen', 'ImageGen'),
+        ('media_gen', 'agent_cascade.tools.media_gen', 'MediaGen'),
+        ('send_message', 'agent_cascade.tools.custom.send_message', 'SendMessage'),
+        ('system_info', 'agent_cascade.tools.custom.system_info', 'SystemInfo'),
+        ('scan_skills', 'agent_cascade.tools.custom.scan_skills', 'ScanSkills'),
+        ('load_skill', 'agent_cascade.tools.custom.load_skill', 'LoadSkill'),
+        ('forget_last', 'agent_cascade.tools.custom.forget_last_tool', 'ForgetLast'),
+        ('propose_skill', 'agent_cascade.tools.custom.propose_skill', 'ProposeSkill'),
+    ]
+
+    @pytest.mark.parametrize('tool_name, module_path, class_name', _MIGRATED_TOOLS)
+    def test_registered_tool_schema_matches_metadata(self, tool_name, module_path, class_name):
+        """Each migrated registered tool: live schema text == TOOL_METADATA text (per-file drift guard)."""
+        import importlib
+        cls = getattr(importlib.import_module(module_path), class_name)
+        self._assert_schema_text_matches(tool_name, cls)
+
+    def test_proxy_tool_schema_matches_metadata(self):
+        """call_agent (proxy): live schema text == TOOL_METADATA text."""
+        from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy
+        proxy = _AgentInstanceFunctionProxy('call_agent')
+        self._assert_schema_text_matches('call_agent', proxy)
+
+
 # ===========================================================================
 # 8c. scan_skills preview — full raw SKILL.md text by name (todo 140)
 # ===========================================================================
@@ -2198,8 +2262,8 @@ class TestScanSkillsPreview:
 
     def test_tool_schema_exposes_preview_param(self):
         """The live tool schema (class .parameters → .function) must expose `preview` so the
-        LLM can call it. This is the real schema path (base.py .function), NOT dna.py's
-        TOOL_METADATA (which scan_skills does not read)."""
+        LLM can call it. This is the real schema path (base.py .function); scan_skills builds
+        it in-class from dna.py's TOOL_METADATA (single source of truth)."""
         from agent_cascade.tools.custom.scan_skills import ScanSkills
         props = ScanSkills.parameters['properties']
         assert 'preview' in props, 'the `preview` param must be visible to the LLM'

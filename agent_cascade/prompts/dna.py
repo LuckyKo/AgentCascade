@@ -258,10 +258,7 @@ KNOWLEDGE_SNIPPET = {'zh': KNOWLEDGE_SNIPPET_ZH, 'en': KNOWLEDGE_SNIPPET_EN}
 TOOL_METADATA = {
     'read_file': {
         'description': ('Reads and returns the content of a specified file. If the file is large, '
-                        'the content will be truncated. The tool\'s response will clearly indicate '
-                        'if truncation has occurred and will provide details on how to read more '
-                        'of the file using the \'start_line\' and \'limit\' parameters. Handles text files '
-                        'natively with streaming line-by-line reading. For binary files, displays a '
+                        'the content will be truncated. For binary files, displays a '
                         'hex dump of the first N bytes with ASCII representation.'),
         'parameters': {
             'path':
@@ -269,7 +266,7 @@ TOOL_METADATA = {
             'start_line':
                 ('Optional: 1-based line number to start reading from. This parameter is named '
                  "'start_line', not 'offset'. Supports negative values (-1 = last line, -3 = "
-                 'third-to-last). Default is 1.'),
+                 'third-to-last). Default: 1.'),
             'limit':
                 "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
@@ -278,12 +275,11 @@ TOOL_METADATA = {
         'description': ('View an image file in the workspace, download and view an http(s) image URL, '
                         'or capture screen/window content. Returns the image for the model to see. '
                         'Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. '
-                        'An http(s) image URL is downloaded to the media folder and shown like a local image. '
                         'Supports special paths for screen/window capture — see \'path\' param for details. '
                         'Use crop_region to view a specific area of large images in more detail.'),
         'parameters': {
             'path':
-                'Path to the image file, absolute or relative to workspace directory, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
+                'Path to the image file, absolute or relative to the workspace root, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
             'crop_region':
                 'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
         }
@@ -344,8 +340,7 @@ TOOL_METADATA = {
         'description': (
             'Lists files and subdirectories within a specified directory path. '
             'Supports recursive traversal, glob-based filtering (single or comma-separated patterns), '
-            'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search. '
-            'By default (skip_vcs=true) common VCS/build dirs (.git, node_modules, __pycache__, etc.) are pruned from recursive listings; set skip_vcs=false to include them.'
+            'file-size and modification-date filters, sorting by name/size/date/type. Use filters for quick file search.'
         ),
         'parameters': {
             'path':
@@ -381,17 +376,14 @@ TOOL_METADATA = {
         }
     },
     'grep': {
-        'description': ('Search for a text pattern in files. Supports Python regex syntax.\n'
-                        '- Smart case by default: case-insensitive unless pattern contains uppercase letters.\n'
-                        '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
-                        '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
-                        '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
-                        '- Groups of matches are separated by "---".'),
+        'description': ('Search for a text pattern in files. Supports Python regex syntax. '
+                        'Smart case by default (case-insensitive unless the pattern contains uppercase letters); '
+                        'respects .gitignore/.rgignore by default (ignore_vcs).'),
         'parameters': {
             'pattern':
                 'Text or regex pattern to search for (Python regex syntax)',
             'path':
-                'Directory to search in, absolute or relative to workspace root (default: ".")',
+                'Directory to search in, absolute or relative to the workspace root (default: ".")',
             'include':
                 'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
             'exclude':
@@ -406,11 +398,8 @@ TOOL_METADATA = {
     },
     'delete_file': {
         'description': (
-            'Delete one or more files/directories. Each entry is actually moved to a backup folder so it can be restored if needed. '
-            'Deleting entries you created in this session is auto-approved; any entry not owned by the current agent requires user approval. '
-            'When multiple targets are requested, a SINGLE aggregate approval prompt is shown listing exactly what will be removed (a bulk delete is not transactional — partial success is possible, and each deleted target is individually restorable from its backup). '
-            "The optional 'include' glob filter works like list_dir: it is applied within the resolved base directory of each path. "
-            'Concurrent deletes on the same file are not supported; there is no per-file filesystem lock.'),
+            'Delete one or more files/directories. Each entry is moved to a backup folder so it can be restored if needed. '
+            'Entries you created in this session are auto-approved; any entry not owned by the current agent requires user approval.'),
         'parameters': {
             'path':
                 "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
@@ -426,36 +415,33 @@ TOOL_METADATA = {
              'a timestamped backup is created before overwriting. This is auto-approved if the destination is new. '
              'You become the owner of the copied file, allowing you to edit it freely without user approval.'),
         'parameters': {
-            'source': "Path to the source file/directory, absolute or relative to workspace root (e.g., 'src/old.py')",
-            'destination': "Path to the destination, absolute or relative to workspace root (e.g., 'src/new.py')"
+            'source': "Path to the source file/directory, absolute or relative to the workspace root (e.g., 'src/old.py')",
+            'destination': "Path to the destination, absolute or relative to the workspace root (e.g., 'src/new.py')"
         }
     },
     'code_interpreter': {
         'description': (
-            'Python code sandbox (Docker-based). The workspace is mounted at /workspace; relative paths work directly. '
+            'Python code sandbox (Docker-based). The workspace and extra paths are mounted, exact mapping can be found by using system_info tool; workspace relative paths work directly. '
             'Use for quick snippets; for longer code, write .py files via file tools and import them here. '
-            'To reach host services, use "host.docker.internal" instead of "localhost". '
-            'Windows-style extra-workspace paths are auto-translated to container paths (disable with fix_paths=false). '
-            'Use system_info to find exact path mappings for extra workspaces. '
-            'Missing packages can be installed as the container will be reused in follow up queries.'),
+            'To reach host services, use "host.docker.internal" instead of "localhost".'),
         'parameters': {
             'code':
                 'The Python code to execute.',
             'fix_paths':
-                'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
+                'Auto-translate Windows host paths to Docker container paths. Default: true. Set to false to disable.',
             'fresh':
-                'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
+                'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default: false. Use when you need a clean environment.',
             'idle_timeout':
-                'Seconds of no output before the kernel is killed. Default 30. Raise for code that runs silently (blocking I/O, big-file parse, subprocess). Silence limit, it is NOT a wall-clock.',
+                'Seconds of no output before the kernel is killed. Default: 30. Raise for code that runs silently (blocking I/O, big-file parse, subprocess). Silence limit, it is NOT a wall-clock.',
         }
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval.\n\n'
-            '**Execution mode:** auto/sync/async — see execution_mode param. '
-            'In async mode a tool_id is returned immediately and the final result is delivered automatically when done — manage it with special commands via that tool_id.\n\n'
-            'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N.\n'
-            '**WARNING:** DO NOT use async shell_cmd with file redirects, pipes or filters.\n'
+            'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval. '
+            'Execution mode auto/sync/async — see execution_mode param. '
+            'In async mode a tool_id is returned immediately and the final result is delivered automatically when done; manage it with special commands via that tool_id. '
+            'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N. '
+            'WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters.'
         ),
         'parameters': {
             'command':
@@ -463,7 +449,7 @@ TOOL_METADATA = {
             'justification':
                 'Why you need to execute this command.',
             'cwd':
-                'Optional working directory, absolute or relative to workspace root.',
+                'Optional working directory, absolute or relative to the workspace root.',
             'timeout':
                 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
             'execution_mode':
@@ -476,31 +462,25 @@ TOOL_METADATA = {
     },
     'system_info': {
         'description': (
-            'Retrieves the current system information. '
-            'This includes the operating system, current time and date, '
-            'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
-            'Python version, and basic session stats. '
-            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
-            "Pass 'help' to fetch a specific AgentCascade documentation section instead of system info."),
+            'Retrieves the current system information: operating system, current time and date, '
+            'work directories with their Docker container mount paths, Python version, and basic session stats. '
+            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'),
         'parameters': {
             'help':
-                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g., 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
+                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
         }
     },
     'read_logs': {
         'description': (
             'Read a JSON/JSONL log file (agent logs, JSON arrays, single objects, or files with mixed/malformed lines). '
-            'Large message contents are truncated in the middle to prevent context overflow while '
-            'retaining the beginning and end of each message. Handles other types of text files as well with the same middle truncation applied for each line, '
-            'and nested extra fields. Use the `range` parameter to select specific entries (e.g., "1:10", "5:", ":20" or "-15:" for tail end). '
-            'Use the `mode` parameter to control truncation behavior. '
-            'Use the `format` parameter to choose output style: "simple" (default, human-readable summary) or "raw" (original JSON lines).'
+            'Large message contents are truncated to prevent context overflow while retaining the beginning and end. '
+            'Handles other text files and nested extra fields as well.'
         ),
         'parameters': {
             'log_file':
-                'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
+                'The path to the log file, absolute or relative to the workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
             'max_chars_per_message':
-                'Maximum characters to keep for each string value in messages. Defaults to 1000.',
+                'Maximum characters to keep for each string value in messages. Default: 1000.',
             'range':
                 'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
             'mode':
@@ -511,56 +491,37 @@ TOOL_METADATA = {
     },
     'image_gen': {
         'description': ('⚠ DEPRECATED — use media_gen instead, which supports image/video/music/TTS with an '
-                        'explicit backend selector (run media_gen with prompt=__help to list options). This tool still works and is kept for backward compatibility. '
+                        'this tool still works and is kept for backward compatibility. '
                         'Generate an image from a text prompt (via ComfyUI or the local '
-                        'stable-diffusion.cpp backend), or render SVG code to an image. '
-                        'Returns the image uncaptioned, same format as view_image (the router auto-captions on return). '
-                        'For text prompts: describe what you want to see. For SVG: provide the full SVG markup. '
-                        "ComfyUI: use the 'workflow' parameter (full path to JSON) to select a saved workflow. "
-                        "stable-diffusion.cpp: use 'sdcpp_config' (a config filename stem, e.g. \"z_image_turbo\") to pick a model config; "
-                        "'guidance' and 'steps' optionally override the config-file values on either backend."),
+                        'stable-diffusion.cpp backend), or render SVG code to an image.'),
         'parameters': {
-            'prompt': 'Text description for image generation, or SVG code to render',
-            'negative_prompt': 'Elements to exclude from the generated image (API only)',
+            'prompt': 'Text prompt for image generation, or SVG code to render to an image.',
+            'negative_prompt': 'Negative prompt to exclude elements (image backends).',
             'workflow': 'Full path to a ComfyUI workflow JSON file. Omit to use the default from settings.',
-            'width': 'Output width in pixels (overrides workflow default)',
-            'height': 'Output height in pixels (overrides workflow default)',
-            'seed': 'Random seed for reproducibility (random if omitted)',
-            'input_image': 'Image file path to use as reference or for editing',
-            'sdcpp_config': 'stable-diffusion.cpp model config filename stem (e.g. "z_image_turbo"); a full .json path is also accepted. Omit to use the default from settings.',
-            'guidance': 'Guidance scale (float). sdcpp: overrides the config-file value. ComfyUI: optionally overrides cfg on KSampler nodes (no-op if none). Omit to use the default.',
-            'steps': 'Diffusion steps (int). sdcpp: overrides the config-file value. ComfyUI: optionally overrides steps on KSampler nodes (no-op if none). Lower = faster. Omit to use the default.'
+            'width': 'Output width in pixels (overrides workflow default).',
+            'height': 'Output height in pixels (overrides workflow default).',
+            'seed': 'Random seed for reproducibility (random if omitted).',
+            'input_image': 'Optional local image file path to use as reference or for editing in ComfyUI workflows (single LoadImage node). Not used for SVG rendering.',
+            'sdcpp_config': 'sdcpp model config filename stem (e.g. "z_image_turbo"); a full .json path is also accepted. Omit to use the default from settings. (sdcpp backend only).',
+            'guidance': 'Guidance scale. sdcpp: overrides the config-file value (fallback 7.0). ComfyUI: optionally overrides cfg on KSampler nodes (no-op if none). Omit to use the default.',
+            'steps': 'Diffusion steps. sdcpp: overrides the config-file value (fallback 20). ComfyUI: optionally overrides steps on KSampler nodes (no-op if none). Lower = faster.'
         }
     },
     'media_gen': {
         'description': (
-            'Generate image / video / audio via a pluggable backend registry. '
-            'Backends: comfyui (ComfyUI server, image/video/music), sdcpp (local stable-diffusion.cpp, image), '
-            'kobold_tts (Kobold TTS GGUF, speech). '
-            'backend is REQUIRED and EXPLICIT (no AUTO): name comfyui | sdcpp | kobold_tts. '
-            "Pass 'config' (a filename stem) as the primary path — everything else is derived from it; "
-            'if omitted, the backend\'s configured default is used. '
-            "Call with prompt='__help' (no other args) to list every backend, its available configs, "
-            'what each produces, and the exact params for each case. '
-            'media_type is NOT a parameter — it is derived (single-type backends take their only type; '
-            'comfyui infers from the loaded workflow: YuE2 nodes→audio, SaveVideo→video, else image). '
-            'Music generation uses two fields — style and lyrics (via overrides) — not a single prompt; '
-            'the prompt alone only sets style and lyrics is dropped if omitted. '
-            'reference_file is a reference/edit image (image-edit, i2v first-frame) or reference audio (TTS voice-clone); '
-            'it is resolved through the path sandbox before any upload/subprocess. '
-            'media_size is a generalized size object (image→width/height; video→+duration/fps; audio→duration). '
-            'Captioning: the generated IMAGE is returned uncaptioned (the router auto-captions it on return); '
-            'video and audio are NEVER sent to the vision guard — their descriptive text line is the contract. '
-            'Migration: backend=comfyui + a workflow name reproduces image_gen exactly.'
+            'Generate image / video / audio via an explicit backend. '
+            'backend is REQUIRED. '
+            "Pass prompt='__help' (no other args) to list every backend, its configs, and exact params. "
+            'media_type is NOT a parameter — it is derived from the backend/workflow.'
         ),
         'parameters': {
-            'prompt': "Text prompt for generation (or the text to speak for TTS). Pass prompt='__help' to list all backends/configs and exact usage.",
-            'backend': 'REQUIRED for generation. Backend id: comfyui | sdcpp | kobold_tts (no AUTO). Omit only for the __help command.',
-            'config': 'Config name (filename stem) or full .json path. The primary path; everything else is derived from it. See __help for the exact stems each backend accepts.',
-            'negative_prompt': 'Elements to exclude (image backends).',
+            'prompt': 'Text prompt for generation (or the text to speak for TTS).',
+            'backend': 'REQUIRED for generation. Backend id: comfyui (ComfyUI server: image/video/music) | sdcpp (local stable-diffusion.cpp: image) | kobold_tts (Kobold TTS GGUF: speech). No AUTO — you must name the backend. Omit only for the __help command.',
+            'config': "Config name (filename stem) or full .json path; everything else is derived from it. Omit to use the backend's configured default. See __help for the exact config stems each backend accepts.",
+            'negative_prompt': 'Negative prompt to exclude elements (image backends).',
             'server_url': 'Optional override for server-backed backends (ComfyUI).',
-            'reference_file': 'Reference/edit image or reference audio; resolved through the path sandbox before any upload/subprocess. NOT supported by the sdcpp backend (image-only) — use comfyui for edits.',
-            'media_size': 'Generalized size object: image→{width,height}; video→+{duration,fps}; audio→{duration}.',
+            'reference_file': 'Reference/edit image for image-edit & i2v video first-frame; reference audio for TTS voice-cloning. NOT supported by the sdcpp backend (image-only, no LoadImage) — use comfyui for edits.',
+            'media_size': 'Generalized size. Backend picks the fields it uses: image→width/height; video→width/height/duration/fps; audio→duration.',
             'overrides': 'Scalar overrides merged over the loaded config (e.g. seed, steps, guidance). For MUSIC (YuE2 audio) pass overrides.style and overrides.lyrics — the prompt alone only sets style; lyrics is dropped if omitted.',
         }
     },
@@ -600,9 +561,7 @@ TOOL_METADATA = {
         'description': (
             'Delegate a task to a specialized agent instance. '
             'If the instance_name already exists, the session continues with the existing context. '
-            'Otherwise, a new session is started using the specified agent_class.\n\n'
-            'Example usage:\n'
-            '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}'
+            'Otherwise, a new session is started using the specified agent_class.'
         ),
         'parameters': {
             'agent_class': {
@@ -676,7 +635,7 @@ TOOL_METADATA = {
             },
             'all_idle': {
                 'type': 'boolean',
-                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
+                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default: false.'
             },
         },
         'required': [],  # lenient: both params optional (all_idle=true works alone)
@@ -694,15 +653,13 @@ TOOL_METADATA = {
                         'Fails if the destination is not actively running.'),
         'parameters': {
             'destination':
-                ("Target of the message. Use an exact agent instance name (e.g., 'Maine', 'supervisor', 'worker1') to send to another agent"
-                 "or 'user' to send to the human user."),
+                ("Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."),
             'message': 'The message content to send.'
         }
     },
     'compress_context': {
         'description': (
             'Summarize the oldest part of the conversation history to free up context space. '
-            'Supports two modes: "auto" (generated via specialized compression LLM) and "manual" (provided by agent via summary_text). '
             'A fraction of history is replaced by a concise summary.'),
         'parameters': {
             'fraction':
@@ -731,21 +688,22 @@ TOOL_METADATA = {
             ('Quickly map a code file to see its structure (classes, functions, methods) and their line numbers. '
              'Use this for an overview of large files before performing targeted reads.'),
         'parameters': {
-            'path': 'Path to the file to map, absolute or relative to workspace root.',
+            'path': 'Path to the file to map, absolute or relative to the workspace root.',
             'force_as': 'Optional. Force parsing as a specific language (e.g., "python", "javascript", "cpp", "java").'
         }
     },
     'forget_last': {
         'description':
             ('Retroactively truncate the output of the last N tool call responses in the active conversation history. '
-             'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
-             'This frees up context space if the tool data is not useful. '
+             'Each truncated response is shortened to a configured maximum length, with a marker indicating truncation. '
+             'Responses already short enough are skipped. An optional justification appends a reason to the truncation marker. '
+             'This frees up context space without losing the fact that the tool was called. '
              'Affects both the in-memory pool and the log file.'),
         'parameters': {
             'count':
-                'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
+                'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default: 1.',
             'justification':
-                'Optional reason for truncation. Appended to the truncation marker for context awareness. Keep it very short (e.g. "useless data").',
+                'Optional reason for truncation. Appended to the truncation marker for context awareness.',
         }
     },
     'syntax_check': {
@@ -761,7 +719,8 @@ TOOL_METADATA = {
     'scan_skills': {
         'description': ('Scan registered skills and return matching skills with relevance scores. '
                         'Use this to discover which skills are available before calling call_agent with load_skill. '
-                        'Returns skill names, descriptions, match scores, and quality ratings for the given query.'),
+                        'Returns skill names, descriptions, match scores, and quality ratings for the given query. '
+                        'Pass a skill name via `preview` (or as a single-word query) to get its full raw text.'),
         'parameters': {
             'query':
                 'Search query or task description to match against available skills. Leave empty to list all registered skills.',
@@ -780,13 +739,17 @@ TOOL_METADATA = {
                         'requested, because rating is not a content modification.'),
         'parameters': {
             'name':
-                'The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
+                'REQUIRED. The skill name (snake_case). For new skills it becomes the registered name; for existing names with content it targets an update; with `rating` and no content it records a rating for that skill.',
             'skill_content':
                 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body. Required for creating/updating a skill; omit for rating-only.',
             'justification':
                 'Why this skill is needed. Required for creating/updating a skill; optional for rating-only.',
-            'rating':
-                'Optional quality rating (0-10, 0.5 steps) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
+            'rating': {
+                'type': 'number',
+                'minimum': 0,
+                'maximum': 10,
+                'description': 'Optional quality rating (0-10, 0.5 steps) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
+            },
         }
     },
     'load_skill': {

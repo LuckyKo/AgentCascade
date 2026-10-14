@@ -4,6 +4,7 @@ import logging
 from typing import Union
 
 from agent_cascade.compression import rebuild_working_set
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT, DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS
 from agent_cascade.tools.base import BaseTool, register_tool
 
@@ -24,34 +25,21 @@ class ForgetLast(BaseTool):
     will be temporarily inconsistent until the next sync cycle. This is a known limitation
     of the fail-open design.
     """
-
     name = 'forget_last'
-    description = (
-        'Retroactively truncate the output of the last N tool call responses in the '
-        'active conversation history. Each truncated response is shortened to '
-        f"{DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS} characters max, with a marker indicating "
-        f"truncation. Responses already ≤ {DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT} chars are skipped as they're short enough. "
-        'An optional justification parameter appends a reason to the truncation marker for context awareness. '
-        'This frees up context space without losing the fact that the tool was called. '
-        'Affects both the in-memory pool and the log file.')
-
+    description = TOOL_METADATA['forget_last']['description']
     parameters = {
         'type': 'object',
         'properties': {
             'count': {
                 'type': 'integer',
-                'description': ('Number of recent tool call responses to truncate. '
-                                'Counts backwards from the most recent function result, '
-                                'skipping non-function messages. Default is 1.'),
+                'description': TOOL_METADATA['forget_last']['parameters']['count'],
                 'minimum': 1,
                 'maximum': 100,  # Guardrail against runaway truncation
                 'default': 1,
             },
             'justification': {
-                'type':
-                    'string',
-                'description': ('Optional reason for truncation. Appended to the truncation marker '
-                                'for context awareness.'),
+                'type': 'string',
+                'description': TOOL_METADATA['forget_last']['parameters']['justification'],
             },
         },
         'required': [],

@@ -11,6 +11,7 @@ import logging
 import re
 
 from agent_cascade.engine.helpers import _SKILL_MSG_PREFIX
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -20,27 +21,12 @@ logger = logging.getLogger(__name__)
 @register_tool('load_skill', allow_overwrite=True)
 class LoadSkill(BaseTool):
     """Tool to load skill instructions into the current agent's context at runtime."""
-
     name = 'load_skill'
-    description = ('Load registered skill instructions into your current context at runtime. '
-                   'Use this when you need specialized expertise for your task. '
-                   'Takes one or more skill names and injects their full instructions as guidelines.')
+    description = TOOL_METADATA['load_skill']['description']
     parameters = {
         'type': 'object',
         'properties': {
-            'skill_names': {
-                'oneOf': [{
-                    'type': 'string',
-                    'description': 'A single skill name to load.',
-                }, {
-                    'type': 'array',
-                    'items': {
-                        'type': 'string'
-                    },
-                    'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
-                }],
-                'description': 'Skill name(s) to load into your context.',
-            },
+            'skill_names': TOOL_METADATA['load_skill']['parameters']['skill_names'],
         },
         'required': ['skill_names'],
     }

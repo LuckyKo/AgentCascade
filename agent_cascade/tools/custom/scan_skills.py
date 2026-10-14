@@ -9,6 +9,7 @@ import logging
 import re
 from pathlib import Path
 
+from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.skills.manager import rating_sort_key
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
@@ -32,34 +33,21 @@ class ScanSkills(BaseTool):
     """Read-only tool to query available skills and their relevance scores."""
 
     name = 'scan_skills'
-    description = ('Scan registered skills and return matching skills with relevance scores. '
-                   'Use this to discover which skills are available before calling call_agent with load_skill. '
-                   'Returns skill names, descriptions, match scores, and quality ratings for the given query. '
-                   'Pass a skill name via `preview` (or as a single-word query) to get its full raw text.')
+    description = TOOL_METADATA['scan_skills']['description']
     parameters = {
         'type': 'object',
         'properties': {
             'query': {
-                'type':
-                    'string',
-                'description':
-                    'Search query or task description to match against available skills. Leave empty to list all registered skills.',
+                'type': 'string',
+                'description': TOOL_METADATA['scan_skills']['parameters']['query'],
             },
             'active': {
                 'type': 'boolean',
-                'description': (
-                    'If true, restrict the no-query listing to ACTIVE skills only (exclude disabled/'
-                    'inactive ones). Default: false — the default listing includes disabled/inactive '
-                    'skills, each marked with an " (inactive)" suffix.'
-                ),
+                'description': TOOL_METADATA['scan_skills']['parameters']['active'],
             },
             'preview': {
-                'type':
-                    'string',
-                'description':
-                    ('Skill name to preview. When provided, returns the full raw text of that skill\'s '
-                     'SKILL.md file in a code block — useful for anchoring when updating an existing '
-                     'skill. Overrides query/listing behavior.'),
+                'type': 'string',
+                'description': TOOL_METADATA['scan_skills']['parameters']['preview'],
             },
         },
         'required': [],
