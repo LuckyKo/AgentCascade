@@ -67,6 +67,12 @@ def make_engine(instance, state_kv_save_enabled=None):
     object (or none at all, to exercise the True-default path).
     """
     pool = SimpleNamespace()
+    # DMS post-return re-stamp (t293-followup, v0.2.300): reacquire_after_slot_yield now calls
+    # pool._mark_activity(inst_name) on a successful re-acquire. The real SlotPool bumps the
+    # instance's last_activity; mirror that so this double stays faithful to production.
+    pool._mark_activity = lambda name: (
+        setattr(instance, 'last_activity', time.monotonic()) if name == getattr(instance, 'instance_name', None) else None
+    )
     if state_kv_save_enabled is not None:
         pool.settings = SimpleNamespace(state_kv_save_enabled=state_kv_save_enabled)
     engine = ExecutionEngine(pool)
