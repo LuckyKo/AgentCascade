@@ -15,6 +15,7 @@ import pytest
 
 from agent_cascade.engine.helpers import _build_resources_block, _get_active_functions_from_template
 from agent_cascade.llm.schema import SYSTEM, Message
+from agent_cascade.tools.base import TOOL_REGISTRY
 
 # ──────────────────────────────────────────────
 # Test Helpers — lightweight mock objects
@@ -127,9 +128,15 @@ class TestGetActiveFunctionsDefensiveChecks:
             },
         )
 
-        result = _get_active_functions_from_template(tmpl, instance=inst)
+        # bad_tool/good_tool are synthetic; register them for the duration of the call so the
+        # use-time registry filter in resolve_disabled_tools_for_agent() (utils/disabled_tools.py)
+        # treats them as known tools and the instance override can actually disable bad_tool.
+        # patch.dict restores on exit.
+        with patch.dict(TOOL_REGISTRY, {'good_tool': func_good, 'bad_tool': func_bad}):
+            result = _get_active_functions_from_template(tmpl, instance=inst)
         assert len(result) == 1
         assert result[0]['name'] == 'good_tool'
+        assert 'bad_tool' not in TOOL_REGISTRY  # no registry leak after patch.dict exit
 
 
 # ──────────────────────────────────────────────
