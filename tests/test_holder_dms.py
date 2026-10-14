@@ -25,9 +25,11 @@ Revert-proof mapping (plan §6):
 
 import time
 import unittest
+from unittest.mock import MagicMock, patch
 
 from agent_cascade.slot_queue import SlotPool, _holder_activity_context
 from agent_cascade.pool.idle_manager import IdleManager
+from agent_cascade.llm.schema import Message
 
 WINDOW = 2.0  # test window; production is 300s
 
@@ -523,12 +525,21 @@ class _BoundaryPool:
         self._instance = instance
         self._template = template
         self.settings = _FakeSettings(WINDOW, cap)
+        self.mark_activity_calls = []
 
     def get_instance(self, name):
         return self._instance if name == self._instance.instance_name else None
 
     def get_template(self, agent_class):
         return self._template
+
+    def _mark_activity(self, instance_name):
+        # Mirror the real AgentPool: bump last_activity. The dispatch boundary re-stamps here
+        # after a sync tool returns (t293-followup DMS fix), so this must exist for the fake.
+        self.mark_activity_calls.append(instance_name)
+        inst = self.get_instance(instance_name)
+        if inst is not None:
+            inst.last_activity = time.monotonic()
 
 
 def _build_dispatcher(inst, tool_obj, on_call=None, raise_call=False, cap=900.0, compression_handler=None):
@@ -664,6 +675,135 @@ class TestSyncToolDMS:
         im, pool, _, _ = _build(inst)
         im._run_holder_dms()
         assert pool.terminated == [], f"compress_context within bound wrongly terminated: {pool.terminated}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# t293-followup — post-return activity re-stamp (the "killed after a long sync op" bug)
+#
+# Root cause: a conc=0 holder whose last_activity went stale during a LONG synchronous
+# operation is terminated by the DMS in the gap AFTER the op returns and BEFORE its next
+# LLM activity — because the bounded-tool marker is already cleared and nothing re-stamps
+# last_activity. The fix re-stamps last_activity at the three "emerged from a long sync op"
+# boundaries:
+#   (1) the generic sync-tool dispatch boundary  (tool_dispatcher.execute_tool finally),
+#   (2) the compress_context branch              (tool_dispatcher.execute_tool finally), and
+#   (3) after a successful slot re-acquire following a sync child / system-agent yield
+#       (engine.core.reacquire_after_slot_yield).
+# All tests below are revert-proof: each fails if its corresponding re-stamp is removed.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestPostReturnRestampReacquire:
+    """(3) reacquire_after_slot_yield re-stamps last_activity on a SUCCESSFUL re-acquire so a
+    healthy caller that just returned from a long sync child is not wedged-dead by the DMS."""
+
+    def _engine_and_instance(self):
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.engine.core import ExecutionEngine
+        inst = AgentInstance(
+            instance_name='P', agent_class='orchestrator',
+            conversation=[Message(role='system', content='sys')],
+            created_at=time.monotonic(), last_activity=time.monotonic() - 1000.0,  # stale on purpose
+            latest_marker_index=0, parent_instance=None,
+        )
+        pool = MagicMock()
+        pool.stopped = False
+        pool._run_generation = 1
+        # Wire a REAL _mark_activity (bump the instance) so we can assert on the timestamp,
+        # not just that the mock was called.
+        pool._mark_activity.side_effect = lambda name: setattr(
+            inst, 'last_activity', time.monotonic()) if name == inst.instance_name else None
+        engine = ExecutionEngine(pool)
+        engine._my_generation = 1
+        return inst, engine, pool
+
+    def test_successful_reacquire_restamps_activity(self):
+        inst, engine, pool = self._engine_and_instance()
+        stale_before = inst.last_activity  # ~1000s old
+        with patch.object(engine, 'reacquire_for', return_value=True), \
+             patch('agent_cascade.engine.core.ExecutionEngine._get_pool_setting', return_value=False):
+            ok = engine.reacquire_after_slot_yield(inst, 'P', context='sync child')
+        assert ok is True
+        # The re-stamp must have advanced last_activity to ~now (well past the stale value).
+        pool._mark_activity.assert_called_once_with('P')
+        assert inst.last_activity > stale_before + 500.0, (
+            f"last_activity not re-stamped after successful re-acquire "
+            f"(stale={stale_before:.1f}, now={inst.last_activity:.1f})")
+
+    def test_failed_reacquire_does_not_restamp(self):
+        """A caller that FAILS to re-acquire (no router) must NOT be marked active — it is not
+        holding a slot, so the DMS/other paths handle it; stamping would be wrong."""
+        inst, engine, pool = self._engine_and_instance()
+        stale_before = inst.last_activity
+        with patch.object(engine, 'reacquire_for', return_value=False):
+            ok = engine.reacquire_after_slot_yield(inst, 'P', context='sync child')
+        assert ok is False
+        pool._mark_activity.assert_not_called()
+        assert inst.last_activity == stale_before, (
+            'last_activity must NOT change when re-acquire fails')
+
+
+class TestPostReturnRestampSyncTool:
+    """(1) & (2) The generic sync-tool and compress_context dispatch boundaries re-stamp
+    last_activity in their finally blocks, so a holder that held the permit silently through a
+    long tool / compression is fresh on return. Uses the existing _build_dispatcher helper
+    (real ToolDispatcher + _BoundaryPool fake)."""
+
+    def test_sync_tool_return_restamps_activity(self):
+        inst = _make_real_inst('H', last_activity=_old())  # stale on purpose (~10s old > 2s window)
+        tool = _FakeTool('code_interpreter', bound=900.0)
+        d, pool, _ = _build_dispatcher(inst, tool)
+        stale_before = inst.last_activity
+
+        result = d.execute_tool(inst, 'code_interpreter', {'code': 'print(1)'}, [])
+
+        assert result == 'ok'
+        # Marker cleared in finally.
+        assert inst._in_blocking_tool is None
+        # Pool re-stamped activity on return (the fix under test) — exactly once, for this holder.
+        assert pool.mark_activity_calls == ['H'], (
+            f"expected one _mark_activity('H') on sync tool return, got {pool.mark_activity_calls}")
+        # And the timestamp actually advanced past the stale value.
+        assert inst.last_activity > stale_before + 5.0, (
+            f"last_activity not re-stamped after sync tool return "
+            f"(stale={stale_before:.1f}, now={inst.last_activity:.1f})")
+
+    def test_sync_tool_exception_still_restamps(self):
+        """The re-stamp lives in the finally block, so it fires even when the tool raises — a holder
+        that survived a failing long tool is still fresh on return (not wedged-dead)."""
+        inst = _make_real_inst('H', last_activity=_old())
+        tool = _FakeTool('code_interpreter', bound=900.0)
+        d, pool, _ = _build_dispatcher(inst, tool, raise_call=True)
+        stale_before = inst.last_activity
+
+        try:
+            d.execute_tool(inst, 'code_interpreter', {'code': 'x'}, [])
+        except RuntimeError:
+            pass  # the fake raises inside _call_tool; execute_tool propagates it
+
+        assert inst._in_blocking_tool is None  # marker cleared even on exception
+        assert pool.mark_activity_calls == ['H'], (
+            f"expected re-stamp even on tool exception, got {pool.mark_activity_calls}")
+        assert inst.last_activity > stale_before + 5.0
+
+    def test_compress_context_return_restamps_activity(self):
+        """(2) A long forced compression is silent the whole time (no LLM activity on the holder),
+        so after it returns the marker is cleared and last_activity is stale — the same defect class.
+        The compress branch must re-stamp in finally. Revert-proof: fails if that line is removed."""
+        inst = _make_real_inst('H', last_activity=_old())  # stale on purpose (~10s old > 2s window)
+        chandler = _FakeCompressionHandler()
+        d, pool, _ = _build_dispatcher(inst, None, cap=888.0, compression_handler=chandler)
+        stale_before = inst.last_activity
+
+        result = d.execute_tool(inst, 'compress_context', {'a': 1}, [])
+
+        assert result == 'compressed'
+        assert inst._in_blocking_tool is None  # marker cleared in finally
+        # Pool re-stamped activity on return (the fix under test) — exactly once, for this holder.
+        assert pool.mark_activity_calls == ['H'], (
+            f"expected one _mark_activity('H') after compress_context return, got {pool.mark_activity_calls}")
+        assert inst.last_activity > stale_before + 5.0, (
+            f"last_activity not re-stamped after compress_context return "
+            f"(stale={stale_before:.1f}, now={inst.last_activity:.1f})")
 
 
 if __name__ == '__main__':

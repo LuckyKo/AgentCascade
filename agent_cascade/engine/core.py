@@ -2170,6 +2170,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             self._clear_orphaned_state_label(instance, inst_name)
             return False
 
+        # DMS post-return re-stamp (t293-followup): the caller was silent through a long sync child /
+        # system-agent yield, so last_activity is stale on return — re-stamp. A genuinely wedged caller
+        # never reaches here (reacquire_for would not return True), so this cannot mask a real wedge.
+        self.pool._mark_activity(inst_name)
+
         # The sync-child NORMAL-delegation path passes respect_toggle=False so its warm-cache
         # restore always runs (its save side is already ungated). System-agent yields keep the
         # default True and honor the UI toggle.

@@ -198,6 +198,9 @@ class ToolDispatcher:
                 result = self.engine.compression_handler.handle_compress_tool(resolved, instance, instance.instance_name)
             finally:
                 instance._in_blocking_tool = None
+                # DMS post-return re-stamp (t293-followup): compression is silent the whole time, so
+                # re-stamp last_activity on return — see marker note above.
+                self.pool._mark_activity(instance.instance_name)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         else:
@@ -233,6 +236,9 @@ class ToolDispatcher:
                 )
             finally:
                 instance._in_blocking_tool = None
+                # DMS post-return re-stamp (t293-followup): a long sync tool held the permit silently,
+                # so re-stamp last_activity on return — see marker note above.
+                self.pool._mark_activity(instance.instance_name)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
 
