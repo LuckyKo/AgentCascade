@@ -14,7 +14,7 @@
   },
   "76": {
     "inputs": {
-      "image": "ZI_00001_.png"
+      "image": "none.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -123,10 +123,7 @@
   },
   "75:74": {
     "inputs": {
-      "text": [
-        "128",
-        0
-      ],
+      "text": "",
       "clip": [
         "75:71",
         0
@@ -134,7 +131,7 @@
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP Text Encode (Positive Prompt)"
+      "title": "CLIP Text Encode (Negative Prompt)"
     }
   },
   "75:105": {
@@ -214,7 +211,7 @@
   "75:79:77": {
     "inputs": {
       "conditioning": [
-        "75:74",
+        "128",
         0
       ],
       "latent": [
