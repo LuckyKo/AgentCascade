@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import httpx
+
 from agent_cascade.tools.media_gen import (
     MediaGen,
     _invalidate_media_gen_config,
@@ -30,7 +32,9 @@ from agent_cascade.tools.media_backends.comfyui import (
     _inject_music_params,
     _find_save_node_prefix,
     _find_newest_output,
+    _comfyui_generate_to_file,
 )
+from agent_cascade.utils.media_utils import save_media_to_media
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +234,164 @@ class TestMusicExtraction:
         found = _find_newest_output(str(tmp_path), 'audio/YuE2',
                                    submit_time=0.0, preexisting=set())
         assert found == (b'flac-bytes', 'flac')
+
+
+# ── audio via /view from history (the fix; no disk pre-creation) ─────────────
+
+class TestMusicViewFetch:
+    """Regression guard: audio is fetched via /view from the history entry.
+
+    FAILS on the pre-fix code (disk-scan only): no file is pre-created on disk, so
+    the old code would raise 'no output file was found'.
+    """
+
+    def test_audio_via_view(self):
+        captured = []
+
+        def handler(request: httpx.Request):
+            captured.append(request)
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True},
+                              'outputs': {'10': {'audio': [
+                                  {'filename': 'YuE2_0001_.flac',
+                                   'subfolder': 'audio', 'type': 'temp'}]}}}})
+            if request.url.path == '/view':
+                return httpx.Response(200, content=b'flac-bytes')
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        data, ext, meta = _comfyui_generate_to_file(
+            'http://127.0.0.1:8188', _YUE2_WF, r'C:\does\not\exist',
+            timeout=10, client=client,
+        )
+        assert (data, ext) == (b'flac-bytes', 'flac')
+        views = [r for r in captured if r.url.path == '/view']
+        assert len(views) == 1
+        assert views[0].url.params['filename'] == 'YuE2_0001_.flac'
+        assert views[0].url.params['subfolder'] == 'audio'
+        # 'temp' (not the 'output' default) proves the type is read from history.
+        assert views[0].url.params['type'] == 'temp'
+
+    def test_audio_fallback_disk_when_history_empty(self, tmp_path):
+        out = tmp_path / 'audio'
+        out.mkdir()
+        (out / 'YuE2_0001_.flac').write_bytes(b'disk-flac')
+
+        def handler(request: httpx.Request):
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True}, 'outputs': {}}})
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        data, ext, meta = _comfyui_generate_to_file(
+            'http://127.0.0.1:8188', _YUE2_WF, str(tmp_path), timeout=10,
+            client=client,
+        )
+        assert (data, ext) == (b'disk-flac', 'flac')
+
+
+# ── extension plumbing (Fix B): save_media_to_media honours a real ext ──────
+
+class TestSaveMediaExtPlumbing:
+    def _redirect_media_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            'agent_cascade.utils.media_utils._get_type_dir',
+            lambda kind: str(tmp_path),
+        )
+
+    def test_save_honors_flac_hint(self, tmp_path, monkeypatch):
+        self._redirect_media_dir(monkeypatch, tmp_path)
+        p = save_media_to_media(b'flac-bytes', 'audio', ext='flac')
+        assert p.endswith('.flac')
+        assert 'aud_' in os.path.basename(p)
+
+    def test_save_music_honors_flac_hint(self, tmp_path, monkeypatch):
+        # music shares the audio dir but must keep the real extension too.
+        self._redirect_media_dir(monkeypatch, tmp_path)
+        p = save_media_to_media(b'flac-bytes', 'music', ext='flac')
+        assert p.endswith('.flac')
+        assert 'aud_' in os.path.basename(p)
+
+    def test_save_unknown_ext_falls_back(self, tmp_path, monkeypatch):
+        self._redirect_media_dir(monkeypatch, tmp_path)
+        p = save_media_to_media(b'x', 'audio', ext='exe;drop')
+        assert p.endswith('.mp3')  # unknown → per-type default, never arbitrary
+
+    def test_save_empty_ext_falls_back(self, tmp_path, monkeypatch):
+        self._redirect_media_dir(monkeypatch, tmp_path)
+        p = save_media_to_media(b'x', 'audio')  # no hint → default
+        assert p.endswith('.mp3')
+
+
+# ── end-to-end music call: real submit→poll→/view, saved as .flac ────────────
+
+class TestMusicEndToEndView:
+    def test_end_to_end_music_saves_flac(self, tmp_path):
+        tool = MediaGen()
+        order = []
+        captured_save = {}
+
+        def _save(inst):
+            order.append('save'); return True
+
+        def _unload(base):
+            order.append('unload'); return True
+
+        def _restore(inst, held_endpoint_cfg=None):
+            order.append('restore'); return True
+
+        # Real _comfyui_generate_to_file runs against a MockTransport server.
+        def handler(request: httpx.Request):
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True},
+                              'outputs': {'10': {'audio': [
+                                  {'filename': 'YuE2_0001_.flac',
+                                   'subfolder': 'audio', 'type': 'output'}]}}}})
+            if request.url.path == '/view':
+                return httpx.Response(200, content=b'flac-bytes')
+            return httpx.Response(404)
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        # Capture the ext the save helper is asked to use, and return a path that
+        # reflects it (so the assertion proves the real ext reached the save call).
+        def _record_save(data, media_type, source_name=None, ext=None):
+            captured_save['ext'] = ext
+            return f'/tmp/media/aud_test.{ext or 'mp3'}'
+
+        with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=_music_cfg()), \
+              patch('agent_cascade.tools.media_backends.comfyui._load_workflow',
+                    return_value=json.loads(json.dumps(_YUE2_WF))), \
+              patch('agent_cascade.tools.media_backends.comfyui._inject_music_params',
+                    wraps=_inject_music_params), \
+              patch('httpx.Client', return_value=mock_client), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media',
+                    side_effect=_record_save), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
+              patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
+            result = tool.call({'prompt': 'synth', 'backend': 'comfyui',
+                                'config': r'C:\workflows\yue2_full.json',
+                                'media_type': 'audio',
+                                'overrides': {'style': 'synth', 'lyrics': '[verse]\nla'}})
+
+        # The real _comfyui_generate_to_file runs (no _gen mock), so no 'run' marker
+        # is appended; the VRAM dance is save → unload → restore. The .flac path and
+        # captured ext below prove the real submit→poll→/view path produced the file.
+        assert order == ['save', 'unload', 'restore']
+        assert captured_save['ext'] == 'flac'
+        assert result[0].audio.endswith('.flac')
 
 
 # ── VRAM slotting for the music path ─────────────────────────────────────────

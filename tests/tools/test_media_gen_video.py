@@ -201,6 +201,100 @@ class TestVideoGenerateToFile:
         assert 'No disk-save node' in str(e.value)
 
 
+# ── /view fetch from history outputs (the fix; no disk pre-creation) ─────────
+
+class TestVideoViewFetch:
+    """Regression guard: video is fetched via /view from the history entry.
+
+    These FAIL on the pre-fix code (which only disk-scans ``output_dir``): no file
+    is pre-created on disk, so the old code would raise 'no output file was found'.
+    """
+
+    def test_view_fetch_from_history_images(self):
+        captured = []
+
+        def handler(request: httpx.Request):
+            captured.append(request)
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True},
+                              'outputs': {'108': {'images': [
+                                  {'filename': 'Wan2.2_i2v_0001_.mp4',
+                                   'subfolder': 'video', 'type': 'temp'}]}}}})
+            if request.url.path == '/view':
+                return httpx.Response(200, content=b'video-bytes')
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        # output_dir points at a non-existent dir: the /view path must be taken,
+        # the disk fallback must NOT be reached.
+        data, ext, meta = _comfyui_generate_to_file(
+            'http://127.0.0.1:8188', _WAN_WF, r'C:\does\not\exist',
+            timeout=10, client=client,
+        )
+        assert data == b'video-bytes'
+        assert ext == 'mp4'  # derived from the history filename, not assumed
+        views = [r for r in captured if r.url.path == '/view']
+        assert len(views) == 1
+        assert views[0].url.params['filename'] == 'Wan2.2_i2v_0001_.mp4'
+        assert views[0].url.params['subfolder'] == 'video'
+        # 'temp' (not the 'output' default) proves the type is read from history.
+        assert views[0].url.params['type'] == 'temp'
+
+    def test_view_fetch_from_history_gifs(self):
+        # SaveVideo may emit ``gifs`` instead of ``images``; both must be accepted.
+        captured = []
+
+        def handler(request: httpx.Request):
+            captured.append(request)
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True},
+                              'outputs': {'108': {'gifs': [
+                                  {'filename': 'Wan2.2_i2v_0001_.mp4',
+                                   'subfolder': 'video', 'type': 'output'}]}}}})
+            if request.url.path == '/view':
+                return httpx.Response(200, content=b'gif-bytes')
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        data, ext, meta = _comfyui_generate_to_file(
+            'http://127.0.0.1:8188', _WAN_WF, r'C:\does\not\exist',
+            timeout=10, client=client,
+        )
+        assert data == b'gif-bytes'
+        assert ext == 'mp4'
+        views = [r for r in captured if r.url.path == '/view']
+        assert len(views) == 1
+        assert views[0].url.params['filename'] == 'Wan2.2_i2v_0001_.mp4'
+
+    def test_view_fallback_disk_when_history_empty(self, tmp_path):
+        # History carries no coordinates → the disk fallback still returns the file.
+        out = tmp_path / 'video'
+        out.mkdir()
+        (out / 'Wan2.2_i2v_0001_.mp4').write_bytes(b'disk-video')
+
+        def handler(request: httpx.Request):
+            if request.url.path == '/prompt':
+                return httpx.Response(200, json={'prompt_id': 'pid-1'})
+            if request.url.path.startswith('/history/'):
+                return httpx.Response(200, json={
+                    'pid-1': {'status': {'completed': True}, 'outputs': {}}})
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        data, ext, meta = _comfyui_generate_to_file(
+            'http://127.0.0.1:8188', _WAN_WF, str(tmp_path), timeout=10,
+            client=client,
+        )
+        assert data == b'disk-video'
+        assert ext == 'mp4'
+
+
 # ── preflight: video injection + output contract ─────────────────────────────
 
 class TestVideoPreflight:

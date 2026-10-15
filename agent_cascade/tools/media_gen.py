@@ -368,7 +368,8 @@ class MediaGen(BaseTool):
         # ── POST: save to media (may itself fail → must restore) ──
         try:
             media_path = save_media_to_media(
-                result.data, req.media_type, source_name=f"{backend.id}_gen"
+                result.data, req.media_type, source_name=f"{backend.id}_gen",
+                ext=result.ext,
             )
         except Exception as e:
             logger.exception('Failed to save generated media')

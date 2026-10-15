@@ -173,9 +173,27 @@ def _inject_music_params(workflow: dict, style: str, lyrics: str,
     return workflow, report
 
 
+def _first_saved_output(outputs: dict) -> dict | None:
+    """Return the first ``{filename, subfolder, type}`` a save node reported, or None.
+
+    Accepts the save-node output keys ComfyUI uses — ``audio`` (SaveAudio) and
+    ``images``/``gifs`` (SaveVideo) — which are distinct from the ``type`` VALUE
+    (read from the entry, never hardcoded here). Single-shot: returns the first
+    entry, matching media_gen's one-call→one-file semantics.
+    """
+    for _node_id, node_out in (outputs or {}).items():
+        for key in ('audio', 'images', 'gifs'):
+            for entry_obj in (node_out or {}).get(key) or []:
+                if isinstance(entry_obj, dict) and entry_obj.get('filename'):
+                    return entry_obj
+    return None
+
+
 def _comfyui_generate_to_file(url: str, workflow: dict, output_dir: str,
                               timeout: int, client=None) -> tuple:
-    """Submit + poll, then read the file a disk-save node wrote.
+    """Submit + poll, then fetch the file the save node reported in /history via
+    /view; fall back to a disk scan of ``output_dir`` when history carries no
+    coordinates.
 
     Returns ``(bytes, ext, meta)``. Raises RuntimeError on submit failure /
     execution error / no output file; TimeoutError on timeout.
@@ -239,6 +257,24 @@ def _comfyui_generate_to_file(url: str, workflow: dict, output_dir: str,
             if status.get('status_str') == 'error':
                 raise RuntimeError(f"ComfyUI generation error: {__import__('json').dumps(status)[:300]}")
             if status.get('completed'):
+                # Prefer the file coordinates ComfyUI reports in the history entry and
+                # fetch it via /view — the same pattern image_gen uses for images. The
+                # save-node output key varies by node (audio/images/gifs); the ``type``
+                # VALUE is read from the entry, never hardcoded.
+                info = _first_saved_output(entry.get('outputs', {}))
+                if info:
+                    filename = info['filename']
+                    subfolder = info.get('subfolder', '')
+                    folder_type = info.get('type', 'output')
+                    view_url = (
+                        f"{url}/view?filename={filename}"
+                        f"&subfolder={subfolder}&type={folder_type}"
+                    )
+                    view_resp = client.get(view_url, timeout=30)
+                    if view_resp.status_code == 200 and view_resp.content:
+                        ext = Path(filename).suffix.lstrip('.')
+                        return view_resp.content, ext, {}
+                # Fallback: server launched with a matching --output-directory → disk scan.
                 found = _find_newest_output(output_dir, prefix, submit_time, preexisting)
                 if not found:
                     raise RuntimeError(
@@ -399,6 +435,11 @@ class ComfyUIBackend(MediaBackend):
             'config_name': req.config_name or block.get('default_workflow', ''),
         }
         if media_type in ('video', 'audio'):
+            # output_dir is still required in config, but it is now used ONLY as the
+            # disk-scan FALLBACK: _comfyui_generate_to_file first fetches the file
+            # via /view using the coordinates ComfyUI reports in /history. The scan
+            # below runs only when /history carries no output coordinates. It does
+            # NOT need to match the server's own output directory.
             output_dir = block.get('output_dir')
             if not output_dir:
                 raise RuntimeError(

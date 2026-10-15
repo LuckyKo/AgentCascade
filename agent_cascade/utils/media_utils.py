@@ -217,10 +217,21 @@ def save_image_from_data_uri(data_uri: str) -> str:
     return save_image_to_media(image_source=image_bytes, source_name='data_uri')
 
 
+# Accepted extensions for a generated media file. A backend-detected extension hint
+# is only honoured when it is in this set; anything else (or empty) falls back to the
+# per-type default below, so a malformed hint can never yield an arbitrary or
+# extensionless filename.
+_ALLOWED_MEDIA_EXTS = frozenset({
+    'mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus',   # audio
+    'mp4', 'webm', 'mkv', 'mov', 'avi',           # video
+})
+
+
 def save_media_to_media(
     source: Union[str, Path, bytes, io.BytesIO],
     media_type: str,
     source_name: Optional[str] = None,
+    ext: Optional[str] = None,
 ) -> str:
     """Save generated media of any supported type and return its absolute path.
 
@@ -239,6 +250,10 @@ def save_media_to_media(
         source: Raw bytes (audio/video) or an image source (path/bytes/BytesIO).
         media_type: One of 'image', 'audio', 'video', 'music'.
         source_name: Optional hint for logging; not used in the filename.
+        ext: Optional extension hint (e.g. a backend-detected 'flac'). Honoured only
+             when it is a recognised media extension; otherwise the per-type default
+             (mp3 for audio, mp4 for video) is used. Never produces an extensionless
+             or arbitrary filename.
 
     Returns:
         Absolute path with forward slashes.
@@ -269,7 +284,14 @@ def save_media_to_media(
         raise MediaStorageError(f"Unsupported source type: {type(source)}")
 
     prefix = 'aud' if media_type in ('audio', 'music') else 'vid'
-    extension = 'mp3' if media_type in ('audio', 'music') else 'mp4'
+    default_ext = 'mp3' if media_type in ('audio', 'music') else 'mp4'
+    # Honour an explicit, recognised extension hint (e.g. a backend-detected .flac);
+    # otherwise fall back to the per-type default so the file is always playable.
+    extension = default_ext
+    if ext:
+        candidate = str(ext).strip().lstrip('.').lower()
+        if candidate in _ALLOWED_MEDIA_EXTS:
+            extension = candidate
     target_dir = _get_type_dir(dir_map[media_type])
     filename = _generate_media_filename(prefix, extension)
     dest_path = Path(target_dir) / filename
