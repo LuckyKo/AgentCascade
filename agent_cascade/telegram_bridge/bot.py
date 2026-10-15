@@ -16,13 +16,14 @@ boundaries; ``_safe_send`` chunks long messages and honors 429 retry_after.
 """
 
 import asyncio
+import base64
 import hashlib
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
@@ -57,6 +58,11 @@ _SEND_ONE_MAX_ATTEMPTS = 5
 # so two different chats cannot collide on the same numeric id.
 _SEEN_TG_IDS: set = set()
 _SEEN_TG_IDS_MAX = 1000
+
+# Max file size a bot can fetch via the hosted Bot API getFile (20 MB). Larger
+# inbound photos/documents are rejected with a notice instead of downloaded —
+# matches core.telegram.org/bots/api ("bots can download files of up to 20MB").
+_TG_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
 
 def chunk_text(text: str, limit: int = CHUNK_SIZE) -> List[str]:
@@ -265,6 +271,50 @@ async def on_polling_error(update: object, context: ContextTypes.DEFAULT_TYPE) -
         logger.warning('Telegram polling error: %r', err)
 
 
+def _pick_image_file(update: Update) -> Tuple[Optional[object], Optional[str]]:
+    """Return (file_obj, mime) for an inbound image, or (None, None).
+
+    Photos: PTB exposes ``message.photo`` as a list of ``PhotoSize`` in ascending
+    resolution — take the largest (last). Arbitrary files (incl. images sent as
+    files) arrive as ``message.document``; only ``image/*`` mime types qualify.
+    Anything else (video, non-image docs, plain text) is not an image we can
+    forward, so returns (None, None) and the caller falls back to text handling.
+    """
+    photo = getattr(update.message, 'photo', None)
+    if photo:
+        return photo[-1], 'image/jpeg'
+    doc = getattr(update.message, 'document', None)
+    if doc and str(getattr(doc, 'mime_type', '')).startswith('image/'):
+        return doc, doc.mime_type  # guard already proved mime_type is a non-empty image/* value
+    return None, None
+
+
+async def _compose_media_text(update: Update, context, chat_id, file_obj, mime: str) -> Optional[str]:
+    """Download an inbound image and compose the markdown data-URI the AC multimodal
+    parser expects, prefixed with the user's caption if present.
+
+    Returns the composed string, or ``None`` when the image was already handled-and-
+    rejected (too large / download failure) — those send their own notice via
+    ``_safe_send`` and return ``None`` so the caller can stop. Kept separate from
+    ``on_message`` so the handler stays about flow, not byte-munging.
+    """
+    if getattr(file_obj, 'file_size', 0) > _TG_MAX_DOWNLOAD_BYTES:
+        await _safe_send(context.bot, chat_id,
+                         f"⚠️ Image too large (max {_TG_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB).")
+        return None
+    try:
+        tg_file = await context.bot.get_file(file_obj.file_id)
+        data = await tg_file.download_as_bytearray()
+    except (TelegramError, asyncio.TimeoutError) as e:  # whole PTB error family (NetworkError/BadRequest/RetryAfter/Forbidden/Conflict/... all subclass TelegramError) so a failed download never crashes the handler or silently drops the image
+        logger.error('get_file/download failed for inbound image: %s', e)
+        await _safe_send(context.bot, chat_id, '⚠️ Could not download image.')
+        return None
+    b64 = base64.b64encode(bytes(data)).decode('ascii')
+    image_md = f"![image](data:{mime};base64,{b64})"
+    caption = (getattr(update.message, 'caption', None) or '').strip()
+    return f"{caption}\n{image_md}" if caption else image_md
+
+
 async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB callback sig)
     """Message handler: auth gate -> inject -> ack -> spawn waiter."""
     cfg: BridgeConfig = context.bot_data['config']
@@ -276,11 +326,24 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
         logger.warning('Ignoring message from non-allowlisted user id=%s', user_id)
         return
 
-    text = (update.message.text or '').strip()
-    if not text:
-        return  # empty / whitespace-only -> ignore
-
     chat_id = update.effective_chat.id
+
+    # Media branch: forward inbound photos / image documents as a markdown data-URI
+    # that the existing multimodal pipeline (_parse_multimodal_content on the AC
+    # side) already understands. This runs BEFORE the empty-text early-return so a
+    # photo with no caption is NOT dropped; the composed string then flows through
+    # the unchanged dedup / slash-command / inject / ack / waiter path below.
+    text = (update.message.text or '').strip()
+    file_obj, mime = _pick_image_file(update)
+    is_image = file_obj is not None
+    if is_image:
+        composed = await _compose_media_text(update, context, chat_id, file_obj, mime)
+        if composed is None:
+            return  # helper already sent its own notice (too-large / download-failure)
+        text = composed
+    elif not text:
+        return  # empty / whitespace-only, no media -> ignore
+
     context.bot_data['last_chat_id'] = chat_id
 
     # Idempotency on the inbound event. A redelivered update (PTB long-poll
@@ -320,8 +383,10 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
     # agent — this early return guarantees ac.inject_message is not called for them,
     # so they are never logged as agent messages. Unregistered '/...' commands and
     # plain text both fall through to inject_message below (so AC-side slash commands
-    # like /compress x reach the agent).
-    if text.startswith('/'):
+    # like /compress x reach the agent). The `is_image` guard means an inbound
+    # image is never treated as a command — a photo captioned '/...' must forward the
+    # image, not dispatch a command whose args would be polluted by the data-URI.
+    if not is_image and text.startswith('/'):
         reply = await dispatch_command(text, ac, cfg)
         if reply is not None:
             await _safe_send(context.bot, chat_id, reply)
@@ -346,7 +411,12 @@ async def on_message(update: Update, context) -> None:  # noqa: ANN001 (PTB call
 def build_application(cfg: BridgeConfig, ac: ACClient):
     """Build the PTB Application wired to our handler.
 
-    ``allowed_updates`` is restricted to plain text messages (v1 is direct 1:1).
+    ``allowed_updates`` (set at the polling entry point, not here) is ``['message']``,
+    which per the Bot API already delivers "any kind - text, photo, sticker, etc." —
+    so photo/document updates reach this process. The handler filter is widened to
+    ``TEXT | PHOTO | Document.ALL`` so ``on_message`` can forward inbound images as a
+    markdown data-URI into the existing multimodal pipeline; TEXT stays included so
+    slash-commands remain reachable via the COMMANDS registry.
     The built-in rate limiter is left at its default (PTB enables it automatically).
 
     A post_shutdown coroutine is registered (via the builder) so that on SIGINT/
@@ -370,10 +440,12 @@ def build_application(cfg: BridgeConfig, ac: ACClient):
     )
     app.bot_data['config'] = cfg
     app.bot_data['ac_client'] = ac
-    # NOTE: plain filters.TEXT (NOT `~filters.COMMAND`) — Phase 2 intercepts slash-
-    # commands inside on_message via the COMMANDS registry. Excluding COMMAND here
-    # would make /stop & co. unreachable dead code.
-    app.add_handler(MessageHandler(filters.TEXT, on_message))
+    # NOTE: TEXT | PHOTO | Document.ALL (NOT `~filters.COMMAND`) — Phase 2 intercepts
+    # slash-commands inside on_message via the COMMANDS registry, so TEXT must stay
+    # included (excluding COMMAND would make /stop & co. unreachable dead code). PHOTO
+    # and Document.ALL are added so inbound photos / image files reach on_message too;
+    # on_message composes them into a markdown data-URI and reuses the same flow.
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, on_message))
     # Register a polling error handler so transient network errors (e.g. a 502 from
     # Telegram's edge) log one quiet line instead of PTB's default WARNING + full
     # traceback ("No error handlers are registered"). See on_polling_error.

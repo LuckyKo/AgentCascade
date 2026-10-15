@@ -361,11 +361,18 @@ def test_send_chunked_sends_all_parts_in_order():
 # 4. Auth gate: non-allowlisted user -> no AC call, no reply
 # ---------------------------------------------------------------------------
 
-def _make_update(user_id, text='hello', chat_id=100):
+def _make_update(user_id, text='hello', chat_id=100, *, photo=None, document=None, caption=None):
     update = MagicMock()
     update.effective_user.id = user_id
     update.effective_chat.id = chat_id
     update.message.text = text
+    # Parity with bot.on_message's media reads: a plain-text update has no
+    # photo/document/caption. MagicMock would auto-create these as truthy Mocks,
+    # which would route text tests into the media branch — so pin them to None
+    # unless a caller supplies real values (see stub-mock-attribute-parity).
+    update.message.photo = photo
+    update.message.document = document
+    update.message.caption = caption
     return update
 
 
@@ -443,6 +450,321 @@ def test_on_message_stores_last_chat_id_in_bot_data():
 
     _run(go())
     assert context.bot_data['last_chat_id'] == 777
+
+
+# ---------------------------------------------------------------------------
+# 4b. Inbound media: photos / image documents -> markdown data-URI (image-receive)
+# ---------------------------------------------------------------------------
+
+def test_on_message_forwards_photo_as_image_data_uri():
+    """A photo-only update (no .text) must NOT be dropped: it is downloaded via
+    PTB get_file/download_as_bytearray and forwarded to inject_message as a
+    markdown data-URI the AC multimodal parser already understands."""
+    from telegram import PhotoSize
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    injected = {}
+
+    async def _inject(text, target=None):
+        injected['text'] = text
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    known = b'\xff\xd8\xff\xe0\x00\x10JFIF' + b'fake-jpeg-bytes'
+    # PTB get_file -> File whose download_as_bytearray returns the known bytes.
+    context.bot.get_file = AsyncMock(return_value=MagicMock(
+        download_as_bytearray=AsyncMock(return_value=bytearray(known))))
+
+    # Largest (last) PhotoSize; file_size under the 20 MB cap so it downloads.
+    photo = PhotoSize(file_id='photo1', file_unique_id='uniq1', width=100, height=100,
+                      file_size=len(known))
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo])
+
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+
+    expected_b64 = base64.b64encode(known).decode('ascii')
+    assert injected['text'] == f"![image](data:image/jpeg;base64,{expected_b64})"
+
+
+def test_on_message_forwards_image_document_as_image_data_uri():
+    """An image sent as a file (message.document, mime image/png) is handled the
+    same way: downloaded and forwarded as a data-URI using the document's mime."""
+    from telegram import Document
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    injected = {}
+
+    async def _inject(text, target=None):
+        injected['text'] = text
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    known = b'\x89PNG\r\n\x1a\n' + b'fake-png-bytes'
+    context.bot.get_file = AsyncMock(return_value=MagicMock(
+        download_as_bytearray=AsyncMock(return_value=bytearray(known))))
+
+    doc = Document(file_id='doc1', file_unique_id='uniq1', file_name='pic.png',
+                   mime_type='image/png', file_size=len(known))
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, document=doc)
+
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+
+    expected_b64 = base64.b64encode(known).decode('ascii')
+    assert injected['text'] == f"![image](data:image/png;base64,{expected_b64})"
+
+
+def test_on_message_rejects_oversized_photo_without_injecting():
+    """A photo larger than the 20 MB getFile cap is NOT downloaded or injected;
+    it gets a short 'too large' notice instead (matches the Bot API cap)."""
+    from telegram import PhotoSize
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    ac.inject_message = MagicMock(side_effect=AssertionError('must not inject oversized'))
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    sent = {}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: sent.update(kw) or asyncio.sleep(0))
+
+    photo = PhotoSize(file_id='big', file_unique_id='u', width=1, height=1,
+                      file_size=21 * 1024 * 1024)  # 21 MB > 20 MB cap
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo])
+
+    _run(on_message(update, context))
+
+    ac.inject_message.assert_not_called()
+    assert sent.get('text') == '⚠️ Image too large (max 20 MB).'
+
+
+def test_on_message_selects_largest_photo():
+    """A photo arrives as multiple PhotoSize in ascending resolution; on_message
+    must download the LARGEST (last), not the first. Distinguished by returning
+    different bytes per file_id and asserting the last one's bytes are forwarded."""
+    from telegram import PhotoSize
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    injected = {}
+
+    async def _inject(text, target=None):
+        injected['text'] = text
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    payloads = {'small': b'SMALL', 'large': b'LARGE-BYTES'}
+
+    def _get_file(file_id):
+        return MagicMock(download_as_bytearray=AsyncMock(return_value=bytearray(payloads[file_id])))
+    context.bot.get_file = AsyncMock(side_effect=_get_file)
+
+    small = PhotoSize(file_id='small', file_unique_id='u1', width=10, height=10, file_size=5)
+    large = PhotoSize(file_id='large', file_unique_id='u2', width=1000, height=1000, file_size=11)
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[small, large])
+
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+
+    expected_b64 = base64.b64encode(b'LARGE-BYTES').decode('ascii')
+    assert injected['text'] == f"![image](data:image/jpeg;base64,{expected_b64})"
+
+
+def test_on_message_ignores_non_image_document():
+    """A non-image file (e.g. application/pdf) is NOT treated as an image: with no
+    caption/text it is dropped, and inject_message is never called."""
+    from telegram import Document
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    ac.inject_message = MagicMock(side_effect=AssertionError('must not inject a PDF'))
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock()
+
+    doc = Document(file_id='doc1', file_unique_id='u1', file_name='report.pdf',
+                   mime_type='application/pdf', file_size=100)
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, document=doc)
+
+    _run(on_message(update, context))
+
+    ac.inject_message.assert_not_called()
+
+
+def test_on_message_composes_caption_with_image():
+    """A photo WITH a caption forwards 'caption\\n![image](data-URI)' so the AC
+    multimodal parser keeps the user's caption alongside the image."""
+    from telegram import PhotoSize
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    injected = {}
+
+    async def _inject(text, target=None):
+        injected['text'] = text
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    known = b'captioned-photo-bytes'
+    context.bot.get_file = AsyncMock(return_value=MagicMock(
+        download_as_bytearray=AsyncMock(return_value=bytearray(known))))
+
+    photo = PhotoSize(file_id='p1', file_unique_id='u1', width=100, height=100, file_size=len(known))
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo], caption='a cat')
+
+    async def go():
+        await on_message(update, context)
+        for t in list(context.bot_data.get('waiters', ()) or ()):
+            try:
+                await asyncio.wait_for(t, timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    _run(go())
+
+    expected_b64 = base64.b64encode(known).decode('ascii')
+    assert injected['text'] == f"a cat\n![image](data:image/jpeg;base64,{expected_b64})"
+
+
+def test_on_message_photo_with_slash_caption_forwards_image_not_command():
+    """A photo whose caption starts with '/' must be forwarded as an IMAGE, NOT
+    dispatched as a slash-command. Locks the `file_obj is None` command gate:
+    without it, text='/status\\n![image](...)' would hit dispatch_command and the
+    image would be dropped."""
+    from telegram import PhotoSize
+    from unittest.mock import patch
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    injected = {}
+
+    async def _inject(text, target=None):
+        injected['text'] = text
+        return {'status': 'success', 'queued': True, 'target': target or 'Maine'}
+    ac.inject_message.side_effect = _inject
+
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: asyncio.sleep(0))
+
+    known = b'slash-caption-photo-bytes'
+    context.bot.get_file = AsyncMock(return_value=MagicMock(
+        download_as_bytearray=AsyncMock(return_value=bytearray(known))))
+
+    photo = PhotoSize(file_id='p1', file_unique_id='u1', width=100, height=100, file_size=len(known))
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo], caption='/status')
+
+    # Patch the command dispatcher on_message would use, so we can prove it is NOT
+    # called when media is present (the file_obj is None guard).
+    with patch('agent_cascade.telegram_bridge.bot.dispatch_command') as dispatch_mock:
+        async def go():
+            await on_message(update, context)
+            for t in list(context.bot_data.get('waiters', ()) or ()):
+                try:
+                    await asyncio.wait_for(t, timeout=1.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+
+        _run(go())
+        dispatch_mock.assert_not_called()
+
+    expected_b64 = base64.b64encode(known).decode('ascii')
+    assert '![image](data:image/jpeg;base64,' in injected['text']
+    assert expected_b64 in injected['text']
+
+
+def test_on_message_download_failure_replies_notice_without_injecting():
+    """If get_file/download raises, the handler must NOT crash and must NOT inject;
+    it replies with the exact download-failure notice via _safe_send."""
+    from telegram import PhotoSize
+    from telegram.error import NetworkError
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    ac.inject_message = MagicMock(side_effect=AssertionError('must not inject on download failure'))
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    sent = {}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: sent.update(kw) or asyncio.sleep(0))
+
+    # get_file raises a realistic PTB network error -> the narrowed except must catch it.
+    context.bot.get_file = AsyncMock(side_effect=NetworkError('telegram getFile 502'))
+
+    photo = PhotoSize(file_id='p1', file_unique_id='u1', width=100, height=100, file_size=10)
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo])
+
+    _run(on_message(update, context))
+
+    ac.inject_message.assert_not_called()
+    assert sent.get('text') == '⚠️ Could not download image.'
+
+
+def test_on_message_non_network_ptb_error_still_handled_gracefully():
+    """A NON-NetworkError PTB error from get_file (Forbidden is a sibling of
+    NetworkError under the TelegramError base) must STILL be caught by the widened
+    except: inject_message NOT called and the 'Could not download image' notice sent.
+    Proves the except covers the whole PTB error family, not just NetworkError."""
+    from telegram import PhotoSize
+    from telegram.error import Forbidden
+
+    cfg = BridgeConfig(enabled=True, bot_token='t', allowed_users=[FAKE_ALLOWED_USER_ID])
+    ac = MagicMock()
+    ac.inject_message = MagicMock(side_effect=AssertionError('must not inject on download failure'))
+    context = MagicMock()
+    context.bot_data = {'config': cfg, 'ac_client': ac}
+    sent = {}
+    context.bot.send_message = MagicMock(side_effect=lambda **kw: sent.update(kw) or asyncio.sleep(0))
+
+    # Forbidden subclasses TelegramError but NOT NetworkError -> only the widened
+    # `except (TelegramError, ...)` catches it.
+    context.bot.get_file = AsyncMock(side_effect=Forbidden('getFile forbidden'))
+
+    photo = PhotoSize(file_id='p1', file_unique_id='u1', width=100, height=100, file_size=10)
+    update = _make_update(user_id=FAKE_ALLOWED_USER_ID, text=None, photo=[photo])
+
+    _run(on_message(update, context))
+
+    ac.inject_message.assert_not_called()
+    assert sent.get('text') == '⚠️ Could not download image.'
 
 
 # ---------------------------------------------------------------------------
