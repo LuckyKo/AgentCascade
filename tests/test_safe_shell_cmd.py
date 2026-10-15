@@ -42,6 +42,12 @@ def test_safe_commands():
         "ls -la | grep '.md'",
         "dir /s /b | findstr 'python'",  # findstr is safe on Windows
 
+        # Bare-primary search commands (BUG: were pipe-only, now primary-safe)
+        "grep 'pattern' file.txt",
+        'findstr /S /I foo *.py',
+        "egrep -r 'TODO' src/",
+        'fgrep -f patterns.txt log.txt',
+
         # find with sort/head/tail/wc
         'find . -type f | wc -l',
         'ls -R | head -20',
@@ -344,6 +350,10 @@ def test_unsafe_commands():
         'ls | cmd /c x',
         'echo hi | powershell -Command Get-Date',
         'find . | git push origin',
+
+        # ── Search commands chained with dangerous operations must stay blocked ──
+        'grep foo && rm -rf /',
+        "findstr foo || python -c 'import os; os.remove(\"x\")'",
 
         # ── File-write redirections (must stay blocked) ──
         'echo hi > out.txt',

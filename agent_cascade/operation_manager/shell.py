@@ -185,6 +185,11 @@ class ShellMixin:
         'test',
         'true',
         'false',
+        # Read-only search utilities (writes only to stdout; no -exec-style escape).
+        'findstr',
+        'grep',
+        'egrep',
+        'fgrep',
     }
 
     # Policy: any command safe as a primary is also safe as a pipe stage.
