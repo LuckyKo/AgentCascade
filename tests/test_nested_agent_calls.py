@@ -16,6 +16,7 @@ import pytest
 from agent_cascade.engine.helpers import _build_resources_block, _get_active_functions_from_template
 from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.tools.base import TOOL_REGISTRY
+from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
 # ──────────────────────────────────────────────
 # Test Helpers — lightweight mock objects
@@ -137,6 +138,44 @@ class TestGetActiveFunctionsDefensiveChecks:
         assert len(result) == 1
         assert result[0]['name'] == 'good_tool'
         assert 'bad_tool' not in TOOL_REGISTRY  # no registry leak after patch.dict exit
+
+    def test_instance_agent_class_fallback_fires_when_template_agent_type_is_non_string(self):
+        """BUG_0076: a non-string truthy template.agent_type must NOT close the
+        instance.agent_class fallback gate. The resolver must receive the instance's
+        agent_class string, not the junk object."""
+        # Template with an explicitly non-string, truthy agent_type (the exact
+        # shape a bare MagicMock auto-attribute produces). Set it explicitly so
+        # the test is self-contained even if _make_mock_template changes later.
+        tmpl = _make_mock_template(
+            name='MysteryAgent',
+            llm=None,                 # no template_cfg → no explicit config
+            function_map={},          # resolver is called before the func_map guard
+        )
+        tmpl.agent_type = MagicMock()  # truthy, non-str — reproduces the bug
+
+        # Instance whose agent_class is a restricted core type the fallback should recover.
+        inst = _make_mock_instance(instance_name='sec1', agent_class='Security',
+                                   generate_cfg_override=None)
+
+        captured = {}
+        real = resolve_disabled_tools_for_agent
+
+        def _spy(**kwargs):
+            captured.update(kwargs)
+            return real(**kwargs)     # delegate so end-to-end behavior is real too
+
+        # Patch the SOURCE module attribute: helpers.py imports it function-locally
+        # (helpers.py:111), so it is re-bound from the module on every call.
+        with patch('agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent',
+                   side_effect=_spy):
+            _get_active_functions_from_template(tmpl, instance=inst)
+
+        # (1) Primary proof: the fallback fired — resolver received the instance's class string.
+        assert captured.get('agent_type') == 'Security'
+
+        # (2) Reinforcement: because 'security' is in the exclusion tuple, the new-agent
+        #     safe baseline is NOT applied to a core agent.
+        assert captured.get('agent_type') != ''  # guard did not just blank it out
 
 
 # ──────────────────────────────────────────────

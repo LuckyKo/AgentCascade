@@ -122,6 +122,8 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
 
     agent_name = getattr(template, 'name', '') or ''
     agent_type = getattr(template, 'agent_type', '') or ''
+    if not isinstance(agent_type, str):
+        agent_type = ''
 
     # Also check instance.agent_class for defense-in-depth: the resolver uses
     # agent_type for class-default enforcement.  If template lacks agent_type
