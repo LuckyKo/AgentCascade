@@ -319,10 +319,6 @@ def test_heuristic_added_nested_lines_indentation():
             f"Blank: {fblank.read_text(encoding='utf-8')!r}"
 
 
-@pytest.mark.xfail(
-    reason='BUG_0069: heuristic_agnostic re-anchoring shifts YAML sibling block indent',
-    strict=False,
-)
 def test_heuristic_agnostic_yaml_append_preserves_indent():
     """BUG_0069: heuristic_agnostic must not mangle indentation when appending a
     sibling block to an indentation-sensitive file (YAML).
@@ -373,6 +369,210 @@ def test_heuristic_agnostic_yaml_append_preserves_indent():
         assert 'OK:' in result, result
         parsed = yaml.safe_load(fy.read_text(encoding='utf-8'))
         assert len(parsed['jobs']) == 2, f"Expected 2 jobs, got {len(parsed['jobs'])}: {parsed}"
+
+
+def test_heuristic_sibling_append_same_level_still_reanchors():
+    """BUG_0069 control: a same-level append (new_base == file_base) must NOT be diverted
+    by the sibling-append guard; the deeper nested block must still be re-anchored to the
+    file's own indent style.
+
+    Discriminating fixture: the caller writes the appended block with TABS while the file
+    uses SPACES. new_base == file_base (the reproduced matched-block line sits at the file's
+    8-space base), so the guard's first clause (new_base < file_base) is False and the
+    re-anchor path runs, normalizing the tab-indented tail to the file's space style. If the
+    guard WRONGLY fired, the sibling-append path would keep the caller's tabs verbatim ->
+    different bytes -> this assertion fails. So the test detects a mis-firing guard.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        fc = Path(tmpdir) / 'c.py'
+        fc.write_text('def end():\n        z = 0\n', encoding='utf-8')
+        op_mgr._own(fc.resolve(), 'test_agent')
+        res = op_mgr.edit_file(path='c.py', agent_name='test_agent',
+                               old_content='z = 0',
+                               new_content='        z = 0\n\t\t\tif z:\n\t\t\t\tw = 1',
+                               match_mode='heuristic')
+        assert 'OK:' in res, res
+        # Correct output is space-indented (the file's style); a mis-firing guard would
+        # leave the tab-indented tail verbatim and fail this.
+        assert fc.read_text(encoding='utf-8') == (
+            'def end():\n        z = 0\n            if z:\n                w = 1\n'), \
+            f"Same-level append: {fc.read_text(encoding='utf-8')!r}"
+
+
+def test_heuristic_col0_lift_control_guard_inert():
+    """BUG_0069 control: a col-0 -> file-indent LIFT (faithful copy, new_rels == file_rels)
+    must NOT be diverted by the guard; the method must still be lifted to the file's indent.
+
+    Mirrors test_heuristic_indentation_alignment Case 1. This is the control that a base-only
+    guard (new_base < file_base) would have broken; the new_rels != file_rels clause keeps it
+    on the re-anchor path.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        file_path_py = Path(tmpdir) / 'nested.py'
+        file_path_py.write_text('class MyClass:\n'
+                                '    def my_func():\n'
+                                '        x = 1\n'
+                                '        y = 2\n',
+                                encoding='utf-8')
+        op_mgr._own(file_path_py.resolve(), 'test_agent')
+
+        res = op_mgr.edit_file(path='nested.py',
+                               agent_name='test_agent',
+                               old_content='def my_func():\n    x = 1\n    y = 2',
+                               new_content='def my_func():\n    x = 10\n    y = 20',
+                               match_mode='heuristic')
+        assert 'OK:' in res
+        expected = ('class MyClass:\n'
+                    '    def my_func():\n'
+                    '        x = 10\n'
+                    '        y = 20\n')
+        assert file_path_py.read_text(encoding='utf-8') == expected
+
+
+def test_heuristic_yaml_sibling_append_preserves_indent():
+    """BUG_0069: the sibling-append guard must also fix match_mode='heuristic' (not only
+    _agnostic), since both modes share the same Phase 2 re-anchor loop.
+
+    Mirrors test_heuristic_agnostic_yaml_append_preserves_indent but with match_mode='heuristic';
+    the file must still parse as valid YAML with 2 jobs.
+    """
+    import yaml
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        fy = Path(tmpdir) / 'workflow.yml'
+        fy.write_text(
+            'name: tests\n'
+            'on: [push]\n'
+            'jobs:\n'
+            '  tests-no-docker:\n'
+            '    runs-on: ubuntu-latest\n'
+            '    steps:\n'
+            '      - name: Run tests\n'
+            '        run: |\n'
+            '          echo hello\n'
+            '          echo world\n',
+            encoding='utf-8')
+        op_mgr._own(fy.resolve(), 'test_agent')
+
+        old = 'echo hello\n          echo world'
+        new = (
+            'echo hello\n'
+            '          echo world\n'
+            '  tests-e2e-fullstack:\n'
+            '    runs-on: ubuntu-latest\n'
+            '    steps:\n'
+            '      - name: Run e2e\n'
+            '        run: |\n'
+            '          echo e2e\n'
+        )
+
+        result = op_mgr.edit_file(
+            path='workflow.yml', agent_name='test_agent',
+            old_content=old, new_content=new,
+            match_mode='heuristic')
+        assert 'OK:' in result, result
+        parsed = yaml.safe_load(fy.read_text(encoding='utf-8'))
+        assert len(parsed['jobs']) == 2, f"Expected 2 jobs, got {len(parsed['jobs'])}: {parsed}"
+
+
+def test_heuristic_interior_sibling_append_preserves_structure():
+    """BUG_0069 scope: the guard is not tail-dependent. A shallower sibling inserted mid-document
+    (content follows the matched block) must still land at its literal indent and leave the
+    surrounding structure intact.
+    """
+    import yaml
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        fy = Path(tmpdir) / 'interior.yml'
+        fy.write_text(
+            'name: tests\n'
+            'on: [push]\n'
+            'jobs:\n'
+            '  job-a:\n'
+            '    steps:\n'
+            '      - name: A\n'
+            '        run: |\n'
+            '          echo a\n'
+            '          echo b\n'
+            '  job-z:\n'
+            '    runs-on: keep\n',
+            encoding='utf-8')
+        op_mgr._own(fy.resolve(), 'test_agent')
+
+        # Match the two 10-space run lines (interior: 'job-z' follows them).
+        old = 'echo a\n          echo b'
+        # Reproduce them, then insert a shallower sibling job at 2-space indent.
+        new = (
+            'echo a\n'
+            '          echo b\n'
+            '  job-new:\n'
+            '    runs-on: new\n'
+        )
+
+        result = op_mgr.edit_file(
+            path='interior.yml', agent_name='test_agent',
+            old_content=old, new_content=new,
+            match_mode='heuristic')
+        assert 'OK:' in result, result
+        parsed = yaml.safe_load(fy.read_text(encoding='utf-8'))
+        # Surrounding structure intact: original job-a and trailing job-z preserved,
+        # plus the inserted sibling -> exactly 3 jobs.
+        assert len(parsed['jobs']) == 3, f"Expected 3 jobs, got {len(parsed['jobs'])}: {parsed}"
+        assert 'job-z' in parsed['jobs'], f"Trailing structure lost: {parsed}"
+        assert 'job-new' in parsed['jobs'], f"Sibling not inserted: {parsed}"
+
+
+def test_heuristic_agnostic_yaml_append_no_trailing_newline_last_line():
+    """BUG_0069: the separator fix must handle the case where the matched block is the file's
+    FINAL line and the file has NO trailing newline. Without a separator, the appended sibling
+    would be glued onto that last line (silent corruption). The sibling job key must land on its
+    own line at its intended indent, and the YAML must parse with the correct number of jobs.
+    """
+    import yaml
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        fy = Path(tmpdir) / 'workflow.yml'
+        # Content deliberately ends WITHOUT a trailing newline; the matched block ('echo a')
+        # is the file's final line, so actual_old_content lacks a trailing newline.
+        fy.write_text(
+            'name: tests\n'
+            'on: [push]\n'
+            'jobs:\n'
+            '  job-a:\n'
+            '    steps:\n'
+            '      - name: A\n'
+            '        run: |\n'
+            '          echo a',
+            encoding='utf-8')
+        op_mgr._own(fy.resolve(), 'test_agent')
+
+        old = 'echo a'
+        new = 'echo a\n  job-new:\n    runs-on: new\n'
+
+        result = op_mgr.edit_file(
+            path='workflow.yml', agent_name='test_agent',
+            old_content=old, new_content=new,
+            match_mode='heuristic_agnostic')
+        assert 'OK:' in result, result
+
+        text = fy.read_text(encoding='utf-8')
+        # The sibling key must start on its own line at 2-space indent, NOT glued onto 'echo a'.
+        assert '\n  job-new:\n' in text, f"Sibling glued onto last line: {text!r}"
+        parsed = yaml.safe_load(text)
+        assert len(parsed['jobs']) == 2, f"Expected 2 jobs, got {len(parsed['jobs'])}: {parsed}"
+        assert 'job-new' in parsed['jobs'], f"Sibling not inserted: {parsed}"
 
 
 def test_delete_and_insert_mode():

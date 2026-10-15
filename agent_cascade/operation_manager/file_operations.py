@@ -1256,6 +1256,15 @@ class FileOpsMixin:
             indent_offset = file_base - new_base
             indent_char = detect_indent_char(file_indent)
 
+            # BUG_0069 guard: a shallower-sibling append reproduces the matched block and then
+            # appends a block whose base indent is shallower than the matched block's base. A
+            # uniform re-anchor (offset>0) over-shifts both. Detect it via a relative-structure
+            # mismatch and handle it by keeping the matched block at its real file indent and
+            # appending the trailing lines verbatim.
+            _new_rels  = sorted(get_indent_width(w) - new_base  for w in _new_ws)
+            _file_rels = sorted(get_indent_width(w) - file_base for w in _file_ws)
+            _sibling_append = (new_base < file_base) and (_new_rels != _file_rels)
+
             def _render_indent(width: int) -> str:
                 """Render an indent of the given space-width using the file's indent char."""
                 width = max(0, int(round(width)))
@@ -1263,20 +1272,29 @@ class FileOpsMixin:
                     return '\t' * (width // 4)
                 return ' ' * width
 
-            adjusted_lines = []
-            for line in new_content_lines:
-                own_ws = line[:len(line) - len(line.lstrip())]
-                base_width = get_indent_width(own_ws) + indent_offset
-                body = line.lstrip()
-                if not body:
-                    # Blank/whitespace-only line: lstrip() strips the newline too (it is
-                    # leading whitespace), which would drop the line. Recover it so a truly
-                    # empty line stays empty instead of being flattened away. The slice
-                    # keeps the original ending (\n or \r\n); 'or' covers lines with no ending.
-                    body = line[len(own_ws.rstrip(' \t')):] or '\n'
-                adjusted_lines.append(_render_indent(base_width) + body)
+            if _sibling_append:
+                # Keep the matched block at its real file indent and append the trailing
+                # (sibling) lines exactly as the caller wrote them. If the matched block is the
+                # file's last line with no trailing newline, actual_old_content lacks one, so
+                # insert a separator to avoid gluing the sibling onto that line.
+                _ncl = new_content.splitlines(keepends=True)
+                _sep = '' if actual_old_content.endswith(('\n', '\r')) else '\n'
+                new_content = actual_old_content + _sep + ''.join(_ncl[len(file_block_lines):])
+            else:
+                adjusted_lines = []
+                for line in new_content_lines:
+                    own_ws = line[:len(line) - len(line.lstrip())]
+                    base_width = get_indent_width(own_ws) + indent_offset
+                    body = line.lstrip()
+                    if not body:
+                        # Blank/whitespace-only line: lstrip() strips the newline too (it is
+                        # leading whitespace), which would drop the line. Recover it so a truly
+                        # empty line stays empty instead of being flattened away. The slice
+                        # keeps the original ending (\n or \r\n); 'or' covers lines with no ending.
+                        body = line[len(own_ws.rstrip(' \t')):] or '\n'
+                    adjusted_lines.append(_render_indent(base_width) + body)
 
-            new_content = ''.join(adjusted_lines)
+                new_content = ''.join(adjusted_lines)
 
             # Phase 3 — Validation: increment-based indentation anomaly detection
             from collections import Counter
