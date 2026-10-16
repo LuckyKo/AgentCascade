@@ -59,6 +59,7 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
+from agent_cascade.tools.media_backends.kobold_tts import kobold_tts_dms_bound
 from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest, resolve_media_timeout
 
 from agent_cascade.tools.image_gen import _fmt_elapsed
@@ -292,7 +293,12 @@ class MediaGen(BaseTool):
             params = {}
         config = _get_media_gen_config()
         backend_id = params.get('backend') or ''
-        return resolve_media_timeout(config, (config or {}).get(backend_id))
+        block = (config or {}).get(backend_id)
+        if backend_id == 'kobold_tts':
+            # Teardown runs after generation, so the DMS bound carries extra headroom — see
+            # kobold_tts_dms_bound (deliberately larger than preflight's generation budget).
+            return kobold_tts_dms_bound(config, block)
+        return resolve_media_timeout(config, block)
 
     def call(self, params, **kwargs) -> List[ContentItem]:
         try:

@@ -68,7 +68,6 @@ def _mg_cfg(**over):
             'media_types': {'image': ['anima', 'flux2_klein_9b', 'z_image_turbo']},
         },
         'kobold_tts': {
-            'url': 'http://127.0.0.1:8080',
             'timeout': 300,
             'media_types': {'audio': ['kokoro_default']},
         },
@@ -473,6 +472,35 @@ class TestMediaGenDmsBound:
         with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg):
             bound = tool.dms_bound('{"backend": "sdcpp"}', inst)
         assert bound == 900.0, f"dms_bound must parse JSON-string args, got {bound!r}"
+
+    def test_dms_bound_kobold_tts_carries_teardown_headroom(self):
+        """kobold_tts teardown (process-tree-exit wait) runs AFTER generation, OUTSIDE the
+        generation budget, so the DMS wall-clock bound must carry that extra headroom — otherwise
+        a healthy-but-slow run is killed mid-teardown and VRAM restore is skipped (leak).
+
+        The bound = configured timeout + TEARDOWN_HEADROOM, and it MUST be strictly LARGER than
+        preflight's internal generation budget (the bare configured timeout). They are different
+        quantities; asserting they're equal would be the bug."""
+        import agent_cascade.tools.media_backends.kobold_tts as kmod
+        cfg = {
+            'kobold_tts': {
+                'binary': r'C:\bin\koboldcpp.exe', 'models_dir': r'C:\models',
+                'config_dir': r'C:\configs\tts', 'default_config': 'kokoro_default',
+                'timeout': 200, 'ready_timeout': 120, 'port_range': [5100, 5199],
+                'media_types': {'audio': ['kokoro_default']},
+            },
+        }
+        tool = MediaGen()
+        inst = MagicMock()
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            bound = tool.dms_bound({'backend': 'kobold_tts'}, inst)
+        gen_budget = 200  # preflight's internal generation budget = configured timeout
+        # DMS bound carries the headroom on top of the generation budget.
+        assert bound == gen_budget + kmod.TEARDOWN_HEADROOM, \
+            f"dms_bound must be gen-budget + teardown headroom for kobold_tts, got {bound!r}"
+        # The two budgets are DISTINCT: DMS bound strictly exceeds the generation budget.
+        assert bound > gen_budget
+        assert bound == kmod.kobold_tts_dms_bound(cfg, cfg['kobold_tts'])
 
     def test_call_does_not_write_marker_boundary_owns_it(self, sdcpp_cfg):
         """t292: media_gen.call() no longer writes _in_blocking_tool — the dispatch boundary
