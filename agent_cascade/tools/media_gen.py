@@ -138,7 +138,7 @@ class MediaGen(BaseTool):
             },
             'backend': {
                 'type': 'string',
-                'enum': ['comfyui', 'sdcpp', 'kobold_tts'],
+                'enum': ['comfyui', 'sdcpp', 'kobold_tts', 'chatterbox'],
                 'description': TOOL_METADATA['media_gen']['parameters']['backend'],
             },
             'config': {
@@ -459,8 +459,9 @@ class MediaGen(BaseTool):
             'comfyui': 'ComfyUI server — image / video / music. Needs the server running.',
             'sdcpp': 'stable-diffusion.cpp local CLI — image only.',
             'kobold_tts': 'Kobold TTS one-shot GGUF — speech. SLOW (can take minutes).',
+            'chatterbox': 'Chatterbox TTS one-shot CLI — speech (MP3), voice-cloned from reference_file. SLOW (model cold-start).',
         }
-        for backend_id in ('comfyui', 'sdcpp', 'kobold_tts'):
+        for backend_id in ('comfyui', 'sdcpp', 'kobold_tts', 'chatterbox'):
             block = (config or {}).get(backend_id)
             if not isinstance(block, dict):
                 continue
@@ -519,6 +520,13 @@ class MediaGen(BaseTool):
         if mtype == 'audio' and backend_id == 'comfyui':
             return (f'backend=comfyui, config={stem}, prompt="<style/mood>", '
                     'overrides={"style": "<style>", "lyrics": "[verse]\\n<lyrics>"}')
+        if mtype == 'audio' and backend_id == 'chatterbox':
+            return (f'backend=chatterbox, config={stem}, prompt="<text to speak>", '
+                    'reference_file="<voice-clip.wav>"')
+        # Audio catch-all: anything not matched by a specific branch above falls
+        # through to the kobold_tts usage string. A new audio backend (e.g. a
+        # second TTS engine) MUST add its own `if mtype == 'audio' and backend_id
+        # == '<id>'` branch above this, or it will be documented as kobold_tts.
         if mtype == 'audio':  # kobold_tts speech
             return f'backend=kobold_tts, config={stem}, prompt="<text to speak>"'
         # image (comfyui or sdcpp)

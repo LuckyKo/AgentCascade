@@ -21,8 +21,9 @@ from .sdcpp import SdcppBackend
 from .comfyui import ComfyUIBackend
 # TTS (step 6) / music (step 7) / video (step 5) slot in here later.
 from .kobold_tts import KoboldTTSBackend  # STUB backend: capabilities + config ownership only
+from .chatterbox import ChatterboxBackend  # one-shot CLI TTS (MP3 to stdout)
 
-_BACKEND_CLASSES = (SdcppBackend, ComfyUIBackend, KoboldTTSBackend)
+_BACKEND_CLASSES = (SdcppBackend, ComfyUIBackend, KoboldTTSBackend, ChatterboxBackend)
 
 BACKENDS: dict = {}  # id -> backend instance
 
@@ -58,7 +59,7 @@ def resolve_backend(req):
     """
     if not req.backend_id:
         raise RuntimeError(
-            "no backend specified. Pass backend='comfyui'|'sdcpp'|'kobold_tts' "
+            "no backend specified. Pass backend='comfyui'|'sdcpp'|'kobold_tts'|'chatterbox' "
             "(or call with prompt='__help' to list what each backend produces)."
         )
     backend = get_backend(req.backend_id)

@@ -34,6 +34,7 @@ from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest
 from agent_cascade.tools.media_backends.sdcpp import SdcppBackend
 from agent_cascade.tools.media_backends.comfyui import ComfyUIBackend, _infer_media_type
 from agent_cascade.tools.media_backends.kobold_tts import KoboldTTSBackend
+from agent_cascade.tools.media_backends.chatterbox import ChatterboxBackend
 from agent_cascade.tools.image_gen import _fmt_elapsed
 
 
@@ -127,11 +128,44 @@ def sdcpp_cfg(tmp_path):
     return cfg
 
 
+@pytest.fixture
+def chatterbox_cfg(tmp_path):
+    """A media_gen config whose chatterbox python/cli_script/reference are REAL
+    temp files so the ``is_file()`` guards inside ``preflight`` pass (mirrors
+    ``sdcpp_cfg``). Yields ``(cfg, py, cli, ref)`` so tests can assert against
+    the concrete paths."""
+    py = tmp_path / 'python.exe'
+    py.write_text('interp')
+    cli = tmp_path / 'chatterbox_tts.py'
+    cli.write_text('cli')
+    ref = tmp_path / 'ref.wav'
+    ref.write_bytes(b'RIFF\x00\x00\x00\x00WAVE')
+    cfg = {'chatterbox': {
+        'python': str(py), 'cli_script': str(cli),
+        'config_dir': str(tmp_path), 'default_config': 'chatterbox_default',
+        'timeout': 600, 'media_types': {'audio': ['chatterbox_default']},
+    }}
+    return cfg, py, cli, ref
+
+
+def _prepared_chatterbox_req():
+    """A MediaRequest with ``prepared`` state set, for the ``run()`` tests.
+
+    The four ``test_run_*`` cases differ only in the ``subprocess.run`` payload
+    they patch, so the request + prepared block is shared here.
+    """
+    req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                      prompt='x', negative_prompt='', config={}, agent_pool=None)
+    req.prepared = {'argv': ['py', 'cli'], 'timeout': 600, 'ext': 'mp3',
+                    'config_name': 'chatterbox_default'}
+    return req
+
+
 # ── registry + explicit-backend selection (pure, no VRAM) ────────────────────
 
 class TestMediaGenRegistry:
     def test_registry_populated(self):
-        assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts'}
+        assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts', 'chatterbox'}
 
     def test_get_backend(self):
         assert get_backend('sdcpp') is SdcppBackend or get_backend('sdcpp').id == 'sdcpp'
@@ -201,6 +235,111 @@ class TestSdcppBackendWiring:
             res = SdcppBackend().run(req)
         assert res.data == b'\x89PNG-bytes'
         assert res.ext == 'png'
+
+
+# ── chatterbox one-shot CLI backend wiring (no live generation) ───────────────
+
+class TestChatterboxBackendWiring:
+    def test_preflight_builds_argv(self, chatterbox_cfg):
+        cfg, py, cli, ref = chatterbox_cfg
+        req = MediaRequest(
+            media_type='', backend_id='chatterbox', config_name=None,
+            prompt='hello', negative_prompt='', config=cfg, agent_pool=None,
+            reference_file=str(ref), overrides={'temperature': 0.9},
+        )
+        # Voice config carries falsy-but-valid seed=0 / cfg_weight=0.0 and a
+        # temperature that the explicit override must beat.
+        voice = {'device': 'cuda', 'temperature': 0.8, 'exaggeration': 0.5,
+                 'cfg_weight': 0.0, 'seed': 0, 'output_format': 'mp3'}
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value=voice), \
+             patch('agent_cascade.tools.media_backends.chatterbox.resolve_tool_path',
+                   return_value=ref):
+            ChatterboxBackend().preflight(req)
+        argv = req.prepared['argv']
+        assert argv[:2] == [str(py), str(cli)]
+        # single-token --flag=value form (dash-safe): value is fused into the token.
+        assert argv[2] == '--text=hello'
+        assert f'--reference={ref}' in argv
+        # presence-gated falsy values MUST reach argv (not truthiness-gated).
+        assert '--seed=0' in argv
+        assert '--cfg-weight=0.0' in argv
+        # explicit override beats the voice-config value.
+        assert '--temperature=0.9' in argv
+        assert req.prepared['ext'] == 'mp3'
+        assert req.prepared['config_name'] == 'chatterbox_default'
+
+    def test_missing_reference_file_raises(self, chatterbox_cfg):
+        # Chatterbox voice cloning ALWAYS needs a reference; preflight must reject
+        # its absence BEFORE any subprocess.
+        cfg, py, cli, ref = chatterbox_cfg
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().preflight(req)
+        assert "requires a 'reference_file'" in str(e.value)
+
+    def test_run_returns_mp3_bytes(self):
+        req = _prepared_chatterbox_req()
+        fake = subprocess.CompletedProcess(args=['py', 'cli'], returncode=0,
+                                          stdout=b'\xff\xfb' + b'\x00' * 500, stderr=b'')
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   return_value=fake):
+            res = ChatterboxBackend().run(req)
+        assert res.data == fake.stdout
+        assert res.ext == 'mp3'
+
+    def test_empty_stdout_raises(self):
+        req = _prepared_chatterbox_req()
+        empty = subprocess.CompletedProcess(args=['py', 'cli'], returncode=0,
+                                           stdout=b'', stderr=b'')
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   return_value=empty):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().run(req)
+        assert 'no audio on stdout' in str(e.value)
+
+    def test_run_nonzero_returncode_raises(self):
+        # run() must turn a non-zero exit into RuntimeError carrying the exit code
+        # and a stderr excerpt (the CLI's documented failure contract).
+        req = _prepared_chatterbox_req()
+        fail = subprocess.CompletedProcess(args=['py', 'cli'], returncode=7,
+                                          stdout=b'', stderr=b'boom')
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   return_value=fail):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().run(req)
+        assert 'chatterbox TTS failed (exit 7)' in str(e.value)
+
+    def test_run_timeout_raises(self):
+        # subprocess.run raising TimeoutExpired must surface as TimeoutError, not
+        # leak the subprocess exception.
+        req = _prepared_chatterbox_req()
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   side_effect=subprocess.TimeoutExpired(cmd=['py', 'cli'], timeout=600)):
+            with pytest.raises(TimeoutError) as e:
+                ChatterboxBackend().run(req)
+        assert 'timed out' in str(e.value)
+
+    def test_unsupported_output_format_rejected(self, chatterbox_cfg):
+        # A voice config naming an unsupported container must be rejected in preflight
+        # (before any subprocess), not silently passed through to the CLI. A valid
+        # reference_file is supplied so the ONLY way preflight raises is the format
+        # check -- the test isolates that branch regardless of preflight ordering.
+        cfg, py, cli, ref = chatterbox_cfg
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=str(ref))
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={'output_format': 'flac'}), \
+              patch('agent_cascade.tools.media_backends.chatterbox.resolve_tool_path',
+                    return_value=ref):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().preflight(req)
+        assert 'Unsupported output-format' in str(e.value)
 
 
 # ── VRAM ordering invariants V1-V9 ───────────────────────────────────────────

@@ -29,7 +29,10 @@ The canonical media-type vocabulary is exactly three types. TTS and music are
 
 from abc import ABC
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+import json
 
 # Canonical media-type vocabulary. Exactly three types.
 MEDIA_TYPES = ('image', 'video', 'audio')
@@ -70,6 +73,69 @@ def resolve_media_timeout(config: Optional[dict], block: Optional[dict] = None) 
         return float(int(candidate))
     except (TypeError, ValueError):
         return float(DEFAULT_MEDIA_TIMEOUT)
+
+
+# ── Shared TTS-backend plumbing (single source of truth) ──────────────────────
+# The one-shot TTS backends (chatterbox / kobold_tts) share this plumbing. It
+# lives here (the leaf contract module, stdlib-only) so neither backend
+# re-implements it. See [[media-gen-kobold-tts-config-clean]].
+
+def _project_root() -> Path:
+    """AgentCascade project root (4 levels up from media_backends/).
+    media_backends -> tools -> agent_cascade -> AgentCascade."""
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_tts_config_json(config: dict, block_key: str, label: str,
+                            name: str | None) -> dict:
+    """Load ``config_dir/<name>.json`` for a TTS backend block.
+
+    Shared by the chatterbox and kobold_tts backends. ``block_key`` selects the
+    config block (``'chatterbox'`` / ``'kobold_tts'``); ``label`` is the human-
+    readable word used in error strings (``'Chatterbox'`` / ``'TTS'``). Falls
+    back to the block's ``default_config`` when ``name`` is None. Raises
+    ``RuntimeError`` (carrying ``label``) if unconfigured/missing/malformed.
+    """
+    block = (config or {}).get(block_key) or {}
+    cfg_dir = block.get('config_dir')
+    if not cfg_dir:
+        raise RuntimeError(
+            f'No {label} config directory configured. Set {block_key}.config_dir '
+            'in media_gen.json (config/media_gen/tts).'
+        )
+    cfg_name = name or block.get('default_config')
+    if not cfg_name:
+        raise RuntimeError(
+            f"No {label} voice config specified and no default configured. Pass "
+            f"config='<name>' or set {block_key}.default_config in media_gen.json."
+        )
+    # config_dir may be project-root-relative or absolute; join then resolve.
+    cfg_path = Path(cfg_dir)
+    if not cfg_path.is_absolute():
+        cfg_path = _project_root() / cfg_path
+    cfg_path = cfg_path / f"{cfg_name}.json"
+    if not cfg_path.is_file():
+        raise RuntimeError(f"{label} config file not found: {cfg_path}")
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(f"Invalid {label} config '{cfg_path}': {e}") from e
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} config '{cfg_path}' must be a JSON object")
+    return data
+
+
+# RIFF/WAVE header magic (bytes 0-3 'RIFF', bytes 8-11 'WAVE'). Only meaningful
+# for the 'wav' container; mp3/opus have no universal magic.
+RIFF_MAGIC = b'RIFF'
+WAVE_MAGIC = b'WAVE'
+
+
+def is_wav_bytes(data: bytes) -> bool:
+    """True if ``data`` looks like a real WAV (non-empty + RIFF/WAVE magic)."""
+    return (isinstance(data, (bytes, bytearray)) and len(data) >= 12
+            and bytes(data[:4]) == RIFF_MAGIC and bytes(data[8:12]) == WAVE_MAGIC)
 
 
 @dataclass

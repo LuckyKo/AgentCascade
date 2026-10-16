@@ -22,55 +22,22 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
+from .base import (
+    MediaBackend, MediaRequest, MediaResult, resolve_media_timeout,
+    _project_root, resolve_tts_config_json, is_wav_bytes,
+)
 
 from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-
-# RIFF/WAVE header magic (bytes 0-3 'RIFF', bytes 8-11 'WAVE').
-_RIFF_MAGIC = b'RIFF'
-_WAVE_MAGIC = b'WAVE'
 
 
 def _resolve_tts_config(config: dict, name: str | None) -> dict:
     """Load a per-voice TTS config JSON (``config_dir/<name>.json``).
 
-    Mirrors ``_resolve_sdcpp_config``: resolves the config stem to a file under
-    the ``kobold_tts.config_dir`` directory (falling back to ``default_config``
-    when no name is given), reads it, and returns the parsed dict. Raises
-    ``RuntimeError`` if no config is configured or the file is missing/malformed.
+    Thin wrapper over the shared :func:`base.resolve_tts_config_json` for the
+    ``kobold_tts`` config block; see that function for the resolution rules and
+    error contract.
     """
-    block = (config or {}).get('kobold_tts') or {}
-    cfg_dir = block.get('config_dir')
-    if not cfg_dir:
-        raise RuntimeError(
-            'No TTS config directory configured. Set kobold_tts.config_dir in '
-            'media_gen.json (config/media_gen/tts).'
-        )
-    cfg_name = name or block.get('default_config')
-    if not cfg_name:
-        raise RuntimeError(
-            'No TTS voice config specified and no default configured. Pass config='
-            "='<name>' or set kobold_tts.default_config in media_gen.json."
-        )
-    # config_dir may be project-root-relative or absolute; join then resolve.
-    cfg_path = Path(cfg_dir)
-    if not cfg_path.is_absolute():
-        # Project root is 3 levels up from this module (media_backends → tools →
-        # agent_cascade → AgentCascade). A relative config_dir resolves against it.
-        root = Path(__file__).resolve().parents[3]
-        cfg_path = root / cfg_path
-    cfg_path = cfg_path / f"{cfg_name}.json"
-    if not cfg_path.is_file():
-        raise RuntimeError(f"TTS config file not found: {cfg_path}")
-    try:
-        import json
-        with open(cfg_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        raise RuntimeError(f"Invalid TTS config '{cfg_path}': {e}") from e
-    if not isinstance(data, dict):
-        raise RuntimeError(f"TTS config '{cfg_path}' must be a JSON object")
-    return data
+    return resolve_tts_config_json(config, 'kobold_tts', 'TTS', name)
 
 
 class KoboldTTSBackend(MediaBackend):
@@ -94,8 +61,7 @@ class KoboldTTSBackend(MediaBackend):
             )
         binary_path = Path(binary)
         if not binary_path.is_absolute():
-            root = Path(__file__).resolve().parents[3]
-            binary_path = root / binary_path
+            binary_path = _project_root() / binary_path
         if not binary_path.is_file():
             raise RuntimeError(f"koboldcpp binary not found: {binary_path}")
 
@@ -107,8 +73,7 @@ class KoboldTTSBackend(MediaBackend):
         models_dir = block.get('models_dir') or ''
         model_path = Path(models_dir) / model_name
         if not model_path.is_absolute():
-            root = Path(__file__).resolve().parents[3]
-            model_path = root / model_path
+            model_path = _project_root() / model_path
         if not model_path.is_file():
             raise RuntimeError(f"TTS model GGUF not found: {model_path}")
 
@@ -117,8 +82,7 @@ class KoboldTTSBackend(MediaBackend):
         if companion_name and isinstance(companion_name, str):
             companion_path = Path(models_dir) / companion_name
             if not companion_path.is_absolute():
-                root = Path(__file__).resolve().parents[3]
-                companion_path = root / companion_path
+                companion_path = _project_root() / companion_path
             if not companion_path.is_file():
                 raise RuntimeError(f"TTS companion GGUF not found: {companion_path}")
 
@@ -173,14 +137,8 @@ class KoboldTTSBackend(MediaBackend):
                 f"{(result.stderr or b'').decode('utf-8', 'replace')[:300]}"
             )
         wav = result.stdout
-        if not _is_wav_bytes(wav):
+        if not is_wav_bytes(wav):
             raise RuntimeError(
                 'koboldcpp produced no WAV on stdout (empty or non-WAV output).'
             )
         return MediaResult(data=wav, ext='wav', meta={})
-
-
-def _is_wav_bytes(data: bytes) -> bool:
-    """True if ``data`` looks like a real WAV (non-empty + RIFF/WAVE magic)."""
-    return (isinstance(data, (bytes, bytearray)) and len(data) >= 12
-            and bytes(data[:4]) == _RIFF_MAGIC and bytes(data[8:12]) == _WAVE_MAGIC)

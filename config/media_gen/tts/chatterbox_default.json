@@ -1,0 +1,9 @@
+{
+  "description": "Chatterbox turbo one-shot TTS (MP3)",
+  "device": "cuda",
+  "output_format": "mp3",
+  "temperature": 0.8,
+  "exaggeration": 0.5,
+  "cfg_weight": 0.5,
+  "seed": 0
+}
