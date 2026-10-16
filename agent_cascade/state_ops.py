@@ -26,6 +26,23 @@ def _normalize_api_base(api_base: str) -> str:
     return base
 
 
+def is_state_save_capable(endpoint_cfg) -> bool:
+    """True if an endpoint config declares state-save capability.
+
+    Shared predicate for the safe-mode caller-endpoint gate: a dict carrying
+    ``state_save_enabled`` plus a usable ``api_base``/``model``. Deliberately port-
+    independent (no fixed 1234/9123 check) — the capability flag is the source of
+    truth. media_gen/image_gen keep their own extra ``is_autoloader_endpoint`` gate
+    local; this predicate is the tool-side seam only.
+    """
+    return bool(
+        isinstance(endpoint_cfg, dict)
+        and endpoint_cfg.get('state_save_enabled')
+        and endpoint_cfg.get('api_base')
+        and endpoint_cfg.get('model')
+    )
+
+
 def save_instance_state(instance: 'AgentInstance') -> bool:
     """Save KV cache state for an instance.
 
@@ -53,8 +70,8 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
         api_base = endpoint_cfg.get('api_base', '')
         model = endpoint_cfg.get('model', '')
 
-        if not api_base or not model or not is_autoloader_endpoint(api_base):
-            logger.debug('Not an autoloader endpoint for state save on %s', instance.instance_name)
+        if not api_base or not model:
+            logger.debug('Missing api_base/model for state save on %s', instance.instance_name)
             return False
 
         label = save_state(api_base, model, instance.instance_name)
@@ -116,8 +133,8 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
         api_base = endpoint_cfg.get('api_base', '')
         model = endpoint_cfg.get('model', '')
 
-        if not api_base or not model or not is_autoloader_endpoint(api_base):
-            logger.debug('Not an autoloader endpoint for state restore on %s', instance.instance_name)
+        if not api_base or not model:
+            logger.debug('Missing api_base/model for state restore on %s', instance.instance_name)
             return False
 
         success = restore_state(api_base, model, label)
@@ -217,6 +234,71 @@ def unload_all_models(api_base: str) -> bool:
 def is_autoloader_endpoint(api_base: str) -> bool:
     """Check if endpoint points to llama-autoloader."""
     return ':1234/' in api_base or ':9123/' in api_base
+
+
+def resolve_held_endpoint(pool, instance: 'AgentInstance'):
+    """Resolve the endpoint the instance currently holds a slot on.
+
+    Returns {'api_base', 'model'} for the cursor-aware effective endpoint (the
+    same resolution used at slot acquisition), or None if it cannot be resolved.
+    Used by state-restore call sites so they only ever load onto an owned
+    endpoint — loading a stale _last_endpoint_config on a shared conc=0 autoloader
+    would auto-evict a live sibling's resident model.
+
+    ``pool`` is duck-typed (only ``pool.api_router`` is touched), mirroring how
+    slot_yield_utils duck-types the pool.
+    """
+    router = pool.api_router if hasattr(pool, 'api_router') else None
+    if not router or not hasattr(router, 'get_effective_slot_info'):
+        return None
+    slot_info = router.get_effective_slot_info(instance.agent_class, instance_name=instance.instance_name) or {}
+    api_base = slot_info.get('api_base') or ''
+    # get_effective_slot_info carries no model — take it from the rotated chain head.
+    chain = router.get_endpoint_chain(instance.agent_class, instance_name=instance.instance_name) or []
+    model = (chain[0].get('model') if chain else '') or ''
+    if not api_base or not model:
+        return None
+    return {'api_base': api_base, 'model': model}
+
+
+def restore_held_slot_state(pool, instance: 'AgentInstance', inst_name: str) -> bool:
+    """Restore KV state to the endpoint the instance currently holds a slot on.
+
+    Defensive by design: any resolution failure skips the restore (a missed
+    restore is far better than a wrongful eviction of a sibling's model).
+    """
+    try:
+        held_cfg = resolve_held_endpoint(pool, instance)
+        if not held_cfg:
+            logger.info('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
+            # Clear the orphaned label so it does NOT re-trigger an expensive
+            # state/load on every subsequent turn (a leaked _state_label would keep
+            # firing the 3.1GB restore attempt while resolution stays broken). Mirrors
+            # the "clear orphaned label" pattern in tool_dispatcher._run_child_sync.
+            clear_orphaned_state_label(instance, inst_name)
+            return False
+        return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
+    except Exception as e:
+        # Never evict on a resolution error — skip the restore.
+        logger.info('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
+        clear_orphaned_state_label(instance, inst_name)
+        return False
+
+
+def clear_orphaned_state_label(instance: 'AgentInstance', inst_name: str) -> None:
+    """Clear a pending _state_label that could not be consumed by a restore.
+
+    Used when endpoint resolution fails before restore_instance_state() runs — in that
+    case the label would otherwise leak and re-trigger an expensive state/load on every
+    later turn. Best-effort: never raises.
+    """
+    try:
+        with instance._state_lock:
+            if instance._state_label is not None:
+                instance._state_label = None
+                logger.debug('Cleared orphaned state label for %s (restore skipped)', inst_name)
+    except Exception as e:
+        logger.debug('Failed to clear state label for %s: %s', inst_name, e)
 
 
 def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):

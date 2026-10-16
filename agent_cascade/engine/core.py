@@ -2021,63 +2021,33 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
     def _resolve_held_endpoint(self, instance: AgentInstance) -> Optional[dict]:
         """Resolve the endpoint the instance currently holds a slot on.
 
-        Returns {'api_base', 'model'} for the cursor-aware effective endpoint (the
-        same resolution used at slot acquisition), or None if it cannot be resolved.
-        Used by state-restore call sites so they only ever load onto an owned
-        endpoint — loading a stale _last_endpoint_config on a shared conc=0 autoloader
-        would auto-evict a live sibling's resident model.
+        Thin delegate to ``state_ops.resolve_held_endpoint`` (the body moved there
+        verbatim per the held-endpoint extraction); kept as a method so existing
+        engine call sites and tests are untouched.
         """
-        router = self.pool.api_router if hasattr(self.pool, 'api_router') else None
-        if not router or not hasattr(router, 'get_effective_slot_info'):
-            return None
-        slot_info = router.get_effective_slot_info(instance.agent_class, instance_name=instance.instance_name) or {}
-        api_base = slot_info.get('api_base') or ''
-        # get_effective_slot_info carries no model — take it from the rotated chain head.
-        chain = router.get_endpoint_chain(instance.agent_class, instance_name=instance.instance_name) or []
-        model = (chain[0].get('model') if chain else '') or ''
-        if not api_base or not model:
-            return None
-        return {'api_base': api_base, 'model': model}
+        from agent_cascade.state_ops import resolve_held_endpoint
+        return resolve_held_endpoint(self.pool, instance)
 
     def _restore_held_slot_state(self, instance: AgentInstance, inst_name: str) -> bool:
         """Restore KV state to the endpoint the instance currently holds a slot on.
 
-        Defensive by design: any resolution failure skips the restore (a missed
-        restore is far better than a wrongful eviction of a sibling's model).
+        Thin delegate to ``state_ops.restore_held_slot_state`` (body moved there
+        verbatim); kept as a method so existing engine call sites and tests are
+        untouched.
         """
-        try:
-            held_cfg = self._resolve_held_endpoint(instance)
-            if not held_cfg:
-                logger.info('[STATE_RESTORE_SKIP] %s — could not resolve held endpoint', inst_name)
-                # Clear the orphaned label so it does NOT re-trigger an expensive
-                # state/load on every subsequent turn (a leaked _state_label would keep
-                # firing the 3.1GB restore attempt while resolution stays broken). Mirrors
-                # the "clear orphaned label" pattern in tool_dispatcher._run_child_sync.
-                self._clear_orphaned_state_label(instance, inst_name)
-                return False
-            from agent_cascade.state_ops import restore_instance_state
-            return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
-        except Exception as e:
-            # Never evict on a resolution error — skip the restore.
-            logger.info('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)
-            self._clear_orphaned_state_label(instance, inst_name)
-            return False
+        from agent_cascade.state_ops import restore_held_slot_state
+        return restore_held_slot_state(self.pool, instance, inst_name)
 
     @staticmethod
     def _clear_orphaned_state_label(instance: AgentInstance, inst_name: str) -> None:
         """Clear a pending _state_label that could not be consumed by a restore.
 
-        Used when endpoint resolution fails before restore_instance_state() runs — in that
-        case the label would otherwise leak and re-trigger an expensive state/load on every
-        later turn. Best-effort: never raises.
+        Thin delegate to ``state_ops.clear_orphaned_state_label`` (body moved there
+        verbatim); kept as a @staticmethod so existing engine call sites and tests
+        (which bind this unbound form) are untouched. Best-effort: never raises.
         """
-        try:
-            with instance._state_lock:
-                if instance._state_label is not None:
-                    instance._state_label = None
-                    logger.debug('Cleared orphaned state label for %s (restore skipped)', inst_name)
-        except Exception as e:
-            logger.debug('Failed to clear state label for %s: %s', inst_name, e)
+        from agent_cascade.state_ops import clear_orphaned_state_label
+        return clear_orphaned_state_label(instance, inst_name)
 
     def save_before_slot_yield(self, instance: AgentInstance, inst_name: str, reason: str = '') -> bool:
         """Persist KV state just before the caller yields its slot to a system agent.

@@ -6,7 +6,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
 from agent_cascade.log import logger
@@ -570,6 +570,7 @@ class ShellMixin:
         cwd: str = '.',
         char_limit: int = 2000,
         timeout: Optional[int] = None,
+        before_execute: Optional[Callable[[], None]] = None,
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
@@ -623,6 +624,13 @@ class ShellMixin:
             justification_text = reason
 
         try:
+            # ── Pre-execution hook (safe mode): runs only after approval, before spawn. ──
+            # First statement inside this try so any exception it raises is caught by the
+            # handler at the bottom (which returns an ERROR: string) — the caller's own
+            # try/finally then still restores KV. Never runs on the rejection path above.
+            if before_execute is not None:
+                before_execute()
+
             # ── Platform-specific setup ──────────────────────────────
             original_command = command  # keep for multi-line detection hint
             if ON_WINDOWS:

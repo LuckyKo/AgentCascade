@@ -438,7 +438,7 @@ TOOL_METADATA = {
     'shell_cmd': {
         'description': (
             'Execute a shell command on the host system. DO NOT USE shell_cmd if there are other tools that can accomplish the same task; it requires an expensive security/user approval. '
-            'Execution mode auto/sync/async — see execution_mode param. '
+            'Execution mode auto/sync/async/safe — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done; manage it with special commands via that tool_id. '
             'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N. '
             'WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters.'
@@ -453,7 +453,7 @@ TOOL_METADATA = {
             'timeout':
                 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
             'execution_mode':
-                '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background. null ≡ auto.',
+                '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background; "safe" = blocking but frees local model RAM/VRAM around the command — use it for memory-heavy commands; null ≡ auto.',
             'heartbeat_interval':
                 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
             'tool_id':

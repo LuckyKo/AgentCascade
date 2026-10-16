@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import time
-from typing import Union
+from typing import Optional, Union
 
 from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import MAX_SHELL_TIMEOUT, ShellMixin
@@ -140,7 +140,7 @@ class ShellCmd(BaseTool):
             },
             'execution_mode': {
                 'type': ['string', 'null'],
-                'enum': ['auto', 'sync', 'async', None],
+                'enum': ['auto', 'sync', 'async', 'safe', None],
                 'default': 'auto',
                 'description': TOOL_METADATA['shell_cmd']['parameters']['execution_mode']
             },
@@ -263,6 +263,7 @@ class ShellCmd(BaseTool):
         #   async            → force background regardless of timeout
         mode = params.get('execution_mode') or 'auto'  # None/absent → 'auto'
         is_auto = (mode == 'auto')
+        run_safe = (mode == 'safe')
         run_async = (mode == 'async') or (is_auto and timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD)
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
         tool_id = params.get('tool_id')
@@ -329,6 +330,14 @@ class ShellCmd(BaseTool):
         # fall through to real shell execution (e.g. `__kill` would run as a literal).
         if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
             return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
+        if run_safe:
+            return self._execute_safe(
+                agent_name=agent_name,
+                command=command,
+                justification=justification,
+                cwd=cwd,
+                timeout=timeout,
+            )
         return self._execute_sync(
             agent_name=agent_name,
             command=command,
@@ -820,3 +829,102 @@ class ShellCmd(BaseTool):
         )
         note = ShellCmd._strip_note(was_stripped)
         return f"{note}{result}"
+
+    # ────────────────────────────────────────────────────────────────
+    # safe execution_mode: free local model RAM/VRAM around a blocking command.
+    # ────────────────────────────────────────────────────────────────
+    def _get_instance(self, agent_name: str) -> Optional['AgentInstance']:
+        """Resolve the caller AgentInstance from the pool, or None if absent.
+
+        ``_get_agent_name`` can return 'unknown', so the None check in the caller is
+        required, not decorative.
+        """
+        try:
+            return self.agent_pool.get_instance(agent_name)
+        except Exception:
+            return None
+
+    def _execute_safe(
+        self,
+        agent_name: str,
+        command: str,
+        justification: str,
+        cwd: str,
+        timeout: int,
+    ) -> str:
+        """Blocking execution that frees local model RAM/VRAM around the command.
+
+        Order (per the safe-mode plan): save KV state BEFORE the security guard, unload
+        the local model immediately before Popen, restore after. Degrades to plain sync
+        when the caller's endpoint isn't state-save-capable. The KV save/restore honors
+        the existing "State KV Save/Restore" toggle; the model-release (unload) is ungated.
+        """
+        instance = self._get_instance(agent_name)
+        pool = self.agent_pool
+
+        # ── GATE A: caller-endpoint capability. No fixed ports anywhere. ──
+        ep = getattr(instance, '_last_endpoint_config', None) if instance else None
+        from agent_cascade.state_ops import is_state_save_capable
+        capable = bool(is_state_save_capable(ep))
+
+        # ── Advisor suppression: one boolean gating ONLY the save. ──
+        # When the Security advisor will run it owns the KV save/restore on the SAME
+        # label, so safe mode must not double-save. Read pool.auto_security with the
+        # same default-True-when-missing semantics as the auto_security read in
+        # approval.py so the tool and the guard can't disagree. The classifier is a
+        # @staticmethod on ShellMixin — call it with NO self argument (same as the
+        # async path in ShellCmd.call).
+        advisor_will_run = bool(getattr(pool, 'auto_security', True)) and \
+            not ShellMixin._is_safe_readonly_shell_command(command)
+
+        # ── KV toggle (existing UI setting) gates save/restore only; unload stays ungated. ──
+        kv_toggle = getattr(getattr(pool, 'settings', None), 'state_kv_save_enabled', True)
+
+        saved = freed = False
+        if capable and kv_toggle and not advisor_will_run:
+            from agent_cascade.state_ops import save_instance_state
+            saved = bool(save_instance_state(instance))  # BEFORE the guard
+
+        def _release_model():
+            # First statement inside the try in ShellMixin.execute_shell_command → its
+            # exceptions hit that method's except, and this method's own finally still
+            # restores.
+            nonlocal freed
+            freed = True  # set BEFORE the POST (media_gen V2/F1 discipline)
+            from agent_cascade.state_ops import unload_all_models
+            if not unload_all_models(ep['api_base']):
+                logger.warning('[shell_cmd] model not unloaded before command')
+
+        try:
+            result = pool.operation_manager.execute_shell_command(
+                command=command,
+                justification=justification,
+                agent_name=agent_name,
+                cwd=cwd,
+                timeout=timeout,
+                before_execute=(_release_model if capable else None),
+            )
+        finally:
+            if freed:
+                # Model was released → restore KV to the endpoint we actually hold
+                # (never a stale _last_endpoint_config). Never raises.
+                from agent_cascade.state_ops import restore_held_slot_state
+                restore_held_slot_state(pool, instance, agent_name)
+            elif saved:
+                # We saved but never unloaded (e.g. rejected): clear the label we set so
+                # it can't re-fire an expensive load; the KV is still warm.
+                from agent_cascade.state_ops import clear_orphaned_state_label
+                clear_orphaned_state_label(instance, agent_name)
+
+        # ── Notification: gated on `freed` alone; KV clause branched on kv_toggle. ──
+        # Never emitted on REJECTED/ERROR/degraded results, since freed is only ever
+        # set inside before_execute, which is unreachable on the rejection path.
+        note = ''
+        if freed:
+            if kv_toggle:
+                note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
+            else:
+                note = ('[safe] Local model(s) unloaded before the command; KV save/restore is '
+                        'disabled by the "State KV Save/Restore" setting — the model will reload '
+                        'cold afterwards.\n')
+        return note + result
