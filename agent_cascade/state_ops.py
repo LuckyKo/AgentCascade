@@ -32,8 +32,9 @@ def is_state_save_capable(endpoint_cfg) -> bool:
     Shared predicate for the safe-mode caller-endpoint gate: a dict carrying
     ``state_save_enabled`` plus a usable ``api_base``/``model``. Deliberately port-
     independent (no fixed 1234/9123 check) — the capability flag is the source of
-    truth. media_gen/image_gen keep their own extra ``is_autoloader_endpoint`` gate
-    local; this predicate is the tool-side seam only.
+    truth. media_gen/image_gen now gate on this same capability check (state_save_enabled
+    + api_base + model) inline; ``is_autoloader_endpoint`` is retained only for legacy
+    test fixtures that still patch it, not for any production decision path.
     """
     return bool(
         isinstance(endpoint_cfg, dict)

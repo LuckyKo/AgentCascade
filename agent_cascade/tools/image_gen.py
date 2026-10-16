@@ -1111,9 +1111,9 @@ class ImageGen(BaseTool):
                     and endpoint_cfg.get('state_save_enabled')
                     and endpoint_cfg.get('api_base')):
                 from agent_cascade.state_ops import (
-                    is_autoloader_endpoint, save_instance_state, unload_all_models,
+                    save_instance_state, unload_all_models,
                 )
-                if is_autoloader_endpoint(endpoint_cfg.get('api_base', '')):
+                if endpoint_cfg.get('model'):
                     _state_saved = save_instance_state(instance)
                     if _state_saved:
                         held = {
@@ -1211,7 +1211,8 @@ class ImageGen(BaseTool):
         path frees VRAM identically to the ComfyUI path: ``getattr(instance,
         '_last_endpoint_config', None)``, the ``isinstance(dict)`` check, the
         ``state_save_enabled``/``api_base`` checks, the lazy ``state_ops`` import,
-        and the ``is_autoloader_endpoint`` gate. Any non-qualifying path leaves
+        and the ``model``-present capability check (completing the ``state_save_enabled``/
+        ``api_base`` gate — port-independent). Any non-qualifying path leaves
         ``state['saved']`` False with no state change.
 
         ``state`` is a mutable holder dict with keys ``'saved'`` and ``'held'``.
@@ -1238,9 +1239,9 @@ class ImageGen(BaseTool):
             return
 
         from agent_cascade.state_ops import (
-            is_autoloader_endpoint, save_instance_state, unload_all_models,
+            save_instance_state, unload_all_models,
         )
-        if not is_autoloader_endpoint(api_base):
+        if not endpoint_cfg.get('model'):
             return
 
         if not save_instance_state(instance):
