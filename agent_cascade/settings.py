@@ -582,6 +582,10 @@ HEARTBEAT_TRUNCATE_LAST_LINES: int = 10  # Lines kept at end when truncating hea
 EARLY_OUTPUT_CHECK_TIMEOUT: float = 2.0  # Max seconds to wait for early output/completion after launch
 AUTO_ASYNC_TIMEOUT_THRESHOLD: int = 60  # Seconds: timeout above this triggers auto-async mode
 DEFAULT_AUTO_ASYNC_HEARTBEAT: int = 30  # Default heartbeat interval for auto-async shells
+# shell_cmd AUTO low-RAM guard (see PoolSettings.safe_mode_auto_ram_floor_mb / safe_mode_auto_vram_floor_mb):
+# below the RAM floor, AUTO forces safe-mode to avoid OOM-killing the host; VRAM is advisory only.
+SAFE_MODE_AUTO_RAM_FLOOR_MB: int = 4096   # MB free system RAM — HARD floor (force safe mode)
+SAFE_MODE_AUTO_VRAM_FLOOR_MB: int = 3072  # MB free GPU VRAM — ADVISORY floor (warn only)
 WAIT_CMD_MAX_TIMEOUT: float = 180.0  # Max seconds __wait will block when heartbeats are configured (3 min)
 WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0  # Seconds __wait blocks when no heartbeats are configured (-1)
 WAIT_CMD_POLL_INTERVAL: float = 0.5  # Seconds between state polls inside the __wait loop
@@ -655,7 +659,7 @@ SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shr
 SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation
 SKILL_SCORE_GHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_GHALF', '20'))  # load-waste scale
 SKILL_SCORE_RFLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_RFLOOR', '0.5'))  # recency floor; must stay <1
-SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS', '200'))  # activity-recency decay
+SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS', '1200'))  # activity-recency decay
 SKILL_SCORE_DQ: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_DQ', '0.5'))  # quality margin / neutral-band width
 SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  # meaningful-use bar
 SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window

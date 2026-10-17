@@ -33,8 +33,9 @@ def is_state_save_capable(endpoint_cfg) -> bool:
     ``state_save_enabled`` plus a usable ``api_base``/``model``. Deliberately port-
     independent (no fixed 1234/9123 check) — the capability flag is the source of
     truth. media_gen/image_gen now gate on this same capability check (state_save_enabled
-    + api_base + model) inline; ``is_autoloader_endpoint`` is retained only for legacy
-    test fixtures that still patch it, not for any production decision path.
+    + api_base + model) inline. ``is_autoloader_endpoint`` (port-based) is a separate,
+    coarser check used by the shell_cmd AUTO low-RAM hook to decide whether to probe the
+    autoloader's /v1/status — it is NOT a substitute for this capability gate.
     """
     return bool(
         isinstance(endpoint_cfg, dict)
@@ -270,6 +271,58 @@ def unload_all_models(api_base: str) -> bool:
 def is_autoloader_endpoint(api_base: str) -> bool:
     """Check if endpoint points to llama-autoloader."""
     return ':1234/' in api_base or ':9123/' in api_base
+
+
+def probe_memory_status(api_base: str, timeout: float = 1.5) -> Optional[dict]:
+    """GET {base}/v1/status on the autoloader; return parsed JSON or None (best-effort).
+
+    Runs on the hot AUTO path of every shell_cmd whose held endpoint is an autoloader, so
+    the timeout is kept short (~1.5s): a hung/unreachable autoloader must not stall real
+    commands. The autoloader caches this body on a background poll, so a client GET is cheap.
+    Body shape (see llama-autoloader server.py::_build_status):
+      - 'ram':  {total_mb, used_mb, free_mb, pct}
+      - 'gpus': [{index, name, total_mb, used_mb, free_mb, utilization_pct}, ...] (may be [])
+    Any non-200 or transport/parse error returns None so callers degrade to the normal
+    path — a status hiccup must never block or crash a command.
+    """
+    try:
+        base = _normalize_api_base(api_base)
+        resp = httpx.get(f"{base}/v1/status", timeout=timeout)
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception as e:
+        logger.warning('[state_ops] /v1/status probe failed for %s: %s', api_base, e)
+        return None
+
+
+def ram_vram_pressure(api_base: str, ram_floor_mb: int, vram_floor_mb: int) -> dict:
+    """Return {'force_safe': bool, 'low_vram_gpus': [int], 'ram_free_mb': Optional[int]}.
+
+    force_safe    = free SYSTEM RAM < ram_floor_mb (HARD — caller forces safe mode).
+                    Uses ONLY status['ram']['free_mb']; VRAM never contributes here.
+    low_vram_gpus = indices of GPUs whose free_mb < vram_floor_mb (ADVISORY only).
+    On probe failure returns {'force_safe': False, 'low_vram_gpus': [], 'ram_free_mb': None}
+    so the caller degrades to the normal path (never blocks/crashes on a status hiccup).
+    Missing 'ram'/'free_mb' keys are treated as not-forced (None).
+    """
+    status = probe_memory_status(api_base)
+    if not status:
+        return {'force_safe': False, 'low_vram_gpus': [], 'ram_free_mb': None}
+
+    ram = status.get('ram') or {}
+    ram_free = ram.get('free_mb')
+    force_safe = isinstance(ram_free, (int, float)) and ram_free < ram_floor_mb  # non-numeric → unknown, never forced
+
+    low_vram_gpus = []
+    for g in (status.get('gpus') or []):
+        free = g.get('free_mb')
+        if isinstance(free, (int, float)) and free < vram_floor_mb:
+            idx = g.get('index')
+            if idx is not None:
+                low_vram_gpus.append(idx)
+
+    return {'force_safe': bool(force_safe), 'low_vram_gpus': low_vram_gpus, 'ram_free_mb': ram_free}
 
 
 def resolve_held_endpoint(pool, instance: 'AgentInstance'):

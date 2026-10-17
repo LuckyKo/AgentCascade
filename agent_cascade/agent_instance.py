@@ -26,7 +26,7 @@ from agent_cascade.settings import (
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
-    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, SKILL_SELECTOR_MODE_KEYWORD, STREAM_MAX_SILENCE_SECONDS,
+    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD)
 
 
@@ -989,6 +989,11 @@ class PoolSettings:
     # State KV save/restore toggle: when False, skips all KV cache state
     # save/restore operations before/after agent delegation (autoloader only).
     state_kv_save_enabled: bool = True
+
+    # shell_cmd AUTO low-RAM guard floors (see state_ops.ram_vram_pressure + shell_cmd hook):
+    # below the RAM floor AUTO forces safe mode; VRAM is advisory-only. Explicit 'sync'/'safe' win.
+    safe_mode_auto_ram_floor_mb: int = SAFE_MODE_AUTO_RAM_FLOOR_MB   # HARD — force safe mode
+    safe_mode_auto_vram_floor_mb: int = SAFE_MODE_AUTO_VRAM_FLOOR_MB  # ADVISORY — warn only
 
     # Streaming timeout settings (layered defense against stuck streams)
     stream_max_silence_seconds: float = STREAM_MAX_SILENCE_SECONDS  # Max seconds between chunks before considering stream stalled

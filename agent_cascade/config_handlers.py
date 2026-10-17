@@ -32,6 +32,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'enable_agent_budgeting',
     'allow_parallel_agents',
     'state_kv_save_enabled',
+    'safe_mode_auto_ram_floor_mb',
+    'safe_mode_auto_vram_floor_mb',
     'max_turns',
     'max_auto_rollbacks',
     'auto_rollback_on_loop',
@@ -1104,6 +1106,18 @@ def _handle_allow_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agent
 def _handle_state_kv_save_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.state_kv_save_enabled = bool(ui_cfg['state_kv_save_enabled'])
+
+
+@register_config_handler('safe_mode_auto_ram_floor_mb')
+def _handle_safe_mode_auto_ram_floor_mb(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.safe_mode_auto_ram_floor_mb = max(0, int(ui_cfg['safe_mode_auto_ram_floor_mb']))
+
+
+@register_config_handler('safe_mode_auto_vram_floor_mb')
+def _handle_safe_mode_auto_vram_floor_mb(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.safe_mode_auto_vram_floor_mb = max(0, int(ui_cfg['safe_mode_auto_vram_floor_mb']))
 
 
 @register_config_handler('idle_check_interval')

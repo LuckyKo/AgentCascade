@@ -8,7 +8,8 @@ from agent_cascade.async_shell import _elapsed_for_task
 from agent_cascade.operation_manager.shell import MAX_SHELL_TIMEOUT, ShellMixin
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIMEOUT_THRESHOLD,
-                                    DEFAULT_AUTO_ASYNC_HEARTBEAT, WAIT_CMD_DEFAULT_TIMEOUT, WAIT_CMD_MAX_TIMEOUT,
+                                    DEFAULT_AUTO_ASYNC_HEARTBEAT, SAFE_MODE_AUTO_RAM_FLOOR_MB,
+                                    SAFE_MODE_AUTO_VRAM_FLOOR_MB, WAIT_CMD_DEFAULT_TIMEOUT, WAIT_CMD_MAX_TIMEOUT,
                                     WAIT_CMD_POLL_INTERVAL)
 from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -310,6 +311,39 @@ class ShellCmd(BaseTool):
                 command=command,
                 heartbeat_interval=heartbeat_interval,
             )
+
+        # ── AUTO RAM floor: force safe when free system RAM is critically low. ──
+        # 'auto' only (explicit sync/async/safe win). Takes precedence over auto-async — a command
+        # about to OOM the box must not run unmonitored in the background. Capability gate mirrors
+        # _execute_safe's GATE A; probe targets the HELD endpoint; best-effort (see state_ops.ram_vram_pressure).
+        if is_auto and not run_safe:
+            from agent_cascade.state_ops import (resolve_held_endpoint, is_autoloader_endpoint,
+                                                 is_state_save_capable, ram_vram_pressure)
+            from agent_cascade.operation_manager import _queue_tool_warning
+            pool = self.agent_pool
+            instance = self._get_instance(agent_name) if pool else None
+            last_ep = getattr(instance, '_last_endpoint_config', None) if instance else None
+            if instance is not None and is_state_save_capable(last_ep):
+                held = resolve_held_endpoint(pool, instance)
+                if held and is_autoloader_endpoint(held['api_base']):
+                    settings = getattr(pool, 'settings', None)
+                    ram_floor = getattr(settings, 'safe_mode_auto_ram_floor_mb', SAFE_MODE_AUTO_RAM_FLOOR_MB) if settings else SAFE_MODE_AUTO_RAM_FLOOR_MB
+                    vram_floor = getattr(settings, 'safe_mode_auto_vram_floor_mb', SAFE_MODE_AUTO_VRAM_FLOOR_MB) if settings else SAFE_MODE_AUTO_VRAM_FLOOR_MB
+                    press = ram_vram_pressure(held['api_base'], ram_floor, vram_floor)
+                    if press['force_safe']:
+                        run_safe = True
+                        run_async = False
+                        logger.info('Auto safe-mode: free RAM %s MB < floor %s MB',
+                                    press['ram_free_mb'], ram_floor)
+                        _queue_tool_warning(
+                            pool, agent_name,
+                            f"[shell_cmd] Running in SAFE mode: free system RAM {press['ram_free_mb']} MB "
+                            f"< floor {ram_floor} MB — local model unloaded to avoid OOM; command may be slower.")
+                    elif press['low_vram_gpus']:
+                        _queue_tool_warning(
+                            pool, agent_name,
+                            f"[shell_cmd] low VRAM on GPU(s) {', '.join(map(str, press['low_vram_gpus']))}: "
+                            f"consider execution_mode='safe'")
 
         # ── Async mode: launch new background shell ────────────────
         if run_async:

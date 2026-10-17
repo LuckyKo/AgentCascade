@@ -453,7 +453,7 @@ TOOL_METADATA = {
             'timeout':
                 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
             'execution_mode':
-                '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background; "safe" = blocking but frees local model RAM/VRAM around the command — use it for memory-heavy commands; null ≡ auto.',
+                '"auto" (default) = background if timeout>60s else blocking, BUT may auto-switch to "safe" if free system RAM is low (to avoid OOM — you\'ll get a warning explaining why); "sync" = always blocking; "async" = always background; "safe" = blocking but frees local model RAM/VRAM around the command — use it for GPU/memory-heavy commands; null ≡ auto.',
             'heartbeat_interval':
                 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
             'tool_id':
@@ -511,6 +511,7 @@ TOOL_METADATA = {
         'description': (
             'Generate image / video / audio via an explicit backend. '
             'backend is REQUIRED. '
+            'Handles VRAM management automatically. '
             "Pass prompt='__help' (no other args) to list every backend, its configs, and exact params. "
             'media_type is NOT a parameter — it is derived from the backend/workflow.'
         ),
