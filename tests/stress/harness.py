@@ -176,6 +176,8 @@ class Harness:
 
         self._patches: List[Any] = []
         self._stop = threading.Event()
+        self._leader_ready = None     # BUG_0086: set only in _launch_roots when barrier_leader is armed
+        self._barrier_leader = ''    # BUG_0086: cached scenario.barrier_leader (opt-in leader-first order)
 
         self.pool = None
         self.router = None
@@ -577,6 +579,10 @@ class Harness:
             slot = self._acquire(inst, 'initial')
             if slot is None:
                 return
+            # BUG_0086: once the leader holds its slot, release the waiting non-leaders
+            # so they queue behind it (guarantees a real waiter behind the long hold).
+            if name == self._barrier_leader and self._leader_ready is not None:
+                self._leader_ready.set()
             # 3. scripted actions through the REAL dispatcher
             for action in script:
                 if self._stop.is_set():
@@ -626,7 +632,21 @@ class Harness:
     def _run_action(self, inst, action, depth: int) -> None:
         name = inst.instance_name
         if action.sleep_ms:
-            time.sleep(action.sleep_ms / 1000.0)
+            total = action.sleep_ms / 1000.0
+            from . import _timing as _t
+            if total > 2 * _t.HEARTBEAT_MAX_SILENCE_S:
+                # BUG_0086: long scripted holds must emit progress heartbeats. A real
+                # LLM call streams continuously; a perfectly silent hold is an artifact
+                # of the harness, not production behavior. Without this the watchdog's
+                # no-progress detector (_timing.NO_PROGRESS_S) fires mid-hold and the
+                # starvation classification becomes a sampling race. See
+                # reports/BUG_0086_ROOT_CAUSE.md.
+                end = time.monotonic() + total
+                while time.monotonic() < end:
+                    self.rec('llm', name, detail='hold-heartbeat')
+                    time.sleep(min(_t.HEARTBEAT_MAX_SILENCE_S, max(0.0, end - time.monotonic())))
+            else:
+                time.sleep(total)
         kind = action.kind
 
         if kind == 'llm':
@@ -719,6 +739,9 @@ class Harness:
         turn starts; `barrier_start` makes all roots wait on a barrier so they
         enter the queue at the same instant (collision-prone shapes). Both are
         bounded: the barrier has a timeout and falls through to a normal start.
+        `barrier_leader` (opt-in, BUG_0086): with a barrier armed, the named root
+        proceeds first and acquires its slot FIRST while every other root waits
+        for that initial acquire (bounded by BARRIER_TIMEOUT, falls through).
         """
         specs = self.scenario.roots()
         jitter = getattr(self.scenario, 'start_jitter_ms', (0.0, 0.0)) or (0.0, 0.0)
@@ -727,6 +750,12 @@ class Harness:
         # the main thread must NOT block here, or _join_all can't proceed).
         from . import _timing as _t
         self._root_barrier = threading.Barrier(len(specs), timeout=_t.BARRIER_TIMEOUT) if use_barrier else None
+
+        # BUG_0086: leader-first acquire order. When a root is named barrier_leader AND a
+        # barrier is armed, create a ready-signal the leader sets after it holds its slot;
+        # non-leaders wait on it. Opt-in (default '' => None, current behavior).
+        self._barrier_leader = getattr(self.scenario, 'barrier_leader', '')
+        self._leader_ready = threading.Event() if (use_barrier and self._barrier_leader) else None
 
         for spec in specs:
             th = threading.Thread(target=self._root_worker, args=(spec,),
@@ -747,6 +776,13 @@ class Harness:
                 self._root_barrier.wait(timeout=_t.BARRIER_TIMEOUT)
             except threading.BrokenBarrierError:
                 pass  # fall through — a missed barrier must never hang the run
+        # BUG_0086: leader-first acquire order — non-leaders must not enter the queue
+        # before the leader holds its slot, or a fast waiter can cycle short turns and
+        # nothing ever queues (the starvation test's premise breaks). See
+        # reports/BUG_0086_ROOT_CAUSE.md.
+        if self._barrier_leader and spec.name != self._barrier_leader and self._leader_ready is not None:
+            from . import _timing as _t
+            self._leader_ready.wait(timeout=_t.BARRIER_TIMEOUT)  # bounded; fall through on expiry
         inst = self._make_instance(spec.name, spec.agent_class, None, 0)
         try:
             self._fake_turn(inst, spec.script, 0)

@@ -24,6 +24,9 @@ Invariant: ``QUEUE_WAIT_TIMEOUT`` MUST stay greater than ``NO_PROGRESS_S`` so a
 thread stuck in SlotPool.acquire is classified by the watchdog BEFORE the
 acquire timeout fires and masks it as a benign event. 25.0 > 3.0 ✔ — keep that
 invariant if you tune these.
+A second invariant: the scripted-hold heartbeat silence cap (HEARTBEAT_MAX_SILENCE_S) MUST
+stay well below NO_PROGRESS_S so a long scripted hold never trips the no-progress detector
+(BUG_0086). 0.5 << 3.0 ✔ — keep that if you tune NO_PROGRESS_S down.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ def _f(name: str, default: float) -> float:
 # ── Watchdog / classification thresholds ────────────────────────────────
 STARVATION_AGE_S = _f('STARVATION_AGE_S', 2.0)      # F-3: starvation threshold
 NO_PROGRESS_S = _f('NO_PROGRESS_S', 3.0)             # watchdog idle window
+HEARTBEAT_MAX_SILENCE_S = _f('HEARTBEAT_MAX_SILENCE_S', 0.5)  # BUG_0086: max gap between progress heartbeats during long scripted holds
 SCENARIO_BUDGET_S = _f('SCENARIO_BUDGET_S', 45.0)    # per-scenario budget
 PHASE_BUDGET_S = _f('PHASE_BUDGET_S', 120.0)         # per-phase budget default
 

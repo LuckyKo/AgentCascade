@@ -368,8 +368,9 @@ def test_integration_zombie_detection():
 def test_integration_starvation_detection():
     """End-to-end: long holder → waiter age crosses threshold → STARVATION.
 
-    Uses a 6s holder with barrier start so the waiters are GUARANTEED to be
-    in the queue while the holder holds the permit (F-1 + F-3 proof).
+    Uses a 6s holder with barrier_start + barrier_leader so the holder reliably
+    holds the permit before the waiters enter the queue (deterministic GUARANTEED
+    queueing, not a start-order race) — the F-1 + F-3 proof.
     """
     from tests.stress.workload import build_long_hold
     from tests.stress.scenarios import run_scenario
@@ -379,6 +380,7 @@ def test_integration_starvation_detection():
     scenario.seed = 9998
     scenario.budget_s = 20.0
     scenario.barrier_start = True  # all roots enter the queue at t≈0
+    scenario.barrier_leader = 'lh_holder'  # BUG_0086: holder must hold the slot before waiters enter the queue
 
     with tempfile.TemporaryDirectory(prefix='stress_int_') as td:
         result, stalls = run_scenario(scenario, td, _REPO_ROOT, 'test')

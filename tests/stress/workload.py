@@ -11,6 +11,9 @@ Validity-plan changes:
     can be exercised without touching production code.
   * `Scenario.start_jitter_ms` / `barrier_start` (plan §3.1/§3.2) — staggered
     or barrier-synchronized root starts for collision-prone shapes.
+  * `Scenario.barrier_leader` (BUG_0086) — opt-in: with `barrier_start`, one named
+    root acquires its slot FIRST and the others wait for that initial acquire, to
+    make holder-before-waiter ordering deterministic. Default '' = no change.
   * Hold tiers: `_hold_ms()` picks from (1, 50, 500, 2000) ms weighted toward
     the short end (plan §3.3).
   * `build_long_hold` — new scenario with a deliberately long holder so waiter
@@ -75,6 +78,11 @@ class Scenario:
     # Plan §3.1/§3.2: start shaping for collision-prone shapes.
     start_jitter_ms: tuple = (0.0, 0.0)   # (lo, hi) per-root stagger in ms
     barrier_start: bool = False           # all roots wait on a barrier
+    # BUG_0086: when set together with barrier_start, this named root proceeds to its
+    # turn immediately after the all-party barrier and acquires its slot FIRST; every
+    # other root waits for the leader's initial acquire to complete before starting its
+    # own turn. Opt-in (default '' = current, unspecified-order behavior).
+    barrier_leader: str = ''
 
     def agent(self, name: str) -> AgentSpec:
         for a in self.agents:
