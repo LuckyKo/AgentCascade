@@ -210,7 +210,9 @@ class TestAutoLowVramAdvisory:
             m_sync.assert_called_once()
             m_safe.assert_not_called()  # NOT forced safe on a VRAM advisory
 
-        assert any('low VRAM on GPU(s)' in w for w in inst._tool_warnings), \
+        # BUG_0085: advisory reworded in 14286608 ("low VRAM" → "low free VRAM ... significant VRAM");
+        # assert the current wording verbatim enough to catch future drift.
+        assert any('low free VRAM on GPU(s)' in w for w in inst._tool_warnings), \
             f'expected a low-VRAM advisory: {inst._tool_warnings}'
         assert any("consider execution_mode='safe'" in w for w in inst._tool_warnings)
         assert not any('Running in SAFE mode' in w for w in inst._tool_warnings)
