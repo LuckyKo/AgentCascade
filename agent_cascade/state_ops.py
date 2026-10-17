@@ -90,7 +90,8 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
         return False
 
 
-def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optional[dict] = None) -> bool:
+def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optional[dict] = None,
+                          label: Optional[str] = None) -> bool:
     """Restore KV cache state for an instance.
 
     Reads the label and endpoint config from the instance under lock, uses cached
@@ -107,18 +108,33 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
             load the model and auto-evict a live sibling's resident model, so callers
             that own a slot must pass the held endpoint. When None (backward-compat
             path), falls back to ``_last_endpoint_config`` as before.
+        label: Optional explicit stable state label (e.g. ``instance_name``). When
+            provided it is used as the restore label INSTEAD of the consume-once
+            ``instance._state_label``. The safe-mode seam needs this because a system
+            agent (Security/Compressor) may have consumed ``_state_label`` inside the
+            approval window before the tool unloads — but the state FILE it wrote
+            survives the load (the autoloader's load_state does not delete it), so
+            re-issuing state/load for the stable label re-warms the KV. When None
+            (the default, every existing caller), behavior is byte-for-byte unchanged:
+            the consume-once ``_state_label`` is read and a missing label returns
+            False with no HTTP.
 
     Returns:
         True if state was restored successfully, False otherwise.
     """
     try:
         with instance._state_lock:
-            label = instance._state_label
+            pending_label = instance._state_label
             endpoint_cfg = instance._last_endpoint_config
 
-        logger.debug('Attempting restore for %s, label=%s', instance.instance_name, label)
+        # An explicitly-supplied stable label wins over the consume-once _state_label.
+        # When none is supplied, restore_label == pending_label and behavior is identical
+        # to the original path.
+        restore_label = label if label is not None else pending_label
 
-        if not label:
+        logger.debug('Attempting restore for %s, label=%s', instance.instance_name, restore_label)
+
+        if not restore_label:
             logger.debug('No state label to restore for %s', instance.instance_name)
             return False
 
@@ -138,18 +154,18 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
             logger.debug('Missing api_base/model for state restore on %s', instance.instance_name)
             return False
 
-        success = restore_state(api_base, model, label)
+        success = restore_state(api_base, model, restore_label)
         if not success:
             # Restore failed — clear the label to avoid retrying stale state
             with instance._state_lock:
                 instance._state_label = None
-            logger.warning('State restore failed for %s (label=%s), cleared label', instance.instance_name, label)
+            logger.warning('State restore failed for %s (label=%s), cleared label', instance.instance_name, restore_label)
             return False
 
         # Clear the label after successful restore to prevent double-restore.
         with instance._state_lock:
             instance._state_label = None
-        logger.debug('Restored state for %s (label=%s)', instance.instance_name, label)
+        logger.debug('Restored state for %s (label=%s)', instance.instance_name, restore_label)
         return True
 
     except Exception as e:
@@ -262,11 +278,23 @@ def resolve_held_endpoint(pool, instance: 'AgentInstance'):
     return {'api_base': api_base, 'model': model}
 
 
-def restore_held_slot_state(pool, instance: 'AgentInstance', inst_name: str) -> bool:
+def restore_held_slot_state(pool, instance: 'AgentInstance', inst_name: str,
+                           label: Optional[str] = None) -> bool:
     """Restore KV state to the endpoint the instance currently holds a slot on.
 
     Defensive by design: any resolution failure skips the restore (a missed
     restore is far better than a wrongful eviction of a sibling's model).
+
+    ``label`` is an optional stable state label (e.g. ``instance_name``) passed
+    through to restore_instance_state INSTEAD of the consume-once
+    ``instance._state_label``. The safe-mode seam passes it so the restore still
+    works after a system agent consumed ``_state_label`` inside the approval window.
+    When omitted (the engine path, unchanged) the consume-once label is used. The
+    held endpoint is always resolved live — callers never supply it.
+
+    On the explicit-label path only, a defensive guard also skips (and clears the
+    orphaned label) when the state file's save endpoint no longer matches the held
+    endpoint — turning what would be a silent 404 state/load into a diagnosable skip.
     """
     try:
         held_cfg = resolve_held_endpoint(pool, instance)
@@ -278,7 +306,27 @@ def restore_held_slot_state(pool, instance: 'AgentInstance', inst_name: str) -> 
             # the "clear orphaned label" pattern in tool_dispatcher._run_child_sync.
             clear_orphaned_state_label(instance, inst_name)
             return False
-        return restore_instance_state(instance, held_endpoint_cfg=held_cfg)
+        # P5 (diagnostic hardening, explicit-label path only): a stable-label restore
+        # targets a file that lives on the SAVE endpoint (_last_endpoint_config). If the
+        # held endpoint we'd restore onto differs, the file isn't there — skip rather
+        # than 404 a state/load on the wrong endpoint (turns H2's silent failure into a
+        # diagnosable one). The engine's consume-once path (label is None) relies on the
+        # held-endpoint resolver and must keep its existing behavior, so it is not gated.
+        if label is not None:
+            save_cfg = getattr(instance, '_last_endpoint_config', None)
+            if isinstance(save_cfg, dict):
+                save_base = _normalize_api_base(save_cfg.get('api_base', '') or '')
+                save_model = save_cfg.get('model', '') or ''
+                held_base = _normalize_api_base(held_cfg.get('api_base', '') or '')
+                held_model = held_cfg.get('model', '') or ''
+                if save_base and save_model and (save_base, save_model) != (held_base, held_model):
+                    logger.info('[STATE_RESTORE_SKIP] %s endpoint moved %s/%s -> %s/%s',
+                                inst_name, save_base, save_model, held_base, held_model)
+                    # Mirror the sibling skip paths: a label we cannot consume on this
+                    # endpoint must not leak and re-fire a 404 state/load every turn.
+                    clear_orphaned_state_label(instance, inst_name)
+                    return False
+        return restore_instance_state(instance, held_endpoint_cfg=held_cfg, label=label)
     except Exception as e:
         # Never evict on a resolution error — skip the restore.
         logger.info('[STATE_RESTORE_SKIP] %s — endpoint resolution failed: %s', inst_name, e)

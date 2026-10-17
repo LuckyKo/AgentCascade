@@ -46,7 +46,10 @@ def _make_instance(*, endpoint=CAPABLE_EP, holds_slot=True):
     inst = MagicMock()
     inst.instance_name = 'agent-1'
     inst.agent_class = 'assistant'
-    inst._state_lock = threading.Lock()
+    # Real AgentInstance uses threading.RLock (agent_instance.py:243); the seam's
+    # save path re-acquires it under an outer lock, so a non-reentrant Lock would
+    # deadlock in tests that drive the real save_instance_state.
+    inst._state_lock = threading.RLock()
     inst._state_label = None
     inst._slot_release = (lambda: None) if holds_slot else None
     inst._last_endpoint_config = endpoint
@@ -124,6 +127,21 @@ def _wire_approval(om, order, approved=True):
     om.request_user_approval = _approve
 
 
+def _wire_approval_consume(om, order, inst):
+    """Like _wire_approval, but the approval also CONSUMES the in-memory state label.
+
+    Models a system agent (Security/Compressor) that ran inside the approval window and
+    did its own save→restore on the same stable label — leaving ``inst._state_label`` None
+    by the time the tool's finally runs. This is exactly the condition the P1 fix must
+    survive (the old consume-once path would then no-op)."""
+    def _approve_and_consume(**kwargs):
+        order.append('approval')
+        with inst._state_lock:
+            inst._state_label = None
+        return (True, 'ok')
+    om.request_user_approval = _approve_and_consume
+
+
 def _router_held(api_base, model):
     """A pool.api_router stand-in resolving a held endpoint (for restore tests)."""
     router = SimpleNamespace()
@@ -155,7 +173,9 @@ def _seam_patches(order, *, save=True, unload=True, restore=True, popen=True,
     if restore:
         stack.enter_context(patch(
             'agent_cascade.state_ops.restore_held_slot_state',
-            side_effect=restore_factory or (lambda p, i, n: order.append('restore'))))
+            # Production now passes label=instance.instance_name; accept **kw so the
+            # order-recorder stub stays in lockstep with the real signature.
+            side_effect=restore_factory or (lambda p, i, n, **kw: order.append('restore'))))
     if popen:
         stack.enter_context(patch(
             'agent_cascade.operation_manager.shell.subprocess.Popen',
@@ -396,7 +416,7 @@ class TestAdvisorSuppression:
 
 
 class TestToggleOff:
-    def test_toggle_off_no_save_restore_unload_still_called(self):
+    def test_toggle_off_no_save_and_restore_only_unload_ungated(self):
         order = []
         inst = _make_instance()
         pool, om = _make_pool(instance=inst, auto_security=False, kv_toggle=False)
@@ -408,7 +428,13 @@ class TestToggleOff:
                                         justification='run it', cwd='.', timeout=None)
 
         assert 'save' not in order  # KV save gated by the toggle
-        assert order == ['approval', 'unload', 'run', 'restore']  # model release + restore-attempt ungated
+        # With the toggle OFF the finally must NOT attempt a restore (cold reload is what
+        # the user asked for) — only the model release (unload) stays ungated. The old
+        # "restore-attempt ungated" assumption predates the stable-label fix: an explicit
+        # label would have bypassed the consume-once no-op, so the restore is now gated on
+        # kv_toggle too. See TestSafeStableLabelRestore.test_toggle_off_no_state_load_issued
+        # for the EFFECT-level assertion (this order test patches restore_held_slot_state).
+        assert order == ['approval', 'unload', 'run']  # model release ungated; restore gated off
         assert 'State KV Save/Restore' in result               # notification explains the toggle
 
 
@@ -495,3 +521,155 @@ class TestEngineDelegates:
         with patch('agent_cascade.state_ops.clear_orphaned_state_label') as m:
             ExecutionEngine._clear_orphaned_state_label(inst, 'agent-1')
         m.assert_called_once()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 18. Stable-label restore (the P1 fix). The suite above patches
+#     restore_instance_state / save_instance_state / restore_held_slot_state, so it
+#     asserts call ORDER, never EFFECT — a patched restore "runs" even when the real
+#     one returns False with no request. These tests patch ONLY the HTTP layer
+#     (state_ops.save_state / state_ops.restore_state) and drive the real save/restore,
+#     asserting a state/load is actually issued for the stable label after the unload.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _http_seam(order, *, restore_factory=None, save_factory=None):
+    """Patch ONLY the HTTP layer (save_state / restore_state / unload_all_models / Popen)
+    for a real-label-lifecycle test, so the real save/restore bookkeeping runs.
+
+    ``restore_factory(api_base, model, label) -> bool`` records each state/load; when
+    omitted it defaults to a recorder that appends the label and returns True. Returns an
+    ExitStack — use as ``with _http_seam(order, ...) as stack: tool._execute_safe(...)``.
+    """
+    restore_calls = []
+
+    def _record_restore(api_base, model, lbl):
+        restore_calls.append(lbl)  # always record the label that was requested
+        if restore_factory is not None:
+            return restore_factory(api_base, model, lbl)
+        return True
+
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch('agent_cascade.state_ops.restore_state', side_effect=_record_restore))
+    if save_factory is not None:
+        stack.enter_context(patch('agent_cascade.state_ops.save_state', side_effect=save_factory))
+    else:
+        stack.enter_context(patch('agent_cascade.state_ops.save_state', return_value='agent-1'))
+    stack.enter_context(patch('agent_cascade.state_ops.unload_all_models',
+                              side_effect=lambda b: (order.append('unload'), True)[1]))
+    stack.enter_context(patch('agent_cascade.operation_manager.shell.subprocess.Popen',
+                              side_effect=_fake_popen(order)))
+    stack.enter_context(patch('agent_cascade.operation_manager.shell.DRAIN_THREAD_JOIN_TIMEOUT', 0))
+    return stack, restore_calls
+
+
+class TestSafeStableLabelRestore:
+    def test_advisor_consumes_label_restore_still_issued(self):
+        """THE regression for this exact bug. With auto_security=True the Security
+        advisor owns the KV on the SAME label and consumes _state_label inside the
+        approval window before the unload. The old finally then no-ops (no state/load).
+        With the P1 fix the finally restores by the stable label, so a state/load IS
+        issued after the unload. We model the advisor's net effect: _state_label set
+        then consumed (None) during the approval window."""
+        order = []
+        inst = _make_instance()
+        # Model the advisor having saved the caller's KV under the stable label.
+        with inst._state_lock:
+            inst._state_label = 'agent-1'
+        pool, om = _make_pool(instance=inst, auto_security=True,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+
+        # Approval recorder also simulates the advisor's restore consuming the label.
+        _wire_approval_consume(om, order, inst)
+
+        stack, restore_calls = _http_seam(order)
+        with stack:
+            tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                               justification='run it', cwd='.', timeout=None)
+
+        # Advisor path suppresses the tool's own save; unload still runs.
+        assert 'save' not in order
+        assert order == ['approval', 'unload', 'run']
+        # THE FIX: a state/load IS issued after the unload, for the stable label,
+        # even though _state_label was None at the finally.
+        assert restore_calls, 'restore_state must be issued after the unload (P1 fix)'
+        assert all(lbl == 'agent-1' for lbl in restore_calls), \
+            f'restore must target the stable label: {restore_calls}'
+        # The label was consumed (None) at the finally — proving the old path would no-op.
+        with inst._state_lock:
+            assert inst._state_label is None
+
+    def test_stable_label_restore_when_label_consumed_mid_window(self):
+        """auto_security=False → the tool's own save runs (real save_instance_state,
+        only save_state HTTP patched). The approval recorder consumes the label mid-window.
+        The finally must still restore by the stable label, not the cleared _state_label."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+
+        _wire_approval_consume(om, order, inst)
+
+        def _save_http(api_base, model, name):
+            order.append('save')
+            return name  # real label == instance_name
+
+        stack, restore_calls = _http_seam(order, save_factory=_save_http)
+        with stack:
+            tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                               justification='run it', cwd='.', timeout=None)
+
+        assert order == ['save', 'approval', 'unload', 'run']
+        assert restore_calls == ['agent-1'], \
+            f'restore_state must use the stable label: {restore_calls}'
+
+    def test_stale_or_absent_file_no_exception_escapes_finally(self):
+        """restore_state returns False (file absent/stale) → the finally must not raise;
+        _execute_safe still returns a string; the label is cleared (no retry storm)."""
+        order = []
+        inst = _make_instance()
+        with inst._state_lock:
+            inst._state_label = 'agent-1'
+        pool, om = _make_pool(instance=inst, auto_security=True,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+
+        _wire_approval_consume(om, order, inst)
+
+        stack, restore_calls = _http_seam(order, restore_factory=lambda a, m, l: False)  # file absent/stale
+        with stack:
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert restore_calls == ['agent-1']  # restore attempted with the stable label
+        assert isinstance(result, str)        # no exception escaped the finally
+        with inst._state_lock:
+            assert inst._state_label is None  # cleared on failure (no retry storm)
+
+    def test_toggle_off_no_state_load_issued(self):
+        """EFFECT guard for the kv_toggle gate. With "State KV Save/Restore" OFF the user
+        asked for a cold reload, so the finally must NOT issue a state/load — even though
+        P1 passes an explicit stable label (which would bypass the consume-once no-op).
+        The order-based TestToggleOff cannot catch this because it patches
+        restore_held_slot_state; here we patch ONLY the HTTP layer and assert that
+        restore_state is never called. Unload stays ungated."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False, kv_toggle=False,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        stack, restore_calls = _http_seam(order)
+        with stack:
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        # No save (toggle off), unload still runs (model release ungated).
+        assert 'save' not in order
+        assert order == ['approval', 'unload', 'run']
+        # THE GUARD: no state/load is issued when the KV toggle is off.
+        assert restore_calls == [], f'toggle-off must NOT issue a state/load: {restore_calls}'
+        assert 'State KV Save/Restore' in result  # notification still explains the toggle

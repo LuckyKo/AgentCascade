@@ -899,7 +899,13 @@ class ShellCmd(BaseTool):
         saved = freed = False
         if capable and kv_toggle and not advisor_will_run:
             from agent_cascade.state_ops import save_instance_state
-            saved = bool(save_instance_state(instance))  # BEFORE the guard
+            # Lock around the save to match engine/core.py:2077-2078: makes the read of
+            # _last_endpoint_config + write of _state_label atomic against a concurrent
+            # advisor (removes a torn-state window). Safe because the instance's own
+            # _state_lock is an RLock (agent_instance.py:243) and save_instance_state
+            # re-acquires it.
+            with instance._state_lock:
+                saved = bool(save_instance_state(instance))  # BEFORE the guard
 
         def _release_model():
             # First statement inside the try in ShellMixin.execute_shell_command → its
@@ -921,11 +927,20 @@ class ShellCmd(BaseTool):
                 before_execute=(_release_model if capable else None),
             )
         finally:
-            if freed:
+            if freed and kv_toggle:
                 # Model was released → restore KV to the endpoint we actually hold
-                # (never a stale _last_endpoint_config). Never raises.
+                # (never a stale _last_endpoint_config). Restore by the STABLE label
+                # (instance_name), not the consume-once _state_label: a system agent
+                # (Security/Compressor) may have consumed _state_label inside the
+                # approval window before this unload, but the state FILE it wrote
+                # survives the load, so re-issuing state/load for the stable label
+                # re-warms the KV. Gated on kv_toggle: with the "State KV Save/Restore"
+                # setting OFF the user asked for a cold reload, so we must NOT issue a
+                # (possibly stale) state/load — before this fix the consume-once path
+                # no-oped here, but the explicit label would bypass that. Never raises.
                 from agent_cascade.state_ops import restore_held_slot_state
-                restore_held_slot_state(pool, instance, agent_name)
+                restore_held_slot_state(pool, instance, agent_name,
+                                        label=instance.instance_name)
             elif saved:
                 # We saved but never unloaded (e.g. rejected): clear the label we set so
                 # it can't re-fire an expensive load; the KV is still warm.

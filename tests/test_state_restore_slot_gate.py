@@ -159,6 +159,58 @@ class TestRestoreTargetsHeldEndpoint:
 
 
 # ============================================================================
+# P5 guard — explicit-label restore skips when the save endpoint no longer matches
+#            the held endpoint (turns a silent 404 state/load into a diagnosable skip)
+# ============================================================================
+
+
+class TestExplicitLabelEndpointMovedSkip:
+
+    def _pool_held_on(self, api_base, model):
+        """A MagicMock pool whose router resolves the HELD endpoint to (api_base, model)."""
+        pool = MagicMock()
+        pool.api_router.get_effective_slot_info.return_value = {'api_base': api_base}
+        pool.api_router.get_endpoint_chain.return_value = [{'model': model}]
+        return pool
+
+    def test_endpoint_moved_skips_and_clears_label(self):
+        """Explicit label + held endpoint differs from the state file's save endpoint →
+        skip (no state/load HTTP) and clear the orphaned label so it can't re-fire a 404
+        every turn. This is the P5 guard on the safe-mode stable-label path."""
+        inst = make_instance(label='B')  # _last_endpoint_config = STALE_Y / stale-model-B (save endpoint)
+        pool = self._pool_held_on(AUTOLOADER_X, 'model-A')  # held endpoint != save endpoint
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            ok = state_ops.restore_held_slot_state(pool, inst, 'B', label='B')
+
+        assert ok is False
+        post_mock.assert_not_called()  # no state/load issued on the wrong endpoint
+        with inst._state_lock:
+            assert inst._state_label is None  # orphaned label cleared (no retry storm)
+
+    def test_matching_endpoints_restores(self):
+        """Explicit label + held endpoint MATCHES the save endpoint → restore proceeds
+        (the guard only skips on a genuine mismatch)."""
+        inst = make_instance(label='B')
+        # Make the save endpoint match what the router will resolve as held.
+        with inst._state_lock:
+            inst._last_endpoint_config = {
+                'api_base': AUTOLOADER_X,
+                'model': 'model-A',
+                'state_save_enabled': True,
+            }
+        pool = self._pool_held_on(AUTOLOADER_X, 'model-A')
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            ok = state_ops.restore_held_slot_state(pool, inst, 'B', label='B')
+
+        assert ok is True
+        load_urls = _recorded_load_urls(post_mock)
+        assert len(load_urls) == 1, f"state/load expected on matching endpoints: {load_urls}"
+
+
+# ============================================================================
 # Change 2 — _setup_turn slot-ownership gate
 # ============================================================================
 
