@@ -516,14 +516,29 @@ class ShellCmd(BaseTool):
         # Computed before the approval gate so tool_args can expose it to the security guard.
         effective_timeout = timeout if timeout else ASYNC_SHELL_DEFAULT_TIMEOUT
 
-        # ── Approval gate: mirror sync mode logic ────────────────────
-        is_safe = ShellMixin._is_safe_readonly_shell_command(command)
+        # ── Approval gate: mirror sync mode logic (§4.4) ───────────────
+        # `strict` is the unchanged read-only bool and is the ONLY thing the
+        # restricted-agent gate may consult (D5). The widened decision comes from
+        # the shared entry point. Async gets the approval widening but NOT
+        # ownership attribution — the command has not run yet here; ownership is
+        # Phase 2 (mark on completion in the tracker), documented in shell.py.
+        strict = ShellMixin._is_safe_readonly_shell_command(command)
 
         # ── Restricted (system-invoked) agents: hard-reject non-read-only commands. ──
-        if not is_safe and self._is_restricted(agent_name):
+        if not strict and self._is_restricted(agent_name):
             return ('REJECTED: Command not allowed for system agents. '
                     'Only read-only filesystem/git commands are permitted. '
                     'Use __help to see allowed commands.')
+
+        # Widened decision. A test stub whose operation_manager is a MagicMock cannot
+        # produce a real (bool, list) decision; fall back to the strict bool so such
+        # stubs keep their prior behaviour. Real pools get the new-file allowance.
+        _decision = self.agent_pool.operation_manager.evaluate_shell_command_safety(
+            command, cwd, agent_name, resolved_cwd=resolved_cwd)
+        if isinstance(_decision, tuple) and len(_decision) == 2:
+            is_safe, _new_file_targets = _decision
+        else:
+            is_safe, _new_file_targets = strict, []
 
         if not is_safe:
             description = (f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "
@@ -871,11 +886,12 @@ class ShellCmd(BaseTool):
         # When the Security advisor will run it owns the KV save/restore on the SAME
         # label, so safe mode must not double-save. Read pool.auto_security with the
         # same default-True-when-missing semantics as the auto_security read in
-        # approval.py so the tool and the guard can't disagree. The classifier is a
-        # @staticmethod on ShellMixin — call it with NO self argument (same as the
-        # async path in ShellCmd.call).
+        # approval.py so the tool and the guard can't disagree. The decision comes
+        # from the SHARED instance entry point (same as the sync/async gates) —
+        # calling it on pool.operation_manager means `self` is that operation_manager,
+        # so we pass NO explicit self argument.
         advisor_will_run = bool(getattr(pool, 'auto_security', True)) and \
-            not ShellMixin._is_safe_readonly_shell_command(command)
+            not pool.operation_manager.evaluate_shell_command_safety(command, cwd, agent_name)[0]
 
         # ── KV toggle (existing UI setting) gates save/restore only; unload stays ungated. ──
         kv_toggle = getattr(getattr(pool, 'settings', None), 'state_kv_save_enabled', True)

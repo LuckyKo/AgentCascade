@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
@@ -205,8 +206,89 @@ class ShellMixin:
     _REDIRECT_RE: 're.Pattern[str]' = re.compile(r'(?:\d*|&)>>?')
 
     @staticmethod
-    def _is_safe_readonly_shell_command(command: str) -> bool:
-        """Check if a shell command is purely read-only (directory listing/search/git/control).
+    def _extract_shell_redirect_targets(cmd: str) -> tuple[bool, list[str]]:
+        """Scan the FULL command for redirect operators; classify their targets.
+
+        Returns ``(well_formed, real_file_targets)``:
+          - ``well_formed=False`` → the command contains a malformed or ambiguous
+            redirect (bare ``>``, an unbalanced quote such as ``echo "a>b"`` /
+            ``awk 'a>b'`` / ``git log --format='%h>%s'``, a glued operator like
+            ``sort -k>1``, or an unresolvable target such as ``$VAR``/globs/``~``/
+            process substitution). Such commands must be rejected.
+          - ``real_file_targets`` are the quote-stripped, metacharacter-trimmed
+            tokens that are genuine file sinks. Null-device (``/dev/null``, ``NUL``)
+            and fd-duplication (``2>&1``, ``>&2``) sinks are skipped. Order is
+            preserved; duplicates are deduplicated by ``os.path.normcase``.
+
+        This is a *pure* classification: it never consults the filesystem. Whether a
+        non-empty target list is safe is decided at runtime by
+        :meth:`evaluate_shell_command_safety` (new file inside a writable root).
+        """
+        targets: list[str] = []
+        seen: set[str] = set()
+        for m in ShellMixin._REDIRECT_RE.finditer(cmd):
+            # 1. Accept a quoted token so `> "my file.txt"` is one target.
+            target_match = re.match(r'\s*("[^"]*"|\'[^\']*\'|\S+)', cmd[m.end():])
+            if not target_match:
+                return (False, [])  # bare `>` / no target → malformed
+            token = target_match.group(1)
+
+            # 2. Quote balance: an odd number of " or ' means the `>` was inside
+            #    quotes (echo "a>b", awk 'a>b', git log --format='%h>%s'). Reject.
+            if token.count('"') % 2 or token.count("'") % 2:
+                return (False, [])
+            # Strip exactly one matched surrounding pair, if present.
+            if len(token) >= 2 and token[0] in '"\'' and token[-1] == token[0]:
+                token = token[1:-1]
+
+            # 3. Trim trailing metacharacters glued to the target so
+            #    `git diff > patch.diff; wc -l patch.diff` yields `patch.diff`.
+            token = token.rstrip(';|&<>')
+
+            # 4. Sink classification (unchanged semantics): fd-duplication and the
+            #    exact null device are not files.
+            if token.startswith('&'):
+                continue
+            if token.lower() in ('/dev/null', 'nul'):
+                continue
+
+            # Nothing left after trimming (e.g. `> ;`) → malformed.
+            if not token:
+                return (False, [])
+
+            # 5. Ambiguity veto (fail closed): targets that cannot be resolved to a
+            #    definite path at validation time. NOTE: no space here — a space can
+            #    only appear inside an already-delimited quoted token (legitimate, e.g.
+            #    "my file.txt"); unquoted tokens never contain spaces.
+            if any(c in '()`$*?[]{}~!\n' for c in token):
+                return (False, [])
+
+            # 6. Standalone-operator rule: a real-file target's operator must be
+            #    preceded by whitespace or be at position 0. A glued operator
+            #    (`-k>1`, `a>b`) is ambiguous. Applied only to real-file sinks, so
+            #    null/fd sinks with a glued operator (e.g. `echo hi> /dev/null`)
+            #    are unaffected.
+            op_start = m.start()
+            if op_start != 0 and not cmd[op_start - 1].isspace():
+                return (False, [])
+
+            # 7. Append (dedup by normcase).
+            key = os.path.normcase(token)
+            if key not in seen:
+                seen.add(key)
+                targets.append(token)
+        return (True, targets)
+
+    @staticmethod
+    def _is_structurally_safe_shell_command(command: str) -> bool:
+        """Structural (pure) safety check — no filesystem, no instance state.
+
+        Returns True iff the command is well-formed and every pipeline/chain
+        segment uses only read-only vocabulary. A well-formed redirect to a real
+        file does NOT make this False; it is reported as a target by
+        :meth:`_extract_shell_redirect_targets` and decided at runtime. Malformed
+        or ambiguous redirects (bare ``>``, ``echo "a>b"``, ``sort -k>1``,
+        ``$VAR``/globs) DO make this False.
 
         Handles:
           - Basic commands: ls, find, dir, tree, pwd, stat, etc.
@@ -227,18 +309,12 @@ class ShellMixin:
         if '$(' in cmd or '`' in cmd:
             return False
 
-        # Redirections: reject any redirect whose target is a real file.
-        # Allowed sinks only: fd duplication (2>&1, >&2) and the null device
-        # (/dev/null, NUL). Scans EVERY operator so `cmd > out.txt 2>/dev/null`
-        # rejects on the real-file target regardless of position/order.
-        for m in ShellMixin._REDIRECT_RE.finditer(cmd):
-            target_match = re.match(r'\s*(\S+)', cmd[m.end():])
-            if not target_match:
-                return False  # bare `>` / no target → malformed, reject on uncertainty
-            target = target_match.group(1).strip('"\'')
-            # fd-duplication (2>&1, >&2) or an exact null-device token are the only sinks.
-            if not (target.startswith('&') or target.lower() in ('/dev/null', 'nul')):
-                return False
+        # Redirections: a well-formed redirect to a real file is NOT a rejection
+        # here — it is collected as a target and decided at runtime. Only
+        # malformed/ambiguous redirects reject.
+        well_formed, _targets = ShellMixin._extract_shell_redirect_targets(cmd)
+        if not well_formed:
+            return False
 
         # Background processes: standalone & that is not part of && nor part of an
         # fd-duplication (i.e. a & directly following a >, as in 2>&1 or >&2). A genuine
@@ -259,7 +335,7 @@ class ShellMixin:
                 seg = seg.strip()
                 if not seg:
                     continue
-                if not ShellMixin._is_safe_readonly_shell_command(seg):
+                if not ShellMixin._is_structurally_safe_shell_command(seg):
                     return False
             return True
 
@@ -299,11 +375,57 @@ class ShellMixin:
         return True
 
     @staticmethod
+    def _classify_shell_command(command: str) -> tuple[bool, list[str]]:
+        """Three-way structural classification of a shell command.
+
+        Returns ``(structural_ok, real_file_targets)``:
+          - ``structural_ok=False`` → hard reject (malformed / ambiguous / unsafe
+            vocabulary). ``real_file_targets`` is empty in this case.
+          - ``structural_ok=True`` with an empty target list → fully read-only,
+            unconditionally safe to auto-approve.
+          - ``structural_ok=True`` with a NON-EMPTY target list → *conditionally*
+            safe: the command is read-only except that it redirects to one or more
+            real files. This is NOT an approval decision — it is approved only if
+            :meth:`evaluate_shell_command_safety` proves every target is a NEW
+            file inside a writable root. Do not mistake "conditional" for "approved".
+        """
+        ok = ShellMixin._is_structurally_safe_shell_command(command)
+        if not ok:
+            return (False, [])
+        well_formed, targets = ShellMixin._extract_shell_redirect_targets(command)
+        return (well_formed, targets if well_formed else [])
+
+    @staticmethod
+    def _is_safe_readonly_shell_command(
+        command: str, *, precomputed: tuple[bool, list[str]] | None = None
+    ) -> bool:
+        """Strict read-only predicate — semantically UNCHANGED from before.
+
+        Kept as a strict subset of :meth:`_classify_shell_command` so every
+        existing caller and test keeps its current expectation: a real-file
+        redirect still returns False here. The widened approval decision (new
+        file inside a writable root) lives in
+        :meth:`evaluate_shell_command_safety`; restricted/system-invoked agents
+        must keep using THIS bool. ``precomputed`` optionally supplies an
+        already-computed ``(structural_ok, targets)`` from :meth:`_classify_shell_command`
+        so a caller that classified the command once (the sync gate) does not re-scan it;
+        the default (no precomputed) path is byte-for-byte identical for all existing callers.
+        """
+        if precomputed is not None:
+            ok, targets = precomputed
+        else:
+            ok, targets = ShellMixin._classify_shell_command(command)
+        return ok and not targets
+
+    @staticmethod
     def _format_help(restricted: bool = False) -> str:
         """Return a formatted list of auto-approved shell commands/patterns for __help.
 
         Rendered directly from the class-level allow-list sets so the output can never
-        drift from what ``_is_safe_readonly_shell_command`` actually accepts.
+        drift from what ``evaluate_shell_command_safety`` actually auto-approves — the
+        widened policy (read-only commands PLUS a new-file redirect inside a writable
+        root). The strict ``_is_safe_readonly_shell_command`` bool is NARROWER and is
+        NOT the source of truth for the approval decision; do not cite it here.
         """
         def _join(items):
             return ', '.join(sorted(items))
@@ -340,14 +462,23 @@ class ShellMixin:
             'Allowed patterns:',
             "  - 'cd <path> && <cmd>' or 'cd <path>; <cmd>' prefix (single command after)",
             "  - pipelines: '<safe cmd> | <safe filter> | ...'",
-            '  - redirections to /dev/null, NUL, or file descriptors (e.g. 2>/dev/null) are allowed',
+            '  - redirections to /dev/null, NUL, or file descriptors (e.g. 2>/dev/null, 2>&1) are allowed',
+        ]
+        if not restricted:
+            lines += [
+                '  - redirections to a NEW file inside your writable workspace are auto-approved and the file',
+                '    becomes owned by you; redirecting over an EXISTING file, or to a path outside your writable',
+                '    folders, still requires approval',
+            ]
+        lines += [
             '',
             'Async shell control commands:',
             f"  {_join(ShellMixin._CONTROL_COMMANDS)}, __heartbeat=N",
             '  (these require a tool_id from a previously launched async shell)',
             '',
-            "NOT allowed: subshells $(...)/`...`, background '&', file-write redirections, "
-            "cmd/powershell wrappers, chained '&&'/'||'/';' beyond the cd prefix.",
+            "NOT allowed: subshells $(...)/`...`, background '&', redirections that overwrite an existing file",
+            "  or target a non-writable/unresolvable path ($VAR, globs, ~, quoted or glued '>' as in \"a>b\"),",
+            "  cmd/powershell wrappers, chained '&&'/'||'/';' beyond the cd prefix.",
         ]
         return '\n'.join(lines)
 
@@ -562,6 +693,92 @@ class ShellMixin:
             logger.warning(f"WMIC descendant sweep failed: {e}")
 
     # ------------------------------------------------------------------
+    def _resolve_shell_redirect_targets(
+        self, raw_targets: list[str], resolved_cwd
+    ) -> tuple[bool, list[Path], str | None]:
+        """Decide whether EVERY redirect target is a NEW file in a writable root.
+
+        Returns ``(all_eligible, eligible_paths, block_reason)``. ``all_eligible`` is
+        False if ANY target fails (all-or-nothing, D4). A target is eligible only when
+        it resolves inside a writable root (``resolve_tool_path(mode='rw')``) AND does
+        not already exist. Fail-closed: any resolution error → not eligible. ``block_reason``
+        is None when all targets are eligible; otherwise it is a concise, human-facing
+        fragment naming the FIRST offending target and the SPECIFIC condition that tripped
+        (already-exists / outside-writable-roots), so the approval prompt is not misleading
+        about which target caused it.
+        """
+        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+        eligible: list[Path] = []
+        for raw in raw_targets:
+            # 1. Build the candidate. Absolute / virtual-prefix tokens pass through
+            #    unchanged; relative tokens are joined with the ACTUAL shell cwd
+            #    (resolved_cwd), not base_dir — the shell runs with cwd=resolved_cwd.
+            #    The join only fixes *which* path is checked; containment is re-checked
+            #    by resolve_tool_path below (a `..\..\x` join can still escape).
+            candidate = raw
+            is_abs = (Path(raw).is_absolute()
+                      or raw.startswith('/workspace')
+                      or raw.startswith('/extra_rw_')
+                      or raw.startswith('/extra_ro_'))
+            if not is_abs:
+                candidate = os.path.join(str(resolved_cwd), raw)
+            # 2. Resolve against the writable-root set. Any failure → not eligible.
+            try:
+                resolved = resolve_tool_path(candidate, mode='rw', agent_pool=self.agent_pool)
+            except Exception as e:
+                logger.debug('[shell_cmd] redirect target %r not writable: %s', raw, e)
+                return (False, [],
+                        f"the redirect target {raw!r} lies outside your writable folders "
+                        f"(or cannot be resolved), so it is not auto-approved")
+            # 3. Existing file (or directory) → overwrite → not eligible.
+            if os.path.exists(resolved):
+                logger.debug('[shell_cmd] redirect target %r already exists: %s', raw, resolved)
+                return (False, [],
+                        f"the redirect target {raw!r} already exists, so it would be "
+                        f"overwritten rather than created as a new file")
+            eligible.append(resolved)
+        return (True, eligible, None)
+
+    def evaluate_shell_command_safety(
+        self, command: str, cwd: str, agent_name: str, resolved_cwd=None,
+        precomputed: tuple[bool, list[str]] | None = None,
+    ) -> tuple[bool, list[Path]]:
+        """Single approval decision shared by every shell gate (sync/async/advisor).
+
+        Returns ``(is_safe, new_file_paths)`` where ``is_safe`` is the FINAL
+        approval decision: structurally safe AND (no real-file targets, OR every
+        target is a new file inside a writable root). ``new_file_paths`` are the
+        targets proven absent at validation time (only non-empty when is_safe is
+        True via the new-file path). Restricted/system-invoked agents must NOT use
+        this widened value at their hard-reject gate — see the two-variable wiring
+        in :meth:`execute_shell_command`. ``precomputed`` optionally supplies an
+        already-computed ``(structural_ok, targets)`` from :meth:`_classify_shell_command`
+        so a caller that classified the command once (the sync gate) does not re-scan it.
+        ``agent_name`` is part of the public API (tests pass it by keyword) but is reserved
+        for the restricted-agent gate / future use; the new-file resolver itself does not
+        read it.
+        """
+        if precomputed is not None:
+            ok, targets = precomputed
+        else:
+            ok, targets = ShellMixin._classify_shell_command(command)
+        if not ok:
+            return (False, [])
+        if not targets:
+            return (True, [])
+        # Resolve cwd (reuse the caller's if supplied to avoid double work).
+        if resolved_cwd is None:
+            from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+            try:
+                resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
+            except Exception:
+                # The caller's own "Invalid working directory" path fires first in
+                # execute_shell_command; here we simply decline to widen.
+                return (False, [])
+        all_ok, paths, _reason = self._resolve_shell_redirect_targets(targets, resolved_cwd)
+        return (all_ok, paths if all_ok else [])
+
+    # ------------------------------------------------------------------
     def execute_shell_command(
         self,
         command: str,
@@ -587,11 +804,21 @@ class ShellMixin:
             return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
         effective_timeout = timeout if timeout is not None else DEFAULT_SHELL_TIMEOUT
 
-        is_safe = self._is_safe_readonly_shell_command(command)
+        # Two-variable split (§4.1): `strict` is the UNCHANGED read-only bool and is
+        # the ONLY thing the restricted-agent gate may consult (D5: system-invoked
+        # agents never get the new-file allowance). `is_safe` is the widened decision
+        # (new-file-in-writable-root) and feeds ONLY the auto-approve branch and the
+        # AUTO-APPROVED prefix. `new_file_targets` are targets proven absent + writable.
+        structural_ok, redirect_targets = ShellMixin._classify_shell_command(command)
+        strict = ShellMixin._is_safe_readonly_shell_command(
+            command, precomputed=(structural_ok, redirect_targets))
+        is_safe, new_file_targets = self.evaluate_shell_command_safety(
+            command, cwd, agent_name, resolved_cwd=resolved_cwd,
+            precomputed=(structural_ok, redirect_targets))
 
         # ── Restricted (system-invoked) agents: hard-reject non-read-only commands.
         #    No user approval prompt — there is no human in the loop for system agents. ──
-        if not is_safe and self._agent_is_restricted(agent_name):
+        if not strict and self._agent_is_restricted(agent_name):
             return ('REJECTED: Command not allowed for system agents. '
                     'Only read-only filesystem/git commands are permitted. '
                     'Use __help to see allowed commands.')
@@ -605,6 +832,17 @@ class ShellMixin:
                 f"⚠️ **SECURITY WARNING**: This is a host shell command. It can potentially bypass folder restrictions!\n\n"
                 f"**CWD**: {resolved_cwd}\n"
                 f"**Execute Shell Command**:\n```bash\n{command}\n```\n**Justification**: {justification}")
+
+            # §4.2: when the prompt is caused by a redirect, tell the user WHY — the
+            # plain description gives no way to tell why a `git diff` needed approval.
+            # The static scan is reused via the precomputed targets above; the filesystem
+            # resolve repeats here only on the prompt path (about to block on human input),
+            # which is acceptable, and surfaces the SPECIFIC condition the resolver tripped
+            # (overwrite vs outside-root).
+            if redirect_targets:
+                _, _, _why = self._resolve_shell_redirect_targets(redirect_targets, resolved_cwd)
+                if _why:
+                    description += f"\n\nWhy this prompted: {_why}"
 
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
@@ -702,6 +940,21 @@ class ShellMixin:
 
             stdout: str = ''.join(stdout_chunks)
             stderr: str = ''.join(stderr_chunks)
+
+            # ── Ownership marking for new-file redirects (§4.3) ──────────
+            # Bookkeeping, NEVER a failure mode: guarded by its own try/except so an
+            # OSError from _own/os.path.exists cannot turn a successful command into
+            # "ERROR: Approved but execution failed" (the outer handler at the bottom).
+            # Gated on "did not exist before" (new_file_targets were proven absent) +
+            # "exists after" (created by this run) — not on exit status, since `git
+            # diff > f` can exit non-zero yet still write the file.
+            if new_file_targets:
+                try:
+                    for _owned_path in new_file_targets:
+                        if os.path.exists(_owned_path):
+                            self._own(_owned_path, agent_name)
+                except Exception as _own_err:
+                    logger.debug('[shell_cmd] redirect ownership marking failed: %s', _own_err)
 
             if result_ok:
                 output = ''
