@@ -95,6 +95,14 @@ def _make_update(user_id, text='hello', chat_id=100, update_id=None, message_id=
     update.effective_user.id = user_id
     update.effective_chat.id = chat_id
     update.message.text = text
+    # BUG_0080: parity with bot.on_message's media reads (same idiom as
+    # tests/test_telegram_bridge.py::_make_update) — a plain-text update has no
+    # photo/document/caption. Auto-created MagicMock attributes are truthy, which
+    # would route these text-only updates into the image branch and crash on the
+    # file_size comparison in _compose_media_text.
+    update.message.photo = None
+    update.message.document = None
+    update.message.caption = None
     update.update_id = update_id
     if message_id is None:
         update.effective_message = None

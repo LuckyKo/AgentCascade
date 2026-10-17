@@ -342,8 +342,8 @@ class ShellCmd(BaseTool):
                     elif press['low_vram_gpus']:
                         _queue_tool_warning(
                             pool, agent_name,
-                            f"[shell_cmd] low VRAM on GPU(s) {', '.join(map(str, press['low_vram_gpus']))}: "
-                            f"consider execution_mode='safe'")
+                            f"[shell_cmd] low free VRAM on GPU(s) {', '.join(map(str, press['low_vram_gpus']))}: "
+                            f"consider execution_mode='safe' if you run any command that may use significant VRAM.")
 
         # ── Async mode: launch new background shell ────────────────
         if run_async:
@@ -567,8 +567,21 @@ class ShellCmd(BaseTool):
         # Widened decision. A test stub whose operation_manager is a MagicMock cannot
         # produce a real (bool, list) decision; fall back to the strict bool so such
         # stubs keep their prior behaviour. Real pools get the new-file allowance.
-        _decision = self.agent_pool.operation_manager.evaluate_shell_command_safety(
-            command, cwd, agent_name, resolved_cwd=resolved_cwd)
+        # BUG_0081: AgentPool.operation_manager is legitimately None when the pool was
+        # constructed without one (pool/core.py injects it, default None) — treat a
+        # missing advisor as "no widened evaluation" instead of crashing the async launch.
+        _op_mgr = getattr(self.agent_pool, 'operation_manager', None) if self.agent_pool else None
+        if _op_mgr is not None:
+            try:
+                _decision = _op_mgr.evaluate_shell_command_safety(
+                    command, cwd, agent_name, resolved_cwd=resolved_cwd)
+            except AttributeError:
+                # Test stub (or partial pool) whose operation_manager lacks the widened
+                # decision API — fall back to the strict bool so such stubs keep their
+                # prior behaviour.
+                _decision = (strict, [])
+        else:
+            _decision = (strict, [])
         if isinstance(_decision, tuple) and len(_decision) == 2:
             is_safe, _new_file_targets = _decision
         else:
