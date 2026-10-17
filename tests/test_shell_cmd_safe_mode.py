@@ -411,12 +411,17 @@ class TestAdvisorSuppression:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 12. Toggle-off path: no save/restore, but unload IS called (model release ungated).
+# 12. Safe mode forces KV save/restore ON regardless of the (default-off) checkpoint toggle.
 # ────────────────────────────────────────────────────────────────────────────
 
 
-class TestToggleOff:
-    def test_toggle_off_no_save_and_restore_only_unload_ungated(self):
+class TestSafeModeForcesKvOn:
+    def test_toggle_off_still_saves_and_restores(self):
+        """THE point of safe mode: it reuses the KV save/restore logic but ORs in a
+        per-instance override (_safe_mode_kv) so it runs even when the "State KV Save/Restore"
+        checkpoint toggle is OFF (its default). With auto_security=False the tool does its own
+        save + restore; with the toggle off the OLD behavior was to skip both and cold-reload —
+        now it must still save, unload, and restore."""
         order = []
         inst = _make_instance()
         pool, om = _make_pool(instance=inst, auto_security=False, kv_toggle=False)
@@ -427,15 +432,13 @@ class TestToggleOff:
             result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
                                         justification='run it', cwd='.', timeout=None)
 
-        assert 'save' not in order  # KV save gated by the toggle
-        # With the toggle OFF the finally must NOT attempt a restore (cold reload is what
-        # the user asked for) — only the model release (unload) stays ungated. The old
-        # "restore-attempt ungated" assumption predates the stable-label fix: an explicit
-        # label would have bypassed the consume-once no-op, so the restore is now gated on
-        # kv_toggle too. See TestSafeStableLabelRestore.test_toggle_off_no_state_load_issued
-        # for the EFFECT-level assertion (this order test patches restore_held_slot_state).
-        assert order == ['approval', 'unload', 'run']  # model release ungated; restore gated off
-        assert 'State KV Save/Restore' in result               # notification explains the toggle
+        # Save + restore both run despite the toggle being off (safe-mode override).
+        assert order == ['save', 'approval', 'unload', 'run', 'restore']
+        # The notification no longer mentions a cold reload — safe mode always restores.
+        assert 'KV state restored after' in result
+        # The per-instance override is cleared once the command window closes.
+        with inst._state_lock:
+            assert inst._safe_mode_kv is False
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -648,13 +651,12 @@ class TestSafeStableLabelRestore:
         with inst._state_lock:
             assert inst._state_label is None  # cleared on failure (no retry storm)
 
-    def test_toggle_off_no_state_load_issued(self):
-        """EFFECT guard for the kv_toggle gate. With "State KV Save/Restore" OFF the user
-        asked for a cold reload, so the finally must NOT issue a state/load — even though
-        P1 passes an explicit stable label (which would bypass the consume-once no-op).
-        The order-based TestToggleOff cannot catch this because it patches
-        restore_held_slot_state; here we patch ONLY the HTTP layer and assert that
-        restore_state is never called. Unload stays ungated."""
+    def test_toggle_off_still_issues_state_load(self):
+        """EFFECT guard for the safe-mode override. With "State KV Save/Restore" OFF (the
+        default) the OLD behavior was to skip save/restore and cold-reload — but safe mode
+        reuses that logic forced ON via _safe_mode_kv, so a state/load IS issued after the
+        unload despite the toggle being off. We patch ONLY the HTTP layer and assert the
+        real restore_state is called for the stable label. Unload stays ungated."""
         order = []
         inst = _make_instance()
         pool, om = _make_pool(instance=inst, auto_security=False, kv_toggle=False,
@@ -662,14 +664,21 @@ class TestSafeStableLabelRestore:
         tool = _make_tool(pool)
         _wire_approval(om, order, approved=True)
 
-        stack, restore_calls = _http_seam(order)
+        # Pass a save_factory that records 'save' so the save side is observed (the default
+        # _http_seam save stub is a silent no-op that would make the save assertion vacuous).
+        def _recording_save(api_base, model, label):
+            order.append('save')
+            return label
+
+        stack, restore_calls = _http_seam(order, save_factory=_recording_save)
         with stack:
             result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
                                         justification='run it', cwd='.', timeout=None)
 
-        # No save (toggle off), unload still runs (model release ungated).
-        assert 'save' not in order
-        assert order == ['approval', 'unload', 'run']
-        # THE GUARD: no state/load is issued when the KV toggle is off.
-        assert restore_calls == [], f'toggle-off must NOT issue a state/load: {restore_calls}'
-        assert 'State KV Save/Restore' in result  # notification still explains the toggle
+        # Save + unload + run all happen despite the toggle being off (safe-mode override).
+        assert order == ['save', 'approval', 'unload', 'run']
+        # THE GUARD: a state/load IS issued for the stable label even with the toggle off —
+        # this is what the old kv_toggle-gated path suppressed (restore_calls would be []).
+        assert restore_calls == ['agent-1'], \
+            f'safe mode must issue a state/load despite the toggle being off: {restore_calls}'
+        assert 'KV state restored after' in result  # no cold-reload branch anymore

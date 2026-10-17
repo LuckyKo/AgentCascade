@@ -44,6 +44,25 @@ def is_state_save_capable(endpoint_cfg) -> bool:
     )
 
 
+def kv_save_effectively_enabled(instance: 'AgentInstance', toggle: bool) -> bool:
+    """Whether KV save/restore should run for ``instance`` right now.
+
+    Single source of truth for every KV save/restore gate: the global "State KV Save/Restore"
+    checkpoint toggle ORed with the instance's safe-mode override (``_safe_mode_kv``). The
+    override is what lets a shell_cmd ``safe`` command force save/restore ON for its window
+    even when the (default-off) checkpoint toggle is off.
+
+    Two non-obvious points: (1) the flag is written under ``_state_lock`` by shell_cmd but read
+    here outside it — safe because it's a single bool (atomic in CPython), write-once/clear-once
+    per window; taking the lock would add hot-path contention for zero safety gain. (2) callers
+    must pass a real AgentInstance — a bare MagicMock auto-creates a truthy ``_safe_mode_kv`` and
+    would silently force KV on.
+    """
+    if toggle:
+        return True
+    return bool(getattr(instance, '_safe_mode_kv', False))
+
+
 def save_instance_state(instance: 'AgentInstance') -> bool:
     """Save KV cache state for an instance.
 

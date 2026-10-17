@@ -352,6 +352,11 @@ class AgentInstance:
     _state_label: Optional[str] = None  # Last saved state label for this instance
     _last_endpoint_config: Optional[
         dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
+    # True while this instance is running a shell_cmd `safe`-mode command — forces KV
+    # save/restore ON for the window regardless of the checkpoint toggle (see
+    # state_ops.kv_save_effectively_enabled). Set/cleared by shell_cmd._execute_safe;
+    # also cleared on termination below.
+    _safe_mode_kv: bool = False
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)  # Pool config version at last rebuild
     _system_prompt_frozen: bool = field(
@@ -836,6 +841,7 @@ class AgentInstance:
         with self._state_lock:
             self._state_label = None
             self._last_endpoint_config = None
+            self._safe_mode_kv = False  # safe-mode KV override must not leak past termination
 
         # Phase 3: Cancel any pending tickets for this agent.
         # This is best-effort — the pool reference may not be available here,

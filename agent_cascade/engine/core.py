@@ -2068,7 +2068,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         Returns:
             True if a label was saved (a restore is pending), False otherwise.
         """
-        if not self._get_pool_setting('state_kv_save_enabled', True):
+        from agent_cascade.state_ops import kv_save_effectively_enabled
+        # KV gate: global checkpoint toggle ORed with the safe-mode override (see state_ops.kv_save_effectively_enabled).
+        if not kv_save_effectively_enabled(instance, self._get_pool_setting('state_kv_save_enabled', True)):
             logger.debug('[STATE_SAVE_SKIP] %s (%s) — KV save before slot yield disabled by toggle',
                          inst_name, reason or 'slot-yield')
             return False
@@ -2147,8 +2149,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         # The sync-child NORMAL-delegation path passes respect_toggle=False so its warm-cache
         # restore always runs (its save side is already ungated). System-agent yields keep the
-        # default True and honor the UI toggle.
-        if respect_toggle and not self._get_pool_setting('state_kv_save_enabled', True):
+        # default True and honor the KV gate: global checkpoint toggle ORed with the safe-mode
+        # override (see state_ops.kv_save_effectively_enabled).
+        from agent_cascade.state_ops import kv_save_effectively_enabled
+        if respect_toggle and not kv_save_effectively_enabled(
+                instance, self._get_pool_setting('state_kv_save_enabled', True)):
             logger.debug('[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
                          inst_name, context or 'slot-yield')
             # Clear any stale label (save may have occurred before toggle was turned OFF).

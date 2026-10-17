@@ -871,8 +871,14 @@ class ShellCmd(BaseTool):
 
         Order (per the safe-mode plan): save KV state BEFORE the security guard, unload
         the local model immediately before Popen, restore after. Degrades to plain sync
-        when the caller's endpoint isn't state-save-capable. The KV save/restore honors
-        the existing "State KV Save/Restore" toggle; the model-release (unload) is ungated.
+        when the caller's endpoint isn't state-save-capable.
+
+        KV save/restore is FORCED ON for the command window regardless of the global
+        "State KV Save/Restore" toggle (a pure system-agent checkpoint setting, off by
+        default) — that is the whole point of safe mode: unload the model, run the
+        command, restore KV with no reprocessing. The per-instance ``_safe_mode_kv``
+        override (set/cleared here) is ORed into the engine's save/restore gates via
+        ``state_ops.kv_save_effectively_enabled``. The model-release (unload) is ungated.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -893,17 +899,21 @@ class ShellCmd(BaseTool):
         advisor_will_run = bool(getattr(pool, 'auto_security', True)) and \
             not pool.operation_manager.evaluate_shell_command_safety(command, cwd, agent_name)[0]
 
-        # ── KV toggle (existing UI setting) gates save/restore only; unload stays ungated. ──
-        kv_toggle = getattr(getattr(pool, 'settings', None), 'state_kv_save_enabled', True)
+        # Safe mode forces KV save/restore ON for this window regardless of the checkpoint
+        # toggle (see docstring + state_ops.kv_save_effectively_enabled). Set before
+        # execute_shell_command (which triggers the approval/security window) and cleared in
+        # the finally below.
+        if instance is not None:
+            with instance._state_lock:
+                instance._safe_mode_kv = True
 
         saved = freed = False
-        if capable and kv_toggle and not advisor_will_run:
+        if capable and not advisor_will_run:
             from agent_cascade.state_ops import save_instance_state
-            # Lock around the save to match engine/core.py:2077-2078: makes the read of
-            # _last_endpoint_config + write of _state_label atomic against a concurrent
-            # advisor (removes a torn-state window). Safe because the instance's own
-            # _state_lock is an RLock (agent_instance.py:243) and save_instance_state
-            # re-acquires it.
+            # Lock around the save to match ExecutionEngine.save_before_slot_yield: makes the
+            # read of _last_endpoint_config + write of _state_label atomic against a concurrent
+            # advisor (removes a torn-state window). Safe because the instance's own _state_lock
+            # is an RLock and save_instance_state re-acquires it.
             with instance._state_lock:
                 saved = bool(save_instance_state(instance))  # BEFORE the guard
 
@@ -927,35 +937,34 @@ class ShellCmd(BaseTool):
                 before_execute=(_release_model if capable else None),
             )
         finally:
-            if freed and kv_toggle:
-                # Model was released → restore KV to the endpoint we actually hold
-                # (never a stale _last_endpoint_config). Restore by the STABLE label
-                # (instance_name), not the consume-once _state_label: a system agent
-                # (Security/Compressor) may have consumed _state_label inside the
-                # approval window before this unload, but the state FILE it wrote
-                # survives the load, so re-issuing state/load for the stable label
-                # re-warms the KV. Gated on kv_toggle: with the "State KV Save/Restore"
-                # setting OFF the user asked for a cold reload, so we must NOT issue a
-                # (possibly stale) state/load — before this fix the consume-once path
-                # no-oped here, but the explicit label would bypass that. Never raises.
-                from agent_cascade.state_ops import restore_held_slot_state
-                restore_held_slot_state(pool, instance, agent_name,
-                                        label=instance.instance_name)
-            elif saved:
-                # We saved but never unloaded (e.g. rejected): clear the label we set so
-                # it can't re-fire an expensive load; the KV is still warm.
-                from agent_cascade.state_ops import clear_orphaned_state_label
-                clear_orphaned_state_label(instance, agent_name)
+            try:
+                if freed:
+                    # Model was released → restore KV to the endpoint we actually hold
+                    # (never a stale _last_endpoint_config). Restore by the STABLE label
+                    # (instance_name), not the consume-once _state_label: a system agent
+                    # (Security/Compressor) may have consumed _state_label inside the
+                    # approval window before this unload, but the state FILE it wrote
+                    # survives the load, so re-issuing state/load for the stable label
+                    # re-warms the KV. Never raises.
+                    from agent_cascade.state_ops import restore_held_slot_state
+                    restore_held_slot_state(pool, instance, agent_name,
+                                            label=instance.instance_name)
+                elif saved:
+                    # We saved but never unloaded (e.g. rejected): clear the label we set so
+                    # it can't re-fire an expensive load; the KV is still warm.
+                    from agent_cascade.state_ops import clear_orphaned_state_label
+                    clear_orphaned_state_label(instance, agent_name)
+            finally:
+                # Always release the safe-mode KV override, even if the restore raised.
+                if instance is not None:
+                    with instance._state_lock:
+                        instance._safe_mode_kv = False
 
-        # ── Notification: gated on `freed` alone; KV clause branched on kv_toggle. ──
+        # ── Notification: gated on `freed` alone. ──
         # Never emitted on REJECTED/ERROR/degraded results, since freed is only ever
-        # set inside before_execute, which is unreachable on the rejection path.
+        # set inside before_execute, which is unreachable on the rejection path. Safe mode
+        # always restores KV (the override forces it on), so there is no cold-reload branch.
         note = ''
         if freed:
-            if kv_toggle:
-                note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
-            else:
-                note = ('[safe] Local model(s) unloaded before the command; KV save/restore is '
-                        'disabled by the "State KV Save/Restore" setting — the model will reload '
-                        'cold afterwards.\n')
+            note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
         return note + result

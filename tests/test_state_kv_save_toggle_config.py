@@ -249,6 +249,72 @@ class TestSaveGate:
         assert len(saves) == 1, f"exactly one state/save expected: {saves}"
 
 
+class TestSafeModeOverrideAtEngineGate:
+    """EFFECT-level proof that a shell_cmd `safe` command forces KV save/restore ON at the
+    ENGINE gate even when the (default-off) checkpoint toggle is OFF. This is the exact
+    production scenario: auto-security ON → the Security check runs inside request_user_approval
+    → engine.save_before_slot_yield / reacquire_after_slot_yield are the funnels that own the KV.
+    The per-instance _safe_mode_kv override (set by shell_cmd._execute_safe) is ORed in via
+    state_ops.kv_save_effectively_enabled, so these gates must fire despite the toggle being off.
+
+    These drive the REAL engine helpers with a real AgentInstance (not the tool's own save),
+    which is why they live here rather than in test_shell_cmd_safe_mode.py (whose fixtures stub
+    request_user_approval and never enter the engine gate)."""
+
+    def _safe_instance(self):
+        inst = make_instance()  # label='B', autoloader endpoint config cached
+        with inst._state_lock:
+            inst._safe_mode_kv = True  # what shell_cmd._execute_safe sets for the window
+        return inst
+
+    def test_off_toggle_safe_mode_save_fires(self):
+        """Toggle OFF + _safe_mode_kv=True → save_before_slot_yield MUST issue a state/save."""
+        inst = self._safe_instance()
+        engine = make_engine(inst, state_kv_save_enabled=False)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            result = engine.save_before_slot_yield(inst, inst.instance_name, 'before_security_check')
+
+        assert result is True
+        saves = [u for u in _recorded_state_urls(post_mock) if '/state/save' in u]
+        assert len(saves) == 1, \
+            f'safe mode must force a state/save despite the toggle being OFF: {saves}'
+
+    def test_off_toggle_no_safe_mode_save_skipped(self):
+        """CONTROL: same gate, toggle OFF but _safe_mode_kv=False (default) → no save. Proves
+        the override is what flips the outcome, not a blanket change to the gate."""
+        inst = make_instance()  # _safe_mode_kv stays False (dataclass default)
+        engine = make_engine(inst, state_kv_save_enabled=False)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            result = engine.save_before_slot_yield(inst, inst.instance_name, 'before_security_check')
+
+        assert result is False
+        assert _recorded_state_urls(post_mock) == [], \
+            'non-safe-mode caller must still honor the OFF toggle'
+
+    def test_off_toggle_safe_mode_restore_fires(self):
+        """Toggle OFF + _safe_mode_kv=True → reacquire_after_slot_yield MUST issue a state/load."""
+        inst = self._safe_instance()
+        engine = make_engine(inst, state_kv_save_enabled=False)
+
+        def fake_reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            with patch.object(engine, 'reacquire_for', side_effect=fake_reacquire):
+                ok = engine.reacquire_after_slot_yield(inst, inst.instance_name, 'after_security_check')
+
+        assert ok is True
+        loads = [u for u in _recorded_state_urls(post_mock) if '/state/load' in u]
+        assert len(loads) == 1, \
+            f'safe mode must force a state/load despite the toggle being OFF: {loads}'
+
+
 class TestReacquireGate:
     """reacquire_after_slot_yield: slot re-acquire is NEVER conditional; only the KV restore
     is skipped when the toggle is OFF."""
