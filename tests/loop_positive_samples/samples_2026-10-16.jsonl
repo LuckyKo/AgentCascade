@@ -1,0 +1,492 @@
+Now let me verify the §5 mapping table against actual config:
+
+Spec §5 table:
+| | kokoro_default | outetts_default |
+| engine | kokoro | outetts | ✓ matches
+| model | Kokoro_no_espeak_Q4.gguf | OuteTTS-0.3-1B-Q4_0.gguf | ✓ matches
+| companion_model | null | WavTokenizer-Large-75-Q4_0.gguf | ✓ matches
+| voice in body | af_bella | omitted (voice: null) | ✓ matches
+
+All config field names match: engine, model, companion_model, voice, speed, reference_audio. Spec §4.2 lists exactly these fields. ✓ Confirmed.
+
+Now, one important note: the spec §4.2 says "Existing fields are sufficient: engine, model, companion_model, voice, speed, reference_audio." The actual config also has a description field. The spec omits description from the field list. Minor — not blocking, but worth noting the spec's field enumeration is incomplete (missing description).
+
+Now let me check the §5 claim about --ttsdir in current preflight: "Current preflight adds --ttsdir whenever reference_file is given." Confirmed in kobold_tts.py lines 116-117: if ref_dir: argv += ['--ttsdir', ref_dir]. ✓ Accurate.
+
+Now let me verify the §7 claim about test_reference_file_resolved_ro_before_subprocess — the spec says "change with §5 decision". The current test asserts '--ttsdir' in req.prepared['argv']. Confirmed at line 177. ✓ Accurate.
+
+Now let me check the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". The current test asserts 'exit 2'. Confirmed at line 236. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me check the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test asserts order == ['save', 'unload', 'run', 'restore']. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test asserts m_restore.assert_called_once(). ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test asserts m_save/unload/restore not called. ✓ Accurate.
+
+Now let me check the spec's §7 claim about test_missing_binary_errors — "keep; unchanged". Current test asserts 'No koboldcpp binary configured'. The spec §3 doesn't change this error message. But wait — the spec's §1.1 "after" preflight still validates binary. So this test stays. ✓ Accurate.
+
+Now, one thing I should double-check: the spec's §7 table for test_argv_golden_with_companion says the current test asserts req.prepared['timeout'] >= 600. The spec's rewrite instruction doesn't mention this assertion. But more importantly, the spec's rewrite says "assert -p NOT in argv". The current test asserts argv[-2:] == ['-p', 'Hello there...']. So the rewrite correctly identifies what to change. But the spec's rewrite instruction omits the req.prepared['timeout'] >= 600 assertion — under the new design, req.prepared won't have a 'timeout' key (it'll have 'gen_timeout'/'ready_timeout'). So the rewrite instruction should address that assertion. This is a minor incompleteness in the test plan.
+
+Now let me verify the spec's §7 claim about the test file docstring. The spec doesn't claim about docstring.
+
+Now let me check the spec's §7 claim about test_argv_without_companion — the current test patches _resolve_tts_config to return a dict WITHOUT companion_model. The spec's rewrite says "same minus companion; '--ttswavtokenizer' not in argv; no -p." ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_missing_model_errors — "keep; unchanged". Current test patches _resolve_tts_config to return {'model': 'missing.gguf'} and asserts 'TTS model GGUF not found'. The spec's new preflight still resolves model GGUF and checks existence. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_out_of_roots_reference_file_rejected — "keep; unchanged". Current test asserts 'Invalid reference_file path'. The spec's new preflight still resolves reference_file via resolve_tool_path. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_captures_stdout_wav — "rewrite → test_run_posts_and_returns_wav". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_non_wav_stdout — "rewrite → ..._response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_rejects_empty_stdout — "rewrite → ..._empty_response". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_nonzero_exit — "delete/replace... exit code is meaningless for a killed server (verified rc=1 on kill)". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_run_timeout_raises_timeouterror — "split". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_order_save_unload_run_restore — "keep, re-mock; order ['save','unload','run','restore']". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_preflight_failure_touches_zero_vram — "keep; still asserts save/unload/restore NOT called". Current test exists. ✓ Accurate.
+
+Now let me verify the spec's §7 claim about test_generation_failure_still_restores — "keep, re-mock; m_restore.assert_called_once()". Current test exists. ✓ Accurate.

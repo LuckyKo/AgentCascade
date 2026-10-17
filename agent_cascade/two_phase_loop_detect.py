@@ -79,8 +79,9 @@ class TwoPhaseLoopDetector:
     suspected interval. Only triggers abort when confirmed_matches_required exact
     repetitions are found.
 
-    Cooldown: On failed confirmation, all suspicion state is cleared and detection
-    is suppressed for cooldown_duration feeds to prevent noisy re-triggering.
+    Cooldown: On a false suspicion (fewer than 2 exact repetitions found), all suspicion state is
+    cleared and detection is suppressed for cooldown_duration feeds. A confirmation that found real
+    repetitions but not yet enough of them keeps state and waits for the next period instead of wiping the counters.
     """
 
     def __init__(self,
@@ -92,7 +93,6 @@ class TwoPhaseLoopDetector:
         self.ngram_window_size = 64  # Token window size (same as current ngram mode)
         self.suspicion_threshold = suspicion_threshold or int(
             os.environ.get('AGENT_CASCADE_LOOP_SUSPICION_THRESHOLD', '7'))
-        self.max_counter_entries = 200  # Prune threshold for counter
 
         # Streaming tokenizer — buffers partial words across chunks for consistent tokenization
         self.tokenizer = StreamingTokenizer()
@@ -100,6 +100,11 @@ class TwoPhaseLoopDetector:
         # Persistent token buffer — accumulates across feeds, bounded
         self.token_buffer: list[str] = []
         self.max_token_buffer = 5000
+
+        # FIX B: size the cap to the buffer so every window it can hold is representable;
+        # the old fixed cap of 200 is below the ~1 000 the real fixtures need. Counter.most_common
+        # is stable (ties break by insertion order) — see plans/inner_loop_phase1_prune_starvation_PLAN.md.
+        self.max_counter_entries = max(1, self.max_token_buffer - self.ngram_window_size + 1)
 
         # Parallel array: char_end_offset[i] = character position in tail_buffer where token i ends.
         # Used for accurate interval estimation (token-based suspicion → char-based confirmation).
@@ -121,6 +126,13 @@ class TwoPhaseLoopDetector:
         # Tail buffer for exact comparison — no truncation needed (detector is per-response, max_chars limits total)
         self.tail_buffer: str = ''
 
+        # Re-confirmation guard state (plans/inner_loop_phase1_prune_starvation_PLAN.md
+        # §8, risk item 2). Once a suspicion's interval is known, the backward exact-match
+        # walk can only reach a higher count once the tail has grown by a full period.
+        # Record the last attempt so feed() can skip redundant _confirm_loop calls.
+        # -1 sentinel = no prior attempt.
+        self._reset_confirm_guard()
+
         # Feature flag — gated for safe rollout (env var fallback if not explicitly set)
         if enabled is not None:
             self.two_phase_enabled = enabled
@@ -136,20 +148,40 @@ class TwoPhaseLoopDetector:
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
         self.tail_buffer = ''
+        self._reset_confirm_guard()
         self.tokenizer.reset()
 
+    def _reset_confirm_guard(self) -> None:
+        """Drop the re-confirmation guard so a fresh suspicion may attempt confirmation."""
+        self._last_confirm_interval = -1
+        self._last_confirm_tail_len = -1
+
     def _prune_counters(self) -> None:
-        """Keep only the most frequent n-grams to bound memory usage."""
+        """Bound counter memory by evicting noise before candidates (FIX C).
+
+        Drop count<=1 singletons oldest-first; keep anything that repeated >=2 as a live candidate.
+        ``most_common`` is stable (ties break by insertion order), so a candidate at suspicion_threshold
+        is preferred over noise and survives the fallback unless there are more live candidates than slots. See plans/inner_loop_phase1_prune_starvation_PLAN.md.
+        """
         if len(self.ngram_counter) <= self.max_counter_entries:
             return
 
-        # Keep top N entries by count
-        top_items = self.ngram_counter.most_common(self.max_counter_entries)
-        kept_keys = {item[0] for item in top_items}
+        excess = len(self.ngram_counter) - self.max_counter_entries
 
-        # Prune both counter and positions
-        self.ngram_counter = Counter(dict(top_items))
-        self.ngram_positions = {k: v for k, v in self.ngram_positions.items() if k in kept_keys}
+        # Single occurrences are noise. Counter/dict iteration is insertion order, so
+        # this drops the OLDEST singletons first and keeps everything that has repeated.
+        singles = [k for k, c in self.ngram_counter.items() if c <= 1]
+        for k in singles[:excess]:
+            del self.ngram_counter[k]
+            self.ngram_positions.pop(k, None)
+
+        # Rare fallback: still over cap (fewer singletons than the excess) → keep the
+        # highest-count entries.
+        if len(self.ngram_counter) > self.max_counter_entries:
+            keep = self.ngram_counter.most_common(self.max_counter_entries)
+            kept_keys = {k for k, _ in keep}
+            self.ngram_counter = Counter(dict(keep))
+            self.ngram_positions = {k: v for k, v in self.ngram_positions.items() if k in kept_keys}
 
     def _estimate_interval(self, ngram_window: tuple[str, ...]) -> int:
         """Estimate loop interval from positions where this n-gram appears.
@@ -267,7 +299,7 @@ class TwoPhaseLoopDetector:
                 if len(pos_list) > 8:
                     pos_list[:] = pos_list[-8:]  # Trim to last 8 positions
 
-        # Prune counters if too large (keep top entries by count)
+        # Prune counters if too large (see _prune_counters: singletons evicted first)
         if len(self.ngram_counter) > self.max_counter_entries:
             self._prune_counters()
 
@@ -355,6 +387,10 @@ class TwoPhaseLoopDetector:
         self.ngram_counter.clear()
         self.ngram_positions.clear()
 
+        # Cooldown clears suspicion state, so any later suspicion is fresh: drop the
+        # re-confirmation guard so it is allowed to attempt confirmation again.
+        self._reset_confirm_guard()
+
     def feed(self, new_text: str) -> dict | None:
         """Main entry point called during streaming.
 
@@ -371,6 +407,20 @@ class TwoPhaseLoopDetector:
         suspicion = self._check_suspicion(new_text)
 
         if suspicion is not None:
+            interval = suspicion.interval_length
+            tail_len = len(self.tail_buffer)
+
+            # Re-confirmation guard: once we have attempted confirmation for this
+            # exact interval, the backward exact-match walk cannot reach a higher count
+            # until the tail has grown by a full period. Skip the redundant re-run until
+            # then (state is kept; the next real period re-attempts). Only skip when the
+            # interval is identical to the last attempt — a changed estimate re-runs.
+            if (self._last_confirm_interval == interval
+                    and tail_len < self._last_confirm_tail_len + interval):
+                return None
+
+            self._last_confirm_interval = interval
+            self._last_confirm_tail_len = tail_len
             confirmed_count = self._confirm_loop(suspicion)
 
             if confirmed_count >= self.confirmed_matches_required:
@@ -380,7 +430,17 @@ class TwoPhaseLoopDetector:
                     'confirmed_repetitions': confirmed_count,
                     'score': 100,
                 }
-            else:
-                self._apply_cooldown()
+
+            # FIX A (D2 state-wiping cooldown): confirmed_count >= 2 means at least two
+            # byte-identical segments really were found — that is "not enough data yet",
+            # not a false suspicion. Clearing state here is what turned a correct
+            # detection into an infinite reject-and-forget loop: the backwards-only walk
+            # re-reported the same count every attempt because cooldown wiped the counters
+            # and skipped tail growth. Keep state and let the tail grow to the next period.
+            if confirmed_count >= 2:
+                return None
+
+            # No evidence at all (0 or 1 exact repeats): a genuine false suspicion → cool down.
+            self._apply_cooldown()
 
         return None  # No loop detected

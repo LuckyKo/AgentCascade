@@ -266,6 +266,16 @@ class TestMemoryBoundedness:
             det.feed(' '.join(words) + '.')
         assert len(det._two_phase_detector.ngram_counter) <= det._two_phase_detector.max_counter_entries
 
+    def test_ngram_counter_bounded_under_high_repetition(self):
+        """Under a high-repetition stream the counter stays bounded (exercises FIX C's eviction)."""
+        det = make_detector()
+        # Repeated blocks interleaved with novel filler: exercises FIX C's eviction policy
+        # (drop singletons before candidates) and asserts the counter never exceeds the cap.
+        block = ' '.join(f"shared_repeated_token_{k}" for k in range(80))
+        for i in range(200):
+            det.feed(block + ' ' + ' '.join(f"novel_{i}_{j}" for j in range(20)) + '.')
+            assert len(det._two_phase_detector.ngram_counter) <= det._two_phase_detector.max_counter_entries
+
 
 # ===================================================================
 # 8. Edge cases
