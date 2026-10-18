@@ -451,7 +451,7 @@ class LifecycleMixin:
                     self, parent_name,
                     f"[Agent '{instance_name}' dismissed]: A sub-agent you spawned was dismissed "
                     f"(idle or user) and is no longer available. Do not wait for its result; "
-                    f"re-dispatch the task if still needed.",
+                    f"reload it from its log if still needed.",
                 )
                 # Wake an IDLE spawner so it actually drains the queued notification (mirrors Fix B above).
                 parent = self.get_instance(parent_name)
