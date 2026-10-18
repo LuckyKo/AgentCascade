@@ -585,7 +585,7 @@ DEFAULT_AUTO_ASYNC_HEARTBEAT: int = 30  # Default heartbeat interval for auto-as
 # shell_cmd AUTO low-RAM guard (see PoolSettings.safe_mode_auto_ram_floor_mb / safe_mode_auto_vram_floor_mb):
 # below the RAM floor, AUTO forces safe-mode to avoid OOM-killing the host; VRAM is advisory only.
 SAFE_MODE_AUTO_RAM_FLOOR_MB: int = 4096   # MB free system RAM — HARD floor (force safe mode)
-SAFE_MODE_AUTO_VRAM_FLOOR_MB: int = 3072  # MB free GPU VRAM — ADVISORY floor (warn only)
+SAFE_MODE_AUTO_VRAM_FLOOR_MB: int = 512  # MB free GPU VRAM — ADVISORY floor (warn only)
 WAIT_CMD_MAX_TIMEOUT: float = 180.0  # Max seconds __wait will block when heartbeats are configured (3 min)
 WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0  # Seconds __wait blocks when no heartbeats are configured (-1)
 WAIT_CMD_POLL_INTERVAL: float = 0.5  # Seconds between state polls inside the __wait loop
