@@ -85,16 +85,20 @@ class _MockPool:
     """Stand-in for AgentPool exposing exactly the attributes _run_holder_dms touches."""
 
     def __init__(self, instances, pools, window=WINDOW, approvals=None,
-                 halted=None, om_present=True):
+                 halted=None, om_present=True, paused=False):
         self.instances = instances
         self.settings = _FakeSettings(window)
         self.api_router = _FakeApiRouter(_FakeScheduler(pools))
         self.operation_manager = _FakeOM(approvals or []) if om_present else None
         self._halted = set(halted or [])
+        self._paused = bool(paused)
         self.terminated = []
 
     def get_instance(self, name):
         return self.instances.get(name)
+
+    def is_paused(self):
+        return self._paused
 
     def is_instance_halted(self, name):
         return name in self._halted
@@ -103,12 +107,12 @@ class _MockPool:
         self.terminated.append(name)
 
 
-def _build(inst, name='H', window=WINDOW, approvals=None, halted=None, om_present=True):
+def _build(inst, name='H', window=WINDOW, approvals=None, halted=None, om_present=True, paused=False):
     """Grant a holder on a real conc=1 SlotPool and wire a mock AgentPool to it."""
     slot_pool = SlotPool(key='dms', capacity=1)
     release = slot_pool.acquire(instance_name=name, agent_class='t')  # fast path grant
     pool = _MockPool({name: inst}, {'dms': slot_pool}, window=window,
-                     approvals=approvals, halted=halted, om_present=om_present)
+                     approvals=approvals, halted=halted, om_present=om_present, paused=paused)
     im = IdleManager(pool)
     return im, pool, slot_pool, release
 
@@ -352,6 +356,44 @@ class TestOtherExclusions:
         im, pool, _, _ = _build(inst, window=0.0)
         im._run_holder_dms()
         assert pool.terminated == [], f"window=0 did not disable DMS: {pool.terminated}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Global pause — a globally-paused pool must NOT preempt a holder (DMS skips).
+# This is the GLOBAL pause mechanism (SlotsMixin.is_paused), distinct from the
+# per-instance halt above; do NOT conflate them. Revert-proof: removing the
+# is_paused early-return in _run_holder_dms makes test_paused... FAIL.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestGlobalPauseExclusion:
+    def test_paused_pool_aged_holder_not_terminated(self):
+        """THE load-bearing test. A globally-paused pool is on hold, not a wedge — the
+        DMS must skip it entirely, even for an aged holder. Fails if the is_paused
+        early-return is removed (the aged holder would otherwise terminate)."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        im, pool, _, _ = _build(inst, paused=True)
+        im._run_holder_dms()
+        assert pool.terminated == [], f"paused pool still preempted holder: {pool.terminated}"
+
+    def test_resumed_pool_aged_holder_is_terminated(self):
+        """Not a blanket 'disable DMS always': when NOT paused the aged holder IS
+        terminated — proves the pause guard is a no-op on a resumed pool."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        im, pool, _, _ = _build(inst, paused=False)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"resumed pool did not terminate aged holder: {pool.terminated}"
+
+    def test_is_paused_raises_holder_not_terminated(self):
+        """_safe_is_paused fail-safe: if pool.is_paused() raises, assume paused and do
+        NOT terminate (fail-safe toward NOT killing, mirrors the halt guard)."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        im, pool, _, _ = _build(inst, paused=False)
+
+        def _boom():
+            raise RuntimeError('is_paused state unavailable')
+        pool.is_paused = _boom
+        im._run_holder_dms()
+        assert pool.terminated == [], f"is_paused failure should not terminate: {pool.terminated}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

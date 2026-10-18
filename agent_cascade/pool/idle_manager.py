@@ -225,6 +225,12 @@ class IdleManager:
         if window <= 0:
             return  # feature disabled
 
+        # Global pause (plan §3.2 guard #4): a paused pool must not
+        # preempt a holder — the whole pool is on hold, not a wedge.
+        if self._safe_is_paused():
+            logger.debug('[holder_dms] pool paused — skipping DMS this tick.')
+            return  # pause disables DMS preemption
+
         api_router = getattr(self.pool, 'api_router', None)
         scheduler = getattr(api_router, 'scheduler', None) if api_router else None
         if scheduler is None:
@@ -295,6 +301,12 @@ class IdleManager:
                 self.pool.terminate_instance(name)
             except Exception as e:
                 logger.error(f"[holder_dms] terminate_instance('{name}') failed: {e}", exc_info=True)
+
+    def _safe_is_paused(self) -> bool:
+        try:
+            return bool(self.pool.is_paused())
+        except Exception:
+            return True  # cannot confirm pause state → fail safe toward NOT terminating
 
     def _evaluate_wedged_holder(self, ctx, now, window, pending_names):
         """Return the holder name if it is a wedged conc=0 holder, else None.
