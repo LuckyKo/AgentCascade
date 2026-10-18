@@ -1463,6 +1463,30 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         await _broadcast_state('done')
         return {'status': 'ok'}
 
+    @app.post('/api/state/save')
+    async def api_state_save(token: str = None, data: dict = None):
+        """Manually save KV state for an instance (mirrors WS 'kv_state' save)."""
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+        instance_name = (data or {}).get('instance_name') or session['session_name']
+        result = await asyncio.to_thread(
+            WsMessageHandler.do_save_kv, agent_pool, instance_name)
+        if result.get('status') == 'ok':
+            await _broadcast_state()
+        return result
+
+    @app.post('/api/state/load')
+    async def api_state_load(token: str = None, data: dict = None):
+        """Manually load KV state for an instance (mirrors WS 'kv_state' load)."""
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
+        instance_name = (data or {}).get('instance_name') or session['session_name']
+        result = await asyncio.to_thread(
+            WsMessageHandler.do_load_kv, agent_pool, instance_name)
+        if result.get('status') == 'ok':
+            await _broadcast_state()
+        return result
+
     @app.post('/api/restart')
     async def api_restart(token: str = None):
         """Restart the AC server process (shared helper with the WS restart path).

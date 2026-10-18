@@ -69,6 +69,7 @@ class WsMessageHandler:
             'message': self.handle_message,
             'continue': self.handle_continue,
             'stop': self.handle_stop,
+            'kv_state': self.handle_kv_state,
             'pause': self.handle_pause,
             'resume_all': self.handle_resume_all,
             'resume': self.handle_resume,
@@ -327,6 +328,177 @@ class WsMessageHandler:
         if hasattr(agent_pool, '_save_pool_settings'):
             agent_pool._save_pool_settings()
 
+    @staticmethod
+    def _kv_result(action: str, instance_name: str, status: str,
+                   reason: str = '', message: str = '') -> dict:
+        """Canonical kv_state result shape.
+
+        Carries ``action`` and ``instance_name`` on EVERY result — success AND failure —
+        because the frontend ``case 'kv_state_result'`` renders ``${data.action}: ${data.message}``
+        and the frame-relay test asserts all four fields.
+        """
+        return {'status': status, 'action': action, 'instance_name': instance_name,
+                'reason': reason, 'message': message}
+
+    @staticmethod
+    def _kv_target(action: str, agent_pool, instance_name: str):
+        """Shared save/load preamble: pool/instance lookup + capability gate.
+
+        Returns the canonical failure result dict on any failure path, else the
+        tuple ``(instance, cfg)``. Callers use::
+
+            target = WsMessageHandler._kv_target('save', agent_pool, instance_name)
+            if isinstance(target, dict):
+                return target
+            instance, cfg = target
+
+        The ``not_capable`` wording is parameterized on ``action`` — save and
+        load differ ONLY in that token (and save's extra parenthetical).
+        """
+        from agent_cascade import state_ops
+        if not agent_pool:
+            return WsMessageHandler._kv_result(
+                action, instance_name, 'failed', 'no_pool', 'Agent pool not available')
+        try:
+            instance = agent_pool.get_instance(instance_name)
+        except Exception:
+            instance = None
+        if instance is None:
+            return WsMessageHandler._kv_result(
+                action, instance_name, 'failed', 'no_instance',
+                f'Instance {instance_name} not found')
+
+        cfg = getattr(instance, '_last_endpoint_config', None)
+        if not isinstance(cfg, dict) or not state_ops.is_state_save_capable(cfg):
+            msg = ('KV state saving is not available for this agent '
+                   '(no KV-capable endpoint allocated yet)'
+                   if action == 'save' else
+                   'KV state loading is not available for this agent')
+            return WsMessageHandler._kv_result(
+                action, instance_name, 'failed', 'not_capable', msg)
+        return instance, cfg
+
+    @staticmethod
+    def do_save_kv(agent_pool, instance_name: str) -> dict:
+        """Core manual KV save — shared by WS 'kv_state' and POST /api/state/save."""
+        from agent_cascade.log import logger
+        from agent_cascade import state_ops
+
+        target = WsMessageHandler._kv_target('save', agent_pool, instance_name)
+        if isinstance(target, dict):
+            return target
+        instance, cfg = target
+
+        # Pure save, no label (D3), no unload (D4). save_instance_state never raises.
+        ok = state_ops.save_instance_state(instance, set_label=False)
+        if ok:
+            logger.info(f"[KV_MANUAL] Saved KV state for {instance_name} "
+                        f"({cfg.get('api_base')}/{cfg.get('model')})")
+            return WsMessageHandler._kv_result('save', instance_name, 'ok',
+                                               message='KV state saved')
+        # save_instance_state logs the specific cause at debug; map the common one.
+        return WsMessageHandler._kv_result(
+            'save', instance_name, 'failed', 'save_failed',
+            'Save failed — model is not loaded on its endpoint '
+            '(idle-evicted), or the endpoint rejected the request')
+
+    @staticmethod
+    def do_load_kv(agent_pool, instance_name: str) -> dict:
+        """Core manual KV load — shared by WS 'kv_state' and POST /api/state/load."""
+        from agent_cascade.log import logger
+        from agent_cascade import state_ops
+
+        target = WsMessageHandler._kv_target('load', agent_pool, instance_name)
+        if isinstance(target, dict):
+            return target
+        instance, cfg = target
+
+        # Ownership guard (D5): refuse while ANY OTHER instance currently HOLDS the
+        # target endpoint. Uses the engine's own signals, never agent state (a
+        # released permit can coexist with a RUNNING state — router.py:947-962
+        # clears _slot_release before the state transition — and an IDLE instance
+        # may still have its model resident; see D5's accepted residual cost).
+        target_key = (state_ops._normalize_api_base(cfg.get('api_base') or ''),
+                      cfg.get('model') or '')
+        # TWO keys, two normalizers — they are NOT interchangeable:
+        #  * target_key   → compared against the sibling's own ``_last_endpoint_config``
+        #                   (state_ops strips /v1, matching how the KV file is addressed).
+        #  * target_map_key → compared against the router's held map, whose values are
+        #                     built at router.py:651 with api_router_pkg.normalization
+        #                     .normalize_api_base — that one KEEPS /v1 and rewrites
+        #                     localhost (see its docstring: "Distinct from
+        #                     state_ops._normalize_api_base"). Reusing target_key here
+        #                     would never match on any /v1 endpoint, i.e. an inert guard.
+        from agent_cascade.api_router_pkg.normalization import normalize_api_base
+        target_map_key = (normalize_api_base(cfg.get('api_base') or ''),
+                          cfg.get('model') or '')
+        router = getattr(agent_pool, 'api_router', None)
+        # Snapshot the held map under the router's own lock — it is documented as
+        # "guarded by self._lock" (api_router_pkg/router.py:276) and a concurrent
+        # acquire/release during iteration raises RuntimeError. Mirrors the engine's
+        # own reader `_base_actively_held` (router.py:657-663).
+        held_pairs = {}
+        if router is not None:
+            with router._lock:
+                held_pairs = dict(router._instance_held_endpoint)
+        def _busy(name):
+            """The single busy-refusal shape (both scans report the same thing)."""
+            return WsMessageHandler._kv_result(
+                'load', instance_name, 'failed', 'busy',
+                f'Another agent ({name}) currently holds this endpoint — '
+                'Load would evict its model. Try again when it is idle.')
+
+        # Scan (a): pool instances whose own ``_slot_release`` signal says they hold
+        # a slot right now; compare against the sibling's own ``_last_endpoint_config``
+        # with the state_ops normalizer (how the KV file is addressed). Defensive
+        # backstop: the map write at router.py:653 is except-pass guarded, so a failed
+        # write leaves the slot signal as the only witness — in the normal case scan
+        # (b) already covers pool instances.
+        for name, other in list(agent_pool.instances.items()):
+            if name == instance_name:
+                continue
+            try:
+                with other._state_lock:
+                    holds_slot = getattr(other, '_slot_release', None) is not None
+                if not holds_slot:
+                    continue
+                other_cfg = getattr(other, '_last_endpoint_config', None) or {}
+                other_key = (state_ops._normalize_api_base(other_cfg.get('api_base', '')),
+                             other_cfg.get('model', ''))
+            except Exception:
+                continue
+            if other_key == target_key:
+                return _busy(name)
+
+        # Scan (b): the router's held map — authoritative for EVERY name, including
+        # ones no longer in ``pool.instances``: the real orphan class is instances
+        # popped from ``pool.instances`` by ``remove_instance`` (pool/lifecycle.py:119)
+        # whose slot release (router.py:962, which pops the map entry) has not run
+        # yet — dismissed/crashed instances. (Sub-agents are NOT orphans: pool.create_instance
+        # registers them in ``pool.instances``, pool/lifecycle.py:94.) The map is also
+        # authoritative for pool instances (written at slot acquire, router.py:653), so
+        # this scan covers every holder — no per-instance map conjunct is needed above.
+        # Compares target_map_key (the router's normalizer) — see the note above.
+        for name, held_key in held_pairs.items():
+            if name == instance_name:
+                continue
+            if held_key == target_map_key:
+                return _busy(name)
+
+        # Stable-label restore (D6). restore_held_slot_state is defensive by design:
+        # it skips (returns False) if the held endpoint can't be resolved or the
+        # saved file's endpoint differs (state_ops.py) — never raises.
+        ok = state_ops.restore_held_slot_state(agent_pool, instance, instance_name,
+                                               label=instance_name)
+        if ok:
+            logger.info(f"[KV_MANUAL] Loaded KV state for {instance_name}")
+            return WsMessageHandler._kv_result('load', instance_name, 'ok',
+                                               message='KV state loaded')
+        return WsMessageHandler._kv_result(
+            'load', instance_name, 'failed', 'load_failed',
+            'Load failed — no saved state for this instance, its '
+            'endpoint moved, or the model load timed out')
+
     def _start_gen_thread(self, history_copy=None, instance_name: str = '') -> None:
         """Launch the generation thread (shared boilerplate)."""
         gen_id = self._start_generation()
@@ -444,6 +616,38 @@ class WsMessageHandler:
             self.agent_pool.pause()  # Sets _paused Event — backend blocks Phase 4 tool execution
             from agent_cascade.log import logger
             logger.info(f"Paused all instances: {inst_names}")
+
+    async def handle_kv_state(self, data: dict) -> None:
+        """Handle 'kv_state' — manual KV state save/load for one instance.
+
+        Core logic lives in do_save_kv/do_load_kv (shared with the REST
+        /api/state/save|load endpoints) so the WS and REST paths cannot drift.
+        The httpx calls are blocking (30s client timeout; autoloader slot-save
+        up to 120s) — offload to a thread so the event loop is never stalled.
+
+        Like handle_pause, this does NOT touch the ``generating`` session flag and
+        does NOT call _broadcast('done') — a manual KV op must not disrupt ongoing
+        streaming state.
+        """
+        action = data.get('action', '')
+        instance_name = data.get('instance_name') or self.session['session_name']
+
+        if action == 'save':
+            result = await asyncio.to_thread(
+                WsMessageHandler.do_save_kv, self.agent_pool, instance_name)
+        elif action == 'load':
+            result = await asyncio.to_thread(
+                WsMessageHandler.do_load_kv, self.agent_pool, instance_name)
+        else:
+            result = WsMessageHandler._kv_result(
+                action or 'unknown', instance_name, 'failed', 'bad_action',
+                "kv_state requires action 'save' or 'load'")
+
+        result['type'] = 'kv_state_result'
+        await self.broadcast_fn(result)
+        # Refresh instance state (kv_state_capable) after a successful op.
+        if result['status'] == 'ok':
+            await self._broadcast()
 
     async def handle_resume_all(self, data: dict) -> None:
         """Handle 'resume_all' — resume ALL paused instances."""

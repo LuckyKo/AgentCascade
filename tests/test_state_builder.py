@@ -339,3 +339,70 @@ def test_stream_token_stats_empty_partial_is_zero():
         'r_stats must be zero when there is no streaming partial; got %r' % r_stats
     )
     assert h_stats['tokens'] + r_stats['tokens'] == get_history_stats(committed)['tokens']
+
+
+# ── Manual KV Save/Load buttons: kv_state_capable field (todo #109, BUILD) ───
+# The field reflects the PER-ENDPOINT state_save_enabled capability ONLY, never the
+# global state_kv_save_enabled automatic-checkpoint toggle (off in the live config).
+# Both serialization sites (_serialize_instance, get_agent_state_from_pool) route
+# through the single _kv_capable helper to prevent the two-blocks drift trap.
+
+_CAPABLE_EP = {'state_save_enabled': True, 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'm'}
+_NONCAP_EP = {'state_save_enabled': False, 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'm'}
+
+
+def _mk_inst(endpoint):
+    inst = MagicMock()
+    inst.instance_name = 'agent-1'
+    inst.agent_class = 'assistant'
+    inst._state_lock = threading.RLock()
+    inst._compression_lock = threading.RLock()
+    inst.conversation = []
+    inst._last_endpoint_config = endpoint
+    return inst
+
+
+def _mk_pool(inst):
+    pool = MagicMock()
+    pool.get_instance = lambda name: inst if name == inst.instance_name else None
+    pool.is_instance_halted = lambda name: False
+    pool.has_messages = lambda name: False
+    pool.get_queue_messages = lambda name: []
+    return pool
+
+
+class TestKvStateCapableField:
+
+    def test_kv_capable_predicate_true(self):
+        from agent_cascade.api_integration_pkg import state_builder
+        inst = _mk_inst(_CAPABLE_EP)
+        assert state_builder._kv_capable(inst) is True
+
+    def test_kv_capable_predicate_false_and_none(self):
+        from agent_cascade.api_integration_pkg import state_builder
+        assert state_builder._kv_capable(_mk_inst(_NONCAP_EP)) is False
+        assert state_builder._kv_capable(_mk_inst(None)) is False
+
+    def test_get_agent_state_includes_capable_true(self):
+        from agent_cascade.api_integration_pkg import state_builder
+        inst = _mk_inst(_CAPABLE_EP)
+        out = state_builder.get_agent_state_from_pool(_mk_pool(inst), 'agent-1')
+        assert 'kv_state_capable' in out
+        assert out['kv_state_capable'] is True
+
+    def test_get_agent_state_includes_capable_false(self):
+        from agent_cascade.api_integration_pkg import state_builder
+        inst = _mk_inst(_NONCAP_EP)
+        out = state_builder.get_agent_state_from_pool(_mk_pool(inst), 'agent-1')
+        assert 'kv_state_capable' in out
+        assert out['kv_state_capable'] is False
+
+    def test_serialize_instance_includes_capable(self):
+        """Close the drift trap directly: _serialize_instance output carries the field."""
+        from agent_cascade.api_integration_pkg import state_builder
+        for endpoint, expected in ((_CAPABLE_EP, True), (_NONCAP_EP, False)):
+            inst = _mk_inst(endpoint)
+            pool = _mk_pool(inst)
+            out = state_builder._serialize_instance(inst, pool)
+            assert 'kv_state_capable' in out
+            assert out['kv_state_capable'] is expected

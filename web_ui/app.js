@@ -541,6 +541,12 @@ const sendBtn = $('#sendBtn');
 const continueBtn = $('#continueBtn');
 const stopBtn = $('#stopBtn');
 const pauseBtn = $('#pauseBtn');
+const saveKvBtn = $('#saveKvBtn');
+const loadKvBtn = $('#loadKvBtn');
+// Shared KV in-flight flag — declared HERE (module scope, before every use in
+// Steps 8/9/10). `let` is TDZ-bound: declaring it later (e.g. at the handler
+// block ~:5720) would throw when updateControls (~:4922) reads it first.
+let kvOpInFlight = false;
 const resetBtn = $('#resetBtn');
 const agentSelect = $('#agentSelect');
 const sessionNameInput = $('#sessionName');
@@ -2644,6 +2650,20 @@ function handleServerMessage(data) {
       } else if (verdict === 'YES') {
           // For YES verdicts, trigger UI update to display security response box
           renderApprovals();
+      }
+      break;
+    }
+
+    case 'kv_state_result': {
+      // Manual KV save/load outcome — statusText is recomputed on every state frame
+      // (app.js:5013) so transient results go to the persistent toast bar instead.
+      kvOpInFlight = false;
+      if (saveKvBtn) { saveKvBtn.disabled = false; if (saveKvBtn.textContent.startsWith('⏳')) saveKvBtn.textContent = saveKvBtn.dataset.kvLabel; }
+      if (loadKvBtn) { loadKvBtn.disabled = false; if (loadKvBtn.textContent.startsWith('⏳')) loadKvBtn.textContent = loadKvBtn.dataset.kvLabel; }
+      if (data.status === 'ok') {
+        showInSystemToastBar(`✅ ${data.message} (${data.instance_name})`);
+      } else {
+        showInSystemToastBar(`⚠️ KV ${data.action}: ${data.message}`);
       }
       break;
     }
@@ -5024,6 +5044,20 @@ function updateControls() {
     terminateBtn.style.display = isInstanceActive ? 'inline-flex' : 'none';
   }
 
+  // KV Save/Load buttons — visible only when the active instance is KV-capable.
+  // Capability comes from the backend per-instance field (state_builder kv_state_capable),
+  // which reflects the per-endpoint state_save_enabled flag ONLY — not the global
+  // state_kv_save_enabled automatic-checkpoint toggle (which is off in this deployment).
+  const kvCapable = !!activeAgentData?.kv_state_capable;
+  if (saveKvBtn && loadKvBtn) {
+    saveKvBtn.style.display = kvCapable ? 'inline-flex' : 'none';
+    loadKvBtn.style.display = kvCapable ? 'inline-flex' : 'none';
+    saveKvBtn.disabled = kvOpInFlight;
+    // Load refuses server-side while another agent HOLDS the endpoint (D5 guard);
+    // client-side we additionally disable it while generating (D5).
+    loadKvBtn.disabled = kvOpInFlight || !!state.generating;
+  }
+
   chatInput.placeholder = state.generating
     ? 'Inject a message into the active agent...'
     : 'Send a message...';
@@ -5717,6 +5751,23 @@ if (terminateBtn) {
     }
   });
 }
+
+// Manual KV state save/load (active tab's instance — same targeting as terminate)
+function sendKvState(action) {
+  if (kvOpInFlight) return;
+  const activeInstance = getActiveInstanceName();
+  if (!activeInstance) return;
+  kvOpInFlight = true;
+  const btn = action === 'save' ? saveKvBtn : loadKvBtn;
+  btn.dataset.kvLabel = btn.textContent;  // single source of truth: capture the LIVE label before overwriting
+  btn.textContent = action === 'save' ? '⏳ Saving…' : '⏳ Loading…';
+  btn.disabled = true;
+  // Safety timeout so a lost result frame can't strand the button (Step 10 clears it on arrival).
+  setTimeout(() => { if (kvOpInFlight) { kvOpInFlight = false; btn.textContent = btn.dataset.kvLabel; btn.disabled = false; } }, 180000);
+  send({ type: 'kv_state', action, instance_name: activeInstance });
+}
+if (saveKvBtn) saveKvBtn.addEventListener('click', () => sendKvState('save'));
+if (loadKvBtn) loadKvBtn.addEventListener('click', () => sendKvState('load'));
 
 const onRetryClick = () => {
   // Invalidate ALL panel caches to force full re-render

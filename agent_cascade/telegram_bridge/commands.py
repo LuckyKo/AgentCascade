@@ -236,6 +236,29 @@ async def _cmd_restore(ctx: CommandContext) -> str:
     return f"📂 Restored session '{name}'"
 
 
+def _kv_reply(result: Dict[str, Any]) -> str:
+    """Surface the server's structured kv_state ``message`` verbatim.
+
+    The REST/WS core (``do_save_kv``/``do_load_kv``) already words every outcome —
+    success, ``not_capable``, ``busy``, ``save_failed`` — so Telegram adds no
+    capability UI of its own, just an icon prefix.
+    """
+    msg = result.get('message') if isinstance(result, dict) else None
+    return msg or 'no result message returned'
+
+
+async def _cmd_savekv(ctx: CommandContext) -> str:
+    """Save KV state: /savekv [instance-name] (omitted = current session instance)."""
+    result = await ctx.ac.save_kv(ctx.args.strip() or None)
+    return f'💾 {_kv_reply(result)}'
+
+
+async def _cmd_loadkv(ctx: CommandContext) -> str:
+    """Load saved KV state: /loadkv [instance-name] (omitted = current session instance)."""
+    result = await ctx.ac.load_kv(ctx.args.strip() or None)
+    return f'📥 {_kv_reply(result)}'
+
+
 # ---------------------------------------------------------------------------
 # Registry — adding a command is one entry here.
 # ---------------------------------------------------------------------------
@@ -251,6 +274,8 @@ COMMANDS: Dict[str, CommandHandler] = {
         CommandHandler('afk', 'Toggle AFK (auto-reject approvals + idle auto-reply): /afk on|off', _cmd_afk),
         CommandHandler('security', 'Toggle auto-ask security: /security on|off', _cmd_security),
         CommandHandler('restore', 'Restore a saved session: /restore <name>', _cmd_restore),
+        CommandHandler('savekv', 'Save KV state of an agent: /savekv [instance-name]', _cmd_savekv),
+        CommandHandler('loadkv', 'Load saved KV state: /loadkv [instance-name]', _cmd_loadkv),
         CommandHandler('help', 'List all commands (alias: /?)', _cmd_help),
     ]
 }

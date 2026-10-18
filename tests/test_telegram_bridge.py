@@ -1135,7 +1135,7 @@ def _cmd_ac(**overrides):
     """
     ac = MagicMock()
     for m in ('inject_message', 'reset', 'approve', 'reject', 'stop', 'restart',
-              'set_auto_security', 'set_afk', 'restore_session'):
+              'set_auto_security', 'set_afk', 'restore_session', 'save_kv', 'load_kv'):
         setattr(ac, m, AsyncMock(return_value={}))
     # ensure_token is async and returns (token, shared_secret).
     ac.ensure_token = AsyncMock(return_value=('tok_test', b'secret'))
@@ -1175,7 +1175,9 @@ def test_parse_command_shapes():
 
 def test_registry_contains_v1_command_set():
     expected = {'new', 'status', 'yes', 'no', 'stop', 'restart',
-                'afk', 'security', 'restore', 'help'}
+                'afk', 'security', 'restore', 'help',
+                # Added by the manual Save/Load KV buttons (todo #109).
+                'savekv', 'loadkv'}
     assert set(COMMANDS) == expected
     # Every handler has a non-empty description (used by /help).
     for name, cmd in COMMANDS.items():
@@ -1194,6 +1196,10 @@ def test_registry_contains_v1_command_set():
     ('/afk on 300', 'set_afk', call(True)),
     ('/afk off', 'set_afk', call(False)),
     ('/restore mysession', 'restore_session', call('mysession')),
+    ('/savekv', 'save_kv', call(None)),
+    ('/savekv agent-2', 'save_kv', call('agent-2')),
+    ('/loadkv', 'load_kv', call(None)),
+    ('/loadkv agent-2', 'load_kv', call('agent-2')),
 ])
 def test_command_calls_right_client_method(text, method, expected):
     """Each registered command routes to the correct ACClient method with right args."""
@@ -1438,6 +1444,29 @@ def test_cmd_afk_ignores_legacy_seconds_token():
     assert len(sent) == 1
 
 
+def test_kv_commands_surface_server_message_verbatim():
+    """Telegram adds NO capability UI of its own — the structured kv_state ``message``
+    from the REST response is relayed as the reply (success AND refusal paths), so the
+    wording can never drift between the Web UI and the bridge."""
+    cases = [
+        ('/savekv', 'save_kv',
+         {'status': 'ok', 'action': 'save', 'instance_name': 'Maine', 'reason': '',
+          'message': 'KV state saved'}),
+        ('/loadkv agent-2', 'load_kv',
+         {'status': 'failed', 'action': 'load', 'instance_name': 'agent-2',
+          'reason': 'busy', 'message': 'Another agent (worker1) currently holds this endpoint'}),
+    ]
+    for text, method, payload in cases:
+        ac = _cmd_ac(**{method: AsyncMock(return_value=payload)})
+        update, context, ac, sent = _cmd_context(text, ac=ac)
+        _run(on_message(update, context))
+        getattr(ac, method).assert_awaited_once()
+        assert len(sent) == 1
+        assert payload['message'] in sent[0], \
+            f"the server's message must be surfaced verbatim: {sent}"
+        ac.inject_message.assert_not_called()
+
+
 def test_non_command_slash_text_falls_through_to_inject():
     """Regression: unregistered '/...' text falls through to inject_message with
     the original text (no "Unknown command" reply)."""
@@ -1494,6 +1523,7 @@ def test_every_registered_command_never_injects():
         'new': '/new', 'status': '/status', 'yes': '/yes', 'no': '/no',
         'stop': '/stop', 'restart': '/restart', 'help': '/help', '?': '/?',
         'afk': '/afk on 300', 'security': '/security off', 'restore': '/restore s1',
+        'savekv': '/savekv', 'loadkv': '/loadkv agent-2',
     }
     for name, text in texts.items():
         update, context, ac, sent = _cmd_context(text)

@@ -1226,6 +1226,23 @@ def _prefix_cache_store(name: str, prefix_key: tuple, cut_point: int, committed_
     }
 
 
+def _kv_capable(inst) -> bool:
+    """Per-instance KV capability for the manual Save/Load buttons.
+
+    Thin, lock-safe, never-raises predicate: reflects the per-endpoint ``state_save_enabled``
+    capability flag ONLY — deliberately NOT gated on the global ``state_kv_save_enabled``
+    automatic-checkpoint toggle (which is off in the live deployment). An instance that
+    has never allocated an endpoint (``_last_endpoint_config`` is None) is simply not capable.
+    """
+    try:
+        from agent_cascade.state_ops import is_state_save_capable
+        with inst._state_lock:
+            cfg = inst._last_endpoint_config
+        return is_state_save_capable(cfg)  # already isinstance-checks and returns bool
+    except Exception:
+        return False
+
+
 def _serialize_instance(
     inst: AgentInstance,
     pool: AgentPool,
@@ -1263,6 +1280,9 @@ def _serialize_instance(
         'queued_messages': pool.get_queue_messages(inst.instance_name) if pool else [],
         # Include is_waiting so ActivityBar can show "Waiting for API slot..."
         'is_waiting': _check_is_waiting(pool, inst.instance_name),
+        # KV manual-save capability for the Save/Load buttons (capability only —
+        # deliberately NOT gated on the state_kv_save_enabled automatic-checkpoint toggle).
+        'kv_state_capable': _kv_capable(inst),
     }
 
     if not include_messages:
@@ -1718,4 +1738,7 @@ def get_agent_state_from_pool(
         'queued_messages': pool.get_queue_messages(instance_name) if pool else [],
         'compression_summary': instance.compression_summary,
         'message_count': msg_count,
+        # KV manual-save capability for the Save/Load buttons (same helper/semantics as
+        # _serialize_instance — kept identical to prevent the two-blocks drift trap).
+        'kv_state_capable': _kv_capable(instance),
     }

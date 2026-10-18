@@ -64,7 +64,7 @@ def kv_save_effectively_enabled(instance: 'AgentInstance', toggle: bool) -> bool
     return bool(getattr(instance, '_safe_mode_kv', False))
 
 
-def save_instance_state(instance: 'AgentInstance') -> bool:
+def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bool:
     """Save KV cache state for an instance.
 
     Uses cached endpoint config from the instance (set during endpoint allocation),
@@ -72,9 +72,15 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
 
     Args:
         instance: AgentInstance to save state for.
+        set_label: When True (default — every existing caller), store the label on
+            the instance, arming the automatic next-turn restore. When False (the
+            manual user-initiated path), perform the save but do NOT touch
+            _state_label: the KV stays warm and no automatic restore is scheduled.
+            The saved FILE still exists under the stable label and can be loaded
+            explicitly via restore_held_slot_state(..., label=instance_name).
 
     Returns:
-        True if state was saved and label stored, False otherwise.
+        True if state was saved (and label stored when set_label is True), False otherwise.
     """
     try:
         with instance._state_lock:
@@ -97,9 +103,12 @@ def save_instance_state(instance: 'AgentInstance') -> bool:
 
         label = save_state(api_base, model, instance.instance_name)
         if label:
-            with instance._state_lock:
-                instance._state_label = label
-            logger.debug('Saved state %s for instance %s', label, instance.instance_name)
+            if set_label:
+                with instance._state_lock:
+                    instance._state_label = label
+            logger.debug('Saved state %s for instance %s (label %s)',
+                         label, instance.instance_name,
+                         'stored' if set_label else 'not stored')
             return True
 
         logger.debug('State save returned no label for %s', instance.instance_name)

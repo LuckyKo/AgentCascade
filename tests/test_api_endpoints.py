@@ -25,6 +25,14 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Session name the module-scoped ``test_app`` fixture configures — fixture single
+# source only. Tests that depend on the CURRENT session name must NOT assume this
+# value: the session dict is shared mutable state and other test classes rename it
+# (session restore sets 'restored'; GET /api/state reports a root-instance-derived
+# name, not session['session_name']). Deterministic tests set the name themselves,
+# e.g. via the WS 'set_session_name' frame.
+TEST_SESSION_NAME = 'TestSession'
+
 from agent_cascade.instance_id import make_instance_dir
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -172,7 +180,7 @@ def test_app(mock_llm_server):
     orchestrator = load_orchestrator_agent(pool, llm_cfg)
     agents = [orchestrator]
 
-    app = create_app(agents=agents, agent_pool=pool, config={'session_name': 'TestSession'})
+    app = create_app(agents=agents, agent_pool=pool, config={'session_name': TEST_SESSION_NAME})
     return app
 
 
@@ -1534,6 +1542,122 @@ class TestAuthenticatedCommandEndpoints:
         loaded_path, target = fake.restore_calls[0]
         assert Path(loaded_path).name == 'orchestrator_restored_20260101_000000.jsonl'
         assert target == 'restored'
+
+
+# ── Manual KV Save/Load REST endpoints (todo #109, BUILD phase) ──────────────
+# Patch target MUST be agent_cascade.ws_handlers.WsMessageHandler.do_save_kv —
+# api_server.py imports the class itself (api_server.py:488) and calls it as a
+# class attribute, so patching a name in agent_cascade.api_server would be vacuous.
+
+
+class TestKvStateEndpoints:
+    """Token-gated POST /api/state/save|load — mirror of the WS 'kv_state' path."""
+
+    def _token(self, client):
+        return _do_handshake(client)[0]
+
+    # ── /api/state/save ────────────────────────────────────────────────────
+
+    def test_state_save_401_without_token(self, client):
+        """POST /api/state/save with a bad token returns 401."""
+        assert client.post('/api/state/save', params={'token': 'bad'}).status_code == 401
+
+    def test_state_save_401_missing_token(self, client):
+        """POST /api/state/save with no token returns 401."""
+        assert client.post('/api/state/save').status_code == 401
+
+    def test_state_save_honors_instance_name(self, client):
+        """Valid token → routes through the shared do_save_kv with body instance_name."""
+        from unittest.mock import patch
+        token = self._token(client)
+        with patch('agent_cascade.ws_handlers.WsMessageHandler.do_save_kv') as m_save:
+            m_save.return_value = {'status': 'ok', 'action': 'save',
+                                   'instance_name': 'agent-7', 'reason': '', 'message': 'KV state saved'}
+            resp = client.post('/api/state/save', params={'token': token},
+                               json={'instance_name': 'agent-7'})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['status'] == 'ok'
+        args, kwargs = m_save.call_args
+        assert args[1] == 'agent-7'
+        assert body['instance_name'] == 'agent-7'
+
+    def test_state_save_defaults_to_session_name(self, client_no_exceptions):
+        """No body → instance_name falls back to the live session name (not a crash).
+
+        Self-contained: the name is set deterministically via the public WS
+        'set_session_name' frame, which writes exactly the shared
+        ``session['session_name']`` the route reads when instance_name is omitted.
+        The shared session dict is mutated by other test classes (session restore
+        renames it), so neither the fixture's configured name nor any snapshot read
+        is a stable expectation across xdist orderings — the setter IS the state.
+        """
+        from unittest.mock import patch
+        token = self._token(client_no_exceptions)
+        expected = 'RenamedForFallbackTest'
+        with client_no_exceptions.websocket_connect('/ws/chat', timeout=5.0) as ws:
+            ws.receive_json()  # initial state frame
+            ws.send_json({'type': 'set_session_name', 'name': expected})
+            ws.receive_json()  # post-rename state frame
+        with patch('agent_cascade.ws_handlers.WsMessageHandler.do_save_kv') as m_save:
+            m_save.return_value = {'status': 'failed', 'action': 'save',
+                                   'instance_name': expected, 'reason': 'no_instance',
+                                   'message': 'Instance not found'}
+            resp = client_no_exceptions.post('/api/state/save', params={'token': token})
+        assert resp.status_code == 200
+        args, kwargs = m_save.call_args
+        assert args[1] == expected
+
+    def test_state_save_structured_failure_not_500(self, client):
+        """Non-capable → 200 with structured failure (not a 500)."""
+        from unittest.mock import patch
+        token = self._token(client)
+        with patch('agent_cascade.ws_handlers.WsMessageHandler.do_save_kv') as m_save:
+            m_save.return_value = {'status': 'failed', 'action': 'save',
+                                   'instance_name': 'agent-1', 'reason': 'not_capable',
+                                   'message': 'KV state saving is not available'}
+            resp = client.post('/api/state/save', params={'token': token},
+                               json={'instance_name': 'agent-1'})
+        assert resp.status_code == 200
+        assert resp.json()['reason'] == 'not_capable'
+
+    # ── /api/state/load ────────────────────────────────────────────────────
+
+    def test_state_load_401_without_token(self, client):
+        """POST /api/state/load with a bad token returns 401."""
+        assert client.post('/api/state/load', params={'token': 'bad'}).status_code == 401
+
+    def test_state_load_401_missing_token(self, client):
+        """POST /api/state/load with no token at all returns 401 (plan 4.4: same pair)."""
+        assert client.post('/api/state/load').status_code == 401
+
+    def test_state_load_honors_instance_name(self, client):
+        """Valid token → routes through the shared do_load_kv with body instance_name."""
+        from unittest.mock import patch
+        token = self._token(client)
+        with patch('agent_cascade.ws_handlers.WsMessageHandler.do_load_kv') as m_load:
+            m_load.return_value = {'status': 'ok', 'action': 'load',
+                                   'instance_name': 'agent-7', 'reason': '', 'message': 'KV state loaded'}
+            resp = client.post('/api/state/load', params={'token': token},
+                               json={'instance_name': 'agent-7'})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['status'] == 'ok'
+        args, kwargs = m_load.call_args
+        assert args[1] == 'agent-7'
+
+    def test_state_load_structured_busy_not_500(self, client):
+        """Ownership-guard refusal → 200 with structured busy (not a 500)."""
+        from unittest.mock import patch
+        token = self._token(client)
+        with patch('agent_cascade.ws_handlers.WsMessageHandler.do_load_kv') as m_load:
+            m_load.return_value = {'status': 'failed', 'action': 'load',
+                                   'instance_name': 'agent-1', 'reason': 'busy',
+                                   'message': 'Another agent currently holds this endpoint'}
+            resp = client.post('/api/state/load', params={'token': token},
+                               json={'instance_name': 'agent-1'})
+        assert resp.status_code == 200
+        assert resp.json()['reason'] == 'busy'
 
 
 class _MISSING:

@@ -211,6 +211,21 @@ class ACClient:
         """POST /api/stop (session_token)."""
         return await self._token_post('/api/stop', {})
 
+    async def save_kv(self, instance_name: str = None) -> Dict[str, Any]:
+        """POST /api/state/save (session_token) — manual KV-state save.
+
+        Mirrors the Web UI's Save button: same core (``do_save_kv``), same structured
+        result dict (``status``/``reason``/``message``). ``instance_name`` is optional —
+        the server falls back to the current session instance when omitted.
+        """
+        return await self._token_post('/api/state/save',
+                                      {'instance_name': instance_name} if instance_name else {})
+
+    async def load_kv(self, instance_name: str = None) -> Dict[str, Any]:
+        """POST /api/state/load (session_token) — manual KV-state load."""
+        return await self._token_post('/api/state/load',
+                                      {'instance_name': instance_name} if instance_name else {})
+
     async def restart(self) -> Dict[str, Any]:
         """POST /api/restart (session_token). The AC process exits right after replying.
 
