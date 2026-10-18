@@ -184,7 +184,7 @@ SKILL_ADVISOR_PROMPT = (
     'Caller: {caller_name}\n'
     'Task: {task_text}\n'
     'Context: {context_text}\n\n'
-    '## AVAILABLE SKILLS (ordered by quality rating, highest first; unrated skills last):\n'
+    '## MOST RELEVANT SKILLS (ordered by quality rating, highest first; unrated skills last):\n'
     'Ratings are advisory signals only — relevance to the task still decides which skills to pick.\n'
     '{skills_metadata}\n{overflow_note}\n'
     '## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n'
