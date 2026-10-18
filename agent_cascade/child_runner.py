@@ -62,22 +62,23 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
     return (stop_flag or was_manual_halt), was_terminated
 
 
-def _resolve_child_log_path(pool, instance_name: str) -> str:
+def _resolve_child_log_path(pool, instance_name: str) -> tuple[str, bool]:
     """Best-effort resolve a child's JSONL log file path.
 
     Uses the same source of truth as list_agents / dismiss (pool.instance_loggers), so the
-    parent can reload the child from the exact file dismiss_agent would have listed. Falls
-    back to a searchable hint when the logger cannot be resolved.
+    parent can reload the child from the exact file dismiss_agent would have listed. Returns
+    ``(path, is_exact)``; when the logger cannot be resolved, ``is_exact`` is False and the
+    path is a searchable hint (the caller keeps that line last so truncation drops it first).
     """
     try:
         loggers = getattr(pool, 'instance_loggers', None)
         if loggers and hasattr(loggers, 'get'):
             logger_inst = loggers.get(instance_name)
             if logger_inst and getattr(logger_inst, 'log_path', None):
-                return str(logger_inst.log_path)
+                return (str(logger_inst.log_path), True)
     except Exception:
         pass
-    return f"logs/ (search for '{instance_name}' in AgentWorkspace/logs/)"
+    return (f"logs/ (search for '{instance_name}' in AgentWorkspace/logs/)", False)
 
 
 def _last_step_hint(conv, instance_name: str) -> str:
@@ -192,13 +193,23 @@ def _failure_detail(pool, instance_name: str, inst, conv, reason: str) -> str:
 
     The base message stays an exact prefix (so callers and `match=` assertions keep working);
     this is only additional recoverable context the parent can act on.
+
+    Line order is truncation-aware: async_tools.py delivers this through
+    error_reporting.format_crash, which collapses newlines and cuts at MAX_MSG_CHARS=160.
+    Reason comes first (always survives), then the last-step hint, and the log path LAST so a
+    truncated parent still sees the cause + partial work before losing the recovery pointer.
     """
-    log_path = _resolve_child_log_path(pool, instance_name)
+    reason_line = f'Reason: {reason}'[:200]
     step = _last_step_hint(conv, instance_name)
-    lines = [f'Reason: {reason}']
+    lines = [reason_line]
     if step:
         lines.append(f'Last completed step: {step}')
-    lines.append(f'Recover the child from its log: {log_path}')
+    log_path, is_exact = _resolve_child_log_path(pool, instance_name)
+    if is_exact:
+        lines.append(f'Recover the child from its log: {log_path}')
+    else:
+        # Unresolvable path — keep it short and last so truncation drops it first.
+        lines.append(f'Child log: search logs/ for "{instance_name}"')
     return '\n'.join(lines)
 
 

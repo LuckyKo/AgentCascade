@@ -362,6 +362,35 @@ class TestChildAgentFailedError:
         assert 'Last completed step:' in msg
         assert 'reviewed files A and B' in msg
 
+    def test_failure_detail_survives_format_crash_truncation(self):
+        """BUG_0083 end-to-end: async_tools.py delivers the failure through
+        error_reporting.format_crash, which collapses newlines and cuts at MAX_MSG_CHARS=160.
+        The parent must still see Reason + last-step after that truncation (the log pointer is
+        deliberately ordered last so it is what gets dropped)."""
+        from agent_cascade.child_runner import ChildAgentFailedError, _failure_detail
+        from agent_cascade.error_reporting import format_crash
+
+        pool = MagicMock()
+        fake_logger = MagicMock()
+        fake_logger.log_path = 'N:\\work\\WD\\AgentWorkspace\\logs\\coder_child1_2026.jsonl'
+        pool.instance_loggers = {'child1': fake_logger}
+        conv = [{'role': 'assistant', 'content': 'reviewed files A and B, no issues found'}]
+
+        err = ChildAgentFailedError(
+            "Sub-agent 'child1' was terminated.\n"
+            + _failure_detail(pool, 'child1', None, conv,
+                              reason='hit its turn budget (reached turn 2 of 2).'))
+        delivered = format_crash(err)
+
+        # format_crash renders "{Type}: {msg}" where msg = _clean_text(str(e), MAX_MSG_CHARS).
+        # _clean_text appends a '…' sentinel when it truncates (160 + 1 chars), and the
+        # "Type: " prefix sits outside that budget — so the bound is prefix + 161.
+        assert len(delivered) <= len('ChildAgentFailedError: ') + 161
+        # Cause + partial work survive the cut; only the recovery pointer may be dropped.
+        assert 'Reason:' in delivered
+        assert 'turn budget' in delivered
+        assert 'Last completed step:' in delivered
+
     def test_parent_receives_background_tool_error_marker(self, mock_pool):
         """When a tool raises ChildAgentFailedError, the parent gets [Background Tool Error]."""
         from agent_cascade.child_runner import ChildAgentFailedError
