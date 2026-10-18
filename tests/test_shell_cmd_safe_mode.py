@@ -174,8 +174,11 @@ def _seam_patches(order, *, save=True, unload=True, restore=True, popen=True,
         stack.enter_context(patch(
             'agent_cascade.state_ops.restore_held_slot_state',
             # Production now passes label=instance.instance_name; accept **kw so the
-            # order-recorder stub stays in lockstep with the real signature.
-            side_effect=restore_factory or (lambda p, i, n, **kw: order.append('restore'))))
+            # order-recorder stub stays in lockstep with the real signature. The stub also
+            # returns True: _execute_safe reads the result to write an HONEST [safe] note,
+            # so a stub that returned None would make every note claim a failed
+            # restore. Mirror the real helper's success return, not its call order alone.
+            side_effect=restore_factory or (lambda p, i, n, **kw: (order.append('restore'), True)[1])))
     if popen:
         stack.enter_context(patch(
             'agent_cascade.operation_manager.shell.subprocess.Popen',
@@ -682,3 +685,107 @@ class TestSafeStableLabelRestore:
         assert restore_calls == ['agent-1'], \
             f'safe mode must issue a state/load despite the toggle being off: {restore_calls}'
         assert 'KV state restored after' in result  # no cold-reload branch anymore
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 19. A FAILED save must not be followed by a restore: loading a ~56-minute-old
+#     snapshot would report success against stale KV. The unload still happens:
+#     RAM was the trigger, and memory safety wins over KV preservation.
+#     The [safe] note must likewise describe what actually ran — never claim a
+#     restore that did not run or did not succeed.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestSaveFailureGate:
+    def test_failed_save_skips_restore_and_note_says_no_restore(self):
+        """save_instance_state returns False → no restore, and the note says so."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        def _save_fails(i):
+            order.append('save')
+            return False  # save timed out / returned non-200
+
+        with _seam_patches(order, save_factory=_save_fails,
+                          restore_factory=lambda p, i, n, **kw: order.append('restore')):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert order == ['save', 'approval', 'unload', 'run'], \
+            f'no restore may run after a failed save: {order}'
+        assert 'KV state restored after' not in result, \
+            'must not claim a restore that never ran'
+        assert 'KV state save failed, no restore attempted' in result
+
+    def test_successful_save_still_restores(self):
+        """Unchanged happy path: a real save → the stable-label restore still runs."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        with _seam_patches(order):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert order == ['save', 'approval', 'unload', 'run', 'restore']
+        assert 'KV state restored after' in result
+
+    def test_advisor_path_is_not_gated_on_the_tools_own_save(self):
+        """auto_security=True → the tool never saved (saved stays False), but the
+        ADVISOR owns the save on the same label and its state FILE survives, so the
+        stable-label restore must still run (the P1 fix must not regress)."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=True,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        with _seam_patches(order):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert 'save' not in order  # save suppressed: the advisor owns the KV
+        assert order == ['approval', 'unload', 'run', 'restore']
+        assert 'KV state restored after' in result
+
+    def test_restore_ran_but_failed_note_says_cold(self):
+        """restore_held_slot_state returns False (file absent / endpoint moved) →
+        the note must NOT claim a restore."""
+        order = []
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False,
+                              api_router=_router_held(CAPABLE_EP['api_base'], CAPABLE_EP['model']))
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        with _seam_patches(order, restore_factory=lambda p, i, n, **kw: (order.append('restore'), False)[1]):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert order == ['save', 'approval', 'unload', 'run', 'restore']
+        assert 'KV state restored after' not in result
+        assert 'KV state could NOT be restored' in result
+
+    def test_not_capable_no_note_at_all(self):
+        """Nothing was unloaded → no [safe] note whatsoever (case c)."""
+        order = []
+        inst = _make_instance(endpoint={'state_save_enabled': False,
+                                        'api_base': 'http://127.0.0.1:1234/v1', 'model': 'test-model'})
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        with _seam_patches(order):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert 'unload' not in order
+        assert not result.startswith('[safe]')

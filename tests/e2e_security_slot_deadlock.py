@@ -466,3 +466,82 @@ def test_skip_path_logs_diagnostics(slot_harness):
     # Slot is free, so the Security agent should NOT deadlock.
     assert not acquire_timeout, (
         f"[UNEXPECTED DEADLOCK] Slot was free but the Security agent still timed out.\n{report}")
+
+
+# ── Test 4: the safe-mode window must defer the advisor's KV restore ──────────
+#
+# The finally-block call site reads the caller's _safe_mode_kv flag (armed by shell_cmd
+# safe mode before the approval window) and passes skip_kv_restore to the shared helper.
+# The helper itself is unit-tested in tests/test_state_restore_slot_gate.py::TestSafeModeRestoreDeferral;
+# here we only pin the WIRING, so the engine stays a MagicMock.
+
+
+def test_safe_mode_window_passes_skip_kv_restore_true(slot_harness):
+    """Caller armed _safe_mode_kv (a shell_cmd safe window) → the finally must pass
+    skip_kv_restore=True so the advisor re-acquires its slot WITHOUT restoring the
+    parent's KV inside the approval window (that restore raced the tool's unload and
+    cold-reloaded a multi-GB model mid-command)."""
+    h = slot_harness
+    caller = h['caller']
+    ap = {
+        'request_id': 'rid_safe_mode',
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
+    }
+
+    # shell_cmd sets this BEFORE the approval window and clears it only in its finally.
+    caller._safe_mode_kv = True
+
+    records, handler_log, targets = _capture_logs()
+    try:
+        engine_instance = _run_execute_check(h['handler'], ap, 'rid_safe_mode', 'caller')
+    finally:
+        _restore_logs(handler_log, targets)
+
+    report = _diagnostic_report(records, h['shared'], 'caller')
+    print('\n' + report)
+
+    calls = engine_instance.reacquire_after_slot_yield.call_args_list
+    assert calls, f'reacquire_after_slot_yield must still run in the finally.\n{report}'
+    targeted = [c for c in calls if c.args and c.args[0] is caller]
+    assert targeted, f'reacquire must target the caller instance.\n{report}'
+    assert all((c.kwargs or {}).get('skip_kv_restore') is True for c in targeted), (
+        'a safe-mode window must defer the advisor KV restore: '
+        f'{[dict(c.kwargs or {}) for c in targeted]}\n{report}')
+
+
+def test_plain_security_check_keeps_advisor_restore(slot_harness):
+    """No _safe_mode_kv (an ordinary security check) → skip_kv_restore must be False,
+    i.e. the advisor's restore stays exactly as before."""
+    h = slot_harness
+    caller = h['caller']
+    ap = {
+        'request_id': 'rid_plain',
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
+    }
+
+    records, handler_log, targets = _capture_logs()
+    try:
+        engine_instance = _run_execute_check(h['handler'], ap, 'rid_plain', 'caller')
+    finally:
+        _restore_logs(handler_log, targets)
+
+    report = _diagnostic_report(records, h['shared'], 'caller')
+    print('\n' + report)
+
+    calls = engine_instance.reacquire_after_slot_yield.call_args_list
+    assert calls, f'reacquire_after_slot_yield must still run in the finally.\n{report}'
+    targeted = [c for c in calls if c.args and c.args[0] is caller]
+    assert targeted, f'reacquire must target the caller instance.\n{report}'
+    assert all((c.kwargs or {}).get('skip_kv_restore') is False for c in targeted), (
+        'outside a safe-mode window the advisor restore must stay enabled: '
+        f'{[dict(c.kwargs or {}) for c in targeted]}\n{report}')

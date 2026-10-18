@@ -669,8 +669,16 @@ class SecurityAdvisorHandler:
                     # the KV saved by save_before_slot_yield (only when a label is pending and
                     # we actually hold the slot). tolerate_failure=False preserves the existing
                     # raise-on-hard-failure sanction below.
+                    #
+                    # Inside a shell_cmd ``safe`` window the tool unloads the model right
+                    # before the command and restores by the stable label afterwards, so restoring
+                    # here would land inside the command window and race that unload (the autoloader
+                    # cold-reloads the model mid-command). _safe_mode_kv is set before execute_shell_command
+                    # and cleared only in the tool's finally AFTER this approval returns, so it is still
+                    # True here. Every other caller (plain security check) keeps the default False.
                     engine.reacquire_after_slot_yield(
-                        caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False)
+                        caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False,
+                        skip_kv_restore=bool(getattr(caller_inst_sec, '_safe_mode_kv', False)))
                 except SlotCancelled:
                     # A stop/dismiss cancelled the reacquire. This is EXPECTED, not a
                     # failure: the verdict was already delivered by _handle_result

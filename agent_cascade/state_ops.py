@@ -224,7 +224,10 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
         # Autoloader's _sanitize_label() strips \, /, .. to prevent path traversal.
         label = instance_name
         url = f"{base}/v1/models/{model}/state/save"
-        resp = httpx.post(url, json={'label': label}, timeout=30)
+        # Must exceed the autoloader's own 120 s slot-action budget: the shortest timeout in the
+        # chain always wins, and a 30 s ceiling abandoned a multi-GB save that was still writing
+        # (leaving an orphan 1.4 GB .tmp, the save killed by the unload that followed it).
+        resp = httpx.post(url, json={'label': label}, timeout=180)
 
         if resp.status_code == 200:
             # Cleanup old states for this instance after successful save
@@ -243,7 +246,10 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
         base = _normalize_api_base(api_base)
 
         url = f"{base}/v1/models/{model}/state/load"
-        resp = httpx.post(url, json={'label': label}, timeout=30)
+        # A restore may have to cold-start the model first (autoloader load_state auto-loads
+        # before applying state), so 30 s is structurally too short: cold-starting a multi-GB
+        # model alone can take 30+ s, and the request is then abandoned with no state/load 200.
+        resp = httpx.post(url, json={'label': label}, timeout=180)
         if resp.status_code != 200:
             logger.debug('State restore returned status %d for label %s', resp.status_code, label)
         return resp.status_code == 200

@@ -2084,7 +2084,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             return False
 
     def reacquire_after_slot_yield(self, instance: AgentInstance, inst_name: str, context: str = '',
-                                   *, tolerate_failure: bool = False, respect_toggle: bool = True) -> bool:
+                                   *, tolerate_failure: bool = False, respect_toggle: bool = True,
+                                   skip_kv_restore: bool = False) -> bool:
         """Re-acquire the caller's slot after a system-agent yield and restore its KV.
 
         Shared re-acquire + restore for every ``yield_caller_slot`` production caller
@@ -2118,6 +2119,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 keep this default. The sync-child NORMAL-delegation path passes False so its warm-cache
                 restore ALWAYS runs regardless of the toggle (the save side is already ungated there, so
                 gating only the restore would drop a saved-but-never-restored state and force reprocess).
+            skip_kv_restore: When True, re-acquire the slot but DO NOT restore the KV. Used ONLY by the
+                shell_cmd ``safe`` approval window: the tool unloads the model immediately before the
+                command and restores by the stable label afterwards, so a restore here would land INSIDE
+                the command window and race that unload (the autoloader would cold-reload the model
+                mid-command). The pending label is still cleared, per the invariant that every skip
+                path must clear it. Default False — every existing caller is unchanged.
 
         Returns:
             True if the slot was re-acquired (restored or not), else False.
@@ -2166,6 +2173,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if instance._slot_release is None:
             # No-slot / unlimited endpoint — nothing to restore onto; clear any label so it
             # does not leak and re-trigger an expensive state/load on a later turn.
+            self._clear_orphaned_state_label(instance, inst_name)
+            return True
+        if skip_kv_restore:
+            # Safe-mode window only: the caller (shell_cmd ``safe``) owns the restore in its
+            # finally, AFTER the command, so restoring here would race the tool's unload and
+            # cold-reload the model inside the command window. Re-acquiring the slot is still
+            # required — only the restore is deferred. The label MUST be cleared: the tool's
+            # finally restores by the stable label, so a leaked _state_label would re-fire a
+            # redundant multi-GB restore at _setup_turn (see .agent_lessons/save-toggle-skip-path-label-clear.md).
+            logger.debug('[STATE_RESTORE_SKIP] %s — advisor KV restore deferred to the safe-mode '
+                         "tool's post-command restore (%s)", inst_name, context or 'slot-yield')
             self._clear_orphaned_state_label(instance, inst_name)
             return True
         if has_saved_state:

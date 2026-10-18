@@ -499,3 +499,63 @@ class TestSyncChildYieldReacquireGate:
 
         assert _recorded_load_urls(post_mock) == [], \
             'no state/load may fire when no save is pending (label gate)'
+
+
+# ============================================================================
+# Safe-mode deferral — the shell_cmd ``safe`` window owns the restore in
+# its own finally (after the command). Restoring inside the approval window
+# raced the tool's unload and cold-reloaded the model mid-command.
+# These tests drive the REAL helper with only the HTTP layer patched, so a
+# "skip" that still issued a state/load cannot pass.
+# ============================================================================
+
+
+class TestSafeModeRestoreDeferral:
+
+    def _fake_reacquire_ok(self):
+        def _reacquire(instance_arg, holder_name, context='reacquire'):
+            instance_arg._slot_release = lambda: None
+            instance_arg._slot_key = 'pool-x'
+            return True
+        return _reacquire
+
+    def test_skip_kv_restore_reacquires_but_never_loads_state(self):
+        """skip_kv_restore=True → the slot IS re-acquired (True returned) but ZERO
+        state/load requests fire, and the pending label is cleared so it cannot
+        re-fire a multi-GB restore at _setup_turn on a later turn."""
+        inst = make_instance()  # label='B' pending
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            with patch.object(engine, 'reacquire_for', side_effect=self._fake_reacquire_ok()):
+                ok = engine.reacquire_after_slot_yield(
+                    inst, inst.instance_name, 'after_security_check', skip_kv_restore=True)
+
+        assert ok is True, 'only the restore is deferred — the slot must still be re-acquired'
+        assert _recorded_load_urls(post_mock) == [], \
+            'skip_kv_restore must not issue a state/load inside the approval window'
+        with inst._state_lock:
+            assert inst._state_label is None, \
+                'the skip path must clear the pending label (save-toggle-skip-path-label-clear)'
+
+    def test_default_false_restore_still_fires(self):
+        """Regression guard: with the kwarg omitted (every existing caller) the restore
+        still runs against the HELD endpoint — behavior is byte-for-byte unchanged."""
+        inst = make_instance()
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            post_mock.return_value.status_code = 200
+            with patch.object(engine, 'reacquire_for', side_effect=self._fake_reacquire_ok()):
+                ok = engine.reacquire_after_slot_yield(
+                    inst, inst.instance_name, 'after_security_check')
+
+        assert ok is True
+        load_urls = _recorded_load_urls(post_mock)
+        assert len(load_urls) == 1, \
+            f'the default path must still restore exactly once: {load_urls}'
+        assert AUTOLOADER_X.rstrip('/') in load_urls[0] and 'model-A' in load_urls[0], \
+            f'default restore must target the held endpoint: {load_urls[0]}'

@@ -926,6 +926,13 @@ class ShellCmd(BaseTool):
         command, restore KV with no reprocessing. The per-instance ``_safe_mode_kv``
         override (set/cleared here) is ORed into the engine's save/restore gates via
         ``state_ops.kv_save_effectively_enabled``. The model-release (unload) is ungated.
+
+        A restore is only attempted when a fresh snapshot exists: if this call's own save
+        failed/timed out and no Security advisor owns the label, the post-command restore is
+        skipped (loading an arbitrarily old snapshot would silently replace a warm cache with
+        a stale one); RAM safety still wins, so the unload is not rolled back. The advisor
+        path keeps its stable-label restore — the advisor saved under the same label and the
+        state FILE survives.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -955,6 +962,7 @@ class ShellCmd(BaseTool):
                 instance._safe_mode_kv = True
 
         saved = freed = False
+        restored = False
         if capable and not advisor_will_run:
             from agent_cascade.state_ops import save_instance_state
             # Lock around the save to match ExecutionEngine.save_before_slot_yield: makes the
@@ -985,7 +993,7 @@ class ShellCmd(BaseTool):
             )
         finally:
             try:
-                if freed:
+                if freed and (saved or advisor_will_run):
                     # Model was released → restore KV to the endpoint we actually hold
                     # (never a stale _last_endpoint_config). Restore by the STABLE label
                     # (instance_name), not the consume-once _state_label: a system agent
@@ -994,8 +1002,16 @@ class ShellCmd(BaseTool):
                     # survives the load, so re-issuing state/load for the stable label
                     # re-warms the KV. Never raises.
                     from agent_cascade.state_ops import restore_held_slot_state
-                    restore_held_slot_state(pool, instance, agent_name,
-                                            label=instance.instance_name)
+                    restored = bool(restore_held_slot_state(pool, instance, agent_name,
+                                                            label=instance.instance_name))
+                elif freed:
+                    # The tool's own save FAILED or timed out, and no advisor owns the
+                    # label — there is nothing fresh to restore. Loading would apply an
+                    # arbitrarily old snapshot and report success against a stale snapshot. The unload still
+                    # happened: RAM was the trigger, and memory safety wins over KV
+                    # preservation. The KV is cold from here on; the next turn reprocesses.
+                    logger.warning('[shell_cmd] safe mode: state save failed — skipping the '
+                                   'post-command KV restore (no fresh snapshot to load)')
                 elif saved:
                     # We saved but never unloaded (e.g. rejected): clear the label we set so
                     # it can't re-fire an expensive load; the KV is still warm.
@@ -1007,11 +1023,22 @@ class ShellCmd(BaseTool):
                     with instance._state_lock:
                         instance._safe_mode_kv = False
 
-        # ── Notification: gated on `freed` alone. ──
+        # ── Notification: gated on `freed` alone, but HONEST about what happened. ──
         # Never emitted on REJECTED/ERROR/degraded results, since freed is only ever
-        # set inside before_execute, which is unreachable on the rejection path. Safe mode
-        # always restores KV (the override forces it on), so there is no cold-reload branch.
+        # set inside before_execute, which is unreachable on the rejection path. The KV
+        # half of the note is driven by what actually ran: the restore is skipped when the
+        # save failed and may itself fail, so claiming "KV state restored" unconditionally
+        # made the tool output contradict the autoloader log in both incident reports.
         note = ''
         if freed:
-            note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
+            if restored:
+                note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
+            elif saved or advisor_will_run:
+                # The restore ran but did not succeed (or was skipped because the held
+                # endpoint moved) — the KV is cold and the next turn reprocesses.
+                note = ('[safe] Local model(s) unloaded before the command; KV state could NOT be '
+                        'restored (the conversation will be reprocessed).\n')
+            else:
+                note = ('[safe] Local model(s) unloaded before the command; KV state save failed, '
+                        'no restore attempted (the conversation will be reprocessed).\n')
         return note + result
