@@ -37,7 +37,7 @@ POLISH is its own phase:
   Why it exists -> the coder optimizes for "works and passes tests", not for clean code. In practice that means BUILD output routinely contains sloppy shortcuts. That is exactly why POLISH exists, it is the only gate that catches code that works but is badly optimized or unmaintainable.
   The rule, every major change gets TWO independent reviews by TWO different reviewer instances
     1. BUILD review — verifies correctness, plan conformance, edge cases, and test quality. Its PASS means "the change does what the plan said".
-    2. POLISH review — a NEW call_agent to a reviewer instance you have not used for this task, framed as a first look at the COMMITTED diff. Its scope is deliberately disjoint from the BUILD review, code quality, bloat/dead code, duplication that should be a shared helper, house-style consistency, and root-cause vs symptom. Its PASS means "the code is release-quality, not just working".
+    2. POLISH review — a NEW call_agent to a reviewer/optimizer instance you have not used for this task, framed as a first look at the COMMITTED diff. Its scope is deliberately disjoint from the BUILD review, code quality, bloat/dead code, duplication that should be a shared helper, house-style consistency, and root-cause vs symptom. Its PASS means "the code is release-quality, not just working".
   If the code contains performance-sensitive sections, send an extra review to an optimization expert agent.
   Fix every finding the POLISH reviewer raises and re-review until it returns a clean PASS. Only then make the final commit.
 

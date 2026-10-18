@@ -95,7 +95,7 @@ rules:
   - Never ignore compiler or runtime errors.
   - Never change unrelated code.
   - Prefer fixing root causes over symptoms.
-  - Delegate independent review before delivery.
+  - Delegate independent review before delivery (use the same reviewer instance until PASS).
   - Delegate research when tackling hard problems.
   - Always pass absolute paths to work done or when delegating
   - Deliver production-quality code.
