@@ -572,7 +572,7 @@
                           <input type="checkbox" id="setting-allow-parallel" checked />
                         </label>
                         <label class="setting-field toggle-field">
-                          <span title="When enabled, agent context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted.">State KV Save/Restore</span>
+                          <span title="Automatic checkpointing only: when enabled, agent KV context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted. This does NOT affect the manual Save KV / Load KV buttons — those depend only on endpoint capability.">State KV Save/Restore</span>
                           <input type="checkbox" id="setting-state-kv-save" checked />
                         </label>
                         <label class="setting-field">

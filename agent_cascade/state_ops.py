@@ -46,10 +46,10 @@ def is_state_save_capable(endpoint_cfg) -> bool:
 
 
 def kv_save_effectively_enabled(instance: 'AgentInstance', toggle: bool) -> bool:
-    """Whether KV save/restore should run for ``instance`` right now.
+    """Whether the AUTOMATIC checkpoint path should run for ``instance`` right now.
 
-    Single source of truth for every KV save/restore gate: the global "State KV Save/Restore"
-    checkpoint toggle ORed with the instance's safe-mode override (``_safe_mode_kv``). The
+    Single source of truth for the automatic slot-yield/sleep checkpoint gates: the
+    "State KV Save/Restore" toggle ORed with the instance's safe-mode override (``_safe_mode_kv``). The
     override is what lets a shell_cmd ``safe`` command force save/restore ON for its window
     even when the (default-off) checkpoint toggle is off.
 

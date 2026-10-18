@@ -1104,6 +1104,9 @@ def _handle_allow_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agent
 
 @register_config_handler('state_kv_save_enabled')
 def _handle_state_kv_save_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    # Automatic checkpoint toggle only — NOT a global KV master switch. The manual
+    # Save/Load buttons gate on per-endpoint capability (is_state_save_capable)
+    # and work with this off; see the state_kv_save_enabled field in agent_instance.py.
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.state_kv_save_enabled = bool(ui_cfg['state_kv_save_enabled'])
 

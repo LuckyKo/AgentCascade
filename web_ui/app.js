@@ -161,6 +161,8 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
   { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents', localKey: 'allow_parallel_agents' },
+  // state_kv_save_enabled = automatic checkpoint toggle only (Security/compression saves);
+  // it does NOT gate the manual Save/Load KV buttons — see index.html tooltip.
   { id: '#setting-state-kv-save', prop: 'checked', key: 'state_kv_save_enabled', localKey: 'state_kv_save_enabled' },
   { id: '#setting-completion-classifier', prop: 'checked', key: 'completion_classifier_enabled', localKey: 'completion-classifier' },
   // Inner-loop detection (master toggle)

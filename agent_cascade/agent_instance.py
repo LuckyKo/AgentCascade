@@ -986,8 +986,12 @@ class PoolSettings:
     # regardless of slot-collision analysis (tool_dispatcher.py:397).
     allow_parallel_agents: bool = True
 
-    # State KV save/restore toggle: when False, skips all KV cache state
-    # save/restore operations before/after agent delegation (autoloader only).
+    # AUTOMATIC system-agent checkpoint toggle ONLY — NOT a global KV master switch.
+    # Gates the engine's automatic slot-yield/sleep checkpoint saves & restores
+    # (core.py kv_save_effectively_enabled). The manual Web UI / Telegram Save/Load
+    # buttons do NOT read this: they gate on per-endpoint capability
+    # (is_state_save_capable, state_ops.py) and work with this toggle off.
+    # When False, automatic checkpoint save/restore is skipped (autoloader only).
     state_kv_save_enabled: bool = True
 
     # shell_cmd AUTO low-RAM guard floors (see state_ops.ram_vram_pressure + shell_cmd hook):
