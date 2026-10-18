@@ -313,6 +313,55 @@ class TestChildAgentFailedError:
                 child_depth=1,
             )
 
+    def test_terminated_child_failure_includes_reason_and_log(self):
+        """A deliberately over-scoped child (turn budget exhausted) reports reason + log + last-step,
+        not a bare 'was terminated.' (BUG_0083)."""
+        from agent_cascade.child_runner import ChildAgentFailedError, run_child_core
+
+        mock_engine = MagicMock()
+        mock_inst = MagicMock()
+        mock_inst.is_terminated = True
+        # Turn budget exhausted: current turn == max_turns -> reason resolves to "turn budget".
+        mock_inst._current_turn = 2
+        mock_inst.max_turns = 2
+        # Multi-step task; last step is a real assistant note.
+        mock_conv = [
+            {'role': 'assistant', 'content': 'reviewed files A and B, no issues found'},
+        ]
+        mock_engine._create_and_run_agent.return_value = (mock_inst, mock_conv)
+
+        mock_pool = MagicMock()
+        mock_pool.stopped = False
+        mock_pool.terminated_instances = {'child1'}
+        mock_pool._halted_instances = set()
+        mock_pool._compression_halted = set()
+        mock_pool.get_instance.return_value = None
+        # Pool resolves the child log via instance_loggers (same source as list_agents/dismiss).
+        fake_logger = MagicMock()
+        fake_logger.log_path = 'N:\\work\\WD\\AgentWorkspace\\logs\\coder_child1_2026.jsonl'
+        mock_pool.instance_loggers = {'child1': fake_logger}
+
+        with pytest.raises(ChildAgentFailedError) as exc:
+            run_child_core(
+                engine=mock_engine,
+                pool=mock_pool,
+                agent_class='coder',
+                instance_name='child1',
+                args={},
+                caller_name='parent1',
+                child_depth=1,
+            )
+
+        msg = str(exc.value)
+        # Base contract preserved: still recognizable as a termination failure.
+        assert 'terminated' in msg
+        # New: actual reason + recoverable log path + last-step hint.
+        assert 'Reason:' in msg
+        assert 'turn budget' in msg
+        assert 'child1_2026.jsonl' in msg
+        assert 'Last completed step:' in msg
+        assert 'reviewed files A and B' in msg
+
     def test_parent_receives_background_tool_error_marker(self, mock_pool):
         """When a tool raises ChildAgentFailedError, the parent gets [Background Tool Error]."""
         from agent_cascade.child_runner import ChildAgentFailedError

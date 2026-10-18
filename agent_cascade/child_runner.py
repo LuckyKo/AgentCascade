@@ -62,6 +62,146 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
     return (stop_flag or was_manual_halt), was_terminated
 
 
+def _resolve_child_log_path(pool, instance_name: str) -> str:
+    """Best-effort resolve a child's JSONL log file path.
+
+    Uses the same source of truth as list_agents / dismiss (pool.instance_loggers), so the
+    parent can reload the child from the exact file dismiss_agent would have listed. Falls
+    back to a searchable hint when the logger cannot be resolved.
+    """
+    try:
+        loggers = getattr(pool, 'instance_loggers', None)
+        if loggers and hasattr(loggers, 'get'):
+            logger_inst = loggers.get(instance_name)
+            if logger_inst and getattr(logger_inst, 'log_path', None):
+                return str(logger_inst.log_path)
+    except Exception:
+        pass
+    return f"logs/ (search for '{instance_name}' in AgentWorkspace/logs/)"
+
+
+def _last_step_hint(conv, instance_name: str) -> str:
+    """One-line "last completed step" hint derived from the child's conversation tail.
+
+    Prefers the last tool-call the child attempted, else the last assistant text (truncated).
+    Reads the live conv, which is the same content the JSONL log tail holds — no extra file IO.
+    """
+    if not conv:
+        return ''
+
+    def _role(m):
+        v = m.get('role', '') if isinstance(m, dict) else getattr(m, 'role', '')
+        return str(v).lower()
+
+    def _tool_names(m):
+        is_dict = isinstance(m, dict)
+        names = []
+        tc = m.get('tool_calls') if is_dict else getattr(m, 'tool_calls', None)
+        if isinstance(tc, list):
+            for call in tc:
+                nm = None
+                fn = call.get('function') if isinstance(call, dict) else getattr(call, 'function', None)
+                if isinstance(fn, dict):
+                    nm = fn.get('name')
+                elif fn is not None:
+                    nm = getattr(fn, 'name', None)
+                if not nm:
+                    nm = call.get('name') if isinstance(call, dict) else getattr(call, 'name', None)
+                if nm:
+                    names.append(str(nm))
+        fc = m.get('function_call') if is_dict else getattr(m, 'function_call', None)
+        if fc is not None:
+            nm = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', None)
+            if nm:
+                names.append(str(nm))
+        return names
+
+    def _text(m):
+        is_dict = isinstance(m, dict)
+        c = m.get('content') if is_dict else getattr(m, 'content', '')
+        if isinstance(c, str):
+            return c.strip()
+        if isinstance(c, list):
+            parts = []
+            for it in c:
+                if isinstance(it, dict):
+                    t = it.get('text', '')
+                    if isinstance(t, str):
+                        parts.append(t)
+            return ' '.join(parts).strip()
+        return ''
+
+    for m in reversed(conv):
+        if _role(m) == 'assistant':
+            names = _tool_names(m)
+            if names:
+                uniq = sorted(set(names))
+                return f"tool call(s): {', '.join(uniq)}"
+            txt = _text(m)
+            if txt:
+                snippet = txt.replace('\n', ' ').strip()
+                return f"last assistant note: {snippet[:120]!r}"
+    return ''
+
+
+def _termination_reason(pool, instance_name: str, inst, was_stopped: bool, result: str) -> str:
+    """Best-effort human description of why the child stopped, from state observable at failure time.
+
+    Deliberately conservative: it never claims a cause it cannot see. The most reliable signal
+    is the turn-budget marker the engine injects on budget exhaustion; otherwise it infers from
+    the instance turn counters, pool stop/halt/compression sets, and defaults to an honest
+    "no explicit reason" note that still points the parent to the log.
+    """
+    from agent_cascade.settings import DEFAULT_MAX_TURNS
+
+    markers = result or ''
+    hit_turns_marker = '[Turn limit reached' in markers
+
+    # Defensive numeric reads: a bare MagicMock instance auto-creates attributes that are
+    # not ints, so only accept real int values and otherwise fall back to defaults
+    # (test-mock-interface-parity gotcha).
+    cur = 0
+    eff = DEFAULT_MAX_TURNS
+    if inst is not None:
+        cur_val = getattr(inst, '_current_turn', 0)
+        if isinstance(cur_val, int) and not isinstance(cur_val, bool):
+            cur = cur_val
+        mt = getattr(inst, 'max_turns', None)
+        if isinstance(mt, int) and not isinstance(mt, bool) and mt > 0:
+            eff = mt
+    hit_turn_budget = bool(cur) and cur >= eff
+
+    comp = False
+    try:
+        comp = instance_name in getattr(pool, '_compression_halted', set())
+    except Exception:
+        comp = False
+
+    if hit_turns_marker or hit_turn_budget:
+        return f'hit its turn budget (reached turn {cur} of {eff}).'
+    if was_stopped:
+        return 'stopped by user (global stop or manual halt).'
+    if comp:
+        return 'suspended by context/compression handling.'
+    return ('terminated with no explicit reason recorded '
+            '(likely user cancellation or infrastructure teardown).')
+
+
+def _failure_detail(pool, instance_name: str, inst, conv, reason: str) -> str:
+    """Compose the enriched detail block appended to a ChildAgentFailedError message.
+
+    The base message stays an exact prefix (so callers and `match=` assertions keep working);
+    this is only additional recoverable context the parent can act on.
+    """
+    log_path = _resolve_child_log_path(pool, instance_name)
+    step = _last_step_hint(conv, instance_name)
+    lines = [f'Reason: {reason}']
+    if step:
+        lines.append(f'Last completed step: {step}')
+    lines.append(f'Recover the child from its log: {log_path}')
+    return '\n'.join(lines)
+
+
 def _determine_force_fresh(agent_class: str) -> bool:
     """Return True for 'security' and 'compressor' classes that need fresh state."""
     return agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES
@@ -139,10 +279,18 @@ def run_child_core(
     # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".
     # Verified: llm_call.py produces "[SYSTEM ERROR: <msg>]" for every fatal/timeout path.
     if result and result.strip().startswith('[SYSTEM ERROR'):
-        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' failed: {result.strip()}")
+        # The system-error text IS the cause; still append the log path + last step so the
+        # parent can recover partial work without guessing (BUG_0083).
+        detail = _failure_detail(pool, instance_name, inst, conv,
+                                reason=result.strip())
+        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' failed: {result.strip()}\n{detail}")
     # Termination is also a failure for the parent (child didn't produce useful output)
     if was_terminated and result:
-        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.")
+        # Base message kept an exact prefix so callers/match assertions still pass; the
+        # detail adds reason + log path + last-step hint (BUG_0083).
+        reason = _termination_reason(pool, instance_name, inst, was_stopped, result)
+        detail = _failure_detail(pool, instance_name, inst, conv, reason=reason)
+        raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.\n{detail}")
 
     return _format_result(
         instance_name=instance_name,
