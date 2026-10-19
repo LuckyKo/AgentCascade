@@ -730,6 +730,15 @@ class GrepMixin:
             if not resolved.exists():
                 return f"Directory not found: {path}"
 
+            # BUG_0087: name the absolute root that was actually searched in every result
+            # header. A relative `path` is resolved against base_dir first, so a same-named
+            # directory under the workspace root silently shadows an extra-path project and a
+            # bare "no matches" reads as evidence of absence. Appended, never reformatted —
+            # existing header prefixes stay byte-stable for every consumer that matches on them.
+            # as_posix(): grep output is forward-slash on every platform (see test_grep_path_normalization),
+            # and _resolve_path accepts forward slashes on Windows, so the echoed root stays copy-pasteable.
+            searched_note = f" (searched: {resolved.as_posix()})"
+
             # Sanitize glob patterns to prevent path traversal via include/exclude
             try:
                 include = self._sanitize_glob_pattern(include)
@@ -773,7 +782,7 @@ class GrepMixin:
             if results is not None:
                 if count == 0 and not _sub_truncated:
                     logger.debug(f"grep: subprocess found no matches for '{pattern}'")
-                    summary = f"No matches found for '{pattern}' in {path}"
+                    summary = f"No matches found for '{pattern}' in {path}{searched_note}"
                     # BUG_0061: with ignore_vcs=True the fast path passes no explicit ignore
                     # flag, so ripgrep's built-in .gitignore rules can prune the only matching
                     # file — making "no matches" indistinguishable from "matches were hidden".
@@ -795,7 +804,7 @@ class GrepMixin:
                     return f"{summary}:\n\n"
                 else:
                     output_text = '\n'.join(results)
-                    summary = f"Found {count} matches for '{pattern}'"
+                    summary = f"Found {count} matches for '{pattern}'{searched_note}"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
 
@@ -1032,9 +1041,9 @@ class GrepMixin:
                 if was_timed_out:
                     return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
                 exclude_info = f", excluding {exclude}" if exclude else ''
-                return f"No matches found for pattern '{pattern}' in {path}/**/{include}{exclude_info}"
+                return f"No matches found for pattern '{pattern}' in {path}/**/{include}{exclude_info}{searched_note}"
 
-            summary = f"Found {match_count} matches for '{pattern}'"
+            summary = f"Found {match_count} matches for '{pattern}'{searched_note}"
             if context > 0:
                 summary += f" (with {context} line(s) of context)"
             output_text = '\n'.join(results)

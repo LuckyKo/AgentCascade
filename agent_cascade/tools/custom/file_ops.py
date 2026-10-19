@@ -1094,6 +1094,15 @@ class EditFile(BaseTool, PathResolutionMixin):
                                 f"the payload. The edit was NOT applied — re-issue it with clean content.")
 
         if match_mode == 'delete_and_insert':
+            # BUG_0096: this schema has no additionalProperties:false, so a replacement text
+            # sent under a wrong key (the model's habit: 'content') is accepted, dropped here,
+            # and the range is deleted with nothing inserted. Name the mistake instead of
+            # deleting quietly — an empty new_content is a legitimate delete-only call.
+            if not new_content:
+                for _alias in ('content', 'text', 'replacement', 'new_text'):
+                    if params_json.get(_alias):
+                        return ("ERROR: delete_and_insert got no 'new_content' (range deleted only). "
+                                'If you meant to replace, pass new_content.')
             if new_content is None:
                 new_content = ''
         else:

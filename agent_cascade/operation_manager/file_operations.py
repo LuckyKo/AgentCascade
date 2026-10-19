@@ -1113,6 +1113,12 @@ class FileOpsMixin:
             if count > 1 and occurrence is None:
                 return f"ERROR: Pattern found {count} times in {path} — add more context lines to old_content to disambiguate"
 
+            # BUG_0095: an identity replacement changes nothing. Returning here (before the
+            # approval/backup/write section) keeps the agent from believing a fix landed when
+            # nothing changed, and leaves no backup artifact behind.
+            if new_content == old_content:
+                return 'NO-OP: old_content and new_content are identical — nothing changed. No backup written.'
+
             # Record match position for feedback message (line range).
             # occurrence is 1-based; None (or a unique pattern) selects the 1st match.
             # Advance by len(old_content) so the Nth occurrence matches str.count()
@@ -1512,8 +1518,10 @@ class FileOpsMixin:
                     # Normal delete+insert
                     res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
                 else:
-                    # Delete-only variant
-                    res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                    # Delete-only variant. BUG_0096: label it explicitly — a bare "-K +0" reads
+                    # like a replacement that lost its text, which is exactly the confusion this
+                    # path used to cause (a replacement passed under the wrong kwarg name).
+                    res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY: no new_content supplied, deleted {old_lc} lines, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"

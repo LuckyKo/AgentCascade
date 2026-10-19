@@ -1195,8 +1195,12 @@ def test_note_absent_when_no_hidden_matches():
         assert spy.call_count == 1, \
             f'probe must actually run on zero-match + ignore_vcs=True (witness missing → ' \
             f'this test could pass for the wrong reason); call_count={spy.call_count}'
-        assert tool_output == "No matches found for 'ABSENT_TOKEN_XYZ' in .:\n\n", \
-            f'output must be byte-identical to pre-fix behaviour, got: {tool_output!r}'
+        # BUG_0087 note: the header now names the absolute root searched (forward slashes,
+        # grep's output convention), so the byte-identical claim is against the NEW format —
+        # the invariant under test is still "no BUG_0061 note".
+        assert tool_output == (f"No matches found for 'ABSENT_TOKEN_XYZ' in . "
+                               f"(searched: {om._resolve_path('.').as_posix()}):\n\n"), \
+            f'output must be byte-identical to pre-fix behaviour apart from the searched-root suffix, got: {tool_output!r}'
         assert 'gitignored path(s)' not in tool_output
 
         print('  genuine absence: probe ran, returned 0, no note')
@@ -1302,6 +1306,74 @@ def test_grep_compare_parser_unaffected():
         _rmtree_force(root)
 
 
+def test_relative_path_names_searched_root_and_warns_on_shadow():
+    """BUG_0087: a relative `path` must name the root actually searched, and a same-named
+    entry under an extra RW path must raise an advisory (not change which root wins).
+
+    Mirrors the reported failure: base_dir holds a near-empty `agent_cascade/` shadow (the
+    pattern is NOT in it), while the real project package of the same name lives under an
+    extra RW folder. Pre-fix the call returned a bare "No matches found" and gave no way
+    to tell which root had been searched.
+    """
+    import re
+    import threading
+    from types import SimpleNamespace
+
+    from agent_cascade.operation_manager import (OperationManager, clear_current_instance_name,
+                                                 set_current_instance_name)
+
+    print('\n--- Test: relative path names searched root + shadow warning (BUG_0087) ---')
+
+    root = tempfile.mkdtemp(prefix='bug87_')
+    try:
+        # base_dir shadow: same-named directory, but the pattern is NOT in it
+        shadow = Path(root) / 'agent_cascade'
+        shadow.mkdir(parents=True)
+        (shadow / 'notes.txt').write_text('nothing relevant here\n', encoding='utf-8')
+
+        # the real project lives under an extra RW folder
+        extra = Path(root) / 'extra_rw'
+        real = extra / 'agent_cascade'
+        real.mkdir(parents=True)
+        (real / 'state_ops.py').write_text('def save_instance_state():\n    pass\n', encoding='utf-8')
+
+        om = OperationManager(base_dir=str(root))
+        om.extra_work_folders_rw = [extra]
+
+        # Real warning-queue target: _queue_tool_warning no-ops without a pool instance
+        # carrying _tool_warnings + _compression_lock (a MagicMock would make this vacuous).
+        inst = SimpleNamespace(_tool_warnings=[], _compression_lock=threading.RLock())
+        om.agent_pool = SimpleNamespace(get_instance=lambda name: inst)
+
+        set_current_instance_name('agent-1')
+        try:
+            result = om.grep(pattern='save_instance_state', path='agent_cascade')
+        finally:
+            clear_current_instance_name()
+
+        assert 'No matches found' in result, \
+            f"base_dir must still win (advisory only): {result}"
+        m = re.search(r'\(searched: (.+?)\)', result)
+        assert m, f"result must name the absolute root searched: {result}"
+        assert Path(m.group(1)) == shadow, \
+            f"named root must be the base_dir one, got {m.group(1)} for {shadow}"
+        assert any('same name also exists' in w for w in inst._tool_warnings), \
+            f"advisory warning must be queued for the calling instance: {inst._tool_warnings}"
+
+        # The ticket's acceptance pair: the absolute-path call still finds the truth.
+        abs_result = om.grep(pattern='save_instance_state', path=str(real))
+        assert 'Found' in abs_result, f"absolute path must still find matches: {abs_result}"
+
+        print('  header names the resolved root; shadow warning queued; absolute path unaffected')
+        print('  [PASS]')
+    except Exception as e:
+        print(f'  [FAIL] {e}')
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _rmtree_force(root)
+
 # ──────────────────────────────────────────────
 #  Main runner
 # ──────────────────────────────────────────────
@@ -1340,6 +1412,8 @@ def main():
         ('BUG_0061 no false note on rc=0 (Case B)', test_no_note_when_normal_match_present),
         ('BUG_0061 grep_compare parser unaffected', test_grep_compare_parser_unaffected),
         ('BUG_0061 fast-path/probe argv drift guard', test_fastpath_and_probe_argv_relationship_is_exact),
+        # BUG_0087: relative-path root ambiguity
+        ('BUG_0087 searched-root echo + shadow warning', test_relative_path_names_searched_root_and_warns_on_shadow),
     ]
 
     passed = 0

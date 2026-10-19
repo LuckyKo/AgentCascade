@@ -1325,3 +1325,81 @@ def test_edit_file_occurrence_tool_wiring():
         })
         assert 'ERROR' in result
         assert 'found 2 times' in result
+
+
+def test_edit_file_noop_edit_not_reported_as_success():
+    """BUG_0095: an edit whose old_content == new_content must report NO-OP, not OK.
+
+    Before the fix the identity replacement took the normal write path: the agent read
+    "OK: Edited ... -1 +1 = +0net" and a timestamped .bak was left behind, so a call
+    that changed nothing looked exactly like a fix that had landed.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        file_path = Path(tmpdir) / 'test_file.txt'
+        original = 'line 1\nline 2\nline 3\n'
+        file_path.write_text(original, encoding='utf-8')
+        op_mgr._own(file_path.resolve(), 'test_agent')
+
+        res = op_mgr.edit_file(path='test_file.txt',
+                               agent_name='test_agent',
+                               old_content='line 2\n',
+                               new_content='line 2\n',
+                               match_mode='exact')
+        assert 'NO-OP' in res, f"no-op edit must not report OK: {res}"
+        assert 'OK:' not in res
+        assert file_path.read_text(encoding='utf-8') == original
+
+        # No backup artifact: the guard returns before the backup/write section.
+        backup_dir = Path(tmpdir) / 'logs' / 'backups' / 'test_agent'
+        assert not backup_dir.exists() or not list(backup_dir.glob('*.bak')), \
+            f"a no-op edit must not leave a backup behind: {sorted(str(p) for p in backup_dir.glob('*'))}"
+
+
+def test_delete_and_insert_missing_new_content():
+    """BUG_0096: a d&i call must not silently delete when the replacement text used a wrong kwarg.
+
+    Part (a) is tool-layer — edit_file's schema has no additionalProperties:false, so a stray
+    `content` key reaches EditFile.call and is dropped there; the tool now names the mistake
+    instead of deleting the range. Part (b) is the operation-manager layer: a legitimate
+    delete-only edit stays allowed but must be labelled DELETE-ONLY on its success line.
+    """
+    import json
+
+    from agent_cascade.tools.custom.file_ops import EditFile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+        file_path = Path(tmpdir) / 'test_file.txt'
+
+        # ── (a) replacement text under the wrong key → ERROR, file untouched ──
+        original = 'a\nb\nc\nd\ne\nf\n'
+        file_path.write_text(original, encoding='utf-8')
+        op_mgr._own(file_path.resolve(), 'test_agent')
+
+        edit_tool = EditFile(cfg=None,
+                             agent_pool=type('obj', (object,), {'operation_manager': op_mgr})(),
+                             agent_name='test_agent')
+        result = edit_tool.call(json.dumps({
+            'path': 'test_file.txt',
+            'match_mode': 'delete_and_insert',
+            'range': '2:4',
+            'content': 'replacement that went nowhere',
+        }))
+        assert 'ERROR' in result, f"(a) silent delete must be rejected: {result}"
+        assert 'new_content' in result, f"error must name the correct parameter: {result}"
+        assert file_path.read_text(encoding='utf-8') == original
+
+        # ── (b) a genuine delete-only edit stays allowed but is labelled DELETE-ONLY ──
+        res = op_mgr.edit_file(path='test_file.txt',
+                               agent_name='test_agent',
+                               old_content='',
+                               new_content='',
+                               match_mode='delete_and_insert',
+                               range_param='2:4')
+        assert 'OK:' in res, f"delete-only is a legitimate mode: {res}"
+        assert 'DELETE-ONLY' in res, f"deletion must be distinguishable from replacement: {res}"
+        assert file_path.read_text(encoding='utf-8') == 'a\ne\nf\n'
