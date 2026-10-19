@@ -6993,15 +6993,11 @@ function renderAgentApiAssignments() {
 // never seeded with another machine's absolute path.
 let mgProjectRoot = null;       // set from the server on first successful load
 let mgRootResolved = false;
-const MG_DEFAULT_WORKFLOW_DIR = 'config/workflows';
-let mgWorkflowsTimer = null;
-let mgWorkflowsSeq = 0;
-const MG_DEFAULT_SDCPP_CONFIG_DIR = 'config/sdcpp';
-let mgSdcppConfigsTimer = null;
-let mgSdcppConfigsSeq = 0;
-const MG_DEFAULT_TTS_CONFIG_DIR = 'config/media_gen/tts';
-let mgTtsConfigsTimer = null;
-let mgTtsConfigsSeq = 0;
+// Data-driven panel state: the backend manifest (labels + field specs) is fetched
+// once from GET /api/media_gen/manifest and the DOM is BUILT from it; subsequent
+// loads only hydrate values in place (risk R6: the sub-tab hook re-runs this).
+let MG_MANIFEST = null;
+let mgDomBuilt = false;
 let mgInitialLoadDone = false;
 
 // Join the server-reported install root with a config-relative path. Falls back to
@@ -7028,113 +7024,114 @@ function _mgShowSaved() {
   _mgShowSaved._t = setTimeout(() => _mgSetStatus('', 'info'), 2500);
 }
 
-// Populate the three default-workflow pulldowns from GET /api/media_gen/workflows,
-// which returns {image:[stems], video:[stems], audio:[stems]} (config ownership).
-// Option values are the bare stems (what the resolver + preflight accept).
-async function loadMediaGenWorkflows(savedImage, savedVideo, savedMusic) {
-  const selImage = document.getElementById('mg-default-image');
-  const selVideo = document.getElementById('mg-default-video');
-  const selMusic = document.getElementById('mg-default-music');
-  if (!selImage && !selVideo && !selMusic) return;
-  const seq = ++mgWorkflowsSeq;
-  let grouped = { image: [], video: [], audio: [] };
-  try {
-    const res = await fetch('/api/media_gen/workflows');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data === 'object') grouped = data;
-    }
-  } catch (err) {
-    console.warn('Failed to fetch media gen workflows:', err);
-  }
-  if (seq !== mgWorkflowsSeq) return; // a newer request superseded this one
+// ── Manifest-driven DOM construction ───────────────────────────────────────────
+// Field element ids are mg-field-<backend>-<key>; build/hydrate/save all key off
+// the manifest, so a new backend needs no UI edit.
 
-  const fill = (sel, names, saved) => {
-    if (!sel) return;
-    sel.innerHTML = '<option value="">— none —</option>' + (names || []).map(stem =>
-      `<option value="${escapeHtml(stem)}">${escapeHtml(stem)}</option>`
-    ).join('');
-    const match = saved && [...sel.options].some(o => o.value === saved);
-    sel.value = match ? saved : '';
-  };
-  fill(selImage, grouped.image, savedImage);
-  fill(selVideo, grouped.video, savedVideo);
-  fill(selMusic, grouped.audio, savedMusic);
+function _mgFieldId(backendId, key) {
+  return 'mg-field-' + backendId + '-' + key;
 }
 
-// Populate the sdcpp Default Config pulldown from GET /api/media_gen/sdcpp_configs.
-async function loadMediaGenSdcppConfigs(selectConfig) {
-  const sel = document.getElementById('mg-sdcpp-default-config');
-  if (!sel) return;
-  const seq = ++mgSdcppConfigsSeq;
-  let configs = [];
-  try {
-    const res = await fetch('/api/media_gen/sdcpp_configs');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) configs = data;
-    }
-  } catch (err) {
-    console.warn('Failed to fetch media gen sdcpp configs:', err);
-  }
-  if (seq !== mgSdcppConfigsSeq) return;
-  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
-    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
-  ).join('');
-  if (selectConfig) {
-    const match = [...sel.options].some(o => o.value === selectConfig);
-    sel.value = match ? selectConfig : '';
+// One <label class="setting-field"><span title>… + <input …> per the existing
+// settings-panel convention; input kind/limits come from the FieldSpec kind.
+function _mgBuildField(backendId, spec) {
+  const label = document.createElement('label');
+  label.className = 'setting-field';
+  const span = document.createElement('span');
+  span.title = spec.label || spec.key;
+  span.textContent = spec.label || spec.key;
+  label.appendChild(span);
+  const el = document.createElement('input');
+  el.id = _mgFieldId(backendId, spec.key);
+  if (spec.kind === 'number') {
+    el.type = 'number';
+    if (spec.min != null) el.setAttribute('min', String(spec.min));
+    if (spec.max != null) el.setAttribute('max', String(spec.max));
+    if (spec.step != null) el.setAttribute('step', String(spec.step));
+  } else if (spec.kind === 'checkbox') {
+    el.type = 'checkbox';
+    el.checked = true; // release_model_around_call: checked = ON (the default)
+  } else if (spec.kind === 'url') {
+    el.type = 'url';
   } else {
-    sel.value = '';
+    el.type = 'text';
   }
+  if (spec.placeholder) el.placeholder = spec.placeholder;
+  label.appendChild(el);
+  return label;
 }
 
-// Populate the TTS Default Voice pulldown from GET /api/media_gen/tts_configs.
-async function loadMediaGenTtsConfigs(selectConfig) {
-  const sel = document.getElementById('mg-tts-default-config');
-  if (!sel) return;
-  const seq = ++mgTtsConfigsSeq;
-  let configs = [];
-  try {
-    const res = await fetch('/api/media_gen/tts_configs');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) configs = data;
-    }
-  } catch (err) {
-    console.warn('Failed to fetch media gen tts configs:', err);
+// Build the backend <select> options and one #mg-block-<id> per manifest entry:
+// connection fields visible, then a collapsed <details> with the advanced fields
+// and a READ-ONLY output-path line (the media root is fixed, user decision O4).
+function _mgBuildDom() {
+  const host = document.getElementById('mg-blocks');
+  const sel = document.getElementById('mg-backend');
+  if (!host || !sel || !MG_MANIFEST) return;
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  for (const [id, m] of Object.entries(MG_MANIFEST)) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = (m.label || id) + ' (' + (m.media_types || []).join('/') + ')';
+    sel.appendChild(opt);
   }
-  if (seq !== mgTtsConfigsSeq) return;
-  sel.innerHTML = '<option value="">— none —</option>' + configs.map(c =>
-    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
-  ).join('');
-  if (selectConfig) {
-    const match = [...sel.options].some(o => o.value === selectConfig);
-    sel.value = match ? selectConfig : '';
-  } else {
-    sel.value = '';
+  if (sel.options.length) sel.options[0].selected = true;
+  for (const [id, m] of Object.entries(MG_MANIFEST)) {
+    const block = document.createElement('div');
+    block.id = 'mg-block-' + id;
+    block.style.display = 'none';
+    (m.connection_fields || []).forEach(spec => block.appendChild(_mgBuildField(id, spec)));
+    const det = document.createElement('details');
+    det.className = 'settings-section'; // collapsed by default, matches sibling sections
+    const sum = document.createElement('summary');
+    sum.className = 'settings-section-title';
+    sum.textContent = 'Advanced (' + id + ')';
+    det.appendChild(sum);
+    (m.advanced_fields || []).forEach(spec => det.appendChild(_mgBuildField(id, spec)));
+    const info = document.createElement('label');
+    info.className = 'setting-field';
+    const infoSpan = document.createElement('span');
+    infoSpan.title = 'Where generated media is written (fixed; not configurable)';
+    infoSpan.textContent = 'Media output: <workspace>/logs/media/<images|audio|video>/';
+    info.appendChild(infoSpan);
+    det.appendChild(info);
+    block.appendChild(det);
+    host.appendChild(block);
   }
+  mgDomBuilt = true;
 }
 
-// Show/hide the ComfyUI / sdcpp / TTS field groups based on the backend selector.
-// The selector is a config-tab switcher (the agent picks the real backend per-call),
-// so each option shows exactly its own block; anything unexpected defaults to ComfyUI.
+// Show exactly one #mg-block-<id> per the backend selector (a config-tab switcher;
+// the agent picks the real backend per-call). Unknown id -> first manifest entry.
 function _mgToggleBackendVisibility(backend) {
-  const comfyBlock = document.getElementById('mg-comfyui-block');
-  const sdcppBlock = document.getElementById('mg-sdcpp-block');
-  const ttsBlock = document.getElementById('mg-tts-block');
-  if (comfyBlock) comfyBlock.style.display = (backend === 'sdcpp' || backend === 'kobold_tts') ? 'none' : '';
-  if (sdcppBlock) sdcppBlock.style.display = (backend === 'sdcpp') ? '' : 'none';
-  if (ttsBlock) ttsBlock.style.display = (backend === 'kobold_tts') ? '' : 'none';
+  const ids = Object.keys(MG_MANIFEST || {});
+  if (!ids.length) return;
+  if (!ids.includes(backend)) backend = ids[0];
+  document.querySelectorAll('[id^="mg-block-"]').forEach(el => {
+    el.style.display = (el.id === 'mg-block-' + backend) ? '' : 'none';
+  });
 }
 
-// Load current config from GET /api/media_gen and populate the fields.
+// Load current config and populate the fields. FIRST call fetches the manifest
+// once and BUILDS the DOM; every later call (sub-tab hook) only HYDRATES values
+// in place — never rebuilds (risk R6).
 async function loadMediaGenSettings() {
   const mgBackend = document.getElementById('mg-backend');
-  const mgUrl = document.getElementById('mg-url');
-  const mgDir = document.getElementById('mg-workflow-dir');
-  const mgTimeout = document.getElementById('mg-timeout');
-  if (!mgBackend || !mgUrl || !mgDir || !mgTimeout) return;
+  if (!mgBackend) return;
+
+  if (!MG_MANIFEST) {
+    try {
+      const res = await fetch('/api/media_gen/manifest');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.backends && typeof data.backends === 'object') MG_MANIFEST = data.backends;
+      }
+    } catch (err) {
+      console.warn('Failed to fetch media gen manifest:', err);
+    }
+  }
+  if (!MG_MANIFEST) return; // panel stays inert until the manifest is reachable
+  if (!mgDomBuilt) _mgBuildDom();
 
   let cfg = {};
   try {
@@ -7148,119 +7145,112 @@ async function loadMediaGenSettings() {
   }
 
   // The server reports the install dir so fallbacks stay portable across machines.
-  // Recorded before any field is seeded below.
   if (!mgRootResolved && typeof cfg.project_root === 'string' && cfg.project_root) {
     mgProjectRoot = cfg.project_root;
     mgRootResolved = true;
   }
 
-  // default_backend is vestigial (the agent picks the backend per-call); fall back to
-  // comfyui so a config block is always shown on load.
-  mgBackend.value = ['comfyui', 'sdcpp', 'kobold_tts'].includes(cfg.default_backend) ? cfg.default_backend : 'comfyui';
-  const comfy = (cfg.comfyui && typeof cfg.comfyui === 'object') ? cfg.comfyui : {};
-  mgUrl.value = comfy.url || '';
-  mgDir.value = comfy.workflow_dir || _mgRootedDir(MG_DEFAULT_WORKFLOW_DIR);
-  const mgOutputDir = document.getElementById('mg-output-dir');
-  if (mgOutputDir) mgOutputDir.value = comfy.output_dir || '';
-  mgTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
+  // default_backend is vestigial (the agent picks the backend per-call); keep the
+  // whitelist derived from the manifest so a config tab is always shown.
+  const ids = Object.keys(MG_MANIFEST);
+  mgBackend.value = ids.includes(cfg.default_backend) ? cfg.default_backend : (ids[0] || '');
 
-  const sdcpp = (cfg.sdcpp && typeof cfg.sdcpp === 'object') ? cfg.sdcpp : {};
-  const mgSdcppBinary = document.getElementById('mg-sdcpp-binary');
-  const mgSdcppModelDir = document.getElementById('mg-sdcpp-model-dir');
-  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
-  const mgSdcppTimeout = document.getElementById('mg-sdcpp-timeout');
-  if (mgSdcppBinary) mgSdcppBinary.value = sdcpp.binary || '';
-  if (mgSdcppModelDir) mgSdcppModelDir.value = sdcpp.models_dir || '';
-  if (mgSdcppConfigDir) mgSdcppConfigDir.value = sdcpp.config_dir || _mgRootedDir(MG_DEFAULT_SDCPP_CONFIG_DIR);
-  if (mgSdcppTimeout) mgSdcppTimeout.value = (sdcpp.timeout != null) ? sdcpp.timeout : 900;
+  const mgTimeout = document.getElementById('mg-timeout');
+  if (mgTimeout) {
+    mgTimeout.value = (cfg.timeout != null) ? cfg.timeout : 180;
+  }
 
-  const tts = (cfg.kobold_tts && typeof cfg.kobold_tts === 'object') ? cfg.kobold_tts : {};
-  const mgTtsBinary = document.getElementById('mg-tts-binary');
-  const mgTtsModelDir = document.getElementById('mg-tts-model-dir');
-  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
-  const mgTtsTimeout = document.getElementById('mg-tts-timeout');
-  if (mgTtsBinary) mgTtsBinary.value = tts.binary || '';
-  if (mgTtsModelDir) mgTtsModelDir.value = tts.models_dir || '';
-  if (mgTtsConfigDir) mgTtsConfigDir.value = tts.config_dir || _mgRootedDir(MG_DEFAULT_TTS_CONFIG_DIR);
-  if (mgTtsTimeout) mgTtsTimeout.value = (tts.timeout != null) ? tts.timeout : 600;
-
-  await loadMediaGenWorkflows(comfy.default_image_workflow, comfy.default_video_workflow, comfy.default_music_workflow);
-  await loadMediaGenSdcppConfigs(sdcpp.default_sdcpp_config);
-  await loadMediaGenTtsConfigs(tts.default_config);
+  for (const [id, manifestEntry] of Object.entries(MG_MANIFEST)) {
+    const block = (cfg[id] && typeof cfg[id] === 'object') ? cfg[id] : {};
+    _mgHydrateFields(id, manifestEntry, block);
+  }
 
   _mgToggleBackendVisibility(mgBackend.value);
 }
 
-// Save via POST /api/media_gen.
+// Set one field element from the config block, per its FieldSpec kind. Defaults
+// come from the manifest (numbers) or the <AgentCascade_root> placeholder (paths).
+function _mgHydrateFields(backendId, manifestEntry, block) {
+  const specs = (manifestEntry.connection_fields || []).concat(manifestEntry.advanced_fields || []);
+  for (const spec of specs) {
+    const el = document.getElementById(_mgFieldId(backendId, spec.key));
+    if (!el) continue;
+    const raw = block[spec.key];
+    if (spec.kind === 'checkbox') {
+      el.checked = raw !== false; // absent -> default ON
+    } else if (spec.kind === 'number') {
+      const dflt = (manifestEntry.defaults || {})[spec.key];
+      const v = (raw != null) ? raw : dflt;
+      if (v != null) el.value = String(v);
+    } else if (typeof raw === 'string' && raw !== '') {
+      el.value = raw;
+    } else if (spec.placeholder && spec.placeholder.includes('<AgentCascade_root>')) {
+      el.value = _mgRootedDir(spec.placeholder.replace('<AgentCascade_root>/', ''));
+    } else {
+      el.value = '';
+    }
+  }
+}
+
+// Save via POST /api/media_gen. The body is built GENERICALLY from the manifest
+// field specs for ALL backend blocks (not just the visible one), so a Save can
+// never wipe an unrendered backend even without the server-side merge. Cleared
+// fields post '' (merge-preserve only fills ABSENT keys, so '' stays cleared).
 async function saveMediaGenSettings() {
+  if (!MG_MANIFEST) return;
   const mgBackend = document.getElementById('mg-backend');
-  const mgUrl = document.getElementById('mg-url');
-  const mgDir = document.getElementById('mg-workflow-dir');
-  const mgOutputDir = document.getElementById('mg-output-dir');
-  const mgImage = document.getElementById('mg-default-image');
-  const mgVideo = document.getElementById('mg-default-video');
-  const mgMusic = document.getElementById('mg-default-music');
+  if (!mgBackend) return;
+  const visible = mgBackend.value;
+  const body = {};
+
   const mgTimeout = document.getElementById('mg-timeout');
-  if (!mgBackend || !mgUrl || !mgDir || !mgTimeout) return;
-
-  let timeout = parseInt(mgTimeout.value, 10);
-  if (isNaN(timeout)) timeout = 180;
-  timeout = Math.min(600, Math.max(30, timeout));
-  mgTimeout.value = String(timeout);
-
-  const backend = mgBackend.value;
-  const url = mgUrl.value.trim();
-  // ComfyUI needs an http(s) URL; sdcpp/TTS do not. Validate whenever the ComfyUI
-  // block is the visible/active one (the selector is a config-tab switcher).
-  if (backend === 'comfyui' && !/^https?:\/\//i.test(url)) {
-    _mgSetStatus('✕ Server URL must start with http:// or https://', 'error');
-    return;
+  if (mgTimeout) {
+    let t = parseInt(mgTimeout.value, 10);
+    if (isNaN(t)) t = 180;
+    t = Math.min(600, Math.max(30, t));
+    mgTimeout.value = String(t);
+    body.timeout = t;
   }
 
-  // default_backend is vestigial — the agent selects the backend per-call via the tool
-  // param, and nothing in the resolver reads it. Keep the key out of the persisted body.
-  const body = { timeout: timeout };
-
-  body.comfyui = {
-    url: url,
-    workflow_dir: mgDir.value.trim(),
-    output_dir: (mgOutputDir ? mgOutputDir.value.trim() : ''),
-    default_image_workflow: (mgImage ? mgImage.value : ''),
-    default_video_workflow: (mgVideo ? mgVideo.value : ''),
-    default_music_workflow: (mgMusic ? mgMusic.value : ''),
-  };
-
-  const mgSdcppBinary = document.getElementById('mg-sdcpp-binary');
-  const mgSdcppModelDir = document.getElementById('mg-sdcpp-model-dir');
-  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
-  const mgSdcppDefaultConfig = document.getElementById('mg-sdcpp-default-config');
-  const mgSdcppTimeout = document.getElementById('mg-sdcpp-timeout');
-  let sdcppTimeout = parseInt(mgSdcppTimeout ? mgSdcppTimeout.value : '', 10);
-  if (isNaN(sdcppTimeout)) sdcppTimeout = 900;
-  sdcppTimeout = Math.min(1800, Math.max(30, sdcppTimeout));
-  body.sdcpp = {
-    binary: (mgSdcppBinary ? mgSdcppBinary.value.trim() : ''),
-    models_dir: (mgSdcppModelDir ? mgSdcppModelDir.value.trim() : ''),
-    config_dir: (mgSdcppConfigDir ? mgSdcppConfigDir.value.trim() : ''),
-    default_sdcpp_config: (mgSdcppDefaultConfig ? mgSdcppDefaultConfig.value : ''),
-    timeout: sdcppTimeout,
-  };
-
-  const mgTtsBinary = document.getElementById('mg-tts-binary');
-  const mgTtsModelDir = document.getElementById('mg-tts-model-dir');
-  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
-  const mgTtsDefaultConfig = document.getElementById('mg-tts-default-config');
-  const mgTtsTimeout = document.getElementById('mg-tts-timeout');
-  let ttsTimeout = parseInt(mgTtsTimeout ? mgTtsTimeout.value : '', 10);
-  if (isNaN(ttsTimeout)) ttsTimeout = 600;
-  ttsTimeout = Math.min(3600, Math.max(60, ttsTimeout));
-  body.kobold_tts = {
-    binary: (mgTtsBinary ? mgTtsBinary.value.trim() : ''),
-    models_dir: (mgTtsModelDir ? mgTtsModelDir.value.trim() : ''),
-    config_dir: (mgTtsConfigDir ? mgTtsConfigDir.value.trim() : ''),
-    default_config: (mgTtsDefaultConfig ? mgTtsDefaultConfig.value : ''),
-    timeout: ttsTimeout,
-  };
+  for (const [id, manifestEntry] of Object.entries(MG_MANIFEST)) {
+    const block = {};
+    const specs = (manifestEntry.connection_fields || []).concat(manifestEntry.advanced_fields || []);
+    for (const spec of specs) {
+      const el = document.getElementById(_mgFieldId(id, spec.key));
+      if (!el) continue;
+      if (spec.kind === 'checkbox') {
+        block[spec.key] = el.checked; // release_model_around_call: explicit bool
+        continue;
+      }
+      if (spec.kind === 'number') {
+        let n = parseInt(el.value, 10);
+        if (isNaN(n)) {
+          const dflt = (manifestEntry.defaults || {})[spec.key];
+          n = (dflt != null) ? dflt : (spec.min != null ? spec.min : 0);
+        }
+        if (spec.min != null) n = Math.max(spec.min, n);
+        if (spec.max != null) n = Math.min(spec.max, n);
+        el.value = String(n);
+        block[spec.key] = n;
+        continue;
+      }
+      const v = (el.value || '').trim();
+      if (spec.kind === 'url' && v && !/^https?:\/\//i.test(v)) {
+        _mgSetStatus('✕ ' + (spec.label || spec.key) + ' must start with http:// or https://', 'error');
+        return;
+      }
+      if (spec.kind === 'url' && !v && id === visible) {
+        _mgSetStatus('✕ ' + (spec.label || spec.key) + ' is required for the selected backend', 'error');
+        return;
+      }
+      if (spec.required && !v) {
+        _mgSetStatus('✕ ' + (spec.label || spec.key) + ' is required', 'error');
+        return;
+      }
+      block[spec.key] = v;
+    }
+    body[id] = block;
+  }
 
   try {
     const res = await fetch('/api/media_gen', {
@@ -7296,67 +7286,14 @@ function initMediaGenSettings() {
     });
   }
 
-  // Backend selector toggle: show/hide the ComfyUI / sdcpp / TTS field groups.
+  // Backend selector toggle: show/hide the manifest-built field blocks.
   const mgBackend = document.getElementById('mg-backend');
   if (mgBackend) {
     mgBackend.addEventListener('change', () => _mgToggleBackendVisibility(mgBackend.value));
   }
-
-  // Debounced re-fetch of the workflow pulldowns when the workflow dir changes.
-  const mgDir = document.getElementById('mg-workflow-dir');
-  if (mgDir) {
-    mgDir.addEventListener('change', () => {
-      clearTimeout(mgWorkflowsTimer);
-      mgWorkflowsTimer = setTimeout(() => loadMediaGenWorkflows(), 400);
-    });
-  }
-
-  // Manual refresh button — re-scans workflows on demand.
-  const mgRefreshWf = document.getElementById('mg-refresh-workflows');
-  if (mgRefreshWf) {
-    mgRefreshWf.addEventListener('click', (e) => {
-      e.stopPropagation();
-      loadMediaGenWorkflows(
-        document.getElementById('mg-default-image')?.value || '',
-        document.getElementById('mg-default-video')?.value || '',
-        document.getElementById('mg-default-music')?.value || ''
-      );
-    });
-  }
-
-  // Debounced re-fetch of the sdcpp config pulldown when the config dir changes.
-  const mgSdcppConfigDir = document.getElementById('mg-sdcpp-config-dir');
-  if (mgSdcppConfigDir) {
-    mgSdcppConfigDir.addEventListener('change', () => {
-      clearTimeout(mgSdcppConfigsTimer);
-      mgSdcppConfigsTimer = setTimeout(() => loadMediaGenSdcppConfigs(), 400);
-    });
-  }
-  const mgRefreshSdcpp = document.getElementById('mg-refresh-sdcpp-configs');
-  if (mgRefreshSdcpp) {
-    mgRefreshSdcpp.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const sel = document.getElementById('mg-sdcpp-default-config');
-      loadMediaGenSdcppConfigs(sel ? sel.value : '');
-    });
-  }
-
-  // Debounced re-fetch of the TTS voice pulldown when the voice-config dir changes.
-  const mgTtsConfigDir = document.getElementById('mg-tts-config-dir');
-  if (mgTtsConfigDir) {
-    mgTtsConfigDir.addEventListener('change', () => {
-      clearTimeout(mgTtsConfigsTimer);
-      mgTtsConfigsTimer = setTimeout(() => loadMediaGenTtsConfigs(), 400);
-    });
-  }
-  const mgRefreshTts = document.getElementById('mg-refresh-tts-configs');
-  if (mgRefreshTts) {
-    mgRefreshTts.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const sel = document.getElementById('mg-tts-default-config');
-      loadMediaGenTtsConfigs(sel ? sel.value : '');
-    });
-  }
+  // No directory-change pulldown reloaders: the endpoint-fed pulldowns were removed
+  // (their ComfyUI keys were dead — C2; the live default_config keys are plain
+  // Advanced text fields now). The agent-facing list of configs lives in __help (W3).
 }
 
 // Reload config whenever the Agent & Tools → System sub-tab is shown so edits

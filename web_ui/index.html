@@ -863,101 +863,20 @@
                   <div class="settings-section-body" id="mg-body">
                     <label class="setting-field">
                       <span title="Select which backend's settings to edit. The agent picks the actual backend per-call via the media_gen tool's backend param; this only switches which config block is shown below.">Backend</span>
-                      <select id="mg-backend">
-                        <option value="comfyui" selected>ComfyUI (image/video/music)</option>
-                        <option value="sdcpp">stable-diffusion.cpp (image)</option>
-                        <option value="kobold_tts">Kobold TTS (voice)</option>
-                      </select>
+                      <!-- Options are populated from GET /api/media_gen/manifest (see app.js) -->
+                      <select id="mg-backend"></select>
                     </label>
-                    <!-- ComfyUI fields (image/video/music via a live server) -->
-                    <div id="mg-comfyui-block">
+                    <!-- Backend field blocks are BUILT FROM THE MANIFEST at runtime (app.js _mgBuildDom):
+                         one #mg-block-<id> per backend; connection fields visible, advanced collapsed. -->
+                    <div id="mg-blocks"></div>
+                    <details class="settings-section">
+                      <summary class="settings-section-title">Advanced (media_gen)</summary>
                       <label class="setting-field">
-                        <span title="Base URL of the running ComfyUI server">Server URL</span>
-                        <input type="url" id="mg-url" placeholder="http://localhost:8188">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory scanned for ComfyUI workflow JSON files">Workflow Directory</span>
-                        <input type="text" id="mg-workflow-dir" placeholder="<AgentCascade_root>/config/workflows">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory where ComfyUI writes video/audio output (created on first run)">Output Directory</span>
-                        <input type="text" id="mg-output-dir" placeholder="<ComfyUI>/user/default/output">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Default image workflow">Default Image Workflow</span>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                          <select id="mg-default-image" style="flex:1;"><option value="">— none —</option></select>
-                          <button id="mg-refresh-workflows" class="btn-small" title="Re-scan workflows">⟳</button>
-                        </div>
-                      </label>
-                      <label class="setting-field">
-                        <span title="Default video (WAN i2v) workflow">Default Video Workflow</span>
-                        <select id="mg-default-video"><option value="">— none —</option></select>
-                      </label>
-                      <label class="setting-field">
-                        <span title="Default music (YuE2) workflow">Default Music Workflow</span>
-                        <select id="mg-default-music"><option value="">— none —</option></select>
-                      </label>
-                    </div>
-                    <!-- stable-diffusion.cpp fields (image only) -->
-                    <div id="mg-sdcpp-block" style="display:none;">
-                      <label class="setting-field">
-                        <span title="Path to the sd-cli binary">Binary</span>
-                        <input type="text" id="mg-sdcpp-binary" placeholder="C:\...\sd-cli.exe">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory containing model files">Models Directory</span>
-                        <input type="text" id="mg-sdcpp-model-dir" placeholder="C:\...\ComfyUI_models\models">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory scanned for per-model sdcpp config JSON files">Config Directory</span>
-                        <input type="text" id="mg-sdcpp-config-dir" placeholder="<AgentCascade_root>/config/sdcpp">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Model config used when the agent does not specify one">Default Config</span>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                          <select id="mg-sdcpp-default-config" style="flex:1;"><option value="">— none —</option></select>
-                          <button id="mg-refresh-sdcpp-configs" class="btn-small" title="Re-scan configs">⟳</button>
-                        </div>
-                      </label>
-                      <label class="setting-field">
-                        <span title="Max seconds to wait for a local generation (30-1800)">Sdcli Timeout (s)</span>
-                        <input type="number" id="mg-sdcpp-timeout" min="30" max="1800" step="30" value="900">
-                      </label>
-                    </div>
-                    <!-- Kobold TTS fields (voice) -->
-                    <div id="mg-tts-block" style="display:none;">
-                      <label class="setting-field">
-                        <span title="Path to the koboldcpp binary">Binary</span>
-                        <input type="text" id="mg-tts-binary" placeholder="C:\...\koboldcpp.exe">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory containing TTS GGUF models">Models Directory</span>
-                        <input type="text" id="mg-tts-model-dir" placeholder="C:\...\Beta\audio">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Directory scanned for TTS voice-config JSON files">Voice Config Directory</span>
-                        <input type="text" id="mg-tts-config-dir" placeholder="<AgentCascade_root>/config/media_gen/tts">
-                      </label>
-                      <label class="setting-field">
-                        <span title="Voice config used when the agent does not specify one">Default Voice</span>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                          <select id="mg-tts-default-config" style="flex:1;"><option value="">— none —</option></select>
-                          <button id="mg-refresh-tts-configs" class="btn-small" title="Re-scan voice configs">⟳</button>
-                        </div>
-                      </label>
-                      <label class="setting-field">
-                        <span title="Max seconds to wait for a TTS generation (slow; 60-3600)">TTS Timeout (s)</span>
-                        <input type="number" id="mg-tts-timeout" min="60" max="3600" step="30" value="600">
-                      </label>
-                    </div>
-                    <div style="display:flex;gap:8px;">
-                      <label class="setting-field" style="flex:1;">
                         <span title="Fallback timeout in seconds (used when the backend has no specific timeout)">Timeout (s)</span>
                         <input type="number" id="mg-timeout" min="30" max="600" step="5" value="180">
                       </label>
-                      <button id="mg-save" class="btn-small">Save</button>
-                    </div>
+                    </details>
+                    <button id="mg-save" class="btn-small">Save</button>
                     <div id="mg-status" style="font-size:11px;min-height:14px;"></div>
                   </div>
                 </div>
