@@ -1513,7 +1513,7 @@ class FileOpsMixin:
                 d_end = end_idx  # exclusive in slice semantics
                 if start_idx == end_idx:
                     # Insert-only variant
-                    res_msg += f" line {d_start} (d&i, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                    res_msg += f" line {d_start} (d&i, INSERT-ONLY, -0 +{new_lc} = {sign}{net_delta}net)"
                 elif new_content:
                     # Normal delete+insert
                     res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
@@ -1521,7 +1521,7 @@ class FileOpsMixin:
                     # Delete-only variant. BUG_0096: label it explicitly — a bare "-K +0" reads
                     # like a replacement that lost its text, which is exactly the confusion this
                     # path used to cause (a replacement passed under the wrong kwarg name).
-                    res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY: no new_content supplied, deleted {old_lc} lines, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                    res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY, -{old_lc} +0 = {sign}{net_delta}net)"
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"

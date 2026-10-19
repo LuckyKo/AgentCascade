@@ -612,7 +612,8 @@ class GrepMixin:
                           smart_case: bool = True,
                           agent_name: str = 'unknown',
                           spill_file_path: Optional[str] = None,
-                          timeout: float = 5.0) -> str:
+                          timeout: float = 5.0,
+                          searched_note: str = '') -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
 
         try:
@@ -621,9 +622,9 @@ class GrepMixin:
             normalized_rel_path = file_path.name
 
         if not fnmatch.fnmatch(normalized_rel_path, include):
-            return f"No matches found for pattern '{pattern}' in {file_path.name}"
+            return f"No matches found for pattern '{pattern}' in {file_path.name}{searched_note}"
         if exclude and fnmatch.fnmatch(normalized_rel_path, exclude):
-            return f"No matches found for pattern '{pattern}' in {file_path.name} (excluded by {exclude})"
+            return f"No matches found for pattern '{pattern}' in {file_path.name} (excluded by {exclude}){searched_note}"
 
         has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
         if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
@@ -679,9 +680,9 @@ class GrepMixin:
                     break
 
         if not results:
-            return f"No matches found for pattern '{pattern}' in {file_path.name}"
+            return f"No matches found for pattern '{pattern}' in {file_path.name}{searched_note}"
 
-        summary = f"Found {match_count} matches for '{pattern}'"
+        summary = f"Found {match_count} matches for '{pattern}'{searched_note}"
         if context > 0:
             summary += f" (with {context} line(s) of context)"
         output_text = '\n'.join(results)
@@ -730,13 +731,10 @@ class GrepMixin:
             if not resolved.exists():
                 return f"Directory not found: {path}"
 
-            # BUG_0087: name the absolute root that was actually searched in every result
-            # header. A relative `path` is resolved against base_dir first, so a same-named
-            # directory under the workspace root silently shadows an extra-path project and a
-            # bare "no matches" reads as evidence of absence. Appended, never reformatted —
-            # existing header prefixes stay byte-stable for every consumer that matches on them.
-            # as_posix(): grep output is forward-slash on every platform (see test_grep_path_normalization),
-            # and _resolve_path accepts forward slashes on Windows, so the echoed root stays copy-pasteable.
+            # BUG_0087 invariant: the absolute root that was actually searched is echoed in
+            # EVERY result header — directory AND single-file. It is appended, never
+            # reformatted, so prefix-matching consumers (see scripts/grep_compare.py) stay
+            # byte-stable; as_posix() keeps grep's forward-slash output convention.
             searched_note = f" (searched: {resolved.as_posix()})"
 
             # Sanitize glob patterns to prevent path traversal via include/exclude
@@ -761,7 +759,8 @@ class GrepMixin:
                                               smart_case=smart_case,
                                               agent_name=agent_name,
                                               spill_file_path=spill_file_path,
-                                              timeout=timeout)
+                                              timeout=timeout,
+                                              searched_note=searched_note)
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,

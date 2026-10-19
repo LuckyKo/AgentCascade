@@ -1328,12 +1328,7 @@ def test_edit_file_occurrence_tool_wiring():
 
 
 def test_edit_file_noop_edit_not_reported_as_success():
-    """BUG_0095: an edit whose old_content == new_content must report NO-OP, not OK.
-
-    Before the fix the identity replacement took the normal write path: the agent read
-    "OK: Edited ... -1 +1 = +0net" and a timestamped .bak was left behind, so a call
-    that changed nothing looked exactly like a fix that had landed.
-    """
+    """BUG_0095: an identity edit (old_content == new_content) reports NO-OP and writes no backup."""
     with tempfile.TemporaryDirectory() as tmpdir:
         op_mgr = OperationManager(base_dir=tmpdir)
         op_mgr.file_ownership = {}
@@ -1359,13 +1354,7 @@ def test_edit_file_noop_edit_not_reported_as_success():
 
 
 def test_delete_and_insert_missing_new_content():
-    """BUG_0096: a d&i call must not silently delete when the replacement text used a wrong kwarg.
-
-    Part (a) is tool-layer — edit_file's schema has no additionalProperties:false, so a stray
-    `content` key reaches EditFile.call and is dropped there; the tool now names the mistake
-    instead of deleting the range. Part (b) is the operation-manager layer: a legitimate
-    delete-only edit stays allowed but must be labelled DELETE-ONLY on its success line.
-    """
+    """BUG_0096: a d&i call with the replacement under a wrong kwarg errors and leaves the file untouched; a genuine delete-only edit stays allowed but is labelled DELETE-ONLY."""
     import json
 
     from agent_cascade.tools.custom.file_ops import EditFile

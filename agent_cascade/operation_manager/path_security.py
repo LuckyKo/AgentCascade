@@ -257,23 +257,21 @@ class PathSecurityMixin:
                                 resolved = candidate
                                 break
 
-        # BUG_0087: a relative path that EXISTS under base_dir never reaches the extra-folder
-        # fallback above, so a same-named directory under an extra work path (e.g. a bare
-        # `agent_cascade/` holding only .agent_lessons under the workspace root) shadows the real
-        # project and the caller gets a false "no matches". Which root wins is deliberately
-        # unchanged — this is advisory only, so existing behaviour/tests stay intact.
-        if (not direct_absolute and extra_prefix_resolved is None and clean_path not in ('', '.')
-                and resolved.exists() and self._path_is_contained(resolved, self.base_dir)):
-            for extra in list(self.extra_work_folders_rw) + list(self.extra_work_folders_ro):
-                shadow = extra / clean_path
-                if shadow.exists():
-                    _queue_tool_warning(self.agent_pool, instance_name,
-                                        f"WARNING: relative path '{path}' resolved to {resolved}; an entry with "
-                                        f"the same name also exists under {shadow}. Use an absolute path to disambiguate.")
-                    break
-
         # 1. Base directory is always RW (and thus RO) — no warning needed
         if self._path_is_contained(resolved, self.base_dir):
+            # BUG_0087: a relative path that EXISTS under base_dir never reaches the extra-folder
+            # fallback above, so a same-named directory under an extra work path (e.g. a bare
+            # `agent_cascade/` holding only .agent_lessons under the workspace root) shadows the real
+            # project and the caller gets a false "no matches". Which root wins is deliberately
+            # unchanged — this is advisory only, so existing behaviour/tests stay intact.
+            if not direct_absolute and extra_prefix_resolved is None and clean_path not in ('', '.'):
+                for extra in self.extra_work_folders_rw + self.extra_work_folders_ro:
+                    shadow = extra / clean_path
+                    if shadow.exists():
+                        _queue_tool_warning(self.agent_pool, instance_name,
+                                            f"relative path '{path}' resolved to {resolved}; an entry with "
+                                            f"the same name also exists under {shadow}. Use an absolute path to disambiguate.")
+                        break
             return resolved
 
         # 2. Check extra RW folders (allowed for both RO and RW)

@@ -1101,8 +1101,8 @@ class EditFile(BaseTool, PathResolutionMixin):
             if not new_content:
                 for _alias in ('content', 'text', 'replacement', 'new_text'):
                     if params_json.get(_alias):
-                        return ("ERROR: delete_and_insert got no 'new_content' (range deleted only). "
-                                'If you meant to replace, pass new_content.')
+                        return (f"ERROR: delete_and_insert got no 'new_content' but a replacement was passed under {_alias!r}. "
+                                'The edit was NOT applied — re-issue with new_content.')
             if new_content is None:
                 new_content = ''
         else:
