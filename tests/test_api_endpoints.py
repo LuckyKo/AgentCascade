@@ -2532,6 +2532,66 @@ class TestMediaGenProjectRoot:
         on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
         assert on_disk['yue2'] == {'style': 'orchestral'}
 
+    # ── BUG_0093 close-out: spec Test A / Test B (reports/BUG_0093_VERIFICATION_SPEC.md) ─
+    # The two tests above cover the same defect shape at the level of the old ticket's
+    # wording; these pin the spec's fixtures literally — an explicit ``{"status": "ok"}``
+    # response body, per-block sentinel values, and a POST that DOES render one block.
+
+    def test_bug0093_partial_save_preserves_every_other_backend_block(self, client, _isolate_config):
+        """BUG_0093 spec Test A: a save rendering ONE backend must keep the other three.
+
+        This is the ticket's exact failure mode: the UI posted only the blocks it
+        rendered, so the non-rendered ``chatterbox`` block was deleted silently.
+        Every block carries a distinct sentinel so any deletion is visible, and the
+        posted ``comfyui`` block carries an unrendered key (``output_dir``) that the
+        inner merge level must keep.
+        """
+        cfg_file = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        seed = {
+            'timeout': 120,
+            'comfyui': {'url': 'http://seed-comfy:1', 'workflow_dir': 'wd',
+                        'output_dir': 'seed-output-dir',
+                        'media_types': {'image': ['a'], 'video': [], 'audio': []}},
+            'sdcpp': {'binary': 'sentinel-sdcpp'},
+            'kobold_tts': {'binary': 'sentinel-kobold'},
+            'chatterbox': {'python': 'sentinel-chatterbox'},
+        }
+        cfg_file.write_text(json.dumps(seed), encoding='utf-8')
+        resp = client.post('/api/media_gen',
+                           json={'timeout': 150, 'comfyui': {'url': 'http://edited-comfy:2'}})
+        assert resp.status_code == 200
+        assert resp.json() == {'status': 'ok'}
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        for key in ('sdcpp', 'kobold_tts', 'chatterbox'):
+            assert on_disk[key] == seed[key], \
+                f'{key} block must survive a POST that omits it entirely'
+        comfy = on_disk['comfyui']
+        assert comfy['url'] == 'http://edited-comfy:2', 'posted key must be applied'
+        for k in ('workflow_dir', 'output_dir', 'media_types'):
+            assert comfy[k] == seed['comfyui'][k], \
+                f'posted-block key {k} must survive when the body omits it'
+        assert on_disk['timeout'] == 150
+
+    def test_bug0093_unknown_future_backend_block_survives_a_rendered_save(self, client, _isolate_config):
+        """BUG_0093 spec Test B: a block with no manifest entry must survive untouched.
+
+        Unlike the fixture above (which posts no backend block at all), this POST
+        renders one block, so the unknown key has to be preserved by the outer
+        merge loop while the inner per-key merge runs on the posted one.
+        """
+        cfg_file = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        seed = {'timeout': 100,
+                'future_backend': {'marker': 'keep-me', 'nested': {'deep': [1, 2, 3]}},
+                'comfyui': {'url': 'http://c:1', 'workflow_dir': 'wd'}}
+        cfg_file.write_text(json.dumps(seed), encoding='utf-8')
+        resp = client.post('/api/media_gen', json={'comfyui': {'url': 'http://c:2'}})
+        assert resp.status_code == 200
+        assert resp.json() == {'status': 'ok'}
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        assert on_disk['future_backend'] == seed['future_backend'], \
+            'unknown block must survive a save that never mentions it'
+        assert on_disk['comfyui'] == {'url': 'http://c:2', 'workflow_dir': 'wd'}
+
     def test_post_validates_every_manifest_block(self, client, _isolate_config):
         """T3: the non-dict block check now covers chatterbox (was hardcoded 3)."""
         resp = client.post('/api/media_gen', json={'chatterbox': 'nope'})
