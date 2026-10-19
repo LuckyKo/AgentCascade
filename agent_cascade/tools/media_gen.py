@@ -474,44 +474,141 @@ class MediaGen(BaseTool):
     }
 
     def _format_media_help(self, config: dict) -> str:
-        """Render the __help self-documentation. Never raises."""
+        """Render the __help self-documentation: generic section + per-backend sections.
+
+        Never raises. Sections come from ``BACKEND_MANIFEST`` (registry order), so
+        a new backend appears here without touching this formatter. Availability
+        lists are scanned lazily HERE only (never on the generation path),
+        ownership-filtered (a stem claimed by another backend's ``media_types``
+        belongs to that engine, not this one — the shared TTS config_dir holds
+        voices for three engines), and capped.
+        """
+        try:
+            from agent_cascade.utils.media_utils import _get_media_root
+            media_root = str(_get_media_root())
+        except Exception:
+            media_root = '<workspace>/logs/media'
         lines = [
             'media_gen — generate image / video / audio. You MUST name a backend '
-            '(no AUTO). Below: each backend, the configs it accepts, what each '
-            'produces, and the exact params to pass.',
+            '(no AUTO). Below: the generic contract, then each backend, the configs '
+            'it accepts, what each produces, and the exact params to pass.',
+            '',
+            '== generic ==',
+            '  args:      prompt (required) | backend (required, see below) | config (stem or full .json path)',
+            '             negative_prompt (image) | server_url (server backends) | reference_file (edit/i2v/TTS-clone)',
+            '             media_size={width,height} image/video · {duration,fps} video · {duration} audio',
+            '             overrides={...} merged over the loaded config',
+            f'  output:    {media_root}/<images|audio|video>/ (fixed; not configurable)',
+            '  vram:      by default the resident model is KV-saved and unloaded before the call and restored',
+            "             after. Set a backend's \"release_model_around_call\" to false to keep the model loaded",
+            '             (faster swap, more VRAM contention). Applies only when your endpoint supports state save.',
+            '  help:      prompt="__help" lists backends and their available configs. No generation runs.',
             '',
         ]
-        backend_notes = {
-            'comfyui': 'ComfyUI server — image / video / music. Needs the server running.',
-            'sdcpp': 'stable-diffusion.cpp local CLI — image only.',
-            'kobold_tts': 'Kobold TTS one-shot GGUF — speech. SLOW (can take minutes).',
-            'chatterbox': 'Chatterbox TTS one-shot CLI — speech (MP3), voice-cloned from reference_file. SLOW (model cold-start).',
-        }
-        for backend_id in ('comfyui', 'sdcpp', 'kobold_tts', 'chatterbox'):
-            block = (config or {}).get(backend_id)
-            if not isinstance(block, dict):
+        # Ownership map: every stem claimed by ANY backend block (this is what makes
+        # media_types useful — it is the ownership claim, kept alive by W4's merge-preserve).
+        claimed = set()
+        for block in (config or {}).values():
+            if isinstance(block, dict):
+                for stems in (block.get('media_types') or {}).values():
+                    if isinstance(stems, list):
+                        claimed.update(s for s in stems if isinstance(s, str))
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        for manifest in BACKEND_MANIFEST.values():
+            try:
+                lines.extend(
+                    self._format_backend_help(manifest, (config or {}).get(manifest['id']), config, claimed)
+                )
+            except Exception:  # never-raises contract
+                logger.debug('[MediaGen] __help backend section failed: %s', manifest['id'])
                 continue
-            lines.append(f"== backend: {backend_id} ==")
-            lines.append(f"  note: {backend_notes.get(backend_id, '')}")
-            media_types = block.get('media_types') or {}
-            for mtype, stems in media_types.items():
+            lines.append('')
+        return '\n'.join(lines)
+
+    def _format_backend_help(self, manifest: dict, block, config: dict, claimed: set) -> list:
+        """One backend's __help section, entirely from its manifest. May raise (caller guards)."""
+        bid = manifest['id']
+        block = block if isinstance(block, dict) else {}
+        lines = [
+            f"== backend: {bid} — {manifest['label']} ==",
+            f"  note:      {manifest['note']}",
+        ]
+        if manifest['agent_args']:
+            lines.append(f"  honors:    {', '.join(manifest['agent_args'])}")
+        if manifest['overrides_keys']:
+            lines.append(f"  overrides: {', '.join(manifest['overrides_keys'])}")
+
+        mine = block.get('media_types') or {}
+        if bid == 'comfyui' and isinstance(mine.get('audio'), list) and mine['audio']:
+            lines += [
+                '  note:      Music (comfyui audio) uses TWO fields: overrides.style (mood/instrumentation) and',
+                '             overrides.lyrics (with [verse]/[chorus] tags). The prompt alone only sets style;',
+                '             lyrics is dropped if omitted.',
+            ]
+
+        avail_key = manifest['availability']
+        avail_dir = block.get(avail_key) if avail_key != 'none' else None
+        if isinstance(avail_dir, str) and avail_dir.strip():
+            if list(manifest['media_types']) == ['audio']:
+                noun = 'voices'
+            elif 'video' in manifest['media_types']:
+                noun = 'workflows'
+            else:
+                noun = 'configs'
+            lines.append(f"  available {noun} ({avail_key}):")
+            listed = 0
+            own_stems = []
+            # 1) stems claimed by THIS backend, in config order, grouped by media type.
+            for mtype, stems in mine.items():
                 if not isinstance(stems, list):
                     continue
                 for stem in stems:
                     if not isinstance(stem, str):
                         continue
-                    desc = self._describe_config(backend_id, stem, config)
-                    usage = self._usage_for(backend_id, mtype, stem)
-                    lines.append(f"  - config={stem}")
-                    lines.append(f"      produces: {desc}")
-                    lines.append(f"      usage:    {usage}")
-            lines.append('')
-        lines.append(
-            'Music (comfyui audio) uses TWO fields: overrides.style (mood/instrumentation) '
-            'and overrides.lyrics (with [verse]/[chorus] tags). The prompt alone only sets '
-            'style; lyrics is dropped if omitted.'
-        )
-        return '\n'.join(lines)
+                    own_stems.append(stem)
+                    if listed < self._HELP_MAX_STEMS:
+                        lines.extend(self._help_entry(bid, mtype, stem, config))
+                    listed += 1
+            # 2) stems on disk claimed by NOBODY (marked as such).
+            for stem in self._scan_available(bid, avail_dir):
+                if stem in claimed or stem in own_stems:
+                    continue
+                if listed < self._HELP_MAX_STEMS:
+                    lines.extend(
+                        self._help_entry(bid, manifest['media_types'][0], stem, config, unclaimed=True)
+                    )
+                listed += 1
+            extra = listed - self._HELP_MAX_STEMS
+            if extra > 0:
+                lines.append(f"  … (+{extra} more)")
+
+        if manifest['release_model_supported']:
+            default = bool(manifest['defaults'].get('release_model_around_call', True))
+            lines.append(f"  release_model_around_call: supported (default {'true' if default else 'false'})")
+        else:
+            lines.append('  release_model_around_call: not supported (this backend never unloads)')
+        return lines
+
+    _HELP_MAX_STEMS = 40
+
+    def _help_entry(self, backend_id: str, mtype, stem: str, config: dict, unclaimed: bool = False) -> list:
+        desc = self._describe_config(backend_id, stem, config)
+        usage = self._usage_for(backend_id, mtype, stem)
+        mark = ' (unclaimed)' if unclaimed else ''
+        return [f"    - {stem}{mark}  {desc}", f"      usage: {usage}"]
+
+    def _scan_available(self, backend_id: str, directory: str) -> list:
+        """Sorted stems in a config/workflow dir. Reuses image_gen's scanners; never raises."""
+        try:
+            if backend_id == 'comfyui':
+                from agent_cascade.tools.image_gen import _list_workflows
+                entries = _list_workflows(directory)
+            else:
+                from agent_cascade.tools.image_gen import _list_sdcpp_configs
+                entries = _list_sdcpp_configs(directory)
+            return [e['name'] for e in entries if isinstance(e, dict) and isinstance(e.get('name'), str)]
+        except Exception:
+            return []
 
     def _describe_config(self, backend_id: str, stem: str, config: dict) -> str:
         """One-line description for a config/workflow stem. Never raises."""
