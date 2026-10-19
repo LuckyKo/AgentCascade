@@ -7276,6 +7276,17 @@ async function saveMediaGenSettings() {
     try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
 
     if (res.ok && (data.status === 'ok' || data.ok === true)) {
+      // The POST succeeded, so the posted body IS the new on-disk state for
+      // every block we sent. Refresh the snapshot here — MG_LOADED_BLOCKS must
+      // mirror disk or a later save mis-answers "did this key exist before"
+      // (e.g. release-flag OFF→save→ON→save would silently drop the true).
+      for (const id in body) {
+        if (MG_LOADED_BLOCKS[id] && typeof MG_LOADED_BLOCKS[id] === 'object') {
+          Object.assign(MG_LOADED_BLOCKS[id], body[id]);
+        } else {
+          MG_LOADED_BLOCKS[id] = body[id];
+        }
+      }
       _mgShowSaved();
     } else {
       const msg = data.message || data.error || `Save failed (${res.status})`;

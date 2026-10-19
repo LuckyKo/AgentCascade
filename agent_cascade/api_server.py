@@ -1901,9 +1901,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # .get() calls at load time. Validation set is the data-driven manifest,
         # so a newly registered backend validates without touching this file.
         from agent_cascade.tools.media_backends import manifest_ids
-        for _block_key in manifest_ids():
-            if _block_key in data and not isinstance(data[_block_key], dict):
-                return JSONResponse(status_code=400, content={'message': f'Invalid {_block_key} block'})
+        for block_key in manifest_ids():
+            if block_key in data and not isinstance(data[block_key], dict):
+                return JSONResponse(status_code=400, content={'message': f'Invalid {block_key} block'})
 
         try:
             _media_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
