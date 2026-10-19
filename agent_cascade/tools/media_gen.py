@@ -14,35 +14,41 @@
 
 """Generic multi-media generation tool (image / video / audio).
 
-``media_gen`` generalises the ``image_gen`` tool over a **backend registry** where
-each backend declares which media types it can produce. Backends implemented in
-increment 1: ``sdcpp`` (stable-diffusion.cpp, image) and ``comfyui`` (ComfyUI
-server, image). ``kobold_tts`` is registered as a capability stub so the AUTO
-resolver's config-ownership path is testable; its generation lands in a later
-increment. Video and music land in later increments too.
+``media_gen`` is a **backend registry** tool: each backend (a class under
+``media_backends/``) declares the media types it can produce and attaches a
+presentation ``manifest`` (UI fields, ``__help`` text, behaviour defaults). All
+four registered backends are implemented end to end: ``comfyui`` (ComfyUI
+server — image / video / music), ``sdcpp`` (stable-diffusion.cpp CLI — image),
+``kobold_tts`` (koboldcpp GGUF — speech), and ``chatterbox`` (Chatterbox-TTS
+one-shot CLI — speech). Adding a backend = adding its class + manifest entry;
+nothing in this file changes.
 
-The canonical media-type vocabulary is exactly three types (image / video / audio).
-TTS and music are both *audio* (a backend/config distinction, not an output type),
-so both return ``ContentItem(audio=...)``.
+The canonical media-type vocabulary is exactly three types (image / video /
+audio). TTS and music are both *audio* (a backend/config distinction, not an
+output type), so both return ``ContentItem(audio=...)``.
 
-Backend selection is EXPLICIT: the caller must name a backend (``comfyui`` /
-``sdcpp`` / ``kobold_tts``) — there is no AUTO. For ComfyUI, the media type
-(image/video/audio) is inferred from the loaded workflow, so the caller only needs
-the backend + config stem. Run with ``prompt='__help'`` to list every backend,
-config, what it produces, and the exact params to pass for each case.
+Backend selection is EXPLICIT: the caller must name a backend — there is no
+AUTO resolver and no media_type parameter. For ComfyUI the media type (image/
+video/audio) is inferred from the loaded workflow, so the caller only needs the
+backend + config stem. Run with ``prompt='__help'`` to list every backend, its
+available configs, what each produces, and the exact params to pass per case;
+the backend id list in the tool schema comes from the composed manifest too.
 
-VRAM management (every backend): before generation we save the owning instance's
-KV state and unload all models from llama-autoloader to free VRAM. The sequence is
-preflight → save → unload → generate → save media → restore. The restore is NOT in
-a ``finally`` block: it is called explicitly at the end and on every early error
-path (generation failure, media-save failure) so the agent's KV is never left
-dangling. ``preflight`` runs strictly BEFORE any VRAM work, so a bad config /
-missing model / out-of-roots ``reference_file`` never leaves the model unloaded.
+VRAM management (every backend, gated per backend by the manifest's
+``release_model_around_call`` — default on): before generation we save the
+owning instance's KV state and unload all models from llama-autoloader to free
+VRAM. The sequence is preflight → save → unload → generate → save media →
+restore. The restore is NOT in a ``finally`` block: it is called explicitly at
+the end and on every early error path (generation failure, media-save failure)
+so the agent's KV is never left dangling. ``preflight`` runs strictly BEFORE
+any VRAM work, so a bad config / missing model / out-of-roots ``reference_file``
+never leaves the model unloaded.
 
-No captioning happens inside this tool: the generated image is returned uncaptioned
-and the router's ``caption_images`` flow supplies the caption later (image only —
-video/audio are never sent to the vision guard). This is why the *primary* restore
-is the one at the end: there is no inner LLM call to reason about.
+No captioning happens inside this tool: the generated image is returned
+uncaptioned and the router's ``caption_images`` flow supplies the caption later
+(image only — video/audio are never sent to the vision guard). This is why the
+*primary* restore is the one at the end: there is no inner LLM call to reason
+about.
 """
 
 import json
@@ -60,7 +66,7 @@ from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
 from agent_cascade.tools.media_backends import manifest_ids
-from agent_cascade.tools.media_backends.kobold_tts import kobold_tts_dms_bound
+from agent_cascade.tools.media_backends import BACKEND_MANIFEST
 from agent_cascade.tools.media_backends.base import (
     MEDIA_TYPES, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
 )
@@ -292,8 +298,8 @@ class MediaGen(BaseTool):
 
         Backend selection is explicit (no AUTO), so the backend id is known from the tool args and
         this resolves to EXACTLY the timeout the backend's preflight stashes in req.prepared['timeout']
-        — resolve_media_timeout(config, config.get(backend_id)) — the same value the old scattered
-        marker carried (t292: replaced by the single dispatch-boundary write).
+        — resolve_media_timeout(config, config.get(backend_id)) — plus any declared teardown
+        headroom. The dispatch boundary (ToolDispatcher) is the single writer of the DMS marker.
         """
         params = tool_args
         if isinstance(params, str):
@@ -308,11 +314,12 @@ class MediaGen(BaseTool):
         config = _get_media_gen_config()
         backend_id = params.get('backend') or ''
         block = (config or {}).get(backend_id)
-        if backend_id == 'kobold_tts':
-            # Teardown runs after generation, so the DMS bound carries extra headroom — see
-            # kobold_tts_dms_bound (deliberately larger than preflight's generation budget).
-            return kobold_tts_dms_bound(config, block)
-        return resolve_media_timeout(config, block)
+        # Teardown that runs in the finally AFTER generation (e.g. waiting for a
+        # process tree to exit) lives outside the generation budget; backends that
+        # have one declare ``teardown_headroom`` seconds in their manifest, and the
+        # DMS wall-clock bound carries it. Backends without teardown declare 0.
+        headroom = (BACKEND_MANIFEST.get(backend_id) or {}).get('teardown_headroom') or 0
+        return resolve_media_timeout(config, block) + headroom
 
     def call(self, params, **kwargs) -> List[ContentItem]:
         try:
@@ -426,7 +433,7 @@ class MediaGen(BaseTool):
 
     def _build_feedback(self, media_type: str, media_path: str, backend_id: str,
                        prepared: dict, elapsed: float) -> str:
-        """Build the descriptive feedback line (§5.4). Never raises."""
+        """Build the descriptive feedback line shown after a generation. Never raises."""
         config_name = (prepared or {}).get('config_name', '')
         elapsed_str = _fmt_elapsed(elapsed)
 
@@ -539,12 +546,8 @@ class MediaGen(BaseTool):
             lines.append(f"  overrides: {', '.join(manifest['overrides_keys'])}")
 
         mine = block.get('media_types') or {}
-        if bid == 'comfyui' and isinstance(mine.get('audio'), list) and mine['audio']:
-            lines += [
-                '  note:      Music (comfyui audio) uses TWO fields: overrides.style (mood/instrumentation) and',
-                '             overrides.lyrics (with [verse]/[chorus] tags). The prompt alone only sets style;',
-                '             lyrics is dropped if omitted.',
-            ]
+        if manifest['music_notes'] and isinstance(mine.get('audio'), list) and mine['audio']:
+            lines.extend(manifest['music_notes'])
 
         avail_key = manifest['availability']
         avail_dir = block.get(avail_key) if avail_key != 'none' else None
@@ -600,7 +603,8 @@ class MediaGen(BaseTool):
     def _scan_available(self, backend_id: str, directory: str) -> list:
         """Sorted stems in a config/workflow dir. Reuses image_gen's scanners; never raises."""
         try:
-            if backend_id == 'comfyui':
+            avail = (BACKEND_MANIFEST.get(backend_id) or {}).get('availability')
+            if avail == 'workflow_dir':
                 from agent_cascade.tools.image_gen import _list_workflows
                 entries = _list_workflows(directory)
             else:
@@ -626,7 +630,8 @@ class MediaGen(BaseTool):
     def _config_json_path(self, backend_id: str, stem: str, config: dict) -> str | None:
         """Absolute path to a config/workflow JSON for a stem, or None."""
         block = (config or {}).get(backend_id) or {}
-        d = block.get('workflow_dir') if backend_id == 'comfyui' else block.get('config_dir')
+        avail = (BACKEND_MANIFEST.get(backend_id) or {}).get('availability')
+        d = block.get(avail) if avail in ('config_dir', 'workflow_dir') else None
         if not d or not isinstance(d, str):
             return None
         p = Path(d)
@@ -636,22 +641,24 @@ class MediaGen(BaseTool):
         return str(p / f"{stem}.json")
 
     def _usage_for(self, backend_id: str, mtype: str, stem: str) -> str:
-        """Exact params to pass for one (backend, media-type, config) case."""
-        if mtype == 'video':
-            return (f'backend=comfyui, config={stem}, prompt="<motion description>", '
-                    'reference_file="<first-frame.png>"')
-        if mtype == 'audio' and backend_id == 'comfyui':
-            return (f'backend=comfyui, config={stem}, prompt="<style/mood>", '
-                    'overrides={"style": "<style>", "lyrics": "[verse]\\n<lyrics>"}')
-        if mtype == 'audio' and backend_id == 'chatterbox':
-            return (f'backend=chatterbox, config={stem}, prompt="<text to speak>", '
-                    'reference_file="<voice-clip.wav>"')
-        # Audio catch-all: anything not matched by a specific branch above falls
-        # through to the kobold_tts usage string. A new audio backend (e.g. a
-        # second TTS engine) MUST add its own `if mtype == 'audio' and backend_id
-        # == '<id>'` branch above this, or it will be documented as kobold_tts.
-        if mtype == 'audio':  # kobold_tts speech
-            return f'backend=kobold_tts, config={stem}, prompt="<text to speak>"'
-        # image (comfyui or sdcpp)
-        return (f'backend={backend_id}, config={stem}, prompt="<image description>", '
-                'media_size={"width": 1024, "height": 1024}')
+        """Exact params to pass for one (backend, media-type, config) case.
+
+        Data-driven: the per-media-type usage tails live in the manifest's
+        ``usage_hints``; a backend that declares none for a media type gets a
+        generic fallback assembled from its agent_args/overrides_keys. No
+        per-backend branch here — a new backend documents itself in its manifest.
+        """
+        entry = BACKEND_MANIFEST.get(backend_id) or {}
+        tail = (entry.get('usage_hints') or {}).get(mtype)
+        if tail is None:
+            parts = [f'prompt="<{mtype} description>"']
+            if 'media_size' in entry.get('agent_args', ()):
+                parts.append('media_size={"width": 1024, "height": 1024}')
+            if entry.get('overrides_keys'):
+                parts.append('overrides={'
+                             + ', '.join(f'"{k}": "<{k}>"' for k in entry['overrides_keys'])
+                             + '}')
+            if 'reference_file' in entry.get('agent_args', ()):
+                parts.append('reference_file="<input-file.ext>"')
+            tail = ', '.join(parts)
+        return f'backend={backend_id}, config={stem}, {tail}'

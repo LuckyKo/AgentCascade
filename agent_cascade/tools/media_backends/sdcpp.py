@@ -27,8 +27,6 @@ from agent_cascade.tools.image_gen import (
 class SdcppBackend(MediaBackend):
     id = 'sdcpp'
     media_types = ('image',)
-    server_backed = False
-    requires_vram = True
 
     manifest = BackendManifest(
         label='stable-diffusion.cpp',
@@ -51,7 +49,11 @@ class SdcppBackend(MediaBackend):
         availability='config_dir',
         agent_args=('config', 'negative_prompt', 'media_size', 'overrides'),
         overrides_keys=('seed', 'steps', 'guidance'),
-        defaults={'release_model_around_call': True, 'timeout': 900},
+        usage_hints=(
+            ('image', 'prompt="<image description>", '
+                      'media_size={"width": 1024, "height": 1024}'),
+        ),
+        defaults={'release_model_around_call': True},
     )
 
     def describe(self) -> str:

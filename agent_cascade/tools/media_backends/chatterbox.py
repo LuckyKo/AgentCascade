@@ -1,9 +1,9 @@
 """
 Chatterbox TTS backend for ``media_gen`` — one-shot CLI, MP3 to stdout.
 
-Shape mirrors the kobold_tts one-shot binary backend (``server_backed=False``,
-``requires_vram=True``): ``preflight()`` resolves the interpreter + CLI script
-paths to absolute and checks they exist BEFORE any VRAM touch (invariant I1),
+Shape mirrors the kobold_tts one-shot binary backend: ``preflight()`` resolves
+the interpreter + CLI script paths to absolute and checks they exist BEFORE any
+VRAM touch (invariant I1),
 resolves the per-voice config JSON and the REQUIRED ``reference_file`` voice
 cloning reference (via ``resolve_tool_path``, the SECURITY seam), then builds
 the argv. ``run()`` executes it with ``subprocess.run(argv, shell=False,
@@ -70,8 +70,6 @@ def _resolve_tts_config(config: dict, name: str | None) -> dict:
 class ChatterboxBackend(MediaBackend):
     id = 'chatterbox'
     media_types = ('audio',)
-    server_backed = False  # local one-shot CLI, NOT an HTTP server
-    requires_vram = True
 
     manifest = BackendManifest(
         label='Chatterbox TTS',
@@ -96,7 +94,9 @@ class ChatterboxBackend(MediaBackend):
         agent_args=('config', 'reference_file', 'overrides'),
         overrides_keys=('device', 'temperature', 'exaggeration', 'cfg_weight',
                         'seed', 'target_sample_rate', 'output_format'),
-        defaults={'release_model_around_call': True, 'timeout': 600},
+        usage_hints=(('audio', 'prompt="<text to speak>", '
+                              'reference_file="<voice-clip.wav>"'),),
+        defaults={'release_model_around_call': True},
     )
 
     def describe(self) -> str:

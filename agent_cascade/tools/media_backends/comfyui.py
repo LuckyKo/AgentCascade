@@ -293,8 +293,6 @@ def _comfyui_generate_to_file(url: str, workflow: dict, output_dir: str,
 class ComfyUIBackend(MediaBackend):
     id = 'comfyui'
     media_types = ('image', 'video', 'audio')  # music + tts are 'audio'
-    server_backed = True
-    requires_vram = True
 
     manifest = BackendManifest(
         label='ComfyUI',
@@ -315,7 +313,20 @@ class ComfyUIBackend(MediaBackend):
         agent_args=('config', 'negative_prompt', 'media_size', 'reference_file',
                     'server_url', 'overrides'),
         overrides_keys=('seed', 'steps', 'guidance'),
-        defaults={'release_model_around_call': True, 'timeout': 180},
+        usage_hints=(
+            ('image', 'prompt="<image description>", '
+                      'media_size={"width": 1024, "height": 1024}'),
+            ('video', 'prompt="<motion description>", '
+                      'reference_file="<first-frame.png>"'),
+            ('audio', 'prompt="<style/mood>", '
+                      'overrides={"style": "<style>", "lyrics": "[verse]\\n<lyrics>"}'),
+        ),
+        music_notes=(
+            '  note:      Music (comfyui audio) uses TWO fields: overrides.style (mood/instrumentation) and',
+            '             overrides.lyrics (with [verse]/[chorus] tags). The prompt alone only sets style;',
+            '             lyrics is dropped if omitted.',
+        ),
+        defaults={'release_model_around_call': True},
     )
 
     def describe(self) -> str:

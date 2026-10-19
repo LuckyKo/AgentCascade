@@ -19,8 +19,8 @@ context manager (see ``_kobold_tts_server``) whose ``finally`` kills+waits the c
 
 Readiness is a capability flag, not "the port answers": poll
 ``GET /api/extra/version`` until ``tts == true`` (a bare 200 with ``--nomodel``
-reports ``tts:false``). ``server_backed`` stays **False** — we spawn and kill a
-private server per call; it is not a user-managed persistent service.
+reports ``tts:false``). We spawn and kill a private server per call — it is
+not a user-managed persistent service.
 
 TTS produces *audio* (one of the three canonical media types), not a 'tts' type.
 """
@@ -331,8 +331,6 @@ def _kobold_tts_server(argv, log_path, port, ready_timeout):
 class KoboldTTSBackend(MediaBackend):
     id = 'kobold_tts'
     media_types = ('audio',)
-    server_backed = False  # we spawn+kill a private server per call; NOT a user-managed service
-    requires_vram = True
 
     manifest = BackendManifest(
         label='Kobold TTS',
@@ -355,7 +353,9 @@ class KoboldTTSBackend(MediaBackend):
         availability='config_dir',
         agent_args=('config',),
         overrides_keys=(),
-        defaults={'release_model_around_call': True, 'timeout': 600},
+        usage_hints=(('audio', 'prompt="<text to speak>"'),),
+        teardown_headroom=TEARDOWN_HEADROOM,
+        defaults={'release_model_around_call': True},
     )
 
     def describe(self) -> str:

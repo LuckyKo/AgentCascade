@@ -229,8 +229,6 @@ class MediaBackend(ABC):
 
     id: str = ''                 # unique backend id (registry key)
     media_types: tuple = ()      # subset of MEDIA_TYPES this backend can serve
-    server_backed: bool = False  # True if it talks to an external server (ComfyUI/TTS)
-    requires_vram: bool = True   # participates in the VRAM save/unload/restore dance
     manifest = None              # optional BackendManifest presentation entry (.manifest module);
                                  # REQUIRED for registration — build_manifest raises without it.
 
