@@ -37,11 +37,16 @@
     }
   },
   "kobold_tts": {
-    "binary": "C:/work/stuff/Beta/koboldcpp.exe",
-    "models_dir": "C:/work/stuff/Beta/audio",
+    "binary": "N:/work/stuff/Beta/koboldcpp.exe",
+    "models_dir": "N:/work/stuff/Beta/audio",
     "config_dir": "N:/work/WD/AgentCascade/config/media_gen/tts",
     "default_config": "kokoro_default",
-    "timeout": 600,
+    "timeout": 200,
+    "ready_timeout": 120,
+    "port_range": [
+      5100,
+      5199
+    ],
     "media_types": {
       "audio": [
         "kokoro_default",
