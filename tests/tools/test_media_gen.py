@@ -155,16 +155,30 @@ def chatterbox_cfg(tmp_path):
     return cfg, py, cli, ref
 
 
+# The shared fixture must mirror what ``preflight`` guarantees — including the
+# child-process contract keys (see the ``test_run_without_contract_keys_*`` case
+# for the .get()→None inherit path that older/hand-built payloads take).
+_CHATTERBOX_REPO = 'C:/fake/Chatterbox-TTS-Server'
+_CHATTERBOX_HF_HOME = _CHATTERBOX_REPO + '/models'
+
+
 def _prepared_chatterbox_req():
     """A MediaRequest with ``prepared`` state set, for the ``run()`` tests.
 
     The four ``test_run_*`` cases differ only in the ``subprocess.run`` payload
-    they patch, so the request + prepared block is shared here.
+    they patch, so the request + prepared block is shared here. The block mirrors
+    what ``preflight`` guarantees — argv/timeout/ext/config_name PLUS the child-process
+    contract (``env``/``cwd``).
     """
     req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
                       prompt='x', negative_prompt='', config={}, agent_pool=None)
     req.prepared = {'argv': ['py', 'cli'], 'timeout': 600, 'ext': 'mp3',
-                    'config_name': 'chatterbox_default'}
+                    'config_name': 'chatterbox_default',
+                    'cwd': _CHATTERBOX_REPO,
+                    'env': {**os.environ, 'HF_HOME': _CHATTERBOX_HF_HOME,
+                            'HF_HUB_CACHE': _CHATTERBOX_HF_HOME,
+                            'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+                            'HF_HUB_DISABLE_TELEMETRY': '1'}}
     return req
 
 
@@ -281,6 +295,26 @@ class TestChatterboxBackendWiring:
         assert '--temperature=0.9' in argv
         assert req.prepared['ext'] == 'mp3'
         assert req.prepared['config_name'] == 'chatterbox_default'
+        # Child-process contract (the HF-cache fix): env/cwd are stashed alongside
+        # argv so run() can hand them to subprocess.run. Default cache root is the
+        # CLI script's parent dir + 'models' (mirrors the repo's own launcher).
+        assert req.prepared['cwd'] == str(cli.parent)
+        env = req.prepared['env']
+        models = str(cli.parent / 'models')
+        assert env['HF_HOME'] == models
+        assert env['HF_HUB_CACHE'] == models
+        assert env['HF_HUB_OFFLINE'] == '1'
+        assert env['TRANSFORMERS_OFFLINE'] == '1'
+        assert env['HF_HUB_DISABLE_TELEMETRY'] == '1'
+        # env= REPLACES the child environment, so every host var we do not
+        # deliberately override must survive intact (PATH is what pydub→FFmpeg
+        # needs for the mp3 encode).
+        overridden = {'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE',
+                      'TRANSFORMERS_OFFLINE', 'HF_HUB_DISABLE_TELEMETRY'}
+        for k, v in os.environ.items():
+            if k not in overridden:
+                assert env[k] == v
+        assert 'PATH' in env
 
     def test_missing_reference_file_raises(self, chatterbox_cfg):
         # Chatterbox voice cloning ALWAYS needs a reference; preflight must reject
@@ -336,6 +370,40 @@ class TestChatterboxBackendWiring:
             with pytest.raises(TimeoutError) as e:
                 ChatterboxBackend().run(req)
         assert 'timed out' in str(e.value)
+
+    def test_run_forwards_env_and_cwd(self):
+        # The contract must actually reach subprocess.run, not just sit in
+        # ``prepared``: a kwargs-capturing fake proves what run() hands over.
+        # Value checks live in the preflight test — here we only prove forwarding.
+        req = _prepared_chatterbox_req()
+        fake = subprocess.CompletedProcess(args=['py', 'cli'], returncode=0,
+                                          stdout=b'\xff\xfb' + b'\x00' * 500,
+                                          stderr=b'')
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   side_effect=lambda *a, **kw: fake) as run_mock:
+            res = ChatterboxBackend().run(req)
+        assert res.data == fake.stdout
+        args, kwargs = run_mock.call_args
+        assert args[0] == req.prepared['argv']    # argv stays positional
+        assert kwargs['cwd'] == _CHATTERBOX_REPO
+        assert kwargs['env'] is req.prepared['env']  # the same dict, unmodified
+
+    def test_run_without_contract_keys_still_inherits(self):
+        # The .get() fallback: a hand-built/older prepared payload that omits the
+        # contract keys must still run — subprocess.run receives None for both,
+        # which is its documented "inherit from the parent" behaviour.
+        req = _prepared_chatterbox_req()
+        req.prepared.pop('env')
+        req.prepared.pop('cwd')
+        fake = subprocess.CompletedProcess(args=['py', 'cli'], returncode=0,
+                                          stdout=b'\xff\xfb' + b'\x00' * 500,
+                                          stderr=b'')
+        with patch('agent_cascade.tools.media_backends.chatterbox.subprocess.run',
+                   side_effect=lambda *a, **kw: fake) as run_mock:
+            res = ChatterboxBackend().run(req)
+        assert res.data == fake.stdout
+        _, kwargs = run_mock.call_args
+        assert kwargs['env'] is None and kwargs['cwd'] is None
 
     def test_unsupported_output_format_rejected(self, chatterbox_cfg):
         # A voice config naming an unsupported container must be rejected in preflight

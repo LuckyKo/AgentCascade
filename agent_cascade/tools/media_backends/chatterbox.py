@@ -6,8 +6,10 @@ the interpreter + CLI script paths to absolute and checks they exist BEFORE any
 VRAM touch (invariant I1),
 resolves the per-voice config JSON and the REQUIRED ``reference_file`` voice
 cloning reference (via ``resolve_tool_path``, the SECURITY seam), then builds
-the argv. ``run()`` executes it with ``subprocess.run(argv, shell=False,
-capture_output=True)`` and reads the audio from **stdout** — the one-shot CLI
+the argv AND the child-process contract — ``env`` (``HF_HOME``/``HF_HUB_CACHE``
+point at ``<repo>/models``, see below) and ``cwd`` = the repo dir. ``run()``
+executes it with ``subprocess.run(argv, shell=False, capture_output=True,
+env=..., cwd=...)`` and reads the audio from **stdout** — the one-shot CLI
 emits raw audio bytes on stdout and all logs on stderr (confirmed empirically),
 so we capture ``result.stdout``. mp3/opus have no single universal magic header,
 so we validate only that the payload is non-empty and of a reasonable size; for
@@ -22,9 +24,20 @@ starting with '-' is not misparsed as an option. Exit 0 on success; non-zero
 otherwise (stderr carries the reason). Generation is SLOW (model cold-start), so
 the default timeout is >=600 s.
 
+Child-process contract (see ``preflight``): the CLI must run with ``cwd`` = the
+repo dir and ``HF_HOME``/``HF_HUB_CACHE`` = ``<repo>/models`` — the same env the
+repo's own launcher exports. Without them ``huggingface_hub`` resolves the model
+snapshot to the default user cache (where no snapshot exists) while ``engine.py``
+forces offline mode, so the load dies with ``LocalEntryNotFoundError``; and the
+repo's CWD-relative ``config.yaml`` is never found (its missing-file branch dumps
+defaults into our workspace and silently turns device selection into 'auto').
+``env`` therefore REPLACES the environment via ``{**os.environ, ...}`` — a bare
+dict would drop ``PATH`` and break the pydub→FFmpeg mp3 encode.
+
 TTS produces *audio* (one of the three canonical media types), not a 'tts' type.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -133,6 +146,30 @@ class ChatterboxBackend(MediaBackend):
         if not cli_path.is_file():
             raise RuntimeError(f"Chatterbox CLI script not found: {cli_path}")
 
+        # ── Child-process contract: env + cwd for the one-shot child. The WHY
+        #     (HF cache root, offline mode, the CWD-relative config.yaml) is in
+        #     the module docstring's "Child-process contract" paragraph. ──
+        repo_dir = cli_path.parent
+        # ``hf_home`` is an OPTIONAL, deliberately UNDECLARED override key (same
+        # precedent as kobold_tts's ready_timeout / port_range). A relative value
+        # resolves against repo_dir, NOT _project_root(): this cache belongs to
+        # the repo (and cwd is the repo), unlike the block's other path keys.
+        hf_home_override = block.get('hf_home')
+        if isinstance(hf_home_override, str) and hf_home_override.strip():
+            hf_home = Path(hf_home_override.strip())
+            if not hf_home.is_absolute():
+                hf_home = repo_dir / hf_home
+        else:
+            hf_home = repo_dir / 'models'
+        env = {
+            **os.environ,  # env= REPLACES the child env: keep PATH (pydub→FFmpeg mp3)
+            'HF_HOME': str(hf_home),
+            'HF_HUB_CACHE': str(hf_home),
+            'HF_HUB_OFFLINE': '1',
+            'TRANSFORMERS_OFFLINE': '1',
+            'HF_HUB_DISABLE_TELEMETRY': '1',
+        }
+
         # ── Resolve the voice config (before any VRAM). ──
         tts_cfg = _resolve_tts_config(req.config, req.config_name)
 
@@ -192,14 +229,20 @@ class ChatterboxBackend(MediaBackend):
             'timeout': timeout,
             'ext': ext,
             'config_name': req.config_name or block.get('default_config', ''),
+            'env': env,
+            'cwd': str(repo_dir),
         }
 
     def run(self, req: MediaRequest) -> MediaResult:
         argv = req.prepared['argv']
         timeout = req.prepared['timeout']
         try:
+            # .get(): env/cwd are optional in ``prepared`` (hand-built test fixtures
+            # and any older prepared payload may omit them; None ⇒ inherit as before).
             result = subprocess.run(argv, shell=False, capture_output=True,
-                                    timeout=timeout)
+                                    timeout=timeout,
+                                    env=req.prepared.get('env'),
+                                    cwd=req.prepared.get('cwd'))
         except subprocess.TimeoutExpired:
             raise TimeoutError(f"Chatterbox TTS generation timed out after {timeout}s")
         if result.returncode != 0:
