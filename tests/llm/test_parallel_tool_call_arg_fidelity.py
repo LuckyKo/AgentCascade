@@ -29,7 +29,6 @@ import json
 
 from agent_cascade.llm.oai import TextChatAtOAI
 from agent_cascade.llm.schema import Message
-import agent_cascade.tools.custom.file_ops as _file_ops
 from agent_cascade.tools.custom.file_ops import WriteFile
 
 
@@ -89,6 +88,8 @@ class _Chunk:
 
 
 class _Resp:
+    """Mimics the OpenAI streaming response object consumed by _chat_stream."""
+
     def __init__(self, chunks):
         self._events = []
         for c in chunks:
@@ -119,6 +120,8 @@ class _Resp:
 
 
 class _SSE:
+    """Mimics an httpx SSE event: .data and .json()."""
+
     def __init__(self, data, payload):
         self.data = data
         self._payload = payload
@@ -249,7 +252,6 @@ def test_missing_required_error_names_received_keys():
     assert out.startswith('ERROR')
     # Legacy contract (must remain byte-identical so the pinned tests cannot break).
     assert "missing required parameter(s) for tool 'write_file': ['path']" in out
-    assert "'path'" in out
     # New self-diagnosing detail: names exactly what was received and what is allowed.
     assert "received keys: ['content', 'justification']" in out
     assert "required: ['path', 'content']" in out
@@ -277,10 +279,6 @@ def test_stream_fault_signature_differs_from_model_omission():
     assert set(spliced) == {'content', 'justification'}, 'a real fault keeps all keys'
     assert spliced['content'] != 'hello world file', 'the surviving value must be garbled (spliced)'
 
-    # The recorded omission is the opposite signature: a required key is simply absent.
-    parsed_omission = json.loads(MISSING_PATH_ARGS)
-    assert 'path' not in parsed_omission, 'model omission drops a key, not a value'
-
 
 # ---------------------------------------------------------------------------
 # 4. write_file coerces a renamed payload key (the model's edit_file habit)
@@ -293,7 +291,7 @@ def test_write_file_renamed_key_is_coerced():
     expected = json.loads(RENAMED_KEY_ARGS)
     om = _RecordingOM()
     t = _write_file_tool(om)
-    with patch.object(_file_ops, 'logger') as lg:
+    with patch('agent_cascade.tools.custom.file_ops.logger') as lg:
         t.call(RENAMED_KEY_ARGS)
     assert om.write is not None, 'coerced call did not reach the filesystem'
     assert om.write[0] == expected['path'], 'wrong path forwarded'

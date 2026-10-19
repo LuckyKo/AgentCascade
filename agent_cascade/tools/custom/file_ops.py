@@ -942,9 +942,8 @@ class WriteFile(BaseTool, PathResolutionMixin):
         sibling tool's key (edit_file's 'new_content', or 'text'/'replacement'/'body').
         write_file declares no additionalProperties:false, so that key would be silently
         dropped and the call would fail on a missing 'content'. Mirror the in-repo
-        precedents — read_file coerces offset -> start_line with a logged notice
-        (file_ops.py:393-396) and edit_file scans misnamed payloads
-        (file_ops.py:1101-1103). Coerce only when 'content' is absent/empty and EXACTLY
+        precedents — ReadFile's `offset`→`start_line` coercion and `EditFile.call`'s
+        `old_string`/`new_string` scan. Coerce only when 'content' is absent/empty and EXACTLY
         one *string* alias is present and non-empty, then log the notice.
         """
         # --- Alias coercion (before schema validation so 'content' is seen) ---

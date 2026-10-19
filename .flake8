@@ -62,6 +62,7 @@ per-file-ignores =
     tests/e2e_security_slot_deadlock.py: E402
     tests/llm/test_dashscope.py: F541
     tests/llm/test_function_content.py: F541
+    tests/llm/test_parallel_tool_call_arg_fidelity.py: E501
     tests/loop_test_utils.py: E402
     tests/scripts/bench_read_file.py: E402, F541
     tests/scripts/bench_read_file_dispatcher.py: E127, E128, E402, F541
