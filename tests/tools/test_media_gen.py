@@ -560,6 +560,62 @@ class TestReleaseModelFlag:
         assert order == ['save', 'unload', 'run', 'restore']
         assert result[0].image == '/tmp/media/out.png'
 
+    def test_pool_present_restore_uses_held_slot_helper(self, sdcpp_cfg):
+        """F4: production path — with a live pool the restore MUST route through
+        restore_held_slot_state(pool, instance, name, label=name), NOT the
+        pool-None fallback. The held endpoint is resolved LIVE from the pool
+        router (the carried 'held' dict is the SAVED endpoint and may be stale);
+        the stable instance-name label survives a system agent consuming
+        _state_label inside the window. Patching the helper (not HTTP) proves
+        routing + arguments; the helper's own request behaviour is state_ops'
+        contract, tested there."""
+        tool = MediaGen(agent_pool=MagicMock(name='agent_pool'))
+        inst = _fake_instance()
+        inst.instance_name = 'caller_agent'
+        order = []
+
+        def _save(inst_):
+            order.append('save'); return True
+
+        def _unload(base):
+            order.append('unload'); return True
+
+        def _restore_held(pool, inst_, inst_name, label=None):
+            order.append('restore')
+            # The real helper resolves the held endpoint from pool.api_router;
+            # assert it received the pool and the stable label, not a stale cfg.
+            assert label == 'caller_agent' and inst_name == 'caller_agent'
+            return True
+
+        def _run(argv, **kwargs):
+            order.append('run')
+            out = argv[argv.index('-o') + 1]
+            with open(out, 'wb') as f:
+                f.write(b'png')
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
+
+        held_restore = MagicMock(name='restore_held_slot_state')
+        held_restore.side_effect = _restore_held
+        with patch.object(tool, '_get_instance', return_value=inst), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
+              patch('agent_cascade.state_ops.restore_held_slot_state', side_effect=held_restore), \
+              patch('agent_cascade.state_ops.restore_instance_state') as fallback_restore:
+            result = tool.call({'prompt': 'a red cube', 'backend': 'sdcpp'})
+
+        assert order == ['save', 'unload', 'run', 'restore']
+        assert result[0].image == '/tmp/media/out.png'
+        held_restore.assert_called_once()
+        args, kwargs = held_restore.call_args
+        assert args[0] is not None                      # the pool is threaded through
+        assert args[2] == 'caller_agent'
+        assert kwargs.get('label') == 'caller_agent'    # stable label, not _state_label
+        fallback_restore.assert_not_called()            # production path, not the fallback
+
 
 # ── DMS bound declaration (plan t292 — single dispatch-boundary writer) ────────
 # media_gen no longer writes _in_blocking_tool itself; the boundary (ToolDispatcher)

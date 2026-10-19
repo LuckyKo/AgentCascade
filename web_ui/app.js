@@ -6998,6 +6998,10 @@ let mgRootResolved = false;
 // loads only hydrate values in place (risk R6: the sub-tab hook re-runs this).
 let MG_MANIFEST = null;
 let mgDomBuilt = false;
+// Backend blocks exactly as loaded from disk at hydrate time; saveMediaGenSettings
+// consults it to tell "user-set" advanced fields apart from manifest-default
+// hydration (C3: never stamp defaults/absent keys back into the config).
+let MG_LOADED_BLOCKS = {};
 let mgInitialLoadDone = false;
 
 // Join the server-reported install root with a config-relative path. Falls back to
@@ -7150,6 +7154,9 @@ async function loadMediaGenSettings() {
     mgRootResolved = true;
   }
 
+  // Snapshot the on-disk blocks so save can tell user-set values from defaults.
+  MG_LOADED_BLOCKS = cfg;
+
   // default_backend is vestigial (the agent picks the backend per-call); keep the
   // whitelist derived from the manifest so a config tab is always shown.
   const ids = Object.keys(MG_MANIFEST);
@@ -7168,8 +7175,10 @@ async function loadMediaGenSettings() {
   _mgToggleBackendVisibility(mgBackend.value);
 }
 
-// Set one field element from the config block, per its FieldSpec kind. Defaults
-// come from the manifest (numbers) or the <AgentCascade_root> placeholder (paths).
+// Set one field element from the config block, per its FieldSpec kind. Values
+// come ONLY from the config block or the <AgentCascade_root> placeholder; an
+// absent advanced number stays EMPTY (never the manifest default) so a later
+// save cannot stamp a default over the user's global/config fallback (F1).
 function _mgHydrateFields(backendId, manifestEntry, block) {
   const specs = (manifestEntry.connection_fields || []).concat(manifestEntry.advanced_fields || []);
   for (const spec of specs) {
@@ -7179,9 +7188,7 @@ function _mgHydrateFields(backendId, manifestEntry, block) {
     if (spec.kind === 'checkbox') {
       el.checked = raw !== false; // absent -> default ON
     } else if (spec.kind === 'number') {
-      const dflt = (manifestEntry.defaults || {})[spec.key];
-      const v = (raw != null) ? raw : dflt;
-      if (v != null) el.value = String(v);
+      el.value = (raw != null) ? String(raw) : '';
     } else if (typeof raw === 'string' && raw !== '') {
       el.value = raw;
     } else if (spec.placeholder && spec.placeholder.includes('<AgentCascade_root>')) {
@@ -7195,7 +7202,9 @@ function _mgHydrateFields(backendId, manifestEntry, block) {
 // Save via POST /api/media_gen. The body is built GENERICALLY from the manifest
 // field specs for ALL backend blocks (not just the visible one), so a Save can
 // never wipe an unrendered backend even without the server-side merge. Cleared
-// fields post '' (merge-preserve only fills ABSENT keys, so '' stays cleared).
+// text/url fields post '' (merge-preserve only fills ABSENT keys, so '' stays
+// cleared); advanced numbers/checkboxes are written ONLY when the user set them
+// (F1: no default-stamping; F3/C3: release_model_around_call absent unless OFF).
 async function saveMediaGenSettings() {
   if (!MG_MANIFEST) return;
   const mgBackend = document.getElementById('mg-backend');
@@ -7214,20 +7223,25 @@ async function saveMediaGenSettings() {
 
   for (const [id, manifestEntry] of Object.entries(MG_MANIFEST)) {
     const block = {};
+    const loaded = MG_LOADED_BLOCKS[id] && typeof MG_LOADED_BLOCKS[id] === 'object' ? MG_LOADED_BLOCKS[id] : {};
     const specs = (manifestEntry.connection_fields || []).concat(manifestEntry.advanced_fields || []);
     for (const spec of specs) {
       const el = document.getElementById(_mgFieldId(id, spec.key));
       if (!el) continue;
       if (spec.kind === 'checkbox') {
-        block[spec.key] = el.checked; // release_model_around_call: explicit bool
+        // C3/F3: write only when the user turned it OFF; keep an existing key
+        // (e.g. an explicit true the user turned back ON), never stamp defaults.
+        if (!el.checked) block[spec.key] = false;
+        else if (loaded[spec.key] != null) block[spec.key] = true;
         continue;
       }
       if (spec.kind === 'number') {
-        let n = parseInt(el.value, 10);
-        if (isNaN(n)) {
-          const dflt = (manifestEntry.defaults || {})[spec.key];
-          n = (dflt != null) ? dflt : (spec.min != null ? spec.min : 0);
-        }
+        // F1: an empty field was never typed into — leave the key absent so the
+        // global/config fallback applies. Only user-typed numbers are written.
+        const rawNum = (el.value || '').trim();
+        if (rawNum === '') continue;
+        let n = parseInt(rawNum, 10);
+        if (isNaN(n)) continue;
         if (spec.min != null) n = Math.max(spec.min, n);
         if (spec.max != null) n = Math.min(spec.max, n);
         el.value = String(n);
@@ -7243,7 +7257,7 @@ async function saveMediaGenSettings() {
         _mgSetStatus('✕ ' + (spec.label || spec.key) + ' is required for the selected backend', 'error');
         return;
       }
-      if (spec.required && !v) {
+      if (spec.required && !v && id === visible) {
         _mgSetStatus('✕ ' + (spec.label || spec.key) + ' is required', 'error');
         return;
       }
