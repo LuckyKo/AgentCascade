@@ -211,9 +211,28 @@ class BaseTool(ABC):
                 # ValueError shape so tools can return it as a normal tool result.
                 if e.validator == 'required':
                     missing = [p for p in self.parameters.get('required', []) if p not in params_json]
-                    raise ValueError(
+                    # BUG_0077: make the error self-diagnosing. A model-side tool call
+                    # that omits or renames a required key used to fail with only the
+                    # missing key, which forced the model to guess ("param ordering").
+                    # Echo the keys that WERE received, the schema's own required list,
+                    # and the full property list (so optional params like 'justification'
+                    # are visible) — all read from the tool's own schema, generically.
+                    received = list(params_json.keys())
+                    required = list(self.parameters.get('required', []))
+                    known = list(self.parameters.get('properties', {}))
+                    msg = (
                         f"missing required parameter(s) for tool '{self.name}': {sorted(missing)}"
-                    ) from e
+                        f"  | received keys: {received}"
+                        f"  | required: {required}"
+                        f"  | known parameters: {known}"
+                    )
+                    if len(missing) == 1:
+                        msg += (f"  | If you meant to send the value under another name, "
+                                f"re-issue with the exact key '{missing[0]}'.")
+                    elif missing:
+                        msg += (f"  | If you meant to send the value under another name, "
+                                f"re-issue with the exact keys {sorted(missing)}.")
+                    raise ValueError(msg) from e
                 raise
         else:
             raise ValueError(f"Invalid parameters schema for tool '{self.name}': must be list or dict")

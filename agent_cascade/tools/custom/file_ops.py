@@ -937,7 +937,36 @@ class WriteFile(BaseTool, PathResolutionMixin):
         to the base class, this ensures write_file's content parameter stays untouched.
         Content starting with tag-like text (e.g., "<thinking>code here") would be
         corrupted by naive stripping.
+
+        BUG_0077 (renamed-key variant): the model's habit is to send the payload under a
+        sibling tool's key (edit_file's 'new_content', or 'text'/'replacement'/'body').
+        write_file declares no additionalProperties:false, so that key would be silently
+        dropped and the call would fail on a missing 'content'. Mirror the in-repo
+        precedents — read_file coerces offset -> start_line with a logged notice
+        (file_ops.py:393-396) and edit_file scans misnamed payloads
+        (file_ops.py:1101-1103). Coerce only when 'content' is absent/empty and EXACTLY
+        one *string* alias is present and non-empty, then log the notice.
         """
+        # --- Alias coercion (before schema validation so 'content' is seen) ---
+        if isinstance(params, str):
+            try:
+                parsed = json_loads(params)
+            except Exception:
+                parsed = None
+        else:
+            parsed = params
+        if isinstance(parsed, dict) and not parsed.get('content'):
+            _ALIASES = ('new_content', 'text', 'replacement', 'body')
+            # Only coerce string payloads: a non-string under an alias is a genuine type error,
+            # not a misnamed text payload — leave it to the schema so the error stays clean.
+            present = [a for a in _ALIASES if isinstance(parsed.get(a), str) and parsed[a]]
+            if len(present) == 1:
+                alias = present[0]
+                parsed = dict(parsed)
+                parsed['content'] = parsed.pop(alias)
+                logger.info("write_file: coerced alias %r -> 'content'", alias)
+                params = parsed  # pass the coerced dict straight through (no re-parse)
+
         params_json = super()._verify_json_format_args(params, strict_json)
 
         # Ensure content is preserved exactly as-is from parsed JSON.
