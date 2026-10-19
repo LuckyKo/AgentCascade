@@ -1898,16 +1898,20 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         data.pop('project_root', None)
 
         # Each backend block must be an object; a non-dict would break the tool's
-        # .get() calls at load time.
-        for _block_key in ('comfyui', 'sdcpp', 'kobold_tts'):
+        # .get() calls at load time. Validation set is the data-driven manifest,
+        # so a newly registered backend validates without touching this file.
+        from agent_cascade.tools.media_backends import manifest_ids
+        for _block_key in manifest_ids():
             if _block_key in data and not isinstance(data[_block_key], dict):
                 return JSONResponse(status_code=400, content={'message': f'Invalid {_block_key} block'})
 
         try:
             _media_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
-            # Preserve the media_types ownership lists from the existing config: the UI
-            # never edits them, and they feed the /api/media_gen/workflows pulldowns. A
-            # naive overwrite would drop them, so re-attach any that the posted block omits.
+            # Merge-preserve, two levels deep: the UI posts only the fields it renders,
+            # so anything else must survive the save — backend blocks the UI has no tab
+            # for (e.g. a newly added backend), and keys inside a posted block that the
+            # UI does not expose (media_types ownership lists, backend-only keys).
+            # A naive overwrite used to drop exactly those (see the settings-save audit).
             existing = {}
             try:
                 with open(_media_gen_config_path, 'r', encoding='utf-8') as f:
@@ -1915,11 +1919,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except (OSError, ValueError):
                 existing = {}
             if isinstance(existing, dict):
-                for block_key, block_val in data.items():
-                    old_block = existing.get(block_key)
-                    if isinstance(block_val, dict) and isinstance(old_block, dict):
-                        if 'media_types' not in block_val and 'media_types' in old_block:
-                            block_val['media_types'] = old_block['media_types']
+                for block_key, old_block in existing.items():
+                    if block_key not in data:
+                        data[block_key] = old_block
+                    elif isinstance(data[block_key], dict) and isinstance(old_block, dict):
+                        for key, value in old_block.items():
+                            data[block_key].setdefault(key, value)
             with open(_media_gen_config_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
         except OSError as e:
@@ -1928,6 +1933,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         from agent_cascade.tools.media_gen import _invalidate_media_gen_config
         _invalidate_media_gen_config()
         return {'status': 'ok'}
+
+    @app.get('/api/media_gen/manifest')
+    async def get_media_gen_manifest():
+        """Data-driven backend manifest for the UI: ids, labels, field specs, defaults.
+
+        Composed in ``media_backends/__init__`` from each backend class's declared
+        ``manifest`` — the UI builds its backend tabs and field controls from this
+        instead of hardcoded per-backend markup, so adding a backend needs no UI edit.
+        """
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        return {'backends': BACKEND_MANIFEST}
 
     @app.get('/api/media_gen/workflows')
     async def list_media_gen_workflows():
