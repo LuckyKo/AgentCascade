@@ -312,16 +312,33 @@ class ShellCmd(BaseTool):
                 heartbeat_interval=heartbeat_interval,
             )
 
+        # ── System agents never take safe mode. ─────────────────────────
+        # The Security advisor and the Compressor hold the endpoint EXCLUSIVELY while
+        # they run, so unloading the model around their own verification command frees
+        # nothing nobody else is using — and unload_all_models destroys the CALLER's
+        # resident KV as collateral (the parent then pays a full model reload plus a
+        # full prompt reprocess, for a command that costs milliseconds). Identified
+        # through the shared system-agent predicate (IdleManager._is_system_agent over
+        # STABLE_SYSTEM_PROMPT_CLASSES), the same one used for idle timeouts; local
+        # import keeps the agents→tools→pool import cycle closed (see
+        # _has_real_wait_for_message).
+        from agent_cascade.pool.idle_manager import IdleManager
+        pool = self.agent_pool
+        instance = self._get_instance(agent_name) if pool else None
+        _system_agent = instance is not None and IdleManager._is_system_agent(instance.agent_class)
+        if _system_agent and run_safe:
+            logger.info("shell_cmd: system agent '%s' holds the endpoint exclusively — "
+                        'downgrading execution_mode=%s to sync (no unload, no KV save/restore)',
+                        agent_name, mode)
+
         # ── AUTO RAM floor: force safe when free system RAM is critically low. ──
         # 'auto' only (explicit sync/async/safe win). Takes precedence over auto-async — a command
         # about to OOM the box must not run unmonitored in the background. Capability gate mirrors
         # _execute_safe's GATE A; probe targets the HELD endpoint; best-effort (see state_ops.ram_vram_pressure).
-        if is_auto and not run_safe:
+        if is_auto and not run_safe and not _system_agent:
             from agent_cascade.state_ops import (resolve_held_endpoint, is_autoloader_endpoint,
                                                  is_state_save_capable, ram_vram_pressure)
             from agent_cascade.operation_manager import _queue_tool_warning
-            pool = self.agent_pool
-            instance = self._get_instance(agent_name) if pool else None
             last_ep = getattr(instance, '_last_endpoint_config', None) if instance else None
             if instance is not None and is_state_save_capable(last_ep):
                 held = resolve_held_endpoint(pool, instance)
@@ -364,7 +381,7 @@ class ShellCmd(BaseTool):
         # fall through to real shell execution (e.g. `__kill` would run as a literal).
         if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
             return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
-        if run_safe:
+        if run_safe and not _system_agent:  # system agents already logged the downgrade
             return self._execute_safe(
                 agent_name=agent_name,
                 command=command,

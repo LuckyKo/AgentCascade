@@ -41,11 +41,15 @@ CAPABLE_EP = {
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _make_instance(*, endpoint=CAPABLE_EP, holds_slot=True):
-    """A stand-in AgentInstance carrying the attributes the seam reads."""
+def _make_instance(*, endpoint=CAPABLE_EP, holds_slot=True, agent_class='assistant'):
+    """A stand-in AgentInstance carrying the attributes the seam reads.
+
+    ``agent_class`` is settable because the safe-mode dispatch now refuses
+    system-agent classes ('security' / 'compressor') — see TestSystemAgentNoSafe.
+    """
     inst = MagicMock()
     inst.instance_name = 'agent-1'
-    inst.agent_class = 'assistant'
+    inst.agent_class = agent_class
     # Real AgentInstance uses threading.RLock (agent_instance.py:243); the seam's
     # save path re-acquires it under an outer lock, so a non-reentrant Lock would
     # deadlock in tests that drive the real save_instance_state.
@@ -215,6 +219,56 @@ class TestSafeDispatch:
             out = tool.call({'command': '__kill', 'tool_id': 7, 'execution_mode': 'safe'})
             assert out == 'CONTROL'
             m_safe.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 1b. System agents (Security advisor / Compressor) never take the safe path.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestSystemAgentNoSafe:
+    def test_system_agent_safe_downgrades_to_sync(self):
+        """The advisor/Compressor hold the endpoint EXCLUSIVELY while they run, so
+        safe mode around THEIR command frees nothing nobody is using and destroys
+        the CALLER's resident KV as collateral (the parent pays a full reload +
+        reprocess for a command that costs milliseconds). 'safe' from such an instance must run plain
+        sync: no _execute_safe, no save/unload/restore, no _safe_mode_kv."""
+        inst = _make_instance(agent_class='security')
+        # Real AgentInstance initializes this to False; a MagicMock would auto-create
+        # a truthy attribute, so pin it to see that the seam never armed.
+        inst._safe_mode_kv = False
+        pool, _om = _make_pool(instance=inst, auto_security=False)
+        # Name-sensitive lookup + the caller's real instance name: the downgrade must
+        # be driven by resolving the CALLER, not by any object answering for 'unknown'.
+        # ``agent_name`` on the tool is the documented _get_agent_name fallback
+        # (tools/base.py:162); agent_instance_name is not in this tool's schema.
+        pool.get_instance = lambda name: inst if name == 'Security_guard' else None
+        tool = _make_tool(pool)
+        tool.agent_name = 'Security_guard'
+        with patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
+              patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync:
+            out = tool.call({'command': 'git diff --stat', 'justification': 'inspect',
+                             'execution_mode': 'safe'})
+            assert out == 'SYNC', "a system agent's 'safe' call must fall through to sync"
+            m_safe.assert_not_called()
+            with inst._state_lock:
+                assert inst._safe_mode_kv is False, 'the safe seam must not arm for a system agent'
+
+    def test_non_system_agent_class_still_takes_safe(self):
+        """Negative side of the new gate: the predicate is the system-agent SET
+        ('security' / 'compressor'), not 'anything that is not assistant'. A sibling
+        class — and an empty one — must keep the parent's safe path. (TestSafeDispatch
+        covers the plain assistant case; the difference here is the class value.)"""
+        for agent_class in ('reviewer', 'researcher', ''):
+            inst = _make_instance(agent_class=agent_class)
+            pool, _om = _make_pool(instance=inst, auto_security=False)
+            tool = _make_tool(pool)
+            with patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
+                  patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC'):
+                out = tool.call({'command': 'python heavy.py', 'justification': 'run it',
+                                 'execution_mode': 'safe'})
+            assert out == 'SAFE', f"non-system class {agent_class!r} must keep the safe path"
+            m_safe.assert_called_once()
 
 
 # ────────────────────────────────────────────────────────────────────────────
