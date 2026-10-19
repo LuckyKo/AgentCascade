@@ -5046,18 +5046,14 @@ function updateControls() {
     terminateBtn.style.display = isInstanceActive ? 'inline-flex' : 'none';
   }
 
-  // KV Save/Load buttons — visible only when the active instance is KV-capable.
-  // Capability comes from the backend per-instance field (state_builder kv_state_capable),
-  // which reflects the per-endpoint state_save_enabled flag ONLY — not the global
-  // state_kv_save_enabled automatic-checkpoint toggle (which is off in this deployment).
-  const kvCapable = !!activeAgentData?.kv_state_capable;
+  // KV Save/Load buttons — always visible and always enabled. They were previously
+  // gated on the backend per-instance kv_state_capable flag (only populated during a
+  // real LLM call, so they vanished after restart) and disabled while generating /
+  // in-flight. Both gates are gone by design: it's the user's choice to save/load at
+  // any time; the server still refuses an impossible op with a toast.
   if (saveKvBtn && loadKvBtn) {
-    saveKvBtn.style.display = kvCapable ? 'inline-flex' : 'none';
-    loadKvBtn.style.display = kvCapable ? 'inline-flex' : 'none';
-    saveKvBtn.disabled = kvOpInFlight;
-    // Load refuses server-side while another agent HOLDS the endpoint (D5 guard);
-    // client-side we additionally disable it while generating (D5).
-    loadKvBtn.disabled = kvOpInFlight || !!state.generating;
+    saveKvBtn.style.display = 'inline-flex';
+    loadKvBtn.style.display = 'inline-flex';
   }
 
   chatInput.placeholder = state.generating
