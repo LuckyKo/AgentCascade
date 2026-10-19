@@ -517,7 +517,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'prompt': 'Text prompt for generation (or the text to speak for TTS).',
-            'backend': 'REQUIRED for generation. Backend id: comfyui (ComfyUI server: image/video/music) | sdcpp (local stable-diffusion.cpp: image) | kobold_tts (Kobold TTS GGUF: speech). No AUTO — you must name the backend. Omit only for the __help command.',
+            'backend': 'REQUIRED for generation. Backend id: see __help (backend names are listed there). No AUTO — you must name the backend. Omit only for the __help command.',
             'config': "Config name (filename stem) or full .json path; everything else is derived from it. Omit to use the backend's configured default. See __help for the exact config stems each backend accepts.",
             'negative_prompt': 'Negative prompt to exclude elements (image backends).',
             'server_url': 'Optional override for server-backed backends (ComfyUI).',

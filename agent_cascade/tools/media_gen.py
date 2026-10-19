@@ -59,6 +59,7 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
+from agent_cascade.tools.media_backends import manifest_ids
 from agent_cascade.tools.media_backends.kobold_tts import kobold_tts_dms_bound
 from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest, resolve_media_timeout
 
@@ -139,7 +140,7 @@ class MediaGen(BaseTool):
             },
             'backend': {
                 'type': 'string',
-                'enum': ['comfyui', 'sdcpp', 'kobold_tts', 'chatterbox'],
+                'enum': manifest_ids(),
                 'description': TOOL_METADATA['media_gen']['parameters']['backend'],
             },
             'config': {

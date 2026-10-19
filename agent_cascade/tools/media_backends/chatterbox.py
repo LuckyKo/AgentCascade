@@ -32,6 +32,7 @@ from .base import (
     MediaBackend, MediaRequest, MediaResult, resolve_media_timeout,
     _project_root, resolve_tts_config_json, is_wav_bytes,
 )
+from .manifest import BackendManifest, FieldSpec
 
 from agent_cascade.utils.tool_path_resolver import resolve_tool_path
 
@@ -71,6 +72,32 @@ class ChatterboxBackend(MediaBackend):
     media_types = ('audio',)
     server_backed = False  # local one-shot CLI, NOT an HTTP server
     requires_vram = True
+
+    manifest = BackendManifest(
+        label='Chatterbox TTS',
+        note='Chatterbox-TTS-Server one-shot CLI — speech (MP3). Local subprocess.',
+        connection_fields=(
+            FieldSpec(key='python', label='Python Interpreter', kind='path', required=True,
+                      placeholder='.../chatterbox_env/Scripts/python.exe'),
+            FieldSpec(key='cli_script', label='CLI Script', kind='path', required=True,
+                      placeholder='.../chatterbox_tts.py'),
+            FieldSpec(key='config_dir', label='Voice Config Directory', kind='path',
+                      placeholder='<AgentCascade_root>/config/media_gen/tts'),
+        ),
+        advanced_fields=(
+            FieldSpec(key='default_config', label='Default Voice', kind='text',
+                      placeholder='chatterbox_default'),
+            FieldSpec(key='timeout', label='Timeout (s)', kind='number',
+                      min=60, max=3600, step=30),
+            FieldSpec(key='release_model_around_call',
+                      label='Free VRAM around the call', kind='checkbox'),
+        ),
+        availability='config_dir',
+        agent_args=('config', 'reference_file', 'overrides'),
+        overrides_keys=('device', 'temperature', 'exaggeration', 'cfg_weight',
+                        'seed', 'target_sample_rate', 'output_format'),
+        defaults={'release_model_around_call': True, 'timeout': 600},
+    )
 
     def describe(self) -> str:
         return 'Chatterbox TTS (one-shot CLI, MP3)'

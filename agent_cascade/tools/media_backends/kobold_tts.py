@@ -40,6 +40,7 @@ from .base import (
     MediaBackend, MediaRequest, MediaResult, resolve_media_timeout,
     _project_root, resolve_tts_config_json, is_wav_bytes,
 )
+from .manifest import BackendManifest, FieldSpec
 
 from agent_cascade.utils.tool_path_resolver import resolve_tool_path
 
@@ -332,6 +333,30 @@ class KoboldTTSBackend(MediaBackend):
     media_types = ('audio',)
     server_backed = False  # we spawn+kill a private server per call; NOT a user-managed service
     requires_vram = True
+
+    manifest = BackendManifest(
+        label='Kobold TTS',
+        note='Kobold TTS one-shot GGUF — speech. SLOW (can take minutes).',
+        connection_fields=(
+            FieldSpec(key='binary', label='Binary', kind='path', required=True,
+                      placeholder='C:\\...\\koboldcpp.exe'),
+            FieldSpec(key='models_dir', label='Models Directory', kind='path'),
+            FieldSpec(key='config_dir', label='Voice Config Directory', kind='path',
+                      placeholder='<AgentCascade_root>/config/media_gen/tts'),
+        ),
+        advanced_fields=(
+            FieldSpec(key='default_config', label='Default Voice', kind='text',
+                      placeholder='kokoro_default'),
+            FieldSpec(key='timeout', label='Timeout (s)', kind='number',
+                      min=60, max=3600, step=30),
+            FieldSpec(key='release_model_around_call',
+                      label='Free VRAM around the call', kind='checkbox'),
+        ),
+        availability='config_dir',
+        agent_args=('config',),
+        overrides_keys=(),
+        defaults={'release_model_around_call': True, 'timeout': 600},
+    )
 
     def describe(self) -> str:
         return 'Kobold TTS (koboldcpp HTTP server)'

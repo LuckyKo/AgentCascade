@@ -14,6 +14,7 @@ import os
 import tempfile
 
 from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
+from .manifest import BackendManifest, FieldSpec
 
 from agent_cascade.tools.image_gen import (
     _resolve_sdcpp_config,
@@ -28,6 +29,30 @@ class SdcppBackend(MediaBackend):
     media_types = ('image',)
     server_backed = False
     requires_vram = True
+
+    manifest = BackendManifest(
+        label='stable-diffusion.cpp',
+        note='stable-diffusion.cpp local CLI — image only.',
+        connection_fields=(
+            FieldSpec(key='binary', label='Binary', kind='path', required=True,
+                      placeholder='C:\\...\\sd-cli.exe'),
+            FieldSpec(key='models_dir', label='Models Directory', kind='path'),
+            FieldSpec(key='config_dir', label='Config Directory', kind='path',
+                      placeholder='<AgentCascade_root>/config/sdcpp'),
+        ),
+        advanced_fields=(
+            FieldSpec(key='default_sdcpp_config', label='Default Config', kind='text',
+                      placeholder='z_image_turbo'),
+            FieldSpec(key='timeout', label='Timeout (s)', kind='number',
+                      min=30, max=1800, step=30),
+            FieldSpec(key='release_model_around_call',
+                      label='Free VRAM around the call', kind='checkbox'),
+        ),
+        availability='config_dir',
+        agent_args=('config', 'negative_prompt', 'media_size', 'overrides'),
+        overrides_keys=('seed', 'steps', 'guidance'),
+        defaults={'release_model_around_call': True, 'timeout': 900},
+    )
 
     def describe(self) -> str:
         return 'stable-diffusion.cpp (local sd-cli)'

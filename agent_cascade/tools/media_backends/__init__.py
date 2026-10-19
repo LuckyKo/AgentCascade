@@ -59,7 +59,7 @@ def resolve_backend(req):
     """
     if not req.backend_id:
         raise RuntimeError(
-            "no backend specified. Pass backend='comfyui'|'sdcpp'|'kobold_tts'|'chatterbox' "
+            "no backend specified. Pass backend='" + "'|'".join(manifest_ids()) + "' "
             "(or call with prompt='__help' to list what each backend produces)."
         )
     backend = get_backend(req.backend_id)
@@ -80,3 +80,15 @@ def resolve_backend(req):
 # Populate the registry at import time.
 for _cls in _BACKEND_CLASSES:
     register_backend(_cls)
+
+# ── Data-driven presentation manifest — compose AFTER the registry loop ───────
+# (Composing at the BACKENDS declaration would evaluate over an empty dict →
+# empty tool enum / empty UI tabs; see the W1 insertion-point trap.)
+from .manifest import build_manifest
+
+BACKEND_MANIFEST: dict = {bid: build_manifest(b) for bid, b in BACKENDS.items()}
+
+
+def manifest_ids() -> list:
+    """Backend ids in registry order — the tool schema enum and REST validation set."""
+    return list(BACKEND_MANIFEST)

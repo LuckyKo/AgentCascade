@@ -75,6 +75,33 @@ def resolve_media_timeout(config: Optional[dict], block: Optional[dict] = None) 
         return float(DEFAULT_MEDIA_TIMEOUT)
 
 
+def resolve_release_model_around_call(config: Optional[dict], backend_id: str) -> bool:
+    """Per-backend VRAM opt-out. Block key > manifest default (True) > True.
+
+    Precedence mirrors :func:`resolve_media_timeout`: the per-backend block key
+    ``config[backend_id]['release_model_around_call']`` wins; absent falls to the
+    manifest default (every backend's manifest defaults this to True — the
+    fallback here is that same True, kept literal so ``base.py`` stays a leaf
+    with no import edge to the composed ``BACKEND_MANIFEST``). Explicit bools are
+    honoured; a non-bool value is parsed only for obvious strings ('false'/'true',
+    case-insensitive) — anything unparseable falls back to the default, so a
+    malformed config never silently disables the dance.
+    """
+    block = (config or {}).get(backend_id) or {}
+    if 'release_model_around_call' not in block:
+        return True
+    value = block['release_model_around_call']
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ('true', '1', 'yes', 'on'):
+            return True
+        if text in ('false', '0', 'no', 'off'):
+            return False
+    return True
+
+
 # ── Shared TTS-backend plumbing (single source of truth) ──────────────────────
 # The one-shot TTS backends (chatterbox / kobold_tts) share this plumbing. It
 # lives here (the leaf contract module, stdlib-only) so neither backend
@@ -204,6 +231,8 @@ class MediaBackend(ABC):
     media_types: tuple = ()      # subset of MEDIA_TYPES this backend can serve
     server_backed: bool = False  # True if it talks to an external server (ComfyUI/TTS)
     requires_vram: bool = True   # participates in the VRAM save/unload/restore dance
+    manifest = None              # optional BackendManifest presentation entry (.manifest module);
+                                 # REQUIRED for registration — build_manifest raises without it.
 
     def preflight(self, req: MediaRequest) -> None:
         """Validate + resolve everything BEFORE any VRAM work.

@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 from .base import MediaBackend, MediaRequest, MediaResult, resolve_media_timeout
+from .manifest import BackendManifest, FieldSpec
 
 from agent_cascade.tools.image_gen import (
     _load_workflow,
@@ -294,6 +295,28 @@ class ComfyUIBackend(MediaBackend):
     media_types = ('image', 'video', 'audio')  # music + tts are 'audio'
     server_backed = True
     requires_vram = True
+
+    manifest = BackendManifest(
+        label='ComfyUI',
+        note='ComfyUI server — image / video / music. Needs the server running.',
+        connection_fields=(
+            FieldSpec(key='url', label='Server URL', kind='url', required=True,
+                      placeholder='http://localhost:8188'),
+            FieldSpec(key='workflow_dir', label='Workflow Directory', kind='path',
+                      placeholder='<AgentCascade_root>/config/workflows'),
+        ),
+        advanced_fields=(
+            FieldSpec(key='timeout', label='Timeout (s)', kind='number',
+                      min=30, max=1800, step=5),
+            FieldSpec(key='release_model_around_call',
+                      label='Free VRAM around the call', kind='checkbox'),
+        ),
+        availability='workflow_dir',
+        agent_args=('config', 'negative_prompt', 'media_size', 'reference_file',
+                    'server_url', 'overrides'),
+        overrides_keys=('seed', 'steps', 'guidance'),
+        defaults={'release_model_around_call': True, 'timeout': 180},
+    )
 
     def describe(self) -> str:
         return 'ComfyUI server workflow'
