@@ -61,7 +61,9 @@ from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
 from agent_cascade.tools.media_backends import manifest_ids
 from agent_cascade.tools.media_backends.kobold_tts import kobold_tts_dms_bound
-from agent_cascade.tools.media_backends.base import MEDIA_TYPES, MediaRequest, resolve_media_timeout
+from agent_cascade.tools.media_backends.base import (
+    MEDIA_TYPES, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
+)
 
 from agent_cascade.tools.image_gen import _fmt_elapsed
 
@@ -204,14 +206,18 @@ class MediaGen(BaseTool):
 
     # ── VRAM seam (ported verbatim from image_gen's _vram_release / _restore_vram_state) ──
 
-    def _vram_release(self, instance, state: dict) -> None:
+    def _vram_release(self, instance, state: dict, *, release: bool = True) -> None:
         """Additive VRAM save+unload prologue, used by every backend.
 
-        Reproduces image_gen's guard verbatim: ``getattr(instance, '_last_endpoint_config',
-        None)``, the ``isinstance(dict)`` check, the ``state_save_enabled``/``api_base``
-        checks, the lazy ``state_ops`` import, and the ``model``-present capability check
-        (completing the ``state_save_enabled``/``api_base`` gate — port-independent).
-        Any non-qualifying path leaves ``state['saved']`` False with no state change.
+        Three explicit gates, in order:
+          1. ``release`` — the per-backend ``release_model_around_call`` opt-out
+             (resolved by ``base.resolve_release_model_around_call``; default True).
+             When False NOTHING is saved and NOTHING is unloaded, so every restore
+             site no-ops (``state['saved']`` stays False).
+          2. ``instance is None`` (no calling agent).
+          3. capability — the shared predicate ``state_ops.is_state_save_capable``
+             (``state_save_enabled`` + ``api_base`` + ``model``; port-independent),
+             replacing the inline verbatim copy of image_gen's gate.
 
         ``state`` is a mutable holder dict with keys ``'saved'`` and ``'held'``.
         ``saved`` is set True as soon as ``save_instance_state`` succeeds — BEFORE
@@ -220,22 +226,15 @@ class MediaGen(BaseTool):
         """
         state['saved'] = False
         state['held'] = None
-        if instance is None:
+        if not release or instance is None:
             return
         endpoint_cfg = getattr(instance, '_last_endpoint_config', None)
-        if not isinstance(endpoint_cfg, dict):
-            return
-        if not endpoint_cfg.get('state_save_enabled'):
+        from agent_cascade.state_ops import (
+            is_state_save_capable, save_instance_state, unload_all_models,
+        )
+        if not is_state_save_capable(endpoint_cfg):
             return
         api_base = endpoint_cfg.get('api_base')
-        if not api_base:
-            return
-
-        from agent_cascade.state_ops import (
-            save_instance_state, unload_all_models,
-        )
-        if not endpoint_cfg.get('model'):
-            return
 
         if not save_instance_state(instance):
             return
@@ -254,14 +253,28 @@ class MediaGen(BaseTool):
     def _restore_vram_state(self, instance, held: dict) -> None:
         """Restore saved KV state after all LLM-side work is done (one retry on failure).
 
-        A final restore failure is logged at ERROR but is non-fatal: the next LLM call
-        triggers a fresh model load via autoloader JIT, so the system self-heals (the
-        user only loses KV cache continuity).
+        With a pool available, routes through ``state_ops.restore_held_slot_state``
+        (the seam proven by shell_cmd safe mode): the held endpoint is resolved LIVE
+        from the pool router — the ``held`` dict we carry is the SAVED endpoint, which
+        may be stale on a shared conc=0 autoloader — and the stable instance-name
+        label survives a system agent consuming ``_state_label`` inside the window.
+        Without a pool (tests, direct tool use), falls back to the previous call with
+        the saved-endpoint config. A final restore failure is logged at ERROR but is
+        non-fatal: the next LLM call triggers a fresh model load via autoloader JIT,
+        so the system self-heals (the user only loses KV cache continuity).
         """
-        from agent_cascade.state_ops import restore_instance_state
+        pool = getattr(self, 'agent_pool', None)
         for attempt in range(2):
             try:
-                restore_instance_state(instance, held_endpoint_cfg=held)
+                if pool is not None:
+                    from agent_cascade.state_ops import restore_held_slot_state
+                    restore_held_slot_state(
+                        pool, instance, instance.instance_name,
+                        label=instance.instance_name,
+                    )
+                else:
+                    from agent_cascade.state_ops import restore_instance_state
+                    restore_instance_state(instance, held_endpoint_cfg=held)
                 return
             except Exception as e:
                 if attempt == 0:
@@ -347,7 +360,12 @@ class MediaGen(BaseTool):
 
         # ── VRAM + GENERATE ──
         try:
-            self._vram_release(instance, state)  # save → unload (INSIDE try, deliberately — V2)
+            # Per-backend opt-out (default True = today's behaviour): when a backend's
+            # block sets release_model_around_call=false, zero save/unload/restore calls.
+            self._vram_release(
+                instance, state,
+                release=resolve_release_model_around_call(req.config, req.backend_id),
+            )  # save → unload (INSIDE try, deliberately — V2)
 
             # Time only the actual generation call (not the VRAM dance) — V7.
             _gen_start = time.monotonic()
