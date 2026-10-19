@@ -2482,3 +2482,69 @@ class TestMediaGenProjectRoot:
         on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
         assert 'project_root' not in on_disk
         assert 'evil' not in json.dumps(on_disk)
+
+    # ── W7 T1-T4: merge-preserve + manifest validation/endpoint ───────────────
+
+    def test_post_preserves_omitted_backend_blocks(self, client, _isolate_config):
+        """T1: a Save that omits whole backend blocks must not delete them.
+
+        This is the exact failure mode of the old UI replace-save: it posted only
+        the blocks it rendered, and the chatterbox block went missing silently.
+        Nested keys inside a POSTED block (media_types ownership, backend-only
+        keys) must survive too.
+        """
+        cfg_file = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        seed = {
+            'timeout': 120,
+            'comfyui': {'url': 'http://seed:1', 'workflow_dir': 'wd', 'output_dir': 'out',
+                        'default_workflow': 'a', 'media_types': {'image': ['a']}},
+            'sdcpp': {'binary': 'seed-bin'},
+            'kobold_tts': {'binary': 'seed-kobold'},
+            'chatterbox': {'python': 'seed-python'},
+        }
+        cfg_file.write_text(json.dumps(seed), encoding='utf-8')
+        try:
+            resp = client.post('/api/media_gen',
+                               json={'timeout': 150, 'comfyui': {'url': 'http://edited:2'}})
+            assert resp.status_code == 200
+            on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+            for key in ('sdcpp', 'kobold_tts', 'chatterbox'):
+                assert on_disk[key] == seed[key], \
+                    f'{key} block must survive a POST that omits it entirely'
+            comfy = on_disk['comfyui']
+            assert comfy['url'] == 'http://edited:2'
+            for k in ('workflow_dir', 'output_dir', 'default_workflow', 'media_types'):
+                assert comfy[k] == seed['comfyui'][k], \
+                    f'posted-block key {k} must survive when the body omits it'
+            assert on_disk['timeout'] == 150
+        finally:
+            # _isolate_config restores the original after; just don't leave garbage
+            # mid-fixture if the assertions above failed.
+            pass
+
+    def test_post_preserves_unknown_top_level_blocks(self, client, _isolate_config):
+        """T2: a top-level key with no manifest entry (future backend) survives."""
+        cfg_file = PROJECT_ROOT / 'config' / 'media_gen' / 'media_gen.json'
+        seed = {'timeout': 100, 'yue2': {'style': 'orchestral'}, 'comfyui': {'url': 'http://c:1'}}
+        cfg_file.write_text(json.dumps(seed), encoding='utf-8')
+        resp = client.post('/api/media_gen', json={'timeout': 111})
+        assert resp.status_code == 200
+        on_disk = json.loads(cfg_file.read_text(encoding='utf-8'))
+        assert on_disk['yue2'] == {'style': 'orchestral'}
+
+    def test_post_validates_every_manifest_block(self, client, _isolate_config):
+        """T3: the non-dict block check now covers chatterbox (was hardcoded 3)."""
+        resp = client.post('/api/media_gen', json={'chatterbox': 'nope'})
+        assert resp.status_code == 400
+
+    def test_manifest_endpoint_matches_registry(self, client):
+        """T4: GET /api/media_gen/manifest == the in-process registry, entry shape checked."""
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST, BACKENDS
+        resp = client.get('/api/media_gen/manifest')
+        assert resp.status_code == 200
+        data = resp.json()['backends']
+        assert set(data) == set(BACKENDS) == set(BACKEND_MANIFEST)
+        for bid, entry in data.items():
+            assert entry.get('id') == bid
+            assert isinstance(entry.get('connection_fields'), list)
+            assert isinstance(entry.get('advanced_fields'), list)

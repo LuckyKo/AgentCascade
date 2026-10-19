@@ -71,6 +71,14 @@ def _mg_cfg(**over):
             'timeout': 300,
             'media_types': {'audio': ['kokoro_default']},
         },
+        'chatterbox': {
+            'python': r'C:\py\python.exe',
+            'cli_script': r'C:\cli\chatterbox_tts.py',
+            'config_dir': r'C:\tts',
+            'default_config': 'chatterbox_default',
+            'timeout': 600,
+            'media_types': {'audio': ['chatterbox_default']},
+        },
     }
     cfg.update(over)
     return cfg
@@ -165,6 +173,12 @@ def _prepared_chatterbox_req():
 class TestMediaGenRegistry:
     def test_registry_populated(self):
         assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts', 'chatterbox'}
+
+    def test_manifest_matches_registry(self):
+        """T12: composed manifest == registry, same order (guards the empty-manifest trap)."""
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST, manifest_ids
+        assert manifest_ids() == list(BACKENDS)
+        assert set(BACKEND_MANIFEST) == set(BACKENDS)
 
     def test_get_backend(self):
         assert get_backend('sdcpp') is SdcppBackend or get_backend('sdcpp').id == 'sdcpp'
@@ -448,6 +462,105 @@ class TestMediaGenVRAM:
         assert 'ERROR' in result[0].text
 
 
+# ── release_model_around_call opt-out (W2 / T5-T7) ────────────────────────────
+
+class TestReleaseModelFlag:
+    """Per-backend VRAM opt-out. Absent + manifest default True == today's dance
+    (pinned by TestMediaGenVRAM.test_vram_order); explicit false => zero calls."""
+
+    def test_flag_false_zero_vram_calls(self, sdcpp_cfg):
+        cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in sdcpp_cfg.items()}
+        cfg['sdcpp'] = dict(cfg['sdcpp'])
+        cfg['sdcpp']['release_model_around_call'] = False
+        tool = MediaGen()
+        with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.save_instance_state') as m_save, \
+              patch('agent_cascade.state_ops.unload_all_models') as m_unload, \
+              patch('agent_cascade.state_ops.restore_instance_state') as m_restore:
+            result = tool.call({'prompt': 'a red cube', 'backend': 'sdcpp'})
+        m_save.assert_not_called()
+        m_unload.assert_not_called()
+        m_restore.assert_not_called()
+        assert result[0].image == '/tmp/media/out.png'
+
+    def test_flag_true_explicit_full_dance(self, sdcpp_cfg):
+        cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in sdcpp_cfg.items()}
+        cfg['sdcpp'] = dict(cfg['sdcpp'])
+        cfg['sdcpp']['release_model_around_call'] = True
+        tool = MediaGen()
+        order = []
+
+        def _save(inst):
+            order.append('save'); return True
+
+        def _unload(base):
+            order.append('unload'); return True
+
+        def _restore(inst, held_endpoint_cfg=None):
+            order.append('restore'); return True
+
+        def _run(argv, **kwargs):
+            order.append('run')
+            out = argv[argv.index('-o') + 1]
+            with open(out, 'wb') as f:
+                f.write(b'png')
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
+
+        with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
+              patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
+            result = tool.call({'prompt': 'a red cube', 'backend': 'sdcpp'})
+        assert order == ['save', 'unload', 'run', 'restore']
+        assert result[0].image == '/tmp/media/out.png'
+
+    def test_flag_is_per_block_not_global(self, sdcpp_cfg):
+        """A neighbour block's false must not disable the caller's dance (T7)."""
+        cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in sdcpp_cfg.items()}
+        cfg['chatterbox'] = dict(cfg['chatterbox'])
+        cfg['chatterbox']['release_model_around_call'] = False
+        tool = MediaGen()
+        order = []
+
+        def _save2(inst):
+            order.append('save'); return True
+
+        def _unload2(base):
+            order.append('unload'); return True
+
+        def _restore2(inst, held_endpoint_cfg=None):
+            order.append('restore'); return True
+
+        def _run2(argv, **kwargs):
+            order.append('run')
+            out = argv[argv.index('-o') + 1]
+            with open(out, 'wb') as f:
+                f.write(b'png')
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b'', stderr=b'')
+
+        with patch.object(tool, '_get_instance', return_value=_fake_instance()), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_run2), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.is_autoloader_endpoint', return_value=True), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save2), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload2), \
+              patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore2):
+            result = tool.call({'prompt': 'a red cube', 'backend': 'sdcpp'})
+        assert order == ['save', 'unload', 'run', 'restore']
+        assert result[0].image == '/tmp/media/out.png'
+
+
 # ── DMS bound declaration (plan t292 — single dispatch-boundary writer) ────────
 # media_gen no longer writes _in_blocking_tool itself; the boundary (ToolDispatcher)
 # is the single writer. media_gen's contribution is dms_bound(): the resolved backend
@@ -679,3 +792,46 @@ class TestHelpCommand:
         assert result[0].image is None and result[0].audio is None and result[0].video is None
         assert 'backend: comfyui' in result[0].text
         assert 'yue2_full' in result[0].text
+
+    def test_help_lists_backend_configs_with_json_descriptions(self, tmp_path):
+        """T8: __help scans the chatterbox config_dir and lists voices with their JSON descriptions."""
+        d = tmp_path / 'voices'
+        d.mkdir()
+        (d / 'voice_one.json').write_text(json.dumps({'description': 'Test voice one'}), encoding='utf-8')
+        cfg = {'chatterbox': {'config_dir': str(d), 'media_types': {'audio': ['voice_one']}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        text = result[0].text
+        assert 'backend: chatterbox' in text
+        assert 'voice_one' in text
+        assert 'Test voice one' in text
+
+    def test_help_ownership_filter_hides_claimed_foreign_stems(self, tmp_path):
+        """T9: shared config_dir — stems claimed by kobold_tts must NOT appear in the
+        chatterbox section (the ownership filter)."""
+        d = tmp_path / 'voices'
+        d.mkdir()
+        for stem in ('kokoro_default', 'outetts_default'):
+            (d / f'{stem}.json').write_text('{}', encoding='utf-8')
+        cfg = {'kobold_tts': {'config_dir': str(d),
+                              'media_types': {'audio': ['kokoro_default', 'outetts_default']}},
+               'chatterbox': {'config_dir': str(d), 'media_types': {}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        text = result[0].text
+        chunk = next(p for p in text.split('== backend: ') if p.startswith('chatterbox'))
+        assert 'kokoro_default' not in chunk
+        assert 'outetts_default' not in chunk
+
+    def test_help_availability_list_is_capped(self, tmp_path):
+        """T10: 45 on-disk stems -> at most _HELP_MAX_STEMS (40) listed + overflow line."""
+        d = tmp_path / 'voices'
+        d.mkdir()
+        for i in range(45):
+            (d / f'voice_{i:02d}.json').write_text('{}', encoding='utf-8')
+        cfg = {'chatterbox': {'config_dir': str(d), 'media_types': {}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        text = result[0].text
+        assert text.count('    - voice_') == 40
+        assert '… (+' in text  # overflow marker present
