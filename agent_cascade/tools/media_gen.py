@@ -513,7 +513,8 @@ class MediaGen(BaseTool):
             '',
         ]
         # Ownership map: every stem claimed by ANY backend block (this is what makes
-        # media_types useful — it is the ownership claim, kept alive by W4's merge-preserve).
+        # media_types useful — it is the ownership claim, preserved across UI saves by
+        # the POST /api/media_gen merge-preserve).
         claimed = set()
         for block in (config or {}).values():
             if isinstance(block, dict):
