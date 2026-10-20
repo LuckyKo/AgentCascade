@@ -241,20 +241,26 @@ class MediaGen(BaseTool):
         if not is_state_save_capable(endpoint_cfg):
             return
         api_base = endpoint_cfg.get('api_base')
+        model = endpoint_cfg.get('model', '')
+        logger.info('[MediaGen] VRAM release: saving state for %s (model=%s)', instance.instance_name, model)
 
         if not save_instance_state(instance):
+            logger.warning('[MediaGen] VRAM release: state save failed for %s', instance.instance_name)
             return
         # Record success BEFORE unload so a raise from unload_all_models below
         # still leaves state['saved'] True -> the caller restores the KV (V2/F1).
         state['saved'] = True
         state['held'] = {
             'api_base': api_base,
-            'model': endpoint_cfg.get('model', ''),
+            'model': model,
         }
+        logger.info('[MediaGen] VRAM release: state saved, unloading model %s', model)
         if not unload_all_models(api_base):
             logger.warning(
                 '[MediaGen] VRAM may be constrained; model was not unloaded before generation'
             )
+        else:
+            logger.info('[MediaGen] VRAM release: model unloaded successfully')
 
     def _restore_vram_state(self, instance, held: dict) -> None:
         """Restore saved KV state after all LLM-side work is done (one retry on failure).
@@ -270,6 +276,7 @@ class MediaGen(BaseTool):
         so the system self-heals (the user only loses KV cache continuity).
         """
         pool = getattr(self, 'agent_pool', None)
+        logger.info('[MediaGen] VRAM restore: restoring state for %s (model=%s)', instance.instance_name, held.get('model', '?'))
         for attempt in range(2):
             try:
                 if pool is not None:
@@ -281,6 +288,7 @@ class MediaGen(BaseTool):
                 else:
                     from agent_cascade.state_ops import restore_instance_state
                     restore_instance_state(instance, held_endpoint_cfg=held)
+                logger.info('[MediaGen] VRAM restore: state restored successfully for %s', instance.instance_name)
                 return
             except Exception as e:
                 if attempt == 0:
