@@ -25,6 +25,7 @@ class FieldSpec:
     kind: str                   # 'text' | 'path' | 'url' | 'number' | 'checkbox'
     required: bool = False
     placeholder: str = ''
+    help: str = ''              # tooltip text (falls back to label)
     min: int | None = None
     max: int | None = None
     step: int | None = None

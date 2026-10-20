@@ -525,7 +525,7 @@ TOOL_METADATA = {
             'backend': 'REQUIRED for generation. Backend id: see __help (backend names are listed there). No AUTO — you must name the backend. Omit only for the __help command.',
             'config': "Config name (filename stem) or full .json path; everything else is derived from it. Omit to use the backend's configured default. See __help for the exact config stems each backend accepts.",
             'negative_prompt': 'Negative prompt to exclude elements (image backends).',
-            'reference_file': 'Reference/edit image for image-edit & i2v video first-frame; reference audio for TTS voice-cloning. NOT supported by the sdcpp backend (image-only, no LoadImage) — use comfyui for edits.',
+            'reference_file': 'Reference/edit image for image-edit & i2v video first-frame; reference audio for TTS voice-cloning (optional for Chatterbox — defaults to the configured default_voice). NOT supported by the sdcpp backend (image-only, no LoadImage) — use comfyui for edits.',
             'media_size': 'Generalized size. Backend picks the fields it uses: image→width/height; video→width/height/duration/fps; audio→duration.',
             'overrides': 'Scalar overrides merged over the loaded config (e.g. seed, steps, guidance). For MUSIC (YuE2 audio) pass overrides.style and overrides.lyrics — the prompt alone only sets style; lyrics is dropped if omitted.',
         }

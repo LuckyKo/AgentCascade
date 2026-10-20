@@ -4,8 +4,9 @@ Chatterbox TTS backend for ``media_gen`` — one-shot CLI, MP3 to stdout.
 Shape mirrors the kobold_tts one-shot binary backend: ``preflight()`` resolves
 the interpreter + CLI script paths to absolute and checks they exist BEFORE any
 VRAM touch (invariant I1),
-resolves the per-voice config JSON and the REQUIRED ``reference_file`` voice
-cloning reference (via ``resolve_tool_path``, the SECURITY seam), then builds
+resolves the per-voice config JSON and the ``reference_file`` voice-cloning
+reference (auto-supplied from ``voices_dir``/``default_voice`` when the agent
+omits it; always validated via ``resolve_tool_path``, the SECURITY seam), then builds
 the argv AND the child-process contract — ``env`` (``HF_HOME``/``HF_HUB_CACHE``
 point at ``<repo>/models``, see below) and ``cwd`` = the repo dir. ``run()``
 executes it with ``subprocess.run(argv, shell=False, capture_output=True,
@@ -44,6 +45,7 @@ from pathlib import Path
 from .base import (
     MediaBackend, MediaRequest, MediaResult, resolve_media_timeout,
     _project_root, resolve_tts_config_json, is_wav_bytes,
+    resolve_block_dir, list_voice_samples,
 )
 from .manifest import BackendManifest, FieldSpec
 
@@ -92,12 +94,24 @@ class ChatterboxBackend(MediaBackend):
                       placeholder='.../chatterbox_env/Scripts/python.exe'),
             FieldSpec(key='cli_script', label='CLI Script', kind='path', required=True,
                       placeholder='.../chatterbox_tts.py'),
-            FieldSpec(key='config_dir', label='Voice Config Directory', kind='path',
-                      placeholder='<AgentCascade_root>/config/media_gen/tts'),
+            FieldSpec(key='config_dir', label='Voice Configs', kind='path',
+                      placeholder='<AgentCascade_root>/config/media_gen/tts',
+                      help='Directory of JSON voice config files. Each .json defines generation '
+                           'parameters (temperature, exaggeration, etc.) for a named voice preset. '
+                           'Create .json files here to add new presets.'),
+            FieldSpec(key='voices_dir', label='Voice Samples', kind='path',
+                      placeholder='<path>/voices',
+                      help='Directory of reference audio files (WAV/MP3/OGG/FLAC) for voice '
+                           'cloning. The default voice is auto-selected from here when the agent '
+                           'does not pass reference_file.'),
         ),
         advanced_fields=(
             FieldSpec(key='default_config', label='Default Voice', kind='text',
                       placeholder='chatterbox_default'),
+            FieldSpec(key='default_voice', label='Default Reference Audio', kind='text',
+                      placeholder='speaker_a.wav',
+                      help='Filename in Voice Samples dir used when no reference_file is passed. '
+                           'Leave empty to require an explicit reference_file.'),
             FieldSpec(key='timeout', label='Timeout (s)', kind='number',
                       min=60, max=3600, step=30),
             FieldSpec(key='release_model_around_call',
@@ -195,21 +209,54 @@ class ChatterboxBackend(MediaBackend):
         ext = out_fmt
 
         # ── reference_file → voice-cloning reference audio (SECURITY seam). ──
-        # REQUIRED for Chatterbox: voice cloning always needs a reference. Resolved
-        # via resolve_tool_path BEFORE any subprocess (mirrors kobold_tts audit 5).
-        if not req.reference_file or not isinstance(req.reference_file, str) \
-                or not req.reference_file.strip():
-            raise RuntimeError(
-                "Chatterbox requires a 'reference_file' (voice-cloning reference "
-                "audio). Pass reference_file='<path-to-audio>'."
-            )
+        # Voice cloning always needs a reference. If the agent did not pass one,
+        # fall back to voices_dir/default_voice from the config block.
+        ref_str = req.reference_file if isinstance(req.reference_file, str) else ''
+        # A reference auto-supplied from config (not passed by the agent) must report
+        # a seam rejection in terms of the config keys, not reference_file.
+        auto_supplied_from = ''
+        if not ref_str.strip():
+            vd = resolve_block_dir(block, 'voices_dir')
+            default_voice = block.get('default_voice')
+            if vd and isinstance(default_voice, str) and default_voice.strip():
+                ref_str = str(vd / default_voice.strip())
+                auto_supplied_from = (f"default_voice '{default_voice.strip()}' in "
+                                      f"voices_dir '{vd}'")
+            elif vd:
+                # voices_dir configured but no default_voice: list what's available.
+                available = list_voice_samples(vd, cap=10)
+                hint = f" Available: {', '.join(available)}" if available else ''
+                raise RuntimeError(
+                    "Chatterbox requires a 'reference_file' (voice-cloning reference "
+                    f"audio). Pass reference_file='<path>' or set chatterbox.default_voice.{hint}"
+                )
+            else:
+                raise RuntimeError(
+                    "Chatterbox requires a 'reference_file' (voice-cloning reference "
+                    "audio). Pass reference_file='<path-to-audio>' or configure "
+                    'chatterbox.voices_dir + chatterbox.default_voice.'
+                )
+        ref_str = ref_str.strip()
         try:
-            ref_path = resolve_tool_path(req.reference_file.strip(), mode='ro',
-                                         agent_pool=req.agent_pool)
+            ref_path = resolve_tool_path(ref_str, mode='ro', agent_pool=req.agent_pool)
         except ValueError as e:
+            if auto_supplied_from:
+                raise RuntimeError(
+                    f"Chatterbox {auto_supplied_from} is not an allowed path: {e}. "
+                    'Add the voices directory to your allowed paths, or pass '
+                    "reference_file='<path>' explicitly."
+                ) from e
             raise RuntimeError(f"Invalid reference_file path: {e}") from e
         if not ref_path.is_file():
-            raise RuntimeError(f"reference_file file not found: {req.reference_file}")
+            if auto_supplied_from:
+                available = list_voice_samples(ref_path.parent, cap=10)
+                hint = f" Available: {', '.join(available)}" if available else ''
+                raise RuntimeError(
+                    f"Chatterbox {auto_supplied_from} was not found at {ref_path}."
+                    f"{hint} Check the filename or pass reference_file='<path>' "
+                    'explicitly.'
+                )
+            raise RuntimeError(f"reference_file file not found: {ref_str}")
 
         # ── Timeout: unified resolver (chatterbox.timeout > top-level timeout > 900). ──
         timeout = resolve_media_timeout(req.config, block)
@@ -231,6 +278,7 @@ class ChatterboxBackend(MediaBackend):
             'config_name': req.config_name or block.get('default_config', ''),
             'env': env,
             'cwd': str(repo_dir),
+            'reference': ref_path.name,  # voice identity for feedback
         }
 
     def run(self, req: MediaRequest) -> MediaResult:

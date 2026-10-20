@@ -59,6 +59,8 @@
     "cli_script": "N:/work/WD/Chatterbox-TTS-Server/chatterbox_tts.py",
     "config_dir": "N:/work/WD/AgentCascade/config/media_gen/tts",
     "default_config": "chatterbox_default",
+    "voices_dir": "N:/work/WD/Chatterbox-TTS-Server/voices",
+    "default_voice": "af_Bella.wav",
     "timeout": 600,
     "media_types": {
       "audio": [

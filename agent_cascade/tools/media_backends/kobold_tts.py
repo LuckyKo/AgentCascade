@@ -339,8 +339,11 @@ class KoboldTTSBackend(MediaBackend):
             FieldSpec(key='binary', label='Binary', kind='path', required=True,
                       placeholder='C:\\...\\koboldcpp.exe'),
             FieldSpec(key='models_dir', label='Models Directory', kind='path'),
-            FieldSpec(key='config_dir', label='Voice Config Directory', kind='path',
-                      placeholder='<AgentCascade_root>/config/media_gen/tts'),
+            FieldSpec(key='config_dir', label='Voice Configs', kind='path',
+                      placeholder='<AgentCascade_root>/config/media_gen/tts',
+                      help='Directory of JSON voice config files. Each .json defines a named '
+                           'voice with a preset name (e.g. "af_bella") and generation parameters. '
+                           'Create .json files here to add new voices.'),
         ),
         advanced_fields=(
             FieldSpec(key='default_config', label='Default Voice', kind='text',

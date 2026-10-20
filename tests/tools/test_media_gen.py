@@ -343,6 +343,96 @@ class TestChatterboxBackendWiring:
                 ChatterboxBackend().preflight(req)
         assert "requires a 'reference_file'" in str(e.value)
 
+    def test_default_voice_autosupplies_reference_file(self, chatterbox_cfg):
+        # No reference_file passed, but voices_dir + default_voice are configured:
+        # preflight must auto-supply the reference by joining voices_dir/default_voice
+        # and hand THAT path to the SECURITY seam. The stub ignores its argument, so
+        # assert_called_with proves the load-bearing join (not the stub's return value).
+        from pathlib import Path
+        cfg, py, cli, ref = chatterbox_cfg
+        cfg['chatterbox']['voices_dir'] = str(ref.parent)
+        cfg['chatterbox']['default_voice'] = ref.name
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}), \
+              patch('agent_cascade.tools.media_backends.chatterbox.resolve_tool_path',
+                    return_value=ref) as rtp:
+            ChatterboxBackend().preflight(req)
+        # Assert the exact joined path was passed to resolve_tool_path (the
+        # absolute-voices_dir branch), not the stub's return value.
+        expected = str(Path(cfg['chatterbox']['voices_dir']) / cfg['chatterbox']['default_voice'])
+        rtp.assert_called_once_with(expected, mode='ro', agent_pool=None)
+
+    def test_default_voice_relative_voices_dir_resolves_project_root(self, chatterbox_cfg):
+        # A RELATIVE voices_dir must resolve against the project root, not the CWD.
+        # The stub ignores its argument, so assert_called_with proves the exact
+        # string handed to the SECURITY seam (the load-bearing join, not the return).
+        from agent_cascade.tools.media_backends.chatterbox import _project_root
+        cfg, py, cli, ref = chatterbox_cfg
+        cfg['chatterbox']['voices_dir'] = 'some/relative/voices'
+        cfg['chatterbox']['default_voice'] = 'speaker_a.wav'
+        expected = str(_project_root() / 'some/relative/voices' / 'speaker_a.wav')
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}), \
+              patch('agent_cascade.tools.media_backends.chatterbox.resolve_tool_path',
+                    return_value=ref) as rtp:
+            ChatterboxBackend().preflight(req)
+        rtp.assert_called_once_with(expected, mode='ro', agent_pool=None)
+
+    def test_auto_supplied_voice_outside_allowed_paths_names_config_keys(self, chatterbox_cfg):
+        # The auto-supplied reference must clear the SECURITY seam. When voices_dir
+        # (the fixture's tmp_path) is outside the allowed dirs, the error must name
+        # the config keys — NOT reference_file, which the agent never passed.
+        # resolve_tool_path is NOT patched: this drives the real agent_pool=None
+        # fallback, which rejects any path outside DEFAULT_WORKSPACE.
+        cfg, py, cli, ref = chatterbox_cfg
+        cfg['chatterbox']['voices_dir'] = str(ref.parent)
+        cfg['chatterbox']['default_voice'] = ref.name
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().preflight(req)
+        msg = str(e.value)
+        assert 'not an allowed path' in msg
+        assert 'default_voice' in msg and 'voices_dir' in msg
+
+    def test_no_reference_file_no_voices_dir_raises(self, chatterbox_cfg):
+        # No reference_file AND no voices_dir configured: the error must name both
+        # reference_file and the voices_dir/default_voice escape hatch.
+        cfg, py, cli, ref = chatterbox_cfg
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().preflight(req)
+        assert "requires a 'reference_file'" in str(e.value)
+        assert 'voices_dir' in str(e.value)
+
+    def test_no_reference_file_voices_dir_no_default_raises(self, chatterbox_cfg):
+        # voices_dir set but no default_voice: the error must name default_voice and
+        # list the audio files actually available in the directory.
+        cfg, py, cli, ref = chatterbox_cfg
+        cfg['chatterbox']['voices_dir'] = str(ref.parent)
+        req = MediaRequest(media_type='', backend_id='chatterbox', config_name=None,
+                          prompt='x', negative_prompt='', config=cfg, agent_pool=None,
+                          reference_file=None)
+        with patch('agent_cascade.tools.media_backends.chatterbox._resolve_tts_config',
+                   return_value={}):
+            with pytest.raises(RuntimeError) as e:
+                ChatterboxBackend().preflight(req)
+        assert 'default_voice' in str(e.value)
+        assert 'ref.wav' in str(e.value)
+
     def test_run_returns_mp3_bytes(self):
         req = _prepared_chatterbox_req()
         fake = subprocess.CompletedProcess(args=['py', 'cli'], returncode=0,
@@ -892,6 +982,33 @@ class TestFeedbackContract:
     def test_elapsed_format_in_feedback(self):
         assert _fmt_elapsed(12.345) == '12.3s'
 
+    def test_audio_feedback_includes_voice_when_reference_present(self):
+        # The auto-supplied/explicit voice identity (prepared['reference']) must
+        # surface in the audio feedback line (the "missing voice feedback" fix).
+        tool = MediaGen()
+        text = tool._build_feedback(
+            'audio', '/tmp/media/a.mp3', 'chatterbox',
+            {'config_name': 'chatterbox_default', 'reference': 'af_Bella.wav'},
+            1.23,
+        )
+        assert 'Generated audio:' in text
+        assert 'backend=chatterbox' in text
+        assert 'voice=af_Bella.wav' in text
+        assert 'config=chatterbox_default' in text
+
+    def test_audio_feedback_omits_voice_when_no_reference(self):
+        # A backend without a 'reference' key (e.g. kobold_tts) must NOT emit a
+        # 'voice=' fragment, and a None prepared must not raise (the guard).
+        tool = MediaGen()
+        text = tool._build_feedback(
+            'audio', '/tmp/media/a.wav', 'kobold_tts',
+            {'config_name': 'kokoro_default'}, 1.0,
+        )
+        assert 'voice=' not in text
+        assert 'backend=kobold_tts' in text
+        none_text = tool._build_feedback('audio', '/x/a.wav', 'b', None, 1.0)
+        assert 'Generated audio:' in none_text
+
 
 # ── comfyui media-type inference (no caller media_type param) ─────────────────
 
@@ -944,6 +1061,35 @@ class TestHelpCommand:
         assert 'voice_one' in text
         assert 'Test voice one' in text
 
+    def test_help_lists_voice_samples(self, tmp_path):
+        """__help scans chatterbox.voices_dir and lists the reference audio files."""
+        d = tmp_path / 'samples'
+        d.mkdir()
+        for name in ('alpha.wav', 'beta.mp3'):
+            (d / name).write_bytes(b'RIFF\x00\x00\x00\x00WAVE')
+        cfg = {'chatterbox': {'config_dir': '', 'voices_dir': str(d), 'media_types': {}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        text = result[0].text
+        assert f'voice samples (2, chatterbox.voices_dir = {d}):' in text
+        assert 'alpha.wav' in text
+        assert 'beta.mp3' in text
+
+    def test_help_voice_samples_count_is_honest_and_overflows(self, tmp_path):
+        """Header count is the TRUE total (not a scan cap); only _HELP_MAX_STEMS (40)
+        are listed and the remainder is summarized. Guards the uncapped list_voice_samples."""
+        d = tmp_path / 'samples'
+        d.mkdir()
+        for i in range(41):
+            (d / f'voice_{i:02d}.wav').write_bytes(b'RIFF\x00\x00\x00\x00WAVE')
+        cfg = {'chatterbox': {'config_dir': '', 'voices_dir': str(d), 'media_types': {}}}
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=cfg):
+            result = MediaGen().call({'prompt': '__help'})
+        text = result[0].text
+        assert f'voice samples (41, chatterbox.voices_dir = {d}):' in text
+        assert text.count('    - voice_') == 40
+        assert '… (+1 more)' in text
+
     def test_help_ownership_filter_hides_claimed_foreign_stems(self, tmp_path):
         """T9: shared config_dir — stems claimed by kobold_tts must NOT appear in the
         chatterbox section (the ownership filter)."""
@@ -973,3 +1119,18 @@ class TestHelpCommand:
         text = result[0].text
         assert text.count('    - voice_') == 40
         assert '… (+' in text  # overflow marker present
+
+
+# ── list_voice_samples helper (shared by preflight hint + __help) ─────────────
+
+def test_list_voice_samples_uncapped_default_and_cap(tmp_path):
+    from agent_cascade.tools.media_backends.base import list_voice_samples
+    d = tmp_path / 'v'
+    d.mkdir()
+    for i in range(45):
+        (d / f'voice_{i:02d}.wav').write_bytes(b'RIFF\x00\x00\x00\x00WAVE')
+    (d / 'notes.txt').write_text('ignore me')          # non-audio excluded
+    assert len(list_voice_samples(d)) == 45            # uncapped default
+    assert len(list_voice_samples(d, cap=10)) == 10    # cap bounds the list
+    assert list_voice_samples(d)[0] == 'voice_00.wav'  # sorted
+    assert list_voice_samples(tmp_path / 'nope') == [] # missing dir -> []

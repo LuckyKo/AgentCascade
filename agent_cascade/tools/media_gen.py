@@ -69,6 +69,7 @@ from agent_cascade.tools.media_backends import manifest_ids
 from agent_cascade.tools.media_backends import BACKEND_MANIFEST
 from agent_cascade.tools.media_backends.base import (
     MEDIA_TYPES, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
+    resolve_block_dir, list_voice_samples,
 )
 
 from agent_cascade.tools.image_gen import _fmt_elapsed
@@ -453,8 +454,10 @@ class MediaGen(BaseTool):
                     f"config={config_name}, backend={backend_id}, {elapsed_str})")
 
         if media_type == 'audio':
+            voice = (prepared or {}).get('reference') or (prepared or {}).get('voice', '')
+            voice_str = f", voice={voice}" if voice else ''
             return (f"Generated audio: {media_path} "
-                    f"(config={config_name}, backend={backend_id}, {elapsed_str})")
+                    f"(config={config_name}, backend={backend_id}{voice_str}, {elapsed_str})")
 
         if media_type == 'video':
             return (f"Generated video: {media_path} "
@@ -588,6 +591,18 @@ class MediaGen(BaseTool):
             extra = listed - self._HELP_MAX_STEMS
             if extra > 0:
                 lines.append(f"  … (+{extra} more)")
+
+        # Voice samples: list audio files in voices_dir (chatterbox).
+        vd = resolve_block_dir(block, 'voices_dir')
+        if vd and vd.is_dir():
+            all_samples = list_voice_samples(vd)
+            if all_samples:
+                shown = all_samples[:self._HELP_MAX_STEMS]
+                lines.append(f"  voice samples ({len(all_samples)}, {bid}.voices_dir = {vd}):")
+                for name in shown:
+                    lines.append(f"    - {name}")
+                if len(all_samples) > len(shown):
+                    lines.append(f"    … (+{len(all_samples) - len(shown)} more)")
 
         if manifest['release_model_supported']:
             default = bool(manifest['defaults'].get('release_model_around_call', True))

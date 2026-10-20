@@ -124,11 +124,11 @@ def resolve_tts_config_json(config: dict, block_key: str, label: str,
     ``RuntimeError`` (carrying ``label``) if unconfigured/missing/malformed.
     """
     block = (config or {}).get(block_key) or {}
-    cfg_dir = block.get('config_dir')
-    if not cfg_dir:
+    cfg_path = resolve_block_dir(block, 'config_dir')
+    if cfg_path is None:
         raise RuntimeError(
             f'No {label} config directory configured. Set {block_key}.config_dir '
-            'in media_gen.json (config/media_gen/tts).'
+            f'in media_gen.json (config/media_gen/tts).'
         )
     cfg_name = name or block.get('default_config')
     if not cfg_name:
@@ -136,10 +136,6 @@ def resolve_tts_config_json(config: dict, block_key: str, label: str,
             f"No {label} voice config specified and no default configured. Pass "
             f"config='<name>' or set {block_key}.default_config in media_gen.json."
         )
-    # config_dir may be project-root-relative or absolute; join then resolve.
-    cfg_path = Path(cfg_dir)
-    if not cfg_path.is_absolute():
-        cfg_path = _project_root() / cfg_path
     cfg_path = cfg_path / f"{cfg_name}.json"
     if not cfg_path.is_file():
         raise RuntimeError(f"{label} config file not found: {cfg_path}")
@@ -151,6 +147,39 @@ def resolve_tts_config_json(config: dict, block_key: str, label: str,
     if not isinstance(data, dict):
         raise RuntimeError(f"{label} config '{cfg_path}' must be a JSON object")
     return data
+
+
+# ── Voice-sample discovery (voices_dir / default_voice feature) ───────────────
+#: Audio file extensions recognised for voice samples.
+AUDIO_EXTS = {'.wav', '.mp3', '.ogg', '.flac'}
+
+
+def resolve_block_dir(block: dict, key: str) -> Path | None:
+    """Resolve a directory key from a config block against the project root.
+    Returns None if the key is missing/empty/not a string."""
+    val = block.get(key)
+    if not isinstance(val, str) or not val.strip():
+        return None
+    p = Path(val)
+    if not p.is_absolute():
+        p = _project_root() / p
+    return p
+
+
+def list_voice_samples(directory: Path, cap: int | None = None) -> list[str]:
+    """Sorted audio filenames in a directory. Never raises.
+
+    ``cap`` bounds the returned list (None = uncapped). Callers that print a
+    listing pass their own display cap; the uncapped result gives an honest total.
+    """
+    try:
+        names = sorted(
+            f.name for f in directory.iterdir()
+            if f.is_file() and f.suffix.lower() in AUDIO_EXTS
+        )
+    except OSError:
+        return []
+    return names[:cap]
 
 
 # RIFF/WAVE header magic (bytes 0-3 'RIFF', bytes 8-11 'WAVE'). Only meaningful

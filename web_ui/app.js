@@ -7042,7 +7042,7 @@ function _mgBuildField(backendId, spec) {
   const label = document.createElement('label');
   label.className = 'setting-field';
   const span = document.createElement('span');
-  span.title = spec.label || spec.key;
+  span.title = spec.help || spec.label || spec.key;
   span.textContent = spec.label || spec.key;
   label.appendChild(span);
   const el = document.createElement('input');
@@ -7055,6 +7055,7 @@ function _mgBuildField(backendId, spec) {
   } else if (spec.kind === 'checkbox') {
     el.type = 'checkbox';
     el.checked = true; // release_model_around_call: checked = ON (the default)
+    label.className = 'setting-field toggle-field';
   } else if (spec.kind === 'url') {
     el.type = 'url';
   } else {
