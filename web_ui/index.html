@@ -867,15 +867,12 @@
                       <select id="mg-backend"></select>
                     </label>
                     <!-- Backend field blocks are BUILT FROM THE MANIFEST at runtime (app.js _mgBuildDom):
-                         one #mg-block-<id> per backend; connection fields visible, advanced collapsed. -->
+                         one #mg-block-<id> per backend; all fields visible inline. -->
                     <div id="mg-blocks"></div>
-                    <details class="settings-section">
-                      <summary class="settings-section-title">Advanced (media_gen)</summary>
-                      <label class="setting-field">
-                        <span title="Fallback timeout in seconds (used when the backend has no specific timeout)">Timeout (s)</span>
-                        <input type="number" id="mg-timeout" min="30" max="600" step="5" value="180">
-                      </label>
-                    </details>
+                    <label class="setting-field">
+                      <span title="Fallback timeout in seconds (used when the backend has no specific timeout)">Timeout (s)</span>
+                      <input type="number" id="mg-timeout" min="30" max="600" step="5" value="180">
+                    </label>
                     <button id="mg-save" class="btn-small">Save</button>
                     <div id="mg-status" style="font-size:11px;min-height:14px;"></div>
                   </div>

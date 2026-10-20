@@ -159,10 +159,6 @@ class MediaGen(BaseTool):
                 'type': 'string',
                 'description': TOOL_METADATA['media_gen']['parameters']['negative_prompt'],
             },
-            'server_url': {
-                'type': 'string',
-                'description': TOOL_METADATA['media_gen']['parameters']['server_url'],
-            },
             'reference_file': {
                 'type': 'string',
                 'description': TOOL_METADATA['media_gen']['parameters']['reference_file'],
@@ -353,7 +349,6 @@ class MediaGen(BaseTool):
             config_name=params.get('config'),
             prompt=prompt,
             negative_prompt=params.get('negative_prompt') or '',
-            server_url=params.get('server_url'),
             reference_file=params.get('reference_file'),
             media_size=params.get('media_size'),
             overrides=params.get('overrides'),
@@ -510,7 +505,7 @@ class MediaGen(BaseTool):
             '',
             '== generic ==',
             '  args:      prompt (required) | backend (required, see below) | config (stem or full .json path)',
-            '             negative_prompt (image) | server_url (server backends) | reference_file (edit/i2v/TTS-clone)',
+            '             negative_prompt (image) | reference_file (edit/i2v/TTS-clone)',
             '             media_size={width,height} image/video · {duration,fps} video · {duration} audio',
             '             overrides={...} merged over the loaded config',
             f'  output:    {media_root}/<images|audio|video>/ (fixed; not configurable)',

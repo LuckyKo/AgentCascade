@@ -234,6 +234,20 @@ class TestMediaGenRegistry:
     def test_media_type_vocabulary_is_three(self):
         assert MEDIA_TYPES == ('image', 'video', 'audio')
 
+    def test_server_url_capability_is_removed(self):
+        """Capability removal: an agent must not be able to retarget a media backend's
+        server per call (unvalidated SSRF + local-file exfiltration via ComfyUI upload).
+        The drift guard pins key-set *equality*, so re-adding the key on BOTH sides
+        satisfies it — the absence is pinned here.
+        The live config key `comfyui.url` (FieldSpec) is a different thing and must stay."""
+        from agent_cascade.prompts.dna import TOOL_METADATA
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        assert 'server_url' not in MediaGen.parameters['properties']
+        assert 'server_url' not in TOOL_METADATA['media_gen']['parameters']
+        for m in BACKEND_MANIFEST.values():
+            assert 'server_url' not in m['agent_args'], \
+                f"server_url found in {m['label']} agent_args"
+
 
 # ── sdcpp backend wiring (mocked) ────────────────────────────────────────────
 

@@ -36,7 +36,7 @@ class BackendManifest:
     label: str                          # human name for tabs / __help headings
     note: str                           # one-line capability warning
     connection_fields: tuple = ()       # rendered by default
-    advanced_fields: tuple = ()         # rendered inside a collapsed <details>
+    advanced_fields: tuple = ()         # rendered inline after connection fields
     availability: str = 'none'          # 'config_dir' | 'workflow_dir' | 'media_types' | 'none'
     agent_args: tuple = ()              # tool args this backend honours, for __help
     overrides_keys: tuple = ()          # voice/config keys passable via overrides={...}

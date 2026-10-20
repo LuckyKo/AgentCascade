@@ -1207,6 +1207,14 @@ body {
   padding: 2px;
 }
 
+/* Shared: read-only informational note (not an editable field) */
+.setting-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
 .toggle-field {
   flex-direction: row;
   align-items: center;

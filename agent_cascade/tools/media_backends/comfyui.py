@@ -311,7 +311,7 @@ class ComfyUIBackend(MediaBackend):
         ),
         availability='workflow_dir',
         agent_args=('config', 'negative_prompt', 'media_size', 'reference_file',
-                    'server_url', 'overrides'),
+                    'overrides'),
         overrides_keys=('seed', 'steps', 'guidance'),
         usage_hints=(
             ('image', 'prompt="<image description>", '
@@ -334,7 +334,7 @@ class ComfyUIBackend(MediaBackend):
 
     def preflight(self, req: MediaRequest) -> None:
         block = (req.config or {}).get('comfyui') or {}
-        url = req.server_url or block.get('url')
+        url = block.get('url')
         if not url:
             raise RuntimeError(
                 'No ComfyUI server configured. Set the image generation server URL '

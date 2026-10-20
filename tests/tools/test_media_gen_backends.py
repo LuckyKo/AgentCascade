@@ -51,7 +51,7 @@ class TestMediaRequestDefaults:
         assert d['media_type'] == 'image'
         assert set(d) == {
             'media_type', 'backend_id', 'config_name', 'prompt', 'negative_prompt',
-            'server_url', 'reference_file', 'media_size', 'overrides',
+            'reference_file', 'media_size', 'overrides',
         }
 
     def test_media_size_is_a_dict(self):

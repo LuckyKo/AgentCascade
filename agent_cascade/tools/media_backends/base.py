@@ -184,7 +184,6 @@ class MediaRequest:
     negative_prompt: str = ''
 
     # ── Per-call overrides (D7: reference_file + media_size are core) ──────
-    server_url: Optional[str] = None     # override comfyui.url / endpoint base
     reference_file: Optional[str] = None  # SECURITY seam: resolved via resolve_tool_path
     media_size: Optional[dict] = None    # {'width': int, 'height': int, ...}
     overrides: Optional[dict] = None     # free-form backend-specific overrides
@@ -203,7 +202,6 @@ class MediaRequest:
             'config_name': self.config_name,
             'prompt': self.prompt,
             'negative_prompt': self.negative_prompt,
-            'server_url': self.server_url,
             'reference_file': self.reference_file,
             'media_size': self.media_size,
             'overrides': self.overrides,

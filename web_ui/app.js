@@ -7066,8 +7066,8 @@ function _mgBuildField(backendId, spec) {
 }
 
 // Build the backend <select> options and one #mg-block-<id> per manifest entry:
-// connection fields visible, then a collapsed <details> with the advanced fields
-// and a READ-ONLY output-path line (the media root is fixed, user decision O4).
+// connection fields, then advanced fields, then a READ-ONLY output-path line
+// (the media root is fixed, user decision O4). All fields are visible inline.
 function _mgBuildDom() {
   const host = document.getElementById('mg-blocks');
   const sel = document.getElementById('mg-backend');
@@ -7085,21 +7085,12 @@ function _mgBuildDom() {
     block.id = 'mg-block-' + id;
     block.style.display = 'none';
     (m.connection_fields || []).forEach(spec => block.appendChild(_mgBuildField(id, spec)));
-    const det = document.createElement('details');
-    det.className = 'settings-section'; // collapsed by default, matches sibling sections
-    const sum = document.createElement('summary');
-    sum.className = 'settings-section-title';
-    sum.textContent = 'Advanced (' + id + ')';
-    det.appendChild(sum);
-    (m.advanced_fields || []).forEach(spec => det.appendChild(_mgBuildField(id, spec)));
-    const info = document.createElement('label');
-    info.className = 'setting-field';
-    const infoSpan = document.createElement('span');
-    infoSpan.title = 'Where generated media is written (fixed; not configurable)';
-    infoSpan.textContent = 'Media output: <workspace>/logs/media/<images|audio|video>/';
-    info.appendChild(infoSpan);
-    det.appendChild(info);
-    block.appendChild(det);
+    (m.advanced_fields || []).forEach(spec => block.appendChild(_mgBuildField(id, spec)));
+    const info = document.createElement('div');
+    info.className = 'setting-note';
+    info.title = 'Where generated media is written (fixed; not configurable)';
+    info.textContent = 'Media output: <workspace>/logs/media/<images|audio|video>/';
+    block.appendChild(info);
     host.appendChild(block);
   }
   mgDomBuilt = true;
