@@ -193,7 +193,8 @@ SKILL_ADVISOR_PROMPT = (
     '[NOTES] <additional task notes or "none">\n'
     '[VERDICT] APPROVE — <reason>\n'
     'OR\n'
-    '[VERDICT] DENY — <reason>')
+    '[VERDICT] DENY — <reason>\n'
+    'After your [VERDICT] line, append [END] on the same line to signal your response is complete. Do NOT make any further tool calls after [END].')
 
 # --- Auto-Skill Reflection (extended-turns phase) ---
 # Injected at the start of the auto-skill extended turns. {loaded_skills} is a rendered list of the
