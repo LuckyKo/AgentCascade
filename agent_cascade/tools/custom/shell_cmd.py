@@ -5,7 +5,8 @@ import time
 from typing import Optional, Union
 
 from agent_cascade.async_shell import _elapsed_for_task
-from agent_cascade.operation_manager.shell import MAX_SHELL_TIMEOUT, ShellMixin
+from agent_cascade.operation_manager.shell import (MAX_SHELL_TIMEOUT, ON_WINDOWS,
+                                                  ShellMixin)
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIMEOUT_THRESHOLD,
                                     DEFAULT_AUTO_ASYNC_HEARTBEAT, SAFE_MODE_AUTO_RAM_FLOOR_MB,
@@ -449,39 +450,129 @@ class ShellCmd(BaseTool):
 
     # BUG_0053/0092: POSIX text tools and PowerShell cmdlets unavailable in cmd.exe.
     # head/tail are already handled by _strip_head_tail_pipes (stripped, not rejected).
+    # Values are the cmd.exe replacement command, or None when there is no equivalent.
     _WINDOWS_POSIX_TOOLS = {
         'grep': 'findstr',
-        'awk': '(no cmd.exe equivalent — use Python)',
-        'sed': '(no cmd.exe equivalent — use Python)',
+        'awk': None,
+        'sed': None,
     }
     _WINDOWS_PS_CMDLETS = {
         'select-string': 'findstr',
-        'select-object': '(no cmd.exe equivalent — use Python)',
+        'select-object': None,
         'where-object': 'findstr',
-        'tee-object': '(use > redirect)',
+        'tee-object': None,
     }
+    # A stage that invokes PowerShell is exempt: its quoted text is PowerShell's
+    # program text, not cmd.exe's.
+    _WINDOWS_PS_HOSTS = ('powershell', 'pwsh')
+
+    @staticmethod
+    def _dialect_hint(alt: str | None) -> str:
+        """Advice slot: the cmd.exe replacement plus general guidance, or an honest
+        statement that no equivalent exists."""
+        if alt is not None:
+            return (f"Use '{alt}' instead. For complex text processing, prefer the "
+                    'grep/read_file tools or write a Python snippet.')
+        return ('There is no cmd.exe equivalent — use a Python snippet or the '
+                'grep/read_file tools.')
+
+    @staticmethod
+    def _split_command_stages(command: str) -> list[str]:
+        """Split a command into stages on UNQUOTED ``|``, ``||``, ``&&``, ``;`` and ``&``.
+
+        Quote state is tracked first, so a separator inside a single- or double-quoted
+        argument (e.g. ``python -c "...'| head'..."``) is string data, not a stage boundary —
+        same invariant as :meth:`ShellCmd._strip_head_tail_pipes` (BUG_0060). A lone ``&``
+        IS a separator because cmd.exe treats it as a command separator (``dir & grep x``
+        really does invoke grep); redirection fragments it produces (``2>&1`` → a ``1`` stage)
+        are harmless here because this feeds :meth:`_stage_command_name`, not a rejoin.
+
+        Known misses, accepted as low value: a path-qualified invocation
+        (``C:\\bin\\grep.exe``), a wrapper-named invocation (``cmd /c "grep x"``,
+        ``start /b grep x`` — the wrapper is the command position) and an unbalanced apostrophe
+        in an unquoted argument (``git commit -m it's broken | grep x``) which opens a quote
+        that never closes, hiding later stages. Same single-quote model as the BUG_0060 invariant
+        in :meth:`ShellCmd._strip_head_tail_pipes`.
+        """
+        stages = []
+        cur = ''
+        quote = None
+        i = 0
+        n = len(command)
+        while i < n:
+            ch = command[i]
+            if quote:
+                cur += ch
+                if ch == quote:
+                    quote = None
+            elif ch in ('"', "'"):
+                quote = ch
+                cur += ch
+            elif ch in ('|', '&'):
+                # All of '|', '||', '&' and '&&' are command separators in cmd.exe.
+                if command[i + 1:i + 2] == ch:
+                    i += 1  # consume the second half of the two-char operator
+                stages.append(cur)
+                cur = ''
+            elif ch == ';':
+                stages.append(cur)
+                cur = ''
+            else:
+                cur += ch
+            i += 1
+        stages.append(cur)
+        return stages
+
+    @staticmethod
+    def _stage_command_name(stage: str) -> str | None:
+        """Return the lowercased command name a stage invokes, or None for an empty stage.
+
+        Leading ``-flag`` tokens are skipped (e.g. ``-E``, ``-i``), matching the
+        stage-inspection rule already used by :meth:`ShellCmd._strip_head_tail_pipes`.
+        Surrounding quotes are stripped so ``"Select-String"`` still identifies.
+        """
+        for token in stage.split():
+            token = token.strip('"\'')
+            if not token or token.startswith('-'):
+                continue
+            return token.lower()
+        return None
 
     @staticmethod
     def _check_windows_dialect(command: str) -> str | None:
         """BUG_0053/0092: reject POSIX tools and PowerShell cmdlets on Windows hosts.
 
-        cmd.exe has no grep/awk/sed and no PowerShell cmdlets. Returns an error
-        message with the cmd.exe equivalent, or None if the command is clean.
+        cmd.exe has no grep/awk/sed and no PowerShell cmdlets. Returns an error message
+        naming the cmd.exe equivalent, or None if the command is clean.
+
+        Only the command name of each stage is matched (:meth:`_split_command_stages` +
+        :meth:`_stage_command_name`), so the tool name appearing as an argument, a flag
+        or a string literal is NOT flagged: ``git grep``, ``git log --grep=fix``,
+        ``type grep.txt``, ``findstr /i grep file.txt`` and
+        ``python -c "print('sed is a stream editor')"`` all pass. A stage that invokes
+        ``powershell``/``pwsh`` is skipped (its quoted text is PowerShell's program, not
+        cmd.exe's), while the other stages of the same command are still checked.
+
+        The message reuses cmd.exe's own failure wording
+        (``'X' is not recognized as an internal or external command``) so
+        ``tool_loop_detect`` classifies a missed dialect error as a failing output.
         """
-        if os.name != 'nt':
+        if not ON_WINDOWS or not command:
             return None
-        cmd_lower = command.lower()
-        for tool, alt in ShellCmd._WINDOWS_POSIX_TOOLS.items():
-            if re.search(rf'\b{tool}\b', cmd_lower):
-                return (f"ERROR: '{tool}' is not available on this Windows host (cmd.exe). "
-                        f"Use '{alt}' instead. "
-                        f"For complex text processing, prefer the grep/read_file tools or write a Python snippet.")
-        for cmdlet, alt in ShellCmd._WINDOWS_PS_CMDLETS.items():
-            if re.search(rf'\b{cmdlet}\b', cmd_lower):
-                display = cmdlet.capitalize().replace('-', '-')  # e.g. 'Select-String'
-                return (f"ERROR: '{display}' is a PowerShell cmdlet, not available in cmd.exe. "
-                        f"Use '{alt}' instead. "
-                        f"For complex filtering, prefer the grep/read_file tools or write a Python snippet.")
+        stages = ShellCmd._split_command_stages(command)
+        names = [ShellCmd._stage_command_name(st) for st in stages]
+        for name in names:
+            if name is None or name in ShellCmd._WINDOWS_PS_HOSTS:
+                continue  # a powershell/pwsh stage: its quoted text is PowerShell's program
+            if name in ShellCmd._WINDOWS_POSIX_TOOLS:
+                return (f"ERROR: '{name}' is not recognized as an internal or external command "
+                        f"on this Windows host (cmd.exe). "
+                        f"{ShellCmd._dialect_hint(ShellCmd._WINDOWS_POSIX_TOOLS[name])}")
+            if name in ShellCmd._WINDOWS_PS_CMDLETS:
+                display = '-'.join(w.capitalize() for w in name.split('-'))
+                return (f"ERROR: '{display}' is not recognized as an internal or external command "
+                        f"on this Windows host (cmd.exe) — it is a PowerShell cmdlet. "
+                        f"{ShellCmd._dialect_hint(ShellCmd._WINDOWS_PS_CMDLETS[name])}")
         return None
 
     @staticmethod
