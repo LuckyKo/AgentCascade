@@ -170,7 +170,8 @@ SECURITY_ADVISOR_PROMPT = (
     'Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n'
     'CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n'
     '[YES] Reason: ...\n'
-    '[NO] Reason: ...')
+    '[NO] Reason: ...\n'
+    'After your [YES]/[NO] line, append [END] on the same line to signal your response is complete. Do NOT make any further tool calls after [END].')
 
 # --- Skill Advisor (AUTO Skill Helper — Advanced mode) ---
 SKILL_ADVISOR_PROMPT = (

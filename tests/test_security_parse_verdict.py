@@ -98,3 +98,106 @@ def test_prefix_stripping_still_works():
     assert is_yes is False
     # 'Reason:' stripped; remaining text keeps original case.
     assert justification == 'unsafe rm -rf'
+
+
+def test_end_token_stripped_from_verdict():
+    """[END] terminal token on the verdict line must be stripped from the justification."""
+    h = _handler()
+    text = '[YES] Reason: Safe operation. [END]'
+    is_yes, is_no, justification = h._parse_verdict(text)
+    assert is_yes is True
+    assert is_no is False
+    assert justification == 'Safe operation.'
+    assert '[END]' not in justification
+
+
+def test_end_token_case_insensitive():
+    """Lowercase [end] is stripped just like [END]; verdict/justification unaffected."""
+    h = _handler()
+    text = '[no] reason: risky. [end]'
+    is_yes, is_no, justification = h._parse_verdict(text)
+    assert is_no is True
+    assert is_yes is False
+    assert justification == 'risky.'
+
+
+# ── Early-break predicate (collection loop) ─────────────────────────────────
+
+def test_signals_completion_on_committed_verdict():
+    """A post-Phase-4 (non-streaming) yield whose text has verdict + [END] breaks the loop."""
+    h = _handler()
+    turn_output = [{'role': 'assistant', 'content': '[YES] Reason: Safe operation. [END]'}]
+    assert h._signals_completion(turn_output, False) is True
+
+
+def test_signals_completion_ignores_streaming_ticks():
+    """Streaming yields carry UNCOMMITTED partial text; breaking there would lose the verdict.
+
+    run() commits the assistant message only in Phase 4 (engine/core.py), which is
+    skipped when the generator is abandoned mid-stream — so a streaming tick must
+    never trip the break even when the partial text already shows verdict + [END].
+    """
+    h = _handler()
+    partial = [{'role': 'assistant', 'content': '[YES] Reason: Safe. [END]'}]
+    assert h._signals_completion(partial, True) is False
+
+
+def test_signals_completion_not_tripped_by_tool_payload():
+    """A tool-result payload containing the literal "[END]" must NOT break the loop.
+
+    Backward compatibility: models that never emit the token still run to max_turns.
+    """
+    h = _handler()
+    turn_output = [{'role': 'function', 'content': 'some file content ... [END] ...'}]
+    assert h._signals_completion(turn_output, False) is False
+
+
+def test_signals_completion_false_without_token():
+    """No [END] at all — the loop runs to max_turns exactly as before."""
+    h = _handler()
+    turn_output = [{'role': 'assistant', 'content': '[YES] Reason: Safe operation.'}]
+    assert h._signals_completion(turn_output, False) is False
+
+
+def test_signals_completion_case_insensitive():
+    """Lowercase [end] from the model is detected like [END]."""
+    h = _handler()
+    turn_output = [{'role': 'assistant', 'content': '[NO] risky. [end]'}]
+    assert h._signals_completion(turn_output, False) is True
+
+
+def test_signals_completion_requires_same_line_pairing():
+    """A provisional [YES] in one message must not pair with a literal [END] in another.
+
+    Realistic trigger: the security prompt itself contains the literal "[END]", so a
+    grep/read_file tool result can carry it while the model has not decided yet.
+    Also covers a [YES] on one line and [END] on the next within one message.
+    """
+    h = _handler()
+    cross_message = [
+        {'role': 'assistant', 'content': 'Maybe [YES] this is fine, let me check the file.'},
+        {'role': 'function', 'content': 'prompt text: append [END] on the same line'},
+    ]
+    assert h._signals_completion(cross_message, False) is False
+
+    same_msg_different_lines = [{'role': 'assistant', 'content': '[YES] Reason: ok.\n[END]'}]
+    assert h._signals_completion(same_msg_different_lines, False) is False
+
+
+def test_signals_completion_ignores_tool_result_log_echo():
+    """A FUNCTION payload holding a complete "[YES] ... [END]" line must NOT break the loop.
+
+    The advisor is pointed at the supervisor's JSONL log precisely so it can read past
+    checks; JSONL escapes newlines, so a previous verdict arrives as one physical line
+    that satisfies the same-line shape. Only assistant-authored text may trip the break.
+    """
+    h = _handler()
+    log_echo = [{'role': 'function', 'content': '{"role": "assistant", "content": "[YES] Reason: Safe operation. [END]"}'}]
+    assert h._signals_completion(log_echo, False) is False
+
+    # The assistant verdict itself still trips it, in the same payload.
+    both = [
+        {'role': 'function', 'content': '[YES] Reason: old check approved. [END]'},
+        {'role': 'assistant', 'content': '[NO] Reason: deletes a critical file. [END]'},
+    ]
+    assert h._signals_completion(both, False) is True

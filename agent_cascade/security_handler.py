@@ -583,6 +583,14 @@ class SecurityAdvisorHandler:
                             self.agent_pool.instance_state[sec_state_key]['message_count'] = len(
                                 sec_instance.conversation)
 
+                    # Early termination: [END] token signals the model considers its
+                    # response complete. Break the collection loop so we don't burn
+                    # turns on post-verdict tool calls (e.g. calculate(1)).
+                    # Optional token — models that don't emit it run to max_turns as before.
+                    if self._signals_completion(sec_turn_output, sec_is_streaming_tick):
+                        logger.debug(f"[SECURITY] [END] token detected in turn {_sec_tick_num} — breaking collection loop (request {rid})")
+                        break
+
             except Exception as e:
                 logger.error(f"Security agent execution error: {e}")
                 raise
@@ -705,6 +713,45 @@ class SecurityAdvisorHandler:
         """Thin wrapper delegating to the shared slot_yield_utils.describe_pool_holders."""
         return describe_pool_holders(self.agent_pool, caller_agent)
 
+    # ── [END] terminal token detection ─────────────────────────────────────
+    @staticmethod
+    def _signals_completion(turn_output, is_streaming_tick: bool) -> bool:
+        """True if this engine yield carries the optional [END] terminal token.
+
+        Two guards keep this both effective and backward compatible:
+          * Streaming yields are ignored. A streaming tick carries *uncommitted*
+            partial text; breaking there abandons run() before Phase 4 (engine/core.py)
+            commits the assistant message, so the verdict would never reach
+            instance.conversation and the check would degrade to ambiguous/reject.
+          * Only assistant content is scanned, and the verdict token and [END] must appear
+            on the SAME line, as the prompt contract specifies ("append [END] on the same
+            line"). Scanning every message for two independent substrings would let a
+            tool-result containing a literal "[END]" (e.g. grep output that echoes the
+            security prompt, or a JSONL log line from a previous check that already ends
+            with "[END]") pair up with an unrelated "[YES]" and break the loop before
+            the real verdict exists.
+
+        Returns False for any yield without a same-line, assistant-authored verdict+[END]
+        pair.
+        """
+        if is_streaming_tick:
+            return False
+
+        from agent_cascade.llm.schema import ASSISTANT
+        from agent_cascade.utils.utils import msg_field
+
+        # Join real message content (not repr): str() of a message list escapes newlines
+        # as the two-character sequence "\n", which would defeat the same-line check below.
+        # Only assistant text can carry the token — without the role filter, a tool result
+        # echoing a prior "[YES] ... [END]" line (the advisor is pointed at the supervisor
+        # log precisely so it can read past checks, and JSONL renders such a line as one
+        # physical line) would trip the break before the model has decided.
+        msgs = turn_output if isinstance(turn_output, (list, tuple)) else [turn_output]
+        text = '\n'.join(c for m in msgs
+                         if msg_field(m, 'role', '') == ASSISTANT
+                         and isinstance(c := msg_field(m, 'content', ''), str))
+        return re.search(r'(?m)^\[(YES|NO)\][^\n]*\[END\]', text, re.IGNORECASE) is not None
+
     # ── Verdict parsing (multiple fallback strategies) ────────────────────
     def _parse_verdict(self, text: str) -> tuple[bool, bool, str]:
         """Parse the security advisor response for [YES]/[NO] verdict.
@@ -730,6 +777,14 @@ class SecurityAdvisorHandler:
                 clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
         except Exception as e:
             logger.debug(f"Thinking block stripping failed (non-critical): {e}")
+
+        # Strip optional [END] terminal token (case-insensitive, with optional surrounding whitespace).
+        # The token signals the model considered its response complete; it carries no semantic
+        # content and must not interfere with verdict extraction.
+        # NOTE: the strip is global, so a model that writes "[END]" mid-justification has that
+        # literal removed too. Accepted trade-off: the prompt only ever suggests it as a trailing
+        # token on the verdict line, and models that never emit it are unaffected.
+        clean_text = re.sub(r'\s*\[END\]\s*', ' ', clean_text, flags=re.IGNORECASE).strip()
 
         is_yes = False
         is_no = False

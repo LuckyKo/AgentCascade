@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent_cascade.security_reuse import (  # noqa: E402
     try_claim, release_claim, claim_holder, _clear_all)
 from agent_cascade.agent_instance import AgentInstance, AgentState  # noqa: E402
-from agent_cascade.llm.schema import Message, SYSTEM, USER  # noqa: E402
+from agent_cascade.llm.schema import Message, SYSTEM, USER, ASSISTANT  # noqa: E402
 from agent_cascade.engine.helpers import _with_run_identity  # noqa: E402
 
 REUSE_NAME = 'Security_guard'
@@ -1013,6 +1013,74 @@ class TestSecurityHandlerIntegration:
         # Legacy path uses the per-rid name Security_<rid>.
         call_kwargs = engine_instance._create_system_agent.call_args.kwargs
         assert call_kwargs['instance_name'] == f'Security_rid_off'
+
+    def test_end_token_breaks_loop_only_after_commit(self):
+        """[END] must break the collection loop only on a COMMITTED (non-streaming) yield.
+
+        Regression guard for the streaming-yield trap: run() hands the consumer *uncommitted*
+        partial text on streaming ticks, and the assistant message is only appended to the
+        conversation in Phase 4 (engine/core.py). Breaking on the first tick that merely
+        *shows* "[END]" would leave extract_instance_output() with no verdict, degrading an
+        obedient model's [YES] to ambiguous/auto-reject.
+        """
+        pool = _make_integration_pool()
+        handler = _make_handler(pool)
+        warm = _make_warm_instance(REUSE_NAME)
+
+        consumed = []
+
+        def _run(inst):
+            # 1) Streaming tick: partial text already shows verdict + [END]. Must NOT break.
+            consumed.append('stream')
+            yield ([Message(role=ASSISTANT, content='[YES] safe [END]')], True)
+            # 2) Post-Phase-4 yield: mirror the real engine by committing the message first.
+            inst.append_message(Message(role=ASSISTANT, content='[YES] safe [END]'))
+            consumed.append('commit')
+            yield ([Message(role=ASSISTANT, content='[YES] safe [END]')], False)
+            # 3) Post-verdict tool-call turn — exactly what [END] exists to skip.
+            consumed.append('post-verdict')
+            yield ([Message(role=ASSISTANT, content='[YES] safe again')], False)
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.side_effect = lambda **kw: (warm, True, REUSE_NAME)
+        engine_instance.run.side_effect = _run
+
+        with patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', True):
+            self._run_check(handler, pool, engine_instance, 'rid_endtoken')
+
+        assert consumed == ['stream', 'commit'], (
+            f'loop must break right after the committed yield, consumed: {consumed}')
+        # The verdict must survive the break: auto-apply approves this request.
+        rids = [c.args[0] for c in pool.operation_manager.user_approve.call_args_list]
+        assert 'rid_endtoken' in rids, f'expected approval for rid_endtoken, got {rids}'
+
+    def test_end_token_break_releases_claim_in_finally(self):
+        """The [END] break must share the timeout break's cleanup: the finally releases the
+        reuse claim/permit so the shared conc=0 slot is not pinned forever."""
+        pool = _make_integration_pool()
+        handler = _make_handler(pool)
+        warm = _make_warm_instance(REUSE_NAME)
+
+        def _run(inst):
+            inst.append_message(Message(role=ASSISTANT, content='[YES] safe [END]'))
+            yield ([Message(role=ASSISTANT, content='[YES] safe [END]')], False)
+            # Never reached — the loop must have broken.
+            yield ([Message(role=ASSISTANT, content='[YES] still running')], False)
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.side_effect = lambda **kw: (warm, True, REUSE_NAME)
+        engine_instance.run.side_effect = _run
+
+        # The mocked acquire skips the real try_claim, so claim manually with the handler's rid
+        # (same technique as test_claim_released_in_finally_on_exception).
+        _clear_all()
+        assert try_claim(REUSE_NAME, 'rid_endclaim') is True
+
+        with patch('agent_cascade.settings.SECURITY_REUSE_ENABLED', True):
+            self._run_check(handler, pool, engine_instance, 'rid_endclaim')
+
+        assert claim_holder(REUSE_NAME) is None, (
+            'the [END] break must release the claim like every other exit path')
 
 
 # ── E. Integration: advisor_runner ────────────────────────────────────────────
