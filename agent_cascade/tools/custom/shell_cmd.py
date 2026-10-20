@@ -256,6 +256,11 @@ class ShellCmd(BaseTool):
         cwd = params.get('cwd', '.')
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
 
+        # BUG_0053/0092: reject POSIX tools / PowerShell cmdlets on Windows hosts early.
+        dialect_err = ShellCmd._check_windows_dialect(command)
+        if dialect_err:
+            return dialect_err
+
         # ── Parse execution parameters ──────────────────────────────
         # execution_mode is a tri-state parameter ('auto'/'sync'/'async'). 'auto' is the default and
         # is also what omission/null maps to (jsonschema default does not inject, so absence arrives as None):
@@ -441,6 +446,43 @@ class ShellCmd(BaseTool):
     def _strip_note(was_stripped: bool) -> str:
         """Return the strip note (with trailing newline) if pipes were stripped, else ''."""
         return ShellCmd._HEAD_TAIL_STRIP_NOTE + '\n' if was_stripped else ''
+
+    # BUG_0053/0092: POSIX text tools and PowerShell cmdlets unavailable in cmd.exe.
+    # head/tail are already handled by _strip_head_tail_pipes (stripped, not rejected).
+    _WINDOWS_POSIX_TOOLS = {
+        'grep': 'findstr',
+        'awk': '(no cmd.exe equivalent — use Python)',
+        'sed': '(no cmd.exe equivalent — use Python)',
+    }
+    _WINDOWS_PS_CMDLETS = {
+        'select-string': 'findstr',
+        'select-object': '(no cmd.exe equivalent — use Python)',
+        'where-object': 'findstr',
+        'tee-object': '(use > redirect)',
+    }
+
+    @staticmethod
+    def _check_windows_dialect(command: str) -> str | None:
+        """BUG_0053/0092: reject POSIX tools and PowerShell cmdlets on Windows hosts.
+
+        cmd.exe has no grep/awk/sed and no PowerShell cmdlets. Returns an error
+        message with the cmd.exe equivalent, or None if the command is clean.
+        """
+        if os.name != 'nt':
+            return None
+        cmd_lower = command.lower()
+        for tool, alt in ShellCmd._WINDOWS_POSIX_TOOLS.items():
+            if re.search(rf'\b{tool}\b', cmd_lower):
+                return (f"ERROR: '{tool}' is not available on this Windows host (cmd.exe). "
+                        f"Use '{alt}' instead. "
+                        f"For complex text processing, prefer the grep/read_file tools or write a Python snippet.")
+        for cmdlet, alt in ShellCmd._WINDOWS_PS_CMDLETS.items():
+            if re.search(rf'\b{cmdlet}\b', cmd_lower):
+                display = cmdlet.capitalize().replace('-', '-')  # e.g. 'Select-String'
+                return (f"ERROR: '{display}' is a PowerShell cmdlet, not available in cmd.exe. "
+                        f"Use '{alt}' instead. "
+                        f"For complex filtering, prefer the grep/read_file tools or write a Python snippet.")
+        return None
 
     @staticmethod
     def _strip_head_tail_pipes(command: str) -> tuple[str, bool]:
