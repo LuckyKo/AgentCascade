@@ -335,7 +335,10 @@ class ShellCmd(BaseTool):
         # 'auto' only (explicit sync/async/safe win). Takes precedence over auto-async — a command
         # about to OOM the box must not run unmonitored in the background. Capability gate mirrors
         # _execute_safe's GATE A; probe targets the HELD endpoint; best-effort (see state_ops.ram_vram_pressure).
-        if is_auto and not run_safe and not _system_agent:
+        # BUG_0100: skip the RAM-floor safe-mode force for auto-approved (read-only) commands —
+        # they are lightweight by definition and the model unload/reload overhead is wasted.
+        if is_auto and not run_safe and not _system_agent \
+                and not ShellMixin._is_safe_readonly_shell_command(command):
             from agent_cascade.state_ops import (resolve_held_endpoint, is_autoloader_endpoint,
                                                  is_state_save_capable, ram_vram_pressure)
             from agent_cascade.operation_manager import _queue_tool_warning
