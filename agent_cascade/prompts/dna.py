@@ -425,7 +425,9 @@ TOOL_METADATA = {
         'description': (
             'Python code sandbox (Docker-based). The workspace and extra paths are mounted, exact mapping can be found by using system_info tool; workspace relative paths work directly. '
             'Use for quick snippets; for longer code, write .py files via file tools and import them here. '
-            'To reach host services, use "host.docker.internal" instead of "localhost".'),
+            'To reach host services, use "host.docker.internal" instead of "localhost". '
+            'NOTE: the container clock is UTC — file mtimes and datetime.now() inside the sandbox are UTC, not host-local. '
+            'Check system_info for the host timezone offset before comparing timestamps.'),
         'parameters': {
             'code':
                 'The Python code to execute.',

@@ -460,9 +460,16 @@ class SystemInfo(BaseTool):
             logger.warning(f"Failed to resolve AC server address: {e}")
             ac_server_str = 'Unknown'
 
+        # BUG_0091: report the host TZ offset so agents can reconcile sandbox (UTC) timestamps
+        # with host-local log timestamps. The code_interpreter container always runs UTC.
+        host_tz = now.astimezone().tzname() or 'UTC'
+        host_offset_h = now.astimezone().utcoffset().total_seconds() / 3600 if now.astimezone().utcoffset() else 0
+        tz_line = f"Host Timezone: {host_tz} (UTC{host_offset_h:+.0f})\n" if host_offset_h != 0 else f"Host Timezone: {host_tz} (UTC)\n"
+
         info = (f"--- System Information ---\n"
                 f"OS: {os_info}\n"
                 f"Current Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"{tz_line}"
                 f"Python Version: {py_version}\n"
                 f"API Endpoint: {api_base}\n"
                 f"Model Used: {model}\n"
