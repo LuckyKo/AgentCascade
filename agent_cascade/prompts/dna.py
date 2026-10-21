@@ -215,8 +215,8 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     'Discourage generosity bias: a skill that was merely present but not needed should NOT get a '
     'high rating. Do NOT rate skills you did not apply.\n\n'
     '### 2. Propose new / updated skills (only if warranted)\n'
-    'If you noticed a reusable pattern, procedure, or gap the loaded skills did not cover, propose '
-    'a new skill (or an update) by calling `propose_skill` with its `name` and full `skill_content`. '
+    'If you discover a non-obvious, particularly useful and reusable pattern or procedure that the loaded skills did not cover, propose '
+    'a new skill (or preferably update existing one) by calling `propose_skill`. '
     'The `name` argument is authoritative — it becomes the registered name. New skills start at '
     'rating 5.0 automatically.\n\n'
     '### 3. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
@@ -655,7 +655,10 @@ TOOL_METADATA = {
     'send_message': {
         'description': ('Send an async message to another running agent or the user. '
                         'Delivered on the recipient\'s next turn without interrupting either party. '
-                        'Fails if the destination is not actively running.'),
+                        'Fails if the destination is not actively running. '
+                        'When destination is \'user\' and the message contains image/audio file paths '
+                        '(absolute local paths, or ![image](path) / ![audio](path)), the Telegram bridge '
+                        'delivers them as media attachments; the browser/WS path shows them as plain text links.'),
         'parameters': {
             'destination':
                 ("Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."),
