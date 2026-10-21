@@ -64,8 +64,12 @@ class TestBug0038Repro:
         assert 'propose_skill' not in out
         # The message points at what edit_file actually requires...
         assert 'path' in out
-        # ...not at a parameter of the other tool.
-        assert 'skill_content' not in out
+        # ...and must not present the foreign tool's param as a VALID edit_file
+        # parameter. (BUG_0077's 'received keys' echo legitimately lists what
+        # the model sent, so we check the known-parameters section rather than
+        # the whole message — hiding received keys would defeat that feature.)
+        known_section = out.split('known parameters', 1)[1] if 'known parameters' in out else ''
+        assert 'skill_content' not in known_section, out
 
 
 class TestEachWrappedSiteNamesItsTool:
