@@ -1,5 +1,14 @@
 """
-Soul Loader - Load agent personality from soul.md file
+Soul Loader - Load agent personality from a soul.md file.
+
+A soul file is authored as YAML frontmatter (a small, well-formed structured
+header) followed by a free-form markdown body. The header carries only the
+fields the loader needs to transform (identity, and optional tool/rule
+declarations); the prose lives in the markdown body and is passed through
+verbatim. This replaces the old "whole file is YAML" format, whose
+`_preprocess_soul_content` band-aid could not survive prose (plain lines after
+a list, `* ` sub-list markers) and turned the prompt into a lossy
+author-YAML -> dict -> markdown round-trip.
 """
 
 from pathlib import Path
@@ -7,106 +16,60 @@ from pathlib import Path
 import yaml
 
 
-def _preprocess_soul_content(content: str) -> str:
-    """
-    Pre-process soul.md content to fix common YAML formatting quirks.
+_FRONTMATTER_DELIMS = ('---', '...')
 
-    Handles:
-    - Trailing whitespace on each line
-    - Indented continuation lines in list items (e.g., a list item followed
-      by a more-indented line without a "- " prefix gets merged into it)
-    - Nested list indentation normalization (nested items at irregular indent
-      levels are normalized to parent_indent + 2)
-    - Colon quoting for merged list items to prevent YAML key-value parsing
+
+def _split_frontmatter(content: str, soul_path: str) -> tuple[str, str]:
+    """Split a soul file into a YAML frontmatter block and a markdown body.
+
+    A soul file is: an opening '---' fence, a YAML header, a closing '---'
+    (or '...') fence, then free-form markdown prose. Returns a
+    ``(frontmatter_text, body_text)`` tuple. The body is returned exactly as
+    written (no re-flowing) so the rendered prompt is byte-stable.
+
+    Raises:
+        ValueError: if the file does not open with a frontmatter fence, or the
+            fence is never closed.
     """
+    if content.startswith('\ufeff'):
+        content = content[1:]
+
     lines = content.split('\n')
+    if not lines or lines[0].strip() != '---':
+        raise ValueError(
+            f"Soul file must start with a '---' frontmatter fence: {soul_path}")
 
-    # Strip trailing whitespace from every line
-    lines = [line.rstrip() for line in lines]
+    for i in range(1, len(lines)):
+        if lines[i].strip() in _FRONTMATTER_DELIMS:
+            frontmatter = '\n'.join(lines[1:i])
+            body = '\n'.join(lines[i + 1:])
+            return frontmatter, body
 
-    # Merge indented continuation lines into their parent list item.
-    # A continuation line is one that:
-    #   - starts with more leading whitespace than the list marker
-    #   - does NOT start with "- " (i.e., it's not a new list item)
-    merged = []
-    for i, line in enumerate(lines):
-        if not line:
-            merged.append(line)
-            continue
-
-        # Check if this is a continuation of the previous list item
-        if i > 0 and merged[-1]:
-            prev = merged[-1]
-            prev_stripped = prev.lstrip()
-            if prev_stripped.startswith('- '):
-                prev_indent = len(prev) - len(prev_stripped)
-                curr_stripped = line.lstrip()
-                curr_indent = len(line) - len(curr_stripped)
-                if curr_indent > prev_indent and not curr_stripped.startswith('- '):
-                    # Append continuation text to previous line
-                    merged[-1] = prev + ' ' + curr_stripped
-                    continue
-
-        merged.append(line)
-
-    # Normalize nested list indentation: track indent stack so each level
-    # is exactly 2 spaces deeper than its parent, preserving hierarchy.
-    normalized = []
-    indent_stack = []
-    for line in merged:
-        stripped = line.lstrip()
-        if stripped.startswith('- '):
-            curr_indent = len(line) - len(stripped)
-            while indent_stack and indent_stack[-1] >= curr_indent:
-                indent_stack.pop()
-            if indent_stack:
-                expected = indent_stack[-1] + 2
-                if curr_indent != expected:
-                    line = ' ' * expected + stripped
-                    curr_indent = expected
-            indent_stack.append(curr_indent)
-        elif not stripped:
-            indent_stack.clear()
-        normalized.append(line)
-
-    # Quote list items containing colons to prevent YAML key-value parsing.
-    # Skip quoting if the next line is a nested list item (the colon is the key).
-    quoted = []
-    for i, line in enumerate(normalized):
-        stripped = line.lstrip()
-        if stripped.startswith('- '):
-            item_text = stripped[2:]
-            # Check if next line is a nested list item at deeper indent
-            has_nested = False
-            if i + 1 < len(normalized):
-                next_line = normalized[i + 1]
-                next_stripped = next_line.lstrip()
-                if next_stripped.startswith('- '):
-                    next_indent = len(next_line) - len(next_stripped)
-                    curr_indent = len(line) - len(stripped)
-                    if next_indent > curr_indent:
-                        has_nested = True
-            if ':' in item_text and not has_nested:
-                item_text = item_text.replace('"', '\\"')
-                line = line[:len(line) - len(stripped)] + '- ' + '"' + item_text + '"'
-        quoted.append(line)
-
-    return '\n'.join(quoted)
+    raise ValueError(
+        f"Soul frontmatter is not closed with a '---' fence: {soul_path}")
 
 
 def load_soul(soul_path: str = 'soul.md') -> dict:
     """
     Load agent configuration from a soul.md file.
 
+    The file is split into a YAML frontmatter header and a markdown body.
+    Only the frontmatter is parsed as YAML; the body is kept as raw markdown
+    and handed to ``build_system_prompt`` for verbatim inclusion.
+
     Args:
         soul_path: Path to the soul.md configuration file
 
     Returns:
-        Dictionary with agent configuration
+        Dict with two keys:
+            - 'frontmatter': the parsed YAML header (a mapping)
+            - 'body': the markdown prose, verbatim
 
     Raises:
         FileNotFoundError: If the soul file doesn't exist
-        yaml.YAMLError: If the YAML is malformed (with helpful context)
+        ValueError: If the file lacks a frontmatter fence, or the frontmatter
+            is not a YAML mapping
+        yaml.YAMLError: If the frontmatter YAML is malformed (with context)
     """
     path = Path(soul_path)
     if not path.exists():
@@ -115,15 +78,13 @@ def load_soul(soul_path: str = 'soul.md') -> dict:
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Pre-process to handle common formatting quirks
-    content = _preprocess_soul_content(content)
+    frontmatter_text, body = _split_frontmatter(content, soul_path)
 
-    # Parse YAML with error handling
     try:
-        config = yaml.safe_load(content)
+        frontmatter = yaml.safe_load(frontmatter_text)
     except yaml.YAMLError as e:
         # Build a helpful error message with file path and error details
-        error_msg = f"Failed to parse soul file: {soul_path}\n"
+        error_msg = f"Failed to parse soul frontmatter: {soul_path}\n"
         mark = getattr(e, 'problem_mark', None)
         if mark is not None:
             error_msg += f"  Line {mark.line + 1}: {e.problem or e}"
@@ -131,59 +92,12 @@ def load_soul(soul_path: str = 'soul.md') -> dict:
             error_msg += f"  {e}"
         raise yaml.YAMLError(error_msg) from e
 
-    if not isinstance(config, dict):
-        raise ValueError(f"Soul file must contain a YAML mapping, got {type(config).__name__}: {soul_path}")
+    if not isinstance(frontmatter, dict):
+        raise ValueError(
+            'Soul frontmatter must be a YAML mapping, got '
+            f"{type(frontmatter).__name__}: {soul_path}")
 
-    return config
-
-
-def _format_value(v, indent=0):
-    """
-    Recursively format a value (list, dict, or scalar) into markdown text.
-
-    Dict-in-list items are formatted with bold key prefixes.
-    Nested dicts use ### sub-headings.
-    Empty dicts are skipped.
-    """
-    res = ''
-    spacing = '  ' * indent
-    if isinstance(v, list):
-        for item in v:
-            if isinstance(item, dict):
-                if not item:
-                    continue
-                elif len(item) == 1:
-                    k, val = next(iter(item.items()))
-                    k_title = str(k).replace('_', ' ').title()
-                    if isinstance(val, (list, dict)):
-                        res += f"{spacing}- **{k_title}**\n"
-                        res += _format_value(val, indent + 1)
-                    else:
-                        res += f"{spacing}- **{k_title}**: {val}\n"
-                else:
-                    for k, val in item.items():
-                        k_title = str(k).replace('_', ' ').title()
-                        if isinstance(val, (list, dict)):
-                            res += f"{spacing}- **{k_title}**\n"
-                            res += _format_value(val, indent + 1)
-                        else:
-                            res += f"{spacing}- **{k_title}**: {val}\n"
-            elif isinstance(item, list):
-                # Format nested list without extra dash prefix
-                formatted = _format_value(item, indent + 1)
-                res += formatted
-            else:
-                res += f"{spacing}- {item}\n"
-    elif isinstance(v, dict):
-        for k, val in v.items():
-            k_title = str(k).replace('_', ' ').title()
-            if isinstance(val, (list, dict)):
-                res += f"{spacing}### {k_title}\n{_format_value(val, indent)}\n"
-            else:
-                res += f"{spacing}**{k_title}**: {val}\n"
-    else:
-        res += f"{spacing}{v}\n"
-    return res
+    return {'frontmatter': frontmatter, 'body': body}
 
 
 def get_tool_description(tool_name: str) -> str:
@@ -199,95 +113,48 @@ def get_tool_description(tool_name: str) -> str:
 
 def build_system_prompt(config: dict) -> str:
     """
-    Build a system prompt from the soul configuration.
+    Build a system prompt from a loaded soul configuration.
+
+    Renders the frontmatter identity header, then includes the markdown body
+    verbatim. If the frontmatter additionally declares ``capabilities.tools``
+    or ``rules``, those are appended as generated sections (auto tool
+    descriptions, numbered rules). Authored prose (including any tools or
+    rules written directly in the body) is passed through untouched, so the
+    author controls ordering and wording exactly.
 
     Args:
-        config: Configuration dictionary from load_soul()
+        config: {'frontmatter': dict, 'body': str} from load_soul()
 
     Returns:
         Formatted system prompt string
     """
-    system_prompt = f"You are {config.get('name', 'Assistant')}.\n"
-    if config.get('tagline'):
-        system_prompt += f"{config.get('tagline')}\n"
+    frontmatter = config.get('frontmatter') or {}
+    body = config.get('body') or ''
 
-    # 1. Identity section
-    identity = config.get('identity', {})
-    if isinstance(identity, dict) and identity:
-        system_prompt += '\n## Who You Are\n'
-        role = identity.get('role')
-        if isinstance(role, str) and role.strip():
-            system_prompt += f"Role: {role.strip()}\n"
-        mission = identity.get('mission')
-        if isinstance(mission, str) and mission.strip():
-            system_prompt += f"Mission: {mission.strip()}\n"
-        bg = identity.get('background')
-        if isinstance(bg, str) and bg.strip():
-            system_prompt += f"{bg.strip()}\n"
+    system_prompt = f"You are {frontmatter.get('name', 'Assistant')}.\n"
+    tagline = frontmatter.get('tagline')
+    if tagline:
+        system_prompt += f"{tagline}\n"
 
-        traits = identity.get('personality_traits', [])
-        if isinstance(traits, list) and traits:
-            system_prompt += '\nPersonality traits:\n'
-            for trait in traits:
-                system_prompt += f"- {trait}\n"
+    # Markdown body — verbatim prose. This is the single source of truth for
+    # the agent's descriptive content; nothing here is parsed or reordered.
+    system_prompt += body
 
-    # 2. Communication style
-    comm_cfg = config.get('communication', {})
-    if isinstance(comm_cfg, dict) and comm_cfg:
-        system_prompt += '\n## How You Communicate\n'
-        if comm_cfg.get('tone'):
-            system_prompt += f"Tone: {comm_cfg.get('tone')}\n"
+    # Optional generated footer sections, only when declared in frontmatter.
+    capabilities = frontmatter.get('capabilities')
+    tools = capabilities.get('tools') if isinstance(capabilities, dict) else None
+    if isinstance(tools, list) and tools:
+        system_prompt += '\n## Your Tools\nYou have access to these tools:\n'
+        for tool in tools:
+            system_prompt += (
+                f"- **{tool}**: Use when you need to "
+                f"{get_tool_description(tool)}\n")
 
-        notes = comm_cfg.get('style_notes', [])
-        if isinstance(notes, list) and notes:
-            system_prompt += '\nStyle guidelines:\n'
-            for note in notes:
-                system_prompt += f"- {note}\n"
-
-        principles = comm_cfg.get('principles', [])
-        if isinstance(principles, list) and principles:
-            system_prompt += '\nPrinciples:\n'
-            for principle in principles:
-                system_prompt += f"- {principle}\n"
-
-    # 3. Features / Capabilities
-    cap = config.get('capabilities', {})
-    if isinstance(cap, dict):
-        tools = cap.get('tools', [])
-        if isinstance(tools, list) and tools:
-            system_prompt += '\n## Your Tools\nYou have access to these tools:\n'
-            for tool in tools:
-                system_prompt += f"- **{tool}**: Use when you need to {get_tool_description(tool)}\n"
-
-    # 4. Rules
-    rules = config.get('rules', [])
+    rules = frontmatter.get('rules')
     if isinstance(rules, list) and rules:
         system_prompt += '\n## Your Rules\n'
         for i, rule in enumerate(rules, 1):
-            if isinstance(rule, dict):
-                # YAML may parse multi-line strings as dicts — normalize to key: value format
-                for k, v in rule.items():
-                    system_prompt += f"{i}. {k}: {v}\n"
-            else:
-                system_prompt += f"{i}. {rule}\n"
-
-    # 5. Dynamic Sections (Anything else in the YAML that isn't handled above)
-    handled_keys = {'name', 'tagline', 'identity', 'communication', 'rules', 'capabilities', 'notes', 'remember'}
-
-    for key, value in config.items():
-        if key in handled_keys:
-            continue
-
-        # Format key to Title Case (e.g., operation_workflow -> Operation Workflow)
-        section_title = key.replace('_', ' ').title()
-        system_prompt += f"\n## {section_title}\n"
-        system_prompt += _format_value(value)
-
-    # 6. Final Notes / Remember
-    final_notes = config.get('notes') or config.get('remember')
-    if isinstance(final_notes, str) and final_notes.strip():
-        system_prompt += '\n## Remember\n'
-        system_prompt += f"{final_notes.strip()}\n"
+            system_prompt += f"{i}. {rule}\n"
 
     return system_prompt
 
@@ -314,8 +181,9 @@ def create_agent_from_soul(llm_cfg: dict,
     if agent_class is None:
         agent_class = Assistant
 
-    # Load soul configuration
+    # Load soul configuration (frontmatter header + markdown body)
     config = load_soul(soul_path)
+    frontmatter = config['frontmatter']
 
     # Build system prompt
     system_prompt = build_system_prompt(config)
@@ -325,7 +193,7 @@ def create_agent_from_soul(llm_cfg: dict,
 
     # Build formatted name: "Role Name" (e.g., "Writer Bob")
     # Avoid duplication if the role name is already part of the name (e.g. "Writer Writer")
-    raw_name = config.get('name', 'Assistant')
+    raw_name = frontmatter.get('name', 'Assistant')
 
     # Normalize for comparison (replace underscores with spaces)
     role_norm = (role_name or '').lower().replace('_', ' ')
@@ -340,7 +208,7 @@ def create_agent_from_soul(llm_cfg: dict,
     agent = agent_class(
         llm=llm_cfg,
         name=formatted_name,
-        description=config.get('tagline', 'A helpful AI assistant'),
+        description=frontmatter.get('tagline', 'A helpful AI assistant'),
         system_message=system_prompt,
         function_list=[],  # Empty - tools added manually by agent_orchestrator
         **agent_kwargs)
@@ -350,7 +218,7 @@ def create_agent_from_soul(llm_cfg: dict,
         agent.agent_type = role_name.replace('_', ' ').title()
 
     # Store config and base system message for later dynamic updates
-    config_key = role_name if role_name else config.get('name', 'assistant')
+    config_key = role_name if role_name else frontmatter.get('name', 'assistant')
     agent.agent_configs = {config_key: config}
     agent.base_system_message = system_prompt
 
@@ -361,7 +229,7 @@ def create_agent_from_soul(llm_cfg: dict,
 if __name__ == '__main__':
     # Test loading the soul
     config = load_soul()
-    print(f"Loaded agent: {config['name']}")
-    print(f"Tagline: {config['tagline']}")
-    print(f"\nSystem prompt preview:")
+    print(f"Loaded agent: {config['frontmatter']['name']}")
+    print(f"Tagline: {config['frontmatter']['tagline']}")
+    print('\nSystem prompt preview:')
     print(build_system_prompt(config)[:500] + '...')

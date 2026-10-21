@@ -108,13 +108,14 @@ llm_cfg = {
 # Create agent from soul.md
 bot, config = create_agent_from_soul(llm_cfg, 'soul.md')
 
-print(f"✓ Loaded agent: {config['name']}")
-print(f"  Tagline: {config['tagline']}")
-print(f"  Tools: {config['capabilities']['tools']}")
+fm = config['frontmatter']
+print(f"✓ Loaded agent: {fm['name']}")
+print(f"  Tagline: {fm.get('tagline', '')}")
+print(f"  Tools: {fm.get('capabilities', {}).get('tools', [])}")
 
 # Configure UI
 chatbot_config = {
-    'input.placeholder': f"Chat with {config['name']}...",
+    'input.placeholder': f"Chat with {fm['name']}...",
     'prompt.suggestions': [
         'Tell me about yourself',
         "What's the weather like in Tokyo?",

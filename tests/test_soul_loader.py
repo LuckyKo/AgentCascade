@@ -1,9 +1,13 @@
-"""Unit tests for agent_cascade.soul_loader.
+"""Unit tests for agent_cascade.soul_loader (frontmatter + markdown format).
 
-Covers load_soul, build_system_prompt, _preprocess_soul_content, and
-_format_value with well-formed soul files, malformed input, and edge cases.
+Covers load_soul (frontmatter parsing, error handling), build_system_prompt
+(header rendering, verbatim body passthrough, optional generated tool/rule
+sections), the adversarial prose cases the old YAML band-aid broke on, and a
+byte-equivalence gate over all 9 real soul files against the pre-migration
+golden prompts.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -14,12 +18,15 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent_cascade.soul_loader import _format_value, _preprocess_soul_content, build_system_prompt, load_soul
+from agent_cascade.soul_loader import (build_system_prompt,
+                                       create_agent_from_soul,
+                                       get_tool_description, load_soul)
 
 # ---------------------------------------------------------------------------
-# Paths to the real soul files
+# Paths to the real soul files and the golden prompt fixture
 # ---------------------------------------------------------------------------
 _AGENTS_DIR = PROJECT_ROOT / 'agents'
+_GOLDEN_PATH = PROJECT_ROOT / 'tests' / 'golden' / 'soul_prompts_pre.json'
 
 SOUL_FILES = {
     'orchestrator': _AGENTS_DIR / 'orchestrator_soul.md',
@@ -52,244 +59,269 @@ def temp_soul_file(tmp_path):
 
 
 # ===========================================================================
-# 1. Good (well-formatted) soul files
+# 1. load_soul — frontmatter parsing
 # ===========================================================================
 
 
-class TestLoadSoulGoodFiles:
-    """load_soul with the four real soul files."""
+class TestLoadSoulFrontmatter:
+    """load_soul with the real soul files (frontmatter + body)."""
 
-    def test_load_returns_dict(self, soul_file):
+    def test_load_returns_frontmatter_and_body(self, soul_file):
         config = load_soul(str(soul_file))
         assert isinstance(config, dict)
+        assert set(config) == {'frontmatter', 'body'}
+        assert isinstance(config['frontmatter'], dict)
+        assert isinstance(config['body'], str)
 
-    def test_load_has_name(self, soul_file):
+    def test_frontmatter_has_name(self, soul_file):
         config = load_soul(str(soul_file))
-        assert 'name' in config
-        assert isinstance(config['name'], str)
+        assert isinstance(config['frontmatter']['name'], str)
+        assert config['frontmatter']['name']
 
-    def test_load_has_identity(self, soul_file):
+    def test_frontmatter_has_tagline(self, soul_file):
         config = load_soul(str(soul_file))
-        assert 'identity' in config
+        assert isinstance(config['frontmatter']['tagline'], str)
 
-    def test_load_has_communication(self, soul_file):
+    def test_body_starts_with_prose_not_frontmatter(self, soul_file):
         config = load_soul(str(soul_file))
-        assert 'communication' in config
+        # The body must not begin with the frontmatter fence or the name key.
+        assert not config['body'].lstrip().startswith('---')
+        assert not config['body'].lstrip().startswith('name:')
 
 
-class TestBuildSystemPromptGoodFiles:
-    """build_system_prompt with real soul files."""
+class TestLoadSoulEdgeCases:
+    """load_soul with malformed / edge-case inputs."""
 
-    def test_prompt_non_empty(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        assert len(prompt) > 0
-
-    def test_prompt_contains_who_you_are(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        assert '## Who You Are' in prompt
-
-    def test_prompt_contains_how_you_communicate(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        assert '## How You Communicate' in prompt
-
-    def test_prompt_contains_role(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        role = config.get('identity', {}).get('role', '')
-        if role:
-            assert role in prompt
-
-    def test_prompt_contains_mission(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        mission = config.get('identity', {}).get('mission', '')
-        if mission:
-            assert mission in prompt
-
-    def test_prompt_contains_principles(self, soul_file):
-        config = load_soul(str(soul_file))
-        prompt = build_system_prompt(config)
-        principles = config.get('communication', {}).get('principles', [])
-        if principles:
-            assert 'Principles' in prompt
-
-
-# ===========================================================================
-# 2. Badly formatted soul files (temp files)
-# ===========================================================================
-
-
-class TestLoadSoulBadFiles:
-    """load_soul with various malformed / edge-case inputs."""
-
-    def test_trailing_whitespace(self, temp_soul_file):
-        content = 'name: Tester  \ntagline: A test agent  \nidentity:\n  role: Tester  \n'
+    def test_valid_frontmatter_and_body(self, temp_soul_file):
+        content = ('---\n'
+                   'name: Tester\n'
+                   'tagline: A test agent\n'
+                   '---\n'
+                   '\n'
+                   '## Who You Are\n'
+                   'Role: Tester\n')
         path = temp_soul_file(content)
         config = load_soul(path)
-        assert config['name'] == 'Tester'
+        assert config['frontmatter']['name'] == 'Tester'
+        assert config['body'].startswith('\n## Who You Are')
 
-    def test_continuation_lines(self, temp_soul_file):
-        content = ('name: Tester\n'
-                   'rules:\n'
-                   '  - First rule\n'
-                   '      continued here\n')
+    def test_missing_frontmatter_fence(self, temp_soul_file):
+        content = 'name: Tester\ntagline: no fence\n'
+        path = temp_soul_file(content)
+        with pytest.raises(ValueError, match='frontmatter fence'):
+            load_soul(path)
+
+    def test_unclosed_frontmatter_fence(self, temp_soul_file):
+        content = '---\nname: Tester\ntagline: unclosed\n'
+        path = temp_soul_file(content)
+        with pytest.raises(ValueError, match='not closed'):
+            load_soul(path)
+
+    def test_dots_closing_fence(self, temp_soul_file):
+        # '...' is an accepted alternative closing fence (YAML document end).
+        content = '---\nname: x\n...\nbody text'
         path = temp_soul_file(content)
         config = load_soul(path)
-        assert isinstance(config['rules'], list)
+        assert config['frontmatter'] == {'name': 'x'}
+        assert config['body'] == 'body text'
 
-    def test_irregular_nested_indent(self, temp_soul_file):
-        content = ('name: Tester\n'
-                   'rules:\n'
-                   '  - Rule one\n'
-                   '    - Sub one\n'
-                   '        - Deep one\n')
-        path = temp_soul_file(content)
-        config = load_soul(path)
-        # Should parse without error
-        assert isinstance(config['rules'], list)
-
-    def test_colons_in_list_items(self, temp_soul_file):
-        content = ('name: Tester\n'
-                   'rules:\n'
-                   '  - Use colons: always\n')
-        path = temp_soul_file(content)
-        config = load_soul(path)
-        assert isinstance(config['rules'], list)
-
-    def test_yaml_list_only(self, temp_soul_file):
-        content = '- one\n- two\n- three\n'
+    def test_frontmatter_not_a_mapping(self, temp_soul_file):
+        content = '---\n- one\n- two\n---\nbody\n'
         path = temp_soul_file(content)
         with pytest.raises(ValueError, match='YAML mapping'):
             load_soul(path)
 
-    def test_plain_string(self, temp_soul_file):
-        content = 'just a plain string\n'
+    def test_malformed_frontmatter_yaml(self, temp_soul_file):
+        content = '---\nname: [unclosed bracket\n---\nbody\n'
         path = temp_soul_file(content)
-        with pytest.raises(ValueError, match='YAML mapping'):
+        with pytest.raises(yaml.YAMLError):
             load_soul(path)
+
+    def test_body_is_not_parsed_as_yaml(self, temp_soul_file):
+        # Prose that is invalid YAML must load fine — it lives in the body.
+        content = ('---\n'
+                   'name: Tester\n'
+                   '---\n'
+                   '\n'
+                   'Some prose: with a colon, and a * bullet list:\n'
+                   '* one\n'
+                   '* two\n')
+        path = temp_soul_file(content)
+        config = load_soul(path)
+        assert config['frontmatter']['name'] == 'Tester'
+        assert '* one' in config['body']
+
+    def test_bom_is_stripped(self, temp_soul_file):
+        content = '\ufeff---\nname: Tester\n---\nbody\n'
+        path = temp_soul_file(content)
+        config = load_soul(path)
+        assert config['frontmatter']['name'] == 'Tester'
 
     def test_missing_file(self):
         with pytest.raises(FileNotFoundError, match='Soul file not found'):
             load_soul('/no/such/path.md')
 
-    def test_malformed_yaml(self, temp_soul_file):
-        content = 'name: [unclosed bracket\n'
-        path = temp_soul_file(content)
-        with pytest.raises(yaml.YAMLError):
-            load_soul(path)
-
 
 # ===========================================================================
-# 3. build_system_prompt edge cases
+# 2. build_system_prompt — header, body passthrough, generated sections
 # ===========================================================================
 
 
-class TestBuildSystemPromptEdgeCases:
+class TestBuildSystemPrompt:
+    """build_system_prompt with the frontmatter+body contract."""
 
-    def test_empty_config(self):
+    def test_empty_config_defaults_to_assistant(self):
         prompt = build_system_prompt({})
         assert 'You are Assistant' in prompt
 
-    def test_identity_as_string(self):
-        config = {'identity': 'just a string'}
+    def test_header_from_frontmatter(self):
+        config = {'frontmatter': {'name': 'Bob', 'tagline': 'A helper'},
+                  'body': ''}
         prompt = build_system_prompt(config)
-        assert len(prompt) > 0
+        assert prompt.startswith('You are Bob.\nA helper\n')
 
-    def test_identity_as_list(self):
-        config = {'identity': ['a', 'b']}
+    def test_body_rendered_verbatim(self):
+        body = '\n## Custom Section\n- alpha\n- beta\nplain trailing line\n'
+        config = {'frontmatter': {'name': 'Bob'}, 'body': body}
         prompt = build_system_prompt(config)
-        assert len(prompt) > 0
+        assert body in prompt
 
-    def test_communication_as_string(self):
-        config = {'communication': 'chatty'}
+    def test_body_ordering_preserved(self):
+        # Whatever order the author writes the body in is preserved exactly.
+        body = '\n## Second\nx\n\n## First\ny\n'
+        config = {'frontmatter': {'name': 'Bob'}, 'body': body}
         prompt = build_system_prompt(config)
-        assert len(prompt) > 0
+        assert prompt.index('## Second') < prompt.index('## First')
 
-    def test_capabilities_as_string(self):
-        config = {'capabilities': 'lots of tools'}
+    def test_tools_section_generated_from_frontmatter(self):
+        config = {'frontmatter': {'name': 'Bob',
+                                  'capabilities': {'tools': ['web_search']}},
+                  'body': ''}
         prompt = build_system_prompt(config)
-        assert len(prompt) > 0
+        assert '## Your Tools' in prompt
+        assert '**web_search**' in prompt
+        assert get_tool_description('web_search') in prompt
 
-    def test_role_mission_as_integers(self):
-        config = {'identity': {'role': 42, 'mission': 99}}
-        prompt = build_system_prompt(config)
-        assert '## Who You Are' in prompt
+    def test_unknown_tool_gets_default_description(self):
+        # Direct unit assertion on the pure helper (not driven through the
+        # renderer, which is covered by test_tools_section_generated_from_frontmatter).
+        assert get_tool_description('mystery_tool') == 'access external information'
 
-    def test_notes_as_list(self):
-        config = {'notes': ['note1', 'note2']}
+    def test_rules_section_numbered_from_frontmatter(self):
+        config = {'frontmatter': {'name': 'Bob',
+                                  'rules': ['First rule', 'Second rule']},
+                  'body': ''}
         prompt = build_system_prompt(config)
-        assert len(prompt) > 0
+        assert '## Your Rules' in prompt
+        assert '1. First rule\n' in prompt
+        assert '2. Second rule\n' in prompt
 
-    def test_whitespace_only_notes(self):
-        config = {'notes': '   \n  '}
+    def test_no_generated_sections_when_absent(self):
+        config = {'frontmatter': {'name': 'Bob'}, 'body': '\nhello\n'}
         prompt = build_system_prompt(config)
-        assert '## Remember' not in prompt
+        assert '## Your Tools' not in prompt
+        assert '## Your Rules' not in prompt
 
 
 # ===========================================================================
-# 4. _preprocess_soul_content edge cases
+# 3. Adversarial prose — the cases the old YAML band-aid broke on
 # ===========================================================================
 
 
-class TestPreprocessSoulContent:
+class TestAdversarialProse:
+    """A body mixing a list with trailing prose, and `* ` sub-lists, must load
+    and render verbatim. These are exactly the inputs that made the previous
+    whole-file-YAML parser raise cryptic errors."""
 
-    def test_empty_string(self):
-        result = _preprocess_soul_content('')
-        assert result == ''
+    def test_list_followed_by_trailing_paragraph(self, temp_soul_file):
+        content = (
+            '---\n'
+            'name: Tester\n'
+            'tagline: adversarial\n'
+            '---\n'
+            '\n'
+            '## Calibrate to blast radius BEFORE planning:\n'
+            '  - Contained: small change, minimal review.\n'
+            '  - Moderate: multi-file, targeted review.\n'
+            '  - High-risk: architecture, exhaustive review.\n'
+            '  Right-size the plan to it; reserve exhaustive tables for high-risk.\n')
+        path = temp_soul_file(content)
+        config = load_soul(path)
+        assert config['frontmatter']['name'] == 'Tester'
+        # The trailing plain paragraph after the list survives verbatim.
+        prompt = build_system_prompt(config)
+        assert 'Right-size the plan to it' in prompt
+        assert '- Contained: small change' in prompt
 
-    def test_multi_level_nesting_preserved(self):
-        content = ('- Level 1\n'
-                   '  - Level 2\n'
-                   '    - Level 3\n')
-        result = _preprocess_soul_content(content)
-        lines = result.strip().split('\n')
-        assert lines[0] == '- Level 1'
-        assert lines[1] == '  - Level 2'
-        assert lines[2] == '    - Level 3'
+    def test_star_sublist_renders(self, temp_soul_file):
+        content = (
+            '---\n'
+            'name: Tester\n'
+            '---\n'
+            '\n'
+            '## Workflow\n'
+            '- Contained\n'
+            '  * Minor edit\n'
+            '  * Skip review\n')
+        path = temp_soul_file(content)
+        config = load_soul(path)  # would have raised YAMLError under old loader
+        prompt = build_system_prompt(config)
+        assert '* Minor edit' in prompt
+        assert '* Skip review' in prompt
 
-    def test_blank_line_resets_indent_stack(self):
-        content = ('- Item A\n'
-                   '  - Sub A\n'
+
+# ===========================================================================
+# 4. Byte-equivalence gate — the migration's acceptance criterion
+# ===========================================================================
+
+
+class TestGoldenEquivalence:
+    """build_system_prompt(load_soul(p)) must be byte-identical to the
+    pre-migration golden prompts for all 9 real soul files."""
+
+    def _golden(self):
+        return json.loads(_GOLDEN_PATH.read_text(encoding='utf-8'))
+
+    def test_golden_fixture_present(self):
+        golden = self._golden()
+        assert len(golden) == 9, 'golden fixture must cover all 9 soul files'
+
+    def test_all_prompts_byte_equivalent(self):
+        golden = self._golden()
+        for fname, expected in golden.items():
+            path = _AGENTS_DIR / fname
+            assert path.exists(), f"missing soul file {fname}"
+            actual = build_system_prompt(load_soul(str(path)))
+            assert actual == expected, f"prompt diverges for {fname}"
+
+    def test_all_soul_files_covered_by_golden(self):
+        golden = self._golden()
+        on_disk = {p.name for p in _AGENTS_DIR.glob('*_soul.md')}
+        assert set(golden) == on_disk
+
+
+# ===========================================================================
+# 5. create_agent_from_soul — end-to-end with the new format
+# ===========================================================================
+
+
+class TestCreateAgentFromSoul:
+
+    def test_returns_agent_and_config(self, temp_soul_file):
+        content = ('---\n'
+                   'name: Bob\n'
+                   'tagline: A helper\n'
+                   '---\n'
                    '\n'
-                   '- Item B\n')
-        result = _preprocess_soul_content(content)
-        assert '- Item B' in result
-
-
-# ===========================================================================
-# 5. _format_value edge cases
-# ===========================================================================
-
-
-class TestFormatValue:
-
-    def test_empty_list(self):
-        result = _format_value([])
-        assert result == ''
-
-    def test_empty_dict(self):
-        result = _format_value({})
-        assert result == ''
-
-    def test_none(self):
-        result = _format_value(None)
-        assert result == 'None\n'
-
-    def test_scalar_string(self):
-        result = _format_value('hello')
-        assert 'hello' in result
-
-    def test_scalar_int(self):
-        result = _format_value(42)
-        assert '42' in result
-
-    def test_nested_lists(self):
-        result = _format_value([['a', 'b']])
-        assert 'a' in result
-
-    def test_dict_in_list(self):
-        result = _format_value([{'key': 'value'}])
-        assert 'Key' in result
+                   '## Who You Are\n'
+                   'Role: Tester\n')
+        path = temp_soul_file(content)
+        llm_cfg = {'model': 'test_model',
+                   'model_server': 'http://localhost:1234/v1',
+                   'api_key': 'EMPTY'}
+        agent, config = create_agent_from_soul(llm_cfg, path,
+                                               role_name='tester')
+        assert agent is not None
+        assert config is not None
+        assert config['frontmatter']['name'] == 'Bob'
+        assert 'You are Bob.' in agent.base_system_message
