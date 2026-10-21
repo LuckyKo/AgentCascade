@@ -1038,7 +1038,11 @@ class CompressionHandler:
             conv_for_count = conv if 'conv' in locals() and conv else self.pool.get_conversation(target_agent_name)
             tokens_after, max_tokens = _authoritative_usage(
                 self.pool, instance, conv_for_count, result.tokens_after, instance._allocated_max_input_tokens or 0)
-            return self._format_compression_feedback('manual', result.messages_discarded, tokens_after,
+            # BUG_0116: label the result with the mode that actually ran. `mode` is authoritative
+            # here — a manual call without a summary is rejected earlier in core.py and never reaches
+            # this success path, so the label always matches what executed.
+            comp_type = 'manual' if mode == 'manual' else 'auto'
+            return self._format_compression_feedback(comp_type, result.messages_discarded, tokens_after,
                                                      max_tokens)
         else:
             return f"Compression failed: {result.error}"

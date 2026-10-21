@@ -75,6 +75,11 @@ MAX_SINGLE_LINE_CHARS = 100_000  # Per-line memory guard: truncate pathological 
 # list_dir default output truncation limit (chars) before spillover is applied.
 DEFAULT_LIST_DIR_CHAR_LIMIT = 3000
 
+# Upper bound on an explicit max_entries request. Without it, an explicit request
+# relaxes the char limit (see ListDir.call) and would be bounded only by whatever
+# number the caller passes. This keeps that entry-count ceiling finite.
+MAX_LIST_DIR_ENTRIES = 10000
+
 
 def _is_binary_file(path: Path) -> bool:
     """Check if a file is binary by reading its first 1 KiB and looking for null bytes."""
@@ -1216,6 +1221,7 @@ class ListDir(BaseTool):
             'max_entries': {
                 'type': 'integer',
                 'default': 500,
+                'maximum': MAX_LIST_DIR_ENTRIES,
                 'description': TOOL_METADATA['list_dir']['parameters']['max_entries']
             },
             'min_size': {
@@ -1309,6 +1315,12 @@ class ListDir(BaseTool):
                     pass
 
         agent_name = self._get_agent_name(kwargs)
+        # BUG_0111: when the caller explicitly asks for an entry count, make that count the
+        # authoritative limit and do NOT let the (undocumented) char budget silently cut below
+        # it — pass char_limit=-1 so the entry cap governs. Default calls (no max_entries param)
+        # keep the char-limit safety unchanged.
+        if 'max_entries' in params:
+            char_limit = -1
         return self.agent_pool.operation_manager.list_directory(
             path,
             recursive=recursive,

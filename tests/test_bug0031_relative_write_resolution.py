@@ -98,12 +98,14 @@ class TestBug0031RelativeWriteResolution:
 
         assert str(resolved).startswith(str(base)), f"Expected base_dir resolution, got: {resolved}"
 
-    def test_parent_exists_in_both_prefers_extra_rw(self, tmp_path):
-        """The exact BUG_0031 scenario: parent dir exists in BOTH base and extra-RW.
+    def test_parent_exists_in_both_prefers_base_dir(self, tmp_path):
+        """Ambiguous case: parent dir exists in BOTH base and extra-RW.
 
-        Before the fix, a new-file write always landed in base_dir (the first candidate),
-        even when the agent's active context was the extra-RW repo. After the fix, the
-        parent-dir check should route it to extra-RW.
+        BUG_0031 originally routed this to extra-RW (the agent's active repo). BUG_0108
+        supersedes that for the ambiguous case: when base_dir CAN host the path, the
+        primary workspace must win, so a relative new-file write no longer silently lands
+        in an extra RW mount. The preserved BUG_0031 behavior (parent exists ONLY in
+        extra-RW) is covered by test_new_file_write_prefers_extra_rw_when_parent_exists.
         """
         base = tmp_path / 'base'
         extra = tmp_path / 'extra'
@@ -115,5 +117,6 @@ class TestBug0031RelativeWriteResolution:
 
         resolved = fake._resolve_path('shared/commit_msg.txt', mode='rw')
 
-        # Fix: prefer the extra-RW folder over base_dir when parent exists in both.
-        assert str(resolved).startswith(str(extra)), f"Expected extra (active repo), got: {resolved}"
+        # BUG_0108: base_dir wins when it can host the path.
+        assert str(resolved).startswith(str(base)), f"Expected base_dir (can host), got: {resolved}"
+        assert resolved == (base / 'shared' / 'commit_msg.txt').resolve(), f"Wrong target: {resolved}"

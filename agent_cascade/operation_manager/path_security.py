@@ -232,8 +232,12 @@ class PathSecurityMixin:
             # Try base_dir first
             resolved = (self.base_dir / clean_path).resolve()
 
-            # If not found in base_dir, try extra work folders (RW then RO)
-            if not resolved.exists():
+            # Only fall back to an extra work folder when the full path is absent AND base_dir
+            # cannot host it. For a WRITE (mode='rw'), base_dir is a valid target whenever its
+            # parent dir exists, so we must NOT fall back there (BUG_0108). For READS (mode='ro')
+            # keep the original behaviour: an existing file under an extra repo must still be
+            # found even when base_dir happens to hold a same-named parent dir.
+            if not resolved.exists() and not (mode == 'rw' and resolved.parent.exists()):
                 # BUG_0031: For new-file writes, the full path doesn't exist anywhere yet,
                 # so the exists() check below always fails. Instead, check whether the
                 # PARENT DIRECTORY exists in an extra folder — if it does, prefer that
