@@ -1256,3 +1256,95 @@ class TestReacquireLogsRealEndpointIdentity:
         assert got_model is not None and got_model != '' and got_model == true_model, \
             f"BUG_0051: reacquire logged model={got_model!r} (empty/missing), expected " \
             f"the caller's true model {true_model!r}"
+
+
+# ============================================================================
+# ASSIGNED-agent Tier 1.5 insertion (confirmed product decision: last-active BEFORE default)
+#
+# Previously the Tier-1.5 block was gated behind `if not endpoint_configs:`, so for an agent
+# WITH its own Tier-1 endpoints the chain was [Tier-1…, Tier-4 default] and Tier 1.5 was never
+# inserted. The chain is now [Tier-1…, Tier-1.5 (last-active), Tier-4 default]: once the agent's
+# own list is exhausted, the endpoint that "just worked" is retried before dropping to the global
+# default. A dedup guard prevents re-inserting an endpoint the agent already has in Tier-1.
+#
+# The UNASSIGNED path (Tier-1 empty → [T1.5, default]) is unchanged, and Tier 3 remains gated
+# to unassigned agents. The first test below is revert-proof: it FAILS on the pre-fix code
+# (chain == [primary, T1, default]) and PASSES with the fix.
+# ============================================================================
+
+
+class TestAssignedAgentLastActiveFallback:
+
+    def test_assigned_chain_inserts_last_active_before_default(self, router):
+        """ASSIGNED agent (2 Tier-1) + a distinct last-active endpoint → chain
+        == [primary, T1, T1.5, default]. T1.5 present and strictly BEFORE the global default.
+
+        Revert-proof: pre-fix the Tier-1.5 block is skipped for assigned agents, so the
+        chain is [primary, T1, default] and this assertion fails.
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a')
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b')
+        _add_endpoint(router, 'c', 'http://c-api', model='model-c')
+        router.set_agent_priorities('coder', ['ep_a', 'ep_b'])
+
+        # Some agent most recently succeeded on 'c' — a THIRD, distinct, enabled endpoint.
+        with router._lock:
+            router._last_released_endpoint = 'ep_c'
+
+        chain = router.get_endpoint_chain('coder')
+        bases = [cfg['api_base'] for cfg in chain]
+        assert bases == ['http://a-api', 'http://b-api', 'http://c-api', 'http://default-api'], \
+            f"expected [primary, T1, T1.5, default], got {bases}"
+        # T1.5 carries the last-active endpoint's model and sits strictly before the default.
+        assert chain[2]['model'] == 'model-c'
+        assert chain[-1]['api_base'] == 'http://default-api'
+
+    def test_dedup_last_active_is_already_a_tier1_entry(self, router):
+        """Last-active endpoint == one of the agent's own Tier-1 entries → NO duplicate.
+
+        The _already guard skips insertion; the chain stays [primary, T1, default].
+        """
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a')
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b')
+        router.set_agent_priorities('coder', ['ep_a', 'ep_b'])
+
+        # last-active points at 'a', which the agent already has in Tier-1.
+        with router._lock:
+            router._last_released_endpoint = 'ep_a'
+
+        chain = router.get_endpoint_chain('coder')
+        bases = [cfg['api_base'] for cfg in chain]
+        assert bases == ['http://a-api', 'http://b-api', 'http://default-api'], \
+            f"expected no duplicate for self-referential last-active, got {bases}"
+        assert len(bases) == 3
+
+    def test_absent_last_active_yields_no_spurious_entry(self, router):
+        """Both markers None → assigned chain is [primary, T1, default] (no spurious entry)."""
+        _add_endpoint(router, 'a', 'http://a-api', model='model-a')
+        _add_endpoint(router, 'b', 'http://b-api', model='model-b')
+        router.set_agent_priorities('coder', ['ep_a', 'ep_b'])
+
+        with router._lock:
+            router._last_released_endpoint = None
+            router._last_active_endpoint = None
+
+        chain = router.get_endpoint_chain('coder')
+        bases = [cfg['api_base'] for cfg in chain]
+        assert bases == ['http://a-api', 'http://b-api', 'http://default-api'], \
+            f"expected no spurious T1.5 when markers absent, got {bases}"
+
+    def test_unassigned_agent_control_still_yields_last_active_first(self, router):
+        """Control (passes pre- AND post-fix): UNASSIGNED agent chain is still [T1.5, default].
+
+        Confirms the fix did NOT regress the unassigned path — the block still LEADS the chain
+        when Tier-1 is empty.
+        """
+        _add_endpoint(router, 'c', 'http://c-api', model='model-c')
+        # 'security' has no priorities → Tier-1 empty.
+        with router._lock:
+            router._last_active_endpoint = 'ep_c'
+
+        chain = router.get_endpoint_chain('security')
+        bases = [cfg['api_base'] for cfg in chain]
+        assert bases == ['http://c-api', 'http://default-api'], \
+            f"unassigned path must be unchanged, got {bases}"

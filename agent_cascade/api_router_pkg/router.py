@@ -288,7 +288,7 @@ class APIRouter:
         # Last-released ENDPOINT preference (Tier 1.5 capability matching). Records the
         # endpoint ID (UUID) of the endpoint the most recently RELEASED holder was committed
         # to — i.e. what it actually succeeded on. Written in release_slot_permit (the single
-        # release funnel) and read ONLY in Tier 1.5 for UNASSIGNED agents, where it takes
+        # release funnel) and read in Tier 1.5 (for all agents), where it takes
         # precedence over the racy global _last_active_endpoint. In-memory only — NOT cleared
         # by from_dict (same reasoning as _last_active_endpoint: after a reload a stale ID
         # simply fails to match any enabled endpoint and degrades gracefully). Guarded by
@@ -1075,8 +1075,9 @@ class APIRouter:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
-          2. Last active endpoint (most recent successful call by any agent;
-             unassigned agents only) — Tier 1.5 (L147)
+          2. Last active endpoint (most recent successful call by any agent) — Tier 1.5 (L147).
+             Leads the chain for UNASSIGNED agents; for ASSIGNED agents it is inserted AFTER the
+             agent's own Tier-1 configs and BEFORE the Tier-4 default (deduped against Tier-1).
           3. Last successful endpoint (if available and validated) — Tier 3
           4. General Settings default (always last) — Tier 4
 
@@ -1134,62 +1135,66 @@ class APIRouter:
                 endpoint_configs.append(cfg)
 
             # Tier 1.5 (L147): Last-active-endpoint fallback — the GLOBAL endpoint most
-            # recently used successfully by ANY agent (_last_active_endpoint). Fires ONLY for
-            # unassigned agents (Tier-1 empty); no instance_name required to look it up, so a
-            # child spawned via call_agent picks up whatever the parent (or anyone) just used.
-            # Maps the stored endpoint ID (UUID) back to an ENABLED endpoint in
-            # self.endpoints via O(1) dict lookup. On no match (endpoint removed/disabled
-            # by a UI reload) the tier logs a WARN and Tier-4 remains the last resort.
-            # Read-only w.r.t. _last_released_endpoint / _last_active_endpoint — no writes.
-            # NOTE: distinct from _instance_committed_endpoint, which is retained solely as the
-            # per-instance probe fast-path gate (skip re-probing a live connection).
+            # recently used successfully by ANY agent (_last_released_endpoint / _last_active_endpoint).
+            # Fires for ALL agents:
+            #   * UNASSIGNED agents (Tier-1 empty): it LEADS the chain — the agent inherits whatever
+            #     the parent (or anyone) just used. No instance_name is required to look it up.
+            #   * ASSIGNED agents: it is inserted AFTER the agent's own Tier-1 configs and BEFORE the
+            #     Tier-4 default, so once the Tier-1 list is exhausted the endpoint that "just worked"
+            #     is retried before dropping to the global default.
+            # Maps the stored endpoint ID (UUID) back to an ENABLED endpoint in self.endpoints via
+            # O(1) dict lookup. On no match (endpoint removed/disabled by a UI reload) the tier logs
+            # a WARN and Tier-4 remains the last resort. Read-only w.r.t. the markers — no writes.
+            # NOTE: distinct from _instance_committed_endpoint, retained solely as the per-instance
+            # probe fast-path gate (skip re-probing a live connection).
             #
-            # Tier 1.5 (capability matching): hand an unassigned agent the last-used/last-released
-            # endpoint directly. We do NOT first-fit to an arbitrary free endpoint when that pool
-            # is saturated — doing so could route a text-only agent onto a vision/multimodal API
-            # whose /models probe fails, wasting a round-trip and confusing capability matching.
-            # When the pool IS saturated the scheduler simply queues the agent FIFO on it; the
-            # Tier-4 global default (appended below) remains the ultimate fallback. This is the
-            # self-saturation-safe behaviour: an agent always lands on a capable endpoint and, at
-            # worst, waits its turn rather than being bounced to an incompatible one.
-            if not endpoint_configs:
-                # Prefer the just-released holder's endpoint (capability matching) over the
-                # racy global marker. Both are now endpoint IDs (UUIDs) — direct O(1) dict
-                # lookup, immune to name/model changes. Plain attribute read — safe inside
-                # this existing lock scope; do NOT add a nested lock. count_active() below
-                # stays lock-free.
-                _la_id = self._last_released_endpoint or self._last_active_endpoint
-                if _la_id is not None:
-                    _la_ep = self.endpoints.get(_la_id)  # O(1) dict lookup by ID
-                    if _la_ep is not None and _la_ep.enabled:
-                        # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
-                        # it would otherwise be appended here AND again as the default below.
-                        _default_cfg = self.default_llm_cfg or {}
-                        _is_default = (normalize_api_base(
-                            _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == normalize_api_base(_la_ep.api_base) and
-                                       _default_cfg.get('model') == _la_ep.model)
-                        if not _is_default:
-                            # ── Tier 1.5: use the last-released endpoint directly ─────────────
-                            # When saturated, the scheduler will queue the agent on that endpoint's
-                            # pool (FIFO). We do NOT first-fit to an arbitrary free endpoint — that
-                            # can route a text-only agent to a vision/multimodal API. The Tier-4
-                            # global default is already appended below as the ultimate fallback.
-                            _chosen_ep = _la_ep
-
-                            if _chosen_ep is not None:
-                                cfg = copy.deepcopy(_chosen_ep.to_llm_cfg())
-                                ep_limit = _chosen_ep.max_input_tokens
-                                if ep_limit <= 0 and general_limit > 0:
-                                    cfg['max_input_tokens'] = general_limit
-
-                                # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
-                                endpoint_configs.append(cfg)
-                    else:
-                        # Stale ID (endpoint removed/disabled) — log a WARN so this is visible.
-                        logger.warning(
-                            f"[APIRouter] Tier 1.5: stale endpoint ID '{_la_id}' for {agent_type}/{instance_name} "
-                            f"— no enabled endpoint match, degrading to Tier 3/4"
-                        )
+            # Capability matching: we hand the agent the last-used/last-released endpoint directly.
+            # We do NOT first-fit to an arbitrary free endpoint when that pool is saturated — that
+            # could route a text-only agent onto a vision/multimodal API whose /models probe fails.
+            # When the pool IS saturated the scheduler queues the agent FIFO on it; the Tier-4 global
+            # default (appended below) remains the ultimate fallback.
+            #
+            # Duplicate suppression (both required): _is_default skips the case where the last-active
+            # endpoint IS the Tier-4 default; _already skips the case where it is one of the agent's
+            # own Tier-1 entries (endpoint_configs currently holds only those). Both compare normalized
+            # (api_base, model) so the chain never carries a duplicate.
+            _la_id = self._last_released_endpoint or self._last_active_endpoint
+            if _la_id is not None:
+                _la_ep = self.endpoints.get(_la_id)  # O(1) dict lookup by ID
+                if _la_ep is not None and _la_ep.enabled:
+                    # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
+                    # it would otherwise be appended here AND again as the default below.
+                    _default_cfg = self.default_llm_cfg or {}
+                    _is_default = (normalize_api_base(
+                        _default_cfg.get('api_base') or _default_cfg.get('model_server', '')) == normalize_api_base(_la_ep.api_base) and
+                                   _default_cfg.get('model') == _la_ep.model)
+                    # Skip if this endpoint is already one of the agent's Tier-1 entries (dedup).
+                    _already = any(
+                        normalize_api_base(c.get('api_base') or c.get('model_server', '')) == normalize_api_base(_la_ep.api_base)
+                        and c.get('model') == _la_ep.model
+                        for c in endpoint_configs
+                    )
+                    if not _is_default and not _already:
+                        # ── Tier 1.5: use the last-released/last-active endpoint directly ─────────────
+                        # When saturated, the scheduler queues the agent on that endpoint's pool (FIFO).
+                        # We do NOT first-fit to an arbitrary free endpoint — that can route a text-only
+                        # agent to a vision/multimodal API. The Tier-4 global default is appended below.
+                        cfg = copy.deepcopy(_la_ep.to_llm_cfg())
+                        ep_limit = _la_ep.max_input_tokens
+                        if ep_limit <= 0 and general_limit > 0:
+                            cfg['max_input_tokens'] = general_limit
+                        # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
+                        endpoint_configs.append(cfg)
+                elif not endpoint_configs:
+                    # Stale ID / disabled endpoint — warn ONLY when the agent actually depends on
+                    # Tier 1.5 (its Tier-1 list is empty). For an ASSIGNED agent with its own
+                    # endpoints a stale global marker is irrelevant noise (it uses its own Tier-1
+                    # chain), so stay silent. "degrading to Tier 3/4" is accurate here because the
+                    # agent has no Tier-1 to fall back on.
+                    logger.warning(
+                        f"[APIRouter] Tier 1.5: stale endpoint ID '{_la_id}' for {agent_type}/{instance_name} "
+                        f"— no enabled endpoint match, degrading to Tier 3/4"
+                    )
 
             # Tier 3: Last successful endpoint fallback — only for agents that ever had priorities configured
             if not endpoint_configs and self._last_successful_endpoint_cfg is not None:
