@@ -250,8 +250,17 @@ class TelegramBridgeSupervisor:
                         return
                     logger.debug('[TG-PUSH] no last_chat_id; falling back to allowlisted user %s (inst=%s gen=%s)',
                                  chat_id, instance_name, run_generation)
+                # N-1 (tg-outbound-media §2.4): hand _safe_send the session's LIVE extra
+                # work folders so media living under them is deliverable. Read per call —
+                # these lists are mutated at runtime by config_handlers.py (see
+                # [[agentcascade-extra-paths-canonical-source]]); never cache them.
+                # Built-in [media_dir, DEFAULT_WORKSPACE] roots are added by path_security.
+                om = getattr(self._agent_pool, 'operation_manager', None) if self._agent_pool else None
+                roots = (list(getattr(om, 'extra_work_folders_ro', []) or [])
+                         + list(getattr(om, 'extra_work_folders_rw', []) or []))
                 await _safe_send(_app.bot, chat_id, message,
-                                 instance_name=instance_name, run_generation=run_generation)
+                                 instance_name=instance_name, run_generation=run_generation,
+                                 allowed_roots=roots)
 
             asyncio.run_coroutine_threadsafe(_do_send(), loop)
             return True

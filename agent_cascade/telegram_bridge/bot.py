@@ -12,19 +12,24 @@ Receiving path (per incoming text message from the allowlisted user):
        outer ceiling (TG_TASK_WAIT_CEILING_SEC) is hit.
 
 Sending path helpers: ``chunk_text`` splits text into <=4096-char parts on line
-boundaries; ``_safe_send`` chunks long messages and honors 429 retry_after.
+boundaries; ``_safe_send`` chunks long messages and honors 429 retry_after. When a
+message references image/audio files, ``_safe_send`` also delivers them as real
+Telegram media (todo.md:102) via ``media_outbound`` + ``_send_media_aware``; text-only
+messages take the pre-existing code path verbatim.
 """
 
 import asyncio
 import base64
 import hashlib
-from typing import List, Optional, Tuple
+import os
+from typing import List, NamedTuple, Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
+from telegram.constants import MessageLimit, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
+from agent_cascade import settings
 from agent_cascade.log import logger
 from agent_cascade.settings import (
     TG_MAX_MESSAGE_LEN,
@@ -37,6 +42,13 @@ from agent_cascade.settings import (
 from .ac_client import ACClient, ACError
 from .commands import dispatch_command
 from .config import BridgeConfig
+# media_outbound is a pure parser + resolver (no PTB import) — see its module docstring.
+from .media_outbound import (
+    MediaItem,
+    caption_from_alt,
+    resolve_media_source,
+    split_media,
+)
 from .waiter import WaiterResult, wait_for_completion
 
 # Telegram's hard limit is 4096 chars/message. Chunk at exactly that so we only
@@ -109,20 +121,39 @@ def _retry_after_seconds(exc, fallback: float) -> float:
         return fallback
 
 
-async def _send_one(bot, chat_id: int, text: str) -> None:
-    """Send a single message, retrying on Telegram 429 per its retry_after and on
-    transient network errors (stale connection after idle) with bounded backoff.
+def _content_fingerprint(payload: str) -> str:
+    """Content fingerprint (first 8 hex chars of sha1) for log correlation.
 
-    ``BadRequest`` is re-raised immediately — a bad request will not heal by
-    retrying. PTB hierarchy note: BOTH ``TimedOut`` and ``BadRequest`` subclass
-    ``NetworkError``, so the ``except BadRequest`` branch MUST precede the
-    ``except NetworkError`` branch or it would be swallowed and retried.
+    Used ONLY in log lines, so repeated retries/deliveries of the SAME payload are
+    correlatable across lines. Never stored, and the payload itself is never logged
+    (the content-free [TG-PUSH] contract, tests/test_tg_dup_stale_snapshot.py).
+    """
+    return hashlib.sha1(payload.encode('utf-8')).hexdigest()[:8]
+
+
+async def _attempt_send(call, label: str, fingerprint: str) -> None:
+    """Run one PTB send call under the shared retry policy (plan §2.2, Option B).
+
+    ``call`` is a zero-argument callable returning the coroutine of a single send
+    attempt (``send_message``, ``send_photo``, ``send_audio``, ...); ``label`` only
+    decorates the BadRequest log ('send' keeps the text-path line byte-identical);
+    ``fingerprint`` is the content hash for the network-retry line.
+
+    Policy (identical for text and media, so neither path can drift):
+      * 429 (``RetryAfter``) -> sleep its retry_after; unbounded, per Telegram's pacing.
+      * ``BadRequest`` -> re-raise immediately; a bad request will not heal by retrying.
+        PTB hierarchy note: BOTH ``TimedOut`` and ``BadRequest`` subclass ``NetworkError``,
+        so the ``except BadRequest`` branch MUST precede the ``except NetworkError`` branch
+        or it would be swallowed and retried (tests/test_telegram_bridge.py:1912).
+      * ``NetworkError``/``TimedOut`` -> exponential backoff, bounded to
+        ``_SEND_ONE_MAX_ATTEMPTS`` total attempts, then re-raise
+        (tests/test_telegram_bridge.py:1896).
     """
     backoff = TG_SEND_RETRY_BACKOFF_BASE_SEC
     net_attempts = 0
     while True:
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await call()
             return
         except RetryAfter as e:
             wait = _retry_after_seconds(e, backoff)
@@ -131,7 +162,7 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
             backoff = min(backoff * 2, TG_SEND_RETRY_BACKOFF_CAP_SEC)
         except BadRequest as e:
             # E.g. message too long despite chunking (shouldn't happen). Surface it.
-            logger.error('Telegram send failed (BadRequest): %s', e)
+            logger.error('Telegram %s failed (BadRequest): %s', label, e)
             raise
         except NetworkError as e:
             # Transient failure from a stale/dropped Telegram connection (covers
@@ -142,15 +173,35 @@ async def _send_one(bot, chat_id: int, text: str) -> None:
                 logger.error('Telegram send failed after %d network retries: %s',
                              net_attempts, e)
                 raise
-            # Content fingerprint (first 8 hex chars of sha1) so repeated retries of the
-            # SAME payload are correlatable across log lines. Used ONLY in this log line —
-            # never stored, and the full text is never logged.
             logger.warning(
                 'Telegram network error (attempt %d/%d); sleeping %.1fs before retry; content=%s',
-                net_attempts, _SEND_ONE_MAX_ATTEMPTS, backoff,
-                hashlib.sha1(text.encode('utf-8')).hexdigest()[:8])
+                net_attempts, _SEND_ONE_MAX_ATTEMPTS, backoff, fingerprint)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, TG_SEND_RETRY_BACKOFF_CAP_SEC)
+
+
+async def _send_one(bot, chat_id: int, text: str) -> None:
+    """Send a single text message (signature unchanged by the Option-B extraction).
+
+    The 429/bounded-network-retry/no-retry-on-BadRequest contract now lives in
+    ``_attempt_send``, which media sends share (see its docstring).
+    """
+    await _attempt_send(lambda: bot.send_message(chat_id=chat_id, text=text),
+                       'send', _content_fingerprint(text))
+
+
+async def _send_chunks(bot, chat_id: int, text: str) -> int:
+    """Send ``text`` through the unchanged chunking path; return the chunk count sent.
+
+    One implementation for both the text-only path (``_safe_send``) and the media
+    caption path (``_send_media_aware``), so the two cannot drift. Empty text sends
+    nothing and returns 0 (an empty caption is never sent, §8 E13).
+    """
+    n_chunks = 0
+    for part in chunk_text(text):
+        await _send_one(bot, chat_id, part)
+        n_chunks += 1
+    return n_chunks
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -227,25 +278,215 @@ async def _run_waiter(ac: ACClient, bot, chat_id: int, cfg: BridgeConfig) -> Non
         next_notify_at += cfg.task_timeout_sec  # next ping one task-timeout later
 
 
+async def _send_one_media(bot, chat_id: int, kind: str, prepared, caption: Optional[str],
+                          *, fingerprint: str) -> None:
+    """Send one prepared media item through the matching PTB method.
+
+    Mapping (plan §7.1): image -> ``send_photo`` (also for .gif/.webp; Telegram may
+    restyle those as animations — the v1 fidelity caveat), audio -> ``send_audio``
+    (NOT ``send_voice``: sendVoice needs audio/ogg <= 1MB while our producers emit
+    mp3/wav/flac), video -> ``send_video`` (only when TG_MEDIA_SEND_VIDEO is on).
+
+    ``prepared`` is whatever ``resolve_media_source`` returned — a path string, decoded
+    bytes, or an http URL; all three are valid PTB ``FileInput`` values (PTB 22.8).
+    Retries come from the shared ``_attempt_send``, so a permanently-invalid file
+    cannot loop forever. The caption is truncated to Telegram's own limit (E25): an
+    over-long alt would otherwise BadRequest and degrade a perfectly-sendable file.
+    """
+    cap_text = caption[:MessageLimit.CAPTION_LENGTH] if caption else None
+    if kind == 'image':
+        await _attempt_send(lambda: bot.send_photo(chat_id=chat_id, photo=prepared,
+                                                  caption=cap_text), 'photo send', fingerprint)
+    elif kind == 'audio':
+        await _attempt_send(lambda: bot.send_audio(chat_id=chat_id, audio=prepared,
+                                                  caption=cap_text), 'audio send', fingerprint)
+    elif kind == 'video':
+        await _attempt_send(lambda: bot.send_video(chat_id=chat_id, video=prepared,
+                                                  caption=cap_text), 'video send', fingerprint)
+    else:
+        # Unreachable by construction (resolve/classify only yield the three kinds above).
+        # Raising keeps the caller's E10 fallback + counters honest: a silent None would
+        # count an unsent item as sent.
+        raise ValueError(f'unknown media kind {kind!r}')
+
+
+def _media_allowed_roots(extra_roots: Optional[List[str]] = None) -> List[str]:
+    """Allowed roots for outbound media, read at CALL time.
+
+    settings.TG_MEDIA_ALLOWED_ROOTS is the user-facing escape hatch (os.pathsep-separated)
+    for media living outside the built-in [media_dir, DEFAULT_WORKSPACE] roots; ``extra_roots``
+    carries the session's live extra work folders (supervisor N-1), which are mutated at
+    runtime by config_handlers.py and must therefore never be cached.
+    """
+    roots = [r for r in (settings.TG_MEDIA_ALLOWED_ROOTS or '').split(os.pathsep) if r.strip()]
+    if extra_roots:
+        roots.extend(str(r) for r in extra_roots)
+    return roots
+
+
+class MediaSendResult(NamedTuple):
+    """What ``_send_media_aware`` delivered, for ``_safe_send``'s [TG-PUSH] line.
+
+    Named instead of a positional 4-tuple: these values ARE the log line's format
+    arguments, so a field cannot be silently swapped with its neighbour.
+    """
+    n_chunks: int
+    n_media: int
+    n_fallback: int
+    caption_text: str
+
+
+async def _send_media_aware(bot, chat_id: int, text: str, items: List[MediaItem],
+                            *, allowed_roots: Optional[List[str]] = None) -> MediaSendResult:
+    """Deliver a media-bearing message: text first, then one send per item.
+
+    Returns a ``MediaSendResult`` (chunk / media / text-fallback counts plus the delivered
+    caption text) so ``_safe_send`` can log its [TG-PUSH] line in the existing format plus
+    ', media=N'.
+
+    Order (plan §7.3): the link-free remainder goes through the UNCHANGED chunking
+    path first (a human sends "look at this: <photo>"), then items in document order.
+    No album: mixed types and per-item captions rule ``send_media_group`` out for v1.
+
+    Excision (plan §3/§12d): a span is removed ONLY for items that RESOLVED, and
+    spans are excised in DESCENDING start-offset order so earlier offsets stay valid.
+    Resolution therefore happens BEFORE the text send: an item that could not be
+    resolved (missing / oversized / outside the allowlist / unreadable) keeps its
+    original link inside the caption text, with no re-insertion afterwards.
+    A payload that Telegram itself REJECTS (E10: wrong content type, photo geometry,
+    dead URL) is a different case — it resolved, so its span is already gone from the
+    caption; it is therefore re-sent as its own TEXT message (the ORIGINAL span) after
+    the media loop, so the user keeps the link they would have got before this feature.
+    Only a failure that could NOT happen to a plain text message gets that fallback
+    (see the ``isinstance`` guard in the loop).
+    """
+    # Constant for one call, so computed once instead of per item. _media_allowed_roots
+    # is still read HERE and never cached at import: the session's extra work folders
+    # change at runtime (supervisor N-1).
+    roots = _media_allowed_roots(allowed_roots)
+    max_photo_bytes = settings.TG_MEDIA_MAX_PHOTO_BYTES
+    max_other_bytes = settings.TG_MEDIA_MAX_OTHER_BYTES
+
+    deliverable = []
+    for item in items:
+        outcome, payload = resolve_media_source(
+            item, allowed_roots=roots,
+            max_photo_bytes=max_photo_bytes, max_other_bytes=max_other_bytes)
+        if outcome is None:
+            # payload is the refusal reason here. The path (if any) was named by
+            # resolve_media_source's own WARNING; the [TG-PUSH] line stays content-free.
+            logger.warning('[TG-PUSH] media item not sent (%s, %s); its link stays in the text',
+                           item.kind, payload)
+            continue
+        deliverable.append((item, payload))
+
+    caption_text = text
+    for item, _payload in sorted(deliverable, key=lambda pair: pair[0].span[0], reverse=True):
+        start, end = item.span
+        caption_text = caption_text[:start] + caption_text[end:]
+
+    n_chunks = await _send_chunks(bot, chat_id, caption_text)   # the EXCISED text — never the raw text (that would re-send the links)
+
+    n_sent = 0
+    n_fallback = 0
+    for item, payload in deliverable:
+        try:
+            await _send_one_media(bot, chat_id, item.kind, payload,
+                                  caption_from_alt(item.alt),
+                                  fingerprint=_content_fingerprint(
+                                      f'{item.kind}:{item.source}:{item.value}'))
+            n_sent += 1
+        except Exception as e:
+            # Per-ITEM isolation (plan §14): one item's failure must not stop the OTHER
+            # items in the same message. The guarantee is scoped to items, not absolute:
+            # a failing text CHUNK above aborts this loop (the message itself is down).
+            logger.warning('Telegram media send failed for a %s (%s) item: %s',
+                          item.kind, item.source, e)
+            # §8 E10 fallback: re-send the ORIGINAL span so the link is not lost — but
+            # only when a text send could actually succeed. PTB 22.8 hierarchy:
+            # BadRequest is a permanent CONTENT rejection and, confusingly, IS a
+            # NetworkError subclass — hence the explicit carve-out, it is exactly the
+            # "Telegram rejected this payload" case E10 describes. Every OTHER TelegramError
+            # is skipped: Forbidden / Conflict / InvalidToken / ChatMigrated etc. are
+            # permanent and are NOT NetworkError, so a text message would be rejected the
+            # same way (the old "not a NetworkError" test paid a doomed re-send plus a
+            # second WARNING for a blocked or kicked bot); TimedOut is transient but its
+            # bounded retry was already paid by _attempt_send, so a text re-send buys a
+            # SECOND backoff chain, not a second chance. RetryAfter never reaches here —
+            # _attempt_send loops on 429 until it heals. Only a non-Telegram exception
+            # (bad FileInput, TypeError, ...) is worth re-sending as text.
+            if not (isinstance(e, TelegramError) and not isinstance(e, BadRequest)):
+                start, end = item.span
+                try:
+                    await _send_one(bot, chat_id, text[start:end])
+                    n_fallback += 1
+                except Exception as e2:
+                    logger.warning('Telegram text fallback for a failed %s item also failed: %s',
+                                   item.kind, e2)
+    return MediaSendResult(n_chunks=n_chunks, n_media=n_sent, n_fallback=n_fallback,
+                          caption_text=caption_text)
+
+
+def _delivery_suffix(instance_name: Optional[str], run_generation: Optional[int]) -> str:
+    """', inst=…, gen=…' for the [TG-PUSH] line — only when BOTH are provided.
+
+    Callers that pass nothing keep their previous log shape (tg-dup v3 F3a contract,
+    tests/test_tg_dup_stale_snapshot.py:168-169).
+    """
+    if instance_name is not None and run_generation is not None:
+        return f', inst={instance_name}, gen={run_generation}'
+    return ''
+
+
 async def _safe_send(bot, chat_id: int, text: str,
                      instance_name: Optional[str] = None,
-                     run_generation: Optional[int] = None) -> None:
+                     run_generation: Optional[int] = None, *,
+                     allowed_roots: Optional[List[str]] = None) -> None:
+    """Send ``text`` to Telegram safely: chunked, retried, never raising.
+
+    Media-aware since todo.md:102: image/audio references in the text are delivered as
+    real Telegram messages. The feature-flag gate lives HERE and only here, and the
+    no-media case (the text-only call sites) takes the pre-existing path verbatim —
+    ``split_media`` never edits the text, so byte-identical sends and logs are the
+    contract, not an aspiration (plan §2.3, E1/E22).
+
+    ``allowed_roots`` is the optional per-call extra-root list (supervisor N-1).
+    """
     try:
-        n_chunks = 0
-        for part in chunk_text(text):          # chunk long answers (short messages are byte-identical: [text])
-            await _send_one(bot, chat_id, part)
-            n_chunks += 1
-        # Success-side observability (tg-dup-delivery plan §4.2, extended by tg-dup v3 F3b):
-        # chunk count and char length ONLY — no message content, so a push can never leak
-        # into logs. The sha1[:8] fingerprint (same construction as the retry WARNING above)
-        # makes a stale cross-run replay diagnosable; inst/gen appear only when BOTH are
-        # provided, keeping P3/P4/bridge-internal lines unchanged in shape.
-        fingerprint = hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]
-        suffix = ''
-        if instance_name is not None and run_generation is not None:
-            suffix = f', inst={instance_name}, gen={run_generation}'
-        logger.info('[TG-PUSH] delivered %d chunk(s), %d chars, fp=%s%s',
-                    n_chunks, len(text), fingerprint, suffix)
+        items = []
+        if settings.TG_OUTBOUND_MEDIA:
+            # The parser is only paid for when the feature is on: with the flag off the
+            # text-only call sites keep the pre-change cost AND the pre-change failure
+            # surface (a parser exception cannot suppress a send that predates the feature).
+            _original, items = split_media(text,
+                                           allow_video=settings.TG_MEDIA_SEND_VIDEO,
+                                           detect_bare_paths=settings.TG_MEDIA_DETECT_BARE_PATHS)
+        if not items:
+            # chunk long answers (short messages are byte-identical: [text])
+            n_chunks = await _send_chunks(bot, chat_id, text)
+            # Success-side observability (tg-dup-delivery plan §4.2, extended by tg-dup v3 F3b):
+            # chunk count and char length ONLY — no message content, so a push can never leak
+            # into logs. The sha1[:8] fingerprint (same construction as the retry WARNING above)
+            # makes a stale cross-run replay diagnosable; inst/gen appear only when BOTH are
+            # provided, keeping P3/P4/bridge-internal lines unchanged in shape.
+            fingerprint = _content_fingerprint(text)
+            suffix = _delivery_suffix(instance_name, run_generation)
+            logger.info('[TG-PUSH] delivered %d chunk(s), %d chars, fp=%s%s',
+                        n_chunks, len(text), fingerprint, suffix)
+            return
+
+        n_chunks, n_media, n_fallback, caption_text = await _send_media_aware(
+            bot, chat_id, text, items, allowed_roots=allowed_roots)
+        # Same line format as the text path, plus ', media=N' (plan §12 item g). fp/chars
+        # describe the caption text actually delivered — never message content, never paths.
+        # ', fallback=M' appears ONLY when Telegram rejected a resolved media item and
+        # its original link was re-sent as text (E10) — the normal media line stays exactly
+        # as the plan specifies.
+        fingerprint = _content_fingerprint(caption_text)
+        suffix = _delivery_suffix(instance_name, run_generation)
+        fallback_suffix = f', fallback={n_fallback}' if n_fallback else ''
+        logger.info('[TG-PUSH] delivered %d chunk(s), %d chars, fp=%s, media=%d%s%s',
+                    n_chunks, len(caption_text), fingerprint, n_media, fallback_suffix, suffix)
     except Exception as e:
         logger.error('failed to send notification to Telegram: %s', e)
 

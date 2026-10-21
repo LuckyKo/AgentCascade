@@ -308,6 +308,17 @@ TG_SEND_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_R
 TG_SEND_RETRY_BACKOFF_CAP_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_RETRY_BACKOFF_CAP_SEC', 30.0))  # Ceiling for any single 429 retry delay
 TG_MAX_MESSAGE_LEN: int = int(os.getenv('AGENT_CASCADE_TG_MAX_MESSAGE_LEN', 4096))  # Telegram hard limit of chars per message (chunking boundary)
 
+# Outbound media delivery (todo.md:102, plans/tg-outbound-media_PLAN.md §11).
+# TG_OUTBOUND_MEDIA is the master switch: False restores the text-only behaviour exactly.
+# Ship enabled — the feature is invisible otherwise. Names follow the AGENT_CASCADE_
+# prefix convention of the newer knobs above (constant == env name minus the prefix).
+TG_OUTBOUND_MEDIA: bool = os.getenv('AGENT_CASCADE_TG_OUTBOUND_MEDIA', 'true').lower() in ('1', 'true', 'yes', 'on')  # Send image/audio references as real Telegram photo/audio messages
+TG_MEDIA_DETECT_BARE_PATHS: bool = os.getenv('AGENT_CASCADE_TG_MEDIA_DETECT_BARE_PATHS', 'true').lower() in ('1', 'true', 'yes', 'on')  # Also detect bare absolute media paths (the media_gen/view_image output format); kill-switch for false positives from quoted logs
+TG_MEDIA_MAX_PHOTO_BYTES: int = int(os.getenv('AGENT_CASCADE_TG_MEDIA_MAX_PHOTO_BYTES', 10 * 1024 * 1024))  # Bot API multipart photo upload limit (PTB send_photo: "photo must be at most 10MB")
+TG_MEDIA_MAX_OTHER_BYTES: int = int(os.getenv('AGENT_CASCADE_TG_MEDIA_MAX_OTHER_BYTES', 50 * 1024 * 1024))  # Bot API multipart limit for audio/other uploads
+TG_MEDIA_ALLOWED_ROOTS: str = os.getenv('AGENT_CASCADE_TG_MEDIA_ALLOWED_ROOTS', '')  # os.pathsep-separated extra directories allowed for outbound media (appended to the /api/file roots in path_security)
+TG_MEDIA_SEND_VIDEO: bool = os.getenv('AGENT_CASCADE_TG_MEDIA_SEND_VIDEO', 'false').lower() in ('1', 'true', 'yes', 'on')  # Stretch goal, off: video references stay text unless explicitly enabled
+
 
 # Settings for endpoint cooldown (time-based skip of failed endpoints)
 def _parse_endpoint_cooldown():

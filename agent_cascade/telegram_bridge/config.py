@@ -24,6 +24,12 @@ from dataclasses import dataclass, field
 from typing import List
 
 from agent_cascade.settings import (
+    TG_MEDIA_ALLOWED_ROOTS,
+    TG_MEDIA_DETECT_BARE_PATHS,
+    TG_MEDIA_MAX_OTHER_BYTES,
+    TG_MEDIA_MAX_PHOTO_BYTES,
+    TG_MEDIA_SEND_VIDEO,
+    TG_OUTBOUND_MEDIA,
     TG_POLL_INTERVAL_SEC,
     TG_TASK_TIMEOUT_SEC,
     TG_TASK_WAIT_CEILING_SEC,
@@ -96,6 +102,18 @@ class BridgeConfig:
     poll_interval_sec: float = TG_POLL_INTERVAL_SEC
     task_timeout_sec: int = TG_TASK_TIMEOUT_SEC
     task_wait_ceiling_sec: float = TG_TASK_WAIT_CEILING_SEC
+    # Outbound media (todo.md:102). bot.py reads the settings constants at call time;
+    # these mirror them so the standalone bridge process resolves the same knobs from
+    # its own env (plan §11) and so a running config can be inspected/diffed as one
+    # object. WARNING: there is no runtime reader today, and dataclass defaults are
+    # frozen at import — load_config() is the only env-accurate path. Do NOT wire these
+    # into bot.py (it must keep reading settings so a runtime override takes effect).
+    outbound_media: bool = TG_OUTBOUND_MEDIA
+    media_detect_bare_paths: bool = TG_MEDIA_DETECT_BARE_PATHS
+    media_max_photo_bytes: int = TG_MEDIA_MAX_PHOTO_BYTES
+    media_max_other_bytes: int = TG_MEDIA_MAX_OTHER_BYTES
+    media_allowed_roots: str = TG_MEDIA_ALLOWED_ROOTS
+    media_send_video: bool = TG_MEDIA_SEND_VIDEO
 
     def is_allowed(self, user_id) -> bool:
         try:
@@ -121,6 +139,22 @@ def load_config() -> BridgeConfig:
         # the only one (the settings constant already reads it).
         task_wait_ceiling_sec=float(
             os.environ.get('AGENT_CASCADE_TG_TASK_WAIT_CEILING_SEC') or TG_TASK_WAIT_CEILING_SEC),
+        # Outbound media knobs (todo.md:102): the AGENT_CASCADE_-prefixed names are the
+        # only env vars for these (no legacy unprefixed name exists), and settings.py
+        # already reads them — the env lookup here keeps the standalone process consistent
+        # if the parent environment differs from this process's import-time snapshot.
+        outbound_media=_parse_bool(os.environ.get('AGENT_CASCADE_TG_OUTBOUND_MEDIA'),
+                                   default=TG_OUTBOUND_MEDIA),
+        media_detect_bare_paths=_parse_bool(os.environ.get('AGENT_CASCADE_TG_MEDIA_DETECT_BARE_PATHS'),
+                                            default=TG_MEDIA_DETECT_BARE_PATHS),
+        media_max_photo_bytes=int(os.environ.get('AGENT_CASCADE_TG_MEDIA_MAX_PHOTO_BYTES')
+                                 or TG_MEDIA_MAX_PHOTO_BYTES),
+        media_max_other_bytes=int(os.environ.get('AGENT_CASCADE_TG_MEDIA_MAX_OTHER_BYTES')
+                                 or TG_MEDIA_MAX_OTHER_BYTES),
+        media_allowed_roots=os.environ.get('AGENT_CASCADE_TG_MEDIA_ALLOWED_ROOTS')
+                            or TG_MEDIA_ALLOWED_ROOTS,
+        media_send_video=_parse_bool(os.environ.get('AGENT_CASCADE_TG_MEDIA_SEND_VIDEO'),
+                                     default=TG_MEDIA_SEND_VIDEO),
     )
 
 
