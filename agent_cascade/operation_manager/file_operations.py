@@ -1373,6 +1373,16 @@ class FileOpsMixin:
             except (ValueError, IndexError) as e:
                 return f"ERROR: Invalid range '{range_param}' for delete_and_insert mode: {str(e)}"
 
+            # BUG_0109: a range that spans the entire file (top through bottom — ':' , 'N:',
+            # '1:total') plus non-empty new_content means "delete everything and rewrite". That
+            # is almost always an unintended append; treat it as an error-by-design and point to
+            # the right tool/args. A genuine whole-file rewrite belongs in write_file.
+            if total_lines and start_idx == 0 and end_idx >= total_lines and new_content:
+                return (f"ERROR: range '{range_param}' spans the entire file ({total_lines} line(s)) "
+                        f"and new_content is non-empty — this would delete and rewrite the whole file. "
+                        f"For a whole-file replace use write_file; to append use range '0' (or a "
+                        f"line number past the end), or match_mode='exact' on the last lines.")
+
             # Split file into before/deleted/after sections
             before = file_lines[:start_idx]
             after = file_lines[end_idx:]  # end_idx is exclusive (Python slice semantics)
@@ -1407,6 +1417,17 @@ class FileOpsMixin:
                 file_lines = before + after
 
             new_file_content = ''.join(file_lines)
+
+            # BUG_0095: a range that deletes N lines and re-inserts the same N lines is byte-
+            # identical to the original (e.g. range '3:3' with new_content '\n'). The old code
+            # reported OK with a +0 net diff, misleading the agent into thinking a fix landed.
+            # Detect the true no-op and say so — no write, no backup. A real edit always changes
+            # bytes, so this only fires on genuine no-ops.
+            if new_file_content == file_content:
+                return (f"WARNING: No-op edit — the result is byte-identical to the current file "
+                        f"({path}); nothing was written and no backup created. A range that deletes "
+                        f"lines and re-inserts identical lines changes nothing. To adjust blank lines "
+                        f"use match_mode='exact' and include surrounding non-blank context in old_content.")
 
         else:
             return f"ERROR: Invalid match_mode '{match_mode}'."
@@ -1476,7 +1497,10 @@ class FileOpsMixin:
             if match_mode == 'delete_and_insert':
                 # BUG FIX: In d&i mode, actual_old_content is the range string (e.g. "3:7"),
                 # not the deleted file content. Compute old_lc from the actual range.
-                old_lc = end_idx - start_idx  # Actual lines in the deleted range
+                # BUG_0109: end_idx is an unclamped slice index (':' yields total+1), so
+                # end_idx - start_idx over-reports by one on ranges with an empty end. Clamp
+                # to the real number of lines removed.
+                old_lc = min(end_idx, total_lines) - start_idx
             else:
                 old_lc = len(actual_old_content.splitlines()) if actual_old_content else 0
             new_lc = len(new_content.splitlines()) if new_content else 0
@@ -1510,7 +1534,9 @@ class FileOpsMixin:
 
             elif match_mode == 'delete_and_insert':
                 d_start = start_idx + 1  # 0-based to 1-based
-                d_end = end_idx  # exclusive in slice semantics
+                # Clamp to the real last line so the shown range matches the corrected
+                # deleted count (':' / 'N:' yield end_idx = total+1).
+                d_end = min(end_idx, total_lines)
                 if start_idx == end_idx:
                     # Insert-only variant
                     res_msg += f" line {d_start} (d&i, INSERT-ONLY, -0 +{new_lc} = {sign}{net_delta}net)"

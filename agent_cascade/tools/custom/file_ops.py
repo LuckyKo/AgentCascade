@@ -1108,11 +1108,14 @@ class EditFile(BaseTool, PathResolutionMixin):
             return "ERROR: Missing 'path'."
 
         # Guard against tool-XML tag injection: a mangled payload that carries the tool's
-        # own closing-tag / justification delimiters would otherwise be written verbatim
-        # into the target file (silent corruption, surfacing far from the cause). Reject it
-        # loudly instead. Legitimate edits never contain these exact fragments.
+        # own closing-tag / justification delimiters, or the ChatML/Hermes parameter-tag
+        # family, would otherwise be written verbatim into the target file (silent corruption,
+        # surfacing far from the cause). Reject it loudly instead. Legitimate code edits
+        # rarely contain these exact fragments; their presence signals a leaked tag.
         _FORBIDDEN_FRAGMENTS = ('</new_content>', '</old_content>',
-                                '</new_string>', '</old_string>', '<justification>')
+                                '</new_string>', '</old_string>', '<justification>',
+                                '<parameter=', '</parameter=', '</parameter>',
+                                '</function>', '<function>')
         for _field_name, _val in (('old_content', old_content), ('new_content', new_content)):
             if isinstance(_val, str):
                 for _frag in _FORBIDDEN_FRAGMENTS:
@@ -1137,7 +1140,23 @@ class EditFile(BaseTool, PathResolutionMixin):
             if not old_content:
                 return "ERROR: Missing 'old_content'. Please provide the exact text you want to replace."
             if new_content is None:
-                return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
+                # BUG_0110: a model-side ChatML/Hermes parameter tag (e.g. '</parameter=new_content>')
+                # folded the intended new_content into another field, so the key never appears.
+                # Make the error self-diagnosing (mirroring base.py's required-missing path):
+                # echo the keys that WERE received and, if a tool-XML tag leaked into one of
+                # them, name it — so the model re-issues instead of guessing at "param ordering".
+                received = list(params_json.keys())
+                leaked = next((frag for frag in _FORBIDDEN_FRAGMENTS
+                               for val in params_json.values()
+                               if isinstance(val, str) and frag in val), None)
+                msg = (f"ERROR: Missing 'new_content' for match_mode='{match_mode}'. "
+                       'Please provide the text you want to replace old_content with.'
+                       f"  | received keys: {received}")
+                if leaked:
+                    msg += (f"  | A tool-XML parameter tag ({leaked!r}) appears to have leaked into "
+                            'the payload — its text was absorbed by another field, so new_content '
+                            'was never sent. Re-issue the call with clean, separate parameters.')
+                return msg
 
         agent_name = self._get_agent_name(kwargs)
         return self.agent_pool.operation_manager.edit_file(
