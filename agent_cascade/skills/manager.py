@@ -316,10 +316,29 @@ class SkillManager:
                     _fcntl.flock(fd, _fcntl.LOCK_UN)
                 _os.close(fd)
 
-            # Atomic rename (cross-platform via os.replace)
-            _os.replace(str(tmp_path), str(self._metrics_file))
+            # Atomic rename (cross-platform via os.replace). On Windows the shared global
+            # target may be held open by a concurrent process, so os.replace raises
+            # PermissionError / OSError with winerror 32 (sharing violation) or 5 (access
+            # denied). Metrics are best-effort and every flush rewrites the FULL snapshot,
+            # so a lost flush self-heals on the next flush (see
+            # [[windows-av-filelock-load-flake-signature-skip]]): retry a few times to
+            # clear a momentary lock, but do NOT retry-to-win the race. Bounded to 3 total
+            # attempts with two short backoffs (50ms, then 100ms); on the final attempt the
+            # error propagates to the except below, which logs at debug and cleans up the
+            # orphaned temp file. Non-transient OSErrors re-raise immediately.
+            backoff = 0.05
+            for attempt in range(3):
+                try:
+                    _os.replace(str(tmp_path), str(self._metrics_file))
+                    break
+                except OSError as exc:
+                    transient = getattr(exc, 'winerror', None) in (32, 5) or isinstance(exc, PermissionError)
+                    if not transient or attempt == 2:
+                        raise
+                    time.sleep(backoff)
+                    backoff *= 2
         except Exception as e:
-            logger.warning('[SKILLS] Failed to flush metrics to disk: %s', e)
+            logger.debug('[SKILLS] Failed to flush metrics to disk (best-effort, self-heals): %s', e)
             # Clean up orphaned temp file if it exists
             try:
                 tmp_path.unlink(missing_ok=True)

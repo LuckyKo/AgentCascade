@@ -741,18 +741,49 @@ class ToolDispatcher:
         instance_name = (args.get('instance_name') or '').strip()
         agent_class = (args.get('agent_class') or '').strip().lower()
 
-        if not instance_name or not agent_class:
+        if not instance_name:
             logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", caller_name,
                            instance_name, agent_class)
-            if not instance_name and not agent_class:
+            if not agent_class:
                 err_msg = 'Error: call_agent requires instance_name and agent_class.'
-            elif not instance_name:
-                err_msg = 'Error: call_agent requires instance_name.'
             else:
-                err_msg = 'Error: call_agent requires agent_class.'
+                err_msg = 'Error: call_agent requires instance_name.'
             return instance_name, agent_class, err_msg
 
+        # agent_class is only required to START a NEW instance (see the call_agent schema).
+        # Continuing an already-ACTIVE instance delivers the task as a message (handle_call_agent
+        # :309-324) and explicitly ignores the requested class, so an omitted/empty agent_class
+        # is valid there. For any other target — a new spawn, or an existing instance that is
+        # not ACTIVE (IDLE/TERMINATED) — a class is genuinely required, so keep the rejection
+        # (and its exact message). (self.pool may be None in validation-only contexts → no
+        # active instance → still rejected.)
+        if not agent_class and not self._active_instance_exists_in_pool(instance_name):
+            logger.warning("call_agent early exit - %s missing agent_class for instance_name='%s'",
+                           caller_name, instance_name)
+            return instance_name, agent_class, 'Error: call_agent requires agent_class.'
+
         return instance_name, agent_class, None
+
+    def _active_instance_exists_in_pool(self, instance_name: str) -> bool:
+        """True if instance_name resolves to an existing ACTIVE pool instance.
+
+        Used by _validate_call_agent_args: only an ACTIVE target's message path (handle_call_agent
+        :309-324) ignores the requested agent_class, so an omitted class is acceptable ONLY there.
+        Mirrors that branch's state read (resolve canonical → get_instance → read .state under
+        _state_lock → check membership in ACTIVE_STATES). Returns False when no pool is wired.
+        """
+        if self.pool is None:
+            return False
+        try:
+            canonical = self.pool._resolve_instance_name(instance_name)
+            inst = self.pool.get_instance(canonical)
+            if inst is None:
+                return False
+            with inst._state_lock:
+                state = inst.state
+            return state in ACTIVE_STATES
+        except Exception:
+            return False
 
     def _check_nesting_depth(self, instance: 'AgentInstance', child_depth: int) -> Optional[str]:
         """Check if nesting depth limit exceeded.
