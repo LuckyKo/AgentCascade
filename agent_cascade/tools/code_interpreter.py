@@ -119,6 +119,31 @@ def _compute_docker_image_tag(dockerfile: str = DOCKER_IMAGE_FILE, requirements_
     return f'{DOCKER_IMAGE_BASE_NAME}:{digest}'
 
 
+def _resolve_fix_paths(params: Union[str, dict, None]) -> bool:
+    """Resolve the ``fix_paths`` flag from the ALREADY-PARSED tool parameters.
+
+    ``fix_paths`` defaults to True (path auto-resolution on). It is disabled only by
+    an explicit false-ish value: a real ``False``, or the case-insensitive strings
+    ``false``/``0``/``no``/``off``/empty. Everything else (including ``True`` and
+    the string ``"true"``) leaves it enabled.
+
+    This MUST read the parsed dict, not the raw ``params``: on the normal LLM path
+    ``params`` is a JSON *string*, so the old ``isinstance(params, dict)`` guard was
+    False and the flag silently stayed True — the parameter was never read (BUG_0113).
+    ``validated_params`` is the single source of truth for all parameters; do not
+    re-parse here. Non-dict input returns the default (True) so the helper is total
+    and safe for the lenient-fallback path where no dict was produced.
+    """
+    if not isinstance(params, dict) or 'fix_paths' not in params:
+        return True
+    value = params['fix_paths']
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off', '')
+    return bool(value)
+
+
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
 
@@ -848,10 +873,17 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if not code.strip():
             return ''
 
-        # Determine if path fixing is enabled (default: True)
-        fix_paths = True  # default
-        if isinstance(params, dict) and 'fix_paths' in params:
-            fix_paths = bool(params.get('fix_paths', True))
+        # Determine if path fixing is enabled (default: True).
+        # Read from the PARSED parameters (validated_params) — the single source of truth.
+        # The old code read the raw `params`, which is a JSON *string* on the normal LLM
+        # path, so `isinstance(params, dict)` was False and the flag silently stayed True
+        # (BUG_0113). _resolve_fix_paths also coerces stringly-typed false/0/no/off.
+        if 'validated_params' in dir():
+            fix_paths = _resolve_fix_paths(validated_params)
+        else:
+            # Lenient-fallback path (no validated_params): fall back to the raw params if
+            # it is already a dict; _resolve_fix_paths returns the default (True) otherwise.
+            fix_paths = _resolve_fix_paths(params)
 
         # ── Resolve session name for shared container (session-scoped kernels) ──
         session_name = kwargs.get('session_name', kwargs.get('agent_instance_name', 'default'))

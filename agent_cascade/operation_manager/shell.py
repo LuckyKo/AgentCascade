@@ -30,6 +30,14 @@ if ON_WINDOWS:
 else:
     _WIN_ENV = None  # noqa: constant used only in method below
 
+# Matches a Python launcher (python / python3 / py) followed by a -c or -e flag.
+# Used by ShellMixin._detect_multiline_python (BUG_0012); the argument itself is
+# scanned separately with quote-state tracking so inner quotes don't hide newlines.
+# The token boundary excludes .exe-suffixed / versioned forms (e.g. python.exe,
+# python3.11) — same accepted "path-qualified invocation" limitation class as
+# ShellCmd._split_command_stages (a bare `py` after a path separator still matches).
+_PYTHON_C_FLAG_RE = re.compile(r'\b(?:python[23]?|py)(?:\s+-\w+)*\s+-[ce]\s+', re.IGNORECASE)
+
 # ─── Module-level helper (used inside ShellMixin) ──────────────────────
 
 
@@ -594,14 +602,44 @@ class ShellMixin:
     # ------------------------------------------------------------------
     @staticmethod
     def _detect_multiline_python(command: str) -> bool:
-        """Check if the command uses python -c with newlines inside quotes.
+        """Check if a Python launcher's -c/-e argument contains a literal newline.
 
-        Returns True if a `python -c "..."` or `python3 -c "..."` pattern is found
-        containing literal newline characters within its quoted argument.
+        Returns True when a ``python``/``python3``/``py`` command carries a ``-c``/``-e``
+        script argument whose value spans a newline. cmd.exe treats an embedded newline
+        as a command separator, so the child never receives the full script and the tool
+        reports success with no output (BUG_0012).
+
+        The old ``[^"]*\\n[^"]*`` regex could not match an argument containing an inner
+        double-quote — the common case — so the hint never fired. This locates the flag
+        with :data:`_PYTHON_C_FLAG_RE`, then walks the quoted argument tracking quote
+        state (same model as :meth:`ShellCmd._split_command_stages`): a newline *inside*
+        the argument's quotes is the signal, while an unquoted newline is a separator that
+        ends the argument. Handles single- and double-quoted args and inner quotes of either
+        kind. Single quotes are treated as argument boundaries here — unlike the
+        ``;``→``&`` translator (which honors cmd's literal-``'`` semantics), a newline
+        inside a single-quoted ``-c`` arg is still split by cmd.exe, so it must be flagged.
+        Pure and side-effect-free; no host I/O.
         """
-        # Match python/python3 -c followed by double-quoted string containing newlines
-        m = re.search(r'(?:python3?\s+-c\s*)("([^"]*\n[^"]*)")', command, re.IGNORECASE)
-        return bool(m)
+        m = _PYTHON_C_FLAG_RE.search(command)
+        if not m:
+            return False
+
+        quote = None  # active quote char, or None when unquoted
+        i = m.end()
+        n = len(command)
+        while i < n:
+            ch = command[i]
+            if quote:
+                if ch == quote:
+                    quote = None
+                elif ch == '\n':
+                    return True  # newline inside the quoted -c argument
+            elif ch in ('"', "'"):
+                quote = ch
+            elif ch in (' ', '\t', '\n', '&', '|', ';'):
+                return False  # unquoted whitespace/separator ends the argument
+            i += 1
+        return False
 
     @staticmethod
     def _multiline_python_hint() -> str:
