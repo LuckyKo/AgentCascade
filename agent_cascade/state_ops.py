@@ -7,12 +7,16 @@ Per-instance state limits are obsolete: we use stable labels (instance_name) and
 autoloader's per-model max-5 LRU eviction to manage disk usage.
 """
 
-import logging
 from typing import Optional
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from agent_cascade.log import _AppLoggerProxy
+
+# Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy):
+# a module logger (logging.getLogger(__name__)) never reaches the console/file
+# handlers, so state save/restore records would silently vanish.
+logger = _AppLoggerProxy()
 
 # Track which instances have confirmed no legacy files — skip their cleanup checks.
 _legacy_cleanup_done_instances: set[str] = set()

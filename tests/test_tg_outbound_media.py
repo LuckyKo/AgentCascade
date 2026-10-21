@@ -202,6 +202,37 @@ def test_split_media_http_pass_through():
     assert items[0].value == 'https://x.com/img.jpg?v=2'
 
 
+def test_split_media_bare_url_scheme_is_not_a_drive_path():
+    """BUG_0114: the bare-path drive branch '[A-Za-z]:[\\/]' had no left boundary, so the
+    'p:' of 'http:', 's:' of 'https:' and 'e:' of 'file:' matched as a Windows drive —
+    the URL was classified local_path, resolved against the bridge CWD, reported missing,
+    and logged a WARNING per URL. The old '://' post-match guard caught '://' forms but
+    still misread the single-slash 'http:/x.jpg'. URL tokens are now masked before the
+    bare pass (a scheme is >=2 letters, disjoint from a 1-letter drive), so bare URLs are
+    never media — while real drive/POSIX paths are still detected."""
+    for text in ('http://example.com/a.jpg',
+                 'https://x.com/a.jpg',
+                 'file:///N:/work/x.jpg',
+                 'ftp://host/a.jpg',
+                 'http:/malformed.jpg',      # the residual single-slash case the guard missed
+                 'mailto:a@b.jpg'):
+        out_text, items = mo.split_media(text)
+        assert out_text == text, 'parser never edits text'
+        assert items == [], f'bare URL must not be classified as local media: {text!r}'
+
+    # Positive controls: real absolute paths are still delivered unchanged.
+    _, items = mo.split_media('N:/work/x.jpg')
+    assert len(items) == 1 and items[0].value == 'N:/work/x.jpg'
+    _, items = mo.split_media(r'C:\foo\a.jpg')
+    assert len(items) == 1 and items[0].value == r'C:\foo\a.jpg'
+    _, items = mo.split_media('D:/foo/img.png')
+    assert len(items) == 1 and items[0].value == 'D:/foo/img.png'
+
+    # Masking is offset-preserving: a real path on the same line as a URL is still found.
+    _, items = mo.split_media('see http://x.com/a.jpg and N:/work/b.jpg')
+    assert len(items) == 1 and items[0].value == 'N:/work/b.jpg'
+
+
 def test_split_media_dedupes_identical_items():
     """Plan O-3: one upload per (kind, normalized target); the duplicate keeps its link."""
     _, items = mo.split_media('dup N:/a/img.jpg and N:/a/img.jpg and ![image](N:/a/img.jpg)')

@@ -219,6 +219,31 @@ _init_lock = threading.Lock()  # Protects check-then-act in init_logging()
 logger = logging.getLogger('agent_cascade_logger')
 
 
+class _AppLoggerProxy:
+    """Late-bound delegate to the live agent_cascade.log.logger.
+
+    The app's handlers live on 'agent_cascade_logger' (or a per-instance child
+    'agent_cascade_logger.<id>'), and init_logging() REBINDS this module's
+    `logger` global to that handler-bearing object. A module-level
+    `from agent_cascade.log import logger` executed at import time binds the
+    pre-init, handler-less object, and `logging.getLogger(__name__)` never
+    reaches the app tree at all (its dotted name is a sibling of
+    'agent_cascade_logger', so its DEBUG/INFO records fall to logging.lastResort
+    and vanish). This proxy resolves the current `log.logger` on every attribute
+    access, so records are emitted through whichever logger is live — before and
+    after init_logging(), with or without an instance id.
+
+    Canonical copy: import this from agent_cascade.log rather than redefining the proxy
+    per module. (Several modules still carry their own copy — consolidating them is a
+    tracked, behavior-neutral follow-up, deliberately out of scope for this fix.)
+    """
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        from agent_cascade.log import logger as _live
+        return getattr(_live, name)
+
+
 def _logging_excepthook(exc_type, exc_value, exc_tb):
     """Replace sys.excepthook to log uncaught main-thread exceptions."""
     try:

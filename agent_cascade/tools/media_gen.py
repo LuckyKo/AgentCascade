@@ -52,7 +52,6 @@ about.
 """
 
 import json
-import logging
 import os
 import tempfile
 import threading
@@ -73,8 +72,12 @@ from agent_cascade.tools.media_backends.base import (
 )
 
 from agent_cascade.tools.image_gen import _fmt_elapsed
+from agent_cascade.log import _AppLoggerProxy
 
-logger = logging.getLogger(__name__)
+# Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy):
+# a module logger (logging.getLogger(__name__)) never reaches the console/file
+# handlers, so [MediaGen] records (VRAM release, save/restore) would silently vanish.
+logger = _AppLoggerProxy()
 
 # ── media_gen config cache ─────────────────────────────────────────────────────
 # The config lives at <AgentCascade_root>/config/media_gen/media_gen.json. Read

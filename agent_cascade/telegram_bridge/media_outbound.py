@@ -78,6 +78,15 @@ _DRIVE_AFTER_SLASH_RE = re.compile(r'^/[A-Za-z]:')
 # A drive-absolute path ('N:/x', 'C:\x') — the other half of _is_absolute_target.
 _DRIVE_LEADING_RE = re.compile(r'^[A-Za-z]:[\\/]')
 
+# A URL token: a scheme (>=2 letters, optionally with +.-) followed by ':' and the rest
+#     up to the same token boundary the bare-path regex uses (whitespace/quote/<>,|).
+#     Masked before the bare pass so _BARE_ABS_RE's drive branch can no longer start
+#     inside a scheme ('p:' of http:, 'e:' of file:). Real-world media/URL schemes (http,
+#     https, file, ftp, …) are >=2 letters, whereas a Windows drive spec is exactly 1
+#     letter, so masking >=2-letter scheme tokens cannot consume a drive letter — the two
+#     sets are disjoint in practice and real drive/POSIX paths are preserved.
+_URL_RE = re.compile(r'[A-Za-z][A-Za-z+.\-]+:[^\s"\'`,<>|]*')
+
 # data:<mime>[;params],<payload> — the browser-pasted-image shape (web_ui/app.js:5410-5412).
 _DATA_URI_RE = re.compile(r'\Adata:(?P<mime>[^;,]*)(?P<params>[^,]*),(?P<payload>.*)\Z', re.DOTALL)
 
@@ -264,14 +273,19 @@ def split_media(text: str, *, allow_video: bool = False,
         ))
 
     if detect_bare_paths:
+        # Root-cause fix for BUG_0114: mask URL tokens (scheme >=2 letters + ':' + rest)
+        # before the bare pass, so _BARE_ABS_RE's drive branch can no longer start inside
+        # a scheme ('p:' of http:, 'e:' of file:). Offsets are preserved (masked spans
+        # become spaces — a token boundary), so a real path after a URL on the same line
+        # is still detected. This replaces the old '://' post-match guard, which was a
+        # symptom-patch that still misread single-slash 'scheme:/…' (e.g. 'http:/x.jpg')
+        # as a Windows drive.
+        for match in _URL_RE.finditer(text):
+            for idx in range(match.start(), match.end()):
+                masked[idx] = ' '
+
         for match in _BARE_ABS_RE.finditer(''.join(masked)):
             raw_target = match.group('path') + match.group('ext')
-            if '://' in raw_target:
-                # A URL fragment, not a path: the drive branch can start INSIDE a scheme,
-                # so bare 'http://x.com/img.jpg' matches as 'p://x.com/img.jpg' (an artifact
-                # of the plan's drafted regex, §2.1 evidence table). Left alone it would be
-                # classified local_path, refused as 'missing', and log a warning per URL.
-                continue
             kind, _source, normalized = classify_target(raw_target)
             if kind is None or (kind == 'video' and not allow_video):
                 continue
