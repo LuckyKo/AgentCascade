@@ -14,6 +14,7 @@
 
 import asyncio
 import atexit
+import base64
 import datetime
 import json
 import threading
@@ -26,6 +27,7 @@ from dotenv import load_dotenv
 
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseTool
+from agent_cascade.utils.media_utils import save_media_to_media, MediaStorageError
 
 
 class MCPManager:
@@ -326,6 +328,21 @@ class MCPManager:
         self.loop_thread.join()
 
 
+def _ext_from_mime(mime: Optional[str], media_type: str) -> Optional[str]:
+    """Map an MCP mimeType to a media extension hint.
+
+    Returns the MIME subtype (text after '/') lowercased, e.g. 'image/png' -> 'png',
+    'audio/wav' -> 'wav'. Returns None when there is no usable MIME so that
+    save_media_to_media applies its per-type default (jpg/mp3). Safe because
+    save_media_to_media only honours the hint when it is a recognised extension
+    and sanitizes everything else, so a malformed MIME can never yield an
+    arbitrary or extensionless filename.
+    """
+    if not mime or '/' not in mime:
+        return None
+    return mime.rsplit('/', 1)[-1].lower()
+
+
 class MCPClient:
 
     def __init__(self):
@@ -415,7 +432,7 @@ class MCPClient:
         return new_client
 
     async def execute_function(self, tool_name, tool_args: dict):
-        from mcp.types import TextResourceContents
+        from mcp.types import BlobResourceContents, TextResourceContents
 
         # Check if session is alive
         try:
@@ -456,8 +473,24 @@ class MCPClient:
                 for resource in read_resource.contents:
                     if isinstance(resource, TextResourceContents):
                         texts.append(resource.text)
-                    # if isinstance(resource, BlobResourceContents):
-                    #     texts.append(resource.blob)
+                    elif isinstance(resource, BlobResourceContents):
+                        # Guarded: only persist blobs whose MIME identifies a known media type.
+                        mt = (resource.mimeType or '').lower()
+                        if mt.startswith(('image/', 'audio/')):
+                            media_type = mt.split('/', 1)[0]
+                            try:
+                                raw = base64.b64decode(resource.blob) if resource.blob else b''
+                                if raw:
+                                    path = save_media_to_media(
+                                        raw, media_type, ext=_ext_from_mime(mt, media_type)
+                                    )
+                                    texts.append(f'![{media_type}]({path})')
+                                    continue
+                            except (MediaStorageError, ValueError) as e:
+                                logger.warning(f'MCP blob resource persist failed, skipping: {e}')
+                        # Non-media blob, empty payload, or persist failure: never dump the
+                        # raw base64 blob into context — emit a short marker instead.
+                        texts.append(f'[NOTE: skipped non-media blob resource: {resource.uri}]')
                 if texts:
                     return '\n\n'.join(texts)
                 else:
@@ -471,11 +504,23 @@ class MCPClient:
             for content in response.content:
                 if content.type == 'text':
                     texts.append(content.text)
-                elif content.type == 'image':
-                    # MCP SDK returns image as ImageContent with base64 data + mimeType
-                    texts.append(
-                        f'![{content.mimeType or 'image'}]({content.data})'
-                    )
+                elif content.type in ('image', 'audio'):
+                    media_type = content.type  # 'image' | 'audio'
+                    alt = 'image' if media_type == 'image' else 'audio'
+                    try:
+                        raw = base64.b64decode(content.data) if content.data else b''
+                        if not raw:
+                            raise ValueError('empty media payload')
+                        path = save_media_to_media(
+                            raw, media_type, ext=_ext_from_mime(content.mimeType, media_type)
+                        )
+                        texts.append(f'![{alt}]({path})')  # absolute path, NOT base64
+                    except (MediaStorageError, ValueError) as e:
+                        # Degrade to inline base64 (same pattern as content_parse.py) so a
+                        # storage failure never breaks the tool result. Do NOT catch bare
+                        # Exception here — that would mask genuine bugs (e.g. TypeError).
+                        logger.warning(f'MCP media persist failed, keeping inline base64: {e}')
+                        texts.append(f'![{alt}]({content.data})')
             if texts:
                 return '\n\n'.join(texts)
             else:
