@@ -1131,6 +1131,15 @@ class LLMCallMixin:
                             instance._streaming_responses = []
                         break
 
+                    # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
+                    # holding the truncated accumulation. Reset it here — AFTER the termination/dismissal breaks
+                    # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
+                    # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
+                    # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
+                    # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
+                    # is a local of this method, not a closure variable here.
+                    last_output = None
+
                     if retry_count >= _max_attempts:
                         # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
                         # retry_count for EVERY non-loop exception, so after _max_attempts

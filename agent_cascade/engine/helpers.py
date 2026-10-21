@@ -761,7 +761,10 @@ def _build_session_metadata(pool, instance) -> str:
             supervisor = instance.parent_instance
             log_filename = _get_supervisor_log_filename(pool, supervisor)
             if log_filename:
-                meta_lines.append(f"- Supervisor: {supervisor} ({log_filename})")
+                # The instance name is the resolvable identifier (send_message matches on it);
+                # the filename is a log reference only. Label it "(log: …)" so it is not pasted
+                # as the identifier (BUG_0094).
+                meta_lines.append(f"- Supervisor: {supervisor} (log: {log_filename})")
             else:
                 meta_lines.append(f"- Supervisor: {supervisor}")
 

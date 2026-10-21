@@ -379,3 +379,49 @@ class TestRootMetadataRestorePath:
 
         inst = pool.instances['Maine']
         assert inst.conversation[0].content.count('## Session Metadata') == 1
+
+
+# ── BUG_0094: sub-agent Supervisor line must not present the log filename as the identifier ──
+
+
+class TestSubAgentSupervisorLineFormat:
+    """The metadata emitter previously wrote ``- Supervisor: <name> (<log_filename>)``, which made
+    the parenthesised log filename look like the resolvable identifier. The model then pasted the
+    filename into send_message, which correctly rejects it (it matches on the instance name).
+
+    Fix: label the filename ``(log: …)`` so the instance name is the only token that reads as an
+    identifier. This test drives the REAL builder and asserts the labelled form is emitted and the
+    bare form is NOT. It FAILS on the pre-fix emitter and passes after the relabel.
+    """
+
+    def test_subagent_supervisor_line_labels_log_filename(self):
+        from types import SimpleNamespace
+
+        from agent_cascade.engine.helpers import _build_session_metadata
+
+        pool = _make_pool()
+        # The supervisor's logger must expose a real log_path so the filename is derived.
+        pool.instance_loggers = {
+            'Maine': SimpleNamespace(log_path='/tmp/logs/orchestrator_Maine_20261019_031621.jsonl'),
+        }
+
+        inst = AgentInstance(
+            instance_name='researcher_task',
+            agent_class='researcher',  # non-stable → Supervisor line is emitted
+            conversation=[],
+            max_turns=10,
+            parent_instance='Maine',
+            created_at=0.0,
+            last_activity=0.0,
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+
+        block = _build_session_metadata(pool, inst)
+
+        # The instance name is the identifier; the filename is explicitly a log reference.
+        assert '- Supervisor: Maine (log: orchestrator_Maine_20261019_031621.jsonl)' in block, (
+            'sub-agent Supervisor line must label the filename as (log: …), got:\n' + block)
+        # The old ambiguous bare form must NOT be present (would read as a second identifier).
+        assert '- Supervisor: Maine (orchestrator_Maine_20261019_031621.jsonl)' not in block, (
+            'bare parenthesised filename (identifier-like) must not be emitted')

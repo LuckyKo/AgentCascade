@@ -162,6 +162,23 @@ class TestSendMessageAgentToAgent:
 
         assert 'Failed' in result and "'nonexistent'" in result and 'exists' in result.lower()
 
+    def test_supervisor_log_filename_still_rejected(self, send_message_tool):
+        """BUG_0094 regression: the metadata fix must NOT loosen the resolver.
+
+        The metadata previously printed ``Supervisor: Maine (orchestrator_Maine_….jsonl)``; the model
+        pasted the parenthesised *log filename* into send_message. The resolver correctly matches on the
+        instance name only, so a bare log filename must still be rejected — proving the exact-name
+        matching was not relaxed to accept filenames.
+        """
+        params = json.dumps({
+            'destination': 'orchestrator_Maine_20261019_031621.jsonl',
+            'message': 'hello',
+        })
+        result = send_message_tool.call(params)
+
+        assert 'Failed' in result and 'orchestrator_Maine_20261019_031621.jsonl' in result
+        assert 'exists' in result.lower()
+
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
     def test_inactive_agent_destination_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
         """Sending to an inactive agent (IDLE/TERMINATED) returns an error."""

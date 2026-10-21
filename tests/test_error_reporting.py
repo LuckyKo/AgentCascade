@@ -563,6 +563,122 @@ class TestLlmCallTerminalPath:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 5b. BUG_0099 — a mid-stream error must NOT commit the truncated partial
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _build_engine_partial_then_error(exc):
+    """Like _build_engine_with_failing_llm, but the LLM call yields accumulating
+    partial chunks BEFORE raising — the exact BUG_0099 scenario (a connection drop after
+    some content has streamed). Only the innermost LLM call and the pre-LLM/telemetry/UI
+    hooks are stubbed; the retry loop and the commit decision are real.
+    """
+    from types import SimpleNamespace
+
+    from agent_cascade.agent_instance import AgentInstance
+    from agent_cascade.engine.core import ExecutionEngine
+    from agent_cascade.llm.schema import Message, ASSISTANT
+
+    engine = ExecutionEngine.__new__(ExecutionEngine)  # skip __init__ (heavy handlers)
+
+    pool = SimpleNamespace()
+    # retry_max_attempts=1 → a single failure exhausts the budget immediately.
+    pool.settings = SimpleNamespace(retry_max_attempts=1, retry_base_delay=0.01, retry_max_delay=0.01)
+    pool.api_router = None
+    pool.telemetry = None
+    engine.pool = pool
+    engine.compression_handler = SimpleNamespace()
+
+    instance = AgentInstance(
+        instance_name='test-inst',
+        agent_class='coder',
+        conversation=[],
+        created_at=0.0,
+        last_activity=0.0,
+        latest_marker_index=0,
+    )
+    template = SimpleNamespace(llm=None, name='coder')
+    active_functions = []
+
+    # Stub pre-LLM checks, telemetry, and the streaming-loop UI/stop hooks so the loop is
+    # hermetic. We assert on the YIELDED messages (what would reach the conversation), not the
+    # UI buffer, so _update_streaming_responses is stubbed to a no-op.
+    engine._pre_llm_checks = lambda *a, **k: False
+    engine._record_telemetry_event = lambda *a, **k: None
+    engine._stamp_llm_activity = lambda *a, **k: None
+    engine._is_terminal_stop = lambda *a, **k: False
+    engine._update_streaming_responses = lambda *a, **k: None
+
+    def _partial_then_error(*args, **kwargs):
+        # Append-only stream: each yielded item is the accumulated response so far.
+        yield [Message(role=ASSISTANT, content='half-finished')]
+        yield [Message(role=ASSISTANT, content='half-finished answer')]
+        raise exc
+
+    engine._execute_llm_call = _partial_then_error
+    return engine, instance, template, active_functions
+
+
+def _drive_partial(engine, instance, template, active_functions):
+    return list(engine._execute_llm_call_with_retry(instance, [], template, active_functions))
+
+
+class TestPartialNotCommittedOnMidStreamError:
+    """BUG_0099: a mid-stream connection error that exhausts retries must commit ONLY the
+    [SYSTEM ERROR], never the truncated accumulation. The generic ``except Exception`` handler
+    cleared the UI buffer but left ``last_output`` holding the partial; the fix resets it to None
+    (mirroring ``_abort_stream``). Positive control proves a complete stream is unaffected.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_probe(self, monkeypatch):
+        import agent_cascade.api_router_pkg.router as router_mod
+        monkeypatch.setattr(router_mod, 'SANITY_PROBE_ENABLED', False)
+
+    def test_mid_stream_error_does_not_commit_truncated_partial(self):
+        from agent_cascade.llm.base import ModelServiceError
+
+        # A connection-drop message classifies as retryable. With retry_max_attempts=1 the
+        # retry_count increment happens AFTER the `retry_count >= _max_attempts` check, so the
+        # while-guard exits and the final commit block emits the `[SYSTEM ERROR: Empty LLM response]`
+        # variant (NOT the display_msg terminal branch). Either way: only a [SYSTEM ERROR], never the partial.
+        exc = ModelServiceError(message='connection dropped mid-stream (RemoteProtocolError)')
+        engine, instance, template, active_functions = _build_engine_partial_then_error(exc)
+        messages = _drive_partial(engine, instance, template, active_functions)
+
+        # (1) A [SYSTEM ERROR] is surfaced on exhaustion.
+        error_msgs = [m for m in messages if getattr(m, 'content', '') and '[SYSTEM ERROR:' in str(m.content)]
+        assert error_msgs, f"expected a [SYSTEM ERROR] on exhaustion, got: {[getattr(m, 'content', None) for m in messages]}"
+
+        # (2) The truncated partial must NOT be committed as an assistant message.
+        committed = [m for m in messages if getattr(m, 'content', '') and 'half-finished' in str(m.content)]
+        assert not committed, (
+            f"truncated partial must not be committed after a failed stream, got: "
+            f"{[str(m.content) for m in committed]}")
+
+    def test_complete_stream_is_committed_unchanged(self):
+        """Positive control: a stream that completes normally commits its full content; no
+        [SYSTEM ERROR]. Proves the last_output reset does not regress recovery/normal calls."""
+        from agent_cascade.llm.schema import Message, ASSISTANT
+
+        engine, instance, template, active_functions = _build_engine_partial_then_error(None)
+
+        def _complete(*args, **kwargs):
+            yield [Message(role=ASSISTANT, content='full answer part one')]
+            yield [Message(role=ASSISTANT, content='full answer part one and two')]
+            # generator ends normally → stream complete
+
+        engine._execute_llm_call = _complete
+        messages = _drive_partial(engine, instance, template, active_functions)
+
+        texts = [str(m.content) for m in messages if getattr(m, 'content', '')]
+        assert any('full answer part one and two' in t for t in texts), (
+            f"complete stream must commit the full content, got: {texts}")
+        assert not any('[SYSTEM ERROR:' in t for t in texts), (
+            f"complete stream must not emit a [SYSTEM ERROR], got: {texts}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 6. _make_retrying_message — error param (plan §3.5)
 # ──────────────────────────────────────────────────────────────────────────────
 
