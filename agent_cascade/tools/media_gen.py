@@ -391,7 +391,8 @@ class MediaGen(BaseTool):
         # Checked before prompt validation and before backend resolution so it needs
         # no backend/config and is unambiguous. Lists every backend + its configs.
         if isinstance(prompt, str) and prompt.strip().lower() == '__help':
-            return [ContentItem(text=self._format_media_help(_get_media_gen_config()))]
+            backend_filter = (params.get('backend') or '').strip().lower()
+            return [ContentItem(text=self._format_media_help(_get_media_gen_config(), backend_filter))]
 
         if not isinstance(prompt, str) or not prompt.strip():
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
@@ -549,8 +550,12 @@ class MediaGen(BaseTool):
         'outetts_default': 'text→speech (OuteTTS voice)',
     }
 
-    def _format_media_help(self, config: dict) -> str:
+    def _format_media_help(self, config: dict, backend_filter: str = '') -> str:
         """Render the __help self-documentation: generic section + per-backend sections.
+
+        ``backend_filter`` (optional, lowercased id) restricts the per-backend
+        sections to just that backend; empty renders all (unchanged default). An
+        unknown filter renders no backend section plus a short known-backends note.
 
         Never raises. Sections come from ``BACKEND_MANIFEST`` (registry order), so
         a new backend appears here without touching this formatter. Availability
@@ -591,7 +596,12 @@ class MediaGen(BaseTool):
                     if isinstance(stems, list):
                         claimed.update(s for s in stems if isinstance(s, str))
         from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        backend_filter = (backend_filter or '').strip().lower()
+        matched = False
         for manifest in BACKEND_MANIFEST.values():
+            if backend_filter and manifest['id'].lower() != backend_filter:
+                continue
+            matched = True
             try:
                 lines.extend(
                     self._format_backend_help(manifest, (config or {}).get(manifest['id']), config, claimed)
@@ -600,6 +610,9 @@ class MediaGen(BaseTool):
                 logger.debug('[MediaGen] __help backend section failed: %s', manifest['id'])
                 continue
             lines.append('')
+        if backend_filter and not matched:
+            known = ', '.join(m['id'] for m in BACKEND_MANIFEST.values())
+            lines.append(f'  (unknown backend "{backend_filter}" — known backends: {known})')
         return '\n'.join(lines)
 
     def _format_backend_help(self, manifest: dict, block, config: dict, claimed: set) -> list:

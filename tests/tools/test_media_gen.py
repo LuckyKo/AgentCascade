@@ -1096,6 +1096,61 @@ class TestHelpCommand:
         assert 'backend: comfyui' in result[0].text
         assert 'yue2_full' in result[0].text
 
+    # ── BUG_0138: __help must honour the requested backend filter ───────────
+
+    def test_help_filter_empty_renders_all_backends(self):
+        """Default (backend_filter='') is unchanged: every BACKEND_MANIFEST entry renders."""
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        text = MediaGen()._format_media_help(_mg_cfg())
+        assert text.count('== backend: ') == len(BACKEND_MANIFEST)
+
+    def test_help_filter_single_backend_renders_only_that_one(self):
+        """backend_filter='comfyui' renders exactly the comfyui section, no others."""
+        text = MediaGen()._format_media_help(_mg_cfg(), 'comfyui')
+        assert '== backend: comfyui' in text
+        assert text.count('== backend: ') == 1
+        for other in ('sdcpp', 'kobold_tts', 'chatterbox'):
+            assert f'== backend: {other}' not in text
+
+    def test_help_filter_unknown_renders_note_not_all_backends(self):
+        """An unknown filter renders NO backend section but a known-backends note."""
+        from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+        text = MediaGen()._format_media_help(_mg_cfg(), 'totally_bogus')
+        assert text.count('== backend: ') == 0
+        known = ', '.join(m['id'] for m in BACKEND_MANIFEST.values())
+        assert f'unknown backend "totally_bogus"' in text
+        assert f'known backends: {known}' in text  # exact registry order, verbatim
+
+    def test_help_filter_is_case_insensitive(self):
+        """'COMFYUI' behaves like 'comfyui' (formatter lowercases defensively)."""
+        text = MediaGen()._format_media_help(_mg_cfg(), 'COMFYUI')
+        assert '== backend: comfyui' in text
+        assert text.count('== backend: ') == 1
+
+    def test_help_filter_matched_section_raises_suppresses_unknown_note(self):
+        """The requested backend exists but its section raises: 0 sections, NO unknown note.
+
+        Locks the `matched = True`-before-the-`try` invariant — a known backend
+        whose section fails must never be misreported as an unknown backend.
+        """
+        tool = MediaGen()
+        with patch.object(tool, '_format_backend_help', side_effect=RuntimeError):
+            text = tool._format_media_help(_mg_cfg(), 'comfyui')
+        assert text.count('== backend: ') == 0
+        assert 'unknown backend' not in text
+
+    def test_help_call_threads_backend_param(self):
+        """End-to-end: call({'prompt':'__help','backend':'comfyui'}) must thread the
+        backend into the formatter — only the comfyui section renders. Locks the
+        dispatch line that was the original BUG_0138 defect (backend not threaded)."""
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=_mg_cfg()):
+            result = MediaGen().call({'prompt': '__help', 'backend': 'comfyui'})
+        text = result[0].text
+        assert text.count('== backend: ') == 1
+        assert '== backend: comfyui' in text
+        for other in ('sdcpp', 'kobold_tts', 'chatterbox'):
+            assert f'== backend: {other}' not in text
+
     def test_help_lists_backend_configs_with_json_descriptions(self, tmp_path):
         """T8: __help scans the chatterbox config_dir and lists voices with their JSON descriptions."""
         d = tmp_path / 'voices'
