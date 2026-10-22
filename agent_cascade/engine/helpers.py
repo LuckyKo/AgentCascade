@@ -18,7 +18,7 @@ from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
-from agent_cascade.utils.utils import msg_field, msg_set
+from agent_cascade.utils.utils import estimate_functions_tokens, msg_field, msg_set
 
 # ── Constants (shared engine constants; true home is this module) ──────────────
 # These were module-level in the original execution_engine.py. They are used by
@@ -160,6 +160,53 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
         disabled |= {name for name in func_map.keys() if name in registered_names}
 
     return [func.function for name, func in sorted(func_map.items()) if name not in disabled]
+
+
+def estimate_instance_tool_schema_tokens(instance, pool=None) -> int:
+    """Estimate tokens of the tool schemas actually sent for *instance*.
+
+    The ``tools=`` payload is not part of the conversation, so
+    ``get_history_stats()`` / ``get_message_stats()`` cannot see it. Context-usage
+    displays and compression readouts therefore need this separate term to match
+    the payload the API receives (and the count used by the pre-send checks).
+
+    Resolution mirrors the LLM call (``_get_active_functions_from_template``), so
+    per-agent tool assignment and UI tool toggles are honored. The result is cached
+    on the instance by (template identity, active function count, sorted names) so
+    streaming state ticks do not re-serialize/tokenize the same schemas.
+
+    Fail-soft: returns 0 when the instance/pool/template is unavailable or anything
+    goes wrong — a display estimate must never break a state tick or a compression
+    decision.
+    """
+    if instance is None or pool is None:
+        return 0
+    try:
+        get_template = getattr(pool, 'get_template', None)
+        template = get_template(getattr(instance, 'agent_class', None)) if callable(get_template) else None
+        if template is None:
+            return 0
+
+        functions = _get_active_functions_from_template(template, instance, pool=pool)
+        key = (
+            id(template),
+            getattr(template, 'name', ''),
+            len(functions),
+            tuple(sorted(str(f.get('name', '')) for f in functions if isinstance(f, dict))),
+        )
+        if (getattr(instance, '_cached_tool_schema_key', None) == key
+                and hasattr(instance, '_cached_tool_schema_tokens')):
+            return instance._cached_tool_schema_tokens
+
+        tokens = estimate_functions_tokens(functions)
+        instance._cached_tool_schema_key = key
+        instance._cached_tool_schema_tokens = tokens
+        return tokens
+    except Exception as e:
+        logger.debug(
+            f"Tool-schema token estimate failed for "
+            f"{getattr(instance, 'instance_name', 'UNKNOWN')}: {e}")
+        return 0
 
 
 def _make_token_count_callback(instance):

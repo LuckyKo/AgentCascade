@@ -755,7 +755,9 @@ class CompressionHandler:
             if elapsed < cooldown:
                 logger.warning(f"Forced compression cooldown active for {inst_name}: "
                                f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle")
-                current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
+                current_tokens = self.engine._count_history_tokens(
+                    instance.conversation, instance,
+                    functions=self.engine._get_active_functions_for_counting(instance))
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
                 self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
                                                         self.engine._get_effective_limit(instance))
@@ -835,7 +837,9 @@ class CompressionHandler:
             if elapsed < backoff:
                 logger.warning(f"[COMPRESSION_BACKOFF] {inst_name}: skipping forced compression "
                                f"(attempt failed {elapsed:.0f}s ago, streak={streak}, backoff={backoff:.0f}s)")
-                current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
+                current_tokens = self.engine._count_history_tokens(
+                    instance.conversation, instance,
+                    functions=self.engine._get_active_functions_for_counting(instance))
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
                 self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
                                                         self.engine._get_effective_limit(instance))

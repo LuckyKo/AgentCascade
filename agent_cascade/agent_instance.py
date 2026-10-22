@@ -311,8 +311,13 @@ class AgentInstance:
 
     # ── Token Count Cache (Fix #2) ────────────────────────────────────────
     _cached_token_count: int = field(default=0)  # Cached cumulative token count for conversation
+    _cached_conversation_tokens: int = field(
+        default=0)  # Cached MESSAGE-ONLY token count (tool schemas are added per call)
     _last_token_count_conversation_length: int = field(
         default=0)  # Length of conversation when tokens were last counted
+    _cached_tool_schema_tokens: int = field(default=0)  # Cached tokens of the active tool schemas
+    _cached_tool_schema_key: Optional[tuple] = field(
+        default=None)  # Toolset identity for _cached_tool_schema_tokens
 
     # ── Ground-Truth Token Counts from LLM API (Fix Force Compression Loop) ──
     _last_actual_token_count: int = field(default=0)  # Actual token count from LLM API response (ground truth)

@@ -86,6 +86,15 @@ class ListAgents(BaseTool):
                 active_msgs = self.agent_pool.slice_history_for_llm(msgs) if self.agent_pool else msgs
                 stats = get_history_stats(active_msgs)
 
+                # Context usage must include the serialized tool schemas (BUG_0136).
+                schema_tokens = 0
+                try:
+                    from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
+                    schema_tokens = estimate_instance_tool_schema_tokens(inst_obj, self.agent_pool)
+                except Exception:
+                    schema_tokens = 0
+                total_tokens = stats['tokens'] + int(schema_tokens)
+
                 # Resolve the effective context-window limit (the "total") so usage can be
                 # shown as used/total with a percentage — an absolute token count alone is not
                 # informative (an agent at 90k could be at 40% or 100% of its window).
@@ -117,10 +126,10 @@ class ListAgents(BaseTool):
                 # Format context usage as used/total with a percentage when the effective
                 # limit is known; fall back to the bare token count when it cannot be resolved.
                 if max_tokens and max_tokens > 0:
-                    pct = (stats['tokens'] / max_tokens) * 100
-                    ctx_display = f"{stats['tokens']} / {max_tokens} tokens ({pct:.0f}%)"
+                    pct = (total_tokens / max_tokens) * 100
+                    ctx_display = f"{total_tokens} / {max_tokens} tokens ({pct:.0f}%)"
                 else:
-                    ctx_display = f"{stats['tokens']} tokens"
+                    ctx_display = f"{total_tokens} tokens"
 
                 lines.append(f"### {status_emoji} Instance: `{inst_name}`")
                 lines.append(f"  - **Status**: {status_text} | **Class**: {cls_name}")
@@ -131,6 +140,3 @@ class ListAgents(BaseTool):
                 lines.append('')
 
         return '\n'.join(lines)
-
-
-

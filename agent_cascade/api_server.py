@@ -1206,13 +1206,22 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 except Exception:
                     stats = {'tokens': 0, 'words': 0}
 
+                # Context usage includes the serialized tool schemas sent with every call
+                # (BUG_0136) — they are not in the message list.
+                schema_tokens = 0
+                try:
+                    from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
+                    schema_tokens = estimate_instance_tool_schema_tokens(inst, agent_pool)
+                except Exception:
+                    schema_tokens = 0
+
                 active_instances.append({
                     'name': name,
                     'agent_class': agent_class,
                     'state': (getattr(inst, 'state', None) or AgentState.IDLE).name,  # "RUNNING" etc.
                     'turn': current_turn,
                     'max_turns': effective_max,
-                    'tokens': int(stats.get('tokens', 0)),
+                    'tokens': int(stats.get('tokens', 0)) + int(schema_tokens),
                     'words': int(stats.get('words', 0)),
                 })
 

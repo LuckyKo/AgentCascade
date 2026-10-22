@@ -92,6 +92,24 @@ def _calc_token_stats(pool: AgentPool,
     return h_stats, r_stats
 
 
+def _instance_tool_schema_tokens(pool, instance) -> int:
+    """Tokens of the tool schemas sent for *instance* (0 on any failure).
+
+    ``get_history_stats()`` counts the conversation only; the API prompt also carries
+    the serialized ``tools=`` payload. State/display totals must include it or the UI
+    context bar under-reports (BUG_0136). Fail-soft by contract.
+    """
+    if instance is None:
+        return 0
+    try:
+        from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
+        return int(estimate_instance_tool_schema_tokens(instance, pool))
+    except Exception as e:
+        logger.debug(f"Tool-schema token estimate failed for "
+                     f"{getattr(instance, 'instance_name', 'UNKNOWN')}: {e}")
+        return 0
+
+
 def _calc_stream_r_stats(partial_responses: Optional[List[Message]]) -> dict:
     """Compute token stats for ONLY the streaming partial (r_stats).
 
@@ -360,6 +378,7 @@ def build_state_from_pool(
     # Build messages list and calculate token stats via helpers
     msgs = _get_instance_messages(pool, instance_name, responses)
     h_stats, r_stats = _calc_token_stats(pool, msgs, responses)
+    schema_tokens = _instance_tool_schema_tokens(pool, instance)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
     max_tokens = _get_max_tokens_for_instance(pool, instance)
@@ -523,7 +542,7 @@ def build_state_from_pool(
         'generating': generating,
         'session_name': session_name,
         'instance_name': instance_name,
-        'total_tokens': h_stats['tokens'] + r_stats['tokens'],
+        'total_tokens': h_stats['tokens'] + r_stats['tokens'] + schema_tokens,
         'total_words': h_stats['words'] + r_stats['words'],
         'max_tokens': max_tokens,
         'summary': current_summary,
@@ -624,6 +643,8 @@ def build_stream_update_from_pool(
             responses,
             current_version,
         )
+
+    schema_tokens = _instance_tool_schema_tokens(pool, instance)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
     max_tokens = _get_max_tokens_for_instance(pool, instance)
@@ -774,7 +795,7 @@ def build_stream_update_from_pool(
         # stream tick built before an approval is registered would carry a stale [] and,
         # if included, clobber live approval state on the client (banner disappears).
         'generating': True,
-        'total_tokens': h_stats['tokens'] + r_stats['tokens'],
+        'total_tokens': h_stats['tokens'] + r_stats['tokens'] + schema_tokens,
         'total_words': h_stats['words'] + r_stats['words'],
         'max_tokens': max_tokens,
         'current_model': current_model,
@@ -1487,6 +1508,7 @@ def _serialize_instance(
     # live as the partial grows. Cheap/O(tail): touches only the small in-flight response,
     # never the full conversation. Added on top of the cached history stats.
     r_stats = _calc_stream_r_stats(stream_responses)
+    schema_tokens = _instance_tool_schema_tokens(pool, inst)
 
     # Get max tokens via direct call to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, inst)
@@ -1497,7 +1519,7 @@ def _serialize_instance(
     result.update({
         'messages': serialized_msgs,
         'history_count': original_history_count + num_streaming,
-        'total_tokens': h_stats['tokens'] + r_stats['tokens'],
+        'total_tokens': h_stats['tokens'] + r_stats['tokens'] + schema_tokens,
         'total_words': h_stats['words'] + r_stats['words'],
         'max_tokens': max_tokens,
     })

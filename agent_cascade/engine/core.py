@@ -4944,17 +4944,28 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 count (causing late compression in tool-heavy sessions).
         """
         try:
-            # Check cache: if conversation length hasn't changed, reuse the
-            # cached count
             inst = instance or getattr(self, '_current_instance', None)  # Prefer explicit param (thread-safe)
+
+            # Cache MESSAGE-ONLY tokens, keyed on conversation length, and add the
+            # caller's schema term on every call. Caching the combined total here used
+            # to poison schema-aware callers: a message-only call (e.g. a compression
+            # warning readout) stored a smaller total under the same key, and the next
+            # trigger call with the same message count got it back (BUG_0136).
+            msg_tokens = None
             if inst and inst._last_token_count_conversation_length >= 0 and len(
                     messages) == inst._last_token_count_conversation_length:
-                return inst._cached_token_count
+                msg_tokens = getattr(inst, '_cached_conversation_tokens', None)
 
-            total = 0
-            for msg in messages:
-                stats = get_message_stats(msg)
-                total += stats['tokens']
+            if msg_tokens is None:
+                msg_tokens = 0
+                for msg in messages:
+                    stats = get_message_stats(msg)
+                    msg_tokens += stats['tokens']
+                if inst:
+                    inst._cached_conversation_tokens = msg_tokens
+                    inst._last_token_count_conversation_length = len(messages)
+
+            total = msg_tokens
 
             # Tool schemas are sent on every call but are not part of the message list,
             # so they were being undercounted here. Count them when provided.
@@ -4962,10 +4973,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 from agent_cascade.utils.utils import estimate_functions_tokens
                 total += estimate_functions_tokens(functions)
 
-            # Update cache
             if inst:
+                # Kept for callers/readouts that ask for the last full total.
                 inst._cached_token_count = total
-                inst._last_token_count_conversation_length = len(messages)
 
             return total
         except Exception as e:

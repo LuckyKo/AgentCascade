@@ -314,9 +314,17 @@ class SystemInfo(BaseTool):
         # Use centralized history stats (tokens & words)
         try:
             stats = get_history_stats(history)
-            total_tokens = stats['tokens']
+            # Add the tool-schema payload (sent as tools=, absent from the message list).
+            schema_tokens = 0
+            try:
+                from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
+                schema_tokens = estimate_instance_tool_schema_tokens(inst, self.agent_pool)
+            except Exception:
+                schema_tokens = 0
+            total_tokens = stats['tokens'] + int(schema_tokens)
             total_words = stats['words']
-            stats_str += f"\nCurrent Agent Usage: ~{total_tokens} tokens, ~{total_words} words (Max Context: {max_context})"
+            stats_str += (f"\nCurrent Agent Usage: ~{total_tokens} tokens (incl. tool schemas), "
+                          f"~{total_words} words (Max Context: {max_context})")
         except Exception as e:
             logger.warning(f"Failed to calculate stats for {agent_name}: {e}")
 
