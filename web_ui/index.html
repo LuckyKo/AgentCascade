@@ -60,12 +60,12 @@
         <div class="sidebar-scroll">
           <div class="sidebar-section">
             <label class="sidebar-label">Agent Soul</label>
-            <select id="agentSelect" class="sidebar-select"></select>
+            <select autocomplete="off" id="agentSelect" class="sidebar-select"></select>
           </div>
 
           <div class="sidebar-section">
             <label class="sidebar-label">Active Session</label>
-            <input type="text" id="sessionName" class="sidebar-input" value="Maine" placeholder="Session name...">
+            <input autocomplete="off" type="text" id="sessionName" class="sidebar-input" value="Maine" placeholder="Session name...">
           </div>
 
           <div class="sidebar-section sidebar-actions">
@@ -103,13 +103,13 @@
 
           <div class="sidebar-section">
             <label class="sidebar-label">Additional Work Folders (Read-Write)</label>
-            <textarea id="workAccessFoldersRW" class="sidebar-input" rows="2" placeholder="C:\path\one&#10;/path/two"
+            <textarea autocomplete="off" id="workAccessFoldersRW" class="sidebar-input" rows="2" placeholder="C:\path\one&#10;/path/two"
               style="resize: vertical;"></textarea>
           </div>
 
           <div class="sidebar-section" style="margin-top: 12px;">
             <label class="sidebar-label">Additional Work Folders (Read-Only)</label>
-            <textarea id="workAccessFoldersRO" class="sidebar-input" rows="2" placeholder="C:\read\only&#10;/read/other"
+            <textarea autocomplete="off" id="workAccessFoldersRO" class="sidebar-input" rows="2" placeholder="C:\read\only&#10;/read/other"
               style="resize: vertical;"></textarea>
           </div>
 
@@ -215,13 +215,13 @@
               style="margin: 0; padding: 0 8px; font-size: 12px; cursor: pointer;"
               title="Server-side AFK: auto-reply when idle + auto-reject approvals">
               <span>AFK</span>
-              <input type="checkbox" id="afkToggle" />
+              <input autocomplete="off" type="checkbox" id="afkToggle" />
             </label>
             <label class="setting-field toggle-field"
               style="margin: 0; padding: 0 8px; font-size: 12px; cursor: pointer; color: #ffc107;"
               title="Automatically ask Security Expert to check and approve commands">
               <span>🛡️ Auto-Security</span>
-              <input type="checkbox" id="autoSecurityToggle" />
+              <input autocomplete="off" type="checkbox" id="autoSecurityToggle" />
             </label>
             <button id="continueBtn" class="btn btn-secondary" title="Continue generation (Ctrl+Shift+Enter)">⏩
               Continue</button>

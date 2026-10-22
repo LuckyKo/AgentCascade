@@ -7389,24 +7389,29 @@ if (btnAddEndpoint) {
 // Chrome stores form-control state in the session history entry and restores it on
 // Back/Forward *after* the page scripts have run (verified: the DOM already holds
 // the stale snapshot when `pageshow` fires). Opt every settings control out of that
-// mechanism so the localStorage store stays the single source of truth. The
-// MutationObserver covers panels rendered after startup (media-gen / per-agent).
+// mechanism so the localStorage store stays the single source of truth. The initial
+// sweep covers the whole document (sidebar session/workspace/security/AFK controls
+// are settings too); the chat draft and session filter keep Chrome's restore because
+// they hold transient text, not settings.
 function disableSessionHistoryFormRestore(root) {
-  if (!root || typeof root.querySelectorAll !== 'function') return;
-  root.querySelectorAll('input, select, textarea').forEach((el) => {
+  if (!root) return;
+  const keepRestore = new Set(['chatInput', 'sessionSearch']);
+  const mark = (el) => {
+    if (!el || el.type === 'file') return;
+    if (el.id && keepRestore.has(el.id)) return;
     if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
-  });
+  };
+  if (typeof root.matches === 'function' && root.matches('input, select, textarea')) mark(root);
+  if (typeof root.querySelectorAll === 'function') {
+    root.querySelectorAll('input, select, textarea').forEach(mark);
+  }
 }
+disableSessionHistoryFormRestore(document);
 if (sidePanel) {
-  disableSessionHistoryFormRestore(sidePanel);
   new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
-        if (node.nodeType !== 1) continue;
-        if (typeof node.matches === 'function' && node.matches('input, select, textarea')) {
-          if (!node.hasAttribute('autocomplete')) node.setAttribute('autocomplete', 'off');
-        }
-        disableSessionHistoryFormRestore(node);
+        if (node.nodeType === 1) disableSessionHistoryFormRestore(node);
       }
     }
   }).observe(sidePanel, { childList: true, subtree: true });

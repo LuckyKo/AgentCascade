@@ -57,46 +57,56 @@ function extractPageshowHandler() {
 }
 
 // ── Test 1: every settings control opts out of session-history form state ─────
-test('audit: every control inside #side-panel has autocomplete="off"', () => {
-  const start = INDEX_HTML.indexOf('<aside id="side-panel"');
-  assert.ok(start >= 0, 'side-panel not found');
-  const end = INDEX_HTML.indexOf('</aside>', start);
-  assert.ok(end > start, 'side-panel close tag not found');
-  const block = INDEX_HTML.slice(start, end);
+test('audit: every settings control opts out of session-history form state', () => {
+  const controls = [...INDEX_HTML.matchAll(/<(input|select|textarea)\b[^>]*>/gi)].map((m) => m[0]);
+  assert.ok(controls.length >= 110, `expected the full settings surface, found only ${controls.length} controls`);
 
-  const controls = [...block.matchAll(/<(input|select|textarea)\b[^>]*>/gi)].map((m) => m[0]);
-  assert.ok(controls.length >= 90, `expected the full settings panel, found only ${controls.length} controls`);
+  // Transient text (chat draft / session filter) intentionally keeps Chrome's restore;
+  // file inputs carry no value to restore.
+  const EXEMPT_IDS = new Set(['chatInput', 'sessionSearch']);
+  const idOf = (tag) => (tag.match(/\bid\s*=\s*["']([^"']+)["']/i) || [])[1];
+  const audited = controls.filter((tag) =>
+    !/\btype\s*=\s*["']file["']/i.test(tag) && !EXEMPT_IDS.has(idOf(tag)));
 
-  const missing = controls.filter((tag) => !/\bautocomplete\s*=\s*["']off["']/i.test(tag));
-  assert.deepEqual(missing, [], 'controls without autocomplete="off":\n' + missing.join('\n'));
+  const missing = audited.filter((tag) => !/\bautocomplete\s*=\s*["']off["']/i.test(tag));
+  assert.deepEqual(missing, [], 'settings controls without autocomplete="off":\n' + missing.join('\n'));
+
+  // Guard the exemptions themselves: the chat input must exist, otherwise the filter
+  // above could silently skip everything on a markup rewrite.
+  assert.ok(controls.some((tag) => idOf(tag) === 'chatInput'), 'chatInput not found');
 });
 
 // ── Test 2: the dynamic-panel sweep exists and is wired to #side-panel ───────
 test('source: startup sweep + MutationObserver opt dynamically rendered controls out', () => {
   assert.match(APP_JS, /function disableSessionHistoryFormRestore\(root\)/);
   assert.match(APP_JS, /root\.querySelectorAll\('input, select, textarea'\)/);
-  assert.match(APP_JS, /disableSessionHistoryFormRestore\(sidePanel\)/);
+  assert.match(APP_JS, /disableSessionHistoryFormRestore\(document\)/);
   assert.match(APP_JS, /new MutationObserver\(/);
   assert.match(APP_JS, /\.observe\(sidePanel,\s*\{\s*childList:\s*true,\s*subtree:\s*true\s*\}\)/);
 });
 
 // ── Test 3: the helper really tags controls (real extracted function) ────────
-test('behaviour: disableSessionHistoryFormRestore tags plain and already-set controls', () => {
+test('behaviour: disableSessionHistoryFormRestore tags settings but keeps transient text/file inputs', () => {
   const ctx = vm.createContext({});
   vm.runInContext(extractFunction('disableSessionHistoryFormRestore'), ctx, { filename: 'helper.js' });
 
-  const makeEl = (attrs = {}) => ({
+  const makeEl = (attrs = {}, props = {}) => ({
+    ...props,
     attrs: { ...attrs },
     hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
     setAttribute(k, v) { this.attrs[k] = v; },
   });
   const plain = makeEl();
   const preset = makeEl({ autocomplete: 'on' });
-  const root = { querySelectorAll: () => [plain, preset] };
+  const chat = makeEl({}, { id: 'chatInput' });
+  const file = makeEl({}, { type: 'file' });
+  const root = { querySelectorAll: () => [plain, preset, chat, file] };
 
   vm.runInContext('disableSessionHistoryFormRestore', ctx)(root);
   assert.equal(plain.attrs.autocomplete, 'off');
   assert.equal(preset.attrs.autocomplete, 'on', 'an explicit autocomplete value must not be overwritten');
+  assert.equal(chat.attrs.autocomplete, undefined, 'chat draft must keep Chrome restore');
+  assert.equal(file.attrs.autocomplete, undefined, 'file inputs have no state to restore');
 });
 
 // ── Test 4: pageshow re-applies the store for history restores only ──────────
