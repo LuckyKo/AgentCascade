@@ -361,8 +361,23 @@ class TelemetryCollector:
         return self._agent_class_stats[agent_class]
 
     def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0, model: str = ''):
-        """Mark the start of an LLM API call."""
+        """Mark the start of an LLM API call.
+
+        If a call for ``instance_name`` is already in flight, the previous attempt
+        never recorded an end (aborted by termination, or a caller that forgot to
+        end it). Finalize it first so its latency/tokens are still counted instead
+        of being silently overwritten by the new start (BUG_0128). The nested end
+        call is safe under the reentrant telemetry lock.
+        """
         with _telemetry_lock:
+            if instance_name in self._active_llm_calls:
+                _logger.warning(
+                    'record_llm_call_start for %r while a previous call was still '
+                    'active; finalizing the previous attempt (missing '
+                    'record_llm_call_end?).',
+                    instance_name,
+                )
+                self.record_llm_call_end(instance_name)
             self._active_llm_calls[instance_name] = {
                 'start_time': time.perf_counter(),
                 'input_tokens_est': input_tokens_est,

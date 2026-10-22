@@ -295,6 +295,24 @@ class TestLLMCallLifecycle:
         # Must not raise.
         collector.record_token_usage('never_started', prompt_tokens=5, completion_tokens=5)
 
+    def test_second_start_finalizes_the_previous_attempt(self, collector):
+        """A start while a call is active must not silently drop the old attempt (BUG_0128).
+
+        The previous attempt is finalized so its latency/tokens are still counted;
+        the new start then proceeds normally.
+        """
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        # Second start without an intervening end (aborted attempt scenario).
+        collector.record_llm_call_start('inst', input_tokens_est=20, model='m')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+
+        s = collector.get_session_summary()
+        assert s['total_llm_calls'] == 2
+        events = [e for e in list(collector.events) if e.get('type') == 'llm_call']
+        assert len(events) == 2
+        # Both attempts are real and carry a non-negative latency.
+        assert all(e['latency_ms'] >= 0 for e in events)
+
 
 class TestCacheClassificationFromUsage:
     """Authoritative prompt-cache hit/miss from server-reported ``cached_tokens``.

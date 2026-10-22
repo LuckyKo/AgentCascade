@@ -1116,6 +1116,9 @@ class LLMCallMixin:
                     # This is NOT an error; exit cleanly without retry or error message.
                     if isinstance(e, AgentTerminatedError):
                         logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
+                        # Close the in-flight telemetry call so its latency is counted
+                        # (BUG_0128) — every other abort path in this loop records 'end'.
+                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         break
@@ -1127,6 +1130,8 @@ class LLMCallMixin:
                     if _is_termination_abort:
                         # Instance was terminated — abort LLM call cleanly without retry or error message.
                         logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
+                        # Close the in-flight telemetry call (BUG_0128).
+                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         break
