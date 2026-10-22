@@ -196,7 +196,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
       // Slot pool dead-man's switch — ONE knob. The hard cap is derived as 6x this value
       // server-side (pool/slots.py::_queue_limits); it is deliberately not a second setting.
-      { id: '#setting-slot-queue-timeout', prop: 'value', key: 'slot_queue_timeout_seconds', localKey: 'slot-queue-timeout' },
+      { id: '#setting-slot-queue-timeout', prop: 'value', key: 'slot_queue_timeout_seconds', localKey: 'slot_queue_timeout_seconds' },
   // Cache pool
   { id: '#setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
   { id: '#setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
