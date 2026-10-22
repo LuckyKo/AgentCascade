@@ -511,6 +511,10 @@ class TelemetryCollector:
                     if status is not None:
                         call['cache_classified'] = True
                         call['cache_status'] = status
+                        # Snapshot the prompt count at classification time so the
+                        # [KV_CACHE_MISS] line reports the value the classifier used,
+                        # even if a subsequent multi-callback overwrites input_tokens_est.
+                        call['classified_prompt_tokens'] = int(prompt_tokens)
                         if status == 'hit':
                             self._session_stats['llm_cache_hits'] += 1
                         else:
@@ -574,7 +578,7 @@ class TelemetryCollector:
             # cached_tokens is authoritative: a miss means the full prompt was reprocessed
             # (the latency/ttft values show how expensive that was).
             if call.get('cache_status') == 'miss':
-                pt = int(call.get('input_tokens_est') or 0)
+                pt = int(call.get('classified_prompt_tokens') or 0)
                 ct = int(call.get('cached_tokens') or 0)
                 _logger.debug(
                     '[KV_CACHE_MISS] %s model=%s prompt_tokens=%d cached_tokens=%d '

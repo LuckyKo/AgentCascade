@@ -665,6 +665,39 @@ class TestKVCacheMissDebugLog:
         assert not [m for m in msgs if '[KV_CACHE_MISS]' in m], \
             f'unknown outcome must not log a miss line, got {msgs!r}'
 
+    def test_multi_callback_reports_classified_prompt_tokens(self, collector):
+        """Regression: if record_token_usage fires twice, the miss line must report
+        the prompt count from the FIRST (classifying) callback, not the overwritten
+        input_tokens_est from the second."""
+        import logging
+        sink = log_mod.logger
+        handler = _ListHandler()
+        handler.setLevel(logging.DEBUG)
+        prev_level = sink.level
+        sink.addHandler(handler)
+        sink.setLevel(logging.DEBUG)
+        try:
+            collector.record_llm_call_start('multi_cb', input_tokens_est=1, model='qwen3-test')
+            # First callback: classifies as miss (1000 prompt tokens, 0 cached)
+            collector.record_token_usage(
+                'multi_cb', prompt_tokens=1000, completion_tokens=5,
+                details={'cached_tokens': 0},
+            )
+            # Second callback: overwrites input_tokens_est to 5000
+            collector.record_token_usage(
+                'multi_cb', prompt_tokens=5000, completion_tokens=5,
+                details={'cached_tokens': 0},
+            )
+            collector.record_llm_call_end('multi_cb')
+        finally:
+            sink.setLevel(prev_level)
+            sink.removeHandler(handler)
+        msgs = [r.getMessage() for r in handler.records]
+        hits = [m for m in msgs if '[KV_CACHE_MISS]' in m]
+        assert len(hits) == 1, f'expected exactly one miss line, got {msgs!r}'
+        assert 'prompt_tokens=1000' in hits[0], \
+            f'miss line must report the classified prompt count (1000), got: {hits[0]}'
+
 
 # ---------------------------------------------------------------------------
 # G. Tool call lifecycle
