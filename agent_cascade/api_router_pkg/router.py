@@ -2676,25 +2676,47 @@ class APIRouter:
         instance's ``_last_endpoint_config``, match api_base + model in the live registry, and
         return that endpoint's ``vision_enabled`` flag.
 
-        Conservative (returns False → caption) when: the instance is unknown, it has no current
-        endpoint config, the registry entry does not match, or the matched endpoint is disabled.
+        When the instance has NO endpoint config yet (fresh create, session restore, or a reset
+        instance), resolve the FIRST endpoint its next call will try via ``get_endpoint_chain``
+        (using the instance's own ``agent_class`` — the same class ``call_with_fallback`` uses)
+        and return that endpoint's explicit ``vision_enabled`` flag. Without this, a restored
+        session's first turn captioned every image even though its assigned endpoint was
+        vision-capable (todo.md:107).
+
+        Conservative (returns False → caption) when: the instance is unknown, there is no
+        resolvable chain, the recorded endpoint no longer matches a live enabled endpoint, or
+        the chain head's capability is not explicitly known (e.g. a bare Tier-4 default cfg).
         """
         if not instance_name or self._pool is None:
             return False
         inst = self._pool.get_instance(instance_name)
         cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
-        if not isinstance(cur_cfg, dict):
+        if isinstance(cur_cfg, dict):
+            cur_base = normalize_api_base(cur_cfg.get('api_base') or cur_cfg.get('model_server', ''))
+            cur_model = cur_cfg.get('model', '')
+            with self._lock:
+                for ep in self.endpoints.values():
+                    if not ep.enabled:
+                        continue
+                    if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
+                        return bool(getattr(ep, 'vision_enabled', True))
+            # No matching enabled endpoint → treat as text-only (conservative).
             return False
-        cur_base = normalize_api_base(cur_cfg.get('api_base') or cur_cfg.get('model_server', ''))
-        cur_model = cur_cfg.get('model', '')
-        with self._lock:
-            for ep in self.endpoints.values():
-                if not ep.enabled:
-                    continue
-                if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
-                    return bool(getattr(ep, 'vision_enabled', True))
-        # No matching enabled endpoint → treat as text-only (conservative).
-        return False
+
+        # ── No endpoint allocated yet (session restore / fresh instance) ──────
+        # The next call_with_fallback() starts at the head of this instance's chain,
+        # so that is the effective "active" endpoint for the caption decision. Only
+        # trust an EXPLICIT flag: a bare Tier-4 default cfg has no capability info,
+        # and captioning is the safe fallback there.
+        agent_type = getattr(inst, 'agent_class', '') or 'generalist'
+        try:
+            chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
+        except (ValueError, RuntimeError) as e:
+            logger.debug(f"[APIRouter] Vision check: no endpoint chain for '{instance_name}': {e}")
+            return False
+        if not chain or 'vision_enabled' not in chain[0]:
+            return False
+        return bool(chain[0].get('vision_enabled'))
 
     def _get_any_vision_endpoint(self) -> Optional[dict]:
         """Return the config of any enabled vision-capable endpoint."""

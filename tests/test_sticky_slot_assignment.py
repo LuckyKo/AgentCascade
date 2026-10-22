@@ -1793,6 +1793,11 @@ class TestN15CaptionWithHeldSlotNoSwap:
         with router._lock:
             router.agent_priorities['coder'] = ['ep0']  # vision resolves to the conc=0 ep0
 
+        # This test drives captioning's slot path, which only runs when a caption call
+        # actually fires. auto mode now (correctly) skips when the chain head is
+        # vision-capable, so force the unconditional path (same as the N17 tests).
+        pool.settings.image_caption_mode = 'always'
+
         # Agent holds the shared slot (sticky state).
         release_cb = router.scheduler.acquire(
             api_base=SEQ_BASE,
@@ -1889,6 +1894,10 @@ class TestN16CaptionWithoutSlotAcquiresAtTailNeverDrops:
         inst = _make_instance(pool, 'agent1', 'coder')
         with router._lock:
             router.agent_priorities['coder'] = ['ep0']  # vision resolves to the conc=0 ep0
+
+        # Slot-path test: captioning must fire. auto mode now correctly skips when the
+        # chain-head endpoint has vision, so force the unconditional path.
+        pool.settings.image_caption_mode = 'always'
 
         assert inst._slot_key is None and inst._slot_release is None  # starts slotless
 

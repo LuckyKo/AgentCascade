@@ -123,6 +123,27 @@ class TestCaptionModeGating:
         img_item = messages[0].content[0]
         assert getattr(img_item, 'caption', None) is None
 
+    def test_auto_skips_when_restored_instance_chain_head_is_vision(self):
+        """Regression (todo.md:107): a restored session has no _last_endpoint_config yet.
+
+        The next call will start at the head of the instance's endpoint chain; when that
+        endpoint is vision-capable, auto mode must NOT run full captioning.
+        """
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool)
+        ep = _vision_endpoint(router)
+        router.set_agent_priorities('generalist', [ep.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            router.caption_images(messages, agent_type='generalist', instance_name='inst1')
+
+        assert not mock_gcm.called, 'restored session must not caption when its chain-head endpoint has vision'
+        assert getattr(messages[0].content[0], 'caption', None) is None
+
     def test_auto_captions_when_active_endpoint_is_text_only(self):
         """auto + text-only active endpoint: caption fires; '[Image]' placeholders are
         cleared and re-captioned, good existing captions are preserved."""
@@ -197,6 +218,30 @@ class TestIsActiveEndpointVision:
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
         _vision_endpoint(router)
+        # Bare Tier-4 default cfg has no explicit vision flag → conservative (caption).
+        assert router._is_active_endpoint_vision('inst1') is False
+
+    def test_returns_true_for_chain_head_vision_when_no_last_endpoint(self):
+        """No allocated endpoint yet → resolve the chain head (todo.md:107)."""
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool)
+        ep = _vision_endpoint(router)
+        router.set_agent_priorities('generalist', [ep.id])
+        assert router._is_active_endpoint_vision('inst1') is True
+
+    def test_returns_false_for_chain_head_text_only_when_no_last_endpoint(self):
+        """Chain head explicitly text-only → caption (explicit flag is trusted)."""
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool)
+        ep = APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False)
+        router.add_endpoint(ep)
+        router.set_agent_priorities('generalist', [ep.id])
         assert router._is_active_endpoint_vision('inst1') is False
 
     def test_returns_false_for_registry_mismatch(self):
