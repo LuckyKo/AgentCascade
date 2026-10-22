@@ -225,13 +225,20 @@ class TelemetryCollector:
         usage accumulator (see ``get_agent_class_summary()``).
         """
         with _telemetry_lock:
-            # Warn if an active turn already exists with a different fingerprint
+            # A second start without an end means the previous turn will never be
+            # recorded (the engine closes turns in run()'s finally, so this is an
+            # upstream bug). Report the window that is about to be dropped instead
+            # of silently overwriting it — whether or not the fingerprint changed.
             existing_turn = self._active_turns.get(instance_name)
-            if existing_turn and existing_turn['config_fingerprint'] != config_fingerprint:
+            if existing_turn:
+                elapsed_ms = (time.perf_counter() - existing_turn['start_time']) * 1000
                 _logger.warning(
-                    'Instance %r started new turn with fingerprint %s (was %s). '
-                    'Config changed mid-session.',
-                    instance_name, config_fingerprint, existing_turn['config_fingerprint'],
+                    'Instance %r started a new turn while the previous one was still '
+                    'open (%.1f ms, fingerprint %s -> %s); the previous turn will not '
+                    'be recorded. Missing record_turn_end?',
+                    instance_name, elapsed_ms,
+                    existing_turn.get('config_fingerprint') or '(none)',
+                    config_fingerprint or '(none)',
                 )
 
             self._active_turns[instance_name] = {
@@ -272,7 +279,10 @@ class TelemetryCollector:
         with _telemetry_lock:
             turn = self._active_turns.pop(instance_name, None)
             if not turn:
-                _logger.warning(
+                # Normal for the two terminal-stop returns that happen before
+                # record_turn_start; the engine calls end from run()'s finally for
+                # every exit path (BUG_0127), so this is not an error.
+                _logger.debug(
                     'record_turn_end called for %r but no matching turn_start found.',
                     instance_name,
                 )

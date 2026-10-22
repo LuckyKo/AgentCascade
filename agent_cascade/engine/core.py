@@ -1188,12 +1188,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 if not messages:
                     # No re-entry (or re-entry still empty) — original early exit.
                     logger.debug('early exit - %s (_setup_turn returned empty)', inst_name)
-                    # Telemetry: record turn end for early exit (non-blocking)
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_turn_end(inst_name)
-                        except Exception:
-                            pass
+                    # Turn-end telemetry is handled by the run() finally (BUG_0127),
+                    # so every exit path is covered exactly once.
                     early_exit = True  # Queued messages were drained above; the exit
                                        # finally must NOT drain again (double-drain race).
                     return  # Manual command handled or error
@@ -1555,14 +1551,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 response_msg = Message(role=ASSISTANT, content=turn_notice)
                 response.append(response_msg)
 
-            # Telemetry: record turn end (non-blocking)
-            inst_name_turn = instance.instance_name
-            if (tel := self._telemetry()) is not None:
-                try:
-                    tel.record_turn_end(inst_name_turn)
-                except Exception:
-                    pass
-
         except AgentTerminatedError:
             # Clean abort from termination during tool execution or slot acquire.
             # Don't log as error, don't yield error message — just exit cleanly.
@@ -1570,18 +1558,26 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
             logger.error('EXCEPTION - %s: %s: %s', instance.instance_name, type(e).__name__, e, exc_info=True)
-            # Telemetry: record turn end on exception (non-blocking)
-            if (tel := self._telemetry()) is not None:
-                try:
-                    tel.record_turn_end(instance.instance_name)
-                except Exception:
-                    pass
             error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
             yield [error_msg]
 
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we
             # exit
+
+            # ── Telemetry: close the turn exactly once, on every exit path ──────
+            # normal completion, unhandled exception, AgentTerminatedError and
+            # GeneratorExit (consumer abandoned the generator). Config/agent-class
+            # attribution of every LLM/tool event created during the turn depends
+            # on this pop, so skipping it makes the whole final turn invisible in
+            # both tables, not just its duration (BUG_0127). record_turn_end is
+            # idempotent (it pops), and is a no-op when run() exited via the two
+            # pre-start terminal-stop returns above.
+            if (tel := self._telemetry()) is not None:
+                try:
+                    tel.record_turn_end(instance.instance_name)
+                except Exception:
+                    pass
 
             # R6 (locked): restore the pre-trigger turn budget so a triggered run's
             # extended max_turns does NOT leak into this instance's NEXT run. The
