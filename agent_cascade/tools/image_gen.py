@@ -204,7 +204,8 @@ def _list_workflows(workflow_dir: str) -> List[dict]:
     d = Path(workflow_dir)
     if not d.exists() or not d.is_dir():
         return []
-    workflows = [{'name': f.stem, 'path': str(f)} for f in d.glob('*.json')]
+    # Skip .meta.json sidecar files (description metadata for __help, not workflows)
+    workflows = [{'name': f.stem, 'path': str(f)} for f in d.glob('*.json') if not f.name.endswith('.meta.json')]
     workflows.sort(key=lambda w: (w['name'], w['path']))
     return workflows
 

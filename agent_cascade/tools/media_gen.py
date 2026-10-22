@@ -697,9 +697,28 @@ class MediaGen(BaseTool):
             return []
 
     def _describe_config(self, backend_id: str, stem: str, config: dict) -> str:
-        """One-line description for a config/workflow stem. Never raises."""
+        """One-line description for a config/workflow stem. Never raises.
+
+        Resolution order:
+        1. Sidecar ``<stem>.meta.json`` (safe for ComfyUI workflows — the main
+           JSON must remain a pure node map with only numeric-string keys).
+        2. Inline ``description`` field in the config/workflow JSON itself
+           (works for non-ComfyUI configs like sdcpp that have no node-map
+           constraint).
+        3. Hardcoded ``_CONFIG_DESCRIPTIONS`` fallback.
+        """
         path = self._config_json_path(backend_id, stem, config)
         if path:
+            # 1) Sidecar metadata file
+            meta_path = path.replace('.json', '.meta.json')
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get('description'), str):
+                    return data['description']
+            except (OSError, ValueError):
+                pass
+            # 2) Inline description in the config/workflow JSON
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
