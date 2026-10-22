@@ -84,10 +84,18 @@ class ToolExecMixin:
         # the loop uses so the detector cannot diverge from what actually runs. is_first_ca/is_last_ca
         # are threaded per-call (never shared instance state) so nested/parallel agents stay correct.
         ca_indices = []
+        # Same static batch detection for media_gen. A parent
+        # may issue several media_gen tool calls in ONE turn_output; each does a full save → unload → generate
+        # → restore VRAM cycle, but the model is already unloaded after the first and only the last needs to
+        # swap it back in. So only the FIRST saves and only the LAST restores. is_first_vram/is_last_vram are
+        # threaded per-call (never shared instance state) so nested/parallel agents stay correct.
+        mg_indices = []
         for _idx, _out in enumerate(turn_output):
             _use, _name, _, _ = self._detect_tool(_out)
             if _use and _name == 'call_agent':
                 ca_indices.append(_idx)
+            elif _use and _name == 'media_gen':
+                mg_indices.append(_idx)
 
         # Whether any call_agent actually ran in this batch — gates the safety net below so it never
         # fires for a batch that contained no call_agent (nothing was ever deferred).
@@ -98,6 +106,9 @@ class ToolExecMixin:
         # _setup_turn). The safety net must therefore fire ONLY when this stayed False — i.e. the loop exited
         # early (terminal-stop break / AgentTerminatedError raise) before the last call_agent.
         reached_last_ca = False
+        # Media-gen counterparts (same polarity as the call_agent markers above).
+        ran_mg = False
+        reached_last_mg = False
 
         # The whole loop is wrapped in try/finally so the deferred restore is guaranteed to run on
         # EVERY exit path — including the terminal-stop break and the AgentTerminatedError raise, both
@@ -227,21 +238,34 @@ class ToolExecMixin:
                         # the pre-scanned ca_indices (single source of truth — never recomputed elsewhere).
                         # A single call_agent → both True → byte-identical to today. Non-call_agent tools get
                         # the safe defaults (True/True) so their behavior is unchanged.
+                        # Parallel-media_gen batch flags: same static batch detection via mg_indices. A single
+                        # media_gen → both True → byte-identical to today; non-media_gen tools get True/True.
                         if tool_name == 'call_agent':
                             ran_ca = True
                             is_first_ca = (_out_idx == ca_indices[0])
                             is_last_ca = (_out_idx == ca_indices[-1])
                             if is_last_ca:
                                 reached_last_ca = True
+                            is_first_vram = is_last_vram = True
+                        elif tool_name == 'media_gen':
+                            ran_mg = True
+                            is_first_vram = (_out_idx == mg_indices[0])
+                            is_last_vram = (_out_idx == mg_indices[-1])
+                            if is_last_vram:
+                                reached_last_mg = True
+                            is_first_ca = is_last_ca = True
                         else:
                             is_first_ca = is_last_ca = True
+                            is_first_vram = is_last_vram = True
                         tool_result = self.tool_dispatcher.execute_tool(instance,
                                                                         tool_name,
                                                                         tool_args,
                                                                         llm_messages,
                                                                         function_id=function_id,
                                                                         is_first_ca=is_first_ca,
-                                                                        is_last_ca=is_last_ca)
+                                                                        is_last_ca=is_last_ca,
+                                                                        is_first_vram=is_first_vram,
+                                                                        is_last_vram=is_last_vram)
                     except AgentTerminatedError:
                         # Clean abort from stop-check during tool execution — re-raise for caller
                         raise
@@ -410,6 +434,29 @@ class ToolExecMixin:
                     self.reacquire_after_slot_yield(
                         parent_inst, inst_name, 'parallel-call-agent safety net', tolerate_failure=True,
                         respect_toggle=False)
+
+            # Media-gen safety net (same polarity as the call_agent net above): a media_gen batch that saved
+            # on its first call but exited before processing the last one (terminal-stop break / compression
+            # break / AgentTerminatedError raise) would otherwise leak a pending _state_label and cold-reload.
+            # The media_gen seam never releases the engine slot, so there is no reacquire to do — only the
+            # deferred KV restore. restore_held_slot_state is defensive (never raises) and targets the held
+            # endpoint live; passing the stable label makes it independent of a system agent (e.g. an auto-ask
+            # security advisor) consuming ``_state_label`` inside an approval window — see the label contract
+            # documented on state_ops.restore_held_slot_state.
+            # GATE POLARITY: for the media net the LABEL gate is load-bearing — the last call's own restore
+            # clears _state_label on every success/skip path, so the net no-ops on a completed batch. The
+            # flow-marker gate (not reached_last_mg) is belt-and-suspenders (unlike the call_agent net, where
+            # an ASYNC last child intentionally leaves the label and the flow marker is the only guard).
+            # ORDERING: this net runs AFTER the call_agent net above, which clears the shared _state_label on
+            # success. In a mixed batch where the call_agent net already forced the restore, the _state_label
+            # gate here is None and this net correctly no-ops (one restore total).
+            if ran_mg and not reached_last_mg:
+                mg_inst = self.pool.get_instance(inst_name) or instance
+                if mg_inst is not None and getattr(mg_inst, '_state_label', None) is not None:
+                    logger.debug(
+                        f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last media_gen; "
+                        f"forcing the deferred KV restore")
+                    self._restore_held_slot_state(mg_inst, inst_name, label=inst_name)
 
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────

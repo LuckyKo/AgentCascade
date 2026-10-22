@@ -633,6 +633,54 @@ class TestMediaGenVRAM:
         m_restore.assert_not_called()
         assert 'ERROR' in result[0].text
 
+    # ── Parallel media_gen batch deferral (mirror of the call_agent KV optimization) ──
+    # N media_gen calls in one turn share ONE instance. Only the FIRST may do the save/unload prologue
+    # (the model is already free after it); only the LAST may do the KV restore (via the _state_label the
+    # first call armed). These tests assert the EFFECT (exactly one save, exactly one restore), not the
+    # plumbing, and a single-call control proving the guard is inert when first==last.
+
+    @pytest.mark.parametrize('calls, expected_order', [
+        # Control: single call, default flags (first==last) → save → unload → restore via the held endpoint.
+        # Proves the batch guard is inert for the working single case.
+        ([(True, True)], ['save', 'unload', 'restore']),
+        # Batch of 2 sharing one instance: call 1 (first, not last) saves+unloads and DEFERS the restore;
+        # call 2 (not first, last) skips the prologue and restores via the pending _state_label. Net: one
+        # save, one unload, one restore across the whole batch.
+        ([(True, False), (False, True)], ['save', 'unload', 'restore']),
+        # A lone non-last call must NOT restore (the last call / safety net owns it) — but the deferred
+        # marker MUST survive the skipped restore so the eventual owner can find it.
+        ([(True, False)], ['save', 'unload']),
+    ])
+    def test_batch_deferral_restore_effect(self, sdcpp_cfg, calls, expected_order):
+        # Assert the EFFECT (save/unload/restore counts across the batch), not the plumbing. For any batch
+        # that ends WITHOUT a restore, additionally assert the deferred _state_label survives — this is the
+        # marker the last call or the dispatch-loop safety net consumes; if it were cleared by a skipped
+        # call, the deferred restore would silently no-op and the caller would cold-reload.
+        tool = MediaGen()
+        tool.agent_pool = MagicMock()
+        inst = _fake_instance()
+        inst._state_label = None
+        order = []
+
+        def _save(i, set_label=True):
+            order.append('save'); i._state_label = 'test-model'; return True
+
+        with patch.object(tool, '_get_instance', return_value=inst), \
+              patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value=sdcpp_cfg), \
+              patch('agent_cascade.tools.media_backends.sdcpp._resolve_sdcpp_config', return_value=_resolved_config()), \
+              patch('agent_cascade.tools.image_gen.subprocess.run', side_effect=_fake_run_write_bytes()), \
+              patch('agent_cascade.tools.media_gen.save_media_to_media', return_value='/tmp/media/out.png'), \
+              patch('agent_cascade.state_ops.save_instance_state', side_effect=_save), \
+              patch('agent_cascade.state_ops.unload_all_models', side_effect=lambda b: order.append('unload') or True), \
+              patch('agent_cascade.state_ops.restore_held_slot_state', side_effect=lambda *a, **k: order.append('restore')):
+            for is_first_vram, is_last_vram in calls:
+                tool.call({'prompt': 'a cube', 'backend': 'sdcpp'},
+                          is_first_vram=is_first_vram, is_last_vram=is_last_vram)
+
+        assert order == expected_order
+        if 'restore' not in expected_order:
+            assert inst._state_label == 'test-model'  # deferred marker survives the skipped restore
+
 
 # ── release_model_around_call opt-out (W2 / T5-T7) ────────────────────────────
 

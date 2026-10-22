@@ -155,7 +155,9 @@ class ToolDispatcher:
                      llm_messages: List[Any],
                      function_id: Optional[str] = None,
                      is_first_ca: bool = True,
-                     is_last_ca: bool = True) -> str:
+                     is_last_ca: bool = True,
+                     is_first_vram: bool = True,
+                     is_last_vram: bool = True) -> str:
         """Execute a tool by name.
 
         Extracted from ExecutionEngine._execute_tool() - Phase 4.3
@@ -172,6 +174,8 @@ class ToolDispatcher:
             tool_args: Arguments for the tool (str or dict)
             llm_messages: Current conversation messages
             function_id: The LLM's tool_call_id for this tool call (optional)
+            is_first_ca, is_last_ca, is_first_vram, is_last_vram: batch-position flags computed once by the
+                dispatch loop; default True = unchanged single-call behavior.
 
         Returns:
             Tool execution result as a string
@@ -236,6 +240,8 @@ class ToolDispatcher:
                     agent_obj=self.engine,
                     messages=llm_messages,
                     session_name=self._resolve_session_name(instance),
+                    is_first_vram=is_first_vram,
+                    is_last_vram=is_last_vram,
                 )
             finally:
                 instance._in_blocking_tool = None

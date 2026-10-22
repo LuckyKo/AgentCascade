@@ -2060,15 +2060,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         from agent_cascade.state_ops import resolve_held_endpoint
         return resolve_held_endpoint(self.pool, instance)
 
-    def _restore_held_slot_state(self, instance: AgentInstance, inst_name: str) -> bool:
+    def _restore_held_slot_state(self, instance: AgentInstance, inst_name: str, label: Optional[str] = None) -> bool:
         """Restore KV state to the endpoint the instance currently holds a slot on.
 
         Thin delegate to ``state_ops.restore_held_slot_state`` (body moved there
         verbatim); kept as a method so existing engine call sites and tests are
-        untouched.
+        untouched. ``label`` defaults to None (consume-once ``_state_label`` behavior);
+        pass the stable instance-name label to make the restore independent of any
+        system agent that may have consumed ``_state_label`` inside the window.
         """
         from agent_cascade.state_ops import restore_held_slot_state
-        return restore_held_slot_state(self.pool, instance, inst_name)
+        return restore_held_slot_state(self.pool, instance, inst_name, label=label)
 
     @staticmethod
     def _clear_orphaned_state_label(instance: AgentInstance, inst_name: str) -> None:

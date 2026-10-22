@@ -262,29 +262,41 @@ class MediaGen(BaseTool):
         else:
             logger.info('[MediaGen] VRAM release: model unloaded successfully')
 
+    def _restore_via_held_endpoint(self, instance) -> bool:
+        """Restore KV via the live held endpoint + the stable instance-name label.
+
+        Shared mechanism for the pool-backed restore used by both _restore_vram_state's
+        pool branch and _restore_vram_from_label: resolves the held endpoint LIVE from
+        the pool router (the carried ``held`` dict is the SAVED endpoint and may be stale
+        on a shared conc=0 autoloader) and restores on the stable instance-name label,
+        which survives a system agent consuming ``_state_label`` inside the window.
+        Returns False when there is no pool (tests / direct tool use have no live endpoint
+        to target) — callers keep their own distinct no-pool fallback.
+        """
+        pool = getattr(self, 'agent_pool', None)
+        if pool is None:
+            return False
+        from agent_cascade.state_ops import restore_held_slot_state
+        restore_held_slot_state(pool, instance, instance.instance_name, label=instance.instance_name)
+        return True
+
     def _restore_vram_state(self, instance, held: dict) -> None:
         """Restore saved KV state after all LLM-side work is done (one retry on failure).
 
-        With a pool available, routes through ``state_ops.restore_held_slot_state``
-        (the seam proven by shell_cmd safe mode): the held endpoint is resolved LIVE
-        from the pool router — the ``held`` dict we carry is the SAVED endpoint, which
-        may be stale on a shared conc=0 autoloader — and the stable instance-name
-        label survives a system agent consuming ``_state_label`` inside the window.
-        Without a pool (tests, direct tool use), falls back to the previous call with
-        the saved-endpoint config. A final restore failure is logged at ERROR but is
-        non-fatal: the next LLM call triggers a fresh model load via autoloader JIT,
-        so the system self-heals (the user only loses KV cache continuity).
+        With a pool available, routes through ``_restore_via_held_endpoint`` (the seam
+        proven by shell_cmd safe mode): the held endpoint is resolved LIVE from the pool
+        router and the stable instance-name label survives a system agent consuming
+        ``_state_label`` inside the window. Without a pool (tests, direct tool use), falls
+        back to the previous call with the saved-endpoint config. A final restore failure
+        is logged at ERROR but is non-fatal: the next LLM call triggers a fresh model load
+        via autoloader JIT, so the system self-heals (the user only loses KV cache continuity).
         """
         pool = getattr(self, 'agent_pool', None)
         logger.info('[MediaGen] VRAM restore: restoring state for %s (model=%s)', instance.instance_name, held.get('model', '?'))
         for attempt in range(2):
             try:
                 if pool is not None:
-                    from agent_cascade.state_ops import restore_held_slot_state
-                    restore_held_slot_state(
-                        pool, instance, instance.instance_name,
-                        label=instance.instance_name,
-                    )
+                    self._restore_via_held_endpoint(instance)
                 else:
                     from agent_cascade.state_ops import restore_instance_state
                     restore_instance_state(instance, held_endpoint_cfg=held)
@@ -298,6 +310,44 @@ class MediaGen(BaseTool):
                     logger.error(
                         '[MediaGen] State restore FAILED after generation — model may not be loaded: %s', e
                     )
+
+    def _restore_if_needed(self, instance, state: dict, is_last_vram: bool) -> None:
+        """Decide whether THIS call owns the end-of-batch KV restore, then perform it.
+
+        Replaces the four inline ``if state['saved'] and instance is not None: _restore_vram_state(...)``
+        sites with one batch-aware dispatcher (single source of truth for the restore decision):
+
+          • instance is None OR not is_last_vram → no-op. A non-last call DEFERS: the last call
+            (or the dispatch-loop safety net) owns the restore, so the model stays unloaded across the
+            batch and only one swap-in happens.
+          • state['saved'] and state['held'] → this call did its own save/unload (single call, or first==last).
+            Restore via the held endpoint we recorded — byte-identical to today.
+          • otherwise, but the instance still has a pending _state_label → batch path: a PRIOR call in this
+            batch did the save and this (last) call skipped its own prologue. Restore via that stable label.
+
+        The label path is safe because nothing inside a pure media_gen batch consumes _state_label (no LLM
+        generation, no system agent runs between the calls), and restore_held_slot_state clears it on success,
+        so a successful restore never leaks a pending label.
+        """
+        if instance is None or not is_last_vram:
+            return
+        if state['saved'] and state['held']:
+            self._restore_vram_state(instance, state['held'])
+        elif getattr(instance, '_state_label', None) is not None:
+            self._restore_vram_from_label(instance)
+
+    def _restore_vram_from_label(self, instance) -> None:
+        """Restore KV via the instance's pending _state_label (set by a prior save in the batch).
+
+        The batch-last call skipped its own save/unload prologue, so it has no ``held`` endpoint dict — but the
+        first call's save wrote a state file under the stable instance-name label and armed ``_state_label``.
+        Routes through the same pool-aware seam as _restore_vram_state (held endpoint resolved live, stable
+        label), just without a held dict. No pool → nothing to do (direct/test use has no live endpoint).
+        """
+        if instance is None or getattr(instance, '_state_label', None) is None:
+            return
+        logger.info('[MediaGen] VRAM restore: batch restore via state label for %s', instance.instance_name)
+        self._restore_via_held_endpoint(instance)
 
     # ── The single choke point ────────────────────────────────────────────────
 
@@ -361,6 +411,11 @@ class MediaGen(BaseTool):
         )
 
         instance = self._get_instance(kwargs)
+        # Parallel-media_gen batch flags (threaded per-call by the dispatch loop, single source of truth
+        # there — never recomputed here). Defaults True so a single call is byte-identical to today: only the
+        # FIRST call of a batch does the save/unload prologue, only the LAST does the restore.
+        is_first_vram = kwargs.get('is_first_vram', True)
+        is_last_vram = kwargs.get('is_last_vram', True)
         state = {'saved': False, 'held': None}
 
         # ── PRE-VRAM: everything that can fail cheaply (V1) ──
@@ -376,23 +431,30 @@ class MediaGen(BaseTool):
         try:
             # Per-backend opt-out (default True = today's behaviour): when a backend's
             # block sets release_model_around_call=false, zero save/unload/restore calls.
-            self._vram_release(
-                instance, state,
-                release=resolve_release_model_around_call(req.config, req.backend_id),
-            )  # save → unload (INSIDE try, deliberately — V2)
+            # Batch deferral: a non-first call in a media_gen batch skips this prologue entirely. The
+            # deferral is keyed to BATCH POSITION (is_first_vram), NOT to the per-backend release flag —
+            # so within one batch only the first call's release decision governs the save/unload. Accepted
+            # trade-off: if the FIRST call fails in the PRE-VRAM block above (backend resolve / preflight),
+            # it returns before arming any save or _state_label, and every later call (is_first_vram=False)
+            # also skips the prologue — so the whole batch generates with the model resident (no VRAM freed).
+            # This is accepted: it is rare (only a first-call preflight failure), self-heals, and has no
+            # correctness impact — the safety net / label restore paths are simply never armed, so nothing leaks.)
+            if is_first_vram:
+                self._vram_release(
+                    instance, state,
+                    release=resolve_release_model_around_call(req.config, req.backend_id),
+                )  # save → unload (INSIDE try, deliberately — V2)
 
             # Time only the actual generation call (not the VRAM dance) — V7.
             _gen_start = time.monotonic()
             result = backend.run(req)
             _gen_elapsed = time.monotonic() - _gen_start
         except (RuntimeError, TimeoutError) as e:
-            if state['saved'] and instance is not None:
-                self._restore_vram_state(instance, state['held'])
+            self._restore_if_needed(instance, state, is_last_vram)
             return [ContentItem(text=f"ERROR: Media generation failed: {e}")]
         except Exception as e:
             logger.exception('Unexpected error during media generation')
-            if state['saved'] and instance is not None:
-                self._restore_vram_state(instance, state['held'])
+            self._restore_if_needed(instance, state, is_last_vram)
             return [ContentItem(text=f"ERROR: Unexpected media generation error: {e}")]
         finally:
             # V8: unlink the temp output file on EVERY path, including the pre-run
@@ -413,14 +475,12 @@ class MediaGen(BaseTool):
             )
         except Exception as e:
             logger.exception('Failed to save generated media')
-            if state['saved'] and instance is not None:
-                self._restore_vram_state(instance, state['held'])
+            self._restore_if_needed(instance, state, is_last_vram)
             return [ContentItem(text=f"ERROR: Failed to save generated media: {e}")]
 
         # Primary restore now that all LLM-side work is done (V4/V5: not in finally,
         # no eager captioning ahead of it, so this is the actual state-restore).
-        if state['saved'] and instance is not None:
-            self._restore_vram_state(instance, state['held'])
+        self._restore_if_needed(instance, state, is_last_vram)
 
         feedback = self._build_feedback(req.media_type, media_path, backend.id, req.prepared, _gen_elapsed)
         return [self._typed_content_item(req.media_type, media_path),
