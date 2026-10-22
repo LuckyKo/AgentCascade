@@ -97,6 +97,7 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     approvalTimeoutSeconds: null,
     approvalTimeoutEnabled: null,
     settingAsyncShellConsoleWindow: null,
+    settingImageCaptionMode: null,
     workAccessFoldersRO: null,
     workAccessFoldersRW: null,
     defaultWorkspace: null,
