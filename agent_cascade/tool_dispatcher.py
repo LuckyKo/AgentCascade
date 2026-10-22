@@ -153,7 +153,9 @@ class ToolDispatcher:
                      tool_name: str,
                      tool_args: Any,
                      llm_messages: List[Any],
-                     function_id: Optional[str] = None) -> str:
+                     function_id: Optional[str] = None,
+                     is_first_ca: bool = True,
+                     is_last_ca: bool = True) -> str:
         """Execute a tool by name.
 
         Extracted from ExecutionEngine._execute_tool() - Phase 4.3
@@ -178,7 +180,8 @@ class ToolDispatcher:
             resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
             if resolved is None:
                 logger.warning('_resolve_placeholders returned None for %s', instance.instance_name)
-            result = self.handle_call_agent(resolved, llm_messages, instance, function_id=function_id)
+            result = self.handle_call_agent(resolved, llm_messages, instance, function_id=function_id,
+                                            is_first_ca=is_first_ca, is_last_ca=is_last_ca)
             logger.debug('handle_call_agent returned type=%s', type(result).__name__)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
@@ -248,7 +251,9 @@ class ToolDispatcher:
                           args: Any,
                           messages: List[Any],
                           instance: 'AgentInstance',
-                          function_id: Optional[str] = None) -> str:
+                          function_id: Optional[str] = None,
+                          is_first_ca: bool = True,
+                          is_last_ca: bool = True) -> str:
         """Handle call_agent tool call.
 
         Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
@@ -388,10 +393,18 @@ class ToolDispatcher:
         # NOTE: NOT gated by the State KV Save/Restore toggle — that toggle only
         # controls system-agent yield sites (Security Guard / Compressor). Normal
         # agent save/restore always runs.
-        try:
-            self._save_parent_state_before_delegation(instance)
-        except Exception:
-            pass
+        #
+        # Parallel-call_agent batch optimization (plan §10.2): when a parent issues several
+        # call_agent calls in ONE turn, its context is identical across them, so only the FIRST
+        # needs to arm the parent save. Non-first children skip it — the stable label (instance_name)
+        # from the first save is still pending and still correct, and re-saving a model the previous
+        # child evicted would be a wasted multi-GB POST. is_first_ca/is_last_ca are computed ONCE by the
+        # dispatch loop (single source of truth) and threaded per-call, never recomputed here.
+        if is_first_ca:
+            try:
+                self._save_parent_state_before_delegation(instance)
+            except Exception:
+                pass
 
         # ── Slot Collision Detection (Target Architecture) ────────────────
         # Determine whether A calling B requires sync or async execution based on
@@ -461,7 +474,8 @@ class ToolDispatcher:
             caller_holds_slot = True
 
         if caller_holds_slot:
-            return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
+            return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth,
+                                        is_last_ca=is_last_ca)
         else:
             return self._run_child_async(caller_name, function_id, agent_class, instance_name, args, child_depth)
 
@@ -581,7 +595,7 @@ class ToolDispatcher:
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
 
     def _run_child_sync(self, agent_class: str, instance_name: str, args: Any, caller_slot_holder: 'AgentInstance',
-                        caller_name: str, child_depth: int) -> str:
+                        caller_name: str, child_depth: int, is_last_ca: bool = True) -> str:
         """Run child agent synchronously (caller holds slot).
 
         Thin wrapper around child_runner.run_child_core() that handles
@@ -671,8 +685,22 @@ class ToolDispatcher:
             # State KV Save/Restore UI toggle — that toggle only gates Security/Compressor yields.
             # The save side (_save_parent_state_before_delegation) is already ungated, so gating
             # only this restore would drop a saved-but-never-restored state and force reprocess.
-            self.engine.reacquire_after_slot_yield(
-                caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False)
+            #
+            # Parallel-call_agent batch optimization (plan §10.3): only the LAST child of a SYNC batch
+            # needs to swap the parent model back in. A non-last child re-acquires its slot (keeping the
+            # FIFO permit accounting and the next child's _slot_release gate intact) but DEFERS the KV
+            # restore via defer_kv_restore=True, leaving _state_label pending so the last child's full
+            # restore consumes it (and a mid-batch early exit self-heals at the next _setup_turn). is_last_ca
+            # is decided by BATCH POSITION (computed once by the dispatch loop), NOT by which child actually
+            # ran — so a terminated non-last child does not change the determination, and a terminated last
+            # child still runs its full restore in this finally.
+            if is_last_ca:
+                self.engine.reacquire_after_slot_yield(
+                    caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False)
+            else:
+                self.engine.reacquire_after_slot_yield(
+                    caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False,
+                    defer_kv_restore=True)
             logger.debug(f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{caller_name}'. "
                          f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
 

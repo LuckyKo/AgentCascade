@@ -970,10 +970,12 @@ class _FakeEngine:
         #   _clear_orphaned_state_label  (@staticmethod — stored directly, called with no self)
         #   _restore_held_slot_state / _resolve_held_endpoint (instance methods → real unbound form)
         self.reacquire_after_slot_yield = \
-            lambda instance, inst_name, context='', *, tolerate_failure=False, respect_toggle=True: \
+            lambda instance, inst_name, context='', *, tolerate_failure=False, respect_toggle=True, \
+                skip_kv_restore=False, defer_kv_restore=False: \
             ExecutionEngine.reacquire_after_slot_yield(
                 self, instance, inst_name, context, tolerate_failure=tolerate_failure,
-                respect_toggle=respect_toggle)
+                respect_toggle=respect_toggle, skip_kv_restore=skip_kv_restore,
+                defer_kv_restore=defer_kv_restore)
         self._clear_orphaned_state_label = ExecutionEngine._clear_orphaned_state_label
         self._restore_held_slot_state = lambda instance, inst_name: \
             ExecutionEngine._restore_held_slot_state(self, instance, inst_name)

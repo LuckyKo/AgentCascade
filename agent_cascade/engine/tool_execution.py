@@ -75,274 +75,341 @@ class ToolExecMixin:
 
             _primary_function_map = getattr(_primary_template, 'function_map', {})
 
-        for out in turn_output:
-            use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-            if not use_tool:
-                continue
+        # ── Parallel-call_agent batch detection (single source of truth) ───────
+        # A parent may issue several call_agent tool calls in ONE turn_output. Their parent context
+        # is identical across the batch (no LLM generation between tool calls), so only the FIRST
+        # needs to arm the parent save and only the LAST needs to swap the parent model back in.
+        # turn_output is the complete, ordered tool-call list for this turn, already in memory, so the
+        # batch structure is known STATICALLY — no runtime in-flight counter. Use the SAME _detect_tool
+        # the loop uses so the detector cannot diverge from what actually runs. is_first_ca/is_last_ca
+        # are threaded per-call (never shared instance state) so nested/parallel agents stay correct.
+        ca_indices = []
+        for _idx, _out in enumerate(turn_output):
+            _use, _name, _, _ = self._detect_tool(_out)
+            if _use and _name == 'call_agent':
+                ca_indices.append(_idx)
 
-            # Cooperatively wait if paused — don't skip tool execution, just wait
-            while self.pool.is_paused():
+        # Whether any call_agent actually ran in this batch — gates the safety net below so it never
+        # fires for a batch that contained no call_agent (nothing was ever deferred).
+        ran_ca = False
+        # Control-flow marker (NOT a deferral flag): did the loop reach and process the batch's LAST
+        # call_agent? If it did, the correct end-of-batch handling already happened (a SYNC last child ran
+        # its full restore; an ASYNC last child intentionally leaves the label to self-heal at the next
+        # _setup_turn). The safety net must therefore fire ONLY when this stayed False — i.e. the loop exited
+        # early (terminal-stop break / AgentTerminatedError raise) before the last call_agent.
+        reached_last_ca = False
+
+        # The whole loop is wrapped in try/finally so the deferred restore is guaranteed to run on
+        # EVERY exit path — including the terminal-stop break and the AgentTerminatedError raise, both
+        # of which bypass the orphan-handling block that follows the loop.
+        try:
+            for _out_idx, out in enumerate(turn_output):
+                use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                if not use_tool:
+                    continue
+
+                # Cooperatively wait if paused — don't skip tool execution, just wait
+                while self.pool.is_paused():
+                    if self._is_terminal_stop(inst_name):
+                        break  # Terminal stop — exit pause-wait, will break at next _is_stopped check
+                    self.pool.wait_if_paused(timeout=1.0)
+
+                # Stop/halt check BEFORE tool execution (check before setting
+                # used_any_tool)
                 if self._is_terminal_stop(inst_name):
-                    break  # Terminal stop — exit pause-wait, will break at next _is_stopped check
-                self.pool.wait_if_paused(timeout=1.0)
+                    break
+                elif self._is_suspended_by_compression(inst_name):
+                    # Compression-halt is a suspension, not termination — wait, then retry this tool.
+                    logger.debug('tool exec suspended by compression - %s', inst_name)
+                    if not self._wait_for_compression_to_clear(inst_name):
+                        break  # Terminal stop during wait
+                    continue  # Resumed, re-enter tool dispatch loop with current tool
 
-            # Stop/halt check BEFORE tool execution (check before setting
-            # used_any_tool)
-            if self._is_terminal_stop(inst_name):
-                break
-            elif self._is_suspended_by_compression(inst_name):
-                # Compression-halt is a suspension, not termination — wait, then retry this tool.
-                logger.debug('tool exec suspended by compression - %s', inst_name)
-                if not self._wait_for_compression_to_clear(inst_name):
-                    break  # Terminal stop during wait
-                continue  # Resumed, re-enter tool dispatch loop with current tool
+                # Additional check: raise AgentTerminatedError if this instance was terminated.
+                # This allows sync children to propagate the signal up to their parent rather
+                # than completing long-running tools after termination.
+                inst = self.pool.get_instance(inst_name)
+                if inst and inst.is_terminated:
+                    raise AgentTerminatedError(inst_name)
 
-            # Additional check: raise AgentTerminatedError if this instance was terminated.
-            # This allows sync children to propagate the signal up to their parent rather
-            # than completing long-running tools after termination.
-            inst = self.pool.get_instance(inst_name)
-            if inst and inst.is_terminated:
-                raise AgentTerminatedError(inst_name)
+                # ── Disabled/Inexistent Tool Auto-Deny
+                # ────────────────────────────
+                # Defense-in-depth: check if tool is disabled BEFORE execution.
+                # Disabled tools are still in function_map (only filtered from
+                # active functions sent to LLM).
+                # If an agent generates a call for a disabled tool, it gets
+                # auto-denied here.
+                if _primary_template and (tool_name in _primary_disabled_tools or tool_name not in _primary_function_map):
+                    # Determine deny reason with same logic as legacy
+                    # implementation
+                    if tool_name in _primary_disabled_tools and tool_name not in _primary_function_map:
+                        deny_reason = 'disabled and does not exist'
+                    elif tool_name in _primary_disabled_tools:
+                        deny_reason = 'disabled'
+                    else:
+                        deny_reason = 'does not exist'
 
-            # ── Disabled/Inexistent Tool Auto-Deny
-            # ────────────────────────────
-            # Defense-in-depth: check if tool is disabled BEFORE execution.
-            # Disabled tools are still in function_map (only filtered from
-            # active functions sent to LLM).
-            # If an agent generates a call for a disabled tool, it gets
-            # auto-denied here.
-            if _primary_template and (tool_name in _primary_disabled_tools or tool_name not in _primary_function_map):
-                # Determine deny reason with same logic as legacy
-                # implementation
-                if tool_name in _primary_disabled_tools and tool_name not in _primary_function_map:
-                    deny_reason = 'disabled and does not exist'
-                elif tool_name in _primary_disabled_tools:
-                    deny_reason = 'disabled'
-                else:
-                    deny_reason = 'does not exist'
+                    logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+                    tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
 
-                logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
-                tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                    # Extract function_id from the assistant message that had the
+                    # tool call
+                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                    function_id = extra_data.get('function_id')
 
-                # Extract function_id from the assistant message that had the
-                # tool call
-                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                function_id = extra_data.get('function_id')
+                    # Telemetry: record tool call start and end for auto-denied
+                    # tools
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_tool_call_start(inst_name, tool_name)
+                            tel.record_tool_call_end(
+                                inst_name,
+                                tool_name,
+                                success=False,
+                                result_chars=len(tool_result),
+                                truncated=False,
+                                error=f"Tool {deny_reason}",
+                                is_call_agent=(tool_name == 'call_agent'),
+                            )
+                        except Exception:
+                            pass
 
-                # Telemetry: record tool call start and end for auto-denied
-                # tools
+                    # Build function result message with denial — include
+                    # function_id per OpenAI spec
+                    fn_msg = Message(
+                        role=FUNCTION,
+                        name=tool_name,
+                        content=tool_result,
+                        extra={
+                            'function_id': function_id or '1',
+                            'tool_success': False,
+                        },
+                    )
+                    self._append_and_log(instance, fn_msg)
+                    response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
+
+                    # Track as executed for orphan handling (it was processed, just
+                    # denied)
+                    executed_tools.append(tool_name)
+
+                    used_any_tool = True
+                    continue  # Skip actual tool execution
+
+                used_any_tool = True
+
+                # Track tool success/failure — needed for function_id matching and
+                # frontend isToolFailure()
+                _tool_success = True
+                _tool_error = ''
+
+                # Telemetry: record tool call start (non-blocking)
                 if (tel := self._telemetry()) is not None:
                     try:
                         tel.record_tool_call_start(inst_name, tool_name)
-                        tel.record_tool_call_end(
-                            inst_name,
-                            tool_name,
-                            success=False,
-                            result_chars=len(tool_result),
-                            truncated=False,
-                            error=f"Tool {deny_reason}",
-                            is_call_agent=(tool_name == 'call_agent'),
-                        )
                     except Exception:
                         pass
 
-                # Build function result message with denial — include
-                # function_id per OpenAI spec
+                # Extract function_id from the assistant message that had the tool
+                # call BEFORE executing
+                # This is critical — without it, the LLM API can't match tool
+                # results to tool calls
+                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                function_id = extra_data.get('function_id')
+
+                try:
+                    # Set current instance name in thread-local for _resolve_path
+                    # warnings
+                    set_current_instance_name(inst_name)
+
+                    try:
+                        # Phase 4.3: Delegate to ToolDispatcher
+                        # Parallel-call_agent batch flags: for a call_agent, derive its batch position from
+                        # the pre-scanned ca_indices (single source of truth — never recomputed elsewhere).
+                        # A single call_agent → both True → byte-identical to today. Non-call_agent tools get
+                        # the safe defaults (True/True) so their behavior is unchanged.
+                        if tool_name == 'call_agent':
+                            ran_ca = True
+                            is_first_ca = (_out_idx == ca_indices[0])
+                            is_last_ca = (_out_idx == ca_indices[-1])
+                            if is_last_ca:
+                                reached_last_ca = True
+                        else:
+                            is_first_ca = is_last_ca = True
+                        tool_result = self.tool_dispatcher.execute_tool(instance,
+                                                                        tool_name,
+                                                                        tool_args,
+                                                                        llm_messages,
+                                                                        function_id=function_id,
+                                                                        is_first_ca=is_first_ca,
+                                                                        is_last_ca=is_last_ca)
+                    except AgentTerminatedError:
+                        # Clean abort from stop-check during tool execution — re-raise for caller
+                        raise
+                    except Exception as e:
+                        # R3: present dispatcher/plumbing crashes with the SAME shape as a tool crash
+                        # (agent.py:_call_tool) — one compact root-cause line at ERROR, full traceback
+                        # demoted to DEBUG and deduped per (root type+msg). The LLM-facing result stays
+                        # compact (no multi-frame stack) for consistency with the tool-crash path.
+                        summary = format_crash(e)
+                        logger.error(f"Tool {tool_name} failed for {inst_name}: {summary}")
+                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                            logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
+                                         f"{traceback.format_exc()}")
+                        tool_result = f"Error: {summary}"
+                        _tool_success = False
+                        _tool_error = str(e)
+                    # Cache full output (if exceeds threshold)
+                    if isinstance(tool_result, str):
+                        self._cache_tool_output(inst_name,
+                                                tool_name,
+                                                tool_result,
+                                                threshold=self.pool.settings.cache_threshold_chars)
+
+                    # ── Post-execution success detection
+                    # ────────────────────────────────
+                    # Many tools return an error message as a string instead of
+                    # raising an exception.
+                    # NOTE: This uses first-line heuristics — false positives are
+                    # possible for tools
+                    # that return structured error-like output. Only affects
+                    # telemetry metrics and
+                    # frontend tool status display, not execution flow.
+                    if _tool_success and isinstance(tool_result, str):
+                        first_line = ''
+                        for line in tool_result.split('\n'):
+                            stripped = line.strip()
+                            if stripped:
+                                first_line = stripped.lower()
+                                break
+                        error_indicators = [
+                            'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:', 'permission denied:',
+                            'an error occurred', 'does not exist'
+                        ]
+                        if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
+                            _tool_success = False
+                            _tool_error = tool_result[:500]
+
+                finally:
+                    # Telemetry: record tool call end (non-blocking, always called)
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_tool_call_end(
+                                inst_name,
+                                tool_name,
+                                success=_tool_success,
+                                result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
+                                error=_tool_error,
+                                is_call_agent=(tool_name == 'call_agent'),
+                            )
+                        except Exception:
+                            pass
+
+                    # Assemble final tool result with consistent layout of warnings,
+                    # output, and truncation (always runs even on exceptions).
+                    # Only assemble when tool_result is defined to avoid errors from
+                    # early failures.
+                    if self.compression_handler:
+                        try:
+                            # Determine truncation params from config.
+                            # char_threshold: when to trigger (Wild Read Threshold)
+                            # char_limit: how much to keep after triggering (Wild Read Truncation)
+                            _llm_cfg = self.pool.llm_cfg or {}
+                            char_threshold = _llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
+                            char_limit = _llm_cfg.get('wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS)
+
+                            # Get base_dir from operation_manager for spillover path resolution
+                            om = getattr(self.pool, 'operation_manager', None)
+                            base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
+
+                            # Use agent-specific endpoint config for vision capability check.
+                            # self.pool.llm_cfg lacks model_type, causing ContentItem lists
+                            # to be stringified instead of properly rendered as images.
+                            if self.pool.api_router:
+                                agent_llm_cfg = self.pool.api_router.get_llm_config(instance.agent_class)
+                            else:
+                                agent_llm_cfg = self.pool.llm_cfg or {}
+
+                            tool_result = self.compression_handler._assemble_tool_result(
+                                instance,
+                                tool_result,
+                                char_limit=char_limit,
+                                instance_name=inst_name,
+                                tool_name=tool_name,
+                                base_dir=base_dir,
+                                llm_cfg=agent_llm_cfg,
+                                char_threshold=char_threshold,
+                            )
+                        except Exception as e:
+                            # Log the failure (was previously silent), then fall back
+                            # to a thin drain chain that still ensures warnings and
+                            # notifications are delivered.
+                            logger.error(f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}")
+                            try:
+                                tool_result = self.compression_handler._legacy_drain_tool_result(instance, tool_result)
+                            except Exception as drain_err:
+                                logger.error(f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}")
+                                # Ensure we have something non-None to return
+                                if not isinstance(tool_result, str):
+                                    tool_result = str(tool_result) if tool_result is not None else ''
+
+                    # Clear thread-local instance name after draining to prevent
+                    # stale references across concurrent calls
+                    clear_current_instance_name()
+
+                # Track compress_context execution and record telemetry
+                if tool_name == 'compress_context':
+                    inst = self.pool.get_instance(inst_name)
+                    if inst:
+                        self._rebuild_working_set(messages, llm_messages, inst_name)
+                    # Item 10: Validate message pool after agent-triggered
+                    # compression
+                    conv = self.pool.get_conversation(inst_name)
+                    if conv and not validate_message_pool(conv, inst_name):
+                        logger.error(
+                            f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
+
+                    # Build function result message — include function_id and
+                    # tool_success per OpenAI spec
+                # function_id was extracted BEFORE _execute_tool call above
                 fn_msg = Message(
                     role=FUNCTION,
                     name=tool_name,
                     content=tool_result,
                     extra={
                         'function_id': function_id or '1',
-                        'tool_success': False,
+                        'tool_success': _tool_success,
                     },
                 )
                 self._append_and_log(instance, fn_msg)
-                response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
+                response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
 
-                # Track as executed for orphan handling (it was processed, just
-                # denied)
+                # Track executed tool for orphan handling
                 executed_tools.append(tool_name)
 
-                used_any_tool = True
-                continue  # Skip actual tool execution
-
-            used_any_tool = True
-
-            # Track tool success/failure — needed for function_id matching and
-            # frontend isToolFailure()
-            _tool_success = True
-            _tool_error = ''
-
-            # Telemetry: record tool call start (non-blocking)
-            if (tel := self._telemetry()) is not None:
-                try:
-                    tel.record_tool_call_start(inst_name, tool_name)
-                except Exception:
-                    pass
-
-            # Extract function_id from the assistant message that had the tool
-            # call BEFORE executing
-            # This is critical — without it, the LLM API can't match tool
-            # results to tool calls
-            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-            function_id = extra_data.get('function_id')
-
-            try:
-                # Set current instance name in thread-local for _resolve_path
-                # warnings
-                set_current_instance_name(inst_name)
-
-                try:
-                    # Phase 4.3: Delegate to ToolDispatcher
-                    tool_result = self.tool_dispatcher.execute_tool(instance,
-                                                                    tool_name,
-                                                                    tool_args,
-                                                                    llm_messages,
-                                                                    function_id=function_id)
-                except AgentTerminatedError:
-                    # Clean abort from stop-check during tool execution — re-raise for caller
-                    raise
-                except Exception as e:
-                    # R3: present dispatcher/plumbing crashes with the SAME shape as a tool crash
-                    # (agent.py:_call_tool) — one compact root-cause line at ERROR, full traceback
-                    # demoted to DEBUG and deduped per (root type+msg). The LLM-facing result stays
-                    # compact (no multi-frame stack) for consistency with the tool-crash path.
-                    summary = format_crash(e)
-                    logger.error(f"Tool {tool_name} failed for {inst_name}: {summary}")
-                    if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
-                        logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
-                                     f"{traceback.format_exc()}")
-                    tool_result = f"Error: {summary}"
-                    _tool_success = False
-                    _tool_error = str(e)
-                # Cache full output (if exceeds threshold)
-                if isinstance(tool_result, str):
-                    self._cache_tool_output(inst_name,
-                                            tool_name,
-                                            tool_result,
-                                            threshold=self.pool.settings.cache_threshold_chars)
-
-                # ── Post-execution success detection
-                # ────────────────────────────────
-                # Many tools return an error message as a string instead of
-                # raising an exception.
-                # NOTE: This uses first-line heuristics — false positives are
-                # possible for tools
-                # that return structured error-like output. Only affects
-                # telemetry metrics and
-                # frontend tool status display, not execution flow.
-                if _tool_success and isinstance(tool_result, str):
-                    first_line = ''
-                    for line in tool_result.split('\n'):
-                        stripped = line.strip()
-                        if stripped:
-                            first_line = stripped.lower()
-                            break
-                    error_indicators = [
-                        'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:', 'permission denied:',
-                        'an error occurred', 'does not exist'
-                    ]
-                    if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
-                        _tool_success = False
-                        _tool_error = tool_result[:500]
-
-            finally:
-                # Telemetry: record tool call end (non-blocking, always called)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_tool_call_end(
-                            inst_name,
-                            tool_name,
-                            success=_tool_success,
-                            result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
-                            error=_tool_error,
-                            is_call_agent=(tool_name == 'call_agent'),
-                        )
-                    except Exception:
-                        pass
-
-                # Assemble final tool result with consistent layout of warnings,
-                # output, and truncation (always runs even on exceptions).
-                # Only assemble when tool_result is defined to avoid errors from
-                # early failures.
-                if self.compression_handler:
-                    try:
-                        # Determine truncation params from config.
-                        # char_threshold: when to trigger (Wild Read Threshold)
-                        # char_limit: how much to keep after triggering (Wild Read Truncation)
-                        _llm_cfg = self.pool.llm_cfg or {}
-                        char_threshold = _llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
-                        char_limit = _llm_cfg.get('wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS)
-
-                        # Get base_dir from operation_manager for spillover path resolution
-                        om = getattr(self.pool, 'operation_manager', None)
-                        base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
-
-                        # Use agent-specific endpoint config for vision capability check.
-                        # self.pool.llm_cfg lacks model_type, causing ContentItem lists
-                        # to be stringified instead of properly rendered as images.
-                        if self.pool.api_router:
-                            agent_llm_cfg = self.pool.api_router.get_llm_config(instance.agent_class)
-                        else:
-                            agent_llm_cfg = self.pool.llm_cfg or {}
-
-                        tool_result = self.compression_handler._assemble_tool_result(
-                            instance,
-                            tool_result,
-                            char_limit=char_limit,
-                            instance_name=inst_name,
-                            tool_name=tool_name,
-                            base_dir=base_dir,
-                            llm_cfg=agent_llm_cfg,
-                            char_threshold=char_threshold,
-                        )
-                    except Exception as e:
-                        # Log the failure (was previously silent), then fall back
-                        # to a thin drain chain that still ensures warnings and
-                        # notifications are delivered.
-                        logger.error(f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}")
-                        try:
-                            tool_result = self.compression_handler._legacy_drain_tool_result(instance, tool_result)
-                        except Exception as drain_err:
-                            logger.error(f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}")
-                            # Ensure we have something non-None to return
-                            if not isinstance(tool_result, str):
-                                tool_result = str(tool_result) if tool_result is not None else ''
-
-                # Clear thread-local instance name after draining to prevent
-                # stale references across concurrent calls
-                clear_current_instance_name()
-
-            # Track compress_context execution and record telemetry
-            if tool_name == 'compress_context':
-                inst = self.pool.get_instance(inst_name)
-                if inst:
-                    self._rebuild_working_set(messages, llm_messages, inst_name)
-                # Item 10: Validate message pool after agent-triggered
-                # compression
-                conv = self.pool.get_conversation(inst_name)
-                if conv and not validate_message_pool(conv, inst_name):
-                    logger.error(
-                        f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
-
-                # Build function result message — include function_id and
-                # tool_success per OpenAI spec
-            # function_id was extracted BEFORE _execute_tool call above
-            fn_msg = Message(
-                role=FUNCTION,
-                name=tool_name,
-                content=tool_result,
-                extra={
-                    'function_id': function_id or '1',
-                    'tool_success': _tool_success,
-                },
-            )
-            self._append_and_log(instance, fn_msg)
-            response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
-
-            # Track executed tool for orphan handling
-            executed_tools.append(tool_name)
+        finally:
+            # Safety net (plan §10.4): guarantee a still-pending deferred parent restore is NOT LOST when the
+            # batch loop exits BEFORE processing the last call_agent — the terminal-stop break, the
+            # compression-wait break, and the AgentTerminatedError raise, all of which bypass the
+            # orphan-handling block below. Two conditions, both required:
+            #   • reached_last_ca is False — the loop exited BEFORE processing the batch's last call_agent.
+            #     If it DID reach it, the correct end-of-batch handling already ran (a SYNC last child did its
+            #     full restore; an ASYNC last child intentionally leaves the label to self-heal at the next
+            #     _setup_turn — forcing a restore here would be the wasted swap-in §10.5 rules out).
+            #   • a still-pending _state_label — the detector for "no full restore has run yet". On the
+            #     normal SYNC path the last child's restore already cleared it, so this no-ops.
+            # tolerate_failure=True swallows a SlotCancelled/TimeoutError so a clean stop is not corrupted by a
+            # raise from finally; respect_toggle=False matches the sync-child finally (the toggle branch would
+            # clear the label and skip the restore). The forced call hits reacquire_for's already-held fast-path,
+            # so it cannot double-acquire.
+            if ran_ca and not reached_last_ca:
+                parent_inst = self.pool.get_instance(inst_name) or instance
+                if parent_inst is not None and getattr(parent_inst, '_state_label', None) is not None:
+                    logger.debug(
+                        f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last call_agent; "
+                        f"forcing the deferred parent restore")
+                    self.reacquire_after_slot_yield(
+                        parent_inst, inst_name, 'parallel-call-agent safety net', tolerate_failure=True,
+                        respect_toggle=False)
 
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────

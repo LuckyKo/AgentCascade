@@ -2117,11 +2117,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
     def reacquire_after_slot_yield(self, instance: AgentInstance, inst_name: str, context: str = '',
                                    *, tolerate_failure: bool = False, respect_toggle: bool = True,
-                                   skip_kv_restore: bool = False) -> bool:
-        """Re-acquire the caller's slot after a system-agent yield and restore its KV.
+                                   skip_kv_restore: bool = False, defer_kv_restore: bool = False) -> bool:
+        """Re-acquire the caller's slot after a yield and (normally) restore its KV.
 
         Shared re-acquire + restore for every ``yield_caller_slot`` production caller
-        (Security / Compressor / sync child). Wraps :meth:`reacquire_for` (bounded FIFO,
+        (Security / Compressor / sync child / parallel call_agent batch). Wraps
+        :meth:`reacquire_for` (bounded FIFO,
         no-slot handling) and then restores the saved KV — but ONLY when both safety gates
         hold:
 
@@ -2135,9 +2136,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         ACTUALLY holds, not the stale ``_last_endpoint_config`` — this also fixes the sync-child
         path that previously restored ungated against the stale config.
 
-        The orphaned label is cleared on EVERY skip path (re-acquire returned False, no slot
+        The orphaned label is cleared on every skip path (re-acquire returned False, no slot
         held, resolution failure, or an exception) so a leaked label can never re-fire a
-        multi-GB restore on later turns.
+        multi-GB restore on later turns — EXCEPT a deferring caller (``defer_kv_restore=True``),
+        which intentionally keeps the label pending for the last child / next-turn self-heal
+        (see the ``defer_kv_restore`` arg below).
 
         Args:
             instance / inst_name: The caller that yielded its slot.
@@ -2157,6 +2160,18 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 the command window and race that unload (the autoloader would cold-reload the model
                 mid-command). The pending label is still cleared, per the invariant that every skip
                 path must clear it. Default False — every existing caller is unchanged.
+            defer_kv_restore: When True, re-acquire the slot but DEFER the KV restore WITHOUT clearing
+                the pending ``_state_label``. Used by the parallel-``call_agent`` batch optimization: a
+                parent that issues several SYNC ``call_agent`` calls in one turn has an identical context
+                across them, so only the LAST child needs to swap the parent model back in. Non-last children
+                re-acquire their slot (keeping the FIFO permit accounting and the next child's
+                ``_slot_release`` gate intact) but leave the label PENDING so the last child's full restore
+                still finds it — and so a mid-batch early exit self-heals at the next turn's ``_setup_turn``.
+                This is the DEFER counterpart to ``skip_kv_restore`` (which CLEARS the label because its owner
+                re-arms the restore by a stable label); the two are opposite marker policies and MUST NOT be
+                conflated. The defer short-circuit returns BEFORE the no-slot / skip_kv_restore / toggle /
+                restore branches, so the label is never cleared on any defer path — which is what makes the
+                deferral safe under early batch exits. Default False — every existing caller is unchanged.
 
         Returns:
             True if the slot was re-acquired (restored or not), else False.
@@ -2165,8 +2180,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             ok = self.reacquire_for(instance, inst_name, context=context)
         except Exception as e:
             # Clear any pending label so it does not leak and re-fire a restore later,
-            # then honor the caller's failure policy.
-            self._clear_orphaned_state_label(instance, inst_name)
+            # then honor the caller's failure policy. A DEFERRING caller (parallel call_agent non-last)
+            # must KEEP its label pending for the last child / next-turn self-heal, so it is not cleared here.
+            if not defer_kv_restore:
+                self._clear_orphaned_state_label(instance, inst_name)
             if tolerate_failure:
                 logger.warning(
                     f"[SLOT_REACQUIRE_DEGRADED] {context or 'slot-yield'} for '{inst_name}' "
@@ -2178,13 +2195,26 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
         if not ok:
             # reacquire_for returned False (no router available) — no slot held.
-            self._clear_orphaned_state_label(instance, inst_name)
+            if not defer_kv_restore:
+                self._clear_orphaned_state_label(instance, inst_name)
             return False
 
         # DMS post-return re-stamp (t293-followup): the caller was silent through a long sync child /
         # system-agent yield, so last_activity is stale on return — re-stamp. A genuinely wedged caller
         # never reaches here (reacquire_for would not return True), so this cannot mask a real wedge.
         self.pool._mark_activity(inst_name)
+
+        if defer_kv_restore:
+            # Parallel-call_agent deferral: the slot is re-acquired (FIFO permit accounting and the next
+            # child's _slot_release gate stay intact), but the KV restore is deferred to the LAST child of
+            # the batch. The _state_label MUST stay pending — the last child's full restore consumes it, and
+            # if the batch exits early the next-turn _setup_turn restore still finds it. Short-circuiting here
+            # deliberately bypasses the toggle / no-slot / skip_kv_restore / restore branches so the label is
+            # preserved on EVERY path (the opposite of skip_kv_restore, which clears it). See
+            # [[defer-per-item-op-to-last-of-static-batch]].
+            logger.debug('[STATE_RESTORE_DEFER] %s — deferring KV restore to the last call_agent in the batch; '
+                         'keeping _state_label pending (%s)', inst_name, context or 'slot-yield')
+            return True
 
         # The sync-child NORMAL-delegation path passes respect_toggle=False so its warm-cache
         # restore always runs (its save side is already ungated). System-agent yields keep the
