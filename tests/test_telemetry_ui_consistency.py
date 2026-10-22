@@ -34,6 +34,14 @@ def test_config_table_shows_llm_time_and_turn_time():
     assert 'r.llm_time_sec' in js
 
 
+def test_config_label_does_not_advertise_sampling():
+    """The fingerprint is model-only, so the row label must not show a T= value
+    that only describes the first-seen turn (BUG_0131)."""
+    js = _APP_JS.read_text(encoding='utf-8')
+    assert 'T=${desc.temperature' not in js
+    assert 'T=${desc.temperature ??' not in js
+
+
 def test_wallclock_card_is_labelled_llm_plus_tool():
     html = _INDEX_HTML.read_text(encoding='utf-8')
     assert 'Wallclock Time' not in html

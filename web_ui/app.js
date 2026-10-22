@@ -6311,8 +6311,11 @@ function updateTelemetryConfigTable(configs) {
   configTbody.innerHTML = configs.map(c => {
     const desc = c.config_description || {};
     const safeModel = desc.model ? escapeHtml(desc.model) : '';
+    // The fingerprint groups by MODEL ONLY (sampling params are not part of the
+    // key), so showing a T= value would present a first-seen sample as if it
+    // described the whole row (BUG_0131). Keep the fingerprint in the tooltip.
     const label = desc.model
-      ? `${safeModel} T=${desc.temperature ?? '?'}`
+      ? safeModel
       : c.config_fingerprint.slice(0, 8);
     return `<tr>
       <td title="${escapeHtml(c.config_fingerprint)}"><span class="telem-config-tag">${label}</span></td>

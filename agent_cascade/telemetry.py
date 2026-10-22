@@ -173,7 +173,12 @@ class TelemetryCollector:
         tools: Optional[List[str]] = None,
         api_base: str = '',
     ) -> Dict:
-        """Return a human-readable config description for display."""
+        """Return a human-readable snapshot of the config at first sight.
+
+        The fingerprint is model-only (see ``fingerprint_config``), so this
+        description is a sample of the first turn that used the model, not a
+        property of the whole row (BUG_0131).
+        """
         cfg = generate_cfg or {}
         return {
             'model': model,
@@ -193,7 +198,13 @@ class TelemetryCollector:
     # ── Helper: per-config stats initialization ───────────────────────
 
     def _ensure_config_stats(self, fingerprint: str, config_description: Optional[Dict] = None):
-        """Ensure per-config stats dict exists for *fingerprint*, creating it if needed."""
+        """Ensure per-config stats dict exists for *fingerprint*, creating it if needed.
+
+        ``config_description`` is captured on first sight and intentionally not
+        refreshed: the fingerprint groups by model only, so sampling/endpoint
+        details are not part of the row identity. Callers must not present this
+        description's sampling values as describing the whole row (BUG_0131).
+        """
         if fingerprint and fingerprint not in self._config_stats:
             self._config_stats[fingerprint] = {
                 'config_description': config_description or {},

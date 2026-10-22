@@ -594,8 +594,8 @@ class TestConfigComparison:
         assert collector.get_config_comparison() == []
 
     def test_row_exposes_total_streaming_time_sec(self, collector):
-        """Guard the frontend "Total Time" column: each A/B row must expose
-        ``total_streaming_time_sec`` (per-endpoint total streaming time)."""
+        """Each A/B row must expose ``total_streaming_time_sec`` (generation-only
+        time), separately from ``total_duration_sec`` / ``total_llm_latency_sec``."""
         fp = 'fp_stream'
         collector.record_turn_start('inst', config_fingerprint=fp)
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
@@ -652,6 +652,25 @@ class TestFingerprintModelOnly:
         with_prompt = TelemetryCollector.fingerprint_config(model='m', system_prompt='You are Security_op_091f048b.')
         without_prompt = TelemetryCollector.fingerprint_config(model='m')
         assert with_prompt == without_prompt
+
+    def test_same_model_different_temperature_one_row_first_seen_description(self, collector):
+        """Sampling is not part of the grouping key; the description is a first-seen
+        snapshot, not a row-wide property (BUG_0131)."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start(
+            'inst', config_fingerprint=fp,
+            config_description={'model': 'm', 'temperature': 0.1})
+        collector.record_turn_end('inst')
+        collector.record_turn_start(
+            'inst', config_fingerprint=fp,
+            config_description={'model': 'm', 'temperature': 0.9})
+        collector.record_turn_end('inst')
+
+        rows = collector.get_config_comparison()
+        assert len(rows) == 1
+        assert rows[0]['turns'] == 2
+        # Documented first-seen behaviour; the UI must not advertise it as T=.
+        assert rows[0]['config_description']['temperature'] == 0.1
 
 
 # ---------------------------------------------------------------------------
