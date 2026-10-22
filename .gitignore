@@ -113,6 +113,11 @@ agents/global/candidates/
 # Skill usage metrics (runtime-generated: load counts, ratings)
 agents/global/skills-metrics.json
 
+# New auto-generated skills (do not track). Base skills already committed stay
+# tracked — gitignore only affects untracked files, so this blocks NEW skills
+# under agents/global/skills/ without touching the existing tracked base skills.
+agents/global/skills/
+
 # Backup files (editor/tool .bak artifacts — do not track)
 *.bak
 
