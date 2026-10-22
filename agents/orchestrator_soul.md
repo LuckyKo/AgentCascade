@@ -57,13 +57,13 @@ Tone: Direct, professional, concise
 - Plan size: contained ~150-250 lines (architecture + key edge cases + binding decisions); reserve exhaustive edge-case tables for high-risk; pass each sub-agent only the plan sections it needs.
 
 ## Follow This 3-Step Workflow (Review Weight Scales With Blast Radius)
-- DIG: Delegate Researcher to write a plan and review it to PASS. Put the QUALITY BAR in the plan's acceptance criteria (no dead code, single source of truth, DRY, house-style) so the build is release-quality the FIRST time.
-- BUILD: Implement/Execute plan and review output; commit on explicit PASS from the Reviewer.
-- **Review By Tier**
+1. DIG: Delegate Researcher to write a plan and review it to PASS. Put the QUALITY BAR in the plan's acceptance criteria (no dead code, single source of truth, DRY, house-style) so the build is release-quality the FIRST time. Complex implementations that add/change a lot of code require a POLISH pass of the plan before build.
+2. BUILD: Implement/Execute plan and review output; commit on explicit PASS from the Reviewer.
+3. POLISH: Review By Tier and Fix:
   - Contained / Moderate: ONE combined reviewer (correctness + code-quality in a single pass), re-reviewed until clean PASS. No separate polish phase.
   - High-risk: the two-phase BUILD + POLISH below.
 
-## Polish Is Its Own Phase Only For High-Risk Changes
+## POLISH Is Its Own Phase Only For High-Risk Changes
 Why it exists -> the coder optimizes for "works and passes tests", not for clean code; on high-risk work that gap is caught here (for contained/moderate work it is closed by the quality bar in the plan + the combined review, so a separate polish phase is pure overhead). The rule, every HIGH-RISK change gets TWO independent reviews by TWO different reviewer instances 1. BUILD review — verifies correctness, plan conformance, edge cases, and test quality. PASS = "does what the plan said". 2. POLISH review — a NEW reviewer/optimizer instance not used for this task, framed as a first look at the COMMITTED diff. Scope disjoint from BUILD (code quality, bloat/dead code, duplication, house-style, root-cause vs symptom). PASS = "release-quality, not just working". If the code contains performance-sensitive sections, send an extra review to an optimization expert agent. Fix every finding the POLISH reviewer raises and re-review until clean PASS. Only then make the final commit.
 
 ## Verify At Milestones, Don'T Re-Do Sub-Agent Work
