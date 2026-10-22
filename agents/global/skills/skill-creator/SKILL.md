@@ -75,7 +75,7 @@ propose_skill(params={
     "justification": "<why this skill is needed>"
 })
 ```
-The `name` argument is authoritative: if the frontmatter carries a different name it is patched to match. If the name already exists, the call is an in-place update (patch version auto-incremented). The tool writes the skill to a pending location, validates structure (frontmatter, required fields, uniqueness), and auto-promotes to `agents/global/skills/` if validated.
+The `name` argument is authoritative: if the frontmatter carries a different name it is patched to match. A NEW name is written to a pending location, validated (frontmatter, required fields, uniqueness), and — if valid — promoted to `agents/global/skills/`. An EXISTING name is an **update**: the version is bumped (never downgraded), the new content goes to `agents/global/candidates/<name>/SKILL.md`, and it becomes the **live-serving candidate** immediately. It is later promoted (copied over production) or discarded by the rating-based decision gate once it has enough ratings; the production file is not modified until then. To update, call `scan_skills` with `preview="<name>"` first and submit the full current file plus your changes.
 
 ## Agent-specific guidance
 

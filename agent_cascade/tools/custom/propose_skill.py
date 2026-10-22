@@ -428,8 +428,8 @@ class ProposeSkill(BaseTool):
                 except Exception as e:  # pragma: no cover - defensive; never break the success path
                     logger.warning('[PROPOSE-SKILL] re-enable of %s raised: %s', proposed_name, e)
             # If a rating was supplied alongside content, record it after successful
-            # registration/update. New skills already got an initial 5.0 in the manager; this
-            # records the caller's explicit assessment on top of that.
+            # registration/update. Skills start unrated (there is no synthetic 5.0 seed), so
+            # this is usually the skill's first rating.
             if content_rating is not None:
                 try:
                     skill_manager.record_rating(proposed_name, content_rating)
@@ -450,6 +450,12 @@ class ProposeSkill(BaseTool):
                              f"quote any value containing special characters (e.g. colons) as a single "
                              f"double-quoted string to keep it clean.")
             verb = 'updated' if is_update else 'registered'
+            if is_update:
+                # Be explicit about the candidate flow: the production file is NOT changed yet,
+                # and the update may be discarded by the gate (BUG_0122).
+                return (f"Skill '{proposed_name}' updated successfully: candidate v{effective_version} "
+                        f"is now serving and will be promoted or discarded after enough ratings."
+                        f"{reenabled_note}{yaml_warn}")
             return f"Skill '{proposed_name}' {verb} successfully (v{effective_version}).{reenabled_note}{yaml_warn}"
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'

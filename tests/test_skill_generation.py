@@ -2296,6 +2296,17 @@ class TestReflectionPrompt:
         assert 'rated 2×' not in prompt
         assert '(unrated)' not in prompt
 
+    def test_prompt_does_not_promise_a_synthetic_initial_rating(self, fresh_manager):
+        """BUG_0122: skills start unrated — the prompt must not claim a 5.0 seed."""
+        inst = self._make_inst(fresh_manager)
+        prompt = fresh_manager.auto_skill_qualifies(
+            inst=inst,
+            turns_effectuated=AUTO_SKILL_MIN_TURNS + 1,
+            loaded_skill_names=None,
+        )
+        assert '5.0 automatically' not in prompt
+        assert 'start unrated' in prompt.lower()
+
 
 class TestFrontmatterSpanLocator:
     """BUG_0119: one tolerant frontmatter locator, shared with the parser."""
@@ -2453,6 +2464,24 @@ class TestProposeSkillRatingModes:
         assert 'version: 9.9.9 (body line that must survive)' in on_disk
         fm_block = re.match(r'^---\s*\n(.*?)\n---', on_disk, re.DOTALL).group(1)
         assert re.search(r'(?m)^version:\s*1\.0\.1\s*$', fm_block)
+
+    def test_update_success_message_reports_candidate_state(self, fresh_manager):
+        """BUG_0122: an update must say it is a candidate, not a completed in-place change."""
+        m = self.manager
+        name = f"test-update-msg-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Update message target skill body text',
+                                      triggers=['update', 'message'],
+                                      generated_from_task='update message test')
+        assert m.register_skill_from_content(content, task_text='update message test')[0]
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        updated = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated, 'justification': 'refine'}))
+        assert result.lower().count('candidate') >= 1
+        assert 'promoted or discarded' in result.lower()
+        assert 'successfully' in result.lower()
 
     def test_update_bumps_instead_of_accepting_version_downgrade(self, fresh_manager):
         """BUG_0120: an explicit LOWER version is advanced past the incumbent, not honored.
