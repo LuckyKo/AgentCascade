@@ -7385,8 +7385,58 @@ if (btnAddEndpoint) {
   });
 }
 
-// ── Page unload: clear debounce timers and flush settings ──
-window.addEventListener('beforeunload', () => {
+// ── Chrome session-history form-state restore (BUG_0134) ─────────────────────
+// Chrome stores form-control state in the session history entry and restores it on
+// Back/Forward *after* the page scripts have run (verified: the DOM already holds
+// the stale snapshot when `pageshow` fires). Opt every settings control out of that
+// mechanism so the localStorage store stays the single source of truth. The
+// MutationObserver covers panels rendered after startup (media-gen / per-agent).
+function disableSessionHistoryFormRestore(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  root.querySelectorAll('input, select, textarea').forEach((el) => {
+    if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
+  });
+}
+if (sidePanel) {
+  disableSessionHistoryFormRestore(sidePanel);
+  new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (typeof node.matches === 'function' && node.matches('input, select, textarea')) {
+          if (!node.hasAttribute('autocomplete')) node.setAttribute('autocomplete', 'off');
+        }
+        disableSessionHistoryFormRestore(node);
+      }
+    }
+  }).observe(sidePanel, { childList: true, subtree: true });
+}
+
+// Chrome may also restore the whole page from the back/forward cache without
+// re-running loadSettings(). Re-apply the store on any history restore, then push
+// the restored config if the socket is already open (a reconnect that raced the
+// restore may have sent the browser's stale snapshot back to the server).
+function _isBackForwardNavigation() {
+  try {
+    const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    return !!nav && nav.type === 'back_forward';
+  } catch (e) {
+    return false;
+  }
+}
+window.addEventListener('pageshow', (event) => {
+  if (!settingsLoaded) return;
+  if (!(event && event.persisted) && !_isBackForwardNavigation()) return;
+  loadSettings();
+  if (state.connected && ws && ws.readyState === WebSocket.OPEN) {
+    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
+  }
+});
+
+// ── Page hide/unload: clear debounce timers and flush settings ──
+// `beforeunload` is NOT fired when the page enters the back/forward cache, so
+// flush on `pagehide` too (it fires for navigation, tab close and bfcache entry).
+function flushSettingsForPageExit() {
   clearAutoSecurityTimers();
 
   // Flush any pending debounced save timer
@@ -7403,4 +7453,6 @@ window.addEventListener('beforeunload', () => {
   } catch (e) {
     // Silently ignore errors during unload
   }
-});
+}
+window.addEventListener('beforeunload', flushSettingsForPageExit);
+window.addEventListener('pagehide', flushSettingsForPageExit);

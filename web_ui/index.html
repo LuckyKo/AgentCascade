@@ -257,19 +257,19 @@
                 <div class="settings-section-body">
                   <label class="setting-field">
                     <span>API Endpoint</span>
-                    <input type="text" id="setting-endpoint" placeholder="http://localhost:5001/v1" />
+                    <input autocomplete="off" type="text" id="setting-endpoint" placeholder="http://localhost:5001/v1" />
                   </label>
                   <label class="setting-field">
                     <span>API Key <em>(optional)</em></span>
-                    <input type="password" id="setting-api-key" placeholder="sk-..." />
+                    <input autocomplete="off" type="password" id="setting-api-key" placeholder="sk-..." />
                   </label>
                   <label class="setting-field">
                     <span>Model</span>
-                    <input type="text" id="setting-model" placeholder="Model name or ID" />
+                    <input autocomplete="off" type="text" id="setting-model" placeholder="Model name or ID" />
                   </label>
                   <label class="setting-field toggle-field">
                     <span title="When enabled, AC spawns and owns the Telegram bridge as a child process (long-polls Telegram and routes messages to the target agent). Requires telegram_bot_token in config/secrets.json and ALLOWED_USERS set; on failure AC logs the error and does not crash-loop.">Enable Telegram Bridge</span>
-                    <input type="checkbox" id="setting-telegram-bridge-enabled" />
+                    <input autocomplete="off" type="checkbox" id="setting-telegram-bridge-enabled" />
                   </label>
                 </div>
               </div>
@@ -280,39 +280,39 @@
                 <div class="settings-section-body">
                   <label class="setting-field">
                     <span>Temperature <output id="val-temperature">0.8</output></span>
-                    <input type="range" id="setting-temperature" min="0" max="2" step="0.05" value="0.8" />
+                    <input autocomplete="off" type="range" id="setting-temperature" min="0" max="2" step="0.05" value="0.8" />
                   </label>
                   <label class="setting-field">
                     <span>Top-P <output id="val-top-p">0.95</output></span>
-                    <input type="range" id="setting-top-p" min="0" max="1" step="0.01" value="0.95" />
+                    <input autocomplete="off" type="range" id="setting-top-p" min="0" max="1" step="0.01" value="0.95" />
                   </label>
                   <label class="setting-field">
                     <span>Top-K <output id="val-top-k">40</output></span>
-                    <input type="range" id="setting-top-k" min="0" max="200" step="1" value="40" />
+                    <input autocomplete="off" type="range" id="setting-top-k" min="0" max="200" step="1" value="40" />
                   </label>
                   <label class="setting-field">
                     <span>Min-P <output id="val-min-p">0.05</output></span>
-                    <input type="range" id="setting-min-p" min="0" max="1" step="0.01" value="0.05" />
+                    <input autocomplete="off" type="range" id="setting-min-p" min="0" max="1" step="0.01" value="0.05" />
                   </label>
                   <label class="setting-field">
                     <span>Repeat Penalty <output id="val-repeat-penalty">1.05</output></span>
-                    <input type="range" id="setting-repeat-penalty" min="1" max="2" step="0.01" value="1.05" />
+                    <input autocomplete="off" type="range" id="setting-repeat-penalty" min="1" max="2" step="0.01" value="1.05" />
                   </label>
                   <label class="setting-field">
                     <span>Presence Penalty <output id="val-presence-penalty">0.0</output></span>
-                    <input type="range" id="setting-presence-penalty" min="-2" max="2" step="0.1" value="0.0" />
+                    <input autocomplete="off" type="range" id="setting-presence-penalty" min="-2" max="2" step="0.1" value="0.0" />
                   </label>
                   <label class="setting-field">
                     <span>Frequency Penalty <output id="val-frequency-penalty">0.0</output></span>
-                    <input type="range" id="setting-frequency-penalty" min="-2" max="2" step="0.1" value="0.0" />
+                    <input autocomplete="off" type="range" id="setting-frequency-penalty" min="-2" max="2" step="0.1" value="0.0" />
                   </label>
                   <label class="setting-field">
                     <span>Max Tokens</span>
-                    <input type="number" id="setting-max-tokens" min="1" max="32768" value="8192" />
+                    <input autocomplete="off" type="number" id="setting-max-tokens" min="1" max="32768" value="8192" />
                   </label>
                   <label class="setting-field">
                     <span>Context Size (Tokens)</span>
-                    <input type="number" id="setting-max-context" min="1024" max="1000000" value="65536" />
+                    <input autocomplete="off" type="number" id="setting-max-context" min="1024" max="1000000" value="65536" />
                   </label>
                 </div>
               </div>
@@ -323,11 +323,11 @@
                 <div class="settings-section-body">
                   <label class="setting-field toggle-field">
                     <span>Vision Enabled</span>
-                    <input type="checkbox" id="setting-vision-enabled" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-vision-enabled" checked />
                   </label>
                   <label class="setting-field">
                     <span>Image Detail</span>
-                    <select id="setting-image-detail">
+                    <select autocomplete="off" id="setting-image-detail">
                       <option value="auto">Auto</option>
                       <option value="low">Low</option>
                       <option value="high">High</option>
@@ -335,15 +335,15 @@
                   </label>
                   <label class="setting-field">
                     <span>Max Image Size (px)</span>
-                    <input type="number" id="setting-max-image-size" min="256" max="4096" value="1024" />
+                    <input autocomplete="off" type="number" id="setting-max-image-size" min="256" max="4096" value="1024" />
                   </label>
                   <label class="setting-field">
                     <span title="Max images with base64 sent to LLM per request. -1=keep all, N>=0=keep only last N">Max Images for LLM</span>
-                    <input type="number" id="setting-max-images-for-llm" min="-1" max="50" value="2" />
+                    <input autocomplete="off" type="number" id="setting-max-images-for-llm" min="-1" max="50" value="2" />
                   </label>
                   <label class="setting-field">
                     <span title="When to auto-caption images. Auto = skip if the active endpoint already has vision, else caption all images before a text-only call. Always = always caption new images. Off = never caption.">Caption Mode</span>
-                    <select id="setting-image-caption-mode">
+                    <select autocomplete="off" id="setting-image-caption-mode">
                       <option value="auto" selected>Auto</option>
                       <option value="always">Always</option>
                       <option value="off">Off</option>
@@ -358,11 +358,11 @@
                 <div class="settings-section-body">
                   <label class="setting-field toggle-field">
                     <span>Enable MCP</span>
-                    <input type="checkbox" id="setting-mcp-enabled" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-mcp-enabled" checked />
                   </label>
                   <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 8px;">
                     <span>MCP Servers (JSON)</span>
-                    <textarea id="setting-mcp-servers"
+                    <textarea autocomplete="off" id="setting-mcp-servers"
                       placeholder='{&#10;  "sqlite": {&#10;    "command": "npx",&#10;    "args": ["-y", "@modelcontextprotocol/server-sqlite", "db.sqlite"]&#10;  }&#10;}'
                       rows="5"
                       style="width: 100%; font-family: monospace; padding: 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;"></textarea>
@@ -380,47 +380,47 @@
                 <div class="settings-section-body">
                   <label class="setting-field toggle-field">
                     <span>Show Line Numbers</span>
-                    <input type="checkbox" id="setting-lines-enabled" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-lines-enabled" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Show char count &amp; timestamp</span>
-                    <input type="checkbox" id="setting-msg-meta" />
+                    <input autocomplete="off" type="checkbox" id="setting-msg-meta" />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Truncate Tool Output</span>
-                    <input type="checkbox" id="setting-truncate-tools" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-truncate-tools" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Auto Agent Tab Focus</span>
-                    <input type="checkbox" id="setting-auto-tab-focus" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-auto-tab-focus" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Sound: User Intervention</span>
-                    <input type="checkbox" id="setting-sound-intervention" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-sound-intervention" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Sound: Task Completed</span>
-                    <input type="checkbox" id="setting-sound-completed" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-sound-completed" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Sound: Agent Messages</span>
-                    <input type="checkbox" id="setting-sound-notification" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-sound-notification" checked />
                   </label>
                   <label class="setting-field">
                     <span>User Message Color</span>
-                    <input type="color" id="setting-user-color" value="#1a3a5c" />
+                    <input autocomplete="off" type="color" id="setting-user-color" value="#1a3a5c" />
                   </label>
                   <label class="setting-field">
                     <span>Assistant Message Color</span>
-                    <input type="color" id="setting-assistant-color" value="#1c2333" />
+                    <input autocomplete="off" type="color" id="setting-assistant-color" value="#1c2333" />
                   </label>
                   <label class="setting-field">
                     <span>Raw Edit Background Color</span>
-                    <input type="color" id="setting-raw-edit-color" value="#111418" />
+                    <input autocomplete="off" type="color" id="setting-raw-edit-color" value="#111418" />
                   </label>
                   <label class="setting-field">
                     <span>Font Size <output id="val-font-size">14</output>px</span>
-                    <input type="range" id="setting-font-size" min="12" max="24" step="1" value="14" />
+                    <input autocomplete="off" type="range" id="setting-font-size" min="12" max="24" step="1" value="14" />
                   </label>
                 </div>
               </div>
@@ -431,27 +431,27 @@
                 <div class="settings-section-body">
                   <label class="setting-field toggle-field">
                     <span>Enable Approval Timeout</span>
-                    <input type="checkbox" id="settingApprovalTimeoutEnabled" checked />
+                    <input autocomplete="off" type="checkbox" id="settingApprovalTimeoutEnabled" checked />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Show Async Shell Console Window</span>
-                    <input type="checkbox" id="settingAsyncShellConsoleWindow" checked />
+                    <input autocomplete="off" type="checkbox" id="settingAsyncShellConsoleWindow" checked />
                   </label>
                   <label class="setting-field">
                     <span>Approval Timeout (seconds)</span>
-                    <input type="number" id="settingApprovalTimeoutSeconds" min="10" max="7200" value="300" step="10" />
+                    <input autocomplete="off" type="number" id="settingApprovalTimeoutSeconds" min="10" max="7200" value="300" step="10" />
                   </label>
                   <label class="setting-field">
                     <span>AFK Agent Auto-Discard (seconds, 0=off)</span>
-                    <input type="number" id="setting-idle-timeout" min="0" max="3600" step="10" value="900" />
+                    <input autocomplete="off" type="number" id="setting-idle-timeout" min="0" max="3600" step="10" value="900" />
                   </label>
                   <label class="setting-field">
                     <span>System Agents (Compressor/Security) Auto-Discard (seconds, 0=off)</span>
-                    <input type="number" id="setting-system-idle-timeout" min="0" max="3600" step="10" value="900" />
+                    <input autocomplete="off" type="number" id="setting-system-idle-timeout" min="0" max="3600" step="10" value="900" />
                   </label>
                   <label class="setting-field">
                     <span title="Dead-man's switch: how long the slot holder may go with no sign of life (new turn or LLM output) before this wait is declared failed. Reset on every sign of life. Hard cap is derived as 6x this value.">Slot Queue Activity Window (s)</span>
-                    <input type="number" id="setting-slot-queue-timeout" min="30" max="7200" step="30" value="300" />
+                    <input autocomplete="off" type="number" id="setting-slot-queue-timeout" min="30" max="7200" step="30" value="300" />
                   </label>
                 </div>
               </div>
@@ -462,23 +462,23 @@
                 <div class="settings-section-body">
                   <label class="setting-field">
                   <span title="Warn agent when context usage exceeds this percentage">Compression Warning Threshold (%)</span>
-                    <input type="number" id="setting-compression-warning-threshold" min="50" max="99" step="1" value="90" />
+                    <input autocomplete="off" type="number" id="setting-compression-warning-threshold" min="50" max="99" step="1" value="90" />
                   </label>
                   <label class="setting-field">
                   <span title="Force compress when context usage exceeds this percentage">Compression Force Threshold (%)</span>
-                    <input type="number" id="setting-compression-force-threshold" min="51" max="99" step="1" value="95" />
+                    <input autocomplete="off" type="number" id="setting-compression-force-threshold" min="51" max="99" step="1" value="95" />
                   </label>
                   <label class="setting-field">
                   <span title="Trigger proactive compression after tool calls when context exceeds this percentage">Proactive Compression Threshold (%)</span>
-                    <input type="number" id="setting-compression-proactive-threshold" min="50" max="96" step="1" value="88" />
+                    <input autocomplete="off" type="number" id="setting-compression-proactive-threshold" min="50" max="96" step="1" value="88" />
                   </label>
                   <label class="setting-field">
                   <span title="Tokens reserved for LLM overhead (system prompt, function schemas)">Context Reserve Tokens</span>
-                    <input type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
+                    <input autocomplete="off" type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
                     </label>
                     <label class="setting-field">
                     <span title="% of conversation history to discard when compressing">Compression Percentage (%)</span>
-                    <input type="number" id="setting-compression-fraction" min="10" max="90" step="1" value="70" />
+                    <input autocomplete="off" type="number" id="setting-compression-fraction" min="10" max="90" step="1" value="70" />
                   </label>
                 </div>
               </div>
@@ -489,15 +489,15 @@
                 <div class="settings-section-body">
                   <label class="setting-field toggle-field">
                     <span>Enable Argument Cache</span>
-                    <input type="checkbox" id="setting-cache-pool-enabled" checked />
+                    <input autocomplete="off" type="checkbox" id="setting-cache-pool-enabled" checked />
                   </label>
                   <label class="setting-field">
                     <span>Cache Size (entries)</span>
-                    <input type="number" id="setting-cache-pool-size" min="5" max="500" step="5" value="50" />
+                    <input autocomplete="off" type="number" id="setting-cache-pool-size" min="5" max="500" step="5" value="50" />
                   </label>
                   <label class="setting-field">
                     <span>Min Cache Size (chars)</span>
-                    <input type="number" id="setting-cache-threshold-chars" min="100" max="10000" step="50" value="1000" />
+                    <input autocomplete="off" type="number" id="setting-cache-threshold-chars" min="100" max="10000" step="50" value="1000" />
                   </label>
                 </div>
               </div>
@@ -556,28 +556,28 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 4px;">
                           <span>AFK Auto-Reply Message</span>
-                          <textarea id="setting-afk-message" rows="3"
+                          <textarea autocomplete="off" id="setting-afk-message" rows="3"
                             style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--bg-elevated); background: var(--bg-tertiary); color: var(--text-primary); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
                         </label>
                         <label class="setting-field">
                           <span>Max Turns per Run</span>
-                          <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
+                          <input autocomplete="off" type="number" id="setting-max-turns" min="1" max="500" value="50" />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="When disabled, all agents use the Max Turns setting regardless of call_agent max_turns args">Enable Agent Budgeting</span>
-                          <input type="checkbox" id="setting-agent-budgeting" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-agent-budgeting" checked />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="When disabled, every call_agent dispatch runs synchronously — the orchestrator waits for each child to finish before proceeding">Allow Parallel Agents</span>
-                          <input type="checkbox" id="setting-allow-parallel" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-allow-parallel" checked />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="Automatic checkpointing only: when enabled, agent KV context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted. This does NOT affect the manual Save KV / Load KV buttons — those depend only on endpoint capability.">State KV Save/Restore</span>
-                          <input type="checkbox" id="setting-state-kv-save" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-state-kv-save" checked />
                         </label>
                         <label class="setting-field">
                           <span>Max Parallel Agents</span>
-                          <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
+                          <input autocomplete="off" type="number" id="setting-max-parallel" min="1" max="10" value="3" />
                         </label>
                       </div>
                     </details>
@@ -588,19 +588,19 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span title="Auto-detects three cases: reasoning-only blocks (no output text), broken tool calls (malformed JSON args), and empty output. When detected, sends a continue signal and resets the turn counter. Capped at 3 consecutive resets to prevent infinite loops.">Auto-Continue &amp; Recovery</span>
-                          <input type="checkbox" id="setting-auto-continue" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-auto-continue" checked />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="On a text-only turn with no tool call, asks a fast decision model whether the agent genuinely finished or still has work pending. If it looks unfinished, auto-continues (bounded). Adds up to ~3s to natural-end turns. Falls back to normal completion if the classifier endpoint is unavailable.">Completion Classifier</span>
-                          <input type="checkbox" id="setting-completion-classifier" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-completion-classifier" checked />
                         </label>
                         <label class="setting-field toggle-field">
                           <span>Auto-Rollback on Loop</span>
-                          <input type="checkbox" id="setting-auto-rollback" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-auto-rollback" checked />
                         </label>
                         <label class="setting-field">
                           <span>Max Auto-Rollbacks (-1=∞)</span>
-                          <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
+                          <input autocomplete="off" type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
                         </label>
                       </div>
                     </details>
@@ -611,11 +611,11 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span title="When enabled, agents auto-load relevant skill instructions based on task context. When disabled, no skills are loaded (saves tokens).">Enable Skills</span>
-                          <input type="checkbox" id="setting-enable-skills" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-enable-skills" checked />
                         </label>
                         <label class="setting-field">
                           <span title="How AUTO skill loading resolves skills. Basic = fast keyword match on task/context. Advanced = a lightweight Security agent semantically recommends skills, improves the prompt, and can deny trivial delegations (adds one LLM call per delegation). None = disables system auto-matched skills entirely (no Basic keyword match, no Advanced advisor); Self-Augmentation and caller-explicit load_skill lists are still preserved.">AUTO Skill Mode</span>
-                          <select id="setting-auto-skill-mode">
+                          <select autocomplete="off" id="setting-auto-skill-mode">
                             <option value="basic" selected>Basic</option>
                             <option value="advanced">Advanced</option>
                             <option value="none">None</option>
@@ -623,22 +623,22 @@
                         </label>
                         <label class="setting-field">
                           <span title="How the Classifier picks skills. Keyword = basic keyword matching (no extra LLM call). API = a decision model resolves the selection; endpoint fallbacks are configured under Agent &amp; Classifier API Assignments below and are shared with the completion classifier.">Classifier Mode</span>
-                          <select id="setting-skill-selector-mode">
+                          <select autocomplete="off" id="setting-skill-selector-mode">
                             <option value="keyword" selected>Keyword (basic matching)</option>
                             <option value="api">API (decision model)</option>
                           </select>
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="When enabled, agents can automatically propose and generate new skills based on task context. Requires 'Enable Skills' to be active.">Enable Auto-Skill Generation</span>
-                          <input type="checkbox" id="setting-auto-skill-gen" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-auto-skill-gen" checked />
                         </label>
                         <label class="setting-field">
                           <span title="Minimum turns an agent must complete before a natural finish triggers auto-skill reflection.">Auto-Skill Min Turns</span>
-                          <input type="number" id="setting-auto-skill-min-turns" min="1" max="500" value="20" />
+                          <input autocomplete="off" type="number" id="setting-auto-skill-min-turns" min="1" max="500" value="20" />
                         </label>
                         <label class="setting-field">
                           <span title="Fresh turn budget granted to the agent for skill reflection when auto-skill triggers (added on top of the exhausted budget).">Auto-Skill Extra Turns</span>
-                          <input type="number" id="setting-auto-skill-extra-turns" min="1" max="200" value="25" />
+                          <input autocomplete="off" type="number" id="setting-auto-skill-extra-turns" min="1" max="200" value="25" />
                         </label>
                       </div>
                     </details>
@@ -649,52 +649,52 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span title="Detect LLM generation loops mid-stream (can cause false positives)">Inner Loop Detection</span>
-                          <input type="checkbox" id="setting-inner-loop-detect" />
+                          <input autocomplete="off" type="checkbox" id="setting-inner-loop-detect" />
                         </label>
 
                         <!-- Thresholds -->
                         <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:4px;">Thresholds</div>
                         <label class="setting-field">
                           <span title="Minimum characters before heavy checks activate">Min Chars</span>
-                          <input type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
+                          <input autocomplete="off" type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
                         </label>
                         <label class="setting-field">
                           <span title="Hard character limit — force-trigger detection if exceeded (~8K tokens)">Max Chars</span>
-                          <input type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
+                          <input autocomplete="off" type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
-                          <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-loop-max-chars-enabled" checked />
                         </label>
 
                         <!-- Detection Modes -->
                         <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Detection Modes</div>
                         <label class="setting-field toggle-field">
                           <span title="Detect consecutive identical characters">Char Run</span>
-                          <input type="checkbox" id="setting-loop-char-run" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-loop-char-run" checked />
                         </label>
                         <label class="setting-field">
                           <span title="Number of consecutive identical characters to trigger detection">Char Run Limit</span>
-                          <input type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
+                          <input autocomplete="off" type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
                         </label>
                         <label class="setting-field toggle-field">
                           <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
-                          <input type="checkbox" id="setting-loop-two-phase" />
+                          <input autocomplete="off" type="checkbox" id="setting-loop-two-phase" />
                         </label>
 
                         <!-- Semantic Parameters -->
                         <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Semantic Parameters</div>
                         <label class="setting-field">
                           <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
-                          <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
+                          <input autocomplete="off" type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
                         </label>
                         <label class="setting-field">
                           <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
-                          <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
+                          <input autocomplete="off" type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
                         </label>
                         <label class="setting-field">
                           <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
-                          <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
+                          <input autocomplete="off" type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
                         </label>
                       </div>
                     </details>
@@ -706,19 +706,19 @@
                         <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">LLM Retry Configuration</div>
                         <label class="setting-field">
                           <span title="Total outer retry attempts across all layers and endpoints [1-6]">Max Attempts</span>
-                          <input type="number" id="setting-retry-max-attempts" min="1" max="6" step="1" value="3" />
+                          <input autocomplete="off" type="number" id="setting-retry-max-attempts" min="1" max="6" step="1" value="3" />
                         </label>
                         <label class="setting-field">
                           <span title="Retries per endpoint before failover to next [0-2]. 0=failover immediately, 2=max retries on single endpoint">Endpoint Retries</span>
-                          <input type="number" id="setting-endpoint-max-retries" min="0" max="2" step="1" value="1" />
+                          <input autocomplete="off" type="number" id="setting-endpoint-max-retries" min="0" max="2" step="1" value="1" />
                         </label>
                         <label class="setting-field">
                           <span title="Initial backoff delay in seconds [≥0.1]">Base Delay (s)</span>
-                          <input type="number" id="setting-retry-base-delay" min="0.1" max="30" step="0.1" value="1.0" />
+                          <input autocomplete="off" type="number" id="setting-retry-base-delay" min="0.1" max="30" step="0.1" value="1.0" />
                         </label>
                         <label class="setting-field">
                           <span title="Maximum backoff cap in seconds [≥1.0]">Max Delay (s)</span>
-                          <input type="number" id="setting-retry-max-delay" min="1.0" max="60" step="0.5" value="8.0" />
+                          <input autocomplete="off" type="number" id="setting-retry-max-delay" min="1.0" max="60" step="0.5" value="8.0" />
                         </label>
                       </div>
                     </details>
@@ -729,35 +729,35 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span>Log API POST Dump</span>
-                          <input type="checkbox" id="setting-log-api-post" />
+                          <input autocomplete="off" type="checkbox" id="setting-log-api-post" />
                         </label>
                         <label class="setting-field">
                           <span>Wild Read Threshold (Chars)</span>
-                          <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
+                          <input autocomplete="off" type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
                         </label>
                         <label class="setting-field">
                           <span>Wild Read Truncation (Chars)</span>
-                          <input type="number" id="setting-wild-read-truncation-chars" min="500" max="50000" step="100" value="2000" />
+                          <input autocomplete="off" type="number" id="setting-wild-read-truncation-chars" min="500" max="50000" step="100" value="2000" />
                         </label>
                         <label class="setting-field toggle-field">
                           <span>Grep Spillover</span>
-                          <input type="checkbox" id="setting-grep-spillover" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-grep-spillover" checked />
                         </label>
                         <label class="setting-field">
                           <span>Grep Char Limit</span>
-                          <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
+                          <input autocomplete="off" type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
                         </label>
                         <label class="setting-field">
                           <span>Shell Output Char Limit</span>
-                          <input type="number" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
+                          <input autocomplete="off" type="number" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
                         </label>
                         <label class="setting-field">
                           <span>Code Output Char Limit</span>
-                          <input type="number" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
+                          <input autocomplete="off" type="number" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
                         </label>
                         <label class="setting-field">
                           <span>List Dir Char Limit</span>
-                          <input type="number" id="setting-list-dir-char-limit" min="-1" max="8000" step="100" value="3000" />
+                          <input autocomplete="off" type="number" id="setting-list-dir-char-limit" min="-1" max="8000" step="100" value="3000" />
                         </label>
                       </div>
                     </details>
@@ -768,23 +768,23 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span title="Surface relevant .agent_lessons memories as tool-warning hints (no user-message injection). Off by default.">Enable Memory Hint</span>
-                          <input type="checkbox" id="setting-memory-hint-enabled" />
+                          <input autocomplete="off" type="checkbox" id="setting-memory-hint-enabled" />
                         </label>
                         <label class="setting-field">
                           <span title="Override floor for the adaptive hint gate [0,1]. The primary gate is self-calibrating (EWMA of past top-1 scores + specificity gap); a value > 0 can only make hints rarer by raising the minimum score. 0 = pure adaptive behavior. Note: values below 0.12 are overridden by the adaptive floor minimum.">Hint Threshold (override, 0 = adaptive)</span>
-                          <input type="number" id="setting-memory-hint-threshold" min="0" max="1" step="0.05" value="0" />
+                          <input autocomplete="off" type="number" id="setting-memory-hint-threshold" min="0" max="1" step="0.05" value="0" />
                         </label>
                         <label class="setting-field">
                           <span title="Max number of top-scoring memories listed in a hint (clamped 1–4).">Hint Max Entries</span>
-                          <input type="number" id="setting-memory-hint-max-entries" min="1" max="4" step="1" value="3" />
+                          <input autocomplete="off" type="number" id="setting-memory-hint-max-entries" min="1" max="4" step="1" value="3" />
                         </label>
                         <label class="setting-field">
                           <span title="Chars of turn text used as the query key (clamped 100–4000).">Query Chars</span>
-                          <input type="number" id="setting-memory-hint-query-chars" min="100" max="4000" step="50" value="1000" />
+                          <input autocomplete="off" type="number" id="setting-memory-hint-query-chars" min="100" max="4000" step="50" value="1000" />
                         </label>
                         <label class="setting-field">
                           <span title="Seconds before the same memory may be re-hinted (clamped 0–86400).">Hint Cooldown (s)</span>
-                          <input type="number" id="setting-memory-hint-cooldown" min="0" max="86400" step="30" value="600" />
+                          <input autocomplete="off" type="number" id="setting-memory-hint-cooldown" min="0" max="86400" step="30" value="600" />
                         </label>
                       </div>
                     </details>
@@ -795,61 +795,61 @@
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
                         <label class="setting-field toggle-field">
                           <span title="At startup, auto-retire (soft-inactivate) the lowest-ranked active skills to keep the active count near the adaptive target. On by default.">Enable Auto-Invalidate</span>
-                          <input type="checkbox" id="setting-skill-invalidate-enabled" checked />
+                          <input autocomplete="off" type="checkbox" id="setting-skill-invalidate-enabled" checked />
                         </label>
                         <label class="setting-field">
                           <span title="Multiplier K for the target: clamp(K × N_qualified, min, max). Clamped 0.1–5.0.">Target Multiplier (K)</span>
-                          <input type="number" id="setting-skill-target-k" min="0.1" max="5" step="0.1" value="1.0" />
+                          <input autocomplete="off" type="number" id="setting-skill-target-k" min="0.1" max="5" step="0.1" value="1.0" />
                         </label>
                         <label class="setting-field">
                           <span title="Floor on the active-skill target (clamped 1–200).">Min Cap</span>
-                          <input type="number" id="setting-skill-min-cap" min="1" max="200" step="1" value="20" />
+                          <input autocomplete="off" type="number" id="setting-skill-min-cap" min="1" max="200" step="1" value="20" />
                         </label>
                         <label class="setting-field">
                           <span title="Ceiling on the active-skill target (clamped ≥ Min Cap, ≤ 1000).">Max Cap</span>
-                          <input type="number" id="setting-skill-max-cap" min="1" max="1000" step="1" value="200" />
+                          <input autocomplete="off" type="number" id="setting-skill-max-cap" min="1" max="1000" step="1" value="200" />
                         </label>
                         <div id="skill-threshold-status" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
                         <!-- Skill-scoring constants (research §5/§7/§18 + D-SAFE) — formula/gate knobs -->
                         <label class="setting-field">
                           <span title="Neutral quality baseline / prior mean q0 (clamped 0–10). Keep equal to the initial rating (5.0).">Score Baseline (q0)</span>
-                          <input type="number" id="setting-skill-score-q0" min="0" max="10" step="0.1" value="5.0" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-q0" min="0" max="10" step="0.1" value="5.0" />
                         </label>
                         <label class="setting-field">
                           <span title="Shrinkage prior strength K_q (clamped 0–20). Higher keeps quality near q0 longer at low counts.">Prior Strength (Kq)</span>
-                          <input type="number" id="setting-skill-score-kq" min="0" max="20" step="1" value="5" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-kq" min="0" max="20" step="1" value="5" />
                         </label>
                         <label class="setting-field">
                           <span title="Usage half-saturation n_half (clamped 1–50). Higher saturates popularity slower.">Usage Half-Sat (n½)</span>
-                          <input type="number" id="setting-skill-score-nhalf" min="1" max="50" step="1" value="8" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-nhalf" min="1" max="50" step="1" value="8" />
                         </label>
                         <label class="setting-field">
                           <span title="Load-waste half-scale g_half (clamped 1–100). Higher loosens the waste penalty.">Waste Scale (g½)</span>
-                          <input type="number" id="setting-skill-score-ghalf" min="1" max="100" step="1" value="20" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-ghalf" min="1" max="100" step="1" value="20" />
                         </label>
                         <label class="setting-field">
                           <span title="Recency floor r_floor (clamped 0–0.99, must stay &lt;1). Lower lets recency penalize more.">Recency Floor (r&#8202;floor)</span>
-                          <input type="number" id="setting-skill-score-rflood" min="0" max="0.99" step="0.01" value="0.5" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-rflood" min="0" max="0.99" step="0.01" value="0.5" />
                         </label>
                         <label class="setting-field">
                           <span title="Activity-recency decay constant τ in user-turns (clamped 10–5000). Higher decays slower.">Recency Decay (τ)</span>
-                          <input type="number" id="setting-skill-score-tau-turns" min="10" max="5000" step="10" value="200" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-tau-turns" min="10" max="5000" step="10" value="200" />
                         </label>
                         <label class="setting-field">
                           <span title="Quality margin δ_q (clamped 0.1–3.0). Wider neutral/USELESS band (fewer USEFUL/BAD).">Quality Margin (δq)</span>
-                          <input type="number" id="setting-skill-score-dq" min="0.1" max="3" step="0.1" value="0.5" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-dq" min="0.1" max="3" step="0.1" value="0.5" />
                         </label>
                         <label class="setting-field">
                           <span title="Meaningful-use bar n_min (clamped 1–20). Ratings needed before a confident USEFUL/BAD call.">Min Uses (n&#8321;ₙ)</span>
-                          <input type="number" id="setting-skill-score-nmin" min="1" max="20" step="1" value="5" />
+                          <input autocomplete="off" type="number" id="setting-skill-score-nmin" min="1" max="20" step="1" value="5" />
                         </label>
                         <label class="setting-field">
                           <span title="PROTECTED window in user-turns (clamped 0–1000). Skills younger than this are shielded from retirement.">Fair Window (turns)</span>
-                          <input type="number" id="setting-skill-fair-window-turns" min="0" max="1000" step="5" value="50" />
+                          <input autocomplete="off" type="number" id="setting-skill-fair-window-turns" min="0" max="1000" step="5" value="50" />
                         </label>
                         <label class="setting-field">
                           <span title="D-SAFE safety cap: max total evictions in one pass (clamped 0–1000). 0 disables both gates.">Max Evictions / Pass</span>
-                          <input type="number" id="setting-skill-max-evictions-per-pass" min="0" max="1000" step="1" value="25" />
+                          <input autocomplete="off" type="number" id="setting-skill-max-evictions-per-pass" min="0" max="1000" step="1" value="25" />
                         </label>
                         <div id="skill-score-preview" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
                       </div>
@@ -864,14 +864,14 @@
                     <label class="setting-field">
                       <span title="Select which backend's settings to edit. The agent picks the actual backend per-call via the media_gen tool's backend param; this only switches which config block is shown below.">Backend</span>
                       <!-- Options are populated from GET /api/media_gen/manifest (see app.js) -->
-                      <select id="mg-backend"></select>
+                      <select autocomplete="off" id="mg-backend"></select>
                     </label>
                     <!-- Backend field blocks are BUILT FROM THE MANIFEST at runtime (app.js _mgBuildDom):
                          one #mg-block-<id> per backend; all fields visible inline. -->
                     <div id="mg-blocks"></div>
                     <label class="setting-field">
                       <span title="Fallback timeout in seconds (used when the backend has no specific timeout)">Timeout (s)</span>
-                      <input type="number" id="mg-timeout" min="30" max="600" step="5" value="180">
+                      <input autocomplete="off" type="number" id="mg-timeout" min="30" max="600" step="5" value="180">
                     </label>
                     <button id="mg-save" class="btn-small">Save</button>
                     <div id="mg-status" style="font-size:11px;min-height:14px;"></div>
@@ -888,7 +888,7 @@
                   <div class="settings-section-body">
                     <label class="setting-field">
                       <span>Select Agent</span>
-                      <select id="setting-agent-select" class="sidebar-select"></select>
+                      <select autocomplete="off" id="setting-agent-select" class="sidebar-select"></select>
                     </label>
                   </div>
                   <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
