@@ -2669,7 +2669,7 @@ class APIRouter:
             return mode
         return 'auto'
 
-    def _is_active_endpoint_vision(self, instance_name: Optional[str]) -> bool:
+    def _is_active_endpoint_vision(self, instance_name: Optional[str], agent_type: str = '') -> bool:
         """Return True if the instance's CURRENTLY-allocated endpoint is vision-capable.
 
         Reuses the registry-matching logic from ``_get_vision_endpoint_for_agent``: resolve the
@@ -2678,7 +2678,7 @@ class APIRouter:
 
         When the instance has NO endpoint config yet (fresh create, session restore, or a reset
         instance), resolve the FIRST endpoint its next call will try via ``get_endpoint_chain``
-        (using the instance's own ``agent_class`` — the same class ``call_with_fallback`` uses)
+        (using the caller-supplied ``agent_type`` — the same class ``call_with_fallback`` uses)
         and return that endpoint's explicit ``vision_enabled`` flag. Without this, a restored
         session's first turn captioned every image even though its assigned endpoint was
         vision-capable (todo.md:107).
@@ -2699,7 +2699,7 @@ class APIRouter:
                     if not ep.enabled:
                         continue
                     if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
-                        return bool(getattr(ep, 'vision_enabled', True))
+                        return bool(getattr(ep, 'vision_enabled', False))
             # No matching enabled endpoint → treat as text-only (conservative).
             return False
 
@@ -2708,10 +2708,13 @@ class APIRouter:
         # so that is the effective "active" endpoint for the caption decision. Only
         # trust an EXPLICIT flag: a bare Tier-4 default cfg has no capability info,
         # and captioning is the safe fallback there.
-        agent_type = getattr(inst, 'agent_class', '') or 'generalist'
+        # Use the caller's agent_type (same as caption_images / _get_vision_endpoint_for_agent)
+        # to keep the chain resolution consistent with the actual captioning endpoint choice.
+        if not agent_type:
+            agent_type = getattr(inst, 'agent_class', '') or 'generalist'
         try:
             chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
-        except (ValueError, RuntimeError) as e:
+        except ValueError as e:
             logger.debug(f"[APIRouter] Vision check: no endpoint chain for '{instance_name}': {e}")
             return False
         if not chain or 'vision_enabled' not in chain[0]:
@@ -2808,7 +2811,7 @@ class APIRouter:
             logger.debug("[APIRouter] Image captioning skipped — mode='off'")
             return messages
         if mode == 'auto':
-            if self._is_active_endpoint_vision(instance_name):
+            if self._is_active_endpoint_vision(instance_name, agent_type=agent_type):
                 # Active endpoint already has vision → no caption cost.
                 logger.debug(f"[APIRouter] Image captioning skipped (mode='auto') — active endpoint "
                              f"for '{instance_name}' is vision-capable")
