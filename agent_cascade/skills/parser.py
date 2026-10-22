@@ -391,6 +391,44 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     return _normalize_frontmatter(frontmatter), body.strip()
 
 
+_FRONTMATTER_BLOCK_RE = re.compile(
+    r'-{3,}[ \t]*(?:\r?\n)(.*?)\r?\n-{3,}[ \t]*(?:\r?\n|\Z)',
+    re.DOTALL,
+)
+
+
+def frontmatter_span(skill_content: str) -> Optional[Tuple[int, int]]:
+    """Return the ``(start, end)`` offsets of the YAML text inside the frontmatter block.
+
+    This is the single locator for callers that need to patch the frontmatter in place
+    (``propose_skill``) so they cannot disagree with :func:`parse_frontmatter`, which is
+    tolerant of a UTF-8 BOM and leading whitespace/newlines. A second, stricter regex
+    used to cause ``propose_skill`` to skip its name/version patch for content starting
+    with ``"\\n"`` or ``"\\ufeff"`` while the parser still read the frontmatter (BUG_0119).
+
+    Args:
+        skill_content: Raw SKILL.md text.
+
+    Returns:
+        ``(inner_start, inner_end)`` such that ``skill_content[inner_start:inner_end]`` is
+        the YAML block between the delimiters, or ``None`` when no ``---``...``---`` pair
+        is present. The returned span never includes the delimiters or the newline that
+        precedes the closing delimiter, so callers can splice a patched block back in.
+    """
+    if not isinstance(skill_content, str) or not skill_content:
+        return None
+
+    offset = 1 if skill_content.startswith('\ufeff') else 0
+    length = len(skill_content)
+    while offset < length and skill_content[offset] in ' \t\r\n':
+        offset += 1
+
+    match = _FRONTMATTER_BLOCK_RE.match(skill_content, offset)
+    if not match:
+        return None
+    return match.start(1), match.end(1)
+
+
 def parse_skill_file(skill_path: Path) -> Dict[str, Any]:
     """Parse a SKILL.md file and extract frontmatter metadata plus body.
 

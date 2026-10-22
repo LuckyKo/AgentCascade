@@ -17,6 +17,7 @@ from agent_cascade.skills.parser import (
     parse_frontmatter,
     strict_frontmatter_check,
     auto_fix_frontmatter,
+    frontmatter_span,
 )
 from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -172,9 +173,9 @@ class ProposeSkill(BaseTool):
         # NOTE: lightweight line-based parse — sufficient for scalar keys (name/version/description);
         # block-style or multi-line YAML values are not interpreted (only first physical line captured).
         fm = {}
-        fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n?', skill_content, re.DOTALL)
-        if fm_match:
-            fm_text = fm_match.group(1)
+        fm_span = frontmatter_span(skill_content)
+        if fm_span:
+            fm_text = skill_content[fm_span[0]:fm_span[1]]
             for line in fm_text.splitlines():
                 m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
                 if m:
@@ -264,7 +265,7 @@ class ProposeSkill(BaseTool):
 
         # Patch the frontmatter block (name always; version only on updates) in one pass, so a
         # body line like "version: X" is never touched.
-        if fm_match:
+        if fm_span:
 
             def _patch_field(text, key, value):
                 """Replace or insert a top-level scalar field within frontmatter text only."""
@@ -272,10 +273,10 @@ class ProposeSkill(BaseTool):
                     return re.sub(r'(?m)^%s\s*:.*$' % key, f'{key}: {value}', text, count=1)
                 return f'{key}: {value}\n' + text
 
-            fm_text = _patch_field(fm_match.group(1), 'name', proposed_name)
+            fm_text = _patch_field(skill_content[fm_span[0]:fm_span[1]], 'name', proposed_name)
             if is_update:
                 fm_text = _patch_field(fm_text, 'version', effective_version)
-            skill_content = skill_content[:fm_match.start(1)] + fm_text + skill_content[fm_match.end(1):]
+            skill_content = skill_content[:fm_span[0]] + fm_text + skill_content[fm_span[1]:]
 
         # ── Pre-approval health check (NEW) ─────────────────────────────────────
         # Screen invalid proposals BEFORE the user-approval prompt so a bad skill never wastes an
@@ -356,6 +357,15 @@ class ProposeSkill(BaseTool):
         )
 
         if success:
+            # BUG_0119 safety net: `name` is the documented contract, so after a successful
+            # registration the skill MUST be findable under it. If the frontmatter patch was
+            # skipped (an exotic delimiter form the shared locator did not match), reporting
+            # success for a name that does not exist sends the caller to the wrong skill.
+            if skill_manager.get_skill_metadata(proposed_name) is None:
+                actual_name = str(parse_frontmatter(skill_content)[0].get('name', '') or '<unknown>')
+                return (f"FAILED: registration used the frontmatter name '{actual_name}' instead "
+                        f"of the required '{proposed_name}'. Ensure the frontmatter 'name: ' "
+                        f'matches the `name` argument or use a standard "---" delimited block.')
             # Re-activate a previously-inactive skill that this proposal re-proposed. register's
             # new-skill path (and the candidate-upgrade path) never clear _disabled_names, so the
             # skill would otherwise stay disabled after a "successful" registration — enable_skill

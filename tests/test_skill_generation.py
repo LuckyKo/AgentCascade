@@ -2297,6 +2297,33 @@ class TestReflectionPrompt:
         assert '(unrated)' not in prompt
 
 
+class TestFrontmatterSpanLocator:
+    """BUG_0119: one tolerant frontmatter locator, shared with the parser."""
+
+    @pytest.mark.parametrize('prefix', ['', '\n', '\ufeff', '\ufeff\n', '  \r\n'])
+    @pytest.mark.parametrize('newline', ['\n', '\r\n'])
+    def test_span_matches_parser_for_bom_and_leading_whitespace(self, prefix, newline):
+        from agent_cascade.skills.parser import frontmatter_span, parse_frontmatter
+        content = prefix + newline.join([
+            '---',
+            'name: span-probe',
+            'version: 1.2.3',
+            '---',
+            '',
+            'Body text.',
+            '',
+        ])
+        span = frontmatter_span(content)
+        assert span is not None
+        assert content[span[0]:span[1]] == newline.join(['name: span-probe', 'version: 1.2.3'])
+        assert parse_frontmatter(content)[0]['name'] == 'span-probe'
+
+    def test_span_absent_without_delimiters(self):
+        from agent_cascade.skills.parser import frontmatter_span
+        assert frontmatter_span('no frontmatter here') is None
+        assert frontmatter_span('---\nname: unterminated\n') is None
+
+
 class TestProposeSkillRatingModes:
     """propose_skill rating-only and content+rating modes."""
 
@@ -2379,6 +2406,30 @@ class TestProposeSkillRatingModes:
         assert m.get_skill_metadata(arg_name) is not None
         on_disk = Path(m.get_skill_metadata(arg_name)['file_path']).read_text(encoding='utf-8')
         assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(arg_name), on_disk)
+
+    @pytest.mark.parametrize('prefix', ['\n', '\ufeff', '\ufeff\n'])
+    def test_name_arg_overrides_frontmatter_name_with_bom_or_leading_whitespace(self, fresh_manager, prefix):
+        """BUG_0119: content the tolerant parser accepts must still get the name patch.
+
+        A stricter second locator used to miss the block entirely, so the frontmatter name
+        won while the tool reported success for the argument name.
+        """
+        m = self.manager
+        arg_name = f"test-name-prefixed-{_uid()}"
+        fm_name = f'different-frontmatter-name-{_uid()}'
+        content = prefix + _make_skill_content(name=fm_name,
+                                               description='Name override target skill body text',
+                                               triggers=['prefix', 'name'],
+                                               generated_from_task='prefix name override test')
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': arg_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert m.get_skill_metadata(arg_name) is not None
+        assert m.get_skill_metadata(fm_name) is None
+        on_disk = Path(m.get_skill_metadata(arg_name)['file_path']).read_text(encoding='utf-8')
+        assert re.search(r'(?m)^name:\s*%s\s*$' % re.escape(arg_name), on_disk)
+        assert not re.search(r'(?m)^name:\s*%s\s*$' % re.escape(fm_name), on_disk)
 
     def test_version_patch_stays_in_frontmatter(self, fresh_manager):
         """Version auto-bump must not touch a body line that looks like 'version: X'."""
