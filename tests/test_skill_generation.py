@@ -4092,6 +4092,50 @@ class TestCandidateFlow:
             }
         assert m._version_rating_avg(name, '1.0.0') == (7.5, 2)
 
+    def test_candidate_registration_does_not_force_a_disk_rescan(self, fresh_manager):
+        """BUG_0124: seating a second candidate resolves O-vs-A with refresh=False.
+
+        The caller holds _write_lock; a disk rescan there would block every skill reader
+        for the duration of a full SKILL.md parse.
+        """
+        m = self.manager
+        name = f"test-cand-noscan-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        content = _make_skill_content(
+            name=name,
+            description='Candidate whose registration must not trigger a rescan',
+            triggers=['noscan', 'candidate'],
+            generated_from_task='test no rescan on registration',
+        )
+        assert m.register_skill_from_content(
+            content.replace('---\n', '---\nversion: 1.0.1\n', 1),
+            task_text='test no rescan on registration')[0]
+
+        calls = []
+        m.evaluate_candidates = lambda *a, **k: calls.append(k)
+        assert m.register_skill_from_content(
+            content.replace('---\n', '---\nversion: 1.0.2\n', 1),
+            task_text='test no rescan on registration')[0]
+        assert calls == [{'refresh': False}], f'expected a no-refresh gate call, got: {calls}'
+
+    def test_evaluate_candidates_refresh_uses_scan_signature(self, fresh_manager):
+        """BUG_0124: the default refresh must not invalidate the cache (no forced full rescan)."""
+        m = self.manager
+
+        def _boom():
+            raise AssertionError('evaluate_candidates must not call invalidate_cache()')
+
+        m.invalidate_cache = _boom
+        calls = []
+        m._ensure_discovered = lambda *a, **k: calls.append(1)
+
+        m.evaluate_candidates()
+        assert calls == [1], 'default refresh should consult discovery (signature-checked)'
+
+        calls.clear()
+        m.evaluate_candidates(refresh=False)
+        assert calls == [], 'refresh=False must not touch discovery'
+
     # -- Orphan handling ---------------------------------------------------------
 
     def test_orphan_candidate_discarded(self, fresh_manager):

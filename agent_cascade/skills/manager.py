@@ -2162,9 +2162,11 @@ class SkillManager:
         # min-ratings hold, disabled-incumbent hold, concurrency re-verification). The caller's
         # _write_lock is held; evaluate_candidates() re-enters it via RLock. A gate hiccup must
         # not fail registration: log and continue to seat B (B then stays pending — over-protective).
+        # refresh=False: the registry was just mutated in memory by this caller, so a disk
+        # rescan adds nothing and would hold the write lock through a full parse (BUG_0124).
         if a_pending:
             try:
-                self.evaluate_candidates()
+                self.evaluate_candidates(refresh=False)
             except Exception as e:  # noqa: BLE001 — a gate hiccup must not fail registration
                 logger.warning('[SKILLS] Pre-seat O-vs-A evaluation failed for %s: %s', name, e)
 
@@ -2405,27 +2407,35 @@ class SkillManager:
 
         logger.info("[SKILLS] Candidate '%s' discarded (incumbent v%s restored on next discovery)", name, prod_version)
 
-    def evaluate_candidates(self) -> None:
+    def evaluate_candidates(self, refresh: bool = True) -> None:
         """Run the rating-based decision gate for all live-serving candidates.
 
         Triggers: pool startup after discovery, every new candidate registration, and a
         30s safety-net timer (catches orphaned candidates after manual file deletions and
-        out-of-band rating changes). Forces a discovery refresh first so the registry is
-        current regardless of cache TTL state. All registry reads/mutations run under
-        _write_lock; every gate action re-verifies disk state so concurrent/duplicate
-        triggers cannot double-promote or double-discard (idempotent).
+        out-of-band rating changes). All registry reads/mutations run under _write_lock;
+        every gate action re-verifies disk state so concurrent/duplicate triggers cannot
+        double-promote or double-discard (idempotent).
+
+        Args:
+            refresh: When True (default), let discovery refresh the registry first if the
+                on-disk scan signature changed. Pass False when the caller just mutated the
+                in-memory registry under _write_lock (candidate registration): a disk rescan
+                adds nothing there and would block every reader for its whole duration
+                (BUG_0124).
 
         Decision per candidate: orphan check (incumbent file missing → discard; a disabled
         incumbent still keeps its candidate pending), then once the candidate has >=
         CANDIDATE_MIN_RATINGS ratings, compare averages (2dp): candidate >= incumbent →
         promote; else discard.
         """
-        # Force a discovery refresh first (D5) — registry must be current regardless of TTL.
-        try:
-            self.invalidate_cache()
-            self._ensure_discovered()
-        except Exception as e:  # noqa: BLE001 — proceed with the current registry on failure
-            logger.warning('[SKILLS] Candidate eval discovery refresh failed: %s', e)
+        # Refresh via the scan signature instead of invalidate_cache(): the old forced
+        # invalidation re-parsed every SKILL.md on every timer tick AND on every candidate
+        # registration (whose caller holds _write_lock, stalling readers) — BUG_0124.
+        if refresh:
+            try:
+                self._ensure_discovered()
+            except Exception as e:  # noqa: BLE001 — proceed with the current registry on failure
+                logger.warning('[SKILLS] Candidate eval discovery refresh failed: %s', e)
 
         candidates_root, production_root = self._candidate_dirs()
 
