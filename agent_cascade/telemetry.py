@@ -386,7 +386,6 @@ class TelemetryCollector:
                 'turns': 0,
                 'total_time_ms': 0,          # turn wall-clock (sum of turn_end durations)
                 'total_llm_latency_ms': 0,   # sum of this class's LLM call latencies
-                'total_ttft_ms': 0,
                 'total_streaming_time_ms': 0,
                 'total_tool_latency_ms': 0,  # excludes call_agent (matches session total)
                 'call_agent_latency_ms': 0,
@@ -609,10 +608,9 @@ class TelemetryCollector:
                 if ac:
                     acs = self._ensure_agent_class_stats(ac)
                     acs['llm_calls'] += 1
-                    # Time breakdown: the same latency/ttft/streaming values that are
+                    # Time breakdown: the same latency/streaming values that are
                     # credited to the config row, so the two tables reconcile.
                     acs['total_llm_latency_ms'] += latency_ms
-                    acs['total_ttft_ms'] += ttft_ms
                     acs['total_streaming_time_ms'] += streaming_time_ms
                 turn['input_tokens_est'] += call['input_tokens_est']
                 turn['output_tokens_est'] += actual_output

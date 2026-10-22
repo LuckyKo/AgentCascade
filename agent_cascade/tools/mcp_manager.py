@@ -506,7 +506,6 @@ class MCPClient:
                     texts.append(content.text)
                 elif content.type in ('image', 'audio'):
                     media_type = content.type  # 'image' | 'audio'
-                    alt = 'image' if media_type == 'image' else 'audio'
                     try:
                         raw = base64.b64decode(content.data) if content.data else b''
                         if not raw:
@@ -514,13 +513,13 @@ class MCPClient:
                         path = save_media_to_media(
                             raw, media_type, ext=_ext_from_mime(content.mimeType, media_type)
                         )
-                        texts.append(f'![{alt}]({path})')  # absolute path, NOT base64
+                        texts.append(f'![{media_type}]({path})')  # absolute path, NOT base64
                     except (MediaStorageError, ValueError) as e:
-                        # Degrade to inline base64 (same pattern as content_parse.py) so a
-                        # storage failure never breaks the tool result. Do NOT catch bare
-                        # Exception here — that would mask genuine bugs (e.g. TypeError).
-                        logger.warning(f'MCP media persist failed, keeping inline base64: {e}')
-                        texts.append(f'![{alt}]({content.data})')
+                        # Never dump the raw base64 into context (context bloat). On persist/empty
+                        # failure emit a short skip marker (same pattern as the read_resource branch).
+                        # Do NOT catch bare Exception here — that would mask genuine bugs (e.g. TypeError).
+                        logger.warning(f'MCP media persist failed, emitting skip marker: {e}')
+                        texts.append(f'[NOTE: skipped media resource: {tool_name}]')
             if texts:
                 return '\n\n'.join(texts)
             else:

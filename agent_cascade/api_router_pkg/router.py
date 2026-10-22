@@ -1268,7 +1268,7 @@ class APIRouter:
             # Per-instance cursor rotation: rotate chain from tracked position to skip previously-failed endpoints.
             # Done inside lock to atomically read cursor and return a consistent rotated view.
             if instance_name and len(endpoint_configs) > 1:
-                tier_count = len(endpoint_configs) - 1  # Everything except the default (Tier 3)
+                tier_count = len(endpoint_configs) - 1  # Everything except the default (Tier 1/1.5, or Tier 3 fallback when no own endpoints)
                 cursor = self._instance_endpoint_position.get(instance_name, 0)
                 default_cfg = endpoint_configs[-1]
                 tier_configs = endpoint_configs[:tier_count]

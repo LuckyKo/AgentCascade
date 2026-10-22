@@ -5127,3 +5127,37 @@ class TestRemovedLegacySkillSettings:
         import agent_cascade.settings as skill_settings
         assert not hasattr(skill_settings, const_name), (
             f'{const_name} has no readers — wire it up or leave it deleted (BUG_0125)')
+
+
+class TestRegisterSingleDoesNotFilter:
+    """BUG_0125: _register_single must NOT apply platform/disabled filtering — that filter is
+    owned by discover(), which parses these files (and indexes them in servable_index so they
+    stay resolvable) but filters them out before they ever reach the registrar. The dead `if parsed
+    is not None: pass / else: <checks>` branch in _register_single was removed; this test pins that
+    the registrar itself does no filtering, so a future edit cannot re-introduce a second filter there.
+
+    The complementary half — that discover() DOES filter platform-incompatible/disabled files
+    out of the registry — is already locked by test_disabled_kept and test_platform_incompatible_kept
+    (see those, do not duplicate them here). Asserts on the concrete registry data structure
+    (_skills_registry), not internal flags or hasattr.
+    """
+
+    def test_register_single_does_not_filter_platform(self, fresh_manager):
+        """_register_single on a platform-incompatible SKILL.md registers it (no filter here)."""
+        m = fresh_manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'foreign-os' / 'SKILL.md', 'foreign-os',
+                       platforms=_platform_excluded_list())
+        m._register_single(root / 'foreign-os' / 'SKILL.md')
+        assert 'foreign-os' in m._skills_registry, \
+            '_register_single must NOT re-introduce platform filtering (discover() owns it)'
+
+    def test_register_single_does_not_filter_disabled(self, fresh_manager):
+        """_register_single on a disabled SKILL.md registers it (does not consult _disabled_names)."""
+        m = fresh_manager
+        root = Path(m._metrics_file).parent / 'skills'
+        _write_skill_md(root / 'turned-off' / 'SKILL.md', 'turned-off')
+        m._disabled_names.add('turned-off')
+        m._register_single(root / 'turned-off' / 'SKILL.md')
+        assert 'turned-off' in m._skills_registry, \
+            '_register_single must NOT consult _disabled_names (discover() owns the filter)'

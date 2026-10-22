@@ -108,6 +108,29 @@ def test_early_exit_records_exactly_one_turn_end(tmp_path):
     assert len(_turn_events(collector)) == 1
 
 
+def test_abandoned_generator_records_exactly_one_turn_end(tmp_path):
+    """Consumer abandoning the run() generator mid-turn (GeneratorExit) closes the turn exactly once.
+
+    The subtlest BUG_0127 exit path: drive one yield, then close() so GeneratorExit is
+    raised inside run() at the yield. The exit finally must record_turn_end exactly once
+    (record_turn_end is idempotent via pop), making the abandoned turn visible in the
+    session total rather than silently dropping it.
+    """
+    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+    engine, inst, _pool = _make_engine(collector)
+    # Non-empty conversation so the turn loop is entered; _pre_llm_checks short-circuits
+    # to a `yield response` (core.py:1238), so the generator is suspended at a yield when closed.
+    engine._setup_turn = MagicMock(return_value=([Message(role='user', content='hi')], [], []))
+    engine._pre_llm_checks = MagicMock(return_value=True)
+
+    gen = engine.run(inst)
+    next(gen)  # drive to the first yield; record_turn_start has already run
+    gen.close()  # raises GeneratorExit at the yield -> run()'s exit finally
+
+    assert collector.get_session_summary()['total_turns'] == 1
+    assert len(_turn_events(collector)) == 1
+
+
 def test_no_active_turn_is_a_silent_noop(tmp_path):
     """A terminal stop before turn_start must not fabricate a turn_end event."""
     collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')

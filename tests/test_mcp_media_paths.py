@@ -137,9 +137,9 @@ class TestMcpMediaPersistence:
         audio_exts = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.opus')
         assert p.lower().endswith(audio_exts), f'Audio path has non-audio extension: {p!r}'
 
-    def test_storage_failure_falls_back_to_inline_base64(self):
-        """When save_media_to_media raises, the result degrades to inline base64 and
-        no exception escapes the tool result."""
+    def test_storage_failure_emits_note_marker(self):
+        """When save_media_to_media raises, the result emits a short skip marker — never
+        the inline base64, which would re-introduce the context bloat this feature removes."""
         b64 = _tiny_png_b64()
         fake = types.SimpleNamespace(type='image', data=b64, mimeType='image/png')
         client = _make_client([fake])
@@ -149,8 +149,8 @@ class TestMcpMediaPersistence:
                          side_effect=MediaStorageError('simulated disk full')):
             out = _run(client.execute_function('any_tool', {}))
 
-        assert '![image](' in out, f'Expected fallback markdown link, got: {out!r}'
-        assert b64 in out, 'fallback must preserve the inline base64 payload'
+        assert 'skipped media resource: any_tool' in out, f'Expected skip marker, got: {out!r}'
+        assert b64 not in out, 'base64 payload must NOT flow through the agent pipe'
 
     def test_text_content_unchanged_control(self):
         """Control: a text content still returns its text verbatim (proves the harness
@@ -162,13 +162,14 @@ class TestMcpMediaPersistence:
         assert out == 'hello world', f'Text content must pass through unchanged, got: {out!r}'
 
     def test_empty_media_payload_falls_back(self):
-        """Empty data must not write a 0-byte file; it degrades to the (empty) inline fallback."""
+        """Empty data must not write a 0-byte file nor emit a path link; it degrades to the
+        same short skip marker as a persist failure — never the raw base64."""
         fake = types.SimpleNamespace(type='image', data='', mimeType='image/png')
         client = _make_client([fake])
 
         out = _run(client.execute_function('any_tool', {}))
         # No path link is emitted for an empty payload; no exception escapes.
-        assert '![image](' in out
+        assert 'skipped media resource: any_tool' in out, f'Expected skip marker, got: {out!r}'
         assert not re.search(r'!\[image\]\(([^)]+)\)', out), \
             'empty payload must not produce a file path link'
 

@@ -1302,6 +1302,36 @@ class SkillManager:
         self._cache_signature = current_sig
         self._cache_timestamp = now
 
+    def _build_registry_entry(
+        self,
+        name: str,
+        parsed: dict,
+        file_path: Path,
+        priority: int,
+        version_default: str = '1.0.0',
+    ) -> dict:
+        """Build the Tier-1 registry-entry dict from parsed skill data.
+
+        Single source of truth for the registry entry shape, shared by discover()
+        (via _register_single) and _discard_candidate (incumbent restore). The output
+        is byte-identical to both call sites' previous inline dicts; the per-site
+        differences (name derivation, priority, version fallback) are passed in as
+        arguments and stay at the call sites.
+        """
+        fm = parsed.get('frontmatter', {})
+        return {
+            'name': name,
+            'description': fm.get('description', ''),
+            'source': fm.get('source', ''),
+            'triggers': fm.get('triggers', []),
+            # parser already normalizes 'version'; version_default is a safety net only
+            'version': parsed.get('version', version_default),
+            'file_path': str(file_path),
+            '_priority': priority,
+            # Keep a reference to the full parsed data for lazy loading
+            '_parsed_data': parsed,
+        }
+
     def _register_single(
         self,
         skill_file: Path,
@@ -1348,18 +1378,13 @@ class SkillManager:
             # logger.debug("[SKILLS] Replacing skill '%s' with higher priority (%d > %d)", name, priority, existing_priority)
 
         # Store parsed data in registry (Tier 1: frontmatter only; body is lazy-loaded)
-        version = parsed.get('version', '1.0.0')  # Already normalized by parser
-        self._skills_registry[name] = {
-            'name': name,
-            'description': frontmatter.get('description', ''),
-            'source': frontmatter.get('source', ''),
-            'triggers': frontmatter.get('triggers', []),
-            'version': version,
-            'file_path': str(skill_file),
-            '_priority': priority,
-            # Keep a reference to the full parsed data for lazy loading
-            '_parsed_data': parsed,
-        }
+        self._skills_registry[name] = self._build_registry_entry(
+            name=name,
+            parsed=parsed,
+            file_path=skill_file,
+            priority=priority,
+            version_default='1.0.0',
+        )
 
     # ── Index Management ─────────────────────────────────────────────────────
 
@@ -2397,17 +2422,13 @@ class SkillManager:
                     except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                         logger.warning('[SKILLS] Could not restore incumbent %s after discard: %s', name, e)
                 if parsed is not None:
-                    fm = parsed.get('frontmatter', {})
-                    self._skills_registry[name] = {
-                        'name': name,
-                        'description': fm.get('description', ''),
-                        'source': fm.get('source', ''),
-                        'triggers': fm.get('triggers', []),
-                        'version': parsed.get('version', prod_version),
-                        'file_path': str(prod_file),
-                        '_priority': _PRIORITY_SYSTEM,
-                        '_parsed_data': parsed,
-                    }
+                    self._skills_registry[name] = self._build_registry_entry(
+                        name=name,
+                        parsed=parsed,
+                        file_path=prod_file,
+                        priority=_PRIORITY_SYSTEM,
+                        version_default=prod_version,
+                    )
                 self._rebuild_index()
 
         with self._metrics_lock:
@@ -2453,6 +2474,11 @@ class SkillManager:
         # Refresh via the scan signature instead of invalidate_cache(): the old forced
         # invalidation re-parsed every SKILL.md on every timer tick AND on every candidate
         # registration (whose caller holds _write_lock, stalling readers) — BUG_0124.
+        # CAVEAT: _ensure_discovered() honors the discovery cache TTL, so this is NOT a hard
+        # re-read of disk — an out-of-band-created candidate file can go undiscovered for up to
+        # one extra tick. Convergence relies on SKILL_CACHE_TTL_SECONDS matching
+        # CANDIDATE_EVAL_INTERVAL_SECONDS (both 30s) plus the scan signature changing on the
+        # next tick; do not lower the TTL below the interval or the guarantee breaks.
         if refresh:
             try:
                 self._ensure_discovered()

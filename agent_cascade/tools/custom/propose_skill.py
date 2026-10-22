@@ -67,7 +67,7 @@ def _choose_update_version(proposed_version: str, existing_version: str, name: s
         logger.info('[PROPOSE-SKILL] %s: proposed v%s is older than incumbent v%s; using v%s',
                     name or '<skill>', proposed_norm, existing_norm, effective)
         return effective
-    if proposed_norm == '1.0.0' or proposed_norm == existing_version:
+    if proposed_norm == '1.0.0' or proposed_norm == existing_norm:
         return _next_patch_version(existing_norm)
     return proposed_norm
 
@@ -483,14 +483,15 @@ class ProposeSkill(BaseTool):
                              f"YAML ({strict_reason}). It was recovered via the tolerant fallback, but "
                              f"quote any value containing special characters (e.g. colons) as a single "
                              f"double-quoted string to keep it clean.")
-            verb = 'updated' if is_update else 'registered'
+            # The is_update branch returns above, so this generic line is only ever reached
+            # for a NEW registration — 'registered' is the only reachable wording.
             if is_update:
                 # Be explicit about the candidate flow: the production file is NOT changed yet,
                 # and the update may be discarded by the gate (BUG_0122).
                 return (f"Skill '{proposed_name}' updated successfully: candidate v{effective_version} "
                         f"is now serving and will be promoted or discarded after enough ratings."
                         f"{reenabled_note}{yaml_warn}")
-            return f"Skill '{proposed_name}' {verb} successfully (v{effective_version}).{reenabled_note}{yaml_warn}"
+            return f"Skill '{proposed_name}' registered successfully (v{effective_version}).{reenabled_note}{yaml_warn}"
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             action = 'update' if is_update else 'register'
