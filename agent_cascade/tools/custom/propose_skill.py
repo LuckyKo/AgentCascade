@@ -36,6 +36,42 @@ def _next_patch_version(version: str) -> str:
         return '1.0.1'
 
 
+def _version_tuple(version: str):
+    """Parse a strict ``X.Y.Z`` string into an int tuple, or None when it is not one."""
+    parts = str(version).split('.')
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        return None
+
+
+def _choose_update_version(proposed_version: str, existing_version: str, name: str = '') -> str:
+    """Return the version an update should carry — always newer than ``existing_version``.
+
+    Rules (BUG_0120):
+    - no explicit valid version, or one EQUAL to the incumbent -> next patch (pre-existing rule);
+    - an explicitly LOWER version -> next patch from the incumbent. Accepting the downgrade
+      would revive a historical ``ratings_by_version`` key (or, on an exact match, share the
+      incumbent's), corrupting the candidate gate's evidence.
+    A higher explicit version is kept as-is.
+    """
+    proposed_norm = normalize_version(proposed_version)
+    existing_norm = normalize_version(existing_version)
+    proposed_key = _version_tuple(proposed_norm)
+    existing_key = _version_tuple(existing_norm)
+
+    if proposed_key and existing_key and proposed_key < existing_key:
+        effective = _next_patch_version(existing_norm)
+        logger.info('[PROPOSE-SKILL] %s: proposed v%s is older than incumbent v%s; using v%s',
+                    name or '<skill>', proposed_norm, existing_norm, effective)
+        return effective
+    if proposed_norm == '1.0.0' or proposed_norm == existing_version:
+        return _next_patch_version(existing_norm)
+    return proposed_norm
+
+
 def _coerce_rating(value):
     """Return (float_value or None, error_string or None) for a 0-10 rating."""
     if value is None:
@@ -187,6 +223,11 @@ class ProposeSkill(BaseTool):
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
         is_update = existing_meta is not None
 
+        # Captured BEFORE any gate/approval side effect: a disabled skill is dropped from the
+        # registry, so `is_update` is False and it takes the new-skill path — but its production
+        # file still carries the installed version, which must not be downgraded (BUG_0120).
+        was_inactive = skill_manager.is_skill_disabled(proposed_name)
+
         # ── Hard-reject similarity gate (NEW + UPDATE) ────────────────────────
         # Reject a proposal whose frontmatter text is too similar to an existing skill,
         # before any approval request or registration. For an UPDATE we exclude the
@@ -254,14 +295,21 @@ class ProposeSkill(BaseTool):
 
         if is_update:
             existing_version = existing_meta.get('version', '1.0.0')
-
-            # An update always advances the version: if the content carries no explicit
-            # (valid semver) version, or one equal to the existing, compute the next patch.
-            proposed_norm = normalize_version(proposed_version)
-            effective_version = proposed_norm if (proposed_norm != '1.0.0' and proposed_norm != existing_version) \
-                else _next_patch_version(existing_version)
+            effective_version = _choose_update_version(proposed_version, existing_version, proposed_name)
         else:
             effective_version = normalize_version(proposed_version) or '1.0.0'
+            # Re-proposing a DISABLED skill takes the new-skill path (absent from the registry),
+            # so it never reaches `_choose_update_version`. Guard it explicitly against a
+            # downgrade of the installed production file (BUG_0120).
+            if was_inactive:
+                installed_version = skill_manager.get_installed_version(proposed_name)
+                proposed_key = _version_tuple(effective_version)
+                installed_key = _version_tuple(installed_version) if installed_version else None
+                if proposed_key and installed_key and proposed_key < installed_key:
+                    effective_version = _next_patch_version(installed_version)
+                    logger.info('[PROPOSE-SKILL] %s: proposed v%s is older than installed v%s; using v%s',
+                                proposed_name, normalize_version(proposed_version), installed_version,
+                                effective_version)
 
         # Patch the frontmatter block (name always; version only on updates) in one pass, so a
         # body line like "version: X" is never touched.
@@ -274,7 +322,11 @@ class ProposeSkill(BaseTool):
                 return f'{key}: {value}\n' + text
 
             fm_text = _patch_field(skill_content[fm_span[0]:fm_span[1]], 'name', proposed_name)
-            if is_update:
+            # Patch the version on updates, and whenever the chosen version differs from what
+            # the content declares (e.g. a downgrade-guarded re-proposal of a disabled skill,
+            # which takes the new-skill path — BUG_0120). Without this the message and the
+            # registered file would disagree.
+            if is_update or effective_version != normalize_version(proposed_version):
                 fm_text = _patch_field(fm_text, 'version', effective_version)
             skill_content = skill_content[:fm_span[0]] + fm_text + skill_content[fm_span[1]:]
 
@@ -344,12 +396,6 @@ class ProposeSkill(BaseTool):
         # name it routes to _register_candidate_upgrade (candidate folder + decision gate), so
         # an update creates a candidate that the gate later promotes/discards — it never
         # overwrites the production file directly. A new name registers/auto-promotes as before.
-
-        # Capture "was inactive" BEFORE register: a disabled/inactive skill is dropped from the
-        # registry by discover(), so get_skill_metadata returns None and is_update=False above, but
-        # re-proposing it under the same name should re-activate it (D4). No pre-gate mutates
-        # _disabled_names, so this value stably reflects "inactive before this operation".
-        was_inactive = skill_manager.is_skill_disabled(proposed_name)
 
         success, errors = skill_manager.register_skill_from_content(
             skill_content=skill_content,

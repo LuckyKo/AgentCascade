@@ -2454,6 +2454,37 @@ class TestProposeSkillRatingModes:
         fm_block = re.match(r'^---\s*\n(.*?)\n---', on_disk, re.DOTALL).group(1)
         assert re.search(r'(?m)^version:\s*1\.0\.1\s*$', fm_block)
 
+    def test_update_bumps_instead_of_accepting_version_downgrade(self, fresh_manager):
+        """BUG_0120: an explicit LOWER version is advanced past the incumbent, not honored.
+
+        Reusing an older version string revives a historical ratings_by_version key; the
+        candidate gate would then compare against (or destroy) that old evidence.
+        """
+        m = self.manager
+        name = f"test-version-downgrade-{_uid()}"
+        content = _make_skill_content(name=name,
+                                      description='Version downgrade target skill body text',
+                                      triggers=['downgrade', 'version'],
+                                      generated_from_task='downgrade guard test'
+                                      ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        assert m.register_skill_from_content(content, task_text='downgrade guard test')[0]
+        assert m.get_skill_metadata(name)['version'] == '2.0.0'
+        prod_version_before = Path(m.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        downgraded = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        downgraded = downgraded.replace('version: 2.0.0', 'version: 1.5.0')
+        result = tool.call(_json.dumps({'name': name, 'skill_content': downgraded, 'justification': 'refine'}))
+
+        assert 'v2.0.1' in result and '1.5.0' not in result
+        assert m.get_skill_metadata(name)['version'] == '2.0.1', 'serving candidate must be the bumped version'
+        cand_file = m._candidates_dir / name / 'SKILL.md'
+        assert cand_file.exists()
+        assert re.search(r'(?m)^version:\s*2\.0\.1\s*$', cand_file.read_text(encoding='utf-8'))
+        prod_file = m._production_skills_dir / name / 'SKILL.md'
+        assert prod_file.read_text(encoding='utf-8') == prod_version_before, 'production file must be untouched'
+
     def test_update_respects_explicit_higher_version(self, fresh_manager):
         """An explicit higher semver in content is kept as-is (no clobbering)."""
         m = self.manager
@@ -3452,6 +3483,48 @@ class TestProposeSkillAutoActivateInactive:
         assert _enable_calls == [], f'enable_skill must not fire on register failure, got: {_enable_calls}'
         # The disabled skill stays disabled.
         assert m.is_skill_disabled(name) is True
+
+    def test_inactive_reproposal_cannot_downgrade_installed_version(self, fresh_manager):
+        """BUG_0120: the disabled/new-skill path must not overwrite a newer production version.
+
+        A disabled skill is absent from the registry, so `is_update` is False and the proposal
+        takes the new-skill path (which writes production directly). An explicit lower version
+        must still be advanced past the installed file's version.
+        """
+        m = self.manager
+        import json as _json
+        self._isolate_dirs(m)
+        name = f"autoact-downgrade-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Best practices for Docker builds and images',
+            triggers=['docker', 'compose'],
+            generated_from_task='docker best practices'
+        ).replace('---\n', '---\nversion: 2.0.0\n', 1)
+        assert m.register_skill_from_content(content, task_text='docker best practices')[0]
+        assert m.get_skill_metadata(name)['version'] == '2.0.0'
+
+        ok, _ = m.disable_skill(name)
+        assert ok and m.is_skill_disabled(name) is True
+        # discover() drops disabled skills from the registry; simulate that post-restart state
+        # so the re-proposal takes the new-skill path (direct production write), as in the
+        # reported repro. Without the version guard this overwrites v2.0.0 with v1.5.0.
+        with m._write_lock:
+            m._skills_registry.pop(name, None)
+        m._rebuild_index()
+        assert m.get_skill_metadata(name) is None
+
+        downgraded = content.replace('Follow these steps carefully', 'Follow these revised steps carefully')
+        downgraded = downgraded.replace('version: 2.0.0', 'version: 1.5.0')
+        tool, _ = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': downgraded, 'justification': 'refine'}))
+
+        assert 'v2.0.1' in result and '1.5.0' not in result
+        assert m.is_skill_disabled(name) is False
+        prod_file = m._production_skills_dir / name / 'SKILL.md'
+        on_disk = prod_file.read_text(encoding='utf-8')
+        assert re.search(r'(?m)^version:\s*2\.0\.1\s*$', on_disk)
+        assert m.get_skill_metadata(name)['version'] == '2.0.1'
 
 
 # ===========================================================================

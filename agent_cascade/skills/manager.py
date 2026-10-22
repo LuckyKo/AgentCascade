@@ -1406,6 +1406,23 @@ class SkillManager:
         with self._write_lock:
             return self._skills_registry.get(skill_name)
 
+    def get_installed_version(self, skill_name: str) -> Optional[str]:
+        """Return the version in the PRODUCTION ``SKILL.md`` for ``skill_name``, or None.
+
+        Reads disk rather than the registry so a disabled/inactive skill — dropped from the
+        registry by ``discover()`` — still reports the version its installed file carries.
+        Used by ``propose_skill`` to stop a re-proposal from downgrading a disabled skill
+        (BUG_0120). Best-effort: returns None when the file is absent or unreadable.
+        """
+        _, production_root = self._candidate_dirs()
+        skill_file = production_root / skill_name / 'SKILL.md'
+        try:
+            if skill_file.exists():
+                return parse_skill_file(skill_file).get('version')
+        except (OSError, UnicodeDecodeError) as e:
+            logger.debug('[SKILLS] Could not read installed version for %s: %s', skill_name, e)
+        return None
+
     def get_skill_chars(self, skill_name: str) -> int:
         """Return the body character count for a skill (0 if unavailable).
 
