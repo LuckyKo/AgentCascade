@@ -3901,6 +3901,95 @@ class TestCandidateFlow:
         entry = m.get_metrics(name)
         assert '3.1.4' in entry['ratings_by_version']
 
+    # -- Decision baseline / metrics seeding (BUG_0121) -----------------------
+
+    def test_unrated_incumbent_gets_explicit_empty_baseline(self, fresh_manager):
+        """BUG_0121: an unrated incumbent must get its OWN empty per-version key.
+
+        Without it, the incumbent's baseline is read from the aggregate — which later holds
+        the candidate's own ratings, i.e. the gate compares the candidate with itself.
+        """
+        m = self.manager
+        name = f"test-cand-unrated-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        assert 'ratings_by_version' not in m.get_metrics(name), 'precondition: no metrics entry'
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate over a never-rated incumbent skill here',
+            triggers=['unrated', 'baseline'],
+            generated_from_task='test unrated incumbent baseline',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test unrated incumbent baseline')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+        assert cand_version == '1.0.1'
+
+        entry = m.get_metrics(name)
+        assert entry['ratings_by_version']['1.0.0'] == {'count': 0, 'sum': 0.0, 'latest': None}
+        assert entry['ratings_by_version'][cand_version] == {'count': 0, 'sum': 0.0, 'latest': None}
+        # No fabricated aggregate rating (a neutral 5.0-style seed would bias the gate).
+        assert not (entry.get('ratings') or {}).get('count')
+
+        assert m._version_rating_avg(name, '1.0.0') == (None, 0)
+
+    def test_missing_prod_version_key_does_not_borrow_aggregate(self, fresh_manager):
+        """BUG_0121: a missing key for the incumbent version reads as unrated, not aggregate.
+
+        Old behavior: the aggregate (old-version ratings, avg 7.0) became avg_prod, so a
+        candidate rated 3.0 was discarded. The documented gate branch is 'unrated incumbent
+        -> any rated candidate promotes'.
+        """
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+
+        m = self.manager
+        name = f"test-cand-stale-agg-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        with m._metrics_lock:
+            m._metrics[name] = {
+                'total_loads': 0,
+                'by_version': {},
+                'ratings': {'count': 12, 'sum': 84.0, 'latest': 7.0, 'last_version': '0.9.0'},
+                'ratings_by_version': {'0.9.0': {'count': 12, 'sum': 84.0, 'latest': 7.0}},
+            }
+
+        content = _make_skill_content(
+            name=name,
+            description='Candidate over a skill with stale aggregate history',
+            triggers=['stale', 'aggregate'],
+            generated_from_task='test stale aggregate baseline',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        success, _ = m.register_skill_from_content(content, task_text='test stale aggregate baseline')
+        assert success
+        cand_version = m.get_skill_metadata(name)['version']
+
+        for _ in range(CANDIDATE_MIN_RATINGS):
+            m.record_rating(name, 3.0)
+
+        # The incumbent version has no history: unrated, NOT the 7.0 aggregate.
+        assert m._version_rating_avg(name, '1.0.0') == (None, 0)
+        m.evaluate_candidates()
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_SYSTEM, 'unrated incumbent -> promote'
+        assert reg['version'] == cand_version
+        assert not (m._candidates_dir / name / 'SKILL.md').exists()
+        entry = m.get_metrics(name)
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS
+        assert abs(entry['ratings']['sum'] - 3.0 * CANDIDATE_MIN_RATINGS) < 1e-9
+
+    def test_legacy_entry_without_version_map_keeps_aggregate_fallback(self, fresh_manager):
+        """BUG_0121: schema 1.0/1.1 entries (no ratings_by_version at all) still read the aggregate."""
+        m = self.manager
+        name = f"test-cand-legacy-fallback-{_uid()}"
+        with m._metrics_lock:
+            m._metrics[name] = {
+                'total_loads': 0,
+                'by_version': {},
+                'ratings': {'count': 2, 'sum': 15.0, 'latest': 8.0, 'last_version': '1.0.0'},
+            }
+        assert m._version_rating_avg(name, '1.0.0') == (7.5, 2)
+
     # -- Orphan handling ---------------------------------------------------------
 
     def test_orphan_candidate_discarded(self, fresh_manager):

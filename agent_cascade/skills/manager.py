@@ -2166,7 +2166,13 @@ class SkillManager:
         # exists (even empty) so per-version lookups never fall back to the aggregate.
         with self._metrics_lock:
             entry = self._metrics.get(name)
-            if entry is not None and 'ratings_by_version' not in entry:
+            if entry is None:
+                # Never-rated skill (no metrics entry at all): create the container so the
+                # incumbent's per-version baseline below can exist. Deliberately NO aggregate
+                # `ratings` block — inventing one would fabricate evidence (BUG_0121).
+                entry = {'total_loads': 0, 'by_version': {}}
+                self._metrics[name] = entry
+            if 'ratings_by_version' not in entry:
                 by_version_ratings = {}
                 agg = entry.get('ratings')
                 if agg and agg.get('count'):
@@ -2222,14 +2228,20 @@ class SkillManager:
     def _version_rating_avg(self, skill_name: str, version: str):
         """Return (avg or None, count) for one version's rating history.
 
-        Reads ratings_by_version[version]; legacy entries without it fall back to the
-        aggregate ratings block (D3). Returns (None, 0) when unrated.
+        Reads ``ratings_by_version[version]``. Only legacy entries that lack the whole map
+        (schema 1.0/1.1) fall back to the aggregate ``ratings`` block (D3). An entry that
+        HAS the map but no key for ``version`` means that version is unrated and must NOT
+        borrow the aggregate: the aggregate mixes every version, including the serving
+        candidate's own samples, which would make the gate compare a candidate with itself
+        and promote it (BUG_0121). Returns (None, 0) when unrated.
         """
         with self._metrics_lock:
             entry = self._metrics.get(skill_name) or {}
-            history = (entry.get('ratings_by_version') or {}).get(version)
-            if history is None:
-                history = entry.get('ratings') or {}  # legacy fallback
+            by_version = entry.get('ratings_by_version')
+            if by_version is None:
+                history = entry.get('ratings') or {}  # legacy fallback (no per-version map)
+            else:
+                history = by_version.get(version) or {}
             count = history.get('count', 0)
             if not count:
                 return None, 0
@@ -2240,9 +2252,11 @@ class SkillManager:
 
         Unconditionally sets ratings_by_version[version] to an empty {count:0, sum:0.0, latest:None}
         entry so the candidate starts unrated and does NOT inherit any prior per-version history on
-        that key. The explicit empty entry (not an absent key) is REQUIRED: _version_rating_avg
-        falls back to the aggregate `ratings` when a per-version key is missing, which would
-        mis-attribute the incumbent's sample to the fresh candidate (D-2).
+        that key. An explicit empty entry (not an absent key) is REQUIRED so _version_rating_avg
+        reports the candidate as unrated instead of borrowing the aggregate (D-2, BUG_0121). The
+        incumbent's prod_version key is seeded empty when absent for the same reason: a missing key
+        would make the incumbent's baseline read the aggregate, which contains the candidate's own
+        samples.
 
         Skipped when version == prod_version (collision with the incumbent — clobbering that key
         would destroy the incumbent's baseline; D-3 / §6). Caller does NOT hold _metrics_lock.
@@ -2252,8 +2266,17 @@ class SkillManager:
         with self._metrics_lock:
             entry = self._metrics.get(name)
             if entry is None:
-                return
+                # Never-rated skill: create the container so BOTH version keys below can be
+                # written. No aggregate `ratings` block is invented (BUG_0121).
+                entry = {'total_loads': 0, 'by_version': {}}
+                self._metrics[name] = entry
             by_version = entry.setdefault('ratings_by_version', {})
+            # The incumbent's key must exist explicitly (even when it is unrated). A MISSING
+            # key makes _version_rating_avg borrow the aggregate, which contains the
+            # candidate's own samples once it is rated, letting the gate compare a candidate
+            # with itself (BUG_0121). setdefault preserves a real history seeded by the
+            # legacy backfill in _register_candidate_upgrade.
+            by_version.setdefault(prod_version, dict(_EMPTY_VERSION_RATING))
             # dict() copy: never store the shared _EMPTY_VERSION_RATING constant itself (a later
             # _record_rating would mutate it in place).
             by_version[version] = dict(_EMPTY_VERSION_RATING)
