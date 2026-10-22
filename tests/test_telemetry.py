@@ -1301,6 +1301,66 @@ class TestConfigClassTimeReconciliation:
         # double-count the child agent's own LLM/tool time).
         assert row['tool_time_sec'] == 0.0
 
+    def test_turn_events_carry_agent_class_and_time_breakdown(self, collector):
+        """turn_start/turn_end expose agent_class + the per-turn time breakdown (BUG_0129)."""
+        collector.record_turn_start('inst', config_fingerprint='fp', agent_class='coder')
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        collector.record_llm_first_token('inst')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+        collector.record_tool_call_start('inst', 'read_file')
+        collector.record_tool_call_end('inst', 'read_file', success=True)
+        collector.record_tool_call_start('inst', 'call_agent')
+        collector.record_tool_call_end('inst', 'call_agent', success=True, is_call_agent=True)
+        collector.record_turn_end('inst')
+
+        starts = [e for e in collector.events if e['type'] == 'turn_start']
+        ends = [e for e in collector.events if e['type'] == 'turn_end']
+        assert starts[0]['agent_class'] == 'coder'
+        end = ends[0]
+        assert end['agent_class'] == 'coder'
+        for key in ('llm_latency_ms', 'ttft_ms', 'streaming_time_ms',
+                    'tool_latency_ms', 'call_agent_latency_ms'):
+            assert key in end
+            assert end[key] >= 0
+
+        # The turn's LLM latency equals the sum of its llm_call events (rounded
+        # to 0.1 ms each, so allow the accumulated rounding slop).
+        llm_events = [x for x in collector.events if x['type'] == 'llm_call']
+        assert end['llm_latency_ms'] == pytest.approx(
+            sum(x['latency_ms'] for x in llm_events), abs=0.5)
+
+    def test_turn_events_reproduce_class_llm_time(self, collector):
+        """Replaying turn_end events reproduces the live class LLM time (BUG_0129)."""
+        self._run_turn(collector, 'a', 'model-a', 'coder')
+        self._run_turn(collector, 'b', 'model-b', 'researcher')
+
+        replay_ms = {}
+        for e in collector.events:
+            if e['type'] == 'turn_end':
+                replay_ms[e['agent_class']] = (
+                    replay_ms.get(e['agent_class'], 0.0) + e['llm_latency_ms'])
+
+        for row in collector.get_agent_class_summary():
+            assert replay_ms[row['agent_class']] == pytest.approx(
+                row['llm_time_sec'] * 1000, abs=2.0)
+
+    def test_session_end_persists_class_and_skill_tables(self, collector):
+        """session_end carries the agent-class and skill tables, not just configs (BUG_0129)."""
+        collector.record_turn_start('inst', config_fingerprint='fp', agent_class='coder')
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+        collector.record_turn_end('inst')
+        collector.record_skills_loaded('coder', ['alpha'], 'auto')
+
+        expected_classes = collector.get_agent_class_summary()
+        expected_skills = collector.get_skill_usage_summary()
+        collector.record_session_end()
+
+        end = [e for e in collector.events if e['type'] == 'session_end'][-1]
+        assert end['agent_class_comparison'] == expected_classes
+        assert end['skill_usage'] == expected_skills
+        assert end['agent_class_comparison'][0]['agent_class'] == 'coder'
+
     def test_turn_without_class_counts_only_in_config(self, collector):
         collector.record_turn_start('inst', config_fingerprint=self._fp('m'),
                                     agent_class='')

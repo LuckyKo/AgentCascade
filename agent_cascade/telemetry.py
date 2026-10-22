@@ -251,6 +251,13 @@ class TelemetryCollector:
                 'tool_calls_detail': [],
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
+                # Per-turn time breakdown, flushed onto the turn_end event so the
+                # JSONL can reproduce the Config/Agent-Class tables offline (BUG_0129).
+                'llm_latency_ms': 0.0,
+                'ttft_ms': 0.0,
+                'streaming_time_ms': 0.0,
+                'tool_latency_ms': 0.0,       # excludes call_agent
+                'call_agent_latency_ms': 0.0,
                 'loops_detected': 0,
                 'retries': 0,
                 'compressions': 0,
@@ -270,6 +277,7 @@ class TelemetryCollector:
             'type': 'turn_start',
             'instance': instance_name,
             'config_fingerprint': config_fingerprint,
+            'agent_class': agent_class,
             'timestamp': _now_iso(),
         }
         self._write_event(event)
@@ -295,12 +303,20 @@ class TelemetryCollector:
                 'type': 'turn_end',
                 'instance': instance_name,
                 'config_fingerprint': fp,
+                'agent_class': turn.get('agent_class') or '',
                 'duration_ms': round(duration_ms, 1),
                 'llm_calls': turn['llm_calls'],
                 'tool_calls': turn['tool_calls'],
                 'tool_calls_detail': turn['tool_calls_detail'],
                 'input_tokens_est': turn['input_tokens_est'],
                 'output_tokens_est': turn['output_tokens_est'],
+                # Per-turn time breakdown (BUG_0129): lets the exported JSONL be
+                # reconciled against the live Config/Agent-Class tables.
+                'llm_latency_ms': round(turn['llm_latency_ms'], 1),
+                'ttft_ms': round(turn['ttft_ms'], 1),
+                'streaming_time_ms': round(turn['streaming_time_ms'], 1),
+                'tool_latency_ms': round(turn['tool_latency_ms'], 1),
+                'call_agent_latency_ms': round(turn['call_agent_latency_ms'], 1),
                 'loops_detected': turn['loops_detected'],
                 'retries': turn['retries'],
                 'compressions': turn['compressions'],
@@ -553,6 +569,10 @@ class TelemetryCollector:
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn['llm_calls'] += 1
+                # Per-turn time breakdown (BUG_0129) — flush onto the turn_end event.
+                turn['llm_latency_ms'] += latency_ms
+                turn['ttft_ms'] += ttft_ms
+                turn['streaming_time_ms'] += streaming_time_ms
                 # Attribute this LLM call to the calling instance's agent class.
                 # Guarded: no active turn / empty class → not attributed (no spurious row).
                 ac = turn.get('agent_class') or ''
@@ -643,6 +663,11 @@ class TelemetryCollector:
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn['tool_calls'] += 1
+                # Per-turn time breakdown (BUG_0129), split like the session total.
+                if is_call_agent:
+                    turn['call_agent_latency_ms'] += latency_ms
+                else:
+                    turn['tool_latency_ms'] += latency_ms
                 turn['tool_calls_detail'].append({
                     'tool_name': tool_name,
                     'latency_ms': round(latency_ms, 1),
@@ -1071,6 +1096,11 @@ class TelemetryCollector:
             self._session_ended = True
             summary = self.get_session_summary()
             config_comparison = self.get_config_comparison()
+            # Persist the agent-class and skill tables too, so the JSONL can
+            # reproduce every dashboard table offline (BUG_0129); previously only
+            # the config comparison was written.
+            agent_class_comparison = self.get_agent_class_summary()
+            skill_usage = self.get_skill_usage_summary()
 
         event = {
             'type': 'session_end',
@@ -1078,6 +1108,8 @@ class TelemetryCollector:
             'timestamp': _now_iso(),
             'summary': summary,
             'config_comparison': config_comparison,
+            'agent_class_comparison': agent_class_comparison,
+            'skill_usage': skill_usage,
         }
         try:
             self._write_critical_event(event)
