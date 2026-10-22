@@ -13,9 +13,24 @@ Design notes:
 - All tests are deterministic: no sleeps, network, or LLM calls.
 """
 
+import logging
+
 import pytest
 
+import agent_cascade.log as log_mod
+from agent_cascade.log import _AppLoggerProxy
 from agent_cascade.telemetry import TelemetryCollector
+
+
+class _ListHandler(logging.Handler):
+    """In-memory handler that keeps emitted records for assertion."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
 
 
 @pytest.fixture
@@ -579,6 +594,76 @@ class TestCacheClassificationFromUsage:
 
     def test_coverage_ratio_none_when_no_llm_calls(self, collector):
         assert collector.get_session_summary()['llm_cache_classified_ratio'] is None
+
+
+# ---------------------------------------------------------------------------
+# F2. KV-cache miss debug logging (todo.md:105 / BUG_0101 tracking)
+# ---------------------------------------------------------------------------
+
+
+class TestKVCacheMissDebugLog:
+    """Each KV-cache miss must emit ONE greppable ``[KV_CACHE_MISS]`` debug line.
+
+    The line is emitted from ``record_llm_call_end`` (so it carries the real
+    latency/ttft of the reprocess) and goes through the late-bound app logger
+    proxy — otherwise it would be filtered by the unwired
+    ``agent_cascade.telemetry`` logger name (BUG_0103 class).
+    """
+
+    @staticmethod
+    def _capture(collector, *, prompt_tokens, cached_tokens, model='qwen3-test'):
+        """Run one LLM call against ``collector``; return captured log messages."""
+        sink = log_mod.logger
+        handler = _ListHandler()
+        handler.setLevel(logging.DEBUG)
+        prev_level = sink.level
+        sink.addHandler(handler)
+        sink.setLevel(logging.DEBUG)
+        try:
+            collector.record_llm_call_start('kv_miss_unit', input_tokens_est=1, model=model)
+            collector.record_token_usage(
+                'kv_miss_unit',
+                prompt_tokens=prompt_tokens,
+                completion_tokens=5,
+                details={'cached_tokens': cached_tokens},
+            )
+            collector.record_llm_call_end('kv_miss_unit')
+        finally:
+            sink.setLevel(prev_level)
+            sink.removeHandler(handler)
+        return [r.getMessage() for r in handler.records]
+
+    def test_telemetry_logger_is_the_canonical_proxy(self):
+        """Regression guard: the unwired getLogger('agent_cascade.telemetry') must not return."""
+        import agent_cascade.telemetry as tel
+        assert isinstance(tel._logger, _AppLoggerProxy)
+
+    def test_miss_log_line_fields(self, collector):
+        msgs = self._capture(collector, prompt_tokens=14503, cached_tokens=0)
+        hits = [m for m in msgs if '[KV_CACHE_MISS]' in m]
+        assert len(hits) == 1, f'expected exactly one miss line, got {msgs!r}'
+        line = hits[0]
+        assert 'kv_miss_unit' in line
+        assert 'model=qwen3-test' in line
+        assert 'prompt_tokens=14503' in line
+        assert 'cached_tokens=0' in line
+        assert 'cached_pct=0.0' in line
+        # Real measured latency/ttft, not placeholders.
+        assert 'latency_ms=' in line and 'ttft_ms=' in line
+        # The miss counter still behaves exactly as before.
+        assert collector.get_session_summary()['llm_cache_misses'] == 1
+
+    def test_hit_does_not_emit_a_miss_line(self, collector):
+        msgs = self._capture(collector, prompt_tokens=1000, cached_tokens=500)
+        assert not [m for m in msgs if '[KV_CACHE_MISS]' in m], \
+            f'hit must not log a miss line, got {msgs!r}'
+        assert collector.get_session_summary()['llm_cache_hits'] == 1
+
+    def test_unknown_cache_outcome_does_not_emit_a_miss_line(self, collector):
+        # prompt_tokens=0 → classify returns None → not a miss, no log line.
+        msgs = self._capture(collector, prompt_tokens=0, cached_tokens=0)
+        assert not [m for m in msgs if '[KV_CACHE_MISS]' in m], \
+            f'unknown outcome must not log a miss line, got {msgs!r}'
 
 
 # ---------------------------------------------------------------------------

@@ -12,14 +12,19 @@ import collections
 import datetime
 import hashlib
 import json
-import logging
 import threading
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-_logger = logging.getLogger('agent_cascade.telemetry')
+from agent_cascade.log import _AppLoggerProxy
+
+# Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy).
+# A plain ``logging.getLogger('agent_cascade.telemetry')`` is a SIBLING of the
+# handler-bearing 'agent_cascade_logger', so its DEBUG/INFO records never reach
+# console.log (same class as BUG_0103).
+_logger = _AppLoggerProxy()
 
 # Module-level RLock protecting ALL telemetry shared state and file I/O.
 # RLock (reentrant) prevents deadlocks if methods call each other while holding the lock.
@@ -505,10 +510,14 @@ class TelemetryCollector:
                     status = self.classify_cache_hit(cached, prompt_tokens)
                     if status is not None:
                         call['cache_classified'] = True
+                        call['cache_status'] = status
                         if status == 'hit':
                             self._session_stats['llm_cache_hits'] += 1
                         else:
                             self._session_stats['llm_cache_misses'] += 1
+                            # Retained for the [KV_CACHE_MISS] debug line emitted in
+                            # record_llm_call_end (todo.md:105 / BUG_0101 tracking).
+                            call['cached_tokens'] = int(cached or 0)
             except Exception as e:
                 _logger.debug('Cache classification from usage failed for %s: %s', instance_name, e)
 
@@ -559,6 +568,20 @@ class TelemetryCollector:
             end_time = time.perf_counter()
             latency_ms = (end_time - call['start_time']) * 1000
             ttft_ms = ((call['first_token_time'] - call['start_time']) * 1000) if call['first_token_time'] > 0 else 0
+
+            # todo.md:105 / BUG_0101 — one greppable debug line per KV-cache miss so
+            # unexpected prompt reprocesses can be tracked from console.log. The server's
+            # cached_tokens is authoritative: a miss means the full prompt was reprocessed
+            # (the latency/ttft values show how expensive that was).
+            if call.get('cache_status') == 'miss':
+                pt = int(call.get('input_tokens_est') or 0)
+                ct = int(call.get('cached_tokens') or 0)
+                _logger.debug(
+                    '[KV_CACHE_MISS] %s model=%s prompt_tokens=%d cached_tokens=%d '
+                    'cached_pct=%.1f latency_ms=%.1f ttft_ms=%.1f — prompt reprocessed',
+                    instance_name, call.get('model') or '?', pt, ct,
+                    (100.0 * ct / pt) if pt else 0.0, latency_ms, ttft_ms,
+                )
 
             # Direct measurement: streaming time = end_time - first_token_time (not indirect subtraction)
             streaming_time_ms = max((end_time - call['first_token_time']) * 1000, 0) if call['first_token_time'] > 0 else 0
