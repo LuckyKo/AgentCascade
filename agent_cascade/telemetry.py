@@ -74,6 +74,9 @@ class TelemetryCollector:
             'total_tool_calls': 0,
             'total_input_tokens_est': 0,
             'total_output_tokens_est': 0,
+            # Output tokens produced by streaming calls only — the numerator that
+            # matches total_streaming_time_ms for TPS (BUG_0133).
+            'total_streamed_output_tokens': 0,
             'total_llm_latency_ms': 0,
             'total_ttft_ms': 0,
             'total_streaming_time_ms': 0,
@@ -213,6 +216,9 @@ class TelemetryCollector:
                 'tool_calls': 0,
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
+                # Streaming-only output tokens: the TPS numerator that matches
+                # total_streaming_time_ms (BUG_0133).
+                'streamed_output_tokens': 0,
                 'total_duration_ms': 0,
                 'total_llm_latency_ms': 0,
                 'total_ttft_ms': 0,
@@ -575,6 +581,10 @@ class TelemetryCollector:
             self._session_stats['total_llm_calls'] += 1
             self._session_stats['total_input_tokens_est'] += call['input_tokens_est']
             self._session_stats['total_output_tokens_est'] += actual_output
+            if streaming_time_ms > 0:
+                # Only streamed output has streaming time, so only it belongs in
+                # the TPS numerator (BUG_0133).
+                self._session_stats['total_streamed_output_tokens'] += actual_output
             self._session_stats['total_llm_latency_ms'] += latency_ms
             self._session_stats['total_ttft_ms'] += ttft_ms
             self._session_stats['total_streaming_time_ms'] += streaming_time_ms
@@ -617,6 +627,8 @@ class TelemetryCollector:
                     cs['llm_calls'] += 1
                     cs['input_tokens_est'] += call['input_tokens_est']
                     cs['output_tokens_est'] += actual_output
+                    if streaming_time_ms > 0:
+                        cs['streamed_output_tokens'] += actual_output
                 if ac:
                     self._ensure_agent_class_stats(ac)['tokens_generated'] += actual_output
 
@@ -876,7 +888,10 @@ class TelemetryCollector:
         total_tokens = stats['total_input_tokens_est'] + stats['total_output_tokens_est']
         total_streaming_time_sec = stats.get('total_streaming_time_ms', 0) / 1000
 
-        avg_tps = stats['total_output_tokens_est'] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
+        # TPS numerator must be the streamed subset: non-streaming calls have
+        # output tokens but no streaming time (BUG_0133).
+        avg_tps = (stats.get('total_streamed_output_tokens', 0) / total_streaming_time_sec
+                   if total_streaming_time_sec > 0 else 0)
         avg_llm_latency = stats['total_llm_latency_ms'] / stats['total_llm_calls'] if stats['total_llm_calls'] > 0 else 0
         # Exclude call_agent from the avg tool-latency denominator to match its
         # numerator. Derived from the is_call_agent-driven counter (single source
@@ -916,6 +931,7 @@ class TelemetryCollector:
             'total_tool_calls': stats['total_tool_calls'],
             'total_input_tokens_est': stats['total_input_tokens_est'],
             'total_output_tokens_est': stats['total_output_tokens_est'],
+            'total_streamed_output_tokens': stats.get('total_streamed_output_tokens', 0),
             'total_tokens': total_tokens,
             'avg_tps': round(avg_tps, 1),
             'avg_llm_latency_ms': round(avg_llm_latency, 1),
@@ -973,7 +989,8 @@ class TelemetryCollector:
 
                 # Streaming time and TPS for this config
                 config_streaming_sec = cs['total_streaming_time_ms'] / 1000 if cs['total_streaming_time_ms'] > 0 else 0
-                config_tps = cs['output_tokens_est'] / config_streaming_sec if config_streaming_sec > 0 else 0
+                config_tps = (cs['streamed_output_tokens'] / config_streaming_sec
+                              if config_streaming_sec > 0 else 0)
 
                 # Tool success rates for this config
                 tool_rates = {}

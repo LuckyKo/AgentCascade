@@ -68,6 +68,7 @@ class TestSessionSummaryDefaults:
             'total_tool_calls',
             'total_input_tokens_est',
             'total_output_tokens_est',
+            'total_streamed_output_tokens',
             'total_tokens',
             'avg_tps',
             'avg_llm_latency_ms',
@@ -317,6 +318,62 @@ class TestLLMCallLifecycle:
         assert len(events) == 2
         # Both attempts are real and carry a non-negative latency.
         assert all(e['latency_ms'] >= 0 for e in events)
+
+
+class TestTpsDenominator:
+    """TPS numerator and denominator must describe the same call population (BUG_0133)."""
+
+    def test_non_streaming_calls_do_not_inflate_tps(self, collector):
+        from unittest.mock import patch
+
+        import agent_cascade.telemetry as tel_mod
+
+        # perf_counter call order: turn_start, llm1_start, llm1_first_token,
+        # llm1_end, llm2_start, llm2_end, turn_end.
+        # llm1 streams for 10 s (t=2 → 12) and produces 100 tokens.
+        # llm2 does not stream and produces 1,000 tokens over 5 s.
+        ticks = iter([0.0, 0.0, 2.0, 12.0, 100.0, 105.0, 110.0, 110.0])
+
+        def fake_perf_counter():
+            return next(ticks, 110.0)
+
+        with patch.object(tel_mod.time, 'perf_counter', side_effect=fake_perf_counter):
+            collector.record_turn_start('inst', config_fingerprint='fp')
+            collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+            collector.record_llm_first_token('inst')
+            collector.record_llm_call_end('inst', output_tokens_est=100)
+            collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+            collector.record_llm_call_end('inst', output_tokens_est=1000)
+            collector.record_turn_end('inst')
+
+        s = collector.get_session_summary()
+        # Token totals still include every call...
+        assert s['total_output_tokens_est'] == 1100
+        # ...but only the streamed 100 tokens are divided by the 10 s streaming time.
+        assert s['total_streamed_output_tokens'] == 100
+        assert s['avg_tps'] == 10.0
+
+        cfg = collector.get_config_comparison()[0]
+        assert cfg['total_streaming_time_sec'] == 10.0
+        assert cfg['avg_tps'] == 10.0
+
+    def test_all_streaming_session_keeps_previous_tps(self, collector):
+        from unittest.mock import patch
+
+        import agent_cascade.telemetry as tel_mod
+
+        ticks = iter([0.0, 0.0, 2.0, 12.0, 12.0])
+
+        with patch.object(tel_mod.time, 'perf_counter',
+                          side_effect=lambda: next(ticks, 12.0)):
+            collector.record_turn_start('inst', config_fingerprint='fp')
+            collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+            collector.record_llm_first_token('inst')
+            collector.record_llm_call_end('inst', output_tokens_est=100)
+            collector.record_turn_end('inst')
+
+        assert collector.get_session_summary()['avg_tps'] == 10.0
+        assert collector.get_config_comparison()[0]['avg_tps'] == 10.0
 
 
 class TestCacheClassificationFromUsage:
