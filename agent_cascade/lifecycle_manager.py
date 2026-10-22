@@ -137,6 +137,7 @@ class AgentLifecycleManager:
         # extract_instance_output(), and the one-shot flag would permanently
         # disable skill reflection for this instance on all future recalls.
         inst._auto_skill_task_output = None
+        inst._auto_skill_source_task = None
         inst._auto_skill_proposed = False
         inst._auto_skill_dirty_stop = False
 

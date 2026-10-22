@@ -288,6 +288,8 @@ class AgentInstance:
         default=False)  # Tracks if the in-loop auto-skill trigger fired for this run (one-shot per run; reset on instance reuse/recall)
     _auto_skill_task_output: Optional[
         str] = None  # Pre-reflection task output snapshot taken when the in-loop trigger fires (read by extract_instance_output(instance=...))
+    _auto_skill_source_task: Optional[
+        str] = None  # Run task that produced this auto-skill reflection (captured at run start); propose_skill screens against it, so Tier-2 self-match cannot be skipped (BUG_0123). Reset with the other auto-skill fields.
     _auto_skill_orig_max_turns: Optional[
         int] = None  # Pre-trigger max_turns snapshot; run()'s exit finally restores it (R6) so the extended budget never leaks into the next run
     _auto_skill_dirty_stop: bool = field(

@@ -11,6 +11,7 @@ import logging
 import re
 
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
 from agent_cascade.skills.parser import (
     normalize_version,
@@ -19,7 +20,6 @@ from agent_cascade.skills.parser import (
     auto_fix_frontmatter,
     frontmatter_span,
 )
-from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
 
@@ -83,6 +83,33 @@ def _coerce_rating(value):
     if not (0.0 <= float_val <= 10.0):
         return None, f"Invalid rating {float_val}: must be between 0 and 10."
     return float_val, None
+
+
+def _source_task_text(agent_pool, instance_name) -> str:
+    """Return the task text that produced this proposal, or '' when it cannot be resolved.
+
+    Tier-2 self-match (``validate_skill``) must not be opt-out-able by the proposing model,
+    so the run's real task is preferred over the self-reported ``generated_from_task`` field
+    (BUG_0123). ``Engine.run`` stashes that text on the instance at run start; an empty result
+    keeps the legacy behavior (frontmatter field) for direct/API callers.
+    """
+    if not instance_name:
+        return ''
+    instances = getattr(agent_pool, 'instances', None)
+    if not isinstance(instances, dict):
+        # Direct/API callers and MagicMock pools: no live instance table to read.
+        return ''
+    instance = instances.get(instance_name)
+    if instance is None:
+        return ''
+
+    stashed = getattr(instance, '_auto_skill_source_task', None)
+    if isinstance(stashed, str) and stashed.strip():
+        return stashed
+    # No stash: direct/API callers (and instances that never ran through Engine.run) keep the
+    # legacy generated_from_task fallback. Deliberately do NOT guess from the live conversation:
+    # during reflection its last user message is the reflection prompt itself.
+    return ''
 
 
 @register_tool('propose_skill', allow_overwrite=True)
@@ -220,6 +247,11 @@ class ProposeSkill(BaseTool):
         proposed_version = fm.get('version', '1.0.0')
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
+        # BUG_0123: the run's actual task is the authoritative input for the Tier-2
+        # self-match gate. Without it the gate is controlled by the proposal's own
+        # frontmatter (omit generated_from_task -> no gate; an honest unrelated value ->
+        # hard reject). Empty for direct/API callers, which keeps the legacy fallback.
+        run_task_text = _source_task_text(self.agent_pool, kwargs.get('agent_instance_name'))
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
         is_update = existing_meta is not None
 
@@ -333,16 +365,17 @@ class ProposeSkill(BaseTool):
         # ── Pre-approval health check (NEW) ─────────────────────────────────────
         # Screen invalid proposals BEFORE the user-approval prompt so a bad skill never wastes an
         # approval/security call. Mirrors register's validate_skill (name derivation + upgrade
-        # exclusion + generated_from_task task derivation); register re-runs it under lock as the
-        # authoritative check, so no drift can slip through. Runs on the patched content (the
-        # authoritative name is already applied). Rating-only mode (above) and the similarity gate
-        # are unaffected. Defensive: a pre-check error must not break propose — fall through to the
-        # authoritative register validation.
+        # exclusion + task derivation); register re-runs it under lock as the authoritative
+        # check, so no drift can slip through. Runs on the patched content (the authoritative
+        # name is already applied). `run_task_text` is the engine-provided run task (BUG_0123)
+        # and is preferred over the frontmatter field by both this call and register.
+        # Rating-only mode (above) and the similarity gate are unaffected. Defensive: a
+        # pre-check error must not break propose — fall through to the authoritative check.
         try:
             # prevalidate_skill returns (passed, messages); on the not-passed path below,
             # messages holds only blocking errors (warnings are non-blocking and never set
             # alongside them).
-            passed, health_messages = skill_manager.prevalidate_skill(skill_content)
+            passed, health_messages = skill_manager.prevalidate_skill(skill_content, task_text=run_task_text)
         except Exception as e:  # pragma: no cover - defensive; pre-check must not break propose
             logger.warning('[PROPOSE-SKILL] pre-approval health check skipped (error): %s: %r',
                            type(e).__name__, e)
@@ -400,6 +433,7 @@ class ProposeSkill(BaseTool):
         success, errors = skill_manager.register_skill_from_content(
             skill_content=skill_content,
             source='auto-generated',
+            task_text=run_task_text,
         )
 
         if success:

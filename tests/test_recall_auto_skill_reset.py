@@ -41,6 +41,7 @@ def _make_idle_instance(name='test-agent'):
     inst.state = AgentState.IDLE
     # Simulate stale state from a previous run that went through extended turns:
     inst._auto_skill_task_output = 'OLD ANSWER from previous task'
+    inst._auto_skill_source_task = 'OLD TASK from previous run'
     inst._auto_skill_proposed = True
     # todo149 Change 3: also prime the dirty-stop flag (set when a prior run's trigger fired
     # via the last-turn-tool-call path) so we can prove reuse clears it too.
@@ -85,6 +86,11 @@ class TestRecallAutoSkillReset:
         assert result_inst._auto_skill_proposed is False, (
             '_auto_skill_proposed not reset on reuse — skill reflection '
             'would be permanently disabled for this instance'
+        )
+        assert result_inst._auto_skill_source_task is None, (
+            f"Stale _auto_skill_source_task not cleared on reuse: "
+            f"{result_inst._auto_skill_source_task!r} — propose_skill would screen against "
+            'the previous task'
         )
         # todo149 Change 3: the dirty-stop flag must also be cleared so a stale
         # last-turn-tool-call stop cannot shadow a new task's answer.

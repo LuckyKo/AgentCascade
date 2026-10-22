@@ -943,6 +943,36 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else '[BACKGROUND TOOL RESULT]'
         return Message(role=USER, content=f"{prefix}: {result_content}")
 
+    @staticmethod
+    def _last_user_task_text(instance) -> Optional[str]:
+        """Return the last USER-role message text in the instance conversation, or None.
+
+        At run start this is the task the run is working on. It is the authoritative input
+        for ``propose_skill``'s Tier-2 self-match gate (BUG_0123), because the proposal's own
+        ``generated_from_task`` field is controlled by the model being screened.
+        """
+        conversation = getattr(instance, 'conversation', None)
+        if not isinstance(conversation, (list, tuple)):
+            return None
+        # Engine-injected USER-role messages are not tasks: budget warnings, background/agent
+        # results, shell result wrappers, compression markers and the reflection prompt.
+        engine_prefixes = ('[SYSTEM WARNING:', '[SYSTEM]', '[BACKGROUND TOOL RESULT', '[Agent ',
+                           '⟨shell_cmd', '--- CONTEXT COMPRESSED', '## Skill Reflection')
+        for msg in reversed(conversation):
+            role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role != USER:
+                continue
+            try:
+                text = extract_text_from_message(msg, add_upload_info=False)
+            except Exception:  # pragma: no cover - defensive
+                continue
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if text.lstrip().startswith(engine_prefixes):
+                continue
+            return text
+        return None
+
     # ═══════════════════════════════════════════════════════════════════════
     #  Main Execution Loop — Core turn loop orchestration and phase dispatch
     # ═══════════════════════════════════════════════════════════════════════
@@ -993,6 +1023,12 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         # so even if _my_generation is clobbered, the stop signal will still be
         # detected.
         self._my_generation = self.pool._run_generation
+
+        # Task provenance for propose_skill's Tier-2 self-match (BUG_0123). Capture it at run
+        # START: the last USER message here is the task this run is working on, while later
+        # engine notices and the reflection prompt are also USER-role messages and would be
+        # picked up if the trigger captured it lazily.
+        instance._auto_skill_source_task = self._last_user_task_text(instance)
 
         # Clear truncation state at the start of each agent turn to prevent
         # stale markers
@@ -4692,6 +4728,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 inst._last_endpoint_config = None
                 # Auto-skill per-run block (agent_instance.py:276-283).
                 inst._auto_skill_task_output = None
+                inst._auto_skill_source_task = None
                 inst._auto_skill_proposed = False
                 inst._auto_skill_dirty_stop = False
                 # Stream-push flags (agent_instance.py:290-292) — a reused instance must not carry

@@ -1514,6 +1514,31 @@ class TestInLoopTrigger:
         # Exactly 3 (up to and including the natural-end turn) + 5 (extra) LLM calls.
         assert engine._call_llm_with_injection.call_count == 3 + 5
 
+    def test_trigger_stashes_source_task_for_propose_skill(self, fresh_manager, tmp_path):
+        """BUG_0123: the run task is stashed before the reflection prompt is injected."""
+        engine, inst, pool, _run = self._make_pool(fresh_manager, tmp_path, max_turns=5, min_turns=2,
+                                                   extra_turns=5, natural_end_at=3).__next__()
+        _run()
+        assert inst._auto_skill_proposed is True
+        assert inst._auto_skill_source_task == 'task', (
+            'source task must be captured from the conversation, not the reflection prompt')
+
+    def test_source_task_extraction_skips_engine_notices(self):
+        """Engine-injected USER messages (budget warnings, results) are not the task."""
+        from agent_cascade.engine.core import ExecutionEngine
+
+        conversation = [
+            Message(role=USER, content='real task text'),
+            Message(role=ASSISTANT, content='working on it'),
+            Message(role=USER, content='[SYSTEM WARNING: Halfway through your turn budget. 3 left.]'),
+        ]
+        inst = type('I', (), {'conversation': conversation})()
+        assert ExecutionEngine._last_user_task_text(inst) == 'real task text'
+
+        only_notices = [Message(role=USER, content='[SYSTEM WARNING: Final turn.]')]
+        inst2 = type('I', (), {'conversation': only_notices})()
+        assert ExecutionEngine._last_user_task_text(inst2) is None
+
     def test_snapshot_captures_last_assistant_text(self, fresh_manager, tmp_path):
         """Snapshot is the last ASSISTANT text in the conversation at trigger time.
 
@@ -3181,6 +3206,118 @@ class TestProposeSkillPreApprovalHealthCheck:
         assert 'health check' in result
         pool.operation_manager.request_user_approval.assert_not_called()
         assert m.get_skill_metadata(name) is None
+
+
+class TestProposeSkillRealTaskText:
+    """BUG_0123: Tier-2 self-match uses the run's real task, not the proposal's own field."""
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    @staticmethod
+    def _instance(task_text=None, conversation_task=None):
+        from types import SimpleNamespace
+        conversation = []
+        if conversation_task is not None:
+            conversation = [Message(role=USER, content=conversation_task)]
+        return SimpleNamespace(conversation=conversation, _auto_skill_source_task=task_text)
+
+    def test_source_task_uses_engine_stash_only(self):
+        from agent_cascade.tools.custom.propose_skill import _source_task_text
+
+        inst = self._instance(task_text='stashed run task', conversation_task='first task')
+        inst.conversation.append(Message(role=USER, content='latest task'))
+        pool = type('P', (), {'instances': {'coder': inst}})()
+
+        assert _source_task_text(pool, 'coder') == 'stashed run task'
+        # No conversation guessing: during reflection the last user message is the prompt.
+        inst._auto_skill_source_task = None
+        assert _source_task_text(pool, 'coder') == ''
+        assert _source_task_text(pool, 'missing') == ''
+        assert _source_task_text(pool, None) == ''
+
+    def test_omitted_generated_from_task_still_screened(self, fresh_manager):
+        """Omitting the frontmatter field must NOT skip Tier-2 (the original bypass)."""
+        import json as _json
+
+        m = self.manager
+        name = f"test-realtask-omit-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Manage PostgreSQL connection pooling for high throughput',
+            triggers=['postgres', 'pool'],
+            generated_from_task='placeholder to be removed',
+        )
+        content = re.sub(r'(?m)^generated_from_task:.*\n', '', content)
+        assert 'generated_from_task' not in content
+
+        tool, pool = self._make_tool(m)
+        pool.instances = {'coder': self._instance(
+            task_text='bake sourdough bread at altitude with a dutch oven',
+            conversation_task='bake sourdough bread at altitude with a dutch oven',
+        )}
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
+                           agent_instance_name='coder')
+
+        assert result.startswith('REJECTED:'), f'expected a Tier-2 reject, got: {result!r}'
+        assert 'Self-match' in result
+        assert m.get_skill_metadata(name) is None
+
+    def test_self_reported_field_cannot_override_run_task(self, fresh_manager):
+        """A matching generated_from_task does not override an unrelated real task."""
+        import json as _json
+
+        m = self.manager
+        name = f"test-realtask-lie-{_uid()}"
+        content = _make_skill_content(
+            name=name,
+            description='Manage PostgreSQL connection pooling for high throughput',
+            triggers=['postgres', 'pool'],
+            generated_from_task='bake sourdough bread at altitude with a dutch oven',
+        )
+
+        tool, pool = self._make_tool(m)
+        pool.instances = {'coder': self._instance(
+            task_text='bake sourdough bread at altitude with a dutch oven')}
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
+                           agent_instance_name='coder')
+
+        assert result.startswith('REJECTED:'), f'the real task must win, got: {result!r}'
+        assert 'Self-match' in result
+        assert m.get_skill_metadata(name) is None
+
+    def test_matching_run_task_registers(self, fresh_manager):
+        """When the real task matches, the proposal passes even without the field."""
+        import json as _json
+
+        m = self.manager
+        name = f"test-realtask-match-{_uid()}"
+        task = 'fix flaky retry loop in the skill manager'
+        content = _make_skill_content(
+            name=name,
+            description='Fix a flaky retry loop in the skill manager by resetting the attempt counter',
+            triggers=['retry', 'flaky', 'loop'],
+            generated_from_task='placeholder to be removed',
+        )
+        content = re.sub(r'(?m)^generated_from_task:.*\n', '', content)
+
+        tool, pool = self._make_tool(m)
+        pool.instances = {'coder': self._instance(task_text=task, conversation_task=task)}
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
+                           agent_instance_name='coder')
+
+        assert not result.startswith('REJECTED'), f'real matching task should pass, got: {result!r}'
+        assert m.get_skill_metadata(name) is not None
 
 
 class TestProposeSkillOverlapGate:
