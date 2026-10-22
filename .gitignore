@@ -97,6 +97,10 @@ todo.md
 # Temp planning docs (local working notes, not shared)
 plans/
 
+# Research & investigation reports (local working docs, not shared)
+research/
+reports/
+
 # Playback data (large JSONL files)
 playback/
 
