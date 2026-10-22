@@ -579,6 +579,11 @@ class TelemetryCollector:
             self._session_stats['total_ttft_ms'] += ttft_ms
             self._session_stats['total_streaming_time_ms'] += streaming_time_ms
             self._session_stats['llm_calls_by_model'][call['model']] += 1
+            # Cache coverage (BUG_0132): a call that never received a usable
+            # usage classification is "unknown", never silently neither-hit-nor-
+            # miss. Guarantees hits + misses + unknown == total_llm_calls.
+            if not call.get('cache_classified'):
+                self._session_stats['llm_cache_unknown'] += 1
 
             # Update active turn and per-config latency stats
             turn = self._active_turns.get(instance_name)

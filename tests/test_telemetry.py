@@ -378,6 +378,34 @@ class TestCacheClassificationFromUsage:
         assert s['llm_cache_misses'] == 0
         assert s['llm_cache_unknown'] == 0
 
+    def test_call_without_usage_increments_unknown(self, collector):
+        """No usage callback → the call is unknown, not silently uncounted (BUG_0132)."""
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+        s = collector.get_session_summary()
+        assert s['llm_cache_unknown'] == 1
+        assert s['llm_cache_hits'] == 0
+        assert s['llm_cache_misses'] == 0
+
+    def test_hits_misses_unknown_cover_every_llm_call(self, collector):
+        # hit
+        collector.record_llm_call_start('a', model='m')
+        collector.record_token_usage('a', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 80})
+        collector.record_llm_call_end('a')
+        # miss
+        collector.record_llm_call_start('b', model='m')
+        collector.record_token_usage('b', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 0})
+        collector.record_llm_call_end('b')
+        # unknown (no usage)
+        collector.record_llm_call_start('c', model='m')
+        collector.record_llm_call_end('c')
+
+        s = collector.get_session_summary()
+        assert (s['llm_cache_hits'], s['llm_cache_misses'], s['llm_cache_unknown']) == (1, 1, 1)
+        assert s['llm_cache_hits'] + s['llm_cache_misses'] + s['llm_cache_unknown'] == s['total_llm_calls']
+
     def test_usage_miss_increments_misses_counter(self, collector):
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         collector.record_token_usage(
@@ -406,25 +434,24 @@ class TestCacheClassificationFromUsage:
         assert s['llm_cache_misses'] == 1
         assert s['llm_cache_unknown'] == 0
 
-    def test_no_usage_at_all_is_not_classified(self, collector):
-        # Non-supporting backend: no usage callback fires at all → nothing classified.
-        # (record_token_usage is simply never called; the call ends with no cache info.)
+    def test_no_usage_at_all_counts_as_unknown(self, collector):
+        # Non-supporting backend: no usage callback fires at all → the call is
+        # unknown (never silently neither-hit-nor-miss) — BUG_0132.
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
         collector.record_llm_call_end('inst')
         s = collector.get_session_summary()
         assert s['llm_cache_hits'] == 0
         assert s['llm_cache_misses'] == 0
-        assert s['llm_cache_unknown'] == 0
+        assert s['llm_cache_unknown'] == 1
 
-    def test_usage_with_zero_prompt_tokens_is_not_classified(self, collector):
-        """Regression: classify_cache_hit returns None when prompt_tokens <= 0.
+    def test_usage_with_zero_prompt_tokens_is_unknown_not_miss(self, collector):
+        """classify_cache_hit returns None when prompt_tokens <= 0 → unknown, not miss.
 
-        A usage object with no usable prompt count must NOT increment any counter —
-        in particular it must not fall into a spurious "miss" branch. (This guards the
-        exact bug where an unguarded else would inflate llm_cache_misses.)
+        The call must not fall into a spurious "miss" branch (which would inflate
+        ``llm_cache_misses``); it ends unclassified and is counted as unknown.
         """
         collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
-        # prompt_tokens=0 → classify returns None → no counter change.
+        # prompt_tokens=0 → classify returns None → not classified as hit/miss.
         collector.record_token_usage(
             'inst',
             prompt_tokens=0,
@@ -436,7 +463,7 @@ class TestCacheClassificationFromUsage:
         s = collector.get_session_summary()
         assert s['llm_cache_hits'] == 0
         assert s['llm_cache_misses'] == 0
-        assert s['llm_cache_unknown'] == 0
+        assert s['llm_cache_unknown'] == 1
 
     # ── Idempotency: a call is classified at most once ────────────────────────
     def test_repeated_usage_does_not_double_count(self, collector):
