@@ -6254,7 +6254,9 @@ function updateTelemetryPanel(telemetry) {
     if (el) el.textContent = val;
   };
 
-  set('telem-turns', formatNumber(telemetry.total_user_turns ?? telemetry.total_turns));
+  // Completed runs, matching the sum of the Agent Class Usage "Turns" column
+  // (total_user_turns counts only runs that consumed a budget, so it can differ).
+  set('telem-turns', formatNumber(telemetry.total_turns));
   set('telem-llm-calls', formatNumber(telemetry.total_llm_calls));
   set('telem-tool-calls', formatNumber(telemetry.total_tool_calls));
   set('telem-sa-calls', formatNumber(telemetry.agent_instance_calls));
@@ -6264,7 +6266,8 @@ function updateTelemetryPanel(telemetry) {
   set('telem-avg-tps', telemetry.avg_tps ? telemetry.avg_tps.toFixed(1) : '—');
   set('telem-avg-llm-lat', formatMs(telemetry.avg_llm_latency_ms));
   set('telem-avg-tool-lat', formatMs(telemetry.avg_tool_latency_ms));
-  // Wallclock: sum of all LLM + tool durations across all agents (can exceed real time with parallelism)
+  // Sum of LLM + non-delegation tool durations across all agents (can exceed real
+  // time with parallelism; excludes call_agent wait, idle and queue time).
   set('telem-wallclock', telemetry.wallclock_ms != null ? formatDuration(telemetry.wallclock_ms) : '—');
   set('telem-compressions', formatNumber(telemetry.total_compressions));
   set('telem-malformed', formatNumber(telemetry.total_auto_continues));

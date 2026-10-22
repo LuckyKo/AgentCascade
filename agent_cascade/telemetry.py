@@ -78,6 +78,9 @@ class TelemetryCollector:
             'total_ttft_ms': 0,
             'total_streaming_time_ms': 0,
             'total_tool_latency_ms': 0,
+            # Sum of turn wall-clock durations across all agents. Can exceed real
+            # elapsed time when agents run in parallel (same caveat as wallclock_ms).
+            'total_turn_time_ms': 0,
             'call_agent_calls': 0,
             'call_agent_latency_ms': 0,
             'total_loops_detected': 0,
@@ -325,6 +328,7 @@ class TelemetryCollector:
 
             # Update session stats (inside lock since RLock is reentrant)
             self._session_stats['total_turns'] += 1
+            self._session_stats['total_turn_time_ms'] += duration_ms
             self._session_stats['total_retries'] += turn['retries']
 
             # Update per-config stats — duration is only known at turn end. The
@@ -922,8 +926,22 @@ class TelemetryCollector:
             'llm_cache_unknown': stats.get('llm_cache_unknown', 0),
             'llm_cache_hit_ratio': llm_cache_hit_ratio,
             'llm_cache_classified_ratio': llm_cache_classified_ratio,
-            # Wallclock time: sum of all LLM + tool call durations across all agents.
-            # With parallel agents this can exceed real elapsed time (by design).
+            # ── Raw time totals (BUG_0130) ──────────────────────────────────────
+            # Exposed so the session cards/tables can be reconciled without re-adding
+            # averages. All are agent-exclusive work sums; with parallel agents they
+            # can exceed real elapsed time.
+            'total_llm_latency_ms': stats.get('total_llm_latency_ms', 0),
+            'total_ttft_ms': stats.get('total_ttft_ms', 0),
+            'total_streaming_time_ms': stats.get('total_streaming_time_ms', 0),
+            'total_tool_latency_ms': stats.get('total_tool_latency_ms', 0),
+            # Sum of turn wall-clock durations (equals the sum of the Agent Class
+            # Usage "Turn Time" column when every turn has a class).
+            'total_turn_time_ms': stats.get('total_turn_time_ms', 0),
+            # Kept for API compatibility. It is *not* wall-clock: it is the sum of
+            # LLM + non-call_agent tool latency, and excludes call_agent wait (nested
+            # child time, already counted under the child's own instance), sleeping,
+            # queue/slot waits and idle time. See total_turn_time_ms for the
+            # turn-duration view.
             'wallclock_ms': stats.get('total_llm_latency_ms', 0) + stats.get('total_tool_latency_ms', 0),
         }
 

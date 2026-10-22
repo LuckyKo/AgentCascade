@@ -85,7 +85,9 @@ class SystemInfo(BaseTool):
             lines.append('')
             lines.append('Session:')
             for k in ('total_turns', 'total_llm_calls', 'total_tool_calls', 'total_input_tokens_est',
-                      'total_output_tokens_est', 'avg_tps', 'total_retries', 'total_compressions'):
+                      'total_output_tokens_est', 'avg_tps', 'total_retries', 'total_compressions',
+                      'total_llm_latency_ms', 'total_tool_latency_ms', 'total_ttft_ms',
+                      'total_streaming_time_ms', 'total_turn_time_ms', 'call_agent_latency_ms'):
                 if k in session:
                     lines.append(f"  {k}: {session[k]}")
 

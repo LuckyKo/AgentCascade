@@ -74,6 +74,11 @@ class TestSessionSummaryDefaults:
             'avg_tool_latency_ms',
             'call_agent_count',
             'call_agent_latency_ms',
+            'total_llm_latency_ms',
+            'total_ttft_ms',
+            'total_streaming_time_ms',
+            'total_tool_latency_ms',
+            'total_turn_time_ms',
             'total_loops_detected',
             'loops_outer',
             'loops_inner',
@@ -1220,6 +1225,51 @@ class TestConsumeTurnFirstTurnSemantics:
         engine = ExecutionEngine(_NoTelPool())
         inst = _FakeInstance()
         assert engine._consume_turn(inst, 5) == 4
+
+
+class TestSessionTimeTotals:
+    """Raw session time totals + honest labels (BUG_0130)."""
+
+    def _run_one_of_each(self, collector):
+        collector.record_turn_start('inst', config_fingerprint='fp', agent_class='coder')
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        collector.record_llm_first_token('inst')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+        collector.record_tool_call_start('inst', 'read_file')
+        collector.record_tool_call_end('inst', 'read_file', success=True)
+        collector.record_tool_call_start('inst', 'call_agent')
+        collector.record_tool_call_end('inst', 'call_agent', success=True, is_call_agent=True)
+        collector.record_turn_end('inst')
+
+    def test_raw_totals_present_and_match_events(self, collector):
+        self._run_one_of_each(collector)
+        s = collector.get_session_summary()
+        for key in ('total_llm_latency_ms', 'total_ttft_ms', 'total_streaming_time_ms',
+                    'total_tool_latency_ms', 'total_turn_time_ms'):
+            assert key in s, f'missing raw total {key}'
+
+        llm = [e for e in collector.events if e['type'] == 'llm_call'][0]
+        # Scripted calls are sub-millisecond, so compare (no >0 lower bound); the
+        # point is that the raw total is exposed and not smaller than the event.
+        assert s['total_llm_latency_ms'] >= llm['latency_ms'] >= 0
+
+        turns = [e for e in collector.events if e['type'] == 'turn_end']
+        assert s['total_turn_time_ms'] == pytest.approx(
+            sum(e['duration_ms'] for e in turns), abs=1.0)
+
+        assert s['wallclock_ms'] == pytest.approx(
+            s['total_llm_latency_ms'] + s['total_tool_latency_ms'])
+
+    def test_wallclock_excludes_call_agent_wait(self, collector):
+        collector.record_turn_start('inst', agent_class='orchestrator')
+        collector.record_tool_call_start('inst', 'call_agent')
+        collector.record_tool_call_end('inst', 'call_agent', success=True, is_call_agent=True)
+        collector.record_turn_end('inst')
+
+        s = collector.get_session_summary()
+        # The delegation wait is reported separately and never folded into wallclock.
+        assert s['call_agent_latency_ms'] >= 0
+        assert s['wallclock_ms'] == 0.0
 
 
 # ---------------------------------------------------------------------------
