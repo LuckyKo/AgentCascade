@@ -3,11 +3,10 @@
 Covers load_soul (frontmatter parsing, error handling), build_system_prompt
 (header rendering, verbatim body passthrough, optional generated tool/rule
 sections), the adversarial prose cases the old YAML band-aid broke on, and a
-byte-equivalence gate over all 9 real soul files against the pre-migration
-golden prompts.
+live-soul integrity gate asserting each real soul file loads cleanly with a
+body that is a verbatim tail of the file.
 """
 
-import json
 import sys
 from pathlib import Path
 
@@ -23,10 +22,9 @@ from agent_cascade.soul_loader import (build_system_prompt,
                                        get_tool_description, load_soul)
 
 # ---------------------------------------------------------------------------
-# Paths to the real soul files and the golden prompt fixture
+# Paths to the real soul files
 # ---------------------------------------------------------------------------
 _AGENTS_DIR = PROJECT_ROOT / 'agents'
-_GOLDEN_PATH = PROJECT_ROOT / 'tests' / 'golden' / 'soul_prompts_pre.json'
 
 SOUL_FILES = {
     'orchestrator': _AGENTS_DIR / 'orchestrator_soul.md',
@@ -271,33 +269,38 @@ class TestAdversarialProse:
 
 
 # ===========================================================================
-# 4. Byte-equivalence gate — the migration's acceptance criterion
+# 4. Live-soul integrity — each real soul file loads with a faithful body
 # ===========================================================================
 
 
-class TestGoldenEquivalence:
-    """build_system_prompt(load_soul(p)) must be byte-identical to the
-    pre-migration golden prompts for all 9 real soul files."""
+class TestLiveSoulIntegrity:
+    """Every real soul file on disk must load cleanly and yield a body that is
+    a verbatim tail of the file, so a loader that truncates or drops body
+    content is caught. This is robust to legitimate soul edits (no frozen
+    snapshot) and replaces the old pre-migration byte-equivalence golden. The
+    rendered-prompt contract (header, generated sections) is covered by
+    TestBuildSystemPrompt, so it is intentionally not re-asserted here.
+    """
 
-    def _golden(self):
-        return json.loads(_GOLDEN_PATH.read_text(encoding='utf-8'))
+    def _soul_files(self):
+        return sorted(_AGENTS_DIR.glob('*_soul.md'))
 
-    def test_golden_fixture_present(self):
-        golden = self._golden()
-        assert len(golden) == 9, 'golden fixture must cover all 9 soul files'
+    def test_real_soul_files_present(self):
+        files = self._soul_files()
+        assert len(files) >= 9, f'expected >=9 real soul files, found {len(files)}'
 
-    def test_all_prompts_byte_equivalent(self):
-        golden = self._golden()
-        for fname, expected in golden.items():
-            path = _AGENTS_DIR / fname
-            assert path.exists(), f"missing soul file {fname}"
-            actual = build_system_prompt(load_soul(str(path)))
-            assert actual == expected, f"prompt diverges for {fname}"
+    def test_frontmatter_name_present(self):
+        for path in self._soul_files():
+            config = load_soul(str(path))
+            assert config['frontmatter'].get('name'), f'no name for {path.name}'
 
-    def test_all_soul_files_covered_by_golden(self):
-        golden = self._golden()
-        on_disk = {p.name for p in _AGENTS_DIR.glob('*_soul.md')}
-        assert set(golden) == on_disk
+    def test_body_is_verbatim_tail_of_file(self):
+        for path in self._soul_files():
+            raw = path.read_text(encoding='utf-8')
+            body = load_soul(str(path))['body']
+            assert body.strip(), f'empty body for {path.name}'
+            assert raw.endswith(body), \
+                f'body is not a verbatim tail of {path.name} (loader truncation?)'
 
 
 # ===========================================================================
