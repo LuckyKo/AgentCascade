@@ -12,7 +12,12 @@ import re
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
-from agent_cascade.skills.parser import normalize_version, parse_frontmatter, strict_frontmatter_check
+from agent_cascade.skills.parser import (
+    normalize_version,
+    parse_frontmatter,
+    strict_frontmatter_check,
+    auto_fix_frontmatter,
+)
 from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
@@ -141,6 +146,25 @@ class ProposeSkill(BaseTool):
         except (AttributeError, TypeError) as e:  # pragma: no cover - defensive; probe must not break propose
             logger.debug('[PROPOSE-SKILL] strict YAML probe failed (%s); skipping warning', type(e).__name__)
             strict_ok, strict_reason = True, ''
+
+        # ── Auto-fix soft-YAML frontmatter (advisory, non-breaking) ──────────
+        # When the strict probe failed, attempt a line-surgical re-quote via the shared
+        # auto_fix_frontmatter helper so the REGISTERED skill loads cleanly (no console spam
+        # on every future load). Runs BEFORE the lightweight parse and all downstream gates,
+        # so everything downstream sees clean content. Defensive: any failure (or an unfixed
+        # result) leaves skill_content untouched and falls back to the warning-only path below.
+        auto_fixed = False
+        if not strict_ok:
+            try:
+                fixed_content, changed, _ = auto_fix_frontmatter(skill_content)
+                if changed:
+                    skill_content = fixed_content
+                    auto_fixed = True
+                    logger.info('[PROPOSE-SKILL] auto-fixed strict-YAML frontmatter for %s (%s)',
+                                proposed_name, strict_reason)
+            except Exception as e:  # pragma: no cover - defensive; fix must not break propose
+                logger.debug('[PROPOSE-SKILL] auto-fix failed (%s); keeping warning-only', type(e).__name__)
+                auto_fixed = False
 
         # The `name` argument is authoritative. Match the frontmatter block ONCE, parse its
         # scalar fields, determine whether this is an update and compute the effective version
@@ -355,11 +379,16 @@ class ProposeSkill(BaseTool):
                     skill_manager.record_rating(proposed_name, content_rating)
                 except ValueError as e:
                     logger.warning('[PROPOSE-SKILL] Failed to record rating for %s: %s', proposed_name, e)
-            # Non-blocking advisory: the frontmatter required the lenient fallback, so tell the
-            # agent its YAML is malformed and how to fix it. Registration already succeeded —
+            # Non-blocking advisory: the frontmatter required the lenient fallback. If we
+            # auto-fixed it, tell the agent it was repaired (no action needed); otherwise tell
+            # it the YAML is malformed and how to fix it. Registration already succeeded —
             # this only surfaces in the success string (soft-gate pattern).
             yaml_warn = ''
-            if not strict_ok:
+            if auto_fixed:
+                yaml_warn = (f"\n\n✅ YAML AUTO-FIXED: your frontmatter had a strict-YAML issue "
+                             f"({strict_reason}). I re-quoted the offending value(s) so it now loads "
+                             f"cleanly — no action needed.")
+            elif not strict_ok:
                 yaml_warn = (f"\n\n⚠️ YAML WARNING: your frontmatter did NOT parse under strict "
                              f"YAML ({strict_reason}). It was recovered via the tolerant fallback, but "
                              f"quote any value containing special characters (e.g. colons) as a single "

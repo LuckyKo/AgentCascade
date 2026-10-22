@@ -2635,46 +2635,48 @@ class TestProposeSkillYamlStrictWarning:
         assert 'registered successfully' in result
         assert 'YAML WARNING' not in result
 
-    def test_unquoted_colon_mid_value_triggers_warning(self, fresh_manager):
-        """The exact 'Also:' case — unquoted colon mid-value in description.
+    def test_unfixable_malformed_yaml_still_warns(self, fresh_manager):
+        """A defect the line-surgical fixer CANNOT repair must still surface 'YAML WARNING'.
 
-        Verified: yaml.safe_load raises YAMLError ('mapping values are not allowed here')
-        on this input, so the lenient fallback path is exercised and the warning fires.
-        Registration still succeeds (non-blocking).
+        NOTE (behavior change): the plain mid-value-colon case is now AUTO-FIXED, not warned
+        (see TestProposeSkillYamlAutoFix::test_auto_fixed_mid_value_colon). This test pins the
+        OTHER half of the contract: a frontmatter whose strict failure is NOT a quotable scalar
+        (here a flow-list `related: [[x]], [[y]]`) is left untouched by auto_fix_frontmatter,
+        so the existing non-blocking warning path is preserved and registration still succeeds.
         """
         m = self.manager
-        name = f"test-yaml-colon-{_uid()}"
-        # Exact defect shape: unquoted colon mid-value in description (the 'Also:' case)
+        name = f"test-yaml-unfixable-warn-{_uid()}"
         content = (
             '---\n'
             f"name: {name}\n"
-            'description: This is a skill that does X. Also: never substitute Y for Z in this workflow\n'
+            'description: A distinctive description that registers fine via the lenient fallback here\n'
             'source: auto-generated\n'
             'triggers:\n'
             '  - yaml\n'
-            '  - colon\n'
-            f"generated_by: coder\n"
-            f"generated_from_task: unquoted colon mid-value test\n"
+            '  - flow\n'
+            'related: [[x]], [[y]]\n'
+            'generated_by: coder\n'
+            'generated_from_task: unfixable flow-list yaml test\n'
             '---\n\n'
             '## Instructions\n\n'
             'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
             '1. Step one\n2. Step two\n3. Step three\n'
         )
-        # Guard: confirm strict parse actually fails on this input (test validity check).
+        # Guard: strict parse genuinely fails, and the fixer cannot repair this shape.
         import yaml as _yaml
-        fm_block = content.split('---')[1]
+        from agent_cascade.skills.parser import auto_fix_frontmatter
         with pytest.raises(_yaml.YAMLError):
-            _yaml.safe_load(fm_block)
+            _yaml.safe_load(content.split('---')[1])
+        assert auto_fix_frontmatter(content)[1] is False, 'flow-list defect must not be auto-fixed'
 
         tool, _ = self._make_tool(m)
         import json as _json
         result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
-        # Registration still succeeds (non-blocking advisory).
+        # Registration still succeeds (non-blocking advisory), warning path preserved.
         assert 'registered successfully' in result
-        # The warning IS present.
         assert 'YAML WARNING' in result
-        # The reason references the actual YAML error.
-        assert 'mapping values are not allowed here' in result
+        assert 'did NOT parse under strict' in result
+        assert 'AUTO-FIXED' not in result, 'unfixable frontmatter must not claim to be auto-fixed'
 
     def test_rating_only_path_unaffected(self, fresh_manager):
         """Rating-only mode must not invoke the strict probe (no content → no warning possible)."""
@@ -2729,6 +2731,141 @@ class TestProposeSkillYamlStrictWarning:
         result = tool.call(_json.dumps({'name': bad_name, 'skill_content': bad_content, 'justification': 'j'}))
         assert 'REJECTED' in result, f"Expected proposal to be rejected by similarity gate, got: {result!r}"
         assert 'YAML WARNING' not in result, 'YAML warning should not appear in rejection response'
+
+
+class TestProposeSkillYamlAutoFix:
+    """Auto-fix of soft-YAML frontmatter at propose_skill time.
+
+    When the submitted frontmatter fails STRICT yaml.safe_load but is line-surgically
+    fixable (re-quote the offending value), propose_skill must AUTO-FIX it so the REGISTERED
+    skill loads cleanly, and say so in the success string ('✅ YAML AUTO-FIXED'). When it
+    cannot be safely fixed, fall back to the existing '⚠️ YAML WARNING'. Registration always
+    proceeds. See plan: autofix-soft-yaml-plan.md and the shared parser.auto_fix_frontmatter.
+    """
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    @staticmethod
+    def _colon_content(name: str) -> str:
+        """SKILL.md whose description has an unescaped mid-value colon (the 'Also:' case)."""
+        return (
+            '---\n'
+            f"name: {name}\n"
+            'description: This is a skill that does X. Also: never substitute Y for Z in this workflow\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - yaml\n'
+            '  - colon\n'
+            'generated_by: coder\n'
+            'generated_from_task: unquoted colon mid-value test\n'
+            '---\n\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
+            '1. Step one\n2. Step two\n3. Step three\n'
+        )
+
+    def _registered_content(self, name: str) -> str:
+        """Read the on-disk SKILL.md the manager wrote for a registered skill."""
+        from pathlib import Path as _P
+        return _P(self.manager.get_skill_metadata(name)['file_path']).read_text(encoding='utf-8')
+
+    def test_auto_fixed_mid_value_colon(self, fresh_manager):
+        """Mid-value colon frontmatter -> success string says 'YAML AUTO-FIXED' (not WARNING)."""
+        m = self.manager
+        name = f"test-yaml-autofix-{_uid()}"
+        content = self._colon_content(name)
+        # Guard: strict parse genuinely fails on this input (exercises the fix path).
+        import yaml as _yaml
+        with pytest.raises(_yaml.YAMLError):
+            _yaml.safe_load(content.split('---')[1])
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert 'YAML AUTO-FIXED' in result
+        assert 'YAML WARNING' not in result, 'auto-fixed path must not also emit the warning'
+
+    def test_registered_frontmatter_strict_valid_after_fix(self, fresh_manager):
+        """The REGISTERED skill's frontmatter must now parse under STRICT yaml.safe_load."""
+        m = self.manager
+        name = f"test-yaml-autofix2-{_uid()}"
+        content = self._colon_content(name)
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+
+        from agent_cascade.skills.parser import strict_frontmatter_check
+        on_disk = self._registered_content(name)
+        ok, reason = strict_frontmatter_check(on_disk)
+        assert ok is True, f"registered frontmatter not strict-clean: {reason}"
+
+    def test_clean_input_untouched(self, fresh_manager):
+        """Valid frontmatter -> no AUTO-FIXED, no WARNING, and content byte-identical."""
+        m = self.manager
+        name = f"test-yaml-clean-{_uid()}"
+        content = (
+            '---\n'
+            f"name: {name}\n"
+            'description: A perfectly clean frontmatter skill with no special characters here\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - yaml\n'
+            '  - clean\n'
+            'generated_by: coder\n'
+            'generated_from_task: clean yaml test\n'
+            '---\n\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
+            '1. Step one\n2. Step two\n3. Step three\n'
+        )
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert 'AUTO-FIXED' not in result
+        assert 'YAML WARNING' not in result
+        assert self._registered_content(name) == content
+
+    def test_unfixable_falls_back_to_warning(self, fresh_manager):
+        """A strict failure that is NOT a quotable scalar (malformed key with spaces) cannot be
+        line-surgically fixed -> the existing 'YAML WARNING' path is kept, not AUTO-FIXED."""
+        m = self.manager
+        name = f"test-yaml-unfixable-{_uid()}"
+        content = (
+            '---\n'
+            f"name: {name}\n"
+            'description: A distinctive description that registers fine via the lenient fallback here\n'
+            'source: auto-generated\n'
+            'triggers:\n'
+            '  - yaml\n'
+            '  - unfixable\n'
+            'bad line here: with: multiple: colons: broken\n'
+            'generated_by: coder\n'
+            'generated_from_task: unfixable yaml test\n'
+            '---\n\n'
+            '## Instructions\n\n'
+            'Follow these steps carefully to complete the task. This body has enough characters to pass validation.\n\n'
+            '1. Step one\n2. Step two\n3. Step three\n'
+        )
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert 'YAML WARNING' in result
+        assert 'AUTO-FIXED' not in result, 'unfixable frontmatter must not claim to be auto-fixed'
 
 
 class TestProposeSkillSimilarityGate:

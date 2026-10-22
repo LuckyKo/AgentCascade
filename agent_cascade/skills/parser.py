@@ -104,6 +104,140 @@ def strict_frontmatter_check(skill_content: str) -> Tuple[bool, str]:
         return (False, str(e).replace('\n', ' '))
 
 
+def _needs_quoting(value: str) -> bool:
+    """True if ``value`` must be quoted to survive strict yaml.safe_load as the SAME string.
+
+    Empirical probe (no hand-rolled character lists): a value needs quoting iff
+    ``yaml.safe_load('probe: <value>')`` either raises OR does not round-trip to the
+    exact original string. This catches mid-value colons, special leading characters,
+    AND number/bool/null-like strings that must stay ``str`` (e.g. ``1.0`` -> float).
+    An empty string is a block-list parent marker, not a scalar — never quoted.
+    """
+    if value == '':
+        return False
+    try:
+        probe = yaml.safe_load(f'probe: {value}')
+    except yaml.YAMLError:
+        return True
+    return not (isinstance(probe, dict) and probe.get('probe') == value)
+
+
+# Line-shape regexes for the surgical re-quoter. The leading-whitespace group is preserved
+# verbatim on rewrite so indented keys / list items keep their indentation.
+_FM_LINE_KEY_RE = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(.*)$')
+_FM_LINE_ITEM_RE = re.compile(r'^(\s*-\s+)(.*)$')
+
+
+def _quote_scalar(value: str) -> str:
+    """Render ``value`` as a safe double-quoted YAML scalar (escape embedded double quotes)."""
+    return f'"{value.replace(chr(34), chr(92) + chr(34))}"'
+
+
+def _fix_fm_line(line: str) -> str:
+    """Re-quote a frontmatter ``key: value`` / ``- item`` line iff its scalar would not
+    survive strict YAML as the same string. Returns the line UNCHANGED when the value is
+    already safe — this is what keeps every valid frontmatter line byte-for-byte. A
+    ``key:`` block-list parent (empty value) and non-key/non-item lines are left alone.
+    """
+    m = _FM_LINE_ITEM_RE.match(line)
+    if m:
+        prefix, item = m.group(1), m.group(2)
+        intended = _strip_quotes(item.strip())
+        if _needs_quoting(intended):
+            return f'{prefix}{_quote_scalar(intended)}'
+        return line
+    m = _FM_LINE_KEY_RE.match(line)
+    if m:
+        indent, key, val = m.group(1), m.group(2), m.group(3)
+        if val.strip() == '':
+            return line
+        intended = _strip_quotes(val.strip())
+        if _needs_quoting(intended):
+            return f'{indent}{key}: {_quote_scalar(intended)}'
+        return line
+    return line
+
+
+def auto_fix_frontmatter(skill_content: str) -> Tuple[str, bool, str]:
+    """Return ``(fixed_content, changed, original_reason)``.
+
+    Auto-fixes a SKILL.md whose frontmatter fails STRICT ``yaml.safe_load`` (recovered
+    by the lenient fallback) by re-quoting ONLY the offending ``key: value`` / ``- item``
+    lines — a line-surgical edit, never a full re-dump (which would risk type-coercing
+    number-like strings and rewriting every line). The markdown body and every other
+    frontmatter line are returned byte-for-byte. (Line-ending convention is preserved: a
+    uniform-LF or uniform-CRLF input stays as-is; a MIXED-ending input is normalized to
+    its dominant convention — no real caller produces mixed endings.)
+
+    - Strict parse OK  -> ``(skill_content, False, '')``
+    - Strict parse FAILS but a line-surgical re-quote makes it parse clean AND preserves the
+      lenient-recovered values -> ``(fixed_content, True, original_reason)``
+    - Strict parse FAILS and it cannot be safely fixed -> ``(skill_content, False, original_reason)``
+
+    ``original_reason`` is the one-line YAMLError message from :func:`strict_frontmatter_check`
+    (same format callers already display). Verification is two-layer: the fixed block must
+    (1) parse under strict ``yaml.safe_load`` and (2) match the values ``parse_frontmatter``
+    recovers from the ORIGINAL content (no data loss). Only if BOTH pass is ``changed=True``
+    returned; otherwise the content is returned UNCHANGED so the caller falls back to the
+    existing warning-only path.
+    """
+    strict_ok, reason = strict_frontmatter_check(skill_content)
+    if strict_ok:
+        return (skill_content, False, '')
+
+    # Preserve the caller's newline convention. Files in this repo are CRLF; a caller that
+    # reads bytes/newline='' and passes CRLF through must NOT get mixed endings (a rebuilt
+    # line would otherwise drop its trailing '\r'). Normalize to LF for the line-surgical
+    # edit, then restore CRLF on the fixed output. Unchanged paths return the original bytes.
+    crlf = '\r\n' in skill_content
+    work = skill_content.replace('\r\n', '\n') if crlf else skill_content
+
+    # Locate the frontmatter block in the content (same detection as strict_frontmatter_check)
+    # but track byte positions so the body and any leading whitespace stay byte-for-byte.
+    lines = work.split('\n')
+    open_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == '':
+            continue
+        if line.strip() == '---':
+            open_idx = i
+        break
+    if open_idx is None:
+        return (skill_content, False, reason)
+    close_idx = None
+    for j in range(open_idx + 1, len(lines)):
+        if re.fullmatch(r'-{3,}', lines[j].strip()):
+            close_idx = j
+            break
+    if close_idx is None:
+        return (skill_content, False, reason)
+    fm_indices = range(open_idx + 1, close_idx)
+
+    fixed_lines = {i: _fix_fm_line(lines[i]) for i in fm_indices}
+    if fixed_lines == {i: lines[i] for i in fm_indices}:
+        # No re-quoteable line found (the strict failure is outside the line-surgical scope).
+        return (skill_content, False, reason)
+
+    fixed_block = '\n'.join(fixed_lines[i] for i in fm_indices)
+    # Layer 1: the fixed block must parse under strict YAML.
+    try:
+        fixed_dict = yaml.safe_load(fixed_block)
+    except yaml.YAMLError:
+        return (skill_content, False, reason)
+    # Layer 2: values must match the lenient recovery of the ORIGINAL content (no data loss).
+    recovered, _ = parse_frontmatter(skill_content)
+    if fixed_dict != recovered:
+        return (skill_content, False, reason)
+
+    out = list(lines)
+    for i in fm_indices:
+        out[i] = fixed_lines[i]
+    result = '\n'.join(out)
+    if crlf:
+        result = result.replace('\n', '\r\n')
+    return (result, True, reason)
+
+
 def _lenient_parse(yaml_lines: List[str]) -> Dict[str, Any]:
     """Tolerant line-based `key: value` parse (Layer 2 fallback).
 

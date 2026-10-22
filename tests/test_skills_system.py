@@ -358,6 +358,161 @@ class TestParseFrontmatter:
             assert l.get(k) == expected.get(k), f"colon-injection divergence on {k!r}: {l.get(k)!r}"
 
 
+class TestAutoFixFrontmatter:
+    """Unit tests for the line-surgical auto_fix_frontmatter helper (parser.py).
+
+    auto_fix_frontmatter re-quotes ONLY the offending ``key: value`` / ``- item`` lines
+    of a frontmatter that fails STRICT yaml.safe_load, leaving every other line and the
+    markdown body byte-for-byte. It returns (content, changed, reason) and only reports
+    changed=True when the fixed block BOTH parses strict AND matches the lenient-recovered
+    values (no data loss). See plan: autofix-soft-yaml-plan.md.
+    """
+
+    @staticmethod
+    def _fm_block(content: str) -> str:
+        """Return the raw frontmatter VALUE text (between the delimiters) for a fixture."""
+        return content.split('---\n')[1]
+
+    def test_needs_quoting_probe(self):
+        """The empirical probe flags mid-value colons and number-like strings, not safe scalars."""
+        from agent_cascade.skills.parser import _needs_quoting
+        assert _needs_quoting('') is False                       # block-list parent marker
+        assert _needs_quoting('plain safe text') is False        # round-trips as str
+        assert _needs_quoting('Review a guard: establish') is True   # mid-value colon raises
+        assert _needs_quoting('1.0') is True                    # would coerce to float
+        assert _needs_quoting('1.0.0') is False                # semver is already a YAML str
+        assert _needs_quoting('true') is True                   # would coerce to bool
+        assert _needs_quoting('null') is True                   # would coerce to None
+
+    def test_clean_content_returned_unchanged(self):
+        """Strict-valid frontmatter -> (same content, False, '')."""
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        content = ('---\n'
+                   'name: clean-skill\n'
+                   'description: A perfectly clean description with no special chars\n'
+                   'triggers:\n'
+                   '  - one\n'
+                   '  - two\n'
+                   '---\n\n# Body\n\nbody text\n')
+        fixed, changed, reason = auto_fix_frontmatter(content)
+        assert changed is False
+        assert reason == ''
+        assert fixed == content
+
+    def test_mid_value_colon_is_fixed_and_value_preserved(self):
+        """Unescaped colon mid-value in description -> (fixed, True, reason); the fixed block
+        parses strict and the description text is preserved EXACTLY (no data loss)."""
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        original_desc = 'Review a guard: establish what it blocks, then confirm downstream.'
+        content = ('---\n'
+                   'name: autofix-target\n'
+                   f'description: {original_desc}\n'
+                   'source: auto-generated\n'
+                   'triggers:\n'
+                   '  - one\n'
+                   '  - two\n'
+                   '---\n\n# Body\n\nbody text\n')
+        fixed, changed, reason = auto_fix_frontmatter(content)
+        assert changed is True
+        assert reason  # non-empty original YAMLError reason
+        # The fixed frontmatter now parses under STRICT yaml.safe_load.
+        parsed = yaml.safe_load(self._fm_block(fixed))
+        assert parsed['description'] == original_desc
+        # Only the description line changed; every other frontmatter line + body untouched.
+        olines, flines = content.split('\n'), fixed.split('\n')
+        assert len(olines) == len(flines)
+        changed_lines = [i for i, (a, b) in enumerate(zip(olines, flines)) if a != b]
+        assert changed_lines == [2]  # the description line only (0-indexed)
+
+    def test_body_byte_identical_on_fix(self):
+        """The markdown body is returned byte-for-byte when a fix is applied."""
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        content = ('---\n'
+                   'name: autofix-target\n'
+                   'description: A guard: keep the body intact.\n'
+                   'triggers:\n'
+                   '  - one\n'
+                   '---\n\n## Instructions\n\nKeep this body byte-for-byte.\n\n1. a\n2. b\n')
+        fixed, changed, _ = auto_fix_frontmatter(content)
+        assert changed is True
+        assert content.split('---\n', 1)[1].split('---\n', 1)[1] == \
+               fixed.split('---\n', 1)[1].split('---\n', 1)[1]
+
+    def test_crlf_input_preserves_line_endings(self):
+        """CRLF frontmatter must stay CRLF after a fix (no mixed endings, body intact).
+
+        A caller that reads a file with newline=''/binary and passes CRLF through would
+        otherwise get the rebuilt line with its trailing '\\r' stripped (mixed endings).
+        """
+        import re as _re
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        content = ('---\r\n'
+                   'name: autofix-crlf\r\n'
+                   'description: A guard: keep CRLF intact.\r\n'
+                   'triggers:\r\n'
+                   '  - one\r\n'
+                   '---\r\n\r\n# Body\r\n\r\nbody text\r\n')
+        fixed, changed, _ = auto_fix_frontmatter(content)
+        assert changed is True
+        assert '\r\n' in fixed
+        # No lone LF: every '\n' must be preceded by '\r' (no mixed endings).
+        assert not _re.search(r'(?<!\r)\n', fixed)
+        # Value preserved (parse the CRLF frontmatter block).
+        fm_text = fixed.split('---\r\n', 1)[1].split('\r\n---', 1)[0]
+        assert yaml.safe_load(fm_text)['description'] == 'A guard: keep CRLF intact.'
+        # Body byte-for-byte (everything after the closing delimiter is unchanged).
+        assert fixed.split('\r\n---\r\n', 1)[1] == content.split('\r\n---\r\n', 1)[1]
+
+    def test_already_fixed_content_is_idempotent(self):
+        """Feeding already-quoted (strict-valid) content back is a no-op (changed=False)."""
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        content = ('---\n'
+                   'name: autofix-target\n'
+                   'description: "Review a guard: establish what it blocks."\n'
+                   'triggers:\n'
+                   '  - one\n'
+                   '---\n\n# Body\n')
+        fixed, changed, _ = auto_fix_frontmatter(content)
+        assert changed is False
+        assert fixed == content
+
+    def test_number_like_version_stays_string(self):
+        """A number-like ``version`` value must NOT be coerced to a float/bool by the fix.
+
+        Covers both the already-a-YAML-string case (``1.0.0``) and the genuine float-coercion
+        case (``1.0``) — after fixing, the registered value is the STRING, not a number.
+        """
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        for raw in ('1.0.0', '1.0'):
+            content = ('---\n'
+                       'name: autofix-target\n'
+                       'description: A guard: force the fix path.\n'
+                       f'version: {raw}\n'
+                       'triggers:\n'
+                       '  - one\n'
+                       '---\n\n# Body\n')
+            fixed, changed, _ = auto_fix_frontmatter(content)
+            assert changed is True, f"expected fix for version={raw!r}"
+            parsed = yaml.safe_load(self._fm_block(fixed))
+            assert isinstance(parsed['version'], str), f"version coerced for {raw!r}"
+            assert parsed['version'] == raw
+
+    def test_unfixable_returns_unchanged(self):
+        """A strict failure that is NOT a quotable scalar (malformed key with spaces) cannot be
+        line-surgically fixed -> (unchanged content, False, reason)."""
+        from agent_cascade.skills.parser import auto_fix_frontmatter
+        content = ('---\n'
+                   'description: valid description text here that is long enough\n'
+                   'triggers:\n'
+                   '  - one\n'
+                   'bad line here: with: multiple: colons: broken\n'
+                   '---\n\n# Body\n')
+        fixed, changed, reason = auto_fix_frontmatter(content)
+        assert changed is False
+        assert reason  # still reports why strict parse failed
+        assert fixed == content
+
+
 class TestParseSkillFile:
     """Test parse_skill_file with real SKILL.md files."""
 
