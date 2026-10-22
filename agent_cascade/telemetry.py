@@ -337,7 +337,12 @@ class TelemetryCollector:
         if agent_class not in self._agent_class_stats:
             self._agent_class_stats[agent_class] = {
                 'turns': 0,
-                'total_time_ms': 0,
+                'total_time_ms': 0,          # turn wall-clock (sum of turn_end durations)
+                'total_llm_latency_ms': 0,   # sum of this class's LLM call latencies
+                'total_ttft_ms': 0,
+                'total_streaming_time_ms': 0,
+                'total_tool_latency_ms': 0,  # excludes call_agent (matches session total)
+                'call_agent_latency_ms': 0,
                 'tokens_generated': 0,
                 'tool_calls': 0,
                 'tool_failures': 0,
@@ -527,7 +532,13 @@ class TelemetryCollector:
                 # Guarded: no active turn / empty class → not attributed (no spurious row).
                 ac = turn.get('agent_class') or ''
                 if ac:
-                    self._ensure_agent_class_stats(ac)['llm_calls'] += 1
+                    acs = self._ensure_agent_class_stats(ac)
+                    acs['llm_calls'] += 1
+                    # Time breakdown: the same latency/ttft/streaming values that are
+                    # credited to the config row, so the two tables reconcile.
+                    acs['total_llm_latency_ms'] += latency_ms
+                    acs['total_ttft_ms'] += ttft_ms
+                    acs['total_streaming_time_ms'] += streaming_time_ms
                 turn['input_tokens_est'] += call['input_tokens_est']
                 turn['output_tokens_est'] += actual_output
                 # Update per-config latency fields (BUG 5 fix)
@@ -625,9 +636,17 @@ class TelemetryCollector:
                 # tool_calls here — not just on failure — keeps tool_usage_accuracy live.
                 ac = turn.get('agent_class') or ''
                 if ac:
-                    self._ensure_agent_class_stats(ac)['tool_calls'] += 1
+                    acs = self._ensure_agent_class_stats(ac)
+                    acs['tool_calls'] += 1
                     if not success:
-                        self._ensure_agent_class_stats(ac)['tool_failures'] += 1
+                        acs['tool_failures'] += 1
+                    # Time breakdown, mirroring the session-level split: call_agent
+                    # wait is reported separately so it is never double-counted with
+                    # the child agent's own LLM/tool time.
+                    if is_call_agent:
+                        acs['call_agent_latency_ms'] += latency_ms
+                    else:
+                        acs['total_tool_latency_ms'] += latency_ms
 
         self._write_event(event)
 
@@ -893,6 +912,12 @@ class TelemetryCollector:
                     'total_duration_sec': round(total_time_sec, 1),
                     'avg_turn_duration_ms': round(avg_turn_time, 1),
                     'avg_tokens_per_turn': round(avg_tokens_per_turn),
+                    # ── Time breakdown (comparable with get_agent_class_summary) ──
+                    # total_duration_sec is turn wall-clock (same measure as the
+                    # agent-class total_time_sec); total_llm_latency_sec and
+                    # total_ttft_sec are the LLM-side components.
+                    'total_llm_latency_sec': round(cs['total_llm_latency_ms'] / 1000, 1),
+                    'total_ttft_sec': round(cs['total_ttft_ms'] / 1000, 1),
                     'total_streaming_time_sec': round(config_streaming_sec, 1),
                     'avg_tps': round(config_tps, 1),
                     'loops_detected': cs['loops_detected'],
@@ -907,9 +932,17 @@ class TelemetryCollector:
 
         Returns a snapshot list (not live dicts) so callers can iterate safely
         without holding the lock. Each entry:
-        ``{agent_class, llm_calls, tool_usage_accuracy, total_time_sec, tokens_generated, turns}``
-        where ``llm_calls`` is the number of LLM API calls made by this agent class and
-        ``tool_usage_accuracy`` is a 0-100 float (or None when no tool calls).
+        ``{agent_class, llm_calls, tool_usage_accuracy, total_time_sec,
+        llm_time_sec, streaming_time_sec, tool_time_sec, call_agent_time_sec,
+        tokens_generated, turns}``.
+
+        ``total_time_sec`` is turn wall-clock (the same measure as the config
+        table's ``total_duration_sec``) and therefore includes prefill, tools,
+        waiting on sub-agents and idle time. ``llm_time_sec`` is the class's share
+        of LLM call latency; it reconciles with the config table's
+        ``total_llm_latency_sec`` (both are attributed per LLM call). Tool time
+        excludes ``call_agent`` wait, which is reported separately, mirroring the
+        session-level split.
         """
         with _telemetry_lock:
             result = []
@@ -925,6 +958,10 @@ class TelemetryCollector:
                     'llm_calls': acs['llm_calls'],
                     'tool_usage_accuracy': accuracy,
                     'total_time_sec': round(acs['total_time_ms'] / 1000, 1),
+                    'llm_time_sec': round(acs['total_llm_latency_ms'] / 1000, 1),
+                    'streaming_time_sec': round(acs['total_streaming_time_ms'] / 1000, 1),
+                    'tool_time_sec': round(acs['total_tool_latency_ms'] / 1000, 1),
+                    'call_agent_time_sec': round(acs['call_agent_latency_ms'] / 1000, 1),
                     'tokens_generated': acs['tokens_generated'],
                     'turns': acs['turns'],
                 })

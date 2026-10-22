@@ -1202,3 +1202,96 @@ class TestConsumeTurnFirstTurnSemantics:
         engine = ExecutionEngine(_NoTelPool())
         inst = _FakeInstance()
         assert engine._consume_turn(inst, 5) == 4
+
+
+# ---------------------------------------------------------------------------
+# J-quad. Config vs Agent-Class time reconciliation (BUG_0126)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigClassTimeReconciliation:
+    """The Config Fingerprint and Agent Class Usage tables must expose the same
+    time measures so that their row sums reconcile.
+
+    Config ``total_duration_sec`` and class ``total_time_sec`` are the same
+    turn wall-clock; config ``total_llm_latency_sec`` and class ``llm_time_sec``
+    are the same per-call LLM latency. They used to be incomparable because the
+    config table surfaced streaming-only time under a "Total Time" header while
+    the class table surfaced turn wall-clock.
+    """
+
+    @staticmethod
+    def _fp(model):
+        return TelemetryCollector.fingerprint_config(model=model)
+
+    def _run_turn(self, collector, inst, model, cls, tool='read_file',
+                  is_call_agent=False, output=5):
+        collector.record_turn_start(
+            inst, config_fingerprint=self._fp(model), agent_class=cls)
+        collector.record_llm_call_start(inst, input_tokens_est=10, model=model)
+        collector.record_llm_first_token(inst)
+        collector.record_llm_call_end(inst, output_tokens_est=output)
+        collector.record_tool_call_start(inst, tool)
+        collector.record_tool_call_end(inst, tool, success=True,
+                                       is_call_agent=is_call_agent)
+        collector.record_turn_end(inst)
+
+    def test_time_sums_reconcile_across_tables(self, collector):
+        # Two models, two classes, interleaved.
+        self._run_turn(collector, 'a', 'model-a', 'coder')
+        self._run_turn(collector, 'b', 'model-b', 'researcher')
+        self._run_turn(collector, 'a', 'model-a', 'coder')
+
+        configs = collector.get_config_comparison()
+        classes = collector.get_agent_class_summary()
+
+        assert round(sum(c['total_duration_sec'] for c in configs), 1) == \
+            round(sum(c['total_time_sec'] for c in classes), 1)
+
+        cfg_llm = round(sum(c['total_llm_latency_sec'] for c in configs), 1)
+        cls_llm = round(sum(c['llm_time_sec'] for c in classes), 1)
+        assert cfg_llm == cls_llm
+
+        # Rounded seconds can legitimately be 0.0 for sub-millisecond scripted
+        # calls, so prove the reconciliation on the raw accumulators too.
+        cfg_llm_ms = sum(cs['total_llm_latency_ms']
+                         for cs in collector._config_stats.values())
+        cls_llm_ms = sum(cs['total_llm_latency_ms']
+                         for cs in collector._agent_class_stats.values())
+        assert cfg_llm_ms > 0
+        assert cfg_llm_ms == pytest.approx(cls_llm_ms)
+
+        cfg_turn_ms = sum(cs['total_duration_ms']
+                          for cs in collector._config_stats.values())
+        cls_turn_ms = sum(cs['total_time_ms']
+                          for cs in collector._agent_class_stats.values())
+        assert cfg_turn_ms == pytest.approx(cls_turn_ms)
+
+        for c in configs:
+            assert {'total_duration_sec', 'total_llm_latency_sec',
+                    'total_ttft_sec', 'total_streaming_time_sec'} <= set(c)
+        for r in classes:
+            assert {'total_time_sec', 'llm_time_sec', 'streaming_time_sec',
+                    'tool_time_sec', 'call_agent_time_sec'} <= set(r)
+
+    def test_call_agent_wait_is_separate_from_tool_time(self, collector):
+        self._run_turn(collector, 'a', 'model-a', 'orchestrator',
+                       tool='call_agent', is_call_agent=True)
+        row = collector.get_agent_class_summary()[0]
+        assert row['call_agent_time_sec'] >= 0
+        # call_agent wait must not be folded into the class tool time (it would
+        # double-count the child agent's own LLM/tool time).
+        assert row['tool_time_sec'] == 0.0
+
+    def test_turn_without_class_counts_only_in_config(self, collector):
+        collector.record_turn_start('inst', config_fingerprint=self._fp('m'),
+                                    agent_class='')
+        collector.record_llm_call_start('inst', input_tokens_est=10, model='m')
+        collector.record_llm_call_end('inst', output_tokens_est=5)
+        collector.record_turn_end('inst')
+
+        assert collector.get_agent_class_summary() == []
+        configs = collector.get_config_comparison()
+        assert len(configs) == 1
+        assert configs[0]['total_duration_sec'] >= 0
+        assert configs[0]['total_llm_latency_sec'] >= 0

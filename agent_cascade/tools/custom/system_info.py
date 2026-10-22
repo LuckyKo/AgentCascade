@@ -116,7 +116,10 @@ class SystemInfo(BaseTool):
                     turns = c.get('turns', '')
                     avg_tps = c.get('avg_tps', '')
                     lines.append(f"  {fp}  model={model}  turns={turns} "
-                                 f"llm_calls={llm_calls}  avg_tps={avg_tps}")
+                                 f"llm_calls={llm_calls}  "
+                                 f"llm_time={c.get('total_llm_latency_sec', '')}s  "
+                                 f"turn_time={c.get('total_duration_sec', '')}s  "
+                                 f"avg_tps={avg_tps}")
 
             # ── Agent class usage ──
             if agent_classes:
@@ -127,7 +130,9 @@ class SystemInfo(BaseTool):
                     acc = a.get('tool_usage_accuracy')
                     acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else 'n/a'
                     lines.append(f"  {cls}: turns={a.get('turns', '')} "
-                                 f"time={a.get('total_time_sec', '')}s "
+                                 f"turn_time={a.get('total_time_sec', '')}s "
+                                 f"llm_time={a.get('llm_time_sec', '')}s "
+                                 f"tool_time={a.get('tool_time_sec', '')}s "
                                  f"tokens_gen={a.get('tokens_generated', '')} "
                                  f"tool_acc={acc_str}")
 
