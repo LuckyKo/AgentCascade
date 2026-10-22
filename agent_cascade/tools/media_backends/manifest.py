@@ -39,6 +39,12 @@ class BackendManifest:
     connection_fields: tuple = ()       # rendered by default
     advanced_fields: tuple = ()         # rendered inline after connection fields
     availability: str = 'none'          # 'config_dir' | 'workflow_dir' | 'media_types' | 'none'
+    output_kind: str = ''               # '' (binary media) | 'text' (inline text output, e.g. ASR).
+                                        # A 'text' backend produces NO media type: it declares an empty
+                                        # media_types, is exempt from the non-empty-media_types manifest
+                                        # test, and media_gen.call() branches on this to skip save_media_to_media
+                                        # and return the transcript inline. Orthogonal to MEDIA_TYPES (which stays
+                                        # exactly image/video/audio — see base.py).
     agent_args: tuple = ()              # tool args this backend honours, for __help
     overrides_keys: tuple = ()          # voice/config keys passable via overrides={...}
     release_model_supported: bool = True
@@ -68,6 +74,7 @@ def build_manifest(backend) -> dict:
         'connection_fields': [asdict(f) for f in m.connection_fields],
         'advanced_fields': [asdict(f) for f in m.advanced_fields],
         'availability': m.availability,
+        'output_kind': m.output_kind,
         'agent_args': list(m.agent_args),
         'overrides_keys': list(m.overrides_keys),
         'defaults': dict(m.defaults),

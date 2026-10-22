@@ -22,8 +22,10 @@ from .comfyui import ComfyUIBackend
 # TTS (step 6) / music (step 7) / video (step 5) slot in here later.
 from .kobold_tts import KoboldTTSBackend  # STUB backend: capabilities + config ownership only
 from .chatterbox import ChatterboxBackend  # one-shot CLI TTS (MP3 to stdout)
+from .voice_to_text import VoiceToTextBackend  # one-shot CLI ASR (audio → text, output_kind='text')
 
-_BACKEND_CLASSES = (SdcppBackend, ComfyUIBackend, KoboldTTSBackend, ChatterboxBackend)
+_BACKEND_CLASSES = (SdcppBackend, ComfyUIBackend, KoboldTTSBackend, ChatterboxBackend,
+                    VoiceToTextBackend)
 
 BACKENDS: dict = {}  # id -> backend instance
 

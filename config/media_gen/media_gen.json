@@ -67,5 +67,14 @@
         "chatterbox_default"
       ]
     }
+  },
+  "voice_to_text": {
+    "engine": "audio_cpp",
+    "binary": "N:/work/WD/audio.cpp/build/windows-cuda-release/bin/audiocpp_cli.exe",
+    "models_dir": "N:/work/stuff/Beta/audio",
+    "family": "qwen3_asr",
+    "model": "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+    "timeout": 300,
+    "release_model_around_call": true
   }
 }

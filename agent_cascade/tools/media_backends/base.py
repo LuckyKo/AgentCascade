@@ -239,9 +239,16 @@ class MediaRequest:
 
 @dataclass
 class MediaResult:
-    """A normalised generation result: raw bytes + extension + metadata."""
+    """A normalised generation result: raw bytes + extension + metadata.
+
+    ``text`` carries an inline TEXT result (e.g. an ASR transcript) for a backend
+    whose manifest declares ``output_kind='text'``; those backends leave ``data``/``ext``
+    empty and media_gen returns the transcript inline instead of saving bytes. Binary-media
+    backends leave ``text`` empty (default). Orthogonal to MEDIA_TYPES — see base.py docstring.
+    """
     data: bytes = b''
     ext: str = ''
+    text: str = ''
     meta: dict = None
     elapsed: float = 0.0
 

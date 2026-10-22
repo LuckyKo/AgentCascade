@@ -186,7 +186,8 @@ def _prepared_chatterbox_req():
 
 class TestMediaGenRegistry:
     def test_registry_populated(self):
-        assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts', 'chatterbox'}
+        assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts', 'chatterbox',
+                                 'voice_to_text'}
 
     def test_manifest_matches_registry(self):
         """T12: composed manifest == registry, same order (guards the empty-manifest trap)."""

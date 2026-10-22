@@ -27,7 +27,11 @@ class TestBackendManifest:
             assert entry['id'] == bid
             assert isinstance(entry['label'], str) and entry['label']
             assert isinstance(entry['note'], str) and entry['note']
-            assert isinstance(entry['media_types'], list) and entry['media_types']
+            # TEXT-output backends (output_kind='text', e.g. voice_to_text) own NO media type;
+            # an empty media_types list is correct for them. Every other backend must claim one.
+            assert isinstance(entry['media_types'], list)
+            if entry.get('output_kind') != 'text':
+                assert entry['media_types']
             assert isinstance(entry['availability'], str) and entry['availability']
             assert isinstance(entry['agent_args'], list) and entry['agent_args']
             assert isinstance(entry['overrides_keys'], list)
@@ -51,7 +55,8 @@ class TestBackendManifest:
 
     def test_timeout_limits_match_per_backend_expectations(self):
         expected = {'comfyui': (30, 1800, 5), 'sdcpp': (30, 1800, 30),
-                    'kobold_tts': (60, 3600, 30), 'chatterbox': (60, 3600, 30)}
+                    'kobold_tts': (60, 3600, 30), 'chatterbox': (60, 3600, 30),
+                    'voice_to_text': (30, 3600, 30)}
         for bid, entry in BACKEND_MANIFEST.items():
             tf = [s for s in entry['advanced_fields'] if s['key'] == 'timeout']
             assert len(tf) == 1

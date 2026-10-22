@@ -182,7 +182,12 @@ class MediaGen(BaseTool):
                 'description': TOOL_METADATA['media_gen']['parameters']['overrides'],
             },
         },
-        'required': ['prompt'],
+        # 'prompt' is intentionally NOT schema-required: text-output backends (output_kind='text',
+        # e.g. voice_to_text) have no text prompt — their required input is reference_file. The
+        # schema is static (cannot be per-backend), so the prompt requirement is enforced at RUNTIME
+        # in call() for every NON-text backend (see the output_kind gate); this only relaxes the
+        # advisory schema hint. No media backend's effective prompt requirement is weakened.
+        'required': [],
     }
 
     def __init__(self, cfg: Optional[dict] = None, **kwargs):
@@ -394,7 +399,13 @@ class MediaGen(BaseTool):
             backend_filter = (params.get('backend') or '').strip().lower()
             return [ContentItem(text=self._format_media_help(_get_media_gen_config(), backend_filter))]
 
-        if not isinstance(prompt, str) or not prompt.strip():
+        # Text-output backends (output_kind='text', e.g. voice_to_text) have NO text prompt —
+        # their required input is reference_file, validated in preflight. Detect from the requested
+        # backend's manifest (the registry is the single source of truth for output_kind).
+        requested_backend = (params.get('backend') or '').strip()
+        is_text_output = (BACKEND_MANIFEST.get(requested_backend) or {}).get('output_kind') == 'text'
+
+        if not is_text_output and (not isinstance(prompt, str) or not prompt.strip()):
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
 
         # Build the normalised request. media_type is DERIVED (single-type backends
@@ -468,6 +479,16 @@ class MediaGen(BaseTool):
                 except OSError:
                     pass
 
+        # ── POST: TEXT-output backends return the transcript inline (no media save). ──
+        # Result shaping only: skip save_media_to_media + the typed media item. The VRAM restore
+        # path is identical (restore after all work). The transcript file was already unlinked by
+        # the finally above; the string is carried in result.text. Reuses the is_text_output gate
+        # computed above (single source of truth — the requested backend's manifest output_kind).
+        if is_text_output:
+            self._restore_if_needed(instance, state, is_last_vram)
+            feedback = self._build_feedback_text(backend.id, req.prepared, _gen_elapsed, result.text)
+            return [ContentItem(text=result.text), ContentItem(text=feedback)]
+
         # ── POST: save to media (may itself fail → must restore) ──
         try:
             media_path = save_media_to_media(
@@ -529,6 +550,16 @@ class MediaGen(BaseTool):
 
         return (f"Generated media: {media_path} "
                 f"(config={config_name}, backend={backend_id}, {elapsed_str})")
+
+    def _build_feedback_text(self, backend_id: str, prepared: dict,
+                             elapsed: float, text: str) -> str:
+        """Feedback line for a TEXT-output (ASR) result. Never raises.
+
+        Reports the transcript length, not a saved path (there is no saved media).
+        """
+        elapsed_str = _fmt_elapsed(elapsed)
+        n = len((text or '').strip())
+        return f"Transcribed: {n} chars, backend={backend_id}, {elapsed_str}"
 
     # ── __help self-documentation ─────────────────────────────────────────────
 
@@ -627,6 +658,13 @@ class MediaGen(BaseTool):
             lines.append(f"  honors:    {', '.join(manifest['agent_args'])}")
         if manifest['overrides_keys']:
             lines.append(f"  overrides: {', '.join(manifest['overrides_keys'])}")
+
+        # TEXT-output backends (output_kind='text'): show the exact params inline. The generic
+        # _usage_for fallback always prepends prompt="<...>" and is unreachable for availability='none',
+        # so a text backend must document its own usage here (no prompt fragment).
+        if manifest.get('output_kind') == 'text':
+            lines.append(f"  usage:     backend={bid}, reference_file=\"<input.wav>\"")
+            lines.append('  output:    transcript returned inline as text (no saved media file)')
 
         mine = block.get('media_types') or {}
         if manifest['music_notes'] and isinstance(mine.get('audio'), list) and mine['audio']:
