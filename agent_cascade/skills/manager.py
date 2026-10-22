@@ -27,11 +27,11 @@ except ImportError:
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import AUTO_SKILL_REFLECTION_PROMPT
 from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURNS, CANDIDATE_EVAL_INTERVAL_SECONDS,
-                                    CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL,
-                                    SKILL_ACTIVE_MAX_CAP, SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K,
-                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD,
-                                    SKILL_WALLCLOCK_SECONDS_PER_TURN, SKILLS_DISABLED,
-                                    parse_skill_always_protected)
+                                    CANDIDATE_MAX_PENDING_DAYS, CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO,
+                                    LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL, SKILL_ACTIVE_MAX_CAP,
+                                    SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K, SKILL_ALWAYS_PROTECTED_DEFAULT,
+                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_WALLCLOCK_SECONDS_PER_TURN,
+                                    SKILLS_DISABLED, parse_skill_always_protected)
 
 from .cache_helper import compute_scan_signature
 from .matcher import SkillMatcher, _TOP_K
@@ -2335,6 +2335,11 @@ class SkillManager:
             return
 
         self._remove_candidate_dir(name)
+        if (candidates_root / name).exists():
+            # The copy already landed; a leftover candidate dir would be re-registered by the
+            # next discovery and shadow production again. Surface it instead of failing silently.
+            logger.warning('[SKILLS] Candidate dir for %s still present after promotion; '
+                           'a later discovery may re-register it over the new production file', name)
 
         # Update the registry entry in place, restoring SYSTEM priority and the production path.
         reg = self._skills_registry.get(name)
@@ -2371,9 +2376,10 @@ class SkillManager:
     def _discard_candidate(self, name: str, prod_version: str) -> None:
         """Discard a candidate (caller holds _write_lock).
 
-        Deletes candidates/<name>/ and removes its registry entry; the next discovery
-        restores the incumbent to service. Metrics: aggregate ratings revert to the
-        incumbent's history (legacy fallback: existing aggregate); total_loads untouched;
+        Deletes candidates/<name>/ and restores the incumbent to the registry IMMEDIATELY by
+        re-parsing its production file — dropping the entry and waiting for the next discovery
+        left the skill unservable in the meantime (BUG_0118). Metrics: aggregate ratings revert
+        to the incumbent's history (legacy fallback: existing aggregate); total_loads untouched;
         the candidate's per-version entry is kept as evidence.
         """
         self._remove_candidate_dir(name)
@@ -2381,7 +2387,27 @@ class SkillManager:
         with self._write_lock:
             reg = self._skills_registry.get(name)
             if reg is not None and reg.get('_priority') == _PRIORITY_CANDIDATE:
+                _, production_root = self._candidate_dirs()
+                prod_file = production_root / name / 'SKILL.md'
                 del self._skills_registry[name]
+                parsed = None
+                if prod_file.exists():
+                    try:
+                        parsed = parse_skill_file(prod_file)
+                    except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
+                        logger.warning('[SKILLS] Could not restore incumbent %s after discard: %s', name, e)
+                if parsed is not None:
+                    fm = parsed.get('frontmatter', {})
+                    self._skills_registry[name] = {
+                        'name': name,
+                        'description': fm.get('description', ''),
+                        'source': fm.get('source', ''),
+                        'triggers': fm.get('triggers', []),
+                        'version': parsed.get('version', prod_version),
+                        'file_path': str(prod_file),
+                        '_priority': _PRIORITY_SYSTEM,
+                        '_parsed_data': parsed,
+                    }
                 self._rebuild_index()
 
         with self._metrics_lock:
@@ -2398,7 +2424,7 @@ class SkillManager:
                     }
                 # else: legacy fallback — keep the existing aggregate as-is
 
-        logger.info("[SKILLS] Candidate '%s' discarded (incumbent v%s restored on next discovery)", name, prod_version)
+        logger.info("[SKILLS] Candidate '%s' discarded (incumbent v%s restored)", name, prod_version)
 
     def evaluate_candidates(self, refresh: bool = True) -> None:
         """Run the rating-based decision gate for all live-serving candidates.
@@ -2419,7 +2445,10 @@ class SkillManager:
         Decision per candidate: orphan check (incumbent file missing → discard; a disabled
         incumbent still keeps its candidate pending), then once the candidate has >=
         CANDIDATE_MIN_RATINGS ratings, compare averages (2dp): candidate >= incumbent →
-        promote; else discard.
+        promote; else discard. A candidate that has been pending longer than
+        CANDIDATE_MAX_PENDING_DAYS without reaching the bar is promoted as well: it has been
+        live-serving since registration, so finalizing the swap changes nothing agents load
+        and prevents an unrated candidate from hanging forever (BUG_0118).
         """
         # Refresh via the scan signature instead of invalidate_cache(): the old forced
         # invalidation re-parsed every SKILL.md on every timer tick AND on every candidate
@@ -2479,8 +2508,15 @@ class SkillManager:
                 if avg_prod is None:
                     avg_prod = 0.0  # unrated incumbent → any rated candidate promotes
 
-                # 2. Gate on minimum ratings.
-                if cand_n < CANDIDATE_MIN_RATINGS:
+                # 2. Gate on minimum ratings. A candidate that has already served longer than
+                # CANDIDATE_MAX_PENDING_DAYS without reaching the bar is finalized anyway: it
+                # took over serving the moment it registered, so promoting it does not change
+                # what agents load — it only stops the candidate dir from hanging forever
+                # (BUG_0118). A setting of 0 disables the deadline.
+                age_days = self._candidate_age_days(cand_file)
+                expired = bool(CANDIDATE_MAX_PENDING_DAYS and age_days is not None
+                               and age_days >= CANDIDATE_MAX_PENDING_DAYS)
+                if cand_n < CANDIDATE_MIN_RATINGS and not expired:
                     # logger.debug("[SKILLS] Candidate '%s' pending decision (%d/%d ratings)", name, cand_n,
                     #             CANDIDATE_MIN_RATINGS)
                     continue
@@ -2502,7 +2538,12 @@ class SkillManager:
                                     're-activate to allow promotion', name)
                         continue
                     parsed = parse_skill_file(cand_file)
-                    if avg_cand is None or avg_cand >= avg_prod:
+                    if cand_n < CANDIDATE_MIN_RATINGS:
+                        logger.info("[SKILLS] Candidate '%s' v%s aged out after %.1f days with %d/%d "
+                                    'ratings — promoting the version that was already serving',
+                                    name, candidate_version, age_days or 0.0, cand_n, CANDIDATE_MIN_RATINGS)
+                        self._promote_candidate(name, cand_file, parsed, prod_version)
+                    elif avg_cand is None or avg_cand >= avg_prod:
                         self._promote_candidate(name, cand_file, parsed, prod_version)
                     else:
                         self._discard_candidate(name, prod_version)
@@ -2518,6 +2559,14 @@ class SkillManager:
             self.prune_stale_metrics()
         except Exception as e:  # noqa: BLE001 — cleanup must never break the gate
             logger.warning('[SKILLS] Metrics prune failed (non-critical): %s', e)
+
+    @staticmethod
+    def _candidate_age_days(cand_file: Path) -> Optional[float]:
+        """Return the candidate ``SKILL.md``'s age in days, or None when it cannot be stat'ed."""
+        try:
+            return max(0.0, (time.time() - cand_file.stat().st_mtime) / 86400.0)
+        except OSError:
+            return None
 
     # ── Auto-skill trigger hook ──────────────────────────────────────────────
 

@@ -10,6 +10,7 @@ Covers:
   - Integration: hot-reload (new skill discoverable after registration)
 """
 
+import os
 import re
 import sys
 import threading
@@ -4091,6 +4092,189 @@ class TestCandidateFlow:
                 'ratings': {'count': 2, 'sum': 15.0, 'latest': 8.0, 'last_version': '1.0.0'},
             }
         assert m._version_rating_avg(name, '1.0.0') == (7.5, 2)
+
+    # -- Swap correctness / backlog drain (BUG_0118) --------------------------
+
+    def test_promotion_swaps_production_file_and_clears_candidate(self, fresh_manager):
+        """Promotion must move the candidate file into production and leave one clean entry."""
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+
+        m = self.manager
+        name = f"test-cand-swap-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='INCUMBENT_SWAP_BODY')
+        candidate_body = '## Candidate body\n\nCANDIDATE_SWAP_BODY ' + 'x' * 120 + '\n'
+        content = _make_skill_content(
+            name=name,
+            description='Promoted candidate skill description text here',
+            triggers=['swap', 'promote'],
+            body=candidate_body,
+            generated_from_task='promotion swap test',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        assert m.register_skill_from_content(content, task_text='promotion swap test')[0]
+
+        with m._metrics_lock:
+            entry = m._metrics[name]
+            entry['total_loads'] = 7
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {
+                'count': 5, 'sum': 25.0, 'latest': 5.0}
+        for _ in range(CANDIDATE_MIN_RATINGS):
+            m.record_rating(name, 8.0)
+
+        prod_file = m._production_skills_dir / name / 'SKILL.md'
+        cand_dir = m._candidates_dir / name
+        assert cand_dir.exists()
+
+        m.evaluate_candidates()
+
+        assert not cand_dir.exists(), 'candidate dir must be removed on promotion'
+        on_disk = prod_file.read_text(encoding='utf-8')
+        assert 'CANDIDATE_SWAP_BODY' in on_disk and 'INCUMBENT_SWAP_BODY' not in on_disk
+        assert re.search(r'(?m)^version:\s*1\.0\.1\s*$', on_disk)
+
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_SYSTEM
+        assert reg['version'] == '1.0.1'
+        assert Path(reg['file_path']) == prod_file
+        assert reg['description'].startswith('Promoted candidate skill')
+
+        entry = m.get_metrics(name)
+        assert entry['total_loads'] == 7, 'load history must survive the swap'
+        assert entry['ratings']['count'] == CANDIDATE_MIN_RATINGS
+        assert abs(entry['ratings']['sum'] - 8.0 * CANDIDATE_MIN_RATINGS) < 1e-9
+        assert entry['ratings']['last_version'] == '1.0.1'
+        assert set(entry['ratings_by_version']) >= {'1.0.0', '1.0.1'}, 'both version histories stay'
+
+        # Idempotent: a second pass must not disturb the swapped state.
+        m.evaluate_candidates()
+        assert m._skills_registry[name]['_priority'] == _PRIORITY_SYSTEM
+        assert m._skills_registry[name]['version'] == '1.0.1'
+
+    def test_discard_restores_incumbent_immediately(self, fresh_manager):
+        """A discard must leave the incumbent registered and servable right away."""
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+
+        m = self.manager
+        name = f"test-cand-revert-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='INCUMBENT_REVERT_BODY')
+        loser_body = '## Candidate body\n\nCANDIDATE_LOSER_BODY ' + 'y' * 120 + '\n'
+        content = _make_skill_content(
+            name=name,
+            description='Candidate that loses the rating comparison',
+            triggers=['revert', 'discard'],
+            body=loser_body,
+            generated_from_task='discard revert test',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        assert m.register_skill_from_content(content, task_text='discard revert test')[0]
+
+        with m._metrics_lock:
+            entry = m._metrics[name]
+            entry['total_loads'] = 4
+            entry.setdefault('ratings_by_version', {})['1.0.0'] = {
+                'count': 5, 'sum': 40.0, 'latest': 8.0}
+        for _ in range(CANDIDATE_MIN_RATINGS):
+            m.record_rating(name, 3.0)
+
+        prod_file = m._production_skills_dir / name / 'SKILL.md'
+        incumbent_before = prod_file.read_text(encoding='utf-8')
+
+        m.evaluate_candidates()
+
+        assert not (m._candidates_dir / name).exists()
+        assert prod_file.read_text(encoding='utf-8') == incumbent_before, 'production must be untouched'
+
+        # Restored immediately (not left to the next discovery).
+        reg = m._skills_registry.get(name)
+        assert reg is not None, 'incumbent must be back in the registry right after discard'
+        assert reg['_priority'] == _PRIORITY_SYSTEM
+        assert reg['version'] == '1.0.0'
+        assert Path(reg['file_path']) == prod_file
+
+        entry = m.get_metrics(name)
+        assert entry['total_loads'] == 4
+        assert entry['ratings']['count'] == 5
+        assert abs(entry['ratings']['sum'] - 40.0) < 1e-9
+        assert entry['ratings']['last_version'] == '1.0.0'
+
+    def test_aged_out_unrated_candidate_is_finalized(self, fresh_manager):
+        """BUG_0118: a candidate that never gathers ratings must not hang forever."""
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+
+        m = self.manager
+        name = f"test-cand-aged-{_uid()}"
+        _write_incumbent(m, name, '1.0.0', body_marker='INCUMBENT_AGED_BODY')
+        aged_body = '## Candidate body\n\nCANDIDATE_AGED_BODY ' + 'z' * 120 + '\n'
+        content = _make_skill_content(
+            name=name,
+            description='Unrated candidate that outlives the pending deadline',
+            triggers=['aged', 'deadline'],
+            body=aged_body,
+            generated_from_task='aged out test',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        assert m.register_skill_from_content(content, task_text='aged out test')[0]
+
+        cand_file = m._candidates_dir / name / 'SKILL.md'
+        old = time.time() - 15 * 86400
+        os.utime(cand_file, (old, old))
+        assert m.get_metrics(name)['ratings_by_version']['1.0.1']['count'] == 0
+
+        m.evaluate_candidates()
+
+        assert not (m._candidates_dir / name).exists(), 'aged-out candidate must be resolved'
+        on_disk = (m._production_skills_dir / name / 'SKILL.md').read_text(encoding='utf-8')
+        assert 'CANDIDATE_AGED_BODY' in on_disk
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_SYSTEM
+        assert reg['version'] == '1.0.1'
+
+    def test_aged_out_candidate_still_held_when_incumbent_disabled(self, fresh_manager):
+        """The deadline must not override the disabled-incumbent hold (Q7)."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+
+        m = self.manager
+        name = f"test-cand-aged-disabled-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        content = _make_skill_content(
+            name=name,
+            description='Aged candidate over a disabled incumbent skill',
+            triggers=['aged', 'disabled'],
+            generated_from_task='aged disabled test',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        assert m.register_skill_from_content(content, task_text='aged disabled test')[0]
+
+        cand_file = m._candidates_dir / name / 'SKILL.md'
+        old = time.time() - 30 * 86400
+        os.utime(cand_file, (old, old))
+        assert m.disable_skill(name)[0]
+
+        m.evaluate_candidates()
+
+        assert (m._candidates_dir / name / 'SKILL.md').exists(), 'candidate must stay pending'
+        assert m._skills_registry[name]['_priority'] == _PRIORITY_CANDIDATE
+
+    def test_pending_deadline_can_be_disabled(self, fresh_manager, monkeypatch):
+        """CANDIDATE_MAX_PENDING_DAYS=0 keeps the old rating-only behavior."""
+        from agent_cascade.skills.manager import _PRIORITY_CANDIDATE
+
+        monkeypatch.setattr('agent_cascade.skills.manager.CANDIDATE_MAX_PENDING_DAYS', 0)
+        m = self.manager
+        name = f"test-cand-nodeadline-{_uid()}"
+        _write_incumbent(m, name, '1.0.0')
+        content = _make_skill_content(
+            name=name,
+            description='Very old unrated candidate with the deadline disabled',
+            triggers=['nodeadline', 'aged'],
+            generated_from_task='no deadline test',
+        ).replace('---\n', '---\nversion: 1.0.1\n', 1)
+        assert m.register_skill_from_content(content, task_text='no deadline test')[0]
+
+        cand_file = m._candidates_dir / name / 'SKILL.md'
+        old = time.time() - 365 * 86400
+        os.utime(cand_file, (old, old))
+
+        m.evaluate_candidates()
+
+        assert (m._candidates_dir / name / 'SKILL.md').exists(), 'deadline disabled -> still pending'
+        assert m._skills_registry[name]['_priority'] == _PRIORITY_CANDIDATE
 
     def test_candidate_registration_does_not_force_a_disk_rescan(self, fresh_manager):
         """BUG_0124: seating a second candidate resolves O-vs-A with refresh=False.

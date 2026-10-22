@@ -763,6 +763,10 @@ CANDIDATE_MIN_RATINGS: int = int(
               5))  # Ratings a candidate must accumulate before the decision gate compares it with the incumbent
 CANDIDATE_EVAL_INTERVAL_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_CANDIDATE_EVAL_INTERVAL', 30.0))  # Safety-net interval for the candidate evaluation timer
+CANDIDATE_MAX_PENDING_DAYS: float = float(os.getenv(
+    'AGENT_CASCADE_CANDIDATE_MAX_PENDING_DAYS', 14.0))  # A candidate still short of CANDIDATE_MIN_RATINGS after this
+# many days is finalized (promoted) instead of hanging forever: it has already been serving since registration.
+# 0 disables the deadline (candidates then wait for ratings only).
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
 MIN_SKILL_BODY_LENGTH: int = 100  # Minimum body char count for skill validation
 MIN_DESCRIPTION_LENGTH: int = 20  # Minimum description length for skill validation
