@@ -644,7 +644,6 @@ AUTO_SKILL_ENABLED: bool = False  # Toggle auto-skill generation on/off
 AUTO_SKILL_EXTRA_TURNS: int = int(
     os.getenv('AGENT_CASCADE_AUTO_SKILL_EXTRA_TURNS',
               25))  # Fresh turn budget granted at in-loop trigger time (added on top of the exhausted budget)
-AUTO_SKILL_MIN_TOOL_CALLS: int = 5  # (legacy) minimum tool calls; superseded by AUTO_SKILL_MIN_TURNS gate
 AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
                                           20))  # Fire reflection when turns effectuated > N (strictly greater)
 # Activity-clock wall-clock fallback rate (research §15 / D-FALLBACK, open decision OD-1):
@@ -765,7 +764,5 @@ CANDIDATE_MIN_RATINGS: int = int(
 CANDIDATE_EVAL_INTERVAL_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_CANDIDATE_EVAL_INTERVAL', 30.0))  # Safety-net interval for the candidate evaluation timer
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
-MAX_SKILL_INJECTION_TOKENS: int = 8000  # Max tokens for skill injection per turn
-MAX_SKILLS_PER_CALL: int = 3  # Max skills to propose per reflection call
 MIN_SKILL_BODY_LENGTH: int = 100  # Minimum body char count for skill validation
 MIN_DESCRIPTION_LENGTH: int = 20  # Minimum description length for skill validation

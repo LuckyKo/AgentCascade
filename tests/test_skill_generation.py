@@ -4792,3 +4792,17 @@ class TestPruneStaleMetrics:
         assert self.metrics_file.read_text(encoding='utf-8') == first_content, 'file content must be unchanged'
         assert self.metrics_file.stat().st_mtime_ns == first_mtime, 'file mtime must be unchanged (no rewrite)'
         assert _json.loads(first_content)['skills'].keys() == {'alive'}
+
+
+class TestRemovedLegacySkillSettings:
+    """BUG_0125: settings with zero readers must not linger as fictional policy."""
+
+    @pytest.mark.parametrize('const_name', [
+        'AUTO_SKILL_MIN_TOOL_CALLS',      # superseded by AUTO_SKILL_MIN_TURNS (already unread)
+        'MAX_SKILL_INJECTION_TOKENS',     # never read anywhere
+        'MAX_SKILLS_PER_CALL',            # described a proposal cap that was never enforced
+    ])
+    def test_constant_removed(self, const_name):
+        import agent_cascade.settings as skill_settings
+        assert not hasattr(skill_settings, const_name), (
+            f'{const_name} has no readers — wire it up or leave it deleted (BUG_0125)')

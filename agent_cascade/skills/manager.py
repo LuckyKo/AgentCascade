@@ -1329,17 +1329,10 @@ class SkillManager:
             name = skill_file.parent.name
             logger.debug("[SKILLS] Skill file %s has no 'name' in frontmatter, using dir: %s", skill_file, name)
 
-        # Platform & disabled checks — skip when caller already filtered
-        if parsed is not None:
-            pass  # discover() already checked these before calling us
-        else:
-            if not _skill_matches_platform(frontmatter):
-                logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping", name, _sys.platform)
-                return
-
-            if name.lower() in self._disabled_names:
-                # logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
-                return
+        # Platform & disabled filtering is owned by discover(), which skips those files before
+        # parsing (and counts them in its skip metrics). This method is only called from there
+        # with an already-filtered file, so the old `if parsed is not None: pass / else: <checks>`
+        # branch was unreachable and misleadingly implied a second filter here (BUG_0125).
 
         existing = self._skills_registry.get(name)
         if existing is not None:
