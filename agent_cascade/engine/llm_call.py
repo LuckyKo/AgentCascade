@@ -86,12 +86,13 @@ class _LLMCallState:
     """Mutable per-call state shared across the extracted retry/stream
     helpers. Holds the retry counters and the last accumulated output so
     those helpers can share them without changing increment timing
-    (see the _abort_stream 'mutate-before-yield' contract). Purely mechanical.
+    (see the _abort_llm_stream 'mutate-before-yield' contract). Purely mechanical.
     """
     retry_count: int = 0
     loop_retry_count: int = 0
     last_output: Optional[List[Message]] = None
     error_already_yielded: bool = False
+
 
 class LLMCallMixin:
     """Mixin providing the LLM-call / retry / error-classification methods."""
@@ -427,11 +428,12 @@ class LLMCallMixin:
 
         Extracted from _call_llm_with_injection() - Phase 3.6
 
-        This method handles:
-        - Retry loop with exponential backoff
-        - Error classification (timeout, network, API error)
-        - Streaming response handling
-        - [RETRYING] message injection for UI
+        Orchestrates the retry loop, delegating streaming to
+        _stream_llm_attempt, error/retry handling to
+        _handle_llm_retry_failure, fallback compression to
+        _handle_fallback_compression_rounds, and finalization to
+        _finalize_llm_result. The retry loop uses exponential backoff and
+        injects [RETRYING] messages for the UI.
 
         Args:
             instance: Agent instance making the call
@@ -624,7 +626,6 @@ class LLMCallMixin:
 
         gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
         _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
-
 
         # Engine-level streaming watchdog: detect mid-stream stalls at the
         # execution engine layer (last defense if backend didn't raise).
@@ -917,7 +918,7 @@ class LLMCallMixin:
         # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
         # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
         # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
-        # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
+        # Mirrors the `nonlocal last_output … = None` reset in _abort_llm_stream. Plain assignment: last_output
         # is a local of this method, not a closure variable here.
         state.last_output = None
 
@@ -958,16 +959,16 @@ class LLMCallMixin:
             state.error_already_yielded = True
             return True
 
-        # _abort_stream already increments retry_count before raising.
+        # _abort_llm_stream already increments retry_count before raising.
         # For regular exceptions, increment if we haven't yet
         # (retry_count==0).
         if state.retry_count == 0:
             state.retry_count += 1
         else:
-            # Already incremented by _abort_stream OR previous round —
-            # check if we need another increment (only if _abort_stream
+            # Already incremented by _abort_llm_stream OR previous round —
+            # check if we need another increment (only if _abort_llm_stream
             # didn't do it).
-            # We know _abort_stream incremented if the error message
+            # We know _abort_llm_stream incremented if the error message
             # contains our markers.
             if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
                 state.retry_count += 1
