@@ -7,6 +7,7 @@ sub-modules:
 - :mod:`agent_cascade.engine.llm_call`         — LLM-call cluster (LLMCallMixin)
 - :mod:`agent_cascade.engine.compression_exec` — engine-side compression (CompressionExecMixin)
 - :mod:`agent_cascade.engine.tool_execution`   — tool dispatch/execution (ToolExecMixin)
+- :mod:`agent_cascade.engine.memory_hint`      — memory-hint query/submit (MemoryHintMixin)
 - :mod:`agent_cascade.engine.core`             — ExecutionEngine class composing the mixins
 
 The historical import surface is preserved by the thin facade at

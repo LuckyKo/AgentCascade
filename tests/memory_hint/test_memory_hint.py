@@ -1599,7 +1599,7 @@ class TestToolJustificationExtraction:
 
     # ── Case 7: 5000-char justification truncated to ≤ MAX_CHARS ───────────
     def test_long_justification_truncated(self):
-        from agent_cascade.engine.core import JUSTIFICATION_MAX_CHARS, JUSTIFICATION_SECTION_PREFIX
+        from agent_cascade.engine.memory_hint import JUSTIFICATION_MAX_CHARS, JUSTIFICATION_SECTION_PREFIX
         from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
         long_j = 'x' * 5000
         msg = Message(role=ASSISTANT, content='',
