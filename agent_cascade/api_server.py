@@ -2281,21 +2281,26 @@ if __name__ == '__main__':
         logger.error('[FATAL] Failed to create orchestrator instance: %s', e)
         raise SystemExit(1)
 
-    # Initialize MCP servers from pool_settings.json (deferred from _load_pool_settings
-    # because templates' function_map needs to exist before tool registration).
-    _pending_mcp = getattr(agent_pool, '_pending_mcp_servers', None)
-    if _pending_mcp:
-        try:
-            from agent_cascade.config_handlers import CONFIG_HANDLERS as _CH
-            _mcp_handler = _CH.get('mcpServers')
-            if _mcp_handler:
-                _all_templates = list(agent_pool.templates.values())
-                _mcp_handler({'mcpServers': _pending_mcp}, agent_pool, _all_templates)
-                logger.info(f"[INIT] MCP servers initialized from pool_settings.json: {list(_pending_mcp.keys())}")
-        except Exception as e:
-            logger.warning(f"[INIT] MCP server initialization failed: {e}")
-        finally:
-            agent_pool._pending_mcp_servers = None  # Clear to avoid re-init on subsequent saves
+    # Initialize MCP servers from config/mcp_servers.json at startup (dedicated local file,
+    # not sourced from browser/pool_settings). Deferred from _load_pool_settings
+    # because templates' function_map needs to exist before tool registration.
+    try:
+        _mcp_config_path = PROJECT_ROOT / 'config' / 'mcp_servers.json'
+        if _mcp_config_path.exists():
+            _mcp_servers = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
+            if _mcp_servers:
+                _mcp_handler = CONFIG_HANDLERS.get('mcpServers')
+                if _mcp_handler:
+                    _all_templates = list(agent_pool.templates.values())
+                    _mcp_handler({'mcpServers': _mcp_servers}, agent_pool, _all_templates)
+                    from agent_cascade.tools.mcp_manager import MCPManager
+                    _mcp_mgr = MCPManager()
+                    if _mcp_mgr._connected_servers:
+                        logger.info(f"[INIT] MCP servers initialized: {list(_mcp_mgr._connected_servers.keys())}")
+                    else:
+                        logger.warning(f"[INIT] MCP handler ran but no servers connected (config: {list(_mcp_servers.keys())})")
+    except Exception as e:
+        logger.warning(f"[INIT] MCP server initialization failed: {e}", exc_info=True)
 
     # Start background services (idle checker thread, etc.)
     try:
