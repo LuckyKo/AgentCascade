@@ -11,6 +11,7 @@ sub-modules:
 - :mod:`agent_cascade.engine.placeholder_cache` — rolling arg/output cache (PlaceholderCacheMixin)
 - :mod:`agent_cascade.engine.slot_lifecycle`    — slot acquire/release/reacquire (SlotLifecycleMixin)
 - :mod:`agent_cascade.engine.system_agent`      — system-agent lifecycle/launch (SystemAgentMixin)
+- :mod:`agent_cascade.engine.turn_setup`        — turn-state restore/prompt/cache setup (TurnSetupMixin)
 - :mod:`agent_cascade.engine.telegram_stream`  — stream-time Telegram pushes
 - :mod:`agent_cascade.engine.token_budget`     — context limits/token counting (TokenBudgetMixin)
 - :mod:`agent_cascade.engine.core`             — ExecutionEngine class composing the mixins
