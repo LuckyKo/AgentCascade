@@ -378,6 +378,32 @@ class SlotLifecycleMixin:
         except Exception:
             pass
 
+    @staticmethod
+    def _acquire_scheduler_permit(router, instance: Any, slot_info: dict, holder_name: str, *,
+                                  timeout: float, hard_cap: Optional[float] = None):
+        """Acquire one scheduler permit with the caller's true endpoint identity.
+
+        Centralizes the two otherwise-identical ``router.scheduler.acquire``
+        calls in :meth:`reacquire_for` (fast window and FIFO-tail re-queue).
+        BUG_0051 (F1): ``endpoint_name`` and ``model`` are passed through so the
+        scheduler's acquire log names the real endpoint + model instead of
+        falling back to first-match-by-base on a shared ``api_base`` config.
+        ``hard_cap`` is omitted when None so the fast-path call keeps its exact
+        original keyword surface.
+        """
+        kwargs = {
+            'api_base': slot_info['api_base'],
+            'concurrency_limit': slot_info['concurrency_limit'],
+            'instance_name': holder_name,
+            'agent_class': instance.agent_class,
+            'endpoint_name': slot_info.get('endpoint_name'),
+            'model': slot_info.get('model'),
+            'timeout': timeout,
+        }
+        if hard_cap is not None:
+            kwargs['hard_cap'] = hard_cap
+        return router.scheduler.acquire(**kwargs)
+
     def reacquire_for(self, instance: Any, holder_name: str, context: str = 'reacquire') -> bool:
         """Re-acquire a concurrency slot for an agent after yielding it to a child.
 
@@ -430,9 +456,6 @@ class SlotLifecycleMixin:
                                        context=f'{context} (unlimited endpoint)', action='drop-stale-unlimited')
             return True
 
-        api_base = slot_info['api_base']
-        concurrency_limit = slot_info['concurrency_limit']
-
         # Defensive fast-path: if the instance already holds a LIVE permit for exactly
         # the desired key, return without acquiring. SlotPool has no reentrant path —
         # an acquire() while holding the same capacity-1 pool self-deadlocks until the
@@ -454,15 +477,8 @@ class SlotLifecycleMixin:
             # scheduler falls back to first-match-by-base (always the FIRST endpoint in file order) and
             # an empty model — misleading diagnostics even though the slot itself is correct. Both are
             # already computed by get_effective_slot_info (router.py:529-530); .get() tolerates None/''.
-            _ep_name = slot_info.get('endpoint_name')
-            _model = slot_info.get('model')
-            release_cb = router.scheduler.acquire(
-                api_base=api_base,
-                concurrency_limit=concurrency_limit,
-                instance_name=holder_name,
-                agent_class=instance.agent_class,
-                endpoint_name=_ep_name,
-                model=_model,
+            release_cb = self._acquire_scheduler_permit(
+                router, instance, slot_info, holder_name,
                 timeout=REACQUIRE_TIMEOUT,  # module constant — bounded FAST re-acquire window
             )
             if release_cb is not None:
@@ -513,15 +529,8 @@ class SlotLifecycleMixin:
         try:
             # BUG_0051 (F1): same identity pass-through as the fast path above — the bug survives the
             # timeout branch unless BOTH reacquire sites carry endpoint_name + model.
-            _ep_name = slot_info.get('endpoint_name')
-            _model = slot_info.get('model')
-            release_cb = router.scheduler.acquire(
-                api_base=api_base,
-                concurrency_limit=concurrency_limit,
-                instance_name=holder_name,
-                agent_class=instance.agent_class,
-                endpoint_name=_ep_name,
-                model=_model,
+            release_cb = self._acquire_scheduler_permit(
+                router, instance, slot_info, holder_name,
                 # Literal, deliberately NOT via _queue_limits — see the comment above.
                 # Do NOT add `pool=self` here: that would silently re-enable the sliding
                 # window on this path and reintroduce the unbounded-worker risk.
