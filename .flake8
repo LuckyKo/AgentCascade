@@ -1,11 +1,13 @@
 # Repo-level flake8 config.
 #
-# The pre-commit flake8 hook lints WHOLE staged files (no --diff), and it runs
-# isort + yapf FIRST (auto-fixing whitespace/blank-line codes). The residual
-# violations below are PRE-EXISTING debt at HEAD that survives that formatting
-# pass. They are suppressed per-file so the hook can gate new code strictly
-# without failing on legacy debt. Do NOT add blanket/global ignores: new files
-# remain fully linted (a file not listed here gets zero extra ignores).
+# NOTE: no pre-commit hook (and no CI) currently runs flake8 — the flake8/isort/yapf
+# hooks were removed from `.pre-commit-config.yaml` (2026-09-17) for non-convergence.
+# Lint is therefore ADVISORY, not a gate: nothing fails a commit on lint grounds.
+# This file only affects manual `python -m flake8` runs and is a signal of intent.
+#
+# The per-file-ignores below suppress PRE-EXISTING debt at HEAD so a manual whole-repo
+# flake8 run is not drowned in legacy noise. Do NOT add blanket/global ignores: files
+# not listed here stay fully linted (a file not listed gets zero extra ignores).
 [flake8]
 max-line-length = 300
 extend-ignore = E231, E702, E251, W604
