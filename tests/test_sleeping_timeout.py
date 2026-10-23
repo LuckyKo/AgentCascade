@@ -1,7 +1,7 @@
 """Tests for the SLEEPING cap (Phase 3, Fix A1).
 
 Exercises the real production code path in:
-- agent_cascade/engine/core.py (_handle_sleeping_state)
+- agent_cascade/engine/sleep_wake.py (_handle_sleeping_state)
 
 An agent waiting in SLEEPING state for background tools (async agent calls /
 async shells) can be held there indefinitely if a tool hangs. Fix A1 caps that
@@ -93,7 +93,7 @@ def _call_sleeping(engine, instance, cap_seconds, sleeping_duration):
         instance.sleeping_since = time.monotonic() - sleeping_duration
 
     with patch(
-        'agent_cascade.engine.core.AGENT_SLEEPING_MAX_WAIT_SECONDS', cap_seconds
+        'agent_cascade.engine.sleep_wake.AGENT_SLEEPING_MAX_WAIT_SECONDS', cap_seconds
     ):
         return engine._handle_sleeping_state(instance, [], [], [])
 
