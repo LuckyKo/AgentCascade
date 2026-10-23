@@ -801,311 +801,7 @@ class LLMCallMixin:
                         retry_count += 1
                         continue
 
-                    # Clear streaming responses under lock (matching existing pattern)
-                    with instance._compression_lock:
-                        instance._streaming_responses = []
-
-                    logger.info(f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
-                                f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'.")
-
-                    agent_type = fcr.agent_type
-
-                    for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
-                        logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
-                                     f"for {inst_name} ===")
-
-                        # Stop-check at the TOP of each round: after a user Stop
-                        # (or generation supersede), do NOT spawn another compressor.
-                        # Raise AgentTerminatedError — the outer retry loop treats it
-                        # as a clean abort signal (no retry, no error message), so the
-                        # turn ends normally instead of exhausting rounds into a
-                        # spurious ContextWindowExceeded.
-                        if self._is_terminal_stop(inst_name):
-                            logger.info(f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
-                                        f"before round {round_num} for {inst_name}.")
-                            raise AgentTerminatedError(inst_name)
-
-                        # Check overfeeding before each round
-                        conv = self.pool.get_conversation(inst_name)
-                        if not conv:
-                            logger.error(f"[FALLBACK_COMPRESSION] No conversation found for {inst_name}")
-                            break
-
-                        messages = []
-                        llm_messages.clear()  # Preserve object identity with caller's list
-                        self._rebuild_working_set(messages, llm_messages, inst_name)
-
-                        if not llm_messages:
-                            logger.error(f"[FALLBACK_COMPRESSION] Empty working set for {inst_name}")
-                            break
-
-                        if self.compression_handler.check_overfeeding(instance, llm_messages):
-                            logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
-                                           f"at round {round_num}. Raising ContextWindowExceeded.")
-                            raise ContextWindowExceeded(
-                                f"Overfeeding detected during fallback compression for {inst_name} "
-                                f"(context exceeded on '{fcr.failed_endpoint}')") from fcr
-
-                        # Get compressor's available window (same logic as core.py lines 131-163)
-                        available_for_messages = None
-                        try:
-                            comp_chain = self.pool.api_router.get_endpoint_chain('Compressor')
-                            max_compressor_tokens = 0
-                            for cfg in comp_chain:
-                                ep_limit = cfg.get('max_input_tokens', 0)
-                                if ep_limit and ep_limit > max_compressor_tokens:
-                                    max_compressor_tokens = ep_limit
-
-                            # Fallback: check compressor agent config directly if endpoint chain lookup fails
-                            if not max_compressor_tokens:
-                                comp_agent = self.pool.get_agent('Compressor')
-                                if comp_agent:
-                                    max_tokens = None
-                                    if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
-                                        max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
-                                    elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
-                                        max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
-                                    if max_tokens:
-                                        max_compressor_tokens = max_tokens
-
-                            if max_compressor_tokens:
-                                available_for_messages = int(max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
-                        except Exception as e:
-                            logger.debug(f"[FALLBACK_COMPRESSION] Could not determine compressor window: {e}")
-
-                        # Get active set for slicing
-                        history = self.pool.get_conversation(inst_name)
-                        active_start_idx, active_set, latest_summary_idx = (
-                            self.pool.get_compression_target_set_from_conversation(inst_name, history))
-
-                        if not active_set or len(active_set) < 3:
-                            logger.warning(
-                                f"[FALLBACK_COMPRESSION] Active set too small ({len(active_set) if active_set else 0}) "
-                                f"for safe compression at round {round_num}.")
-                            break
-
-                        # Use helper to find a slice that fits the compressor window.
-                        slice_result = self._find_compression_slice(
-                            active_set=active_set,
-                            history=history,
-                            active_start_idx=active_start_idx,
-                            latest_summary_idx=latest_summary_idx,
-                            compressor_window=available_for_messages,
-                            min_fraction=FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
-                        )
-
-                        if slice_result is None:
-                            logger.error(f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
-                                         f"for {inst_name} at round {round_num}. Giving up.")
-                            raise ContextWindowExceeded(
-                                f"Smart slicing failed for {inst_name}: no slice of active history "
-                                f"fits the compressor's context window. Cannot compress further.") from fcr
-
-                        final_fraction, discard_count, _target_messages = slice_result
-
-                        # Invoke compression with the validated fraction.
-                        # Lazy import to avoid circular dependency (see module-level comment).
-                        try:
-                            from agent_cascade.compression.core import compress_context as _compress_local
-
-                            result = _compress_local(
-                                agent_pool=self.pool,
-                                target_agent_name=inst_name,
-                                fraction=final_fraction,
-                                mode='auto',
-                                force=True,
-                            )
-
-                            if not result.success:
-                                logger.warning(f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
-                                               f"{inst_name}: {result.error}. Trying next round.")
-                                continue
-
-                            # Compression succeeded — rebuild working set from compressed pool state
-                            self._rebuild_working_set(messages, llm_messages, inst_name)
-
-                            # Update instance metadata (matching execute_force_compression pattern)
-                            instance.compression_summary = result.summary_text
-                            conv = self.pool.get_conversation(inst_name)
-                            if conv:
-                                for idx, msg in enumerate(conv):
-                                    c = msg_field(msg, 'content', '')
-                                    if isinstance(c, str) and '<context_summary>' in c:
-                                        instance.latest_marker_index = idx
-
-                            logger.debug(
-                                f"[FALLBACK_COMPRESSION] Round {round_num} succeeded for {inst_name}: "
-                                f"fraction={final_fraction:.4f}, discarded {result.messages_discarded} messages, "
-                                f"tokens {result.tokens_before} → {result.tokens_after}")
-
-                            # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
-                            # compress_context() rewrote instance.conversation (the pool) but does NOT
-                            # touch the JSONL logger — that is the caller's responsibility. The forced
-                            # path calls _sync_logger_after_compression(); the fallback path previously
-                            # did not, so after a successful round the pool was compressed while the
-                            # log still held the OLD large history. Any path reading back from the log
-                            # (recovery at handler.py:140-149, session reload) then re-inflated the pool
-                            # → context-exceeded re-fired next turn → infinite loop.
-                            #
-                            # Order matters (see handler._sync_logger_after_compression docstring): sync
-                            # BEFORE appending the notification below — reset_history(rewrite=True) would
-                            # otherwise double-log it. A sync failure must NOT abort the retry loop.
-                            try:
-                                # Unconditional call: self.compression_handler is always set on the engine
-                                # (core.py constructor) and a None handler would be caught by this try/except.
-                                self.compression_handler._sync_logger_after_compression(
-                                    inst_name,
-                                    instance.agent_class,
-                                    'fallback compression',
-                                    instance,
-                                )
-                            except Exception as sync_err:
-                                # Best-effort: reset_history(rewrite=True) is a single non-atomic write, so on
-                                # failure the JSONL may be left half-written / out of sync with the pool. We do
-                                # not make it atomic (larger, higher-risk change); log loudly instead so operators
-                                # know recovery/reload could re-inflate. The retry loop continues regardless.
-                                logger.warning(
-                                    f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
-                                    f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
-                                    f"compressed pool (possibly half-written) — recovery/reload could "
-                                    f"re-inflate it. Continuing retry.")
-
-                            # Post-compression check: does compressed payload fit next endpoint?
-                            try:
-                                chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
-                                if chain:
-                                    # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
-                                    next_limit = chain[0].get('max_input_tokens') or 0
-
-                                    # FIX (trigger b): when the router chain reports no limit
-                                    # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
-                                    # fall back to the context size dynamically detected on the agent's
-                                    # LLM instance (llm/oai.py sets generate_cfg['max_input_tokens']).
-                                    # This mirrors the compressor-window lookup above and avoids the old
-                                    # "no limit → assume it fits" path that never verified against the
-                                    # real server limit. Only when BOTH are unavailable do we assume fit.
-                                    if next_limit <= 0:
-                                        detected_limit = None
-                                        try:
-                                            _llm = getattr(instance, 'llm', None)
-                                            if _llm is not None and hasattr(_llm, 'generate_cfg'):
-                                                detected_limit = _llm.generate_cfg.get('max_input_tokens')
-                                            elif _llm is not None and hasattr(_llm, 'cfg'):
-                                                detected_limit = _llm.cfg.get('max_input_tokens')
-                                        except Exception:
-                                            detected_limit = None
-                                        if detected_limit and detected_limit > 0:
-                                            next_limit = int(detected_limit)
-                                            logger.debug(
-                                                f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
-                                                f"using LLM-instance detected limit {next_limit} for {inst_name}.")
-
-                                    if next_limit > 0:
-                                        # Full message stats (reasoning, tool_calls, template overhead) —
-                                        # prevents the undercount that caused "chain of compressions".
-                                        estimated = sum(get_message_stats(msg)['tokens'] for msg in llm_messages)
-
-                                        logger.debug(
-                                            f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
-                                            f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}")
-
-                                        if estimated <= next_limit * 0.95:  # 5% safety margin
-                                            # Payload fits — inject notification and resume agent
-                                            from agent_cascade.compression.handler import CompressionHandler
-                                            # Denominator priority: next_limit (the endpoint we are about to
-                                            # resume against, and the same number the 95% gate above used) must
-                                            # win over instance._allocated_max_input_tokens — that attribute is a
-                                            # per-call cache of the PREVIOUS request's budget, possibly a different
-                                            # endpoint's entirely. Deliberately NOT routed through
-                                            # measure_context_usage: its denominator is endpoint-relative by
-                                            # construction, and _get_effective_limit would report the CURRENT
-                                            # endpoint's limit, contradicting the 95% gate printed above.
-                                            max_tokens = next_limit or instance._allocated_max_input_tokens or 0
-                                            notif_msg = Message(role=USER,
-                                                                content=CompressionHandler._format_compression_feedback(
-                                                                    'fallback', 0, estimated, max_tokens))
-                                            self._append_and_log(instance, notif_msg)
-
-                                            # Resume all instances (compression may have halted them)
-                                            try:
-                                                self.pool.resume_all_instances()
-                                            except Exception:
-                                                pass
-
-                                            logger.info(f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
-                                                        f"{round_num} compression round(s). Resuming {inst_name}.")
-
-                                            # Continue outer retry loop with compressed messages
-                                            break
-                                        else:
-                                            logger.warning(
-                                                f"[FALLBACK_COMPRESSION] Compressed payload (~{estimated} tokens) "
-                                                f"still exceeds next endpoint limit ({next_limit}). "
-                                                f"Continuing to round {round_num + 1}...")
-                                    else:
-                                        # No limit from the router chain AND no detected limit on the LLM
-                                        # instance — we cannot verify the payload against any real server
-                                        # limit. Do NOT silently "assume it fits" here: that was exactly the
-                                        # escape hatch that caused the original infinite loop (the payload
-                                        # was accepted without ever being checked, then re-fired context-
-                                        # exceeded on the next turn). Instead log a WARNING and do NOT break —
-                                        # fall through to the outer retry loop's `continue` so the LLM call is
-                                        # retried with the now-compressed payload. If it still exceeds the real
-                                        # (unknown) limit, FallbackCompressionRequired re-fires and the existing
-                                        # context-exceeded guard drives another compression round. This path is
-                                        # therefore bounded by FALLBACK_COMPRESSION_MAX_ROUNDS — no infinite loop.
-                                        logger.warning(
-                                            f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
-                                            f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
-                                            f"compressed payload size; NOT assuming it fits. Retrying so the "
-                                            f"context-exceeded guard re-checks against the real limit.")
-                            except Exception as chain_err:
-                                # Non-fatal — continue retry anyway
-                                logger.debug(
-                                    f"[FALLBACK_COMPRESSION] Could not verify next endpoint limit for {inst_name}: "
-                                    f"{chain_err}. Continuing retry.")
-                                break
-
-                        except ContextWindowExceeded:
-                            raise
-                        except AgentTerminatedError:
-                            # Stop landed DURING the compression call (e.g. the
-                            # compressor invoker aborts on pool.stopped). Propagate
-                            # immediately — do not log as a compression failure or
-                            # burn another round after the user pressed Stop.
-                            raise
-                        except Exception as comp_err:
-                            logger.error(
-                                f"[FALLBACK_COMPRESSION] Round {round_num} raised exception for {inst_name}: "
-                                f"{comp_err}",
-                                exc_info=True)
-                            # Continue to next round
-
-                        # After each round, check if we should trigger automatic forced compression
-                        # via the normal pre-LLM checks (usage_pct > 95%). The retry loop will
-                        # naturally hit _pre_llm_checks on the next iteration if needed.
-
-                    else:
-                        # Exhausted all compression rounds without success
-                        logger.error(
-                            f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
-                            f"for {inst_name}. Raising ContextWindowExceeded.")
-                        raise ContextWindowExceeded(
-                            f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
-                            f"Context still exceeds available endpoint limits after aggressive compression. "
-                            f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
-
-                    # If we got here, compression succeeded and payload fits — continue retry loop
-                    # llm_messages has been updated in-place by _rebuild_working_set
-
-                    # Guard: ensure llm_messages identity matches _cached_llm_messages to prevent stale payload.
-                    if instance._cached_llm_messages is not llm_messages:
-                        logger.warning(
-                            f"[FALLBACK_COMPRESSION] llm_messages identity diverged from "
-                            f"_cached_llm_messages for {inst_name} "
-                            f"(id={id(llm_messages)} vs id={id(instance._cached_llm_messages)}). "
-                            f"Next turn may send stale payload.")
-
+                    self._handle_fallback_compression_rounds(instance, inst_name, llm_messages, fcr)
                     continue
 
                 except Exception as e:
@@ -1296,6 +992,325 @@ class LLMCallMixin:
                 self.pool.api_router.reset_instance_endpoint(inst_name)
 
     # ═══════════════════════════════════════════════════════════════════════
+
+    def _handle_fallback_compression_rounds(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        llm_messages: List[Message],
+        fcr: FallbackCompressionRequired,
+    ) -> None:
+        """Run smart slice-first fallback compression rounds after context overflow.
+
+        Extracted verbatim from _execute_llm_call_with_retry. Returns when the caller
+        should continue the outer retry loop; raises the same terminal exceptions as
+        before. The caller handles the missing-instance retry increment.
+        """
+        # Clear streaming responses under lock (matching existing pattern)
+        with instance._compression_lock:
+            instance._streaming_responses = []
+
+        logger.info(f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
+                    f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'.")
+
+        agent_type = fcr.agent_type
+
+        for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
+            logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
+                         f"for {inst_name} ===")
+
+            # Stop-check at the TOP of each round: after a user Stop
+            # (or generation supersede), do NOT spawn another compressor.
+            # Raise AgentTerminatedError — the outer retry loop treats it
+            # as a clean abort signal (no retry, no error message), so the
+            # turn ends normally instead of exhausting rounds into a
+            # spurious ContextWindowExceeded.
+            if self._is_terminal_stop(inst_name):
+                logger.info(f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
+                            f"before round {round_num} for {inst_name}.")
+                raise AgentTerminatedError(inst_name)
+
+            # Check overfeeding before each round
+            conv = self.pool.get_conversation(inst_name)
+            if not conv:
+                logger.error(f"[FALLBACK_COMPRESSION] No conversation found for {inst_name}")
+                break
+
+            messages = []
+            llm_messages.clear()  # Preserve object identity with caller's list
+            self._rebuild_working_set(messages, llm_messages, inst_name)
+
+            if not llm_messages:
+                logger.error(f"[FALLBACK_COMPRESSION] Empty working set for {inst_name}")
+                break
+
+            if self.compression_handler.check_overfeeding(instance, llm_messages):
+                logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
+                               f"at round {round_num}. Raising ContextWindowExceeded.")
+                raise ContextWindowExceeded(
+                    f"Overfeeding detected during fallback compression for {inst_name} "
+                    f"(context exceeded on '{fcr.failed_endpoint}')") from fcr
+
+            # Get compressor's available window (same logic as core.py lines 131-163)
+            available_for_messages = None
+            try:
+                comp_chain = self.pool.api_router.get_endpoint_chain('Compressor')
+                max_compressor_tokens = 0
+                for cfg in comp_chain:
+                    ep_limit = cfg.get('max_input_tokens', 0)
+                    if ep_limit and ep_limit > max_compressor_tokens:
+                        max_compressor_tokens = ep_limit
+
+                # Fallback: check compressor agent config directly if endpoint chain lookup fails
+                if not max_compressor_tokens:
+                    comp_agent = self.pool.get_agent('Compressor')
+                    if comp_agent:
+                        max_tokens = None
+                        if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
+                            max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
+                        elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
+                            max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+                        if max_tokens:
+                            max_compressor_tokens = max_tokens
+
+                if max_compressor_tokens:
+                    available_for_messages = int(max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
+            except Exception as e:
+                logger.debug(f"[FALLBACK_COMPRESSION] Could not determine compressor window: {e}")
+
+            # Get active set for slicing
+            history = self.pool.get_conversation(inst_name)
+            active_start_idx, active_set, latest_summary_idx = (
+                self.pool.get_compression_target_set_from_conversation(inst_name, history))
+
+            if not active_set or len(active_set) < 3:
+                logger.warning(
+                    f"[FALLBACK_COMPRESSION] Active set too small ({len(active_set) if active_set else 0}) "
+                    f"for safe compression at round {round_num}.")
+                break
+
+            # Use helper to find a slice that fits the compressor window.
+            slice_result = self._find_compression_slice(
+                active_set=active_set,
+                history=history,
+                active_start_idx=active_start_idx,
+                latest_summary_idx=latest_summary_idx,
+                compressor_window=available_for_messages,
+                min_fraction=FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
+            )
+
+            if slice_result is None:
+                logger.error(f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
+                             f"for {inst_name} at round {round_num}. Giving up.")
+                raise ContextWindowExceeded(
+                    f"Smart slicing failed for {inst_name}: no slice of active history "
+                    f"fits the compressor's context window. Cannot compress further.") from fcr
+
+            final_fraction, discard_count, _target_messages = slice_result
+
+            # Invoke compression with the validated fraction.
+            # Lazy import to avoid circular dependency (see module-level comment).
+            try:
+                from agent_cascade.compression.core import compress_context as _compress_local
+
+                result = _compress_local(
+                    agent_pool=self.pool,
+                    target_agent_name=inst_name,
+                    fraction=final_fraction,
+                    mode='auto',
+                    force=True,
+                )
+
+                if not result.success:
+                    logger.warning(f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
+                                   f"{inst_name}: {result.error}. Trying next round.")
+                    continue
+
+                # Compression succeeded — rebuild working set from compressed pool state
+                self._rebuild_working_set(messages, llm_messages, inst_name)
+
+                # Update instance metadata (matching execute_force_compression pattern)
+                instance.compression_summary = result.summary_text
+                conv = self.pool.get_conversation(inst_name)
+                if conv:
+                    for idx, msg in enumerate(conv):
+                        c = msg_field(msg, 'content', '')
+                        if isinstance(c, str) and '<context_summary>' in c:
+                            instance.latest_marker_index = idx
+
+                logger.debug(
+                    f"[FALLBACK_COMPRESSION] Round {round_num} succeeded for {inst_name}: "
+                    f"fraction={final_fraction:.4f}, discarded {result.messages_discarded} messages, "
+                    f"tokens {result.tokens_before} → {result.tokens_after}")
+
+                # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
+                # compress_context() rewrote instance.conversation (the pool) but does NOT
+                # touch the JSONL logger — that is the caller's responsibility. The forced
+                # path calls _sync_logger_after_compression(); the fallback path previously
+                # did not, so after a successful round the pool was compressed while the
+                # log still held the OLD large history. Any path reading back from the log
+                # (recovery at handler.py:140-149, session reload) then re-inflated the pool
+                # → context-exceeded re-fired next turn → infinite loop.
+                #
+                # Order matters (see handler._sync_logger_after_compression docstring): sync
+                # BEFORE appending the notification below — reset_history(rewrite=True) would
+                # otherwise double-log it. A sync failure must NOT abort the retry loop.
+                try:
+                    # Unconditional call: self.compression_handler is always set on the engine
+                    # (core.py constructor) and a None handler would be caught by this try/except.
+                    self.compression_handler._sync_logger_after_compression(
+                        inst_name,
+                        instance.agent_class,
+                        'fallback compression',
+                        instance,
+                    )
+                except Exception as sync_err:
+                    # Best-effort: reset_history(rewrite=True) is a single non-atomic write, so on
+                    # failure the JSONL may be left half-written / out of sync with the pool. We do
+                    # not make it atomic (larger, higher-risk change); log loudly instead so operators
+                    # know recovery/reload could re-inflate. The retry loop continues regardless.
+                    logger.warning(
+                        f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
+                        f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
+                        f"compressed pool (possibly half-written) — recovery/reload could "
+                        f"re-inflate it. Continuing retry.")
+
+                # Post-compression check: does compressed payload fit next endpoint?
+                try:
+                    chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
+                    if chain:
+                        # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
+                        next_limit = chain[0].get('max_input_tokens') or 0
+
+                        # FIX (trigger b): when the router chain reports no limit
+                        # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
+                        # fall back to the context size dynamically detected on the agent's
+                        # LLM instance (llm/oai.py sets generate_cfg['max_input_tokens']).
+                        # This mirrors the compressor-window lookup above and avoids the old
+                        # "no limit → assume it fits" path that never verified against the
+                        # real server limit. Only when BOTH are unavailable do we assume fit.
+                        if next_limit <= 0:
+                            detected_limit = None
+                            try:
+                                _llm = getattr(instance, 'llm', None)
+                                if _llm is not None and hasattr(_llm, 'generate_cfg'):
+                                    detected_limit = _llm.generate_cfg.get('max_input_tokens')
+                                elif _llm is not None and hasattr(_llm, 'cfg'):
+                                    detected_limit = _llm.cfg.get('max_input_tokens')
+                            except Exception:
+                                detected_limit = None
+                            if detected_limit and detected_limit > 0:
+                                next_limit = int(detected_limit)
+                                logger.debug(
+                                    f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
+                                    f"using LLM-instance detected limit {next_limit} for {inst_name}.")
+
+                        if next_limit > 0:
+                            # Full message stats (reasoning, tool_calls, template overhead) —
+                            # prevents the undercount that caused "chain of compressions".
+                            estimated = sum(get_message_stats(msg)['tokens'] for msg in llm_messages)
+
+                            logger.debug(
+                                f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
+                                f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}")
+
+                            if estimated <= next_limit * 0.95:  # 5% safety margin
+                                # Payload fits — inject notification and resume agent
+                                from agent_cascade.compression.handler import CompressionHandler
+                                # Denominator priority: next_limit (the endpoint we are about to
+                                # resume against, and the same number the 95% gate above used) must
+                                # win over instance._allocated_max_input_tokens — that attribute is a
+                                # per-call cache of the PREVIOUS request's budget, possibly a different
+                                # endpoint's entirely. Deliberately NOT routed through
+                                # measure_context_usage: its denominator is endpoint-relative by
+                                # construction, and _get_effective_limit would report the CURRENT
+                                # endpoint's limit, contradicting the 95% gate printed above.
+                                max_tokens = next_limit or instance._allocated_max_input_tokens or 0
+                                notif_msg = Message(role=USER,
+                                                    content=CompressionHandler._format_compression_feedback(
+                                                        'fallback', 0, estimated, max_tokens))
+                                self._append_and_log(instance, notif_msg)
+
+                                # Resume all instances (compression may have halted them)
+                                try:
+                                    self.pool.resume_all_instances()
+                                except Exception:
+                                    pass
+
+                                logger.info(f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
+                                            f"{round_num} compression round(s). Resuming {inst_name}.")
+
+                                # Continue outer retry loop with compressed messages
+                                break
+                            else:
+                                logger.warning(
+                                    f"[FALLBACK_COMPRESSION] Compressed payload (~{estimated} tokens) "
+                                    f"still exceeds next endpoint limit ({next_limit}). "
+                                    f"Continuing to round {round_num + 1}...")
+                        else:
+                            # No limit from the router chain AND no detected limit on the LLM
+                            # instance — we cannot verify the payload against any real server
+                            # limit. Do NOT silently "assume it fits" here: that was exactly the
+                            # escape hatch that caused the original infinite loop (the payload
+                            # was accepted without ever being checked, then re-fired context-
+                            # exceeded on the next turn). Instead log a WARNING and do NOT break —
+                            # fall through to the outer retry loop's `continue` so the LLM call is
+                            # retried with the now-compressed payload. If it still exceeds the real
+                            # (unknown) limit, FallbackCompressionRequired re-fires and the existing
+                            # context-exceeded guard drives another compression round. This path is
+                            # therefore bounded by FALLBACK_COMPRESSION_MAX_ROUNDS — no infinite loop.
+                            logger.warning(
+                                f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
+                                f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
+                                f"compressed payload size; NOT assuming it fits. Retrying so the "
+                                f"context-exceeded guard re-checks against the real limit.")
+                except Exception as chain_err:
+                    # Non-fatal — continue retry anyway
+                    logger.debug(
+                        f"[FALLBACK_COMPRESSION] Could not verify next endpoint limit for {inst_name}: "
+                        f"{chain_err}. Continuing retry.")
+                    break
+
+            except ContextWindowExceeded:
+                raise
+            except AgentTerminatedError:
+                # Stop landed DURING the compression call (e.g. the
+                # compressor invoker aborts on pool.stopped). Propagate
+                # immediately — do not log as a compression failure or
+                # burn another round after the user pressed Stop.
+                raise
+            except Exception as comp_err:
+                logger.error(
+                    f"[FALLBACK_COMPRESSION] Round {round_num} raised exception for {inst_name}: "
+                    f"{comp_err}",
+                    exc_info=True)
+                # Continue to next round
+
+            # After each round, check if we should trigger automatic forced compression
+            # via the normal pre-LLM checks (usage_pct > 95%). The retry loop will
+            # naturally hit _pre_llm_checks on the next iteration if needed.
+
+        else:
+            # Exhausted all compression rounds without success
+            logger.error(
+                f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
+                f"for {inst_name}. Raising ContextWindowExceeded.")
+            raise ContextWindowExceeded(
+                f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
+                f"Context still exceeds available endpoint limits after aggressive compression. "
+                f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
+
+        # If we got here, compression succeeded and payload fits — continue retry loop
+        # llm_messages has been updated in-place by _rebuild_working_set
+
+        # Guard: ensure llm_messages identity matches _cached_llm_messages to prevent stale payload.
+        if instance._cached_llm_messages is not llm_messages:
+            logger.warning(
+                f"[FALLBACK_COMPRESSION] llm_messages identity diverged from "
+                f"_cached_llm_messages for {inst_name} "
+                f"(id={id(llm_messages)} vs id={id(instance._cached_llm_messages)}). "
+                f"Next turn may send stale payload.")
+        return
 
     def _call_llm_with_injection(self, instance: AgentInstance, llm_messages: List[Message]) -> Iterator[Message]:
         """Delegate to retry logic — now ~15 lines.
