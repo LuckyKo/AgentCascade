@@ -129,6 +129,11 @@ class _Engine:
         self._my_generation = 0
         # Bind the real implementations (not stubs) so we test production logic.
         self._check_and_handle_truncation = ExecutionEngine._check_and_handle_truncation.__get__(self, type(self))
+        self._handle_reasoning_only_soft_continue = ExecutionEngine._handle_reasoning_only_soft_continue.__get__(
+            self, type(self))
+        self._handle_full_auto_continue_retry = ExecutionEngine._handle_full_auto_continue_retry.__get__(
+            self, type(self))
+        self._reset_auto_continue_state = ExecutionEngine._reset_auto_continue_state.__get__(self, type(self))
         self._is_terminal_stop = ExecutionEngine._is_terminal_stop.__get__(self, type(self))
         self._telemetry = lambda: None  # telemetry is optional (None → skipped) in the engine path
         self._inject_soft_continue_nudge = ExecutionEngine._inject_soft_continue_nudge.__get__(self, type(self))
@@ -409,12 +414,12 @@ class TestNudgeOnPath:
 
     @pytest.fixture(autouse=True)
     def _enable_nudge(self, monkeypatch):
-        import agent_cascade.engine.core as core_mod
+        import agent_cascade.engine.response_pipeline as pipeline_mod
 
         # Enable the nudge flag AND raise N to 3 so the soft→full transition is reachable under
         # cap=5 (with the default N=2 the cap fires on attempt 3 before any full retry occurs).
-        monkeypatch.setattr(core_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', True)
-        monkeypatch.setattr(core_mod, 'REASONING_ONLY_CONTINUE_ATTEMPTS', 3)
+        monkeypatch.setattr(pipeline_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', True)
+        monkeypatch.setattr(pipeline_mod, 'REASONING_ONLY_CONTINUE_ATTEMPTS', 3)
         yield
 
     def _engine(self):
@@ -491,10 +496,10 @@ class TestNudgeOnPath:
         full retry DID occur and its rollback popped the reasoning message + both nudges. Counters
         are zeroed by the cap-hit reset. This matches the plan's documented behavior — do not 'fix'
         it into a behavior change."""
-        import agent_cascade.engine.core as core_mod
+        import agent_cascade.engine.response_pipeline as pipeline_mod
 
         # Restore default N (the autouse fixture set it to 3 above).
-        core_mod.REASONING_ONLY_CONTINUE_ATTEMPTS = REASONING_ONLY_CONTINUE_ATTEMPTS
+        pipeline_mod.REASONING_ONLY_CONTINUE_ATTEMPTS = REASONING_ONLY_CONTINUE_ATTEMPTS
         engine = self._engine()
         instance = _make_instance()
         results = [_run(engine, instance, [_reasoning_only_msg()]) for _ in range(MAX_AUTO_CONTINUE_ATTEMPTS)]

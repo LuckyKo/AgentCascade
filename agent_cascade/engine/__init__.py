@@ -9,6 +9,7 @@ sub-modules:
 - :mod:`agent_cascade.engine.tool_execution`   — tool dispatch/execution (ToolExecMixin)
 - :mod:`agent_cascade.engine.memory_hint`      — memory-hint query/submit (MemoryHintMixin)
 - :mod:`agent_cascade.engine.placeholder_cache` — rolling arg/output cache (PlaceholderCacheMixin)
+- :mod:`agent_cascade.engine.response_pipeline` — response normalize/retry/log sync (ResponsePipelineMixin)
 - :mod:`agent_cascade.engine.slot_lifecycle`    — slot acquire/release/reacquire (SlotLifecycleMixin)
 - :mod:`agent_cascade.engine.system_agent`      — system-agent lifecycle/launch (SystemAgentMixin)
 - :mod:`agent_cascade.engine.turn_setup`        — turn-state restore/prompt/cache setup (TurnSetupMixin)

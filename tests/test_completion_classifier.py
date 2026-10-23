@@ -33,7 +33,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 from agent_cascade.agent_instance import AgentInstance  # noqa: E402
 from agent_cascade.api_router_pkg.endpoints import APIEndpoint  # noqa: E402
 from agent_cascade.api_router_pkg.router import APIRouter  # noqa: E402
-from agent_cascade.engine.core import ExecutionEngine, _last_assistant_text  # noqa: E402
+from agent_cascade.engine.core import ExecutionEngine  # noqa: E402
+from agent_cascade.engine.response_pipeline import _last_assistant_text  # noqa: E402
 from agent_cascade.llm.schema import ASSISTANT, Message  # noqa: E402
 from agent_cascade.skills.selector import classify_completion  # noqa: E402
 
@@ -135,6 +136,11 @@ class _Engine:
         self.pool = pool
         self._my_generation = 0
         self._check_and_handle_truncation = ExecutionEngine._check_and_handle_truncation.__get__(self, _Engine)
+        self._handle_reasoning_only_soft_continue = ExecutionEngine._handle_reasoning_only_soft_continue.__get__(
+            self, _Engine)
+        self._handle_full_auto_continue_retry = ExecutionEngine._handle_full_auto_continue_retry.__get__(
+            self, _Engine)
+        self._reset_auto_continue_state = ExecutionEngine._reset_auto_continue_state.__get__(self, _Engine)
         self._is_terminal_stop = ExecutionEngine._is_terminal_stop.__get__(self, _Engine)
         self._telemetry = lambda: None
         self._rebuild_working_set = lambda messages, llm_messages, inst_name: (
