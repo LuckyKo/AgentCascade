@@ -233,48 +233,10 @@ class ToolExecMixin:
                     # Only assemble when tool_result is defined to avoid errors from
                     # early failures.
                     if self.compression_handler:
-                        try:
-                            # Determine truncation params from config.
-                            # char_threshold: when to trigger (Wild Read Threshold)
-                            # char_limit: how much to keep after triggering (Wild Read Truncation)
-                            _llm_cfg = self.pool.llm_cfg or {}
-                            char_threshold = _llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
-                            char_limit = _llm_cfg.get('wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS)
-
-                            # Get base_dir from operation_manager for spillover path resolution
-                            om = getattr(self.pool, 'operation_manager', None)
-                            base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
-
-                            # Use agent-specific endpoint config for vision capability check.
-                            # self.pool.llm_cfg lacks model_type, causing ContentItem lists
-                            # to be stringified instead of properly rendered as images.
-                            if self.pool.api_router:
-                                agent_llm_cfg = self.pool.api_router.get_llm_config(instance.agent_class)
-                            else:
-                                agent_llm_cfg = self.pool.llm_cfg or {}
-
-                            tool_result = self.compression_handler._assemble_tool_result(
-                                instance,
-                                tool_result,
-                                char_limit=char_limit,
-                                instance_name=inst_name,
-                                tool_name=tool_name,
-                                base_dir=base_dir,
-                                llm_cfg=agent_llm_cfg,
-                                char_threshold=char_threshold,
-                            )
-                        except Exception as e:
-                            # Log the failure (was previously silent), then fall back
-                            # to a thin drain chain that still ensures warnings and
-                            # notifications are delivered.
-                            logger.error(f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}")
-                            try:
-                                tool_result = self.compression_handler._legacy_drain_tool_result(instance, tool_result)
-                            except Exception as drain_err:
-                                logger.error(f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}")
-                                # Ensure we have something non-None to return
-                                if not isinstance(tool_result, str):
-                                    tool_result = str(tool_result) if tool_result is not None else ''
+                        # Guard required for unbound-safety: on the AgentTerminatedError / early-raise
+                        # paths tool_result is never bound, and the original guarded its finally-reference
+                        # with this same check. The post-processing body lives in _postprocess_tool_result.
+                        tool_result = self._postprocess_tool_result(instance, inst_name, tool_name, tool_result)
 
                     # Clear thread-local instance name after draining to prevent
                     # stale references across concurrent calls
@@ -555,6 +517,63 @@ class ToolExecMixin:
         if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
             return False, tool_result[:500]
         return True, ''
+
+    def _postprocess_tool_result(self, instance: AgentInstance, inst_name: str, tool_name: str,
+                                 tool_result) -> object:
+        """Assemble the final tool result with a consistent layout of warnings, output,
+        and truncation (truncation/drain post-processing).
+
+        Called ONLY when a compression handler is present (the caller guards that check,
+        which also preserves the original's safety on the AgentTerminatedError / early-raise
+        paths where ``tool_result`` is never bound). Resolves truncation params from config,
+        gets ``base_dir`` from ``pool.operation_manager``, and uses agent-specific endpoint
+        config (``api_router.get_llm_config`` with a ``pool.llm_cfg`` fallback) for the vision
+        capability check. Assembles via ``_assemble_tool_result``; on failure, logs and falls
+        back to a thin drain chain (``_legacy_drain_tool_result``), coercing to a string so the
+        result is never None. Returns the final result.
+        """
+        try:
+            # Determine truncation params from config.
+            # char_threshold: when to trigger (Wild Read Threshold)
+            # char_limit: how much to keep after triggering (Wild Read Truncation)
+            _llm_cfg = self.pool.llm_cfg or {}
+            char_threshold = _llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
+            char_limit = _llm_cfg.get('wild_read_truncation_chars', DEFAULT_WILD_READ_TRUNCATION_CHARS)
+
+            # Get base_dir from operation_manager for spillover path resolution
+            om = getattr(self.pool, 'operation_manager', None)
+            base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
+
+            # Use agent-specific endpoint config for vision capability check.
+            # self.pool.llm_cfg lacks model_type, causing ContentItem lists
+            # to be stringified instead of properly rendered as images.
+            if self.pool.api_router:
+                agent_llm_cfg = self.pool.api_router.get_llm_config(instance.agent_class)
+            else:
+                agent_llm_cfg = self.pool.llm_cfg or {}
+
+            tool_result = self.compression_handler._assemble_tool_result(
+                instance,
+                tool_result,
+                char_limit=char_limit,
+                instance_name=inst_name,
+                tool_name=tool_name,
+                base_dir=base_dir,
+                llm_cfg=agent_llm_cfg,
+                char_threshold=char_threshold,
+            )
+        except Exception as e:
+            # Log the failure (was previously silent), then fall back to a thin drain
+            # chain that still ensures warnings and notifications are delivered.
+            logger.error(f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}")
+            try:
+                tool_result = self.compression_handler._legacy_drain_tool_result(instance, tool_result)
+            except Exception as drain_err:
+                logger.error(f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}")
+                # Ensure we have something non-None to return
+                if not isinstance(tool_result, str):
+                    tool_result = str(tool_result) if tool_result is not None else ''
+        return tool_result
 
     def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
