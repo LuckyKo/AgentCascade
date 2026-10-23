@@ -145,6 +145,12 @@ class ToolExecMixin:
                 extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
                 function_id = extra_data.get('function_id')
 
+                # P8-4: bind tool_result before the try. The finally block references tool_result
+                # unconditionally (post-processing at ~line 238); on the AgentTerminatedError re-raise
+                # path execute_tool never binds it, so an UnboundLocalError there would mask the
+                # AgentTerminatedError. An empty string is a safe, post-processable default.
+                tool_result = ''
+
                 try:
                     # Set current instance name in thread-local for _resolve_path
                     # warnings
@@ -183,7 +189,12 @@ class ToolExecMixin:
                                                                         is_first_vram=is_first_vram,
                                                                         is_last_vram=is_last_vram)
                     except AgentTerminatedError:
-                        # Clean abort from stop-check during tool execution — re-raise for caller
+                        # Clean abort from a stop-check during tool execution. Record the termination
+                        # in telemetry (success=False, error='terminated') so the finally's
+                        # record_tool_call_end reflects a failed call rather than a spurious success,
+                        # then re-raise for the caller.
+                        _tool_success = False
+                        _tool_error = 'terminated'
                         raise
                     except Exception as e:
                         # R3: present dispatcher/plumbing crashes with the SAME shape as a tool crash
@@ -232,9 +243,10 @@ class ToolExecMixin:
                     # Only assemble when tool_result is defined to avoid errors from
                     # early failures.
                     if self.compression_handler:
-                        # Guard required for unbound-safety: on the AgentTerminatedError / early-raise
-                        # paths tool_result is never bound, and the original guarded its finally-reference
-                        # with this same check. The post-processing body lives in _postprocess_tool_result.
+                        # Only post-process when a compression handler is configured. tool_result is
+                        # always bound here (initialized to '' before the try), so this reference is
+                        # safe even on the AgentTerminatedError re-raise path. The post-processing body
+                        # lives in _postprocess_tool_result.
                         tool_result = self._postprocess_tool_result(instance, inst_name, tool_name, tool_result)
 
                     # Clear thread-local instance name after draining to prevent
