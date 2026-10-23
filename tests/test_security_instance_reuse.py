@@ -707,7 +707,7 @@ class TestEpsilonGateReal:
         """A recently-active instance (age = 0.3 * epsilon, inside the blocking band) must FALL BACK
         to fresh spawn. This is the "too recent" guard still working — a disabled/bypassed gate would
         wrongly reuse here."""
-        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        from agent_cascade.engine.system_agent import _REUSE_IDLE_EPSILON
         inst = _make_warm_instance()
         got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 0.3)
         assert got is None, (
@@ -717,7 +717,7 @@ class TestEpsilonGateReal:
     def test_recent_activity_near_epsilon_boundary_falls_back(self):
         """A gap just under epsilon (0.9 * epsilon) is STILL inside the blocking band → must FALL BACK.
         Pins the boundary direction: the gate only releases reuse at age >= epsilon, not earlier."""
-        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        from agent_cascade.engine.system_agent import _REUSE_IDLE_EPSILON
         inst = _make_warm_instance()
         got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 0.9)
         assert got is None, (
@@ -729,7 +729,7 @@ class TestEpsilonGateReal:
         object with is_reuse=True. This is the regression guard: if epsilon were reverted to a larger
         value or an async-teardown regression kept stamping _last_llm_activity too recently, this would
         fall back instead of reusing."""
-        from agent_cascade.engine.core import _REUSE_IDLE_EPSILON
+        from agent_cascade.engine.system_agent import _REUSE_IDLE_EPSILON
         inst = _make_warm_instance()
         got = _acquire_with_llm_age(inst, age_s=_REUSE_IDLE_EPSILON * 2.0)
         assert got is not None, (
