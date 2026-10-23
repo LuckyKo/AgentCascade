@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import traceback
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.error_reporting import TB_DEDUP, format_crash
@@ -114,61 +114,13 @@ class ToolExecMixin:
                 # ────────────────────────────
                 # Defense-in-depth: check if tool is disabled BEFORE execution.
                 # Disabled tools are still in function_map (only filtered from
-                # active functions sent to LLM).
-                # If an agent generates a call for a disabled tool, it gets
-                # auto-denied here.
-                if _primary_template and (tool_name in _primary_disabled_tools or tool_name not in _primary_function_map):
-                    # Determine deny reason with same logic as legacy
-                    # implementation
-                    if tool_name in _primary_disabled_tools and tool_name not in _primary_function_map:
-                        deny_reason = 'disabled and does not exist'
-                    elif tool_name in _primary_disabled_tools:
-                        deny_reason = 'disabled'
-                    else:
-                        deny_reason = 'does not exist'
-
-                    logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
-                    tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
-
-                    # Extract function_id from the assistant message that had the
-                    # tool call
-                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                    function_id = extra_data.get('function_id')
-
-                    # Telemetry: record tool call start and end for auto-denied
-                    # tools
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_tool_call_start(inst_name, tool_name)
-                            tel.record_tool_call_end(
-                                inst_name,
-                                tool_name,
-                                success=False,
-                                result_chars=len(tool_result),
-                                truncated=False,
-                                error=f"Tool {deny_reason}",
-                                is_call_agent=(tool_name == 'call_agent'),
-                            )
-                        except Exception:
-                            pass
-
-                    # Build function result message with denial — include
-                    # function_id per OpenAI spec
-                    fn_msg = Message(
-                        role=FUNCTION,
-                        name=tool_name,
-                        content=tool_result,
-                        extra={
-                            'function_id': function_id or '1',
-                            'tool_success': False,
-                        },
-                    )
-                    self._append_and_log(instance, fn_msg)
-                    response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
-
-                    # Track as executed for orphan handling (it was processed, just
-                    # denied)
-                    executed_tools.append(tool_name)
+                # active functions sent to LLM). If an agent generates a call for a
+                # disabled tool, it gets auto-denied here.
+                deny_reason = self._auto_deny_reason(
+                    _primary_template, _primary_disabled_tools, _primary_function_map, tool_name)
+                if deny_reason is not None:
+                    self._auto_deny_tool_call(
+                        instance, inst_name, out, tool_name, deny_reason, response, executed_tools)
 
                     used_any_tool = True
                     continue  # Skip actual tool execution
@@ -587,6 +539,74 @@ class ToolExecMixin:
         appended) — never call with an empty list (would raise IndexError).
         """
         return (out_idx == indices[0]), (out_idx == indices[-1])
+
+    def _auto_deny_reason(self, template, disabled_tools: set[str], function_map: dict,
+                          tool_name: str) -> Optional[str]:
+        """Return the auto-deny reason for a tool call, or ``None`` if it is allowed.
+
+        Encapsulates the FULL guard (``template`` present AND the tool is disabled or
+        absent from ``function_map``) plus the three-branch reason chain in the existing
+        order. Returns ``None`` unless the guard matches — callers branch on the returned
+        reason; do NOT treat this as only the inner chain, or every tool absent from an
+        empty ``function_map`` would be denied.
+        """
+        if not (template and (tool_name in disabled_tools or tool_name not in function_map)):
+            return None
+        if tool_name in disabled_tools and tool_name not in function_map:
+            return 'disabled and does not exist'
+        elif tool_name in disabled_tools:
+            return 'disabled'
+        else:
+            return 'does not exist'
+
+    def _auto_deny_tool_call(self, instance: AgentInstance, inst_name: str, out, tool_name: str,
+                             deny_reason: str, response: List[Message],
+                             executed_tools: List[str]) -> None:
+        """Build and append the auto-deny FUNCTION result for a disabled/absent tool.
+
+        Records telemetry (start+end, success=False), builds the denial message with
+        the caller's ``function_id``, appends via ``_append_and_log``, streams to the
+        UI ``response`` list, and tracks the tool as processed for orphan handling.
+        ``used_any_tool`` is set by the CALLER after this returns (post-append timing).
+        """
+        logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+        tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+
+        # Extract function_id from the assistant message that had the tool call
+        extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+        function_id = extra_data.get('function_id')
+
+        # Telemetry: record tool call start and end for auto-denied tools
+        if (tel := self._telemetry()) is not None:
+            try:
+                tel.record_tool_call_start(inst_name, tool_name)
+                tel.record_tool_call_end(
+                    inst_name,
+                    tool_name,
+                    success=False,
+                    result_chars=len(tool_result),
+                    truncated=False,
+                    error=f"Tool {deny_reason}",
+                    is_call_agent=(tool_name == 'call_agent'),
+                )
+            except Exception:
+                pass
+
+        # Build function result message with denial — include function_id per OpenAI spec
+        fn_msg = Message(
+            role=FUNCTION,
+            name=tool_name,
+            content=tool_result,
+            extra={
+                'function_id': function_id or '1',
+                'tool_success': False,
+            },
+        )
+        self._append_and_log(instance, fn_msg)
+        response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
+
+        # Track as executed for orphan handling (it was processed, just denied)
+        executed_tools.append(tool_name)
 
     @staticmethod
     def _has_images(messages):
