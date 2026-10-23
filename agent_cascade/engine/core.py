@@ -20,13 +20,10 @@ original file; only the mixin composition, module constants, and imports were ad
 
 from __future__ import annotations
 
-import time
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.compression.handler import CompressionHandler
-from agent_cascade.exceptions import (CharacterRunDetected, ContextWindowExceeded,
-                                      MaxTokenExceeded)
 from agent_cascade.lifecycle_manager import AgentLifecycleManager
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 from agent_cascade.log import logger
@@ -37,7 +34,6 @@ from agent_cascade.tool_dispatcher import ToolDispatcher
 from agent_cascade.utils.utils import extract_text_from_message, msg_field, msg_set
 
 # ── Constants (core) ───────────────────────────────────────────────────────────
-_COMPRESSION_WAIT_TIMEOUT = 1.0  # Seconds to wait per iteration when suspended by compression
 
 # REACQUIRE_TIMEOUT relocated to settings.py (plan §3.4.1) so router.py's sticky-slot sync can
 # share the same bound without a circular import. Imported below with the other settings.
@@ -510,321 +506,21 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
 
 
 
-    def _is_terminal_stop(self, inst_name: str) -> bool:
-        """Check if this instance has a TERMINAL stop condition (cannot resume).
-
-        Returns True only for conditions that mean execution must end permanently:
-        - Global pool stop (user clicked Stop)
-        - Generation mismatch (superseded by newer run)
-        - Instance terminated
-
-        Does NOT return True for compression-halt or manual halt — those are suspendable.
-        """
-        global_stop = self.pool.stopped
-        gen_mismatch = self._my_generation != self.pool._run_generation
-        inst_terminated = self.pool.is_instance_terminated(inst_name)
-        result = global_stop or gen_mismatch or inst_terminated
-        return result
-
-    def _is_suspended_by_compression(self, inst_name: str) -> bool:
-        """Check if this instance is suspended by a compression halt.
-
-        Returns True only when the instance is tracked in ``pool._compression_halted`` —
-        i.e. it was halted via the pool's public ``halt_all_instances()`` (manual /
-        programmatic callers and tests). Forced compression itself no longer halts any
-        sibling (t151b: the Compressor is a pure FIFO citizen bounded by QUEUE_WAIT_TIMEOUT),
-        so this set is now populated only by explicit halt_all_instances() calls. These
-        agents should wait cooperatively and resume automatically when
-        resume_all_instances() clears the flag.
-        """
-        return inst_name in self.pool._compression_halted
-
-    def _wait_for_compression_to_clear(self, inst_name: str) -> bool:
-        """Wait cooperatively while suspended by compression-halt.
-
-        Compression-halt is a suspension, not termination — agents resume
-        automatically once forced compression completes and clears the flag.
-
-        BUG-1 FIX: yields the endpoint slot before blocking so other agents
-        (including the Compressor required to clear this halt) can acquire it,
-        then re-acquires via the standard bounded-FIFO path after resume.
-        Without this, a slot-holding agent frozen mid-run starves the whole
-        conc=0 pool for up to QUEUE_WAIT_TIMEOUT (circular-wait deadlock).
-
-        Returns:
-            True if compression cleared (agent should continue normally).
-            False if a terminal stop occurred during wait (agent must exit).
-        """
-        instance = self.pool.get_instance(inst_name)
-
-        # ── BUG-1 FIX: yield the slot before blocking on the halt flag ──────
-        # Save KV state BEFORE release (matches sleep-transition ordering) so
-        # our context survives while other agents share the conc=0 pool.
-        if instance is not None:
-            from agent_cascade.state_ops import save_instance_state
-            with instance._state_lock:
-                instance._compression_suspended_at = time.monotonic()  # BUG-4/8 marker
-                save_instance_state(instance)
-            self._release_slot(instance, inst_name, 'compression_halt', action='drop-handoff')
-
-        try:
-            # ── BUG-6 FIX: plain sleep tick ─────────────────────────────────
-            # The old `pool.wait_if_paused()` waits on the GLOBAL _paused event,
-            # but compression-halt is per-instance (_halted_instances) — while
-            # globally resumed every Event.wait(1.0) returned instantly, making
-            # this a 100%-CPU hot loop for the entire suspension. A per-instance
-            # halt has no event to wait on; sleep the same 1s tick instead.
-            while self._is_suspended_by_compression(inst_name):
-                if self._is_terminal_stop(inst_name):
-                    return False  # Terminal stop — cannot resume; slot stays released (exit finally re-releases idempotently)
-                time.sleep(_COMPRESSION_WAIT_TIMEOUT)
-        finally:
-            if not self._is_terminal_stop(inst_name):
-                # Same re-acquire idiom as the tool_dispatcher sync-child path:
-                # reacquire_for handles no-slot endpoints, bounded FIFO wait, and
-                # (since the sticky-slot change) re-raises on hard scheduler failure.
-                # Restore KV ONLY AFTER successful re-acquisition to avoid evicting
-                # another agent's model.
-                #
-                # SANCTIONED EXCEPTION to the "no ungated state" rule (documented):
-                # this is the ONLY place in the codebase where a slotless state is
-                # tolerated. It's a system path — if re-acquisition fails here (hard
-                # scheduler failure raised, OR reacquire_for returning False for a
-                # missing router), a stuck compression-resume is worse than a degraded
-                # one, so we swallow it and let compression resume WITHOUT re-acquiring
-                # its slot. Every other reacquire_for caller lets the exception propagate.
-                try:
-                    ok = self.reacquire_for(instance, inst_name, context='after_compression_resume')
-                except Exception as e:
-                    logger.error(
-                        f"[SLOT_REACQUIRE_DEGRADED] compression-resume for '{inst_name}' "
-                        f"failed to re-acquire its slot (pool={getattr(instance, '_slot_key', None) if instance else 'unknown'}); "
-                        f"continuing WITHOUT a re-acquired slot (sanctioned degrade): {e}",
-                        exc_info=True,
-                    )
-                    ok = False
-                if ok and instance is not None:
-                    # Gate on ACTUAL slot ownership (ok=True also covers the no-slot /
-                    # unlimited case where _slot_release is None), and target the held
-                    # endpoint — never the stale _last_endpoint_config (eviction safety,
-                    # same rationale as the _setup_turn gate).
-                    if instance._slot_release is not None:
-                        self._restore_held_slot_state(instance, inst_name)
-        return True  # Compression cleared — safe to continue
 
 
 
 
 
 
-    def _check_stop_conditions(self, instance: AgentInstance) -> bool:
-        """Check if we should skip the LLM call due to stop conditions.
-
-        Only returns True for terminal stops — compression-halt agents should
-        wait and retry rather than skipping the LLM call permanently.
-
-        Extracted from _pre_llm_checks() - Phase 3.8
-
-        Args:
-            instance: Current agent instance
-
-        Returns:
-            True if any stop condition met (skip LLM call), False otherwise.
-        """
-        inst_name = instance.instance_name
-        return self._is_terminal_stop(inst_name)
-
-    def _is_stopped(self, inst_name: str) -> bool:
-        """Check if execution should stop for this instance.
-
-        Legacy name kept for backward compatibility at call sites that only need
-        a boolean 'should I stop now'. Returns True for terminal stops OR any halt.
-
-        IMPORTANT: Callers that break/return on this check must distinguish between
-        terminal stops (break permanently) and compression-halt (wait then resume).
-        Use _is_terminal_stop() and _is_suspended_by_compression() directly at those sites.
-
-        Note: Does NOT include pause — pause is handled separately via cooperative
-        wait loops (e.g. `while self.pool.is_paused(): time.sleep(0.1)`).
-        Pause should not interrupt execution; it should just wait and resume.
-
-        Args:
-            inst_name: Instance name to check halt/termination status
-
-        Returns:
-            True if any stop condition met, False otherwise.
-        """
-        return (self._is_terminal_stop(inst_name) or inst_name in self.pool._halted_instances)
-
-    def _check_stream_termination(self, stream_tick: int, inst_name: str, response: List[Message],
-                                  turn_output: List[Message],
-                                  partial_msgs: List[Message]) -> Optional[Tuple[List[Message], bool]]:
-        """Check for termination every N ticks during LLM streaming.
-
-        Shared helper to avoid duplicating the 20-tick check pattern across multiple
-        yield paths in the streaming loop. Returns (messages, is_streaming) tuple
-        ready to yield, or signals a break via returning early.
-
-        Args:
-            stream_tick: Current tick counter (incremented each loop iteration)
-            inst_name: Instance name for stop checks and logging
-            response: Accumulated persistent response messages
-            turn_output: Messages accumulated this turn (not yet committed to response)
-            partial_msgs: Currently streaming partial responses
-
-        Returns:
-            Tuple of (messages_list, is_streaming_bool) ready to yield.
-            Returns (response + turn_output + partial_msgs, False) if stop detected.
-            Returns None if no stop detected (caller should continue normally).
-        """
-        if stream_tick % 20 == 0:
-            stopped = self._is_terminal_stop(inst_name)
-            if stopped:
-                logger.debug('[TERMINATE] Stopped mid-stream after %d ticks - %s', stream_tick, inst_name)
-                return (response + turn_output + partial_msgs, False)
-        return None
-
-    def _inject_async_messages(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message],
-                               response: List[Message]) -> bool:
-        """Drain and inject user messages and async results that arrived during LLM call.
-
-        Extracted from _pre_llm_checks() - Phase 3.8
-
-        Also invalidates LLM preprocessing cache after queue injection for fresh processing.
-
-        Args:
-            instance: Current agent instance
-            messages, llm_messages, response: Working message sets
-
-        Returns:
-            True if any messages were injected (need to re-process), False otherwise.
-        """
-        inst_name = instance.instance_name
-
-        # Drain user messages from queue (includes async results — single queue now)
-        if self._drain_and_inject(
-                instance,
-                inst_name,
-                messages,
-                llm_messages,
-                response,
-        ):
-            # Invalidate LLM preprocessing cache after queue injection for fresh processing
-            self._clear_llm_preprocess_cache(instance, inst_name)
-            return True
-
-        return False
 
 
 
-    def _handle_inner_loop_detection(self, instance: AgentInstance, e: Exception, retry_count: int,
-                                     loop_retry_count: int, _max_attempts: int) -> None:
-        """Handle inner-loop detection (CharacterRunDetected/MaxTokenExceeded).
 
-        Advances endpoint cursor when appropriate and checks loop budget exhaustion.
-        Counters are NOT incremented here — they were already incremented by
-        _abort_stream before the exception was raised.
 
-        Dual counter semantics:
-        - retry_count: shared budget counter for all retries (general + inner-loop)
-        - loop_retry_count: tracks inner-loop-specific retries for observability
-        Both draw from the same _max_attempts budget pool.
 
-        Args:
-            instance: Agent instance making the call
-            e: The CharacterRunDetected or MaxTokenExceeded exception
-            retry_count: Current shared retry counter (already incremented by _abort_stream)
-            loop_retry_count: Current inner-loop-specific counter (already incremented by _abort_stream)
-            _max_attempts: Maximum retry attempts from pool settings
 
-        Raises:
-            CharacterRunDetected: if retry budget exhausted (defense-in-depth check)
-        """
-        inst_name = instance.instance_name
 
-        # Record inner-loop detection in telemetry (non-blocking — must never break the LLM call path).
-        _det_reason = getattr(e, 'detection_reason', str(e)) or str(e)
-        if (tel := self._telemetry()) is not None:
-            try:
-                tel.record_loop_detected(inst_name,
-                                         reason=_det_reason,
-                                         auto_rolled_back=False,
-                                         pop_count=0,
-                                         loop_type='inner')
-            except Exception:
-                pass
 
-        # Check dedicated loop retry budget — fail fast if exhausted (_max_attempts from pool.settings.retry_max_attempts)
-        # Note: generator already checks this before raising, so this is defense-in-depth.
-        # Raising here matches original inline behavior for this edge case.
-        if isinstance(e, CharacterRunDetected) and loop_retry_count >= _max_attempts:
-            last_reason = getattr(e, 'detection_reason', str(e))
-            raise CharacterRunDetected(
-                f"inner_loop_exhausted: retried {_max_attempts} times, "
-                f"giving up — last reason: {last_reason}",
-                detection_reason=last_reason,
-            )
-
-        # Advance endpoint cursor only on character-run or max-token
-        # detection so the next retry starts from a different endpoint
-        # in the chain. Other detection types (sentence, ngram, block,
-        # entropy, max-chars) should retry the same endpoint — they are
-        # weaker signals. This is the "kick to next endpoint" mechanism
-        # — without this, retries would try the same (failing) endpoint
-        # again because call_with_fallback builds a fresh chain each time.
-        _reason = getattr(e, 'detection_reason', '')
-        if isinstance(e, (MaxTokenExceeded, ContextWindowExceeded)) or _reason.startswith('character run'):
-            new_pos = self.pool.api_router.advance_instance_endpoint(inst_name)
-            logger.warning(f"[INNER_LOOP] Endpoint cursor advanced for '{inst_name}' "
-                           f"to position {new_pos} (detection: {_reason}). "
-                           f"Next retry will use a different endpoint.")
-        else:
-            logger.info(f"[INNER_LOOP] Detection triggered for '{inst_name}' "
-                        f"(reason: {_reason}), but not strong enough to advance cursor. "
-                        f"Retrying same endpoint.")
-
-    def _record_telemetry_event(self, inst_name: str, event_type: str, **kwargs) -> None:
-        """Record telemetry event for LLM call lifecycle.
-
-        Lightweight wrapper to reduce inline noise in retry logic.
-        Failures are silently swallowed — telemetry must never break LLM calls.
-
-        Also stamps the instance's LLM-activity fields ('start'/'end') that the
-        FIFO head-stall alarm reads (plan §3.2 write site A). The per-chunk stamp
-        (write site B) lives in the streaming watchdog block, where the timestamp
-        is already being taken.
-
-        Args:
-            inst_name: Agent instance name
-            event_type: One of 'start', 'end', 'first_token'
-            **kwargs: Event-specific data (input_tokens_est, output_tokens_est, model)
-        """
-        try:
-            if tel := self._telemetry():
-                if event_type == 'start':
-                    tel.record_llm_call_start(inst_name, **kwargs)
-                elif event_type == 'end':
-                    last_output = kwargs.pop('last_output', None)
-                    tel.record_llm_call_end(inst_name,
-                                            output_tokens_est=kwargs.get('output_tokens_est', 0),
-                                            last_output=last_output)
-                elif event_type == 'first_token':
-                    tel.record_llm_first_token(inst_name, **kwargs)
-        except Exception:
-            pass
-        # LLM-activity stamp (plan §3.2): covers prefill (start) and completion
-        # (end) for every retry attempt — the same boundaries telemetry uses.
-        # Best-effort: test doubles may use a pool stub without get_instance, so
-        # guard it exactly like the telemetry block above (must never break the call).
-        if event_type in ('start', 'end'):
-            try:
-                inst = self.pool.get_instance(inst_name)
-            except Exception:
-                # Diagnostic path — must never break LLM calls (same principle as the
-                # telemetry block above); test doubles may stub the pool without it.
-                inst = None
-            if inst is not None:
-                self._stamp_llm_activity(inst, event_type)
 
 
             # Clean thinking blocks from function call arguments (P4
@@ -847,59 +543,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
 
 
 
-    def _post_turn_checks(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message],
-                          response: List[Message]) -> bool:
-        """Phase 5: Check for final answer, wait for parallel agents, drain post-generation queue.
-
-        Returns False when agent has truly completed (break from loop).
-        Handles: final answer detection, thinking-only detection, parallel agent wait,
-        and post-generation message drain.
-
-        Args:
-            instance: The agent being executed.
-            messages: Full working set of messages.
-            llm_messages: Messages formatted for LLM API.
-            response: Response list to yield back to caller.
-
-        Returns:
-            True to continue the turn loop, False to break (agent complete).
-        """
-        inst_name = instance.instance_name
-
-        # Check stop immediately after LLM response — prevents unnecessary
-        # post-turn processing
-        if self._is_terminal_stop(inst_name):
-            return False  # Terminal stop — break from main loop
-        elif self._is_suspended_by_compression(inst_name):
-            # Compression-halt is a suspension, not termination — wait, then re-process.
-            logger.debug('post-turn processing suspended by compression - %s', inst_name)
-            if not self._wait_for_compression_to_clear(inst_name):
-                return False  # Terminal stop during wait
-            # Resumed — fall through to process the response normally
-
-        # 1. Check for unexecuted tool calls
-        if self._check_for_tool_calls_in_output(instance, response):
-            return True  # Tool was called — continue the loop (tool result will be in next turn)
-
-        # 2. Transition to SLEEPING if async tools pending
-        #    A pending background tool is real outstanding work and must take priority
-        #    over the stall detector below — otherwise a parent that dispatched an async
-        #    child then emitted a reasoning-only post-turn would wrongly break to IDLE
-        #    before it could sleep, losing the child's later result.
-        if self._transition_to_sleeping_if_pending(instance, inst_name):
-            return True  # Continue loop → hits SLEEPING guard at top
-
-        # 3. Detect pure thinking turn (stalled agent)
-        #    Only reached when there is NO pending async work, so a genuinely stuck
-        #    agent (no outstanding tools) still breaks out of the loop here.
-        if self._detect_pure_thinking_turn(instance, response):
-            return False  # Pure reasoning detected — break out of loop (agent stalled)
-
-        # 4. Drain post-generation messages (safety drain)
-        if self._drain_post_generation_messages(instance, inst_name, messages, llm_messages, response):
-            return True  # Messages drained — continue looping
-
-        return False  # Agent has truly completed
 
 
 

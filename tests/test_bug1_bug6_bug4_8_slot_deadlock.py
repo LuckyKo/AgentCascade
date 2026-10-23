@@ -212,7 +212,7 @@ class TestBug6WaitLoopSleeps:
     def test_sleep_ticks_instead_of_wait_if_paused(self):
         """While suspended, the loop advances via time.sleep(_COMPRESSION_WAIT_TIMEOUT)
         and NEVER calls pool.wait_if_paused."""
-        from agent_cascade.engine import core as core_mod
+        from agent_cascade.engine import run_loop as rl_mod
         inst = make_instance()
         engine, pool = make_engine(inst)
 
@@ -225,14 +225,14 @@ class TestBug6WaitLoopSleeps:
 
         with patch('agent_cascade.state_ops.save_instance_state', return_value=True), \
              patch.object(engine, 'reacquire_for', return_value=True), \
-             patch.object(core_mod.time, 'sleep', side_effect=fake_sleep), \
+             patch.object(rl_mod.time, 'sleep', side_effect=fake_sleep), \
              patch.object(pool, 'wait_if_paused') as wip:
             suspend(pool)
             result = engine._wait_for_compression_to_clear('A')
 
         assert result is True
         assert len(sleeps) == 3, f"expected exactly 3 sleep ticks, got {len(sleeps)}"
-        assert all(s == core_mod._COMPRESSION_WAIT_TIMEOUT for s in sleeps)
+        assert all(s == rl_mod._COMPRESSION_WAIT_TIMEOUT for s in sleeps)
         wip.assert_not_called(), 'pool.wait_if_paused (global-event spin) must not be used'
 
     def test_loop_exits_promptly_when_flag_clears(self):
