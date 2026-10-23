@@ -518,207 +518,21 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                 or a tuple of (messages_list, is_streaming_bool) during LLM streaming phases.
                 Consumers should unpack tuples before extending conversations to avoid bool leaks.
         """
-        logger.debug('engine.run() ENTRY - instance=%s', instance.instance_name)
-        # Every run starts with a clean turn-consumed flag so the first budget
-        # consumption of this run counts as exactly one user turn in telemetry.
-        # Set BEFORE any early-exit path so a stale flag can never suppress it.
-        instance._turn_consumed = False
-        # Transition to RUNNING state (replaces is_active=True)
-        with instance._state_lock:
-            if instance.state == AgentState.IDLE:
-                instance._transition(AgentState.RUNNING)
-            else:
-                # Safety net: If we reach here, the L1 session_lock guard in
-                # api_server.py
-                # failed to prevent a race condition. Raise to surface the bug
-                # instead of
-                # silent return.
-                raise RuntimeError(f"[BUG] {instance.instance_name} entered engine.run() in state "
-                                   f"{instance.state.name} — should be IDLE. L1 race guard failed!")
-        self._current_instance = instance  # Fix #2: set for token count cache lookups
-
-        # Capture run generation to detect if a newer execution has superseded
-        # this one.
-        # When user clicks Stop then Resume, pool._run_generation is
-        # incremented and
-        # the old thread exits here instead of continuing with stale state.
-        # NOTE: The shared ExecutionEngine's _my_generation can be overwritten
-        # by sub-agents
-        # via _create_and_run_agent(). However, pool.stopped provides
-        # defense-in-depth,
-        # so even if _my_generation is clobbered, the stop signal will still be
-        # detected.
-        self._my_generation = self.pool._run_generation
-
-        # Task provenance for propose_skill's Tier-2 self-match (BUG_0123). Capture it at run
-        # START: the last USER message here is the task this run is working on, while later
-        # engine notices and the reflection prompt are also USER-role messages and would be
-        # picked up if the trigger captured it lazily.
-        instance._auto_skill_source_task = self._last_user_task_text(instance)
-
-        # Clear truncation state at the start of each agent turn to prevent
-        # stale markers
-        clear_truncation_state()
-        instance._loop_rollback_count = 0
-
+        self._run_preflight(instance)
         # Initialize variables before try block to handle exceptions during
         # _setup_turn
         messages = None
         llm_messages = None
         response = None
         early_exit = False  # Set True on empty-conversation early exit so the finally block does not double-drain the queue.
-
-        # ── Acquire concurrency slot for this agent's endpoint ───────────────
-        # On sequential endpoints (concurrency_limit=0), only one agent should
-        # be making API calls at a time. The parent acquires the slot, then
-        # releases
-        # it when transitioning to SLEEPING so children can proceed.
-
-        # Acquire concurrency slot (single FIFO queue per endpoint — no bypass).
-        # Nested agents (Security, Compressor) now yield their caller's slot before
-        # running, so they acquire normally here instead of inheriting the parent's slot.
-        #
-        # NOTE: The terminal-stop guards below live INSIDE the try block on purpose.
-        # They run after the RUNNING transition above but must pass through this
-        # generator's exit finally (RUNNING→IDLE transition). Returning before
-        # `try:` skips that finally entirely and leaves the instance stuck in
-        # RUNNING state — the next engine.run() entry then trips the L1 race guard.
-
-        # Sticky slot plan change #7: a non-None _slot_release at run() entry means a
-        # previous run leaked its permit without going through a release point. The
-        # original implementation CLEARED it without releasing, which converted a
-        # recoverable leak into a PERMANENT zombie holder (the SlotHolder stays in
-        # pool._running, keyed by instance_name — only a release carrying the matching
-        # acquisition_id can remove it, and that callback was just discarded).
-        # Correct behavior: release it, then continue. The helper logs a loud
-        # [SLOT_STALE_PERMIT] WARNING when it actually found one — reaching here is
-        # always an upstream bug and must stay greppable.
-        self._discard_stale_permit(instance, instance.instance_name,
-                                   context='run() entry stale permit', action='drop-stale-guard')
-        instance._compression_suspended_at = 0.0  # Reset per-run suspension marker (BUG-4/8 exit-finally)
-
         try:
-            if self._is_terminal_stop(instance.instance_name):
-                return  # Terminal stop — don't start work (exit finally → IDLE)
+            if not self._run_acquire_initial_slot(instance):
+                return
 
-            self._acquire_slot_with_logging(instance, 'initial')
-
-            # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
-            if self._is_terminal_stop(instance.instance_name):
-                self._release_slot(instance, instance.instance_name, action='drop-exit')
-                return  # Terminal stop — release slot and exit (exit finally → IDLE)
-
-            # ── Phase 1: Setup ─────────────────────────────────────────────
-            logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
-
-            # Telemetry: record turn start (non-blocking)
-            if (tel := self._telemetry()) is not None:
-                try:
-                    template = self.pool.get_template(instance.agent_class)
-                    model = getattr(getattr(template, 'llm', None), 'model', '') or ''
-                    cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
-                    llm_cfg = getattr(getattr(template, 'llm', None), 'cfg', None) or {}
-                    api_base = llm_cfg.get('api_base', '') or llm_cfg.get('model_server', '') or ''
-                    sys_prompt = ''
-                    if template:
-                        try:
-                            m0_msgs = instance.conversation[:1]
-                            for m in m0_msgs:
-                                c = msg_field(m, 'content', '')
-                                if isinstance(c, str):
-                                    sys_prompt = c
-                                    break
-                        except Exception:
-                            pass
-                    tools_list = None
-                    if template and hasattr(template, 'function_map'):
-                        tools_list = sorted(template.function_map.keys())
-                    fp = tel.fingerprint_config(
-                        model=model,
-                        generate_cfg=cfg,
-                        system_prompt=sys_prompt,
-                        tools=tools_list,
-                        api_base=api_base,
-                    )
-                    desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list, api_base=api_base)
-                    tel.record_turn_start(instance.instance_name,
-                                          config_fingerprint=fp,
-                                          config_description=desc,
-                                          agent_class=instance.agent_class)
-                except Exception:
-                    pass
-
-            messages, llm_messages, response = self._setup_turn(instance)
-            # _setup_turn's documented contract (see its docstring) is to return
-            # (None, None, None) on the empty-conversation early exit, so guard the
-            # debug log against None — calling len() here crashed the early-exit path.
-            logger.debug(
-                f"[TURN_DONE] Got messages={len(messages) if messages is not None else 'None'}, "
-                f"llm_messages={len(llm_messages) if llm_messages is not None else 'None'}"
-            )
+            messages, llm_messages, response = self._run_turn_setup(instance)
             if not messages:
-                # Safety: drain any queued user messages before exiting, so
-                # they aren't lost.
-                # Safe to append directly: on the re-entry path below we
-                # re-run _setup_turn, which rebuilds from instance.conversation
-                # under the compression lock and therefore sees these; on the
-                # true early-exit path the turn is abandoned and the cached
-                # lists are never used again.
-                # This prevents reintroducing the silent cache rebuild bug from
-                # Fix 1.
-                inst_name = instance.instance_name
-                queued = self.pool.drain_queue(inst_name)
-                drained_count = 0
-                for item in queued:
-                    msg = self._make_user_message(item)
-                    # Handle both string and list (multimodal) content types
-                    if isinstance(msg.content, list):
-                        if not msg.content:
-                            continue
-                    elif not msg.content.strip():
-                        continue
-                    try:
-                        self._append_and_log(instance, msg)
-                        drained_count += 1
-                    except Exception as e:
-                        logger.error(f"Failed to append queued message for {inst_name}: {e}")
-
-                # ── Tail sync check after early-exit logging (design doc §5.2
-                # — D1 fix) ──
-                if queued and getattr(self.pool.settings, 'tail_sync_check_enabled', True):
-                    try:
-                        from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                        with instance._compression_lock:
-                            conv = instance.conversation
-                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        _check_tail(inst_name, conv, log_inst.log_path, context='early_exit')
-                    except Exception:
-                        pass  # Non-critical check
-
-                # ── Empty-conversation re-entry (defense-in-depth) ────────────
-                # If we drained real user messages into an empty conversation,
-                # re-run _setup_turn so the LLM actually sees them this turn.
-                # Without this, the early exit consumed the message and returned
-                # without any LLM call — the user had to send a second message.
-                # Upstream cause: run_agent_unified.py does not seed a system
-                # message when none is available, so the conversation can be
-                # empty on the first turn. Do not remove this as redundant —
-                # it is the safety net for any empty-conversation early exit.
-                if drained_count > 0:
-                    logger.info(
-                        '[EARLY_EXIT_REENTRY] %s: drained %d msg(s) into empty conversation, re-entering turn',
-                        inst_name, drained_count,
-                    )
-                    messages, llm_messages, response = self._setup_turn(instance)
-
-                if not messages:
-                    # No re-entry (or re-entry still empty) — original early exit.
-                    logger.debug('early exit - %s (_setup_turn returned empty)', inst_name)
-                    # Turn-end telemetry is handled by the run() finally (BUG_0127),
-                    # so every exit path is covered exactly once.
-                    early_exit = True  # Queued messages were drained above; the exit
-                                       # finally must NOT drain again (double-drain race).
-                    return  # Manual command handled or error
+                early_exit = True
+                return
 
             max_turns = instance.max_turns or DEFAULT_MAX_TURNS
             turns_available = max_turns
@@ -1066,69 +880,9 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                             continue                                               # run the reflection turns
                     break
 
-            # ── Cleanup: Turn limit reached ────────────────────────────────
-            # Muted for single-turn runs: their single turn IS the complete task,
-            # so there is no "incomplete" state — the notice would be pure noise.
-            # BUG_0140: use the run-start turn count (max_turns may have been
-            # extended mid-run by auto-skill reflection).
-            # BUG_0141: in soft mode there is no max_turns hard stop, so this notice
-            # is only correct when the absolute safety ceiling stopped the run.
-            soft_limit_hard_stop = (
-                soft_turn_limit and turns_available <= 0
-                and (max_turns - turns_available) >= soft_limit_absolute_cap)
-            if soft_limit_hard_stop:
-                logger.warning('[SOFT_TURN_LIMIT] %s hit the absolute safety cap (%d turns)',
-                               inst_name, soft_limit_absolute_cap)
-            if turns_available <= 0 and ((not soft_turn_limit and initial_turns_available > 1)
-                                         or soft_limit_hard_stop):
-                # Inject turn limit notice into the LAST assistant message
-                # content
-                # instead of appending a new message. This ensures
-                # extract_instance_output()
-                # (which reads messages[-1]) returns the agent's actual output
-                # with the warning.
-                turn_notice = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
-                notice_appended = False
-                if instance.conversation:
-                    # Find the last assistant message with text content and
-                    # append the notice
-                    for msg in reversed(instance.conversation):
-                        msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                        if msg_role != ASSISTANT:
-                            continue
-                        # Try to append to text content
-                        if isinstance(msg, dict):
-                            content = msg.get('content', '')
-                            if isinstance(content, list):
-                                for item in content:
-                                    if isinstance(item, dict) and item.get('type') == 'text':
-                                        item['text'] = item['text'] + turn_notice
-                                        notice_appended = True
-                                        break
-                            elif isinstance(content, str):
-                                msg['content'] = content + turn_notice
-                                notice_appended = True
-                        else:
-                            content = getattr(msg, 'content', '')
-                            if isinstance(content, list):
-                                for item in content:
-                                    if isinstance(item, dict) and item.get('type') == 'text':
-                                        item['text'] = item['text'] + turn_notice
-                                        notice_appended = True
-                                        break
-                            elif isinstance(content, str):
-                                msg.content = content + turn_notice
-                                notice_appended = True
-                        if notice_appended:
-                            break
-                    # Fallback: if no assistant message with text found, append
-                    # a new one
-                    if not notice_appended:
-                        msg = Message(role=ASSISTANT, content=turn_notice)
-                        self._append_and_log(instance, msg)
-                # Also append to response so UI streams the notice
-                response_msg = Message(role=ASSISTANT, content=turn_notice)
-                response.append(response_msg)
+            self._run_turn_limit_notice(
+                instance, response, turns_available, max_turns,
+                initial_turns_available, soft_turn_limit, soft_limit_absolute_cap)
 
         except AgentTerminatedError:
             # Clean abort from termination during tool execution or slot acquire.
@@ -1139,137 +893,400 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             logger.error('EXCEPTION - %s: %s: %s', instance.instance_name, type(e).__name__, e, exc_info=True)
             error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
             yield [error_msg]
-
         finally:
-            # C4 fix: Always clean up — transition to IDLE regardless of how we
-            # exit
+            self._run_finalize(instance, early_exit)
 
-            # ── Telemetry: close the turn exactly once, on every exit path ──────
-            # normal completion, unhandled exception, AgentTerminatedError and
-            # GeneratorExit (consumer abandoned the generator). Config/agent-class
-            # attribution of every LLM/tool event created during the turn depends
-            # on this pop, so skipping it makes the whole final turn invisible in
-            # both tables, not just its duration (BUG_0127). record_turn_end is
-            # idempotent (it pops), and is a no-op when run() exited via the two
-            # pre-start terminal-stop returns above.
-            if (tel := self._telemetry()) is not None:
-                try:
-                    tel.record_turn_end(instance.instance_name)
-                except Exception:
-                    pass
+    def _run_preflight(self, instance: AgentInstance) -> None:
+        """Prepare run state and generation before entering the guarded loop."""
+        logger.debug('engine.run() ENTRY - instance=%s', instance.instance_name)
+        # Every run starts with a clean turn-consumed flag so the first budget
+        # consumption of this run counts as exactly one user turn in telemetry.
+        # Set BEFORE any early-exit path so a stale flag can never suppress it.
+        instance._turn_consumed = False
+        # Transition to RUNNING state (replaces is_active=True)
+        with instance._state_lock:
+            if instance.state == AgentState.IDLE:
+                instance._transition(AgentState.RUNNING)
+            else:
+                # Safety net: If we reach here, the L1 session_lock guard in
+                # api_server.py
+                # failed to prevent a race condition. Raise to surface the bug
+                # instead of
+                # silent return.
+                raise RuntimeError(f"[BUG] {instance.instance_name} entered engine.run() in state "
+                                   f"{instance.state.name} — should be IDLE. L1 race guard failed!")
+        self._current_instance = instance  # Fix #2: set for token count cache lookups
 
-            # R6 (locked): restore the pre-trigger turn budget so a triggered run's
-            # extended max_turns does NOT leak into this instance's NEXT run. The
-            # snapshot is taken at trigger time (see _try_auto_skill_extension block);
-            # when no trigger fired the attribute is absent and nothing happens.
-            if getattr(instance, '_auto_skill_orig_max_turns', None) is not None:
-                instance.max_turns = instance._auto_skill_orig_max_turns
+        # Capture run generation to detect if a newer execution has superseded
+        # this one.
+        # When user clicks Stop then Resume, pool._run_generation is
+        # incremented and
+        # the old thread exits here instead of continuing with stale state.
+        # NOTE: The shared ExecutionEngine's _my_generation can be overwritten
+        # by sub-agents
+        # via _create_and_run_agent(). However, pool.stopped provides
+        # defense-in-depth,
+        # so even if _my_generation is clobbered, the stop signal will still be
+        # detected.
+        self._my_generation = self.pool._run_generation
 
-            inst_name = instance.instance_name
-            suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
-            terminated = self._is_terminal_stop(inst_name)
-            # TG-STREAM F3/D3: a terminal stop skips Phase 5 entirely, so the
-            # final-answer push never fires — if the first-output push already went out but no
-            # final one did, say so explicitly (the user got an early update, not the answer).
-            if terminated and getattr(instance, '_tg_first_pushed', False) \
-                    and getattr(instance, '_tg_final_pushed_phase', None) is None:
-                logger.info('[TG-PUSH] run stopped before final push for %s (first-output push sent, '
-                            'final answer not delivered)', inst_name)
-            outstanding = self.pool.has_pending(inst_name) or self.pool.has_messages(inst_name)
+        # Task provenance for propose_skill's Tier-2 self-match (BUG_0123). Capture it at run
+        # START: the last USER message here is the task this run is working on, while later
+        # engine notices and the reflection prompt are also USER-role messages and would be
+        # picked up if the trigger captured it lazily.
+        instance._auto_skill_source_task = self._last_user_task_text(instance)
 
-            # BUG-8 FIX: preserve wakeups ONLY when a suspension-driven exit left real
-            # work behind. Normal completions and terminal stops behave exactly as before.
-            preserve = suspended_this_run and not terminated and outstanding
+        # Clear truncation state at the start of each agent turn to prevent
+        # stale markers
+        clear_truncation_state()
+        instance._loop_rollback_count = 0
+        # Sticky slot plan change #7: a non-None _slot_release at run() entry means a
+        # previous run leaked its permit without going through a release point. The
+        # original implementation CLEARED it without releasing, which converted a
+        # recoverable leak into a PERMANENT zombie holder (the SlotHolder stays in
+        # pool._running, keyed by instance_name — only a release carrying the matching
+        # acquisition_id can remove it, and that callback was just discarded).
+        # Correct behavior: release it, then continue. The helper logs a loud
+        # [SLOT_STALE_PERMIT] WARNING when it actually found one — reaching here is
+        # always an upstream bug and must stay greppable.
+        self._discard_stale_permit(instance, instance.instance_name,
+                                   context='run() entry stale permit', action='drop-stale-guard')
+        instance._compression_suspended_at = 0.0  # Reset per-run suspension marker (BUG-4/8 exit-finally)
 
-            # Early-exit (empty conversation) runs already drained the message queue
-            # in their safety drain — draining again here would silently discard any
-            # user message enqueued between the two drains (e.g. the first message of
-            # a session after server restart). Skip the exit-finally cleanup entirely
-            # for those runs: clear_pending is also unnecessary since no LLM call ran.
-            if early_exit:
-                logger.debug('early-exit drain already handled — skipping exit-finally queue drain for %s', inst_name)
+    def _run_acquire_initial_slot(self, instance: AgentInstance) -> bool:
+        """Check for a terminal stop and acquire the initial concurrency slot.
 
-            elif not preserve:
-                if hasattr(self.pool, '_async_registry'):
-                    try:
-                        self.pool._async_registry.clear_pending(instance.instance_name)
-                    except Exception:
-                        pass  # Non-critical cleanup
-                # Also drain the message queue to prevent memory leak from stale messages
-                if hasattr(self.pool, 'drain_queue'):
-                    try:
-                        self.pool.drain_queue(instance.instance_name)
-                    except Exception:
-                        pass  # Non-critical cleanup
+        Returns False when the run must exit immediately; the caller's finally
+        still performs the normal IDLE/state cleanup.
+        """
+        if self._is_terminal_stop(instance.instance_name):
+            return False  # Terminal stop — don't start work (exit finally → IDLE)
 
-            # FIX Critical
-            with instance._compression_lock:
-                if instance._continue_saved_msg is not None:
-                    logger.debug(
-                        f"[CONTINUE_FIX] Continue saved message not merged (merge path skipped) for {instance.instance_name}. "
-                        f"Content is in conversation; this is expected on early exit.")
-                    instance._continue_saved_msg = None
+        self._acquire_slot_with_logging(instance, 'initial')
 
-            # Release concurrency slot on exit if still held (using helper
-            # method FIX Mi3). Structured drop-exit event (change #10c).
+        # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
+        if self._is_terminal_stop(instance.instance_name):
             self._release_slot(instance, instance.instance_name, action='drop-exit')
+            return False  # Terminal stop — release slot and exit (exit finally → IDLE)
+        return True
 
-            # FIX LogAppendFixer: Final sync to ensure all messages in
-            # conversation are logged
-            # This catches any injected messages that weren't followed by an
-            # LLM call triggering _process_response() sync
+    def _run_turn_setup(self, instance: AgentInstance):
+        """Run ``_setup_turn`` plus the empty-conversation drain/re-entry safety net.
+
+        Returns ``(messages, llm_messages, response)`` or ``(None, None, None)``
+        for the documented early-exit path.
+        """
+        # ── Phase 1: Setup ─────────────────────────────────────────────
+        logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
+
+        # Telemetry: record turn start (non-blocking)
+        if (tel := self._telemetry()) is not None:
             try:
-                inst_name = instance.instance_name
-                agent_class = instance.agent_class
-                log_inst = self.pool.get_logger(inst_name, agent_class)
-
-                already_logged_count = len(log_inst.data.get('history', []))
-                with instance._compression_lock:
-                    conv_len = len(instance.conversation)
-
-                # Only sync if there's a mismatch (defensive check to avoid
-                # redundant logging)
-                if already_logged_count < conv_len:
-                    logger.debug(
-                        f"[FINAL_SYNC] {inst_name}: Catching up {conv_len - already_logged_count} unlogged messages "
-                        f"(logged={already_logged_count}, conversation={conv_len})")
-                    with instance._compression_lock:
-                        conv = list(instance.conversation)
-                        # Catch-all: messages are already in conversation; only
-                        # JSONL needs catching up.
-                        for msg in conv[already_logged_count:]:
-                            if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
-                                log_inst.log_message(msg)
-
-                        # ── Tail sync check after final sync (design doc §5.2
-                        # — D1 fix) ──
-                        if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
-                            from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                            _check_tail(inst_name, conv, log_inst.log_path, context='final_sync')
-            except Exception as e:
-                logger.debug(
-                    f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}"
+                template = self.pool.get_template(instance.agent_class)
+                model = getattr(getattr(template, 'llm', None), 'model', '') or ''
+                cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+                llm_cfg = getattr(getattr(template, 'llm', None), 'cfg', None) or {}
+                api_base = llm_cfg.get('api_base', '') or llm_cfg.get('model_server', '') or ''
+                sys_prompt = ''
+                if template:
+                    try:
+                        m0_msgs = instance.conversation[:1]
+                        for m in m0_msgs:
+                            c = msg_field(m, 'content', '')
+                            if isinstance(c, str):
+                                sys_prompt = c
+                                break
+                    except Exception:
+                        pass
+                tools_list = None
+                if template and hasattr(template, 'function_map'):
+                    tools_list = sorted(template.function_map.keys())
+                fp = tel.fingerprint_config(
+                    model=model,
+                    generate_cfg=cfg,
+                    system_prompt=sys_prompt,
+                    tools=tools_list,
+                    api_base=api_base,
                 )
+                desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list, api_base=api_base)
+                tel.record_turn_start(instance.instance_name,
+                                      config_fingerprint=fp,
+                                      config_description=desc,
+                                      agent_class=instance.agent_class)
+            except Exception:
+                pass
 
-            with instance._state_lock:
-                current_state = instance.state
-                if current_state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
-                    # Mark activity at task completion so idle timer starts
-                    # from when agent becomes idle, not from creation
-                    self.pool._mark_activity(instance.instance_name)
-                    # BUG-4 FIX: exiting with preserved outstanding work → SLEEPING
-                    # (idle-checker protected; agents wake from queued messages in
-                    # either state). Everything else → IDLE as before.
-                    target = AgentState.SLEEPING if preserve else AgentState.IDLE
-                    instance._transition(target)
-                    if preserve:
-                        instance.sleeping_since = time.monotonic()
-                    logger.debug('EXIT - %s %s→%s%s', instance.instance_name, current_state.name, target.name,
-                                 ' [suspension-preserved]' if preserve else '')
-                elif current_state == AgentState.TERMINATED:
-                    logger.debug('EXIT - %s already TERMINATED', instance.instance_name)
-                else:
-                    logger.debug('EXIT - %s in %s state', instance.instance_name, current_state.name)
+        messages, llm_messages, response = self._setup_turn(instance)
+        # _setup_turn's documented contract (see its docstring) is to return
+        # (None, None, None) on the empty-conversation early exit, so guard the
+        # debug log against None — calling len() here crashed the early-exit path.
+        logger.debug(
+            f"[TURN_DONE] Got messages={len(messages) if messages is not None else 'None'}, "
+            f"llm_messages={len(llm_messages) if llm_messages is not None else 'None'}"
+        )
+        if not messages:
+            # Safety: drain any queued user messages before exiting, so
+            # they aren't lost.
+            # Safe to append directly: on the re-entry path below we
+            # re-run _setup_turn, which rebuilds from instance.conversation
+            # under the compression lock and therefore sees these; on the
+            # true early-exit path the turn is abandoned and the cached
+            # lists are never used again.
+            # This prevents reintroducing the silent cache rebuild bug from
+            # Fix 1.
+            inst_name = instance.instance_name
+            queued = self.pool.drain_queue(inst_name)
+            drained_count = 0
+            for item in queued:
+                msg = self._make_user_message(item)
+                # Handle both string and list (multimodal) content types
+                if isinstance(msg.content, list):
+                    if not msg.content:
+                        continue
+                elif not msg.content.strip():
+                    continue
+                try:
+                    self._append_and_log(instance, msg)
+                    drained_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to append queued message for {inst_name}: {e}")
+
+            # ── Tail sync check after early-exit logging (design doc §5.2
+            # — D1 fix) ──
+            if queued and getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                try:
+                    from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                    with instance._compression_lock:
+                        conv = instance.conversation
+                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                    _check_tail(inst_name, conv, log_inst.log_path, context='early_exit')
+                except Exception:
+                    pass  # Non-critical check
+
+            # ── Empty-conversation re-entry (defense-in-depth) ────────────
+            # If we drained real user messages into an empty conversation,
+            # re-run _setup_turn so the LLM actually sees them this turn.
+            # Without this, the early exit consumed the message and returned
+            # without any LLM call — the user had to send a second message.
+            # Upstream cause: run_agent_unified.py does not seed a system
+            # message when none is available, so the conversation can be
+            # empty on the first turn. Do not remove this as redundant —
+            # it is the safety net for any empty-conversation early exit.
+            if drained_count > 0:
+                logger.info(
+                    '[EARLY_EXIT_REENTRY] %s: drained %d msg(s) into empty conversation, re-entering turn',
+                    inst_name, drained_count,
+                )
+                messages, llm_messages, response = self._setup_turn(instance)
+
+            if not messages:
+                # No re-entry (or re-entry still empty) — original early exit.
+                logger.debug('early exit - %s (_setup_turn returned empty)', inst_name)
+                # Turn-end telemetry is handled by the run() finally (BUG_0127),
+                # so every exit path is covered exactly once.
+                return None, None, None
+        return messages, llm_messages, response
+
+    def _run_turn_limit_notice(self, instance: AgentInstance, response: List[Message], turns_available: int,
+                               max_turns: int, initial_turns_available: int, soft_turn_limit: bool,
+                               soft_limit_absolute_cap: int) -> None:
+        """Append the turn-limit notice after a normal loop exit."""
+        inst_name = instance.instance_name
+        # ── Cleanup: Turn limit reached ────────────────────────────────
+        # Muted for single-turn runs: their single turn IS the complete task,
+        # so there is no "incomplete" state — the notice would be pure noise.
+        # BUG_0140: use the run-start turn count (max_turns may have been
+        # extended mid-run by auto-skill reflection).
+        # BUG_0141: in soft mode there is no max_turns hard stop, so this notice
+        # is only correct when the absolute safety ceiling stopped the run.
+        soft_limit_hard_stop = (
+            soft_turn_limit and turns_available <= 0
+            and (max_turns - turns_available) >= soft_limit_absolute_cap)
+        if soft_limit_hard_stop:
+            logger.warning('[SOFT_TURN_LIMIT] %s hit the absolute safety cap (%d turns)',
+                           inst_name, soft_limit_absolute_cap)
+        if turns_available <= 0 and ((not soft_turn_limit and initial_turns_available > 1)
+                                     or soft_limit_hard_stop):
+            # Inject turn limit notice into the LAST assistant message
+            # content
+            # instead of appending a new message. This ensures
+            # extract_instance_output()
+            # (which reads messages[-1]) returns the agent's actual output
+            # with the warning.
+            turn_notice = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
+            notice_appended = False
+            if instance.conversation:
+                # Find the last assistant message with text content and
+                # append the notice
+                for msg in reversed(instance.conversation):
+                    msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    if msg_role != ASSISTANT:
+                        continue
+                    # Try to append to text content
+                    if isinstance(msg, dict):
+                        content = msg.get('content', '')
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'text':
+                                    item['text'] = item['text'] + turn_notice
+                                    notice_appended = True
+                                    break
+                        elif isinstance(content, str):
+                            msg['content'] = content + turn_notice
+                            notice_appended = True
+                    else:
+                        content = getattr(msg, 'content', '')
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'text':
+                                    item['text'] = item['text'] + turn_notice
+                                    notice_appended = True
+                                    break
+                        elif isinstance(content, str):
+                            msg.content = content + turn_notice
+                            notice_appended = True
+                    if notice_appended:
+                        break
+                # Fallback: if no assistant message with text found, append
+                # a new one
+                if not notice_appended:
+                    msg = Message(role=ASSISTANT, content=turn_notice)
+                    self._append_and_log(instance, msg)
+            # Also append to response so UI streams the notice
+            response_msg = Message(role=ASSISTANT, content=turn_notice)
+            response.append(response_msg)
+
+    def _run_finalize(self, instance: AgentInstance, early_exit: bool) -> None:
+        """Run the ``run()`` finally cleanup: telemetry, queue/slot, sync, and state."""
+        # C4 fix: Always clean up — transition to IDLE regardless of how we
+        # exit
+
+        # ── Telemetry: close the turn exactly once, on every exit path ──────
+        # normal completion, unhandled exception, AgentTerminatedError and
+        # GeneratorExit (consumer abandoned the generator). Config/agent-class
+        # attribution of every LLM/tool event created during the turn depends
+        # on this pop, so skipping it makes the whole final turn invisible in
+        # both tables, not just its duration (BUG_0127). record_turn_end is
+        # idempotent (it pops), and is a no-op when run() exited via the two
+        # pre-start terminal-stop returns above.
+        if (tel := self._telemetry()) is not None:
+            try:
+                tel.record_turn_end(instance.instance_name)
+            except Exception:
+                pass
+
+        # R6 (locked): restore the pre-trigger turn budget so a triggered run's
+        # extended max_turns does NOT leak into this instance's NEXT run. The
+        # snapshot is taken at trigger time (see _try_auto_skill_extension block);
+        # when no trigger fired the attribute is absent and nothing happens.
+        if getattr(instance, '_auto_skill_orig_max_turns', None) is not None:
+            instance.max_turns = instance._auto_skill_orig_max_turns
+
+        inst_name = instance.instance_name
+        suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
+        terminated = self._is_terminal_stop(inst_name)
+        # TG-STREAM F3/D3: a terminal stop skips Phase 5 entirely, so the
+        # final-answer push never fires — if the first-output push already went out but no
+        # final one did, say so explicitly (the user got an early update, not the answer).
+        if terminated and getattr(instance, '_tg_first_pushed', False) \
+                and getattr(instance, '_tg_final_pushed_phase', None) is None:
+            logger.info('[TG-PUSH] run stopped before final push for %s (first-output push sent, '
+                        'final answer not delivered)', inst_name)
+        outstanding = self.pool.has_pending(inst_name) or self.pool.has_messages(inst_name)
+
+        # BUG-8 FIX: preserve wakeups ONLY when a suspension-driven exit left real
+        # work behind. Normal completions and terminal stops behave exactly as before.
+        preserve = suspended_this_run and not terminated and outstanding
+
+        # Early-exit (empty conversation) runs already drained the message queue
+        # in their safety drain — draining again here would silently discard any
+        # user message enqueued between the two drains (e.g. the first message of
+        # a session after server restart). Skip the exit-finally cleanup entirely
+        # for those runs: clear_pending is also unnecessary since no LLM call ran.
+        if early_exit:
+            logger.debug('early-exit drain already handled — skipping exit-finally queue drain for %s', inst_name)
+
+        elif not preserve:
+            if hasattr(self.pool, '_async_registry'):
+                try:
+                    self.pool._async_registry.clear_pending(instance.instance_name)
+                except Exception:
+                    pass  # Non-critical cleanup
+            # Also drain the message queue to prevent memory leak from stale messages
+            if hasattr(self.pool, 'drain_queue'):
+                try:
+                    self.pool.drain_queue(instance.instance_name)
+                except Exception:
+                    pass  # Non-critical cleanup
+
+        # FIX Critical
+        with instance._compression_lock:
+            if instance._continue_saved_msg is not None:
+                logger.debug(
+                    f"[CONTINUE_FIX] Continue saved message not merged (merge path skipped) for {instance.instance_name}. "
+                    f"Content is in conversation; this is expected on early exit.")
+                instance._continue_saved_msg = None
+
+        # Release concurrency slot on exit if still held (using helper
+        # method FIX Mi3). Structured drop-exit event (change #10c).
+        self._release_slot(instance, instance.instance_name, action='drop-exit')
+
+        # FIX LogAppendFixer: Final sync to ensure all messages in
+        # conversation are logged
+        # This catches any injected messages that weren't followed by an
+        # LLM call triggering _process_response() sync
+        try:
+            inst_name = instance.instance_name
+            agent_class = instance.agent_class
+            log_inst = self.pool.get_logger(inst_name, agent_class)
+
+            already_logged_count = len(log_inst.data.get('history', []))
+            with instance._compression_lock:
+                conv_len = len(instance.conversation)
+
+            # Only sync if there's a mismatch (defensive check to avoid
+            # redundant logging)
+            if already_logged_count < conv_len:
+                logger.debug(
+                    f"[FINAL_SYNC] {inst_name}: Catching up {conv_len - already_logged_count} unlogged messages "
+                    f"(logged={already_logged_count}, conversation={conv_len})")
+                with instance._compression_lock:
+                    conv = list(instance.conversation)
+                    # Catch-all: messages are already in conversation; only
+                    # JSONL needs catching up.
+                    for msg in conv[already_logged_count:]:
+                        if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                            log_inst.log_message(msg)
+
+                    # ── Tail sync check after final sync (design doc §5.2
+                    # — D1 fix) ──
+                    if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                        from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                        _check_tail(inst_name, conv, log_inst.log_path, context='final_sync')
+        except Exception as e:
+            logger.debug(
+                f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}"
+            )
+
+        with instance._state_lock:
+            current_state = instance.state
+            if current_state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
+                # Mark activity at task completion so idle timer starts
+                # from when agent becomes idle, not from creation
+                self.pool._mark_activity(instance.instance_name)
+                # BUG-4 FIX: exiting with preserved outstanding work → SLEEPING
+                # (idle-checker protected; agents wake from queued messages in
+                # either state). Everything else → IDLE as before.
+                target = AgentState.SLEEPING if preserve else AgentState.IDLE
+                instance._transition(target)
+                if preserve:
+                    instance.sleeping_since = time.monotonic()
+                logger.debug('EXIT - %s %s→%s%s', instance.instance_name, current_state.name, target.name,
+                             ' [suspension-preserved]' if preserve else '')
+            elif current_state == AgentState.TERMINATED:
+                logger.debug('EXIT - %s already TERMINATED', instance.instance_name)
+            else:
+                logger.debug('EXIT - %s in %s state', instance.instance_name, current_state.name)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Phase Methods — each ~20-60 lines, independently testable
