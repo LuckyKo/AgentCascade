@@ -16,7 +16,6 @@ from typing import Any, List, Optional
 from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 from agent_cascade.utils.utils import estimate_functions_tokens, msg_field, msg_set
 
@@ -285,8 +284,8 @@ def _normalize_thinking_blocks(text):
     content inside JSON string values (e.g., tool arguments containing tag-like text).
 
     TODO: Consider consolidating with strip_thinking_blocks from thinking_block.py.
-    Currently kept separate as it's used for reasoning_content normalization and
-    _strip_thinking_blocks method, both of which need start-anchored behavior only.
+    Currently kept separate because reasoning_content normalization needs
+    start-anchored behavior only.
 
     Args:
         text: Raw text that may contain thinking tags at the start
@@ -389,6 +388,27 @@ def _extract_text_content(msg: Message) -> str:
             if isinstance(item, dict) and item.get('type') == 'text'
         ).strip()
     return content if isinstance(content, str) else str(content).strip()
+
+
+def _extract_direct_text_content(msg: Message) -> str:
+    """Return direct text content without the tool-call fallback.
+
+    Reads ``content`` as a string or as a list of ``text`` fields, deliberately
+    ignoring every other content shape. This is the shared shape used by
+    Telegram stream pushes and the memory-hint query builder; neither may leak
+    tool-call descriptions into user-visible or recall text.
+    """
+    content = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        frags = []
+        for part in content:
+            text = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
+            if isinstance(text, str) and text.strip():
+                frags.append(text.strip())
+        return ' '.join(frags).strip()
+    return ''
 
 
 def _is_incomplete_state(turn_output: List[Message]) -> str | None:

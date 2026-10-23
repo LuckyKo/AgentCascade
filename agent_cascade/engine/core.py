@@ -118,17 +118,7 @@ def _tg_stream_text(messages: List[Any]) -> str:
         role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
         if role != ASSISTANT:
             continue
-        content = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', None)
-        text = ''
-        if isinstance(content, str):
-            text = content.strip()
-        elif isinstance(content, list):
-            frags = []
-            for part in content:
-                t = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
-                if isinstance(t, str) and t.strip():
-                    frags.append(t.strip())
-            text = ' '.join(frags).strip()
+        text = _extract_direct_text_content(msg)
         if text:
             return text
     return ''
@@ -237,7 +227,8 @@ def _tg_push_final(instance: AgentInstance, response: List[Message], pool: Any, 
 from agent_cascade.engine.compression_exec import CompressionExecMixin
 from agent_cascade.engine.helpers import (MAX_TEXT_LENGTH_FOR_REGEX, MIN_OUTPUT_LENGTH, SleepAction,
                                           _build_resources_block, _build_session_metadata, _check_message_truncation,
-                                          _extract_text_content, _extract_tool_calls_from_text,
+                                          _extract_direct_text_content, _extract_text_content,
+                                          _extract_tool_calls_from_text,
                                           _inject_skills_to_system_message,
                                           _is_incomplete_state, _normalize_gemma_thought_tags,
                                           _merge_loaded_skill_names, _normalize_thinking_blocks,
@@ -276,8 +267,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
     - State machine transitions
     - Delegation to LifecycleManager, CompressionHandler, ToolDispatcher, StreamPublisher
 
-    After Phase 4 refactoring: ExecutionEngine class is ~2,400 lines (down from original ~3,727).
-    Total file size: ~2,800 lines (includes module-level helper functions and delegation wrappers).
+    The class is still large and is being decomposed incrementally; see
+    ``plans/engine_core_audit_2026-10-23.md`` for the current audit and split plan.
 
     Uses two-phase initialization:
     1. __init__() creates handlers with pool only (no engine reference)
@@ -822,7 +813,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             drain_fn: Optional[Callable[[str],
                                         Any]] = None,  # Drain mode: callable that takes inst_name and returns data
             items: Optional[Any] = None,  # Items mode: already-drained data to inject
-            factory: Callable[[Any], Message],  # Converts raw item → Message
+            factory: Optional[Callable[[Any], Message]] = None,  # Converts raw item → Message
             log_level: str = 'debug',  # Most injection points are debug-level
     ) -> bool:
         """Drain a queue/buffer and inject results as USER messages into all working lists.
@@ -832,10 +823,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         centralized append_message() API, ensuring no length mismatches between cached
         lists and conversation with automatic cache invalidation.
 
-        Exactly one of drain_fn or items must be provided.
+        Exactly one of drain_fn or items must be provided. When neither is supplied,
+        ``drain_fn`` defaults to ``self.pool.drain_queue`` and ``factory`` defaults to
+        ``self._make_user_message`` (the common injection path).
 
         Returns True if any messages were injected, False otherwise.
         """
+        if factory is None:
+            factory = self._make_user_message
+        if drain_fn is None and items is None:
+            drain_fn = self.pool.drain_queue
+
         # Get data from either mode
         if items is not None:
             raw_data = items
@@ -894,15 +892,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         try:
             for _ in processed_messages:
                 self.pool._mark_activity(inst_name)
-
-            # ── Tail sync check after drain+inject logging (design doc §5.2 —
-            # D1 fix) ──
-            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
-                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                with instance._compression_lock:
-                    conv = instance.conversation
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                _check_tail(inst_name, conv, log_inst.log_path, context='drain_inject')
+            self._tail_sync_conversation(instance, inst_name, 'drain_inject')
         except Exception as e:
             logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
@@ -929,20 +919,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
     def _make_user_message(text: str) -> Message:
         """Create a USER message from raw text."""
         return Message(role=USER, content=text)
-
-    @staticmethod
-    def _make_async_result_message(tuple_data: Tuple[str, Optional[str]]) -> Message:
-        """Create a USER message from an async result tuple (content, function_id)."""
-        result_content, function_id = tuple_data
-        # Don't wrap shell_cmd messages—they already have their own structured prefix
-        stripped = result_content.strip()
-        if stripped.startswith('⟨shell_cmd'):
-            return Message(role=USER, content=result_content)
-        # Don't double-wrap agent results that already have [Agent ...] prefix
-        if stripped.startswith('[Agent '):
-            return Message(role=USER, content=result_content)
-        prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else '[BACKGROUND TOOL RESULT]'
-        return Message(role=USER, content=f"{prefix}: {result_content}")
 
     @staticmethod
     def _last_user_task_text(instance) -> Optional[str]:
@@ -2402,8 +2378,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 messages,
                 llm_messages,
                 response,
-                drain_fn=self.pool.drain_queue,
-                factory=self._make_user_message,
         ):
             # Invalidate LLM preprocessing cache after queue injection for fresh processing
             self._clear_llm_preprocess_cache(instance, inst_name)
@@ -2448,64 +2422,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         if needs_update:
             instance._streaming_responses = copy.deepcopy(last_output)
 
-    def _classify_llm_error(self, error: Exception) -> str:
-        """Classify LLM error as 'retryable', 'fatal', or 'unknown'.
-
-        Extracted from _call_llm_with_injection() - Phase 3.6
-
-        .. deprecated:: Use agent_cascade.retry_policy.classify_error() instead.
-           Kept for backward compatibility; will be removed in a future phase.
-
-        Args:
-            error: The exception that occurred
-
-        Returns:
-            Error classification string
-        """
-        error_str = str(error).lower()
-
-        # Retryable errors (transient)
-        retryable_errors = (
-            'connection',
-            'timeout',
-            'timed out',
-            'ssl',
-            'broken pipe',
-            'disconnected',
-            'eof',
-            'reset by peer',
-            'refused',
-            'terminated',
-            'fetch failed',  # Connection termination patterns from logs
-            '503',
-            '502',
-            '504',
-            '429',  # Server errors + rate limiting
-            'network unreachable',
-            'dns',
-            'resolution failed',  # Network/DNS issues
-            'temporary',
-            'overloaded',
-            'service unavailable'  # Transient server states
-        )
-
-        # Explicitly non-retryable patterns (billing, auth, config)
-        non_retryable_errors = ('insufficient_quota', 'billing_error', 'account_not_active', 'invalid_api_key',
-                                'authentication', 'unauthorized', 'forbidden', 'permission denied', 'model_not_found',
-                                'invalid_model', 'invalid_request', 'validation')
-
-        is_non_retryable = any(err in error_str for err in non_retryable_errors)
-        has_retryable_pattern = any(err in error_str for err in retryable_errors)
-
-        if is_non_retryable:
-            return 'fatal'
-        elif has_retryable_pattern:
-            return 'retryable'
-        else:
-            # Unknown error — default to retryable for transient issues we
-            # haven't categorized
-            return 'unknown'
-
     def _make_retrying_message(self,
                                instance: AgentInstance,
                                attempt: int,
@@ -2533,20 +2449,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         reason = classify_endpoint_failure(error) if error is not None else 'Connection lost'
         return Message(role=ASSISTANT,
                        content=f"[RETRYING] {reason}, retrying ({attempt}/{max_retries}) in {delay:.1f}s...")
-
-    def _make_error_message(self, instance: AgentInstance, error_msg: str) -> Message:
-        """Create [ERROR] notification message for UI.
-
-        Extracted from _call_llm_with_injection() - Phase 3.6
-
-        Args:
-            instance: Agent instance
-            error_msg: Error message to display
-
-        Returns:
-            Transient Message object (not added to conversation history)
-        """
-        return Message(role=ASSISTANT, content=f"[ERROR {instance.instance_name}: {error_msg}]")
 
     def _handle_inner_loop_detection(self, instance: AgentInstance, e: Exception, retry_count: int,
                                      loop_retry_count: int, _max_attempts: int) -> None:
@@ -2857,6 +2759,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         return ('Your last turn contained only reasoning/thinking and no output or tool call. '
                 'Please continue — produce your response text or make the next tool call now.')
 
+    def _tail_sync_conversation(self, instance: AgentInstance, inst_name: str, context: str) -> None:
+        """Run the best-effort tail-sync JSONL check after a conversation append.
+
+        Callers own activity marking and exception handling; this helper only performs
+        the optional tail-sync check so the shape lives in one place.
+        """
+        if not getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+            return
+        from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+        with instance._compression_lock:
+            conv = instance.conversation
+        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+        _check_tail(inst_name, conv, log_inst.log_path, context=context)
+
     def _sync_conversation_log(self, instance: AgentInstance, inst_name: str, context: str) -> None:
         """Mark activity + run the tail-sync JSONL check after a conversation append (house pattern).
 
@@ -2865,12 +2781,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
         """
         try:
             self.pool._mark_activity(inst_name)
-            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
-                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
-                with instance._compression_lock:
-                    conv = instance.conversation
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                _check_tail(inst_name, conv, log_inst.log_path, context=context)
+            self._tail_sync_conversation(instance, inst_name, context)
         except Exception as e:
             logger.debug(f"Conversation log sync failed for {inst_name} (non-critical): {e}")
 
@@ -2997,8 +2908,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 messages,
                 llm_messages,
                 response,
-                drain_fn=self.pool.drain_queue,
-                factory=self._make_user_message,
         ):
             return True  # Continue to next LLM call for urgent message processing
 
@@ -3161,8 +3070,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     messages,
                     llm_messages,
                     response,
-                    drain_fn=self.pool.drain_queue,
-                    factory=self._make_user_message,
             ):
                 return True  # Continue loop to process drained results
         except Exception as e:
@@ -3619,7 +3526,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 llm_messages,
                 response,
                 items=messages_list,  # Pass pre-drained items directly
-                factory=self._make_user_message,
             )
 
             # Re-acquire concurrency slot after waking from SLEEPING
@@ -3699,8 +3605,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     messages,
                     llm_messages,
                     response,
-                    drain_fn=self.pool.drain_queue,
-                    factory=self._make_user_message,
             ):
                 results_found = True
 
@@ -3711,8 +3615,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     messages,
                     llm_messages,
                     response,
-                    drain_fn=self.pool.drain_queue,
-                    factory=self._make_user_message,
             ):
                 results_found = True
 
@@ -5087,13 +4989,6 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                 return True, calls[0][0], calls[0][1], text
 
         return False, None, None, text or ''
-
-    def _strip_thinking_blocks(self, text: str) -> str:
-        """Remove thinking tags from reasoning content.
-
-        Delegates to module-level helper for consistency.
-        """
-        return _normalize_thinking_blocks(text)
 
     def _append_system_notification(self, messages: List[Message], guard_prefix: str, notification_text: str):
         """Append a system notification to the last message, preventing duplicates."""

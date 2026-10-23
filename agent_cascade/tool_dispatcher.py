@@ -846,8 +846,6 @@ class ToolDispatcher:
     # Note: truncate_tool_result and _write_spillover_file removed -
     # tools already handle their own truncation for wild reads.
 
-    # Note: LLM call helper methods (_classify_llm_error, _make_retrying_message,
-
-
-# _make_error_message) remain in ExecutionEngine as they are used by
-# _execute_llm_call_with_retry() which is still owned by ExecutionEngine.
+    # Note: LLM call helper methods (for example, _make_retrying_message)
+    # remain in ExecutionEngine because _execute_llm_call_with_retry() still
+    # owns them.
