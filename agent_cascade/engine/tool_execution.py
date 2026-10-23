@@ -378,101 +378,12 @@ class ToolExecMixin:
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────
         # If halt/stop was detected mid-loop, remaining tools in turn_output
-        # don't have FUNCTION results.
-        # Add placeholder FUNCTION messages to prevent API Error 400 (orphaned
-        # tool_call_id's).
+        # don't have FUNCTION results. Add placeholder FUNCTION messages to prevent
+        # API Error 400 (orphaned tool_call_id's). Runs only when the instance is
+        # stopped; the placeholder batch is owned by _handle_orphaned_tool_calls.
         if self._is_stopped(inst_name):
-            executed_set = set(executed_tools)  # Convert to set for O(1) lookup
-            tools_processed = 0
-
-            # Resolve tool policy (shared with the primary loop) outside the
-            # compression lock — template/disabled list don't change during the loop.
-            _orphan_template, _orphan_disabled_tools, _orphan_function_map = self._resolve_tool_policy(instance)
-
-            with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
-
-                for out in turn_output:
-                    use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-                    if not use_tool:
-                        continue
-
-                    # Only add placeholder for tools that were NOT executed
-                    if tool_name in executed_set:
-                        continue
-
-                    # ── Disabled/Inexistent Tool Auto-Deny (orphan handling)
-                    # ────────
-                    # For unexecuted tools due to halt, check if they're
-                    # disabled/inexistent.
-                    # If so, give proper denial message instead of generic
-                    # "skipped" message.
-                    deny_reason = None
-                    # Template guard for consistency with primary loop
-                    if _orphan_template and (tool_name in _orphan_disabled_tools or
-                                             tool_name not in _orphan_function_map):
-                        # Determine deny reason with same logic as legacy
-                        # implementation
-                        if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
-                            deny_reason = 'disabled and does not exist'
-                        elif tool_name in _orphan_disabled_tools:
-                            deny_reason = 'disabled'
-                        else:
-                            deny_reason = 'does not exist'
-
-                        # Log the denial (matching primary loop pattern)
-                        logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
-
-                    # Extract function_id from the assistant message that had
-                    # the tool call
-                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                    _orphan_function_id = extra_data.get('function_id')  # Use same pattern as primary loop
-
-                    # Add placeholder FUNCTION result for unexecuted tool
-                    # Use denial message if tool is disabled/inexistent,
-                    # otherwise use skip message
-                    if deny_reason:
-                        fn_content = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
-                    else:
-                        fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
-
-                    # Telemetry: record tool call start and end (matching
-                    # primary loop pattern)
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_tool_call_start(inst_name, tool_name)
-                            tel.record_tool_call_end(
-                                inst_name,
-                                tool_name,
-                                success=False,
-                                result_chars=len(fn_content),
-                                truncated=False,
-                                error=f"Tool {deny_reason}" if deny_reason else 'Skipped (halt/stop)',
-                                is_call_agent=(tool_name == 'call_agent'),
-                            )
-                        except Exception:
-                            pass
-
-                    fn_msg = Message(
-                        role=FUNCTION,
-                        name=tool_name,
-                        content=fn_content,
-                        extra={
-                            'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
-                            'tool_success': False,
-                        },
-                    )
-                    self._append_and_log(instance, fn_msg, lock_held=True)
-                    response.append(fn_msg)  # Stream to UI (separate list for streaming)
-
-                    # Track as executed for consistency (matching primary loop
-                    # pattern)
-                    executed_tools.append(tool_name)
-
-                    tools_processed += 1
-
-                if tools_processed > 0:
-                    logger.warning(
-                        f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+            self._handle_orphaned_tool_calls(
+                instance, inst_name, turn_output, executed_tools, response)
 
         if used_any_tool:
             self._proactive_compression_check(instance, messages, llm_messages, response, check_label='post-tool')
@@ -510,6 +421,95 @@ class ToolExecMixin:
 
             function_map = getattr(template, 'function_map', {})
         return template, disabled_tools, function_map
+
+    def _handle_orphaned_tool_calls(self, instance: AgentInstance, inst_name: str,
+                                    turn_output: List[Message], executed_tools: List[str],
+                                    response: List[Message]) -> None:
+        """Add placeholder FUNCTION results for tool calls left orphaned by an early
+        halt/stop, preventing API Error 400 from orphaned tool_call_ids.
+
+        Called only when the instance is stopped (guarded by the caller). Holds
+        ``instance._compression_lock`` for the whole placeholder batch (single acquisition
+        around the loop AND the count warning), skips already-executed tool names, applies
+        the same disabled/inexistent denial rules via ``_auto_deny_reason``, appends with
+        ``_append_and_log(..., lock_held=True)``, streams to the UI ``response`` list,
+        tracks each tool in ``executed_tools``, and logs the count of placeholders added.
+        """
+        executed_set = set(executed_tools)  # Convert to set for O(1) lookup
+        tools_processed = 0
+
+        # Resolve tool policy (shared with the primary loop) outside the
+        # compression lock — template/disabled list don't change during the loop.
+        _orphan_template, _orphan_disabled_tools, _orphan_function_map = self._resolve_tool_policy(instance)
+
+        with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
+
+            for out in turn_output:
+                use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                if not use_tool:
+                    continue
+
+                # Only add placeholder for tools that were NOT executed
+                if tool_name in executed_set:
+                    continue
+
+                # ── Disabled/Inexistent Tool Auto-Deny (orphan handling)
+                # ────────
+                # For unexecuted tools due to halt, check if they're disabled/inexistent.
+                # If so, give proper denial message instead of generic "skipped" message.
+                deny_reason = self._auto_deny_reason(
+                    _orphan_template, _orphan_disabled_tools, _orphan_function_map, tool_name)
+                if deny_reason is not None:
+                    # Log the denial (matching primary loop pattern)
+                    logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+
+                # Extract function_id from the assistant message that had the tool call
+                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                _orphan_function_id = extra_data.get('function_id')  # Use same pattern as primary loop
+
+                # Add placeholder FUNCTION result for unexecuted tool.
+                # Use denial message if tool is disabled/inexistent, otherwise skip message.
+                if deny_reason:
+                    fn_content = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                else:
+                    fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
+
+                # Telemetry: record tool call start and end (matching primary loop pattern)
+                if (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_tool_call_start(inst_name, tool_name)
+                        tel.record_tool_call_end(
+                            inst_name,
+                            tool_name,
+                            success=False,
+                            result_chars=len(fn_content),
+                            truncated=False,
+                            error=f"Tool {deny_reason}" if deny_reason else 'Skipped (halt/stop)',
+                            is_call_agent=(tool_name == 'call_agent'),
+                        )
+                    except Exception:
+                        pass
+
+                fn_msg = Message(
+                    role=FUNCTION,
+                    name=tool_name,
+                    content=fn_content,
+                    extra={
+                        'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
+                        'tool_success': False,
+                    },
+                )
+                self._append_and_log(instance, fn_msg, lock_held=True)
+                response.append(fn_msg)  # Stream to UI (separate list for streaming)
+
+                # Track as executed for consistency (matching primary loop pattern)
+                executed_tools.append(tool_name)
+
+                tools_processed += 1
+
+            if tools_processed > 0:
+                logger.warning(
+                    f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
     def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
