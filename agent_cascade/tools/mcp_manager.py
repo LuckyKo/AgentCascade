@@ -186,9 +186,7 @@ class MCPManager:
             # to get tool registrations).  Uses a prefix scan so the guard is
             # robust against hash differences from a prior connect_server call.
             with self._mcp_lock:
-                existing = any(k.startswith(f'{server_name}:')
-                               for k in self._connected_servers)
-                if existing:
+                if self._find_connected_key(server_name) is not None:
                     logger.debug(f"MCP server '{server_name}' already connected, "
                                  f"returning cached tools.")
                     tools.extend(self._server_tools.get(server_name, []))
@@ -202,109 +200,14 @@ class MCPManager:
                 uuid.uuid4())  # To allow the same server name be used across different running agents
             client.client_id = client_id  # Ensure client_id is set on the client instance
             self.clients[client_id] = client  # Add to clients dict after successful connection
-            _server_tools_start = len(tools)  # Mark start index for per-server tool caching
-            for tool in client.tools:
-                """MCP tool example:
-                {
-                "name": "read_query",
-                "description": "Execute a SELECT query on the SQLite database",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                        "type": "string",
-                        "description": "SELECT SQL query to execute"
-                        }
-                    },
-                    "required": ["query"]
-                }
-                """
-                parameters = tool.inputSchema
-                # The required field in inputSchema may be empty and needs to be initialized.
-                if 'required' not in parameters:
-                    parameters['required'] = []
-                # Remove keys from parameters that do not conform to the standard OpenAI schema
-                # Check if the required fields exist
-                required_fields = {'type', 'properties', 'required'}
-                missing_fields = required_fields - parameters.keys()
-                if missing_fields:
-                    raise ValueError(f'Missing required fields in schema: {missing_fields}')
-
-                # Keep only the necessary fields
-                cleaned_parameters = {
-                    'type': parameters['type'],
-                    'properties': parameters['properties'],
-                    'required': parameters['required']
-                }
-                register_name = server_name + '-' + tool.name
-                agent_tool = self.create_tool_class(register_name=register_name,
-                                                    register_client_id=client_id,
-                                                    tool_name=tool.name,
-                                                    tool_desc=tool.description,
-                                                    tool_parameters=cleaned_parameters)
-                tools.append(agent_tool)
-
-            if client.resources:
-                """MCP resource example:
-                {
-                    uri: string;           // Unique identifier for the resource
-                    name: string;          // Human-readable name
-                    description?: string;  // Optional description
-                    mimeType?: string;     // Optional MIME type
-                }
-                """
-                # List resources
-                list_resources_tool_name = server_name + '-' + 'list_resources'
-                list_resources_params = {'type': 'object', 'properties': {}, 'required': []}
-                list_resources_agent_tool = self.create_tool_class(
-                    register_name=list_resources_tool_name,
-                    register_client_id=client_id,
-                    tool_name='list_resources',
-                    tool_desc='Servers expose a list of concrete resources through this tool. '
-                    'By invoking it, you can discover the available resources and obtain resource templates, which help clients understand how to construct valid URIs. '
-                    'These URI formats will be used as input parameters for the read_resource function. ',
-                    tool_parameters=list_resources_params)
-                tools.append(list_resources_agent_tool)
-
-                # Read resource
-                resources_template_str = ''  # Check if there are resource templates
-                try:
-                    list_resource_templates = await client.session.list_resource_templates(
-                    )  # Check if the server has resources tesmplate
-                    if list_resource_templates.resourceTemplates:
-                        resources_template_str = '\n'.join(
-                            str(template) for template in list_resource_templates.resourceTemplates)
-
-                except Exception as e:
-                    logger.warning(f'Failed in listing MCP resource templates: {e}')
-
-                read_resource_tool_name = server_name + '-' + 'read_resource'
-                read_resource_params = {
-                    'type': 'object',
-                    'properties': {
-                        'uri': {
-                            'type': 'string',
-                            'description': 'The URI identifying the specific resource to access'
-                        }
-                    },
-                    'required': ['uri']
-                }
-                original_tool_desc = 'Request to access a resource provided by a connected MCP server. Resources represent data sources that can be used as context, such as files, API responses, or system information.'
-                if resources_template_str:
-                    tool_desc = original_tool_desc + '\nResource Templates:\n' + resources_template_str
-                else:
-                    tool_desc = original_tool_desc
-                read_resource_agent_tool = self.create_tool_class(register_name=read_resource_tool_name,
-                                                                  register_client_id=client_id,
-                                                                  tool_name='read_resource',
-                                                                  tool_desc=tool_desc,
-                                                                  tool_parameters=read_resource_params)
-                tools.append(read_resource_agent_tool)
+            # Create tool classes for this client (shared implementation with connect_server).
+            server_tools = await self._build_tools_for_client(client, server_name, client_id)
+            tools.extend(server_tools)
 
             # Cache this server's tools and mark as connected (only after all tool creation
             # succeeded — if an exception occurred above, the guard stays unset so retries work).
             with self._mcp_lock:
-                self._server_tools[server_name] = tools[_server_tools_start:]
+                self._server_tools[server_name] = server_tools
                 self._connected_servers[_guard_key] = client_id
 
         return tools
@@ -351,18 +254,116 @@ class MCPManager:
         ToolClass.__name__ = f'{register_name}_Class'
         return ToolClass()
 
+    def _find_connected_key(self, server_name) -> str | None:
+        """Find the guard key for a server name in _connected_servers.
+
+        _connected_servers is keyed "server_name:config_hash", so this matches on the
+        "{name}:" prefix — the config hash is an internal detail that may differ from
+        what connect_server would compute for the same server. Must be called under _mcp_lock.
+        """
+        for key in self._connected_servers:
+            if key.startswith(f'{server_name}:'):
+                return key
+        return None
+
+    async def _build_tools_for_client(self, client, server_name, client_id) -> list:
+        """Create tool classes for a connected MCP client.
+
+        Returns the full tool list for one server: the server's own tools (with
+        inputSchema reduced to the OpenAI function-schema subset), plus list_resources
+        and read_resource when the client exposes resources. Must be awaited inside the
+        MCP event loop; connect_server bridges to it via asyncio.run_coroutine_threadsafe.
+        """
+        tools: list = []
+        for tool in client.tools:
+            # MCP tool inputSchema example:
+            #   {"name": "read_query", "description": "...",
+            #    "inputSchema": {"type": "object", "properties": {...}, "required": [...]}}
+            parameters = tool.inputSchema
+            # The 'required' field in inputSchema may be absent and needs to be initialized.
+            if 'required' not in parameters:
+                parameters['required'] = []
+            # Keep only the fields that conform to the standard OpenAI function schema.
+            required_fields = {'type', 'properties', 'required'}
+            missing_fields = required_fields - parameters.keys()
+            if missing_fields:
+                raise ValueError(f'Missing required fields in schema: {missing_fields}')
+            cleaned_parameters = {
+                'type': parameters['type'],
+                'properties': parameters['properties'],
+                'required': parameters['required'],
+            }
+            register_name = server_name + '-' + tool.name
+            agent_tool = self.create_tool_class(
+                register_name=register_name,
+                register_client_id=client_id,
+                tool_name=tool.name,
+                tool_desc=tool.description,
+                tool_parameters=cleaned_parameters)
+            tools.append(agent_tool)
+
+        if client.resources:
+            # List resources
+            list_resources_tool_name = server_name + '-list_resources'
+            list_resources_params = {'type': 'object', 'properties': {}, 'required': []}
+            list_resources_agent_tool = self.create_tool_class(
+                register_name=list_resources_tool_name,
+                register_client_id=client_id,
+                tool_name='list_resources',
+                tool_desc=(
+                    'Servers expose a list of concrete resources through this tool. '
+                    'By invoking it, you can discover the available resources and obtain '
+                    'resource templates, which help clients understand how to construct '
+                    'valid URIs. These URI formats will be used as input parameters for '
+                    'the read_resource function. '),
+                tool_parameters=list_resources_params)
+            tools.append(list_resources_agent_tool)
+
+            # Read resource — augment its description with any resource templates the server exposes.
+            resources_template_str = ''
+            try:
+                list_resource_templates = await client.session.list_resource_templates()
+                if list_resource_templates.resourceTemplates:
+                    resources_template_str = '\n'.join(
+                        str(template) for template in list_resource_templates.resourceTemplates)
+            except Exception as e:
+                logger.warning(f'Failed in listing MCP resource templates: {e}')
+
+            read_resource_tool_name = server_name + '-read_resource'
+            read_resource_params = {
+                'type': 'object',
+                'properties': {
+                    'uri': {
+                        'type': 'string',
+                        'description': 'The URI identifying the specific resource to access'
+                    }
+                },
+                'required': ['uri']
+            }
+            original_tool_desc = (
+                'Request to access a resource provided by a connected MCP server. '
+                'Resources represent data sources that can be used as context, such as '
+                'files, API responses, or system information.')
+            if resources_template_str:
+                tool_desc = original_tool_desc + '\nResource Templates:\n' + resources_template_str
+            else:
+                tool_desc = original_tool_desc
+            read_resource_agent_tool = self.create_tool_class(
+                register_name=read_resource_tool_name,
+                register_client_id=client_id,
+                tool_name='read_resource',
+                tool_desc=tool_desc,
+                tool_parameters=read_resource_params)
+            tools.append(read_resource_agent_tool)
+
+        return tools
+
     def disconnect_server(self, server_name: str, templates: list) -> bool:
         """Disconnect one MCP server: remove its tools from agent templates, clean up
         the client process, and clear all tracking state.  Idempotent: returns True
         when the server is not connected (already in the desired state)."""
         with self._mcp_lock:
-            # Find the guard key by prefix scan — the config hash is an internal
-            # detail and may differ from what connect_server would compute.
-            guard_key = None
-            for k in self._connected_servers:
-                if k.startswith(f'{server_name}:'):
-                    guard_key = k
-                    break
+            guard_key = self._find_connected_key(server_name)
             if guard_key is None:
                 return True  # not connected — already disabled
 
@@ -416,9 +417,8 @@ class MCPManager:
         # startup that included 'enabled' in the config does not cause a
         # duplicate connection.
         with self._mcp_lock:
-            for k in self._connected_servers:
-                if k.startswith(f'{server_name}:'):
-                    return True
+            if self._find_connected_key(server_name) is not None:
+                return True
 
         client = MCPClient()
         try:
@@ -433,88 +433,12 @@ class MCPManager:
         client_id = server_name + '_' + str(uuid.uuid4())
         client.client_id = client_id
 
-        # Create tool classes (same logic as init_config_async).
-        new_tools: list = []
+        # Create tool classes (shared with init_config_async). The helper runs in the
+        # MCP event loop; bridge the coroutine from this calling thread.
         try:
-            for tool in client.tools:
-                parameters = tool.inputSchema
-                if 'required' not in parameters:
-                    parameters['required'] = []
-                required_fields = {'type', 'properties', 'required'}
-                missing_fields = required_fields - parameters.keys()
-                if missing_fields:
-                    raise ValueError(
-                        f'Missing required fields in schema: {missing_fields}')
-                cleaned_parameters = {
-                    'type': parameters['type'],
-                    'properties': parameters['properties'],
-                    'required': parameters['required'],
-                }
-                register_name = server_name + '-' + tool.name
-                agent_tool = self.create_tool_class(
-                    register_name=register_name,
-                    register_client_id=client_id,
-                    tool_name=tool.name,
-                    tool_desc=tool.description,
-                    tool_parameters=cleaned_parameters)
-                new_tools.append(agent_tool)
-
-            if client.resources:
-                list_resources_tool_name = server_name + '-list_resources'
-                list_resources_params = {
-                    'type': 'object', 'properties': {}, 'required': []}
-                list_resources_agent_tool = self.create_tool_class(
-                    register_name=list_resources_tool_name,
-                    register_client_id=client_id,
-                    tool_name='list_resources',
-                    tool_desc=(
-                        'Servers expose a list of concrete resources through this '
-                        'tool. By invoking it, you can discover the available '
-                        'resources and obtain resource templates, which help clients '
-                        'understand how to construct valid URIs. These URI formats '
-                        'will be used as input parameters for the read_resource '
-                        'function. '),
-                    tool_parameters=list_resources_params)
-                new_tools.append(list_resources_agent_tool)
-
-                resources_template_str = ''
-                try:
-                    list_resource_templates = asyncio.run_coroutine_threadsafe(
-                        client.session.list_resource_templates(),
-                        self.loop).result(timeout=10)
-                    if list_resource_templates.resourceTemplates:
-                        resources_template_str = '\n'.join(
-                            str(t) for t in list_resource_templates.resourceTemplates)
-                except Exception as e:
-                    logger.warning(
-                        'Failed in listing MCP resource templates: %s', e)
-
-                read_resource_tool_name = server_name + '-read_resource'
-                read_resource_params = {
-                    'type': 'object',
-                    'properties': {
-                        'uri': {
-                            'type': 'string',
-                            'description': 'The URI identifying the specific '
-                            'resource to access'}},
-                    'required': ['uri']}
-                original_tool_desc = (
-                    'Request to access a resource provided by a connected MCP '
-                    'server. Resources represent data sources that can be used as '
-                    'context, such as files, API responses, or system information.')
-                if resources_template_str:
-                    tool_desc = (original_tool_desc + '\nResource Templates:\n'
-                                 + resources_template_str)
-                else:
-                    tool_desc = original_tool_desc
-                read_resource_agent_tool = self.create_tool_class(
-                    register_name=read_resource_tool_name,
-                    register_client_id=client_id,
-                    tool_name='read_resource',
-                    tool_desc=tool_desc,
-                    tool_parameters=read_resource_params)
-                new_tools.append(read_resource_agent_tool)
-
+            new_tools = asyncio.run_coroutine_threadsafe(
+                self._build_tools_for_client(client, server_name, client_id),
+                self.loop).result(timeout=30)
         except Exception as e:
             logger.error(
                 "Failed to create tools for MCP server '%s': %s", server_name, e)

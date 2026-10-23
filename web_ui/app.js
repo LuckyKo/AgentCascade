@@ -403,7 +403,7 @@ const MCP_CONFIG_TAB_NAME = 'mcp-config'; // Static UI tab — config/mcp_server
 // Clobber guard: while true the MCP Config Save button is disabled so a stale textarea
 // can never overwrite a config that was just fetched (or about to be fetched).
 let _mcpConfigFetchInFlight = false;
-// Latest /api/mcp-status result, cached for Phase 3's server-list rendering.
+// Latest /api/mcp-status result, cached for server-list rendering.
 let _mcpStatusCache = [];
 
 // Load messages from localStorage
@@ -4311,13 +4311,12 @@ function initAgentMessagesTab() {
 }
 
 // ── MCP Config Tab (config/mcp_servers.json editor) ─────────────────────────
-// Static tab mirroring the Agent Messages tab. Phase 1+2 provides the JSON textarea
-// and Save; Phase 3 renders the server list (mcp-server-list) and per-server toggles.
+// Static tab mirroring the Agent Messages tab. Provides the JSON textarea, Save button, and per-server toggle list.
 
 function _mcpSetStatus(msg, type) {
   const el = document.getElementById('mcp-config-status');
   if (!el) return;
-  const colors = { ok: 'var(--accent)', error: '#ff6b6b', info: 'var(--text-muted)' };
+  const colors = { ok: 'var(--accent)', error: 'var(--danger)', info: 'var(--text-muted)' };
   el.style.color = colors[type] || colors.info;
   el.textContent = msg || '';
 }
@@ -4359,14 +4358,12 @@ function initMcpConfigTab() {
   labelSpan.textContent = ' MCP Config';
   tabBtn.appendChild(labelSpan);
 
-  mainTabBar.appendChild(tabBtn);
-
   // Panel
   const panel = document.createElement('div');
   panel.className = 'main-tab-panel mcp-config-panel';
   panel.id = 'panelSub-' + MCP_CONFIG_TAB_NAME;
 
-  // Server list container — empty until Phase 3 renders per-server toggles.
+  // Server list container — rendered by renderMcpServerList().
   const serverList = document.createElement('div');
   serverList.className = 'mcp-server-list';
   serverList.id = 'mcp-server-list';
@@ -4397,6 +4394,25 @@ function initMcpConfigTab() {
 
   panel.appendChild(actionRow);
   mainTabPanels.appendChild(panel);
+
+  // Close button (matches agent tab close pattern). Created after the panel exists
+  // so its handler can reference panel.
+  const closeBtn = document.createElement('span');
+  closeBtn.className = 'close-tab';
+  closeBtn.title = 'Close MCP Config tab';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = (e) => {
+    e.stopPropagation();
+    tabBtn.remove();
+    panel.remove();
+    const remaining = mainTabBar.querySelectorAll('.main-tab');
+    if (remaining.length > 0) {
+      switchMainTab(remaining[0].dataset.tab);
+    }
+  };
+  tabBtn.appendChild(closeBtn);
+
+  mainTabBar.appendChild(tabBtn);
 }
 
 // Fetch config → textarea and status → cache. Guarded so a stale textarea can never
@@ -4508,7 +4524,7 @@ function renderMcpServerList() {
     checkbox.type = 'checkbox';
     checkbox.checked = srv.enabled;
     checkbox.dataset.serverName = srv.name;
-    checkbox.addEventListener('change', () => onMcpToggleChange(checkbox.dataset.serverName, checkbox.checked));
+    checkbox.addEventListener('change', () => onMcpToggleChange(checkbox, checkbox.checked));
     const toggleText = document.createElement('span');
     toggleText.textContent = 'Enabled';
     toggle.appendChild(checkbox);
@@ -4530,24 +4546,16 @@ function renderMcpServerList() {
   }
 }
 
-async function onMcpToggleChange(serverName, enabled) {
+async function onMcpToggleChange(checkbox, enabled) {
   if (_mcpConfigFetchInFlight) return; // a save/refresh is in flight
 
   _mcpConfigFetchInFlight = true;
   _mcpSetSaveEnabled(false);
 
+  const serverName = checkbox.dataset.serverName;
+
   // Disable the toggle to prevent double-click.
-  const container = document.getElementById('mcp-server-list');
-  const rows = container ? container.querySelectorAll('.mcp-server-row') : [];
-  let toggleInput = null;
-  for (const row of rows) {
-    const inp = row.querySelector('input[type="checkbox"]');
-    if (inp && inp.dataset.serverName === serverName) {
-      toggleInput = inp;
-      inp.disabled = true;
-      break;
-    }
-  }
+  checkbox.disabled = true;
 
   let toggleSuccess = false;
   try {
@@ -4574,14 +4582,14 @@ async function onMcpToggleChange(serverName, enabled) {
   // Clear the guard BEFORE refreshing so refreshMcpConfigPanel is not blocked.
   _mcpConfigFetchInFlight = false;
   _mcpSetSaveEnabled(true);
-  if (toggleInput) toggleInput.disabled = false;
+  checkbox.disabled = false;
 
   if (toggleSuccess) {
     // Re-fetch status and config so the UI reflects the new state.
     refreshMcpConfigPanel();
   } else {
     // Revert the checkbox to its previous state.
-    if (toggleInput) toggleInput.checked = !enabled;
+    checkbox.checked = !enabled;
   }
 }
 
@@ -6457,6 +6465,10 @@ initAgentMessagesTab(); // NEW: initialize Agent Messages tab
 initMcpConfigTab(); // NEW: initialize MCP Config tab (config/mcp_servers.json editor)
 if ($('#open-mcp-config-btn')) {
   $('#open-mcp-config-btn').addEventListener('click', () => {
+    // Re-create the tab if it was closed
+    if (!document.getElementById('panelSub-' + MCP_CONFIG_TAB_NAME)) {
+      initMcpConfigTab();
+    }
     switchMainTab('sub-' + MCP_CONFIG_TAB_NAME);
   });
 }

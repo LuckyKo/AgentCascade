@@ -1756,16 +1756,22 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # root is one level up (parent.parent).
     _mcp_config_path = Path(__file__).resolve().parent.parent / 'config' / 'mcp_servers.json'
 
+    def _read_mcp_config() -> dict | None:
+        """Read config/mcp_servers.json. Returns None if the file is absent or unparseable,
+        the parsed map otherwise. Each call re-reads from disk, so callers that mutate the
+        result (e.g. persisting an 'enabled' flag) only affect their own copy."""
+        if not _mcp_config_path.exists():
+            return None
+        try:
+            return json.loads(_mcp_config_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            return None
+
     @app.get('/api/mcp-config')
     async def get_mcp_config():
         """Return the raw MCP server config (config/mcp_servers.json). {} if the file is absent."""
-        try:
-            if _mcp_config_path.exists():
-                return json.loads(_mcp_config_path.read_text(encoding='utf-8'))
-            return {}
-        except (OSError, ValueError) as e:
-            logger.warning('[mcp-config] read failed: %s', e)
-            return JSONResponse(status_code=500, content={'message': f'Failed to read MCP config: {e}'})
+        cfg = _read_mcp_config()
+        return cfg if cfg is not None else {}
 
     @app.put('/api/mcp-config')
     async def put_mcp_config(data: dict):
@@ -1775,8 +1781,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         Validation reuses MCPManager.is_valid_mcp_servers (wrapped in its expected top-level form).
         """
         from agent_cascade.tools.mcp_manager import MCPManager
-        if not isinstance(data, dict):
-            return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
         if not MCPManager().is_valid_mcp_servers({'mcpServers': data}):
             return JSONResponse(status_code=400, content={'message': 'Invalid MCP server config'})
         try:
@@ -1795,14 +1799,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         is keyed by "server_name:config_hash", so a server counts as connected if any key starts with
         "{name}:"; `_server_tools` is keyed by the bare server name.
         """
-        try:
-            if _mcp_config_path.exists():
-                servers = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
-            else:
-                servers = {}
-        except (OSError, ValueError) as e:
-            logger.warning('[mcp-status] config read failed: %s', e)
-            return JSONResponse(status_code=500, content={'message': f'Failed to read MCP config: {e}'})
+        servers = _read_mcp_config()
         if not isinstance(servers, dict):
             servers = {}
 
@@ -1847,15 +1844,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 'message': 'enabled (bool) required'})
 
         # Read the current config from disk (single source of truth).
-        try:
-            if _mcp_config_path.exists():
-                config = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
-            else:
-                return JSONResponse(status_code=404, content={
-                    'message': 'mcp_servers.json not found'})
-        except (OSError, ValueError) as e:
-            return JSONResponse(status_code=500, content={
-                'message': f'Failed to read MCP config: {e}'})
+        config = _read_mcp_config()
+        if config is None:
+            return JSONResponse(status_code=404, content={
+                'message': 'mcp_servers.json missing or unreadable'})
 
         if not isinstance(config, dict) or server_name not in config:
             return JSONResponse(status_code=404, content={

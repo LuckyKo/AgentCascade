@@ -680,7 +680,7 @@ body {
   overflow-y: auto;
 }
 
-/* Server list — populated by Phase 3 (per-server rows + toggles). */
+/* Server list — populated by renderMcpServerList() (per-server rows + toggles). */
 .mcp-server-list {
   display: flex;
   flex-direction: column;
