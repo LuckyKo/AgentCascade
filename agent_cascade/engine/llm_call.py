@@ -522,23 +522,32 @@ class LLMCallMixin:
                     if _break:
                         break
 
-            # Final update before yielding results
-            if state.last_output is not None:
-                with instance._compression_lock:
-                    self._update_streaming_responses(instance, state.last_output)
-
-            if not state.last_output or (isinstance(state.last_output, list) and len(state.last_output) == 0):
-                if not state.error_already_yielded:
-                    yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
-            else:
-                for msg in state.last_output:
-                    yield msg
+            yield from self._finalize_llm_result(instance, state)
         finally:
             # Turn-boundary cursor reset: the endpoint cursor is a transient
             # per-turn failover mechanism. Clear it unconditionally so the next
             # turn starts from position 0, regardless of how this turn ended.
             if hasattr(self.pool.api_router, 'reset_instance_endpoint'):
                 self.pool.api_router.reset_instance_endpoint(inst_name)
+
+    def _finalize_llm_result(self, instance, state) -> Iterator[Message]:
+        """Commit and yield the final turn output after the retry loop exits.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A5). Syncs any
+        remaining streaming responses, then yields either the empty-response
+        system error (unless an error was already surfaced) or the accumulated
+        messages. The owner's outer try/finally (cursor reset) is unchanged.
+        """
+        if state.last_output is not None:
+            with instance._compression_lock:
+                self._update_streaming_responses(instance, state.last_output)
+
+        if not state.last_output or (isinstance(state.last_output, list) and len(state.last_output) == 0):
+            if not state.error_already_yielded:
+                yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
+        else:
+            for msg in state.last_output:
+                yield msg
 
     def _stream_llm_attempt(
         self,
