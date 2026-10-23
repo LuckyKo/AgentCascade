@@ -1229,13 +1229,14 @@ class TestReacquireLogsRealEndpointIdentity:
         assert true_name == 'b' and true_model == 'model-b', \
             f"fixture must resolve the caller to endpoint b/model-b, got {true_name!r}/{true_model!r}"
 
-        # Minimal host object: reacquire_for only reads self.pool.api_router (core.py:3083) and calls
-        # the static _safe_note_held_endpoint. Bind that staticmethod onto the host so the real method
-        # body runs (it is a pure bookkeeping no-raise helper). A plain namespace keeps this a tight test.
+        # Minimal host object: reacquire_for only reads self.pool.api_router and calls the static
+        # _safe_note_held_endpoint / _acquire_scheduler_permit helpers. Bind those staticmethods onto
+        # the host so the real method body runs. A plain namespace keeps this a tight test.
         import types
         host = types.SimpleNamespace(pool=types.SimpleNamespace(api_router=router))
         # Accessed on the class, a @staticmethod is already a plain function (no __func__).
         host._safe_note_held_endpoint = ExecutionEngine._safe_note_held_endpoint
+        host._acquire_scheduler_permit = ExecutionEngine._acquire_scheduler_permit
         inst = types.SimpleNamespace(agent_class='coder', instance_name='caller',
                                      _state_lock=threading.RLock(), _slot_release=None, _slot_key=None)
 

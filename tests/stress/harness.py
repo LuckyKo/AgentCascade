@@ -960,6 +960,9 @@ class _FakeEngine:
         self._compression_lock = threading.RLock()
         self.reacquire_for = lambda instance, holder_name, context='reacquire': \
             ExecutionEngine.reacquire_for(self, instance, holder_name, context)
+        # reacquire_for delegates its scheduler.acquire calls to this static helper.
+        # Bind the REAL staticmethod so the fake exercises the production acquire path.
+        self._acquire_scheduler_permit = ExecutionEngine._acquire_scheduler_permit
         # t151b: production slot-reacquire callers (Security / Compressor / sync child) now
         # invoke the shared helper reacquire_after_slot_yield (core.py), which wraps
         # reacquire_for and then restores the saved KV. Bind the REAL unbound method so the
