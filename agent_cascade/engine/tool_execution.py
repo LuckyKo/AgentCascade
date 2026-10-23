@@ -211,19 +211,7 @@ class ToolExecMixin:
                     # telemetry metrics and
                     # frontend tool status display, not execution flow.
                     if _tool_success and isinstance(tool_result, str):
-                        first_line = ''
-                        for line in tool_result.split('\n'):
-                            stripped = line.strip()
-                            if stripped:
-                                first_line = stripped.lower()
-                                break
-                        error_indicators = [
-                            'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:', 'permission denied:',
-                            'an error occurred', 'does not exist'
-                        ]
-                        if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
-                            _tool_success = False
-                            _tool_error = tool_result[:500]
+                        _tool_success, _tool_error = self._detect_tool_result_failure(tool_result)
 
                 finally:
                     # Telemetry: record tool call end (non-blocking, always called)
@@ -545,6 +533,28 @@ class ToolExecMixin:
             logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
                          f"{traceback.format_exc()}")
         return f"Error: {summary}"
+
+    def _detect_tool_result_failure(self, tool_result) -> tuple:
+        """Return ``(tool_success, tool_error)`` from the first-line error heuristic.
+
+        Pure decision helper — does NOT log, cache, or mutate ``tool_result``. Scans the
+        first non-blank line of the result; if it starts with a known error indicator
+        or contains ``failed to``, reports the result as failed with a 500-char excerpt.
+        A clean result returns ``(True, '')``.
+        """
+        first_line = ''
+        for line in tool_result.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                first_line = stripped.lower()
+                break
+        error_indicators = [
+            'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:', 'permission denied:',
+            'an error occurred', 'does not exist'
+        ]
+        if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
+            return False, tool_result[:500]
+        return True, ''
 
     def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
