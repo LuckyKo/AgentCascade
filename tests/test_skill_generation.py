@@ -1359,6 +1359,11 @@ class TestInLoopTrigger:
         pool.settings.auto_skill_extra_turns = extra_turns
         pool.settings.default_load_skill_mode = load_mode
         pool.settings.tail_sync_check_enabled = False
+        # BUG_0141 follow-up: soft_turn_limit must be set explicitly. A bare MagicMock
+        # auto-creates a TRUTHY child mock, which the engine reads as soft-mode ON and
+        # runs the turn loop to the absolute cap (1000) instead of hard-stopping —
+        # this is what broke TestInLoopTrigger after the soft turn limit landed.
+        pool.settings.soft_turn_limit = False
         pool.get_template.return_value = template
         pool.is_instance_terminated.return_value = False
         pool.has_pending.return_value = False
