@@ -22,6 +22,7 @@ from agent_cascade.llm.base import register_llm
 from agent_cascade.llm.oai import TextChatAtOAI
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
+from agent_cascade.settings import IMAGE_MAX_SHORT_SIDE
 from agent_cascade.utils.utils import (encode_audio_as_base64, encode_image_as_base64, encode_video_as_base64,
                                        sanitize_chrome_file_path)
 
@@ -149,7 +150,7 @@ def conv_multimodel_value(t, v):
 
         if v_exists:
             if t == 'image':
-                v = encode_image_as_base64(v, max_short_side_length=1080)
+                v = encode_image_as_base64(v, max_short_side_length=IMAGE_MAX_SHORT_SIDE)
             elif t == 'video':
                 v = encode_video_as_base64(v)
             elif t == 'audio':

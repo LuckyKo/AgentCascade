@@ -38,7 +38,8 @@ from pydantic import BaseModel
 from agent_cascade.llm.schema import (ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem,
                                       Message)
 from agent_cascade.log import logger
-from agent_cascade.settings import CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_TOKEN_ESTIMATE
+from agent_cascade.settings import (CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_MAX_SHORT_SIDE, IMAGE_TOKEN_ESTIMATE,
+                                    IMAGE_TOKEN_MIN, IMAGE_TOKEN_PATCH_SIZE)
 
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
@@ -1091,21 +1092,135 @@ def load_image_from_base64(image_base64: Union[bytes, str]):
     return image
 
 
-def resize_image(img, short_side_length: int = 1080):
+def _resized_dims(width: int, height: int, short_side_length: int) -> Tuple[int, int]:
+    """Compute the dimensions actually sent after the short-side downscale rule.
+
+    Single source of truth for the resize rule, used directly by `resize_image` and `save_image_to_media`
+    (via a lazy import), and by `estimate_image_tokens` through `_tokens_from_size`; `encode_image_as_base64`
+    shares it only indirectly, through `resize_image` — it keeps its own `min(image.size) > max_short_side_length`
+    guard before delegating. Keeping one implementation prevents the token estimate from drifting from what is sent.
+    The image is downscaled ONLY when min(width, height) is STRICTLY greater than short_side_length;
+    the short side is set to short_side_length and the long side scaled proportionally with int()
+    truncation via the same width<=height branch. Returns the original dimensions unchanged when no
+    downscale is required (including short_side_length <= 0).
+    """
+    if short_side_length <= 0 or min(width, height) <= short_side_length:
+        return width, height
+    if width <= height:
+        return short_side_length, int((short_side_length / width) * height)
+    return int((short_side_length / height) * width), short_side_length
+
+
+def resize_image(img, short_side_length: int = IMAGE_MAX_SHORT_SIDE):
     from PIL import Image
     assert isinstance(img, Image.Image)
 
-    width, height = img.size
+    new_size = _resized_dims(img.size[0], img.size[1], short_side_length)
+    if new_size == img.size:
+        return img
 
-    if width <= height:
-        new_width = short_side_length
-        new_height = int((short_side_length / width) * height)
-    else:
-        new_height = short_side_length
-        new_width = int((short_side_length / height) * width)
-
-    resized_img = img.resize((new_width, new_height), resample=Image.Resampling.BILINEAR)
+    resized_img = img.resize(new_size, resample=Image.Resampling.BILINEAR)
     return resized_img
+
+
+def _read_image_size(image_ref: str) -> Optional[Tuple[int, int]]:
+    """Read an image's pixel dimensions without a full decode, for any source type.
+
+    Returns the (width, height) tuple, or None when dimensions cannot be read so the caller
+    falls back to the flat estimate. Handles:
+      1. data:image/...;base64,... -> bounded base64 decode (guarded by MAX_DATA_URL_SIZE), then a
+         PIL header read; the decode materializes the (<=50 MB) payload, so this is real bounded work
+         per uncached image and runs only on message-cache misses — the get_message_stats LRU keeps
+         it off the steady-state tick path;
+       2. local path / file:// URL -> sanitize_chrome_file_path() + lazy PIL header read (no decode);
+      3. http(s) URL -> None (never fetched from the token-estimation hot path);
+      4. missing / unreadable / malformed -> None.
+    """
+    if not image_ref or not isinstance(image_ref, str):
+        return None
+
+    # Remote URL: fetching would block every state tick and is a security/perf risk.
+    if is_http_url(image_ref):
+        return None
+
+    # data:image/...;base64,... — decode a bounded amount, then read only the header.
+    if image_ref[:5].lower() == 'data:':
+        try:
+            header, b64_data = image_ref.split(',', 1)
+            if ';base64' not in header.lower():
+                return None
+            # Bound the decoded size before touching it (same guard as save_url_to_local_work_dir).
+            if (len(b64_data) * 3) // 4 > MAX_DATA_URL_SIZE:
+                return None
+            from PIL import Image
+            with Image.open(BytesIO(base64.b64decode(b64_data))) as img:
+                return img.size
+        except Exception:
+            return None
+
+    # Local path / file:// URL.
+    try:
+        from PIL import Image
+        with Image.open(sanitize_chrome_file_path(image_ref)) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def _tokens_from_size(width: int, height: int) -> int:
+    """Qwen3-VL vision tokens for an image of the given pixel dimensions.
+
+    Applies the same short-side downscale the wire path uses (via _resized_dims + IMAGE_MAX_SHORT_SIDE),
+    then counts 32px vision cells. Rounding is HALF-UP via integer math — NOT math.ceil (which
+    overcounts e.g. 1000 -> 32 cells instead of 31) and NOT Python round() (banker's rounding
+    undercounts 1040 -> 32 instead of 33). The +2 is the vision start/end marker overhead; IMAGE_TOKEN_MIN
+    is the observed floor for tiny images.
+    """
+    width, height = _resized_dims(width, height, IMAGE_MAX_SHORT_SIDE)
+    patch = IMAGE_TOKEN_PATCH_SIZE
+    grid_w = (width + patch // 2) // patch
+    grid_h = (height + patch // 2) // patch
+    return max(IMAGE_TOKEN_MIN, grid_w * grid_h + 2)
+
+
+def estimate_image_tokens(image_ref: str) -> int:
+    """Estimate the vision-token cost of one image from its pixel dimensions.
+
+    Reads the image's dimensions for any source type (data URI, local path, file:// URL) via
+    _read_image_size, applies the shared short-side resize rule, and returns the Qwen3-VL cell count
+    via _tokens_from_size. Returns the flat IMAGE_TOKEN_ESTIMATE fallback whenever dimensions
+    cannot be read (remote http(s) URL, missing file, malformed data URI, non-string ref) so behavior
+    degrades gracefully. This runs on the get_message_stats hot path, so it uses only a lazy PIL
+    header read (no full pixel decode) and never fetches remote URLs.
+    """
+    size = _read_image_size(image_ref)
+    if size is None:
+        return IMAGE_TOKEN_ESTIMATE
+    return _tokens_from_size(size[0], size[1])
+
+
+def _image_signature(image_refs: List[str]) -> str:
+    """Cheap fingerprint of structured image references for the message cache key.
+
+    Two messages with identical text and the same image COUNT but different images must not share
+    a cached token count (BUG_0137 cache-key defect). Uses the path for local/file:// refs and
+    (length + trailing 80 chars) for data URIs, so a multi-MB base64 payload is never re-hashed on
+    every stream tick. This is a probabilistic fingerprint, not a collision-free key: two distinct
+    data URIs sharing the same length AND identical trailing 80 chars would collide. That is an
+    acceptable tradeoff for a token-estimate cache (not a correctness/security key) and is vanishingly
+    unlikely for real images, but it is not guaranteed unique. A local path is likewise keyed on its
+    string only, so if the SAME path is re-saved with different pixels between ticks the cached count
+    can go stale; this is rare because media paths use unique generated filenames and are normally
+    immutable.
+    """
+    parts = []
+    for ref in image_refs:
+        if isinstance(ref, str) and ref[:5].lower() == 'data:':
+            parts.append(f'data:{len(ref)}:{ref[-80:]}')
+        else:
+            parts.append(str(ref))
+    return hashlib.md5('\x00'.join(parts).encode('utf-8', errors='replace')).hexdigest()[:16]
+
 
 
 def get_last_usr_msg_idx(messages: List[Union[dict, Message]]) -> int:
@@ -1337,16 +1452,20 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         # different image counts would otherwise collide on a stale entry. Counting here (in the
         # same pass that builds text_items) keeps the per-tick key computation at one O(items)
         # scan instead of two.
-        _img_count = 0
+        _img_refs = []
         text_parts = []
         for item in content:
             if hasattr(item, 'text') and item.text:
                 text_parts.append(item.text)
-            if _get_item_attr(item, 'image'):
-                _img_count += 1
+            _img_ref = _get_item_attr(item, 'image')
+            if _img_ref:
+                _img_refs.append(_img_ref)
         full_text = ''.join(text_parts)
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
-        content_key = ('multi', content_hash, _img_count)
+        # Fold an image fingerprint into the key (BUG_0137): two messages with the same text and
+        # image COUNT but different images must NOT share a cached token count. _img_refs is reused
+        # below for the per-image estimate, so this stays a single O(items) scan.
+        content_key = ('multi', content_hash, len(_img_refs), _image_signature(_img_refs))
     else:
         full_text = str(content)
         content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
@@ -1379,7 +1498,9 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
 
         def repl(match):
             nonlocal image_tokens
-            image_tokens += IMAGE_TOKEN_ESTIMATE
+            # Group 2 is the data URI (group 1 is the caption); estimate from the image's own
+            # dimensions, falling back to the flat constant only when they cannot be read.
+            image_tokens += estimate_image_tokens(match.group(2))
             return f"[Image: {match.group(1)}]"
 
         text_for_tokens = IMAGE_REGEX.sub(repl, text)
@@ -1388,10 +1509,10 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         # These render as '[Image]'/'[Image: caption]' placeholders in extract_text_from_message,
         # which the markdown IMAGE_REGEX above does NOT match → they would otherwise get 0 tokens.
         # No double counting: structured items never appear as markdown image syntax in `text`.
-        # _img_count is computed up-front for the cache key (always defined on this path), so no
-        # re-scan of content is needed here.
+        # _img_refs was collected up-front for the cache key (always defined on this path), so no
+        # re-scan of content is needed here; estimate each image from its own dimensions.
         if isinstance(content, list):
-            image_tokens += _img_count * IMAGE_TOKEN_ESTIMATE
+            image_tokens += sum(estimate_image_tokens(ref) for ref in _img_refs)
 
         tokens = qwen_count(text_for_tokens) + image_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
 

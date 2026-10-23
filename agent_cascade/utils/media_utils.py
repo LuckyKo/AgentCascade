@@ -19,7 +19,7 @@ from typing import Optional, Union
 from PIL import Image
 
 from agent_cascade.instance_id import make_instance_dir
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, IMAGE_MAX_SHORT_SIDE
 
 
 class MediaStorageError(Exception):
@@ -94,7 +94,7 @@ def _generate_media_filename(prefix: str, extension: str) -> str:
 def save_image_to_media(
     image_source: Union[str, Path, bytes, io.BytesIO],
     source_name: Optional[str] = None,
-    max_short_side: int = 1080,
+    max_short_side: int = IMAGE_MAX_SHORT_SIDE,
     quality: float = 0.85,
     max_file_size_mb: float = 10.0,
 ) -> str:
@@ -137,16 +137,14 @@ def save_image_to_media(
 
         width, height = image.size
 
-        # Resize if shorter dimension exceeds max_short_side
-        if max_short_side > 0 and min(width, height) > max_short_side:
-            if width <= height:
-                new_width = max_short_side
-                new_height = int((max_short_side / width) * height)
-            else:
-                new_height = max_short_side
-                new_width = int((max_short_side / height) * width)
-
-            image = image.resize((new_width, new_height), resample=Image.Resampling.LANCZOS)
+        # Resize if shorter dimension exceeds max_short_side. Uses the shared _resized_dims helper
+        # (agent_cascade.utils.utils) so the save path and the token estimator can never drift. Imported
+        # lazily to keep this light module's import graph free of utils' heavier deps (numpy/soundfile/
+        # requests); there is no import cycle either way. LANCZOS resampling is preserved.
+        from agent_cascade.utils.utils import _resized_dims
+        new_size = _resized_dims(width, height, max_short_side)
+        if new_size != (width, height):
+            image = image.resize(new_size, resample=Image.Resampling.LANCZOS)
 
         # Convert to RGB for JPEG compatibility (handles RGBA, LA, P modes with transparency)
         if image.mode in ('RGBA', 'LA', 'P'):

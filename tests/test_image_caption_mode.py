@@ -5,8 +5,9 @@ Covers:
   1. Mode gating in ``APIRouter.caption_images()`` — with a mocked vision endpoint and
      mocked pool settings, no live LLM / HTTP.
   2. Token estimation in ``get_message_stats()`` — structured image items (file-path and
-     base64) are counted at IMAGE_TOKEN_ESTIMATE each, and the LRU cache key folds in the
-     image-item count so same-text/different-image-count messages do not collide.
+     base64) are counted via the dimension-aware estimate_image_tokens() (unreadable refs
+     fall back to IMAGE_TOKEN_ESTIMATE), and the LRU cache key folds in an image fingerprint
+     so same-text/different-image messages do not collide.
   3. Settings plumbing — PoolSettings round-trip + config handler validation.
 
 All tests are self-contained (no LLM or API server required).
@@ -287,9 +288,12 @@ class TestIsActiveEndpointVision:
 
 
 class TestImageTokenEstimation:
-    """get_message_stats() must count every structured image content item at
-    IMAGE_TOKEN_ESTIMATE each (file-path and base64 alike), with no double counting,
-    and the LRU cache key must fold in the image-item count."""
+    """get_message_stats() must count every structured image content item via the
+    dimension-aware estimator estimate_image_tokens() (file-path and base64 alike), with no
+    double counting, and the LRU cache key must fold in an image fingerprint so same-text
+    messages with different images do not collide. Unreadable refs (missing files, remote
+    URLs) fall back to the flat IMAGE_TOKEN_ESTIMATE; readable images are estimated from their
+    pixel dimensions (a 1x1 PNG hits the IMAGE_TOKEN_MIN floor, not 255)."""
 
     @staticmethod
     def _clear_cache():
@@ -318,27 +322,28 @@ class TestImageTokenEstimation:
         return qwen_count(extract_text_from_message(msg, add_upload_info=True))
 
     def test_file_path_image_counted(self):
-        """A file-path image item must be counted at IMAGE_TOKEN_ESTIMATE (plus the rendered
-        placeholder text tokens) — i.e. NOT 0 as before the fix."""
-        from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
-        from agent_cascade.utils.utils import get_message_stats
+        """A file-path image item must be counted via estimate_image_tokens() (plus the rendered
+        placeholder text tokens) — NOT 0 as before the fix. A non-existent path is unreadable,
+        so it falls back to the flat IMAGE_TOKEN_ESTIMATE."""
+        from agent_cascade.utils.utils import estimate_image_tokens, get_message_stats
 
-        img = 'media/a.png'
+        img = 'media/a.png'  # non-existent -> unreadable -> IMAGE_TOKEN_ESTIMATE fallback
         text_only = Message(role=USER, content='hello world')
         with_img = Message(role=USER, content=[ContentItem(text='hello world'), ContentItem(image=img)])
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(with_img)['tokens']
-        expected_delta = IMAGE_TOKEN_ESTIMATE \
+        expected_delta = estimate_image_tokens(img) \
             + self._rendered_tokens(with_img) - self._rendered_tokens(text_only)
         assert total - base == expected_delta, \
             f"file-path image must add {expected_delta} tokens (got delta {total - base})"
 
     def test_base64_image_item_counted(self):
-        """A base64 data-URI structured item is counted via the same structured path —
-        IMAGE_TOKEN_ESTIMATE + placeholder text tokens, NOT 0."""
+        """A base64 data-URI structured item is counted via the same structured path using
+        estimate_image_tokens() (readable dimensions) — NOT 0, and NOT the flat 255. The 1x1
+        fixture hits the IMAGE_TOKEN_MIN floor."""
         from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
-        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.utils.utils import estimate_image_tokens, get_message_stats
 
         b64 = self.B64_IMAGE
         text_only = Message(role=USER, content='hello world')
@@ -346,21 +351,22 @@ class TestImageTokenEstimation:
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(with_b64)['tokens']
-        expected_delta = IMAGE_TOKEN_ESTIMATE \
+        expected_delta = estimate_image_tokens(b64) \
             + self._rendered_tokens(with_b64) - self._rendered_tokens(text_only)
+        assert estimate_image_tokens(b64) < IMAGE_TOKEN_ESTIMATE, \
+            'a 1x1 image must estimate below the flat fallback (dimension-aware path is live)'
         assert total - base == expected_delta, \
             f"base64 image item must add {expected_delta} tokens (got delta {total - base})"
 
     def test_mixed_no_double_count(self):
-        """Two structured images (file-path + base64) → each counted exactly once at
-        IMAGE_TOKEN_ESTIMATE. The rendered placeholder text is ONE shared '(Uploaded ...)'
+        """Two structured images (file-path + base64) → each counted exactly once via
+        estimate_image_tokens(). The rendered placeholder text is ONE shared '(Uploaded ...)'
         info line plus one '[Image]' marker per image. We assert the exact real total so a
         regression (e.g. dropping to 0 for structured items, or double counting) fails loudly."""
-        from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
-        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.utils.utils import estimate_image_tokens, get_message_stats
 
-        img = 'media/a.png'
-        b64 = self.B64_IMAGE
+        img = 'media/a.png'  # non-existent -> IMAGE_TOKEN_ESTIMATE fallback
+        b64 = self.B64_IMAGE  # 1x1 -> IMAGE_TOKEN_MIN floor
         text_only = Message(role=USER, content='hello world')
         mixed = Message(role=USER,
                         content=[
@@ -371,9 +377,9 @@ class TestImageTokenEstimation:
 
         base = get_message_stats(text_only)['tokens']
         total = get_message_stats(mixed)['tokens']
-        # Expected: 2 flat estimates + (rendered-text tokens of `mixed` minus those of the
-        # text-only baseline, which shares the same 'hello world' text).
-        expected_delta = 2 * IMAGE_TOKEN_ESTIMATE \
+        # Expected: one estimate per image (file-path fallback + 1x1 floor) + the rendered-text
+        # delta of `mixed` over the text-only baseline (which shares the same 'hello world' text).
+        expected_delta = estimate_image_tokens(img) + estimate_image_tokens(b64) \
             + self._rendered_tokens(mixed) - self._rendered_tokens(text_only)
         assert total - base == expected_delta, \
             f"two image items must add {expected_delta} tokens (got delta {total - base})"
@@ -383,8 +389,7 @@ class TestImageTokenEstimation:
         cache entry — the first call's result must not be returned for the second. The
         multimodal cache key folds in the image-item count (see utils.get_message_stats), so
         the second message gets its own entry instead of reusing the first's."""
-        from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
-        from agent_cascade.utils.utils import get_message_stats
+        from agent_cascade.utils.utils import estimate_image_tokens, get_message_stats
 
         one_img = Message(role=USER, content=[ContentItem(text='same text'), ContentItem(image='media/a.png')])
         two_img = Message(
@@ -396,11 +401,11 @@ class TestImageTokenEstimation:
         t_one = get_message_stats(one_img)['tokens']
         t_two = get_message_stats(two_img)['tokens']
 
-        # tokens = qwen_count(rendered) + N*ESTIMATE + OVERHEAD. For two same-text messages
-        # the delta is (N2-N1)*ESTIMATE + [rendered_tokens(two) - rendered_tokens(one)].
-        # If the cache key did NOT fold in the image count, t_two would reuse t_one's entry
-        # and this delta would be 0.
-        expected_delta = IMAGE_TOKEN_ESTIMATE \
+        # tokens = qwen_count(rendered) + sum(estimate_image_tokens(ref)) + OVERHEAD. For two
+        # same-text messages the delta is estimate_image_tokens(the extra image) +
+        # [rendered_tokens(two) - rendered_tokens(one)]. If the cache key did NOT fold in the
+        # image count/fingerprint, t_two would reuse t_one's entry and this delta would be 0.
+        expected_delta = estimate_image_tokens('media/b.png') \
             + self._rendered_tokens(two_img) - self._rendered_tokens(one_img)
         assert expected_delta > 0, 'test setup: the two messages must render different placeholder text'
         assert t_two - t_one == expected_delta, \

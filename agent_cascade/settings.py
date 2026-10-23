@@ -401,7 +401,18 @@ SERVER_BUSY_WAIT_CAP_SECONDS: float = float(
 # Based on typical English text (~4 chars/token).
 TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv('AGENT_CASCADE_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))
 IMAGE_TOKEN_ESTIMATE: int = int(os.getenv('AGENT_CASCADE_IMAGE_TOKEN_ESTIMATE',
-                                          255))  # Estimated tokens per image in message counting
+                                          255))  # Fallback tokens per image when dimensions are unreadable
+# Dimension-aware image token estimation (Qwen3-VL dynamic resolution). The flat IMAGE_TOKEN_ESTIMATE
+# above is only a fallback for images whose pixel dimensions cannot be read (remote URL, missing
+# file, malformed data URI). For readable images the token cost is computed from the sent pixel
+# dimensions. Defaults target Qwen3-VL (16px patches merged 2x2 -> 32px cells); use
+# AGENT_CASCADE_IMAGE_TOKEN_PATCH_SIZE=28 for Qwen2.5-VL.
+IMAGE_TOKEN_PATCH_SIZE: int = int(os.getenv('AGENT_CASCADE_IMAGE_TOKEN_PATCH_SIZE',
+                                            32))  # Vision cell size in px (patch_size * merge_size)
+IMAGE_TOKEN_MIN: int = int(os.getenv('AGENT_CASCADE_IMAGE_TOKEN_MIN',
+                                     11))  # Observed floor for tiny images (vision markers + padding)
+IMAGE_MAX_SHORT_SIDE: int = int(os.getenv('AGENT_CASCADE_IMAGE_MAX_SHORT_SIDE',
+                                          1080))  # Short-side cap applied before sending (single source of truth)
 CHAT_TEMPLATE_TOKEN_OVERHEAD: int = int(
     os.getenv('AGENT_CASCADE_CHAT_TEMPLATE_TOKEN_OVERHEAD',
               8))  # Overhead per message from llama.cpp chat template (bos, role tags, newlines, etc.)
