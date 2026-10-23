@@ -293,7 +293,14 @@ class MCPManager:
                 # Submit coroutine to the event loop and wait for the result
                 manager = MCPManager()
                 client = manager.clients[self.client_id]
-                future = asyncio.run_coroutine_threadsafe(client.execute_function(tool_name, tool_args), manager.loop)
+                # Pass agent context so media saves can queue a path notification
+                agent_instance_name = kwargs.get('agent_instance_name')
+                agent_obj = kwargs.get('agent_obj')
+                pool = getattr(agent_obj, 'pool', None) if agent_obj else None
+                future = asyncio.run_coroutine_threadsafe(
+                    client.execute_function(tool_name, tool_args,
+                                             pool=pool, instance_name=agent_instance_name),
+                    manager.loop)
                 try:
                     result = future.result()
                     return result
@@ -341,6 +348,35 @@ def _ext_from_mime(mime: Optional[str], media_type: str) -> Optional[str]:
     if not mime or '/' not in mime:
         return None
     return mime.rsplit('/', 1)[-1].lower()
+
+
+def _queue_media_path_notification(tool_name: str, media_type: str, path: str,
+                                   pool=None, instance_name: Optional[str] = None) -> None:
+    """Queue a system notification telling the agent where an MCP media file was saved.
+
+    Mirrors the 'Generated image: <path> (...)' feedback that media_gen provides,
+    so the agent always knows the on-disk location of internal media copies.
+    For images, includes dimensions (WxH) so the agent can use crop_region to zoom.
+    Best-effort: silently no-ops if pool or instance_name is unavailable.
+    """
+    if not pool or not instance_name:
+        return
+    try:
+        from agent_cascade.operation_manager import _queue_tool_warning
+        # Include image dimensions for zoom/crop reference
+        detail = ''
+        if media_type == 'image':
+            try:
+                from PIL import Image
+                with Image.open(path) as img:
+                    w, h = img.size
+                detail = f" ({w}x{h})"
+            except Exception as e:
+                logger.debug('[MCP_MEDIA_NOTIFY] dimension read failed for %s: %s', path, e)
+        msg = f"MCP {media_type} saved to: {path}{detail} (tool: {tool_name})"
+        _queue_tool_warning(pool, instance_name, msg)
+    except Exception as e:
+        logger.debug('[MCP_MEDIA_NOTIFY] failed to queue for %s: %s', instance_name, e)
 
 
 class MCPClient:
@@ -431,7 +467,8 @@ class MCPClient:
         await new_client.connection_server(self._last_mcp_server_name, self._last_mcp_server)
         return new_client
 
-    async def execute_function(self, tool_name, tool_args: dict):
+    async def execute_function(self, tool_name, tool_args: dict,
+                               pool=None, instance_name: Optional[str] = None):
         from mcp.types import BlobResourceContents, TextResourceContents
 
         # Check if session is alive
@@ -445,7 +482,8 @@ class MCPClient:
                 manager = MCPManager()
                 if self.client_id is not None:
                     manager.clients[self.client_id] = await self.reconnect()
-                    return await manager.clients[self.client_id].execute_function(tool_name, tool_args)
+                    return await manager.clients[self.client_id].execute_function(
+                        tool_name, tool_args, pool=pool, instance_name=instance_name)
                 else:
                     logger.info('Reconnect failed: client_id is None')
                     return 'Session reconnect (client creation) exception: client_id is None'
@@ -485,6 +523,9 @@ class MCPClient:
                                         raw, media_type, ext=_ext_from_mime(mt, media_type)
                                     )
                                     texts.append(f'![{media_type}]({path})')
+                                    _queue_media_path_notification(
+                                        'read_resource', media_type, path,
+                                        pool=pool, instance_name=instance_name)
                                     continue
                             except (MediaStorageError, ValueError) as e:
                                 logger.warning(f'MCP blob resource persist failed, skipping: {e}')
@@ -513,7 +554,11 @@ class MCPClient:
                         path = save_media_to_media(
                             raw, media_type, ext=_ext_from_mime(content.mimeType, media_type)
                         )
-                        texts.append(f'![{media_type}]({path})')  # absolute path, NOT base64
+                        texts.append(f'![{media_type}]({path})')
+                        # Push file path into the system notification queue so the agent
+                        # knows where the internal copy lives (mirrors media_gen's feedback).
+                        _queue_media_path_notification(tool_name, media_type, path,
+                                                       pool=pool, instance_name=instance_name)
                     except (MediaStorageError, ValueError) as e:
                         # Never dump the raw base64 into context (context bloat). On persist/empty
                         # failure emit a short skip marker (same pattern as the read_resource branch).

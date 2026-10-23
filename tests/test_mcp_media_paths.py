@@ -207,6 +207,108 @@ class TestExtFromMime:
         assert mm._ext_from_mime(mime, 'image') == expected
 
 
+class TestMcpMediaPathNotification:
+    """The _queue_media_path_notification helper: queues a [SYSTEM NOTIFICATIONS]
+    entry with the saved file path (and dimensions for images) so the agent knows
+    where the internal copy lives."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_saved_media(self):
+        self._saved = []
+        yield
+        for p in self._saved:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def _track(self, path):
+        self._saved.append(path)
+
+    def test_image_notification_includes_path_and_dimensions(self):
+        """When pool/instance_name are provided, _queue_tool_warning is called with
+        a message containing the absolute path AND (WxH) dimensions."""
+        b64 = _tiny_png_b64()
+        fake = types.SimpleNamespace(type='image', data=b64, mimeType='image/png')
+        client = _make_client([fake])
+
+        stub_inst = MagicMock()
+        stub_inst._tool_warnings = []
+        import threading
+        stub_inst._compression_lock = threading.RLock()
+
+        stub_pool = MagicMock()
+        stub_pool.get_instance.return_value = stub_inst
+
+        with patch('agent_cascade.operation_manager.path_security._queue_tool_warning',
+                   wraps=None) as mock_qtw:
+            # Re-patch at the import site inside the helper
+            with patch('agent_cascade.tools.mcp_manager._queue_media_path_notification',
+                       wraps=mm._queue_media_path_notification) as mock_notify:
+                out = _run(client.execute_function('blender-look', {},
+                                                   pool=stub_pool, instance_name='test_agent'))
+                # The notification helper should have been called
+                assert mock_notify.call_count == 1
+                args, kwargs = mock_notify.call_args
+                assert args[0] == 'blender-look'  # tool_name
+                assert args[1] == 'image'         # media_type
+                # path is a real saved file
+                assert os.path.isfile(args[2])
+                self._track(args[2])
+                assert kwargs.get('pool') is stub_pool
+                assert kwargs.get('instance_name') == 'test_agent'
+
+    def test_notification_noop_without_pool(self):
+        """Without pool/instance_name, the notification is a silent no-op —
+        the tool result is unchanged (just the markdown link)."""
+        b64 = _tiny_png_b64()
+        fake = types.SimpleNamespace(type='image', data=b64, mimeType='image/png')
+        client = _make_client([fake])
+
+        with patch('agent_cascade.tools.mcp_manager._queue_media_path_notification') as mock_notify:
+            out = _run(client.execute_function('any_tool', {}))
+            # No pool/instance → helper is called but returns at the guard
+            assert mock_notify.call_count == 1
+            # Tool result is still just the markdown link
+            assert '![image](' in out
+
+    def test_notification_message_format_with_dimensions(self):
+        """Direct unit test: the message format includes path + (WxH) for images."""
+        # Create a real tiny image on disk
+        img = Image.new('RGB', (64, 48), color='blue')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        # Save via the real pipeline
+        path = mm.save_media_to_media(buf.getvalue(), 'image')
+        self._track(path)
+
+        mock_qtw = MagicMock()
+        with patch('agent_cascade.operation_manager._queue_tool_warning', mock_qtw):
+            mm._queue_media_path_notification('test_tool', 'image', path,
+                                              pool=MagicMock(), instance_name='agent1')
+
+        assert mock_qtw.call_count == 1
+        call_args = mock_qtw.call_args
+        # First arg is pool, second is instance_name, third is the message
+        msg = call_args[0][2]
+        assert path in msg, f'Path not in message: {msg!r}'
+        assert '(64x48)' in msg, f'Dimensions not in message: {msg!r}'
+        assert 'test_tool' in msg, f'Tool name not in message: {msg!r}'
+
+    def test_notification_message_audio_no_dimensions(self):
+        """Audio notifications do NOT include dimensions (only images do)."""
+        mock_qtw = MagicMock()
+        with patch('agent_cascade.operation_manager._queue_tool_warning', mock_qtw):
+            mm._queue_media_path_notification('test_tool', 'audio', '/fake/audio.mp3',
+                                              pool=MagicMock(), instance_name='agent1')
+
+        assert mock_qtw.call_count == 1
+        msg = mock_qtw.call_args[0][2]
+        assert '/fake/audio.mp3' in msg
+        assert 'x' not in msg.split('saved to:')[1].split('(tool:')[0], \
+            f'Audio msg should not have dimensions: {msg!r}'
+
+
 class TestReadResourceBlob:
     """The guarded read_resource blob handler."""
 
