@@ -963,11 +963,11 @@ class TestN8SlotlessNeverUngated:
         h = sticky_harness
         router, shared = h['router'], h['shared']
 
-        import agent_cascade.engine.core as core_mod
+        import agent_cascade.engine.slot_lifecycle as slot_mod
 
         # Shrink the bounded FAST re-acquire window so the first acquire times out
         # quickly, forcing the unbounded FIFO tail re-queue path.
-        monkeypatch.setattr(core_mod, 'REACQUIRE_TIMEOUT', 0.3)
+        monkeypatch.setattr(slot_mod, 'REACQUIRE_TIMEOUT', 0.3)
 
         # A blocker holds the shared slot for the whole test.
         blocker_release = router.scheduler.acquire(
@@ -1599,12 +1599,12 @@ class TestN14UnboundedRequeueAfterFastTimeout:
         h = sticky_harness
         router, pool, shared = h['router'], h['pool'], h['shared']
 
-        import agent_cascade.engine.core as core_mod
+        import agent_cascade.engine.slot_lifecycle as slot_mod
 
         # Shrink the bounded FAST re-acquire window so the first (fast) acquire times out
         # quickly and forces the unbounded FIFO-tail re-queue path. The holder runs well
         # beyond this window (1s hold >> 0.3s fast window).
-        monkeypatch.setattr(core_mod, 'REACQUIRE_TIMEOUT', 0.3)
+        monkeypatch.setattr(slot_mod, 'REACQUIRE_TIMEOUT', 0.3)
 
         inst = _make_instance(pool, 'parent', 'coder')
         engine = _make_engine(router.scheduler, SEQ_BASE, 0)

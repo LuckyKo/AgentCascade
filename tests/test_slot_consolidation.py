@@ -527,11 +527,11 @@ class TestT5ReacquireTimeout:
     NEVER left in a slotless state (sticky slot plan change #5b / §3.9 Gap A)."""
 
     def test_reacquire_timeout_requeues_unbounded(self, scheduler, monkeypatch):
-        from agent_cascade.engine import core as core_mod
+        from agent_cascade.engine import slot_lifecycle as slot_mod
 
         # Shrink the bounded FAST re-acquire window so the first acquire times out
         # quickly, forcing the unbounded FIFO tail re-queue path.
-        monkeypatch.setattr(core_mod, 'REACQUIRE_TIMEOUT', 0.3)
+        monkeypatch.setattr(slot_mod, 'REACQUIRE_TIMEOUT', 0.3)
 
         api_base = 'http://seq-api'
         conc = 0

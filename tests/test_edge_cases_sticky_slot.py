@@ -144,7 +144,7 @@ def edge_harness(tmp_path, request):
     """
     import agent_cascade.api_router_pkg.router as _rmod
     import agent_cascade.api_router_pkg.scheduler as _ar_mod
-    import agent_cascade.engine.core as _core_mod
+    import agent_cascade.engine.slot_lifecycle as _slot_mod
     import agent_cascade.slot_queue as _sq_mod
 
     cfg_dir = tmp_path / request.node.name.replace('/', '_')
@@ -156,12 +156,12 @@ def edge_harness(tmp_path, request):
     old_sq = _sq_mod.QUEUE_WAIT_TIMEOUT
     old_ar = _ar_mod.QUEUE_WAIT_TIMEOUT
     old_cool = _rmod.ENDPOINT_COOLDOWN_SECONDS
-    old_reacq = _core_mod.REACQUIRE_TIMEOUT
+    old_reacq = _slot_mod.REACQUIRE_TIMEOUT
     # Shorten the shared-slot acquire timeout + endpoint cooldown + fast re-acquire window.
     _sq_mod.QUEUE_WAIT_TIMEOUT = 5
     _ar_mod.QUEUE_WAIT_TIMEOUT = 5
     _rmod.ENDPOINT_COOLDOWN_SECONDS = 0
-    _core_mod.REACQUIRE_TIMEOUT = 0.3
+    _slot_mod.REACQUIRE_TIMEOUT = 0.3
 
     router = _build_real_router(cfg_dir)
     pool = _build_pool(router)
@@ -181,7 +181,7 @@ def edge_harness(tmp_path, request):
     _sq_mod.QUEUE_WAIT_TIMEOUT = old_sq
     _ar_mod.QUEUE_WAIT_TIMEOUT = old_ar
     _rmod.ENDPOINT_COOLDOWN_SECONDS = old_cool
-    _core_mod.REACQUIRE_TIMEOUT = old_reacq
+    _slot_mod.REACQUIRE_TIMEOUT = old_reacq
     if old_slot_window is not None:
         pool.settings.slot_queue_timeout_seconds = old_slot_window
     # Restore the config-dir env var to its prior value (or drop it if it was unset).
