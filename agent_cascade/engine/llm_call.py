@@ -493,307 +493,10 @@ class LLMCallMixin:
                     break
 
                 try:
-                    # Telemetry: record LLM call start (non-blocking)
-                    self._record_telemetry_event(
-                        inst_name,
-                        'start',
-                        input_tokens_est=_input_tokens_est,
-                        model=getattr(template.llm, 'model', '') or '',
-                    )
-
-                    # Streaming UI Content Update: Track partial LLM content
-                    # for UI updates every ~100ms or on fast bursts
-                    last_streaming_update_time = time.monotonic()
-                    _chunks_since_last_update = 0
-                    _chars_since_last_update = 0
-
-                    # Inner-loop detector: fresh instance per retry attempt to
-                    # catch generation loops mid-stream. Uses char_run + max_chars
-                    # (last line of defense) and optional two-phase semantic detection.
-                    _ps = self.pool.settings
-                    _inner_settings = _InnerLoopSettings(
-                        default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
-                        default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
-                        char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
-                        char_run_limit=getattr(_ps, 'loop_char_run_limit', 129),
-                        loop_max_chars_enabled=getattr(_ps, 'loop_max_chars_enabled', True),
-                        loop_two_phase_enabled=getattr(_ps, 'loop_two_phase_enabled', False),
-                        loop_suspicion_threshold=getattr(_ps, 'loop_suspicion_threshold', 7),
-                        loop_confirm_required=getattr(_ps, 'loop_confirm_required', 3),
-                        loop_cooldown_feeds=getattr(_ps, 'loop_cooldown_feeds', 50),
-                    )
-                    _inner_detector = InnerLoopDetector(settings=_inner_settings)
-                    _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
-
-                    # Max-output-token guard: safety net against LLMs exceeding
-                    # their token budget
-                    # Resolve the output token limit from generate_cfg override,
-                    # template config, or default
-                    _max_output_tokens = 8192  # Default cap per single response
-                    _gen_override = getattr(instance, '_generate_cfg_override', None)
-                    if _gen_override and isinstance(_gen_override, dict):
-                        _mt = _gen_override.get('max_tokens') or _gen_override.get(
-                            'max_output_tokens') or _gen_override.get('max_input_tokens')
-                        if isinstance(_mt, int) and _mt > 0:
-                            _max_output_tokens = _mt
-                    # Also check template LLM generate_cfg as fallback
-                    if _max_output_tokens == 8192:
-                        _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
-                        _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get(
-                            'max_input_tokens')
-                        if isinstance(_mt, int) and _mt > 0:
-                            _max_output_tokens = _mt
-
-                    _token_guard_triggered = False  # Prevent double-trigger within same iteration
-
-                    gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
-                    _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
-
-                    # --- Interrupt helper (shared by inner-loop and max-token
-                    # guards) ---
-                    # Defined ONCE per retry attempt before the loop to avoid
-                    # recreating on every iteration.
-                    # Counter increments happen BEFORE yield so they update even if
-                    # consumer drops the iterator.
-                    def _abort_stream(reason_msg):
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
-                        # Clean up async tasks (same as stop condition handler)
-                        if hasattr(self.pool, '_async_registry'):
-                            try:
-                                self.pool._async_registry.clear_pending(inst_name)
-                            except Exception:
-                                pass
-                        # Record telemetry end for aborted call
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        try:
-                            gen.close()
-                        except RuntimeError:
-                            pass  # Already closed/exhausted
-                        logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
-                        # Increment counters BEFORE yield — ensures update even if
-                        # consumer drops iterator mid-yield
-                        state.last_output = None
-                        state.retry_count += 1
-                        state.loop_retry_count += 1
-                        yield None  # Signal UI
-
-                    # Engine-level streaming watchdog: detect mid-stream stalls at the
-                    # execution engine layer (last defense if backend didn't raise).
-                    # Read configured values from pool settings, falling back to module defaults.
-                    _engine_max_silence = getattr(self.pool.settings, 'stream_max_silence_seconds',
-                                                  STREAM_MAX_SILENCE_SECONDS)
-                    _engine_max_total = getattr(self.pool.settings, 'stream_max_total_seconds',
-                                                STREAM_MAX_TOTAL_SECONDS)
-                    _engine_stream_start = time.monotonic()
-                    _engine_first_output = True
-                    _engine_last_output_time = None
-
-                    for output in gen:
-                        # Watchdog check on each consumed output
-                        _now = time.monotonic()
-                        # FIFO head-stall alarm (plan §3.2 write site B): stamp the
-                        # holder's last-LLM-activity timestamp. Zero added cost — the
-                        # watchdog already takes this timestamp every iteration.
-                        self._stamp_llm_activity(instance, 'chunk')
-                        # Silence check only after first output; slow reasoning models may take >120s to produce first token
-                        if not _engine_first_output and _engine_last_output_time is not None:
-                            if (_now - _engine_last_output_time) > _engine_max_silence:
-                                logger.info(
-                                    f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
-                                    f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
-                                _abort_stream('Engine watchdog: stream_stalled')
-                                break  # Exit loop after aborting; will retry in outer while
-                        # Total timeout applies from stream start regardless of first output timing
-                        if (_now - _engine_stream_start) > _engine_max_total:
-                            logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
-                                        f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
-                            _abort_stream('Engine watchdog: stream_stalled')
-                            break  # Exit loop after aborting; will retry in outer while
-                        if _engine_first_output:
-                            _engine_first_output = False
-                        _engine_last_output_time = _now
-
-                        state.last_output = output
-
-                        # Feed delta text to inner-loop detector (extracts new
-                        # content from accumulated response)
-                        try:
-                            _last_msg = output[-1] if output else None
-                            if _last_msg is not None:
-                                _content = msg_field(_last_msg, 'content', '') or ''
-                                _reasoning = msg_field(_last_msg, 'reasoning_content') or ''
-                                # Handle multimodal content (list of items) for
-                                # both fields
-                                if isinstance(_content, list):
-                                    _content = ' '.join(str(c) for c in _content if isinstance(c, str))
-                                else:
-                                    _content = str(_content)
-                                if isinstance(_reasoning, list):
-                                    _reasoning = ' '.join(str(c) for c in _reasoning if isinstance(c, str))
-                                else:
-                                    _reasoning = str(_reasoning)
-                                _total_text = _reasoning + _content
-
-                                # Also feed function_call data so tool-call streaming
-                                # (where content is empty but payload is in name+arguments)
-                                # is detected by the inner-loop detector.
-                                _fc = msg_field(_last_msg, 'function_call')
-                                if _fc:
-                                    if isinstance(_fc, dict):
-                                        _fc_name = _fc.get('name', '') or ''
-                                        _fc_args = _fc.get('arguments', '') or ''
-                                    else:
-                                        _fc_name = getattr(_fc, 'name', '') or ''
-                                        _fc_args = getattr(_fc, 'arguments', '') or ''
-                                    if _fc_name or _fc_args:
-                                        _total_text += f"\n{_fc_name}: {_fc_args}"
-
-                                # Generator is append-only (delta_stream=False), so
-                                # slicing by previous length gives the new delta
-                                _delta_text = _total_text[_prev_text_len:]
-                                _prev_text_len = len(_total_text)
-
-                                if _delta_text:
-                                    _chars_since_last_update += len(_delta_text)
-                                    # Inner-loop detection (gated by pool settings
-                                    # toggle)
-                                    if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
-                                        _ev = _inner_detector.feed(_delta_text)
-                                        if _ev:  # Loop detected mid-stream
-                                            _sample_path = save_loop_sample(
-                                                text=_total_text[:4000],
-                                                reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
-                                                instance_name=inst_name,
-                                            )
-                                            yield from _abort_stream(
-                                                f"Detected generation loop: {_ev['reason']} (score={_ev['score']})")
-                                            if _sample_path:
-                                                logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                            # Check dedicated loop retry budget
-                                            # (gated by _max_attempts from pool.settings.retry_max_attempts)
-                                            if state.loop_retry_count >= _max_attempts:
-                                                raise CharacterRunDetected(
-                                                    f"inner_loop_exhausted: retried {_max_attempts} times, "
-                                                    f"giving up — last reason: {_ev['reason']}",
-                                                    detection_reason=_ev['reason'],
-                                                )
-                                            raise CharacterRunDetected(
-                                                f"inner_loop: {_ev['reason']}",
-                                                detection_reason=_ev['reason'],
-                                            )
-
-                                # Max-output-token guard: safety net — if LLM
-                                # exceeds token budget it's likely looping
-                                if not _token_guard_triggered:
-                                    _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
-                                    if _est_tokens > _max_output_tokens:
-                                        _sample_path = save_loop_sample(
-                                            text=_total_text[:4000],
-                                            reason=
-                                            f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
-                                            instance_name=inst_name,
-                                        )
-                                        yield from _abort_stream(
-                                            f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})"
-                                        )
-                                        if _sample_path:
-                                            logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                        _token_guard_triggered = True
-                                        raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
-                        except Exception as e:
-                            logger.warning(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
-                            # Re-raise if this is an explicit inner-loop or
-                            # max-tokens detection exception
-                            if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                                raise
-
-                        # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
-                        if not _first_token_received:
-                            self._record_telemetry_event(inst_name, 'first_token')
-                            _first_token_received = True
-
-                        # Check stop/halt mid-stream FIRST (before any work) —
-                        # ensures fastest response to stop.
-                        # Also checks generation change (old run superseded by
-                        # newer one on resume).
-                        # This is defense-in-depth: _check_stop_conditions() runs
-                        # before the LLM call, but stop
-                        # can also be triggered DURING the streaming call itself
-                        # (while chunks are arriving).
-                        if self._is_terminal_stop(inst_name):
-                            # Telemetry: record LLM call end for mid-stream stop (non-blocking)
-                            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                            with instance._compression_lock:
-                                instance._streaming_responses = []
-                            # Clear pending async tool registrations so the stop is clean
-                            if hasattr(self.pool, '_async_registry'):
-                                try:
-                                    self.pool._async_registry.clear_pending(inst_name)
-                                except Exception:
-                                    pass  # Non-critical cleanup
-                            try:
-                                gen.close(
-                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
-                            except RuntimeError:
-                                pass  # Already closed/exhausted
-                            yield None  # Signal UI that stop was detected mid-stream
-                            break
-                        # Compression-halt during streaming: let the stream complete, handle at Site 3
-
-                        _chunks_since_last_update += 1
-
-                        # Update _streaming_responses on a time floor OR on rapid bursts
-                        # (chunk/char volume thresholds), whichever comes first.
-                        current_time = time.monotonic()
-                        should_update = ((current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
-                                         or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS) or
-                                         (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
-                        if should_update:
-                            with instance._compression_lock:
-                                self._update_streaming_responses(instance, state.last_output)
-                            last_streaming_update_time = current_time
-                            _chunks_since_last_update = 0
-                            _chars_since_last_update = 0
-
-                        # Re-check stop/halt after UI update (defense in depth —
-                        # catches stop during slow streaming)
-                        if self._is_terminal_stop(inst_name):
-                            # Telemetry: record LLM call end for mid-stream stop (non-blocking)
-                            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                            with instance._compression_lock:
-                                instance._streaming_responses = []
-                            # Clear pending async tool registrations so the stop is clean
-                            if hasattr(self.pool, '_async_registry'):
-                                try:
-                                    self.pool._async_registry.clear_pending(inst_name)
-                                except Exception:
-                                    pass  # Non-critical cleanup
-                            try:
-                                gen.close(
-                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
-                            except RuntimeError:
-                                pass  # Already closed/exhausted
-                            yield None  # Signal UI that stop was detected mid-stream
-                            break
-
-                        # Yield partial content for UI update only when responses were updated
-                        if should_update:
-                            yield None
-
-                    if state.last_output is not None:
-                        # Ensure any remaining in-flight tokens from the final burst are synced
-                        if _chunks_since_last_update > 0:
-                            with instance._compression_lock:
-                                self._update_streaming_responses(instance, state.last_output)
-                        # Token counts captured at streaming layer via _on_usage callback.
-                        # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=state.last_output)
+                    _got_output = yield from self._stream_llm_attempt(
+                        instance, inst_name, template, llm_messages, active_functions, _input_tokens_est, state, _max_attempts)
+                    if _got_output:
                         break
-
-                    # Telemetry: record LLM call end for empty response before retrying (non-blocking)
-                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-
                 except FallbackCompressionRequired as fcr:
                     # Context window exceeded during fallback to smaller endpoint.
                     # Use SMART SLICE-FIRST iterative compression: before each compression,
@@ -836,6 +539,326 @@ class LLMCallMixin:
             # turn starts from position 0, regardless of how this turn ended.
             if hasattr(self.pool.api_router, 'reset_instance_endpoint'):
                 self.pool.api_router.reset_instance_endpoint(inst_name)
+
+    def _stream_llm_attempt(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        template,
+        llm_messages: List[Message],
+        active_functions,
+        input_tokens_est: int,
+        state: _LLMCallState,
+        max_attempts: int,
+    ) -> Iterator[Optional[Message]]:
+        """Run one streaming LLM attempt: telemetry start, inner-loop/max-token
+        guards, engine watchdog, mid-stream stop handling and UI throttling.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A4). Returns True when
+        an attempt produced state.last_output (caller breaks the retry loop), False
+        for empty/aborted attempts (caller retries). Does NOT catch FallbackCompression
+        Required and does NOT own the outer while-break; the guard exceptions propagate
+        to the caller.
+        """
+        # Telemetry: record LLM call start (non-blocking)
+        self._record_telemetry_event(
+            inst_name,
+            'start',
+            input_tokens_est=input_tokens_est,
+            model=getattr(template.llm, 'model', '') or '',
+        )
+
+        # Streaming UI Content Update: Track partial LLM content
+        # for UI updates every ~100ms or on fast bursts
+        last_streaming_update_time = time.monotonic()
+        _chunks_since_last_update = 0
+        _chars_since_last_update = 0
+
+        # Inner-loop detector: fresh instance per retry attempt to
+        # catch generation loops mid-stream. Uses char_run + max_chars
+        # (last line of defense) and optional two-phase semantic detection.
+        _ps = self.pool.settings
+        _inner_settings = _InnerLoopSettings(
+            default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
+            default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
+            char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
+            char_run_limit=getattr(_ps, 'loop_char_run_limit', 129),
+            loop_max_chars_enabled=getattr(_ps, 'loop_max_chars_enabled', True),
+            loop_two_phase_enabled=getattr(_ps, 'loop_two_phase_enabled', False),
+            loop_suspicion_threshold=getattr(_ps, 'loop_suspicion_threshold', 7),
+            loop_confirm_required=getattr(_ps, 'loop_confirm_required', 3),
+            loop_cooldown_feeds=getattr(_ps, 'loop_cooldown_feeds', 50),
+        )
+        _inner_detector = InnerLoopDetector(settings=_inner_settings)
+        _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
+
+        # Max-output-token guard: safety net against LLMs exceeding
+        # their token budget
+        # Resolve the output token limit from generate_cfg override,
+        # template config, or default
+        _max_output_tokens = 8192  # Default cap per single response
+        _gen_override = getattr(instance, '_generate_cfg_override', None)
+        if _gen_override and isinstance(_gen_override, dict):
+            _mt = _gen_override.get('max_tokens') or _gen_override.get(
+                'max_output_tokens') or _gen_override.get('max_input_tokens')
+            if isinstance(_mt, int) and _mt > 0:
+                _max_output_tokens = _mt
+        # Also check template LLM generate_cfg as fallback
+        if _max_output_tokens == 8192:
+            _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+            _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get(
+                'max_input_tokens')
+            if isinstance(_mt, int) and _mt > 0:
+                _max_output_tokens = _mt
+
+        _token_guard_triggered = False  # Prevent double-trigger within same iteration
+
+        gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
+        _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
+
+
+        # Engine-level streaming watchdog: detect mid-stream stalls at the
+        # execution engine layer (last defense if backend didn't raise).
+        # Read configured values from pool settings, falling back to module defaults.
+        _engine_max_silence = getattr(self.pool.settings, 'stream_max_silence_seconds',
+                                      STREAM_MAX_SILENCE_SECONDS)
+        _engine_max_total = getattr(self.pool.settings, 'stream_max_total_seconds',
+                                    STREAM_MAX_TOTAL_SECONDS)
+        _engine_stream_start = time.monotonic()
+        _engine_first_output = True
+        _engine_last_output_time = None
+
+        for output in gen:
+            # Watchdog check on each consumed output
+            _now = time.monotonic()
+            # FIFO head-stall alarm (plan §3.2 write site B): stamp the
+            # holder's last-LLM-activity timestamp. Zero added cost — the
+            # watchdog already takes this timestamp every iteration.
+            self._stamp_llm_activity(instance, 'chunk')
+            # Silence check only after first output; slow reasoning models may take >120s to produce first token
+            if not _engine_first_output and _engine_last_output_time is not None:
+                if (_now - _engine_last_output_time) > _engine_max_silence:
+                    logger.info(
+                        f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
+                        f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
+                    self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                    break  # Exit loop after aborting; will retry in outer while
+            # Total timeout applies from stream start regardless of first output timing
+            if (_now - _engine_stream_start) > _engine_max_total:
+                logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
+                            f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
+                self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                break  # Exit loop after aborting; will retry in outer while
+            if _engine_first_output:
+                _engine_first_output = False
+            _engine_last_output_time = _now
+
+            state.last_output = output
+
+            # Feed delta text to inner-loop detector (extracts new
+            # content from accumulated response)
+            try:
+                _last_msg = output[-1] if output else None
+                if _last_msg is not None:
+                    _content = msg_field(_last_msg, 'content', '') or ''
+                    _reasoning = msg_field(_last_msg, 'reasoning_content') or ''
+                    # Handle multimodal content (list of items) for
+                    # both fields
+                    if isinstance(_content, list):
+                        _content = ' '.join(str(c) for c in _content if isinstance(c, str))
+                    else:
+                        _content = str(_content)
+                    if isinstance(_reasoning, list):
+                        _reasoning = ' '.join(str(c) for c in _reasoning if isinstance(c, str))
+                    else:
+                        _reasoning = str(_reasoning)
+                    _total_text = _reasoning + _content
+
+                    # Also feed function_call data so tool-call streaming
+                    # (where content is empty but payload is in name+arguments)
+                    # is detected by the inner-loop detector.
+                    _fc = msg_field(_last_msg, 'function_call')
+                    if _fc:
+                        if isinstance(_fc, dict):
+                            _fc_name = _fc.get('name', '') or ''
+                            _fc_args = _fc.get('arguments', '') or ''
+                        else:
+                            _fc_name = getattr(_fc, 'name', '') or ''
+                            _fc_args = getattr(_fc, 'arguments', '') or ''
+                        if _fc_name or _fc_args:
+                            _total_text += f"\n{_fc_name}: {_fc_args}"
+
+                    # Generator is append-only (delta_stream=False), so
+                    # slicing by previous length gives the new delta
+                    _delta_text = _total_text[_prev_text_len:]
+                    _prev_text_len = len(_total_text)
+
+                    if _delta_text:
+                        _chars_since_last_update += len(_delta_text)
+                        # Inner-loop detection (gated by pool settings
+                        # toggle)
+                        if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
+                            _ev = _inner_detector.feed(_delta_text)
+                            if _ev:  # Loop detected mid-stream
+                                _sample_path = save_loop_sample(
+                                    text=_total_text[:4000],
+                                    reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
+                                    instance_name=inst_name,
+                                )
+                                yield from self._abort_llm_stream(
+                                    instance, inst_name, gen,
+                                    f"Detected generation loop: {_ev['reason']} (score={_ev['score']})",
+                                    state)
+                                if _sample_path:
+                                    logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                                # Check dedicated loop retry budget
+                                # (gated by max_attempts from pool.settings.retry_max_attempts)
+                                if state.loop_retry_count >= max_attempts:
+                                    raise CharacterRunDetected(
+                                        f"inner_loop_exhausted: retried {max_attempts} times, "
+                                        f"giving up — last reason: {_ev['reason']}",
+                                        detection_reason=_ev['reason'],
+                                    )
+                                raise CharacterRunDetected(
+                                    f"inner_loop: {_ev['reason']}",
+                                    detection_reason=_ev['reason'],
+                                )
+
+                    # Max-output-token guard: safety net — if LLM
+                    # exceeds token budget it's likely looping
+                    if not _token_guard_triggered:
+                        _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                        if _est_tokens > _max_output_tokens:
+                            _sample_path = save_loop_sample(
+                                text=_total_text[:4000],
+                                reason=
+                                f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
+                                instance_name=inst_name,
+                            )
+                            yield from self._abort_llm_stream(
+                                instance, inst_name, gen,
+                                f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})",
+                                state)
+                            if _sample_path:
+                                logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                            _token_guard_triggered = True
+                            raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
+            except Exception as e:
+                logger.warning(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
+                # Re-raise if this is an explicit inner-loop or
+                # max-tokens detection exception
+                if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                    raise
+
+            # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
+            if not _first_token_received:
+                self._record_telemetry_event(inst_name, 'first_token')
+                _first_token_received = True
+
+            # Check stop/halt mid-stream FIRST (before any work) —
+            # ensures fastest response to stop.
+            # Also checks generation change (old run superseded by
+            # newer one on resume).
+            # This is defense-in-depth: _check_stop_conditions() runs
+            # before the LLM call, but stop
+            # can also be triggered DURING the streaming call itself
+            # (while chunks are arriving).
+            if self._is_terminal_stop(inst_name):
+                self._stop_mid_stream(instance, inst_name, gen)
+                yield None  # Signal UI that stop was detected mid-stream
+                break
+            # Compression-halt during streaming: let the stream complete, handle at Site 3
+
+            _chunks_since_last_update += 1
+
+            # Update _streaming_responses on a time floor OR on rapid bursts
+            # (chunk/char volume thresholds), whichever comes first.
+            current_time = time.monotonic()
+            should_update = ((current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
+                             or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS) or
+                             (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
+            if should_update:
+                with instance._compression_lock:
+                    self._update_streaming_responses(instance, state.last_output)
+                last_streaming_update_time = current_time
+                _chunks_since_last_update = 0
+                _chars_since_last_update = 0
+
+            # Re-check stop/halt after UI update (defense in depth —
+            # catches stop during slow streaming)
+            if self._is_terminal_stop(inst_name):
+                self._stop_mid_stream(instance, inst_name, gen)
+                yield None  # Signal UI that stop was detected mid-stream
+                break
+
+            # Yield partial content for UI update only when responses were updated
+            if should_update:
+                yield None
+
+        if state.last_output is not None:
+            # Ensure any remaining in-flight tokens from the final burst are synced
+            if _chunks_since_last_update > 0:
+                with instance._compression_lock:
+                    self._update_streaming_responses(instance, state.last_output)
+            # Token counts captured at streaming layer via _on_usage callback.
+            # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=state.last_output)
+            return True
+
+        # Telemetry: record LLM call end for empty response before retrying (non-blocking)
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        return False
+
+    def _abort_llm_stream(self, instance, inst_name, gen, reason_msg, state) -> Iterator[None]:
+        """Abort an in-flight stream from an inner-loop/max-token guard.
+
+        Replaces the nested _abort_stream closure (Phase 7 A4). Mutates state (clears
+        last_output, bumps retry/loop counters) BEFORE yielding None so the counters
+        update even if the consumer drops the iterator mid-yield.
+        """
+        with instance._compression_lock:
+            instance._streaming_responses = []
+        # Clean up async tasks (same as stop condition handler)
+        if hasattr(self.pool, '_async_registry'):
+            try:
+                self.pool._async_registry.clear_pending(inst_name)
+            except Exception:
+                pass
+        # Record telemetry end for aborted call
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        try:
+            gen.close()
+        except RuntimeError:
+            pass  # Already closed/exhausted
+        logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
+        # Increment counters BEFORE yield — ensures update even if
+        # consumer drops iterator mid-yield
+        state.last_output = None
+        state.retry_count += 1
+        state.loop_retry_count += 1
+        yield None  # Signal UI
+
+    def _stop_mid_stream(self, instance, inst_name, gen) -> None:
+        """Mid-stream stop cleanup: close the in-flight stream and clear pending state.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A4). Does NOT touch retry
+        counters or state.last_output - the caller still breaks the loop itself.
+        """
+        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        with instance._compression_lock:
+            instance._streaming_responses = []
+        # Clear pending async tool registrations so the stop is clean
+        if hasattr(self.pool, '_async_registry'):
+            try:
+                self.pool._async_registry.clear_pending(inst_name)
+            except Exception:
+                pass  # Non-critical cleanup
+        try:
+            gen.close(
+            )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
+        except RuntimeError:
+            pass  # Already closed/exhausted
 
     def _handle_llm_retry_failure(
         self,
