@@ -52,40 +52,16 @@ def _is_explicit_skill_list(load_skill_value) -> bool:
 class SystemAgentMixin:
     """Create, reuse, launch, and surface system agents."""
 
-    def _create_and_run_agent(self,
-                              agent_class: str,
-                              instance_name: str,
-                              args: dict,
-                              caller: str,
-                              nest_depth: int = 0,
-                              force_fresh: bool = False) -> tuple:
-        """Create an AgentInstance and run it through the unified loop.
+    def _run_skill_advisor_gate(self, agent_class: str, instance_name: str, args: dict,
+                                caller: str, force_fresh: bool,
+                                log_file: Any) -> Tuple[Optional[List[str]], str, Optional[tuple]]:
+        """Run the Skill Advisor gate before any child instance is allocated.
 
-        Shared helper used by both sync and parallel call_agent paths.
-        Creates the instance, builds system + task messages, logs them,
-        tracks in active_stack, and runs engine.run(inst).
-
-        Returns:
-            Tuple of (AgentInstance, conversation history).
-
-        Args:
-            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
-            force_fresh: If True, always create new instance even if inactive one exists.
-                        Used for Security/Compressor agents that should start fresh each time.
+        Returns ``(recommended_skills, task_notes, denied_result)``. When the
+        advisor denies, ``denied_result`` is the exact ``(None, [Message])`` tuple
+        the caller returns; otherwise it is None.
         """
-        self._create_completed = False  # Reset for this execution cycle
-
-        logger.debug(
-            '[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=%s, class=%s, caller=%s, '
-            'nest_depth=%d, force_fresh=%s', instance_name, agent_class, caller, nest_depth, force_fresh)
-
-        # BUG FIX (Bug 2): Extract log_file from args and pass through the
-        # chain
-        log_file = args.get('log_file')
-
-        # ── Skill Advisor gate (AUTO Skill Helper — Advanced mode) ───────────
-        # Runs BEFORE find_or_create_instance() so a DENY never allocates a child.
-        _advisor_recommended_skills: Optional[List[str]] = None  # names, or None → use resolve_load_skill
+        _advisor_recommended_skills: Optional[List[str]] = None  # names, or None -> use resolve_load_skill
         _advisor_task_notes: str = ''
 
         load_skill_value = args.get('load_skill')
@@ -101,12 +77,12 @@ class SystemAgentMixin:
                         _decoded[0]).upper() in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
                     load_skill_value = str(_decoded[0])
             except (ValueError, TypeError):
-                pass  # not valid JSON — treat as literal string below
+                pass  # not valid JSON - treat as literal string below
         elif isinstance(load_skill_value, list) and len(load_skill_value) == 1:
             _single = str(load_skill_value[0]).strip().upper()
             if _single in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
                 load_skill_value = _single
-        # Multi-element lists (e.g. ["AUTO", "docker"]) default to AUTO — the
+        # Multi-element lists (e.g. ["AUTO", "docker"]) default to AUTO - the
         # presence of explicit skill names alongside AUTO means "auto + extras".
         load_skill_mode_upper = (load_skill_value.strip().upper() if isinstance(load_skill_value, str) else 'AUTO')
         auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
@@ -116,20 +92,20 @@ class SystemAgentMixin:
         try:
             if _skill_mgr_gate is not None:
                 _skill_mgr_gate._ensure_discovered()
-        except Exception as e:  # noqa: BLE001 — never block delegation on a discovery hiccup
+        except Exception as e:  # noqa: BLE001 - never block delegation on a discovery hiccup
             logger.debug('[SKILL-ADVISOR] gate _ensure_discovered failed: %s', e)
 
         # NOTE: auto_skill_mode == "none" never runs the advisor. The `== "advanced"`
         # check below already excludes it (only "advanced" passes), so no extra guard
-        # is required — this comment documents that intent explicitly.
+        # is required - this comment documents that intent explicitly.
         should_run_advisor = (
             load_skill_mode_upper == LOAD_SKILL_AUTO and auto_skill_mode == 'advanced' and not force_fresh and
-            log_file is None  # external load → skip advisor (needs fresh skills)
+            log_file is None  # external load -> skip advisor (needs fresh skills)
             and _skill_mgr_gate is not None and len(_skill_mgr_gate.get_skill_names()) > 0  # nothing to recommend
         )
         logger.debug(
             '[SKILL-ADVISOR] gate check: mode=%s, auto_skill_mode=%s, force_fresh=%s, '
-            'log_file=%s, skill_mgr=%s, skills_count=%d → should_run=%s',
+            'log_file=%s, skill_mgr=%s, skills_count=%d -> should_run=%s',
             load_skill_mode_upper,
             auto_skill_mode,
             force_fresh,
@@ -143,7 +119,7 @@ class SystemAgentMixin:
             # Early recall check replicates _is_recall below WITHOUT calling
             # find_or_create_instance(), since that would allocate a child before
             # we know whether to deny. Locks are released BEFORE the advisor's LLM
-            # call. On failure we treat it as "new" — worst case the advisor runs
+            # call. On failure we treat it as "new" - worst case the advisor runs
             # once for a recall, which is harmless.
             _is_early_recall = False
             try:
@@ -156,7 +132,7 @@ class SystemAgentMixin:
                         if _existing_inst.conversation and len(_existing_inst.conversation) > 0 \
                                 and getattr(_existing_inst.conversation[0], 'role', None) == SYSTEM:
                             _is_early_recall = True
-            except Exception as e:  # noqa: BLE001 — never block delegation on a check failure
+            except Exception as e:  # noqa: BLE001 - never block delegation on a check failure
                 logger.debug('[SKILL-ADVISOR] Early recall check failed (treating as new): %s', e)
 
             if not _is_early_recall:
@@ -172,7 +148,7 @@ class SystemAgentMixin:
                         agent_class=agent_class,
                         caller_name=caller,
                     )
-                except Exception as e:  # noqa: BLE001 — advisor must never break delegation
+                except Exception as e:  # noqa: BLE001 - advisor must never break delegation
                     logger.error('[SKILL-ADVISOR] Unexpected error; falling back to basic match: %s', e)
                     _advisor_result = SkillAdvisorResult(verdict='ambiguous', reason=f"unexpected: {e}")
 
@@ -196,15 +172,15 @@ class SystemAgentMixin:
                         instance_name,
                         _advisor_result.reason,
                     )
-                    # No child instance is created — return an error the caller can surface.
+                    # No child instance is created - return an error the caller can surface.
                     # Use ASSISTANT role so extract_instance_output() picks up the text
                     # (FUNCTION role triggers the "terminated with tool result" guard).
-                    return None, [
+                    return None, '', (None, [
                         Message(
                             role=ASSISTANT,
                             content=(f"[SKILL-ADVISOR DENIED] {_advisor_result.reason} "
                                      f"Consider handling this task yourself or rephrasing with more specific context."))
-                    ]
+                    ])
 
                 if _advisor_result.verdict == 'approve':
                     _advisor_recommended_skills = list(_advisor_result.recommended_skills)
@@ -215,30 +191,20 @@ class SystemAgentMixin:
                         _advisor_recommended_skills,
                         len(_advisor_task_notes),
                     )
-                else:  # "ambiguous" → fall back to basic keyword match below
+                else:  # "ambiguous" -> fall back to basic keyword match below
                     logger.warning(
-                        '[SKILL-ADVISOR] Ambiguous result for %s (%s) — falling back to basic match',
+                        '[SKILL-ADVISOR] Ambiguous result for %s (%s) - falling back to basic match',
                         instance_name,
                         _advisor_result.reason,
                     )
 
-        # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
-        inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(agent_class,
-                                                                                    instance_name,
-                                                                                    caller,
-                                                                                    nest_depth,
-                                                                                    force_fresh,
-                                                                                    log_file=log_file)
+        return _advisor_recommended_skills, _advisor_task_notes, None
 
-        # ── System message + skills handling ────────────────────────────────────
-        # Skill refresh happens ONLY on a rebuild: a NEW instance or an external load
-        # (reload-from-file after termination) — both handled in the else branch below,
-        # which does a full build_system_message + skill injection. On recall of an
-        # existing idle agent we keep conversation[0] byte-for-byte verbatim (no skill
-        # refresh, no mutation of any kind) and ignore the per-call load_skill — this
-        # preserves the LLM prefix cache so a recall is a cheap cache-hit.
-        # A recall must NOT be an external load (log_file restore): that returns
-        # is_reuse=True AND session_was_loaded=True and still needs build + skill injection.
+    def _prepare_child_system_message(self, inst: AgentInstance, instance_name: str, args: dict,
+                                      is_reuse: bool, session_was_loaded: bool,
+                                      advisor_recommended_skills: Optional[List[str]],
+                                      advisor_task_notes: str) -> Tuple[Any, dict]:
+        """Build or preserve the child system message and resolve/inject skills."""
         _is_recall = is_reuse and not session_was_loaded and bool(inst.conversation) \
             and getattr(inst.conversation[0], 'role', None) == SYSTEM
         task_text = args.get('task', '')
@@ -246,19 +212,19 @@ class SystemAgentMixin:
         context_text = args.get('context', '')  # only used in else branch for resolve_load_skill
         # Skills resolved/injected this run (name, body) pairs. Initialized here so it is always
         # bound even on the recall path (which skips resolution and keeps the system prompt
-        # verbatim) — the auto-skill call site below reads it to build the reflection prompt.
+        # verbatim) - the auto-skill call site below reads it to build the reflection prompt.
         loaded_skills = []
         # Skill Advisor (Advanced mode): append its improved notes to the context so
-        # they reach the child agent via build_task_message. Only on fresh instances —
+        # they reach the child agent via build_task_message. Only on fresh instances -
         # recall preserves conversation[0] verbatim and never rebuilds the task message.
-        if _advisor_task_notes and not _is_recall:
-            context_text = f"{context_text}\n\n[Skill Advisor notes] {_advisor_task_notes}".strip()
+        if advisor_task_notes and not _is_recall:
+            context_text = f"{context_text}\n\n[Skill Advisor notes] {advisor_task_notes}".strip()
         if _is_recall:
-            # Reuse path (active-but-IDLE instance): keep conversation[0] EXACTLY as-is —
+            # Reuse path (active-but-IDLE instance): keep conversation[0] EXACTLY as-is -
             # byte-for-byte, no skill refresh, no mutation of any kind. This preserves the
             # LLM prefix cache so a recall is a cheap cache-hit, not a full reprocess.
             # Skill updates are picked up only on a rebuild: a NEW instance or an external
-            # load (reload-from-file after termination) — both handled in the else branch
+            # load (reload-from-file after termination) - both handled in the else branch
             # below, which does a full build_system_message + skill injection.
             # The per-call load_skill arg is still ignored on recall.
             sys_msg = inst.conversation[0]
@@ -275,10 +241,10 @@ class SystemAgentMixin:
             # was loaded from log file)
             sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
-            # ── Skills System: Resolve load_skill and inject into sys_msg ─────
+            # -- Skills System: Resolve load_skill and inject into sys_msg -----
             # (task_text / context_text / skill_manager hoisted above the branch)
 
-            # GLOBAL "Enable skills" setting (UI toggle → pool.settings.
+            # GLOBAL "Enable skills" setting (UI toggle -> pool.settings.
             # default_load_skill_mode: 'AUTO'=ON, 'NONE'=OFF). This is the single
             # source of truth for whether Self-Augmentation is present.
             global_skills_enabled = \
@@ -288,29 +254,30 @@ class SystemAgentMixin:
             # It never removes Self-Augmentation while the global toggle is ON.
             load_skill_value = args.get('load_skill')
             if load_skill_value is None:
-                # No explicit per-call arg → fall back to the global setting.
+                # No explicit per-call arg -> fall back to the global setting.
                 load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
 
+            auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
             loaded_skills = []
             if skill_manager and global_skills_enabled:
-                # (1) Matched/auto skills — gated by the PER-CALL load_skill arg.
-                #     NONE → no matched skills; otherwise resolve as before.
+                # (1) Matched/auto skills - gated by the PER-CALL load_skill arg.
+                #     NONE -> no matched skills; otherwise resolve as before.
                 if isinstance(load_skill_value, str):
                     load_skill_mode_upper = load_skill_value.strip().upper()
                 else:
                     load_skill_mode_upper = 'AUTO'
                 if load_skill_mode_upper != LOAD_SKILL_NONE and auto_skill_mode != AUTO_SKILL_MODE_NONE:
-                    # Basic ("basic") / Advanced ("advanced") behavior — unchanged.
-                    if _advisor_recommended_skills is not None:
-                        # Skill Advisor (Advanced mode) APPROVED — use its semantic
+                    # Basic ("basic") / Advanced ("advanced") behavior - unchanged.
+                    if advisor_recommended_skills is not None:
+                        # Skill Advisor (Advanced mode) APPROVED - use its semantic
                         # recommendations instead of basic keyword matching. Names were
                         # already validated against the registry by the advisor.
                         _advisor_loaded_names = []
-                        for _name in _advisor_recommended_skills:
+                        for _name in advisor_recommended_skills:
                             _body = skill_manager.load_full_instructions(_name)
                             if _body is None:
                                 # Skill was removed from the registry between the advisor
-                                # run and injection — skip it (Self-Augmentation still loads).
+                                # run and injection - skip it (Self-Augmentation still loads).
                                 logger.warning(
                                     "[SKILL-ADVISOR] Recommended skill '%s' no longer available; skipping",
                                     _name,
@@ -342,12 +309,12 @@ class SystemAgentMixin:
                     # "none" mode: skip system auto-matching entirely (no Basic keyword
                     # match, no Advanced advisor). Caller-explicit skill lists are still
                     # honored. We delegate to resolve_load_skill() so it handles every
-                    # explicit form consistently with the Basic path — native lists AND
+                    # explicit form consistently with the Basic path - native lists AND
                     # JSON-encoded list strings like '["docker"]' (which LLMs sometimes
                     # emit). _is_explicit_skill_list() is True only for those two shapes,
                     # so a bare "AUTO"/"NONE"/None never reaches here and no auto-matching
                     # leaks. A literal "AUTO" token inside an explicit list is resolved by
-                    # name and silently skipped (it won't match a real skill) — existing
+                    # name and silently skipped (it won't match a real skill) - existing
                     # resolve_load_skill behavior, preserved so it isn't surprising later.
                     try:
                         loaded_skills = skill_manager.resolve_load_skill_pairs(load_skill_value, task_text,
@@ -356,16 +323,16 @@ class SystemAgentMixin:
                         logger.warning('[SKILLS] Failed to resolve skills for %s: %s', instance_name, e)
                         loaded_skills = []
                     # Telemetry: capture explicit skills (this branch is explicit-only by
-                    # construction — _is_explicit_skill_list gate above). Names come from
+                    # construction - _is_explicit_skill_list gate above). Names come from
                     # the same pairs used for injection so they match exactly.
                     _resolved_names = [name for name, _body in loaded_skills]
                     if _resolved_names:
                         _tel = getattr(self.pool, 'telemetry', None)
                         if _tel is not None:
                             _tel.record_skills_loaded(inst.agent_class, _resolved_names, 'explicit')
-                # else: "none" mode + AUTO/default → no auto-matched skills (loaded_skills stays [])
+                # else: "none" mode + AUTO/default -> no auto-matched skills (loaded_skills stays [])
 
-                # (2) Self-Augmentation — gated by the GLOBAL "Enable skills" toggle
+                # (2) Self-Augmentation - gated by the GLOBAL "Enable skills" toggle
                 #     (global_skills_enabled), INDEPENDENT of the per-call load_skill arg.
                 #     It is the meta-skill that enables runtime discovery and must be
                 #     present whenever skills are globally ON, even if this call passed
@@ -376,7 +343,7 @@ class SystemAgentMixin:
                     ('self-augmentation', self_augmentation_instructions) not in loaded_skills):
                     loaded_skills.append(('self-augmentation', self_augmentation_instructions))
                     # Telemetry: capture Self-Augmentation (init path only). The restore/
-                    # runner paths record it in _inject_self_augmentation_skill instead —
+                    # runner paths record it in _inject_self_augmentation_skill instead -
                     # these are mutually exclusive, so each injection is counted once.
                     _tel = getattr(self.pool, 'telemetry', None)
                     if _tel is not None:
@@ -384,16 +351,16 @@ class SystemAgentMixin:
 
             # Inject skills into system message using general-purpose helper.
             # When the global toggle is OFF (global_skills_enabled False),
-            # loaded_skills stays empty → nothing is injected.
+            # loaded_skills stays empty -> nothing is injected.
             _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
             # Record this run's resolved skill names on the instance so the
             # in-loop auto-skill trigger can render them in the reflection prompt
-            # (plan §2.3). Recall path leaves it unset → prompt renders "(none)".
+            # (plan 2.3). Recall path leaves it unset -> prompt renders "(none)".
             # Merge prior (conversation-derived) names with this run's resolved skills so a
-            # restored / externally-loaded instance — whose conversation already holds prior
-            # runtime-injected skill user-messages — doesn't lose them on overwrite. A
-            # brand-new instance has an empty conversation → prior == [] → byte-identical to
+            # restored / externally-loaded instance - whose conversation already holds prior
+            # runtime-injected skill user-messages - doesn't lose them on overwrite. A
+            # brand-new instance has an empty conversation -> prior == [] -> byte-identical to
             # before this change (resolved only, or None when nothing resolved). The merge is a
             # shared helper so the exact expression is unit-testable in isolation.
             inst._loaded_skill_names = _merge_loaded_skill_names(
@@ -401,16 +368,41 @@ class SystemAgentMixin:
 
         # Write augmented context (with advisor notes) into a COPY of args so
         # build_task_message picks it up without mutating the caller's dict.
-        # Only on fresh instances — recall preserves the original task message verbatim.
-        if _advisor_task_notes and not _is_recall:
+        # Only on fresh instances - recall preserves the original task message verbatim.
+        if advisor_task_notes and not _is_recall:
             args = dict(args)
             args['context'] = context_text
 
-        # Build task message using lifecycle manager
-        task_msg = self.lifecycle.build_task_message(args, caller)
+        return sys_msg, args
 
-        # Phase 4.1: Delegate to lifecycle manager for conversation
-        # initialization
+    def _build_system_task_message(self, inst: AgentInstance, task_args: dict, caller: str):
+        """Build a system-agent task message and apply Security run identity."""
+        task_msg = self.lifecycle.build_task_message(task_args, caller)
+        if inst.agent_class == 'Security':
+            task_msg = _with_run_identity(self.pool, task_msg, caller)
+        return task_msg
+
+    def _boot_system_agent(self, inst: AgentInstance, instance_name: str, agent_class: str,
+                           caller: str, conv: list, nest_depth: int = 0) -> None:
+        """Shared active-stack, WebUI, and stream boot for system agents."""
+        append = getattr(self.pool, 'active_stack_append', None)
+        if append is not None:
+            append(instance_name, nest_depth)
+        else:
+            # Minimal test doubles expose only the raw stack; the real pool always
+            # has active_stack_append. Same lock/append semantics either way.
+            with self.pool._execution._state_lock:
+                self.pool._execution.active_stack.append((instance_name, nest_depth))
+        self._update_webui_state(instance_name, agent_class, inst, conv, final_resp=[], is_initial=True)
+        self.stream_publisher.push_initial_state(inst, caller)
+
+    def _initialize_child_run(self, inst: AgentInstance, instance_name: str, args: dict,
+                              caller: str, sys_msg, is_reuse: bool, session_was_loaded: bool,
+                              agent_class: str) -> list:
+        """Build the task message, initialize conversation, and boot the child."""
+        # Generic call_agent children keep the original builder call (no Security
+        # run-identity relocation here; that gate belongs to the system-agent paths).
+        task_msg = self.lifecycle.build_task_message(args, caller)
         conv = self.lifecycle.initialize_conversation(inst,
                                                       sys_msg,
                                                       task_msg,
@@ -418,27 +410,218 @@ class SystemAgentMixin:
                                                       instance_name,
                                                       inst.agent_class,
                                                       from_external_load=session_was_loaded)
-
-        # Phase 4.1: Delegate to lifecycle manager for settings propagation
         self.lifecycle.propagate_settings(inst, caller, inst.agent_class, call_agent_args=args)
+        self._boot_system_agent(inst, instance_name, agent_class, caller, conv,
+                                nest_depth=getattr(inst, '_nest_depth', 0))
+        return conv
 
-        # Track in active stack with depth info (thread-safe via RLock)
-        with self.pool._execution._state_lock:
-            self.pool._execution.active_stack.append((instance_name, inst._nest_depth))
+    def _stream_child_run(self, inst: AgentInstance, instance_name: str, conv: list) -> Tuple[list, Optional[tuple]]:
+        """Run the child loop and stream throttled updates; return final response + state."""
+        final_resp = []
+        _update_counter = 0
+        _last_sub_send = 0.0
+        _sub_last_resp_len = 0
+        _last_tick_suppressed = False  # FIX A: True if the most recent loop tick was throttled out (its state never reached the UI)
+        _tick_num = 0
 
-        # Item 12: Initialize sub-agent WebUI state before execution begins
+        if self.pool.is_instance_terminated(instance_name):
+            logger.info('instance %s terminated before execution - skipping', instance_name)
+            # Clear leftover queued messages to prevent accumulation
+            q = self.pool.message_queues.get(instance_name)
+            if q:
+                q.clear()
+            return [], None
+
+        # Hoisted from the loop below: importing at module level would create a
+        # circular dependency (api_integration_pkg.runner -> execution_engine facade
+        # -> engine.core, which is still mid-load). Importing once here - outside the
+        # per-tick loop - avoids re-executing the import on every iteration while
+        # staying cycle-safe. Imports directly from streaming.py to skip the
+        # api_integration facade re-export chain.
+        from agent_cascade.api_integration_pkg.streaming import broadcast_stream_update
+
+        _run_gen = self.run(inst)
+        try:
+            for resp in _run_gen:
+                now_mono = time.monotonic()  # Single clock read per tick (probe timing + throttle)
+                # Inner run() loop handles compression-halt via cooperative wait at Site 3.
+                # Only break here on terminal stops (which cause run() to yield final state and end).
+                if self._is_terminal_stop(instance_name):
+                    break
+
+                # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from
+                # engine.run()
+                # engine.run() yields tuples like (List[Message], bool), but we
+                # only need the message list
+                if isinstance(resp, tuple) and len(resp) == 2:
+                    final_resp, is_streaming_tick = resp
+                else:
+                    final_resp, is_streaming_tick = resp, False
+
+                # Item 12: Throttled sub-agent WebUI state update (every 5
+                # turns) - Fix
+                _update_counter += 1
+                if _update_counter % 5 == 0:
+                    # Issue Y2: Use shared helper method instead of duplicated
+                    # logic
+                    current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                    self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
+
+                # -- Push stream_update to frontend during sub-agent execution --
+                _last_sub_send, _sub_last_resp_len = broadcast_stream_update(
+                    pool=self.pool,
+                    instance_name=instance_name,
+                    turn_output=final_resp,
+                    is_streaming_tick=is_streaming_tick,
+                    tick_num=_tick_num,
+                    now_sec=now_mono,
+                    last_send=_last_sub_send,
+                    last_resp_len=_sub_last_resp_len,
+                    yield_time=now_mono,
+                )
+                # FIX A: a suppressed tick returns its (stale) last_send unchanged, while a real
+                # broadcast returns now_sec (= now_mono). Compare against the current tick's own
+                # timestamp so detection is robust even if two consecutive sends land on the same
+                # monotonic resolution tick (avoids a false "suppressed" -> spurious extra frame).
+                _last_tick_suppressed = (_last_sub_send != now_mono)
+                _tick_num += 1
+        finally:
+            # Deterministic generator cleanup: close() forces the suspended
+            # run() generator to unwind its exit finally (RUNNING->IDLE), so
+            # the child instance is never left in RUNNING state. Idempotent.
+            # Guard with hasattr: engine.run() may be mocked in tests to return a
+            # plain iterator (no .close()); only real generators need closing.
+            try:
+                if hasattr(_run_gen, 'close'):
+                    _run_gen.close()
+            except RuntimeError:
+                pass  # Already closed/exhausted
+
+        return final_resp, (_last_sub_send, _sub_last_resp_len, _last_tick_suppressed, _tick_num)
+
+    def _finalize_child_run(self, inst: AgentInstance, instance_name: str, conv: list,
+                            final_resp: list, stream_state: tuple, caller: str) -> None:
+        """Emit final WebUI/stream state and refresh the caller panel."""
+        from agent_cascade.api_integration_pkg.streaming import broadcast_stream_update
+
+        _last_sub_send, _sub_last_resp_len, _last_tick_suppressed, _tick_num = stream_state
+        self._create_completed = True  # Mark for finally-block EXIT log reason tracking
+
+        # Item 12: Always emit final sub-agent state after loop completes
         # (Fix
+        # Ensures even short-lived agents (<5 turns) appear in the WebUI
         # Issue Y2: Use shared helper method instead of duplicated logic
-        self._update_webui_state(instance_name, inst.agent_class, inst, conv, final_resp=[], is_initial=True)
+        current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+        self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
-        # Phase 4.4: Delegate to StreamPublisher for WebSocket push
-        self.stream_publisher.push_initial_state(inst, caller)
+        # -- Push final stream_update after sub-agent completes ---------------
+        # FIX A (turn-end frame dedup): the old code forced last_send=0.0 so the
+        # throttle check `(now - 0.0 > 0.1)` was ALWAYS true -> an unconditional
+        # full frame even when the last loop tick had just delivered one <100ms ago.
+        # That produced a same-timestamp duplicate of the final committed state.
+        #
+        # Safe conditional: only emit a final sub-agent frame when it is NOT already
+        # covered by the most recent loop broadcast. need_final is True when ANY of:
+        #   (a) the last loop tick was SUPPRESSED (_last_tick_suppressed) - its committed
+        #       state never reached the UI, so we MUST deliver it now even if <100ms have
+        #       passed since the previous actual send (guards the message-loss regression
+        #       on fast turns that finish right after a throttled tick), OR
+        #   (b) >=100ms elapsed since the last ACTUAL send - the throttle window has opened,
+        #       so the current state is fresh enough to warrant a frame, OR
+        #   (c) the response length changed vs. what the last tick reported - a new committed
+        #       message not yet broadcast.
+        # When need_final is False the loop already delivered an equivalent final state <100ms
+        # ago and nothing has changed since, so we skip to avoid the spurious duplicate frame.
+        #
+        # We pass the REAL tracked values (_last_sub_send / _sub_last_resp_len), NOT 0.0:
+        # if the last tick JUST sent (<100ms) and len is unchanged and it was not suppressed,
+        # need_final is False -> skip; if it was suppressed or throttled out, we send.
+        # (broadcast_stream_update re-evaluates the same condition internally with these real
+        # values, so no double-send can occur.)
+        now_mono = time.monotonic()
+        need_final = (_last_tick_suppressed or ((now_mono - _last_sub_send) > 0.1) or
+                      (len(final_resp) != _sub_last_resp_len))
+        if need_final:
+            broadcast_stream_update(
+                pool=self.pool,
+                instance_name=instance_name,
+                turn_output=final_resp,
+                is_streaming_tick=False,
+                tick_num=_tick_num,
+                now_sec=now_mono,
+                last_send=_last_sub_send,
+                last_resp_len=_sub_last_resp_len,
+            )
 
+        # Root/caller panel refresh - KEEP (do NOT remove). While the parent is
+        # suspended inside the child's tool call it has no other immediate update path,
+        # so this is the only thing that refreshes the ROOT panel after the child completes.
+        # NOTE: push_final_state targets a DIFFERENT instance (instance_name=caller, full
+        # pool snapshot) than the sub-agent final frame above (instance_name=<sub>), so it
+        # is NOT a same-timestamp duplicate of that frame - no stagger needed. The measured
+        # "same timestamp" pair was queue-level; per-instance there is never a collision.
+        self.stream_publisher.push_final_state(inst, caller)
+
+    def _create_and_run_agent(self,
+                              agent_class: str,
+                              instance_name: str,
+                              args: dict,
+                              caller: str,
+                              nest_depth: int = 0,
+                              force_fresh: bool = False) -> tuple:
+        """Create an AgentInstance and run it through the unified loop.
+
+        Shared helper used by both sync and parallel call_agent paths.
+        Creates the instance, builds system + task messages, logs them,
+        tracks in active_stack, and runs engine.run(inst).
+
+        Returns:
+            Tuple of (AgentInstance, conversation history).
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
+            force_fresh: If True, always create new instance even if inactive one exists.
+                        Used for Security/Compressor agents that should start fresh each time.
+        """
+        self._create_completed = False  # Reset for this execution cycle
+
+        logger.debug(
+            '[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY - target=%s, class=%s, caller=%s, '
+            'nest_depth=%d, force_fresh=%s', instance_name, agent_class, caller, nest_depth, force_fresh)
+
+        # BUG FIX (Bug 2): Extract log_file from args and pass through the
+        # chain
+        log_file = args.get('log_file')
+
+        # -- Skill Advisor gate (AUTO Skill Helper - Advanced mode) -----------
+        # Runs BEFORE find_or_create_instance() so a DENY never allocates a child.
+        advisor_recommended_skills, advisor_task_notes, denied = self._run_skill_advisor_gate(
+            agent_class, instance_name, args, caller, force_fresh, log_file)
+        if denied is not None:
+            return denied
+
+        # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
+        inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(agent_class,
+                                                                                    instance_name,
+                                                                                    caller,
+                                                                                    nest_depth,
+                                                                                    force_fresh,
+                                                                                    log_file=log_file)
+
+        # -- System message + skills handling ---------------------------------
+        sys_msg, args = self._prepare_child_system_message(
+            inst, instance_name, args, is_reuse, session_was_loaded,
+            advisor_recommended_skills, advisor_task_notes)
+
+        conv = self._initialize_child_run(inst, instance_name, args, caller, sys_msg,
+                                          is_reuse, session_was_loaded, inst.agent_class)
+
+        final_resp = []
         try:
             # Telemetry: track sub-agent call latency (non-blocking)
             _call_start = time.perf_counter()
 
-            # Execute through unified loop — push stream_update events so the
+            # Execute through unified loop - push stream_update events so the
             # frontend sees sub-agent tab updates independently of main agent
             # flow.
             # Without this, the main streaming loop is blocked during tool
@@ -446,90 +629,9 @@ class SystemAgentMixin:
             # and no WebSocket events arrive until the sub-agent finishes.
             logger.debug('starting engine.run() for %s', instance_name)
 
-            final_resp = []
-            _update_counter = 0
-            _last_sub_send = 0.0
-            _sub_last_resp_len = 0
-            _last_tick_suppressed = False  # FIX A: True if the most recent loop tick was throttled out (its state never reached the UI)
-            _tick_num = 0
-
-            # Bug
-            if self.pool.is_instance_terminated(instance_name):
-                logger.info('instance %s terminated before execution - skipping', instance_name)
-                # Clear leftover queued messages to prevent accumulation
-                q = self.pool.message_queues.get(instance_name)
-                if q:
-                    q.clear()
+            final_resp, stream_state = self._stream_child_run(inst, instance_name, conv)
+            if stream_state is None:
                 return inst, []
-
-            # Bind the generator so we can close it deterministically on early
-            # break (same pattern as core.py:691-692). Without close(), a break
-            # on terminal stop leaves run() suspended before its exit finally,
-            # so the child stays RUNNING and any re-entry trips the L1 guard.
-            # Hoisted from the loop below: importing at module level would create a
-            # circular dependency (api_integration_pkg.runner → execution_engine facade
-            # → engine.core, which is still mid-load). Importing once here — outside the
-            # per-tick loop — avoids re-executing the import on every iteration while
-            # staying cycle-safe. Imports directly from streaming.py to skip the
-            # api_integration facade re-export chain.
-            from agent_cascade.api_integration_pkg.streaming import broadcast_stream_update
-
-            _run_gen = self.run(inst)
-            try:
-                for resp in _run_gen:
-                    now_mono = time.monotonic()  # Single clock read per tick (probe timing + throttle)
-                    # Inner run() loop handles compression-halt via cooperative wait at Site 3.
-                    # Only break here on terminal stops (which cause run() to yield final state and end).
-                    if self._is_terminal_stop(instance_name):
-                        break
-
-                    # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from
-                    # engine.run()
-                    # engine.run() yields tuples like (List[Message], bool), but we
-                    # only need the message list
-                    if isinstance(resp, tuple) and len(resp) == 2:
-                        final_resp, is_streaming_tick = resp
-                    else:
-                        final_resp, is_streaming_tick = resp, False
-
-                    # Item 12: Throttled sub-agent WebUI state update (every 5
-                    # turns) — Fix
-                    _update_counter += 1
-                    if _update_counter % 5 == 0:
-                        # Issue Y2: Use shared helper method instead of duplicated
-                        # logic
-                        current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-                        self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
-
-                    # ── Push stream_update to frontend during sub-agent execution ──
-                    _last_sub_send, _sub_last_resp_len = broadcast_stream_update(
-                        pool=self.pool,
-                        instance_name=instance_name,
-                        turn_output=final_resp,
-                        is_streaming_tick=is_streaming_tick,
-                        tick_num=_tick_num,
-                        now_sec=now_mono,
-                        last_send=_last_sub_send,
-                        last_resp_len=_sub_last_resp_len,
-                        yield_time=now_mono,
-                    )
-                    # FIX A: a suppressed tick returns its (stale) last_send unchanged, while a real
-                    # broadcast returns now_sec (= now_mono). Compare against the current tick's own
-                    # timestamp so detection is robust even if two consecutive sends land on the same
-                    # monotonic resolution tick (avoids a false "suppressed" → spurious extra frame).
-                    _last_tick_suppressed = (_last_sub_send != now_mono)
-                    _tick_num += 1
-            finally:
-                # Deterministic generator cleanup: close() forces the suspended
-                # run() generator to unwind its exit finally (RUNNING→IDLE), so
-                # the child instance is never left in RUNNING state. Idempotent.
-                # Guard with hasattr: engine.run() may be mocked in tests to return a
-                # plain iterator (no .close()); only real generators need closing.
-                try:
-                    if hasattr(_run_gen, 'close'):
-                        _run_gen.close()
-                except RuntimeError:
-                    pass  # Already closed/exhausted
 
             # FIX MSG_COUNT_BUG: Removed conv.extend(final_resp) to prevent
             # duplicate messages.
@@ -537,66 +639,11 @@ class SystemAgentMixin:
             # engine.run() via _process_response().
             # Note: For new instances, rebuild_conversation() creates a copy of
             # conv, so they are NOT the same
-            # reference — only reused instances share the same list. Extending
+            # reference - only reused instances share the same list. Extending
             # again would cause duplication
             # regardless. See: .agent_lessons/lessons_msg_count_bug.md for
             # detailed analysis.
-            self._create_completed = True  # Mark for finally-block EXIT log reason tracking
-
-            # Item 12: Always emit final sub-agent state after loop completes
-            # (Fix
-            # Ensures even short-lived agents (<5 turns) appear in the WebUI
-            # Issue Y2: Use shared helper method instead of duplicated logic
-            current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-            self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
-
-            # ── Push final stream_update after sub-agent completes ──────────────
-            # FIX A (turn-end frame dedup): the old code forced last_send=0.0 so the
-            # throttle check `(now - 0.0 > 0.1)` was ALWAYS true → an unconditional
-            # full frame even when the last loop tick had just delivered one <100ms ago.
-            # That produced a same-timestamp duplicate of the final committed state.
-            #
-            # Safe conditional: only emit a final sub-agent frame when it is NOT already
-            # covered by the most recent loop broadcast. need_final is True when ANY of:
-            #   (a) the last loop tick was SUPPRESSED (_last_tick_suppressed) — its committed
-            #       state never reached the UI, so we MUST deliver it now even if <100ms have
-            #       passed since the previous actual send (guards the message-loss regression
-            #       on fast turns that finish right after a throttled tick), OR
-            #   (b) >=100ms elapsed since the last ACTUAL send — the throttle window has opened,
-            #       so the current state is fresh enough to warrant a frame, OR
-            #   (c) the response length changed vs. what the last tick reported — a new committed
-            #       message not yet broadcast.
-            # When need_final is False the loop already delivered an equivalent final state <100ms
-            # ago and nothing has changed since, so we skip to avoid the spurious duplicate frame.
-            #
-            # We pass the REAL tracked values (_last_sub_send / _sub_last_resp_len), NOT 0.0:
-            # if the last tick JUST sent (<100ms) and len is unchanged and it was not suppressed,
-            # need_final is False → skip; if it was suppressed or throttled out, we send.
-            # (broadcast_stream_update re-evaluates the same condition internally with these real
-            # values, so no double-send can occur.)
-            now_mono = time.monotonic()
-            need_final = (_last_tick_suppressed or ((now_mono - _last_sub_send) > 0.1) or
-                          (len(final_resp) != _sub_last_resp_len))
-            if need_final:
-                broadcast_stream_update(
-                    pool=self.pool,
-                    instance_name=instance_name,
-                    turn_output=final_resp,
-                    is_streaming_tick=False,
-                    tick_num=_tick_num,
-                    now_sec=now_mono,
-                    last_send=_last_sub_send,
-                    last_resp_len=_sub_last_resp_len,
-                )
-
-            # Root/caller panel refresh — KEEP (do NOT remove). While the parent is
-            # suspended inside the child's tool call it has no other immediate update path,
-            # so this is the only thing that refreshes the ROOT panel after the child completes.
-            # NOTE: push_final_state targets a DIFFERENT instance (instance_name=caller, full
-            # pool snapshot) than the sub-agent final frame above (instance_name=<sub>), so it
-            # is NOT a same-timestamp duplicate of that frame — no stagger needed. The measured
-            # "same timestamp" pair was queue-level; per-instance there is never a collision.
-            self.stream_publisher.push_final_state(inst, caller)
+            self._finalize_child_run(inst, instance_name, conv, final_resp, stream_state, caller)
 
         finally:
             # Telemetry: record agent instance call (non-blocking, fires in
@@ -613,7 +660,7 @@ class SystemAgentMixin:
                 except Exception:
                     pass
 
-            # Always clean up active stack — even on halt or error
+            # Always clean up active stack - even on halt or error
             with self.pool._execution._state_lock:
                 for i, (name, _depth) in enumerate(self.pool._execution.active_stack):
                     if name == instance_name:
@@ -623,7 +670,7 @@ class SystemAgentMixin:
             # Determine exit reason for debugging
             _completed = getattr(self, '_create_completed', False)
             logger.debug(
-                '[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=%s, reason=%s, '
+                '[CALL_AGENT_DEBUG] _create_and_run_agent EXIT - target=%s, reason=%s, '
                 'inst_type=%s, conv_len=%d, final_resp_len=%d', instance_name, 'completed' if _completed else 'aborted',
                 type(inst).__name__, len(conv),
                 len(final_resp) if 'final_resp' in locals() else 0)
@@ -634,7 +681,7 @@ class SystemAgentMixin:
         # list(new_messages),
         # so the original `conv` from initialize_conversation never receives
         # appended messages.
-        # For reused instances, they happen to be the same reference — but
+        # For reused instances, they happen to be the same reference - but
         # using inst.conversation
         # is correct in both cases. See: investigation report for sub-agent
         # response propagation bug.
@@ -690,9 +737,7 @@ class SystemAgentMixin:
         # __init__), NOT on the pool — a real AgentPool has no `lifecycle` attribute. (An earlier
         # v2 draft called self.pool.lifecycle here and crashed at runtime on a real shell_cmd
         # security check; test fixtures masked it by stubbing pool.lifecycle.)
-        task_msg = self.lifecycle.build_task_message({'task': task, 'context': context}, caller)
-        if inst.agent_class == 'Security':
-            task_msg = _with_run_identity(self.pool, task_msg, caller)
+        task_msg = self._build_system_task_message(inst, {'task': task, 'context': context}, caller)
 
         # Initialize conversation using lifecycle manager (pass actual is_reuse
         # value)
@@ -707,15 +752,8 @@ class SystemAgentMixin:
         # Phase 4.1: Propagate settings from caller to system agent
         self.lifecycle.propagate_settings(inst, caller, inst.agent_class)
 
-        # Track in active stack (thread-safe)
-        self.pool.active_stack_append(instance_name, 0)
-
-        # Initialize WebUI state for immediate tab visibility
-        # Issue Y2: Use shared helper method instead of duplicated logic
-        self._update_webui_state(instance_name, inst.agent_class, inst, conv, final_resp=[], is_initial=True)
-
-        # Phase 4.4: Delegate to StreamPublisher for WebSocket push
-        self.stream_publisher.push_initial_state(inst, caller)
+        # Shared active-stack / WebUI / stream boot (mirrors the fresh and reuse paths)
+        self._boot_system_agent(inst, instance_name, inst.agent_class, caller, conv, nest_depth=0)
 
         # System-invoked agents have no human in the loop for shell approval. Keep shell_cmd
         # AVAILABLE but restrict it to read-only/auto-approved commands: safe commands
@@ -1004,15 +1042,11 @@ class SystemAgentMixin:
             # a fresh and a reused Security instance get an identical conversation[1] shape.
             # build_task_message is on the engine's lifecycle (self.lifecycle), not the pool — see
             # the matching NOTE in _create_system_agent above.
-            task_msg = self.lifecycle.build_task_message({'task': task, 'context': context}, caller)
-            if inst.agent_class == 'Security':
-                task_msg = _with_run_identity(self.pool, task_msg, caller)
+            task_msg = self._build_system_task_message(inst, {'task': task, 'context': context}, caller)
             inst.append_message(task_msg)
 
             # ── UI / stream bookkeeping (mirrors _create_system_agent) ────────────────────────
-            pool.active_stack_append(instance_name, 0)
-            self._update_webui_state(instance_name, agent_class, inst, inst.conversation, final_resp=[], is_initial=True)
-            self.stream_publisher.push_initial_state(inst, caller)
+            self._boot_system_agent(inst, instance_name, agent_class, caller, inst.conversation, nest_depth=0)
 
             # Drop the warm instance's cached serialization/version so the first frame of the new
             # run re-serializes from the freshly-reset conversation (stale tail / version otherwise

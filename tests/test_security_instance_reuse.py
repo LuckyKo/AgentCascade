@@ -1977,10 +1977,16 @@ class TestT3RelocationCorrectness:
         """
         import inspect
         from agent_cascade.engine import core as core_mod
+        from agent_cascade.engine.system_agent import SystemAgentMixin
+        # Phase 3b: both task sites now delegate to the shared builder, which is
+        # the single home of the Security-only gate.
+        src = inspect.getsource(SystemAgentMixin._build_system_task_message)
+        assert "inst.agent_class == 'Security'" in src, (
+            '_build_system_task_message must gate the ## Run Identity relocation on Security only')
         for method_name in ('_create_system_agent', '_acquire_reusable_system_agent'):
             src = inspect.getsource(getattr(core_mod.ExecutionEngine, method_name))
-            assert "agent_class == 'Security'" in src, (
-                f'{method_name} must gate the ## Run Identity relocation on Security only')
+            assert '_build_system_task_message' in src, (
+                f'{method_name} must use the shared Security-gated task builder')
 
     def test_compressor_fresh_spawn_task_message_has_no_run_identity(self):
         """Behavioral (plan §8 T3): drive the REAL fresh-spawn path for a Compressor and assert its
