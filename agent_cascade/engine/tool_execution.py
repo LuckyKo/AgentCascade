@@ -328,52 +328,13 @@ class ToolExecMixin:
                 executed_tools.append(tool_name)
 
         finally:
-            # Safety net (plan §10.4): guarantee a still-pending deferred parent restore is NOT LOST when the
-            # batch loop exits BEFORE processing the last call_agent — the terminal-stop break, the
-            # compression-wait break, and the AgentTerminatedError raise, all of which bypass the
-            # orphan-handling block below. Two conditions, both required:
-            #   • reached_last_ca is False — the loop exited BEFORE processing the batch's last call_agent.
-            #     If it DID reach it, the correct end-of-batch handling already ran (a SYNC last child did its
-            #     full restore; an ASYNC last child intentionally leaves the label to self-heal at the next
-            #     _setup_turn — forcing a restore here would be the wasted swap-in §10.5 rules out).
-            #   • a still-pending _state_label — the detector for "no full restore has run yet". On the
-            #     normal SYNC path the last child's restore already cleared it, so this no-ops.
-            # tolerate_failure=True swallows a SlotCancelled/TimeoutError so a clean stop is not corrupted by a
-            # raise from finally; respect_toggle=False matches the sync-child finally (the toggle branch would
-            # clear the label and skip the restore). The forced call hits reacquire_for's already-held fast-path,
-            # so it cannot double-acquire.
-            if ran_ca and not reached_last_ca:
-                parent_inst = self.pool.get_instance(inst_name) or instance
-                if parent_inst is not None and getattr(parent_inst, '_state_label', None) is not None:
-                    logger.debug(
-                        f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last call_agent; "
-                        f"forcing the deferred parent restore")
-                    self.reacquire_after_slot_yield(
-                        parent_inst, inst_name, 'parallel-call-agent safety net', tolerate_failure=True,
-                        respect_toggle=False)
-
-            # Media-gen safety net (same polarity as the call_agent net above): a media_gen batch that saved
-            # on its first call but exited before processing the last one (terminal-stop break / compression
-            # break / AgentTerminatedError raise) would otherwise leak a pending _state_label and cold-reload.
-            # The media_gen seam never releases the engine slot, so there is no reacquire to do — only the
-            # deferred KV restore. restore_held_slot_state is defensive (never raises) and targets the held
-            # endpoint live; passing the stable label makes it independent of a system agent (e.g. an auto-ask
-            # security advisor) consuming ``_state_label`` inside an approval window — see the label contract
-            # documented on state_ops.restore_held_slot_state.
-            # GATE POLARITY: for the media net the LABEL gate is load-bearing — the last call's own restore
-            # clears _state_label on every success/skip path, so the net no-ops on a completed batch. The
-            # flow-marker gate (not reached_last_mg) is belt-and-suspenders (unlike the call_agent net, where
-            # an ASYNC last child intentionally leaves the label and the flow marker is the only guard).
-            # ORDERING: this net runs AFTER the call_agent net above, which clears the shared _state_label on
-            # success. In a mixed batch where the call_agent net already forced the restore, the _state_label
-            # gate here is None and this net correctly no-ops (one restore total).
-            if ran_mg and not reached_last_mg:
-                mg_inst = self.pool.get_instance(inst_name) or instance
-                if mg_inst is not None and getattr(mg_inst, '_state_label', None) is not None:
-                    logger.debug(
-                        f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last media_gen; "
-                        f"forcing the deferred KV restore")
-                    self._restore_held_slot_state(mg_inst, inst_name, label=inst_name)
+            # Guarantee a still-pending deferred parent/KV restore is NOT lost when the batch
+            # loop exits early (terminal-stop break / compression break / AgentTerminatedError raise),
+            # all of which bypass the orphan-handling block below. The call_agent net runs FIRST, then
+            # the media_gen net; both gate on their ran_*/reached_last_* markers plus a still-pending
+            # _state_label. Full gate rationale lives in _run_deferred_state_restore_safety_nets.
+            self._run_deferred_state_restore_safety_nets(
+                instance, inst_name, ran_ca, reached_last_ca, ran_mg, reached_last_mg)
 
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────
@@ -510,6 +471,68 @@ class ToolExecMixin:
             if tools_processed > 0:
                 logger.warning(
                     f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+
+    def _run_deferred_state_restore_safety_nets(self, instance: AgentInstance, inst_name: str,
+                                               ran_ca: bool, reached_last_ca: bool,
+                                               ran_mg: bool, reached_last_mg: bool) -> None:
+        """Run the deferred state-restore safety nets for a tool batch.
+
+        Called from the loop's ``finally`` (after the loop, before orphan handling) so a
+        still-pending deferred restore is NOT lost when the batch loop exits early. The
+        call_agent net runs FIRST, then the media_gen net (ordering matters: the call_agent
+        net clears the shared ``_state_label`` on success, so a mixed batch performs exactly
+        one restore).
+
+        Bare-instance safety: neither net calls ``reacquire_after_slot_yield`` /
+        ``_restore_held_slot_state`` unless its ``ran_*`` marker is true, so a batch that
+        contained no call_agent / media_gen never touches slot machinery.
+        """
+        # Safety net (plan §10.4): guarantee a still-pending deferred parent restore is NOT LOST when the
+        # batch loop exits BEFORE processing the last call_agent — the terminal-stop break, the
+        # compression-wait break, and the AgentTerminatedError raise, all of which bypass the
+        # orphan-handling block below. Two conditions, both required:
+        #   • reached_last_ca is False — the loop exited BEFORE processing the batch's last call_agent.
+        #     If it DID reach it, the correct end-of-batch handling already ran (a SYNC last child did its
+        #     full restore; an ASYNC last child intentionally leaves the label to self-heal at the next
+        #     _setup_turn — forcing a restore here would be the wasted swap-in §10.5 rules out).
+        #   • a still-pending _state_label — the detector for "no full restore has run yet". On the
+        #     normal SYNC path the last child's restore already cleared it, so this no-ops.
+        # tolerate_failure=True swallows a SlotCancelled/TimeoutError so a clean stop is not corrupted by a
+        # raise from finally; respect_toggle=False matches the sync-child finally (the toggle branch would
+        # clear the label and skip the restore). The forced call hits reacquire_for's already-held fast-path,
+        # so it cannot double-acquire.
+        if ran_ca and not reached_last_ca:
+            parent_inst = self.pool.get_instance(inst_name) or instance
+            if parent_inst is not None and getattr(parent_inst, '_state_label', None) is not None:
+                logger.debug(
+                    f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last call_agent; "
+                    f"forcing the deferred parent restore")
+                self.reacquire_after_slot_yield(
+                    parent_inst, inst_name, 'parallel-call-agent safety net', tolerate_failure=True,
+                    respect_toggle=False)
+
+        # Media-gen safety net (same polarity as the call_agent net above): a media_gen batch that saved
+        # on its first call but exited before processing the last one (terminal-stop break / compression
+        # break / AgentTerminatedError raise) would otherwise leak a pending _state_label and cold-reload.
+        # The media_gen seam never releases the engine slot, so there is no reacquire to do — only the
+        # deferred KV restore. restore_held_slot_state is defensive (never raises) and targets the held
+        # endpoint live; passing the stable label makes it independent of a system agent (e.g. an auto-ask
+        # security advisor) consuming ``_state_label`` inside an approval window — see the label contract
+        # documented on state_ops.restore_held_slot_state.
+        # GATE POLARITY: for the media net the LABEL gate is load-bearing — the last call's own restore
+        # clears _state_label on every success/skip path, so the net no-ops on a completed batch. The
+        # flow-marker gate (not reached_last_mg) is belt-and-suspenders (unlike the call_agent net, where
+        # an ASYNC last child intentionally leaves the label and the flow marker is the only guard).
+        # ORDERING: this net runs AFTER the call_agent net above, which clears the shared _state_label on
+        # success. In a mixed batch where the call_agent net already forced the restore, the _state_label
+        # gate here is None and this net correctly no-ops (one restore total).
+        if ran_mg and not reached_last_mg:
+            mg_inst = self.pool.get_instance(inst_name) or instance
+            if mg_inst is not None and getattr(mg_inst, '_state_label', None) is not None:
+                logger.debug(
+                    f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last media_gen; "
+                    f"forcing the deferred KV restore")
+                self._restore_held_slot_state(mg_inst, inst_name, label=inst_name)
 
     def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
