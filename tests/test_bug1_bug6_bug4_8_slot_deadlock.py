@@ -296,7 +296,7 @@ class TestBug48SuspensionAwareExit:
         engine, pool = make_engine(inst)
         pool.settings.tail_sync_check_enabled = False
 
-        with patch('agent_cascade.engine.core.logger') as log_mock:
+        with patch('agent_cascade.engine.run_loop.logger') as log_mock:
             drive_run_to_exit(engine, inst, pool, suspended=True, outstanding=True)
 
         # Exactly ONE drain call: the pre-existing early-exit safety drain

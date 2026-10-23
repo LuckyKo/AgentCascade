@@ -115,7 +115,7 @@ class TestSoftModeContinues:
 class TestAbsoluteSafetyCeiling:
     def test_soft_mode_hard_stops_at_absolute_cap(self, monkeypatch):
         # Lower the ceiling for the test: 4 effectuated turns total (2 hard + 2 over).
-        monkeypatch.setattr('agent_cascade.engine.core.SOFT_TURN_LIMIT_ABSOLUTE_MAX', 4)
+        monkeypatch.setattr('agent_cascade.engine.run_loop.SOFT_TURN_LIMIT_ABSOLUTE_MAX', 4)
         script = [_tool_call_msg(i) for i in range(4)]
         llm, instance = _run_soft(2, script, soft=True)
 

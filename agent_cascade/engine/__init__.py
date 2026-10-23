@@ -10,6 +10,7 @@ sub-modules:
 - :mod:`agent_cascade.engine.memory_hint`      — memory-hint query/submit (MemoryHintMixin)
 - :mod:`agent_cascade.engine.placeholder_cache` — rolling arg/output cache (PlaceholderCacheMixin)
 - :mod:`agent_cascade.engine.response_pipeline` — response normalize/retry/log sync (ResponsePipelineMixin)
+- :mod:`agent_cascade.engine.run_loop`          — main turn loop and phase helpers (RunLoopMixin)
 - :mod:`agent_cascade.engine.slot_lifecycle`    — slot acquire/release/reacquire (SlotLifecycleMixin)
 - :mod:`agent_cascade.engine.sleep_wake`        — SLEEPING transitions/wakeups (SleepWakeMixin)
 - :mod:`agent_cascade.engine.system_agent`      — system-agent lifecycle/launch (SystemAgentMixin)
