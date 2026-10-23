@@ -536,9 +536,10 @@ class ToolExecMixin:
         """Assemble the final tool result with a consistent layout of warnings, output,
         and truncation (truncation/drain post-processing).
 
-        Called ONLY when a compression handler is present (the caller guards that check,
-        which also preserves the original's safety on the AgentTerminatedError / early-raise
-        paths where ``tool_result`` is never bound). Resolves truncation params from config,
+        Called ONLY when a compression handler is present (the caller guards that check).
+        ``tool_result`` is always bound at the call site (initialized to '' before the per-tool
+        try), so this runs safely even on the AgentTerminatedError / early-raise paths. Resolves
+        truncation params from config,
         gets ``base_dir`` from ``pool.operation_manager``, and uses agent-specific endpoint
         config (``api_router.get_llm_config`` with a ``pool.llm_cfg`` fallback) for the vision
         capability check. Assembles via ``_assemble_tool_result``; on failure, logs and falls
