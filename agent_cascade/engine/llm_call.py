@@ -18,6 +18,7 @@ import random
 import sys
 import time
 import traceback
+from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
@@ -79,6 +80,18 @@ SAMPLING_AND_LIMIT_KEYS = frozenset({
     'max_tokens',
 })
 
+
+@dataclass
+class _LLMCallState:
+    """Mutable per-call state shared across the extracted retry/stream
+    helpers. Holds the retry counters and the last accumulated output so
+    those helpers can share them without changing increment timing
+    (see the _abort_stream 'mutate-before-yield' contract). Purely mechanical.
+    """
+    retry_count: int = 0
+    loop_retry_count: int = 0
+    last_output: Optional[List[Message]] = None
+    error_already_yielded: bool = False
 
 class LLMCallMixin:
     """Mixin providing the LLM-call / retry / error-classification methods."""
@@ -430,10 +443,7 @@ class LLMCallMixin:
             Message objects or None for progress updates
         """
         inst_name = instance.instance_name
-        last_output = None
-        retry_count = 0
-        loop_retry_count = 0  # Dedicated counter for inner-loop retries (gated by pool.settings.retry_max_attempts)
-        error_already_yielded = False
+        state = _LLMCallState()
         _max_attempts = self.pool.settings.retry_max_attempts  # At least 1 retry to avoid instant failure
 
         # Phase 1: Fix A2 — absolute wall-clock deadline for this entire call (all
@@ -468,7 +478,7 @@ class LLMCallMixin:
             )
 
         try:
-            while retry_count < _max_attempts:
+            while state.retry_count < _max_attempts:
                 # Phase 1: Fix A2 — wall-clock deadline check. Placed at the TOP of the
                 # loop, OUTSIDE the inner try/except, so the yield+break below is NOT
                 # caught by the per-attempt `except Exception` (which would swallow it).
@@ -479,7 +489,7 @@ class LLMCallMixin:
                     yield Message(
                         role=ASSISTANT,
                         content=(f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
-                    error_already_yielded = True
+                    state.error_already_yielded = True
                     break
 
                 try:
@@ -563,10 +573,9 @@ class LLMCallMixin:
                         logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
                         # Increment counters BEFORE yield — ensures update even if
                         # consumer drops iterator mid-yield
-                        nonlocal last_output, retry_count, loop_retry_count
-                        last_output = None
-                        retry_count += 1
-                        loop_retry_count += 1
+                        state.last_output = None
+                        state.retry_count += 1
+                        state.loop_retry_count += 1
                         yield None  # Signal UI
 
                     # Engine-level streaming watchdog: detect mid-stream stalls at the
@@ -605,7 +614,7 @@ class LLMCallMixin:
                             _engine_first_output = False
                         _engine_last_output_time = _now
 
-                        last_output = output
+                        state.last_output = output
 
                         # Feed delta text to inner-loop detector (extracts new
                         # content from accumulated response)
@@ -663,7 +672,7 @@ class LLMCallMixin:
                                                 logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                             # Check dedicated loop retry budget
                                             # (gated by _max_attempts from pool.settings.retry_max_attempts)
-                                            if loop_retry_count >= _max_attempts:
+                                            if state.loop_retry_count >= _max_attempts:
                                                 raise CharacterRunDetected(
                                                     f"inner_loop_exhausted: retried {_max_attempts} times, "
                                                     f"giving up — last reason: {_ev['reason']}",
@@ -742,7 +751,7 @@ class LLMCallMixin:
                                          (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
                         if should_update:
                             with instance._compression_lock:
-                                self._update_streaming_responses(instance, last_output)
+                                self._update_streaming_responses(instance, state.last_output)
                             last_streaming_update_time = current_time
                             _chunks_since_last_update = 0
                             _chars_since_last_update = 0
@@ -772,14 +781,14 @@ class LLMCallMixin:
                         if should_update:
                             yield None
 
-                    if last_output is not None:
+                    if state.last_output is not None:
                         # Ensure any remaining in-flight tokens from the final burst are synced
                         if _chunks_since_last_update > 0:
                             with instance._compression_lock:
-                                self._update_streaming_responses(instance, last_output)
+                                self._update_streaming_responses(instance, state.last_output)
                         # Token counts captured at streaming layer via _on_usage callback.
                         # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=last_output)
+                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=state.last_output)
                         break
 
                     # Telemetry: record LLM call end for empty response before retrying (non-blocking)
@@ -798,7 +807,7 @@ class LLMCallMixin:
                     if not instance:
                         logger.error(f"[FALLBACK_COMPRESSION] Instance {inst_name} not found in pool. "
                                      f"Cannot compress after context-exceeded on '{fcr.failed_endpoint}'.")
-                        retry_count += 1
+                        state.retry_count += 1
                         continue
 
                     self._handle_fallback_compression_rounds(instance, inst_name, llm_messages, fcr)
@@ -839,9 +848,9 @@ class LLMCallMixin:
                     # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
                     # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
                     # is a local of this method, not a closure variable here.
-                    last_output = None
+                    state.last_output = None
 
-                    if retry_count >= _max_attempts:
+                    if state.retry_count >= _max_attempts:
                         # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
                         # retry_count for EVERY non-loop exception, so after _max_attempts
                         # failures retry_count == _max_attempts and the `while
@@ -875,14 +884,14 @@ class LLMCallMixin:
                             logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
                                          f"({inst_name}):\n{traceback.format_exc()}")
                         yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
-                        error_already_yielded = True
+                        state.error_already_yielded = True
                         break
 
                     # _abort_stream already increments retry_count before raising.
                     # For regular exceptions, increment if we haven't yet
                     # (retry_count==0).
-                    if retry_count == 0:
-                        retry_count += 1
+                    if state.retry_count == 0:
+                        state.retry_count += 1
                     else:
                         # Already incremented by _abort_stream OR previous round —
                         # check if we need another increment (only if _abort_stream
@@ -890,11 +899,11 @@ class LLMCallMixin:
                         # We know _abort_stream incremented if the error message
                         # contains our markers.
                         if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            retry_count += 1
+                            state.retry_count += 1
 
                         # Handle inner-loop detection: budget check and endpoint advancement
                         if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
+                            self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, _max_attempts)
 
                     # Classify error type using centralized policy (Phase 4a)
                     error_type = classify_error(e)
@@ -917,17 +926,17 @@ class LLMCallMixin:
                         if _is_stop:
                             logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
                                         f"is a terminal stop — no SYSTEM ERROR emitted")
-                            error_already_yielded = True
+                            state.error_already_yielded = True
                             break
                         error_msg = str(e).split('\n')[0] if e else 'Unknown error'
                         logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
                                        f"error: {summarize_exhaustion(e)}")
                         yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
-                        error_already_yielded = True
+                        state.error_already_yielded = True
                         break
 
                     # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
-                    backoff = calculate_backoff(retry_count, _retry_policy)
+                    backoff = calculate_backoff(state.retry_count, _retry_policy)
 
                     # Only claim "new endpoint" when cursor was actually advanced.
                     # Matches _handle_inner_loop_detection logic: character-run and max-token
@@ -940,13 +949,13 @@ class LLMCallMixin:
                     endpoint_str = ' with new endpoint' if advancing_endpoint else ''
 
                     logger.warning(
-                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
+                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {state.retry_count}/{_max_attempts}. "
                         f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
 
                     # Signal retry to UI before blocking on sleep (pass the error so the message
                     # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
                     # "Connection lost"; plan §3.5).
-                    yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff, error=e)
+                    yield self._make_retrying_message(instance, state.retry_count, _max_attempts, backoff, error=e)
 
                     # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
                     # no time left, abort now; otherwise cap the backoff to what remains so
@@ -957,7 +966,7 @@ class LLMCallMixin:
                             role=ASSISTANT,
                             content=(
                                 f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
-                        error_already_yielded = True
+                        state.error_already_yielded = True
                         break
                     # D-7: re-check stop before sleeping — a stop that did not
                     # close the generator would otherwise sleep and retry.
@@ -968,21 +977,21 @@ class LLMCallMixin:
                     if _terminal:
                         logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
                                     f"(error was: {summarize_exhaustion(e)})")
-                        error_already_yielded = True
+                        state.error_already_yielded = True
                         break
                     time.sleep(min(backoff, _remaining))
                     yield None
 
             # Final update before yielding results
-            if last_output is not None:
+            if state.last_output is not None:
                 with instance._compression_lock:
-                    self._update_streaming_responses(instance, last_output)
+                    self._update_streaming_responses(instance, state.last_output)
 
-            if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
-                if not error_already_yielded:
+            if not state.last_output or (isinstance(state.last_output, list) and len(state.last_output) == 0):
+                if not state.error_already_yielded:
                     yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
             else:
-                for msg in last_output:
+                for msg in state.last_output:
                     yield msg
         finally:
             # Turn-boundary cursor reset: the endpoint cursor is a transient
