@@ -814,173 +814,10 @@ class LLMCallMixin:
                     continue
 
                 except Exception as e:
-                    with instance._compression_lock:
-                        instance._streaming_responses = []
-
-                    # Handle AgentTerminatedError — clean abort signal from stop-checks during blocking ops.
-                    # This is NOT an error; exit cleanly without retry or error message.
-                    if isinstance(e, AgentTerminatedError):
-                        logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
-                        # Close the in-flight telemetry call so its latency is counted
-                        # (BUG_0128) — every other abort path in this loop records 'end'.
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
+                    _break = yield from self._handle_llm_retry_failure(
+                        instance, inst_name, e, state, _max_attempts, _retry_policy, _deadline)
+                    if _break:
                         break
-
-                    # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
-                    _is_termination_abort = (isinstance(e, RuntimeError) and len(e.args) >= 1 and e.args[0] and
-                                             'has been terminated' in str(e.args[0]))
-
-                    if _is_termination_abort:
-                        # Instance was terminated — abort LLM call cleanly without retry or error message.
-                        logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
-                        # Close the in-flight telemetry call (BUG_0128).
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
-                        break
-
-                    # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
-                    # holding the truncated accumulation. Reset it here — AFTER the termination/dismissal breaks
-                    # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
-                    # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
-                    # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
-                    # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
-                    # is a local of this method, not a closure variable here.
-                    state.last_output = None
-
-                    if state.retry_count >= _max_attempts:
-                        # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
-                        # retry_count for EVERY non-loop exception, so after _max_attempts
-                        # failures retry_count == _max_attempts and the `while
-                        # retry_count < _max_attempts` loop guard exits the loop — `>` was
-                        # therefore UNREACHABLE, and control fell through to the
-                        # `[SYSTEM ERROR: Empty LLM response]` branch with last_output=None.
-                        # Any plain-raising exception that exhausted the retry budget
-                        # (slot timeouts included) produced a useless message. `>=` makes
-                        # this informative terminal branch actually reachable.
-                        # Telemetry: record LLM call end for exhausted retries (non-blocking)
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
-                        # Give clearer message for loop detection failures
-                        if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
-                            display_msg = f"LLM generation loop detected (exceeded {_max_attempts} max attempts)"
-                        elif isinstance(e, CharacterRunDetected):
-                            display_msg = f"LLM generation loop detected (tried {_max_attempts} times)"
-                        elif isinstance(e, MaxTokenExceeded):
-                            display_msg = f"LLM exceeded token limit (tried {_max_attempts} times)"
-                        elif isinstance(e, ContextWindowExceeded):
-                            display_msg = f"LLM context window exceeded (tried {_max_attempts} times)"
-                        else:
-                            # Terminal LLM failure — build a human-readable, multi-line message from
-                            # the router's structured .endpoint_failures (plan §3.4). The log line uses
-                            # a compact digest so the full concatenated stack dumps are never re-printed.
-                            display_msg = build_terminal_message(e, _max_attempts)
-                        logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} "
-                                     f"retry attempts: {summarize_exhaustion(e)}")
-                        # Deduped full traceback at DEBUG — this is the user-visible failure point.
-                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
-                            logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
-                                         f"({inst_name}):\n{traceback.format_exc()}")
-                        yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
-                        state.error_already_yielded = True
-                        break
-
-                    # _abort_stream already increments retry_count before raising.
-                    # For regular exceptions, increment if we haven't yet
-                    # (retry_count==0).
-                    if state.retry_count == 0:
-                        state.retry_count += 1
-                    else:
-                        # Already incremented by _abort_stream OR previous round —
-                        # check if we need another increment (only if _abort_stream
-                        # didn't do it).
-                        # We know _abort_stream incremented if the error message
-                        # contains our markers.
-                        if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            state.retry_count += 1
-
-                        # Handle inner-loop detection: budget check and endpoint advancement
-                        if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, _max_attempts)
-
-                    # Classify error type using centralized policy (Phase 4a)
-                    error_type = classify_error(e)
-
-                    # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
-                    # Skip for fatal errors — they have their own end call below
-                    if error_type != 'fatal':
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-
-                    if error_type == 'fatal':
-                        # Telemetry: record LLM call end for fatal error (non-blocking)
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        # D-7 wording guard: a terminal stop (SlotCancelled /
-                        # AgentTerminatedError) is not an LLM failure — break
-                        # silently without yielding a SYSTEM ERROR line.
-                        try:
-                            _is_stop = self._is_terminal_stop(inst_name)
-                        except AttributeError:
-                            _is_stop = False
-                        if _is_stop:
-                            logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
-                                        f"is a terminal stop — no SYSTEM ERROR emitted")
-                            state.error_already_yielded = True
-                            break
-                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
-                        logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
-                                       f"error: {summarize_exhaustion(e)}")
-                        yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
-                        state.error_already_yielded = True
-                        break
-
-                    # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
-                    backoff = calculate_backoff(state.retry_count, _retry_policy)
-
-                    # Only claim "new endpoint" when cursor was actually advanced.
-                    # Matches _handle_inner_loop_detection logic: character-run and max-token
-                    # advance the cursor; other detections (sentence, ngram, block, entropy)
-                    # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
-                    _det_reason = getattr(e, 'detection_reason', '')
-                    advancing_endpoint = isinstance(
-                        e, (MaxTokenExceeded, ContextWindowExceeded)) or (isinstance(e, CharacterRunDetected) and
-                                                                          _det_reason.startswith('character run'))
-                    endpoint_str = ' with new endpoint' if advancing_endpoint else ''
-
-                    logger.warning(
-                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {state.retry_count}/{_max_attempts}. "
-                        f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
-
-                    # Signal retry to UI before blocking on sleep (pass the error so the message
-                    # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
-                    # "Connection lost"; plan §3.5).
-                    yield self._make_retrying_message(instance, state.retry_count, _max_attempts, backoff, error=e)
-
-                    # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
-                    # no time left, abort now; otherwise cap the backoff to what remains so
-                    # the next iteration's top-of-loop check fires promptly.
-                    _remaining = _deadline - time.monotonic()
-                    if _remaining <= 0:
-                        yield Message(
-                            role=ASSISTANT,
-                            content=(
-                                f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
-                        state.error_already_yielded = True
-                        break
-                    # D-7: re-check stop before sleeping — a stop that did not
-                    # close the generator would otherwise sleep and retry.
-                    try:
-                        _terminal = self._is_terminal_stop(inst_name)
-                    except AttributeError:
-                        _terminal = False   # test doubles may lack pool
-                    if _terminal:
-                        logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
-                                    f"(error was: {summarize_exhaustion(e)})")
-                        state.error_already_yielded = True
-                        break
-                    time.sleep(min(backoff, _remaining))
-                    yield None
 
             # Final update before yielding results
             if state.last_output is not None:
@@ -999,6 +836,191 @@ class LLMCallMixin:
             # turn starts from position 0, regardless of how this turn ended.
             if hasattr(self.pool.api_router, 'reset_instance_endpoint'):
                 self.pool.api_router.reset_instance_endpoint(inst_name)
+
+    def _handle_llm_retry_failure(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        e: Exception,
+        state: _LLMCallState,
+        max_attempts: int,
+        retry_policy: RetryPolicy,
+        deadline: float,
+    ) -> Iterator[Optional[Message]]:
+        """Handle a failed LLM attempt: termination clean-exits, retry-budget
+        exhaustion, error classification, backoff and the [RETRYING] UI signal.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A3). Returns True
+        when the caller should break out of the retry loop, False to continue.
+        """
+        with instance._compression_lock:
+            instance._streaming_responses = []
+
+        # Handle AgentTerminatedError — clean abort signal from stop-checks during blocking ops.
+        # This is NOT an error; exit cleanly without retry or error message.
+        if isinstance(e, AgentTerminatedError):
+            logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
+            # Close the in-flight telemetry call so its latency is counted
+            # (BUG_0128) — every other abort path in this loop records 'end'.
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            with instance._compression_lock:
+                instance._streaming_responses = []
+            return True
+
+        # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
+        _is_termination_abort = (isinstance(e, RuntimeError) and len(e.args) >= 1 and e.args[0] and
+                                 'has been terminated' in str(e.args[0]))
+
+        if _is_termination_abort:
+            # Instance was terminated — abort LLM call cleanly without retry or error message.
+            logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
+            # Close the in-flight telemetry call (BUG_0128).
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            with instance._compression_lock:
+                instance._streaming_responses = []
+            return True
+
+        # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
+        # holding the truncated accumulation. Reset it here — AFTER the termination/dismissal breaks
+        # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
+        # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
+        # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
+        # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
+        # is a local of this method, not a closure variable here.
+        state.last_output = None
+
+        if state.retry_count >= max_attempts:
+            # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
+            # retry_count for EVERY non-loop exception, so after max_attempts
+            # failures retry_count == max_attempts and the `while
+            # retry_count < max_attempts` loop guard exits the loop — `>` was
+            # therefore UNREACHABLE, and control fell through to the
+            # `[SYSTEM ERROR: Empty LLM response]` branch with last_output=None.
+            # Any plain-raising exception that exhausted the retry budget
+            # (slot timeouts included) produced a useless message. `>=` makes
+            # this informative terminal branch actually reachable.
+            # Telemetry: record LLM call end for exhausted retries (non-blocking)
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            error_msg = str(e).split('\n')[0] if e else 'Unknown error'
+            # Give clearer message for loop detection failures
+            if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
+                display_msg = f"LLM generation loop detected (exceeded {max_attempts} max attempts)"
+            elif isinstance(e, CharacterRunDetected):
+                display_msg = f"LLM generation loop detected (tried {max_attempts} times)"
+            elif isinstance(e, MaxTokenExceeded):
+                display_msg = f"LLM exceeded token limit (tried {max_attempts} times)"
+            elif isinstance(e, ContextWindowExceeded):
+                display_msg = f"LLM context window exceeded (tried {max_attempts} times)"
+            else:
+                # Terminal LLM failure — build a human-readable, multi-line message from
+                # the router's structured .endpoint_failures (plan §3.4). The log line uses
+                # a compact digest so the full concatenated stack dumps are never re-printed.
+                display_msg = build_terminal_message(e, max_attempts)
+            logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {max_attempts} "
+                         f"retry attempts: {summarize_exhaustion(e)}")
+            # Deduped full traceback at DEBUG — this is the user-visible failure point.
+            if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
+                             f"({inst_name}):\n{traceback.format_exc()}")
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
+            state.error_already_yielded = True
+            return True
+
+        # _abort_stream already increments retry_count before raising.
+        # For regular exceptions, increment if we haven't yet
+        # (retry_count==0).
+        if state.retry_count == 0:
+            state.retry_count += 1
+        else:
+            # Already incremented by _abort_stream OR previous round —
+            # check if we need another increment (only if _abort_stream
+            # didn't do it).
+            # We know _abort_stream incremented if the error message
+            # contains our markers.
+            if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                state.retry_count += 1
+
+            # Handle inner-loop detection: budget check and endpoint advancement
+            if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, max_attempts)
+
+        # Classify error type using centralized policy (Phase 4a)
+        error_type = classify_error(e)
+
+        # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
+        # Skip for fatal errors — they have their own end call below
+        if error_type != 'fatal':
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+
+        if error_type == 'fatal':
+            # Telemetry: record LLM call end for fatal error (non-blocking)
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            # D-7 wording guard: a terminal stop (SlotCancelled /
+            # AgentTerminatedError) is not an LLM failure — break
+            # silently without yielding a SYSTEM ERROR line.
+            try:
+                _is_stop = self._is_terminal_stop(inst_name)
+            except AttributeError:
+                _is_stop = False
+            if _is_stop:
+                logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
+                            f"is a terminal stop — no SYSTEM ERROR emitted")
+                state.error_already_yielded = True
+                return True
+            error_msg = str(e).split('\n')[0] if e else 'Unknown error'
+            logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
+                           f"error: {summarize_exhaustion(e)}")
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
+            state.error_already_yielded = True
+            return True
+
+        # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
+        backoff = calculate_backoff(state.retry_count, retry_policy)
+
+        # Only claim "new endpoint" when cursor was actually advanced.
+        # Matches _handle_inner_loop_detection logic: character-run and max-token
+        # advance the cursor; other detections (sentence, ngram, block, entropy)
+        # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
+        _det_reason = getattr(e, 'detection_reason', '')
+        advancing_endpoint = isinstance(
+            e, (MaxTokenExceeded, ContextWindowExceeded)) or (isinstance(e, CharacterRunDetected) and
+                                                              _det_reason.startswith('character run'))
+        endpoint_str = ' with new endpoint' if advancing_endpoint else ''
+
+        logger.warning(
+            f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {state.retry_count}/{max_attempts}. "
+            f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
+
+        # Signal retry to UI before blocking on sleep (pass the error so the message
+        # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
+        # "Connection lost"; plan §3.5).
+        yield self._make_retrying_message(instance, state.retry_count, max_attempts, backoff, error=e)
+
+        # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
+        # no time left, abort now; otherwise cap the backoff to what remains so
+        # the next iteration's top-of-loop check fires promptly.
+        _remaining = deadline - time.monotonic()
+        if _remaining <= 0:
+            yield Message(
+                role=ASSISTANT,
+                content=(
+                    f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
+            state.error_already_yielded = True
+            return True
+        # D-7: re-check stop before sleeping — a stop that did not
+        # close the generator would otherwise sleep and retry.
+        try:
+            _terminal = self._is_terminal_stop(inst_name)
+        except AttributeError:
+            _terminal = False   # test doubles may lack pool
+        if _terminal:
+            logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
+                        f"(error was: {summarize_exhaustion(e)})")
+            state.error_already_yielded = True
+            return True
+        time.sleep(min(backoff, _remaining))
+        yield None
+        return False
 
     # ═══════════════════════════════════════════════════════════════════════
 

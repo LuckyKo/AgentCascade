@@ -325,6 +325,108 @@ class TestAPIRouterFallbackBehavior:
 
 
 # ──────────────────────────────────────────────
+# 3c. Generator-close during retry must still fire the turn-boundary cursor reset
+#     (covers the A3 _handle_llm_retry_failure yield-from frame)
+# ──────────────────────────────────────────────
+
+
+class TestGeneratorCloseDuringRetry:
+    """Closing the retry generator while it is suspended inside the extracted
+    retry helper must still run the owner's outer finally exactly once
+    (reset_instance_endpoint). Regression guard for the A3 yield-from frame."""
+
+    def test_cursor_reset_on_generator_close_during_retry(self):
+        """gen.close() right after the [RETRYING] yield → cursor reset fires once.
+
+        The outer try/finally in _execute_llm_call_with_retry owns the reset;
+        GeneratorExit raised by close() inside _handle_llm_retry_failure must
+        propagate through the yield-from and run the finally once.
+        """
+        from types import SimpleNamespace
+        import time as _time
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.engine.core import ExecutionEngine
+
+        inst_name = 'retry1'
+        now = _time.monotonic()
+        instance = AgentInstance(
+            instance_name=inst_name,
+            agent_class='coder',
+            conversation=[Message(role=USER, content='go')],
+            created_at=now,
+            last_activity=now,
+            latest_marker_index=-1,
+        )
+
+        # Real INT settings so the `while retry_count < max_attempts` guard and
+        # `>=` comparisons behave (a MagicMock setting is truthy — see
+        # magicmock-pool-setting-truthy-default).
+        settings = type('S', (), {
+            'retry_max_attempts': 3,
+            'retry_base_delay': 0.0,
+            'retry_max_delay': 0.0,
+            'inner_loop_detect_enabled': False,
+        })()
+
+        reset_calls = []
+
+        class _Router:
+            def __init__(self):
+                self._instance_endpoint_position = {inst_name: 1}  # cursor advanced
+
+            def reset_instance_endpoint(self, name):
+                reset_calls.append(name)
+
+        class _Pool:
+            stopped = False
+            _run_generation = 0
+
+            def __init__(self, inst, settings):
+                self.settings = settings
+                self.api_router = _Router()
+                self._inst = inst
+
+            def get_instance(self, name):
+                return self._inst
+
+            def is_instance_terminated(self, name):
+                return False
+
+        pool = _Pool(instance, settings)
+
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        engine.pool = pool
+        engine._my_generation = 0
+        # Real engine methods used as-is; only the LLM call is faked to raise a
+        # transient error classify_error() marks 'retryable' → routes into the
+        # retry path (not a fatal/terminal branch).
+        engine._execute_llm_call = MagicMock(side_effect=ConnectionError('connection reset by peer'))
+
+        gen = engine._execute_llm_call_with_retry(
+            instance,
+            [Message(role=USER, content='go')],
+            template=SimpleNamespace(llm=None),
+            active_functions=None,
+        )
+
+        # Drive until the retry helper yields the [RETRYING] message — proves we
+        # exercised the retry path, not a fallback/early-exit.
+        saw_retrying = False
+        for item in gen:
+            content = getattr(item, 'content', '') or ''
+            if '[RETRYING]' in content:
+                saw_retrying = True
+                break
+        assert saw_retrying, 'retry generator never yielded a [RETRYING] message'
+
+        # Close the generator WHILE suspended inside the extracted retry helper.
+        gen.close()
+
+        assert reset_calls == [inst_name], (
+            f"reset_instance_endpoint fired {reset_calls}; expected exactly once")
+
+
+# ──────────────────────────────────────────────
 # 3b. A1/A2 gate — server context-exceeded errors must be sanity-checked against the
 #     endpoint's CONFIGURED limit before triggering fallback compression
 #     (2026-08-21 incident: model-swap produced a spurious exceed_context_size 400 for a
