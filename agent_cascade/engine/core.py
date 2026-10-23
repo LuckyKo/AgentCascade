@@ -625,99 +625,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                 if action == _RunAction.CONTINUE_LOOP:
                     continue
 
-                # Clean up last-turn tool disabling only if we set it this
-                # iteration
-                if final_turn_tools_disabled:
-                    if hasattr(instance, '_generate_cfg_override') and isinstance(instance._generate_cfg_override,
-                                                                                  dict):
-                        instance._generate_cfg_override.pop('disabled_tools', None)
-
-                # ── Memory-Hint trigger (feature: memory_hint) ────────────────
-                # Phase-3/Phase-4 boundary: turn_output is fully populated here. Best-effort;
-                # never blocks, never mutates the turn budget. Hints ride the tool-warning
-                # queue (NO user-message injection — plan §0 / R1).
-                self._maybe_submit_memory_hint(instance, turn_output)
-
-                # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)}
-                # messages from LLM")
-                # ── Phase 4: Response Processing and Tool Execution ─────────
-                if self._process_response(instance, turn_output, messages, llm_messages, response):
-                    # NOTE: auto-continue deliberately does NOT reset turns_available — the
-                    # per-iteration decrement (turns_available -= 1) already ran before this
-                    # LLM call, so every auto-continue consumes exactly one real turn and
-                    # max_turns stays a hard budget.
-                    # Change 2 (todo149): if THIS was the last turn of the original budget and the
-                    # cheap gates pass, grant the auto-skill reflection extension INSTEAD of letting
-                    # the loop exit on an exhausted budget. _process_response has ALREADY committed
-                    # the assistant tool-call + FUNCTION result before returning, so the reflection
-                    # prompt injected by _try_auto_skill_extension lands AFTER the FUNCTION message
-                    # (order: assistant tool-call → FUNCTION result → user reflection-prompt). A
-                    # tool-call turn `continue`s here and NEVER reaches Phase 5 in the same iteration,
-                    # so this path and the natural-completion path cannot double-fire; the one-shot
-                    # _auto_skill_proposed flag (checked inside _try_auto_skill_extension →
-                    # _auto_skill_gates_met) also guarantees at most one extension per run. On a
-                    # FAILED trigger (gates pass but auto_skill_qualifies returns no prompt) this
-                    # condition is False and control falls through to the normal `yield; continue`
-                    # below, so the loop exits on the exhausted budget with no flag poisoning.
-                    if _is_last_original_turn and \
-                            self._try_auto_skill_extension(
-                                instance, messages, llm_messages,
-                                loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
-                        # Change 3 marker (todo149): the run did not end on a clean no-tool answer
-                        # before reflecting → extract_instance_output must return the LAST reflection
-                        # message, not the pre-reflection snapshot.
-                        instance._auto_skill_dirty_stop = True
-                        max_turns = self._grant_auto_skill_extension(instance)
-                        _suppress_budget_warnings = True
-                        turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
-                        yield response
-                        continue
-                    # logger.debug("tool used - %s looping",
-                    # instance.instance_name)
-                    yield response
+                action, max_turns, turns_available, _suppress_budget_warnings = \
+                    yield from self._run_response_phase(
+                        instance, messages, llm_messages, response, turn_output,
+                        final_turn_tools_disabled, _is_last_original_turn, max_turns,
+                        turns_available, _suppress_budget_warnings)
+                if action == _RunAction.CONTINUE_LOOP:
                     continue
-
-                # ── Phase 5: Post-Turn Checks ───────────────────────────────
-                completed = self._post_turn_checks(instance, messages, llm_messages, response)
-                if not completed:
-                    # _post_turn_checks breaks on four paths (stop ×2, stall, genuine
-                    # completion); only the last may reflect. _is_genuine_completion
-                    # excludes stop/stall so a stopped or stalled agent never triggers.
-                    if self._is_genuine_completion(instance, response):
-                        # TG-STREAM F2: push the final answer NOW, at stream time —
-                        # this no-tool assistant turn IS the natural end, and its committed text
-                        # lives in `response` (no history lookback). Observed BEFORE/independently
-                        # of _try_auto_skill_extension: the old `and` short-circuit only fired when
-                        # reflection qualified, so a run that completed without reflecting never
-                        # pushed. Phase is keyed on instance._auto_skill_proposed — False here means
-                        # 'pre' (this is the pre-extension answer); after the extension fires below,
-                        # the reflection's own final turn reaches this same point with the flag set
-                        # and pushes 'post'. See _tg_push_final for dedup/retry semantics.
-                        _tg_push_final(instance, response, self.pool,
-                                       phase='post' if getattr(instance, '_auto_skill_proposed', False) else 'pre')
-                        if self._try_auto_skill_extension(
-                                instance, messages, llm_messages,
-                                loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
-                            # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
-                            # turns for the reflection. Instance-state mutations are shared with the
-                            # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
-                            # reset + yield/continue stay here (run() frame locals).
-                            max_turns = self._grant_auto_skill_extension(instance)
-                            # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
-                            # The reflection is a fresh phase (turns_available counts down from
-                            # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds
-                            # are meaningless and would print misleading "N remaining out of {extended}"
-                            # messages. Suppress them; the final-turn warning (==1) still fires on the
-                            # reflection's last turn.
-                            _suppress_budget_warnings = True
-                            # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
-                            # _consume_turn has already decremented turns_available for the triggering
-                            # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
-                            # budget-exhaustion design fired BEFORE _consume_turn, which is why its
-                            # reset carried a +1; that no longer applies at this call site.
-                            turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
-                            yield response
-                            continue                                               # run the reflection turns
+                action, max_turns, turns_available, _suppress_budget_warnings = \
+                    yield from self._run_post_turn(
+                        instance, messages, llm_messages, response, max_turns,
+                        turns_available, _suppress_budget_warnings)
+                if action == _RunAction.CONTINUE_LOOP:
+                    continue
+                if action == _RunAction.BREAK_LOOP:
                     break
 
             self._run_turn_limit_notice(
@@ -735,6 +656,122 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             yield [error_msg]
         finally:
             self._run_finalize(instance, early_exit)
+
+    def _run_response_phase(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message],
+                            response: List[Message], turn_output: List[Message], final_turn_tools_disabled: bool,
+                            is_last_original_turn: bool, max_turns: int, turns_available: int,
+                            suppress_budget_warnings: bool) -> Iterator[Tuple[_RunAction, int, int, bool]]:
+        """Process this turn's response and tool-call continuation.
+
+        Returns ``(action, max_turns, turns_available, suppress_budget_warnings)``.
+        """
+        # Clean up last-turn tool disabling only if we set it this
+        # iteration
+        if final_turn_tools_disabled:
+            if hasattr(instance, '_generate_cfg_override') and isinstance(instance._generate_cfg_override,
+                                                                          dict):
+                instance._generate_cfg_override.pop('disabled_tools', None)
+
+        # ── Memory-Hint trigger (feature: memory_hint) ────────────────
+        # Phase-3/Phase-4 boundary: turn_output is fully populated here. Best-effort;
+        # never blocks, never mutates the turn budget. Hints ride the tool-warning
+        # queue (NO user-message injection — plan §0 / R1).
+        self._maybe_submit_memory_hint(instance, turn_output)
+
+        # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)}
+        # messages from LLM")
+        # ── Phase 4: Response Processing and Tool Execution ─────────
+        if self._process_response(instance, turn_output, messages, llm_messages, response):
+            # NOTE: auto-continue deliberately does NOT reset turns_available — the
+            # per-iteration decrement (turns_available -= 1) already ran before this
+            # LLM call, so every auto-continue consumes exactly one real turn and
+            # max_turns stays a hard budget.
+            # Change 2 (todo149): if THIS was the last turn of the original budget and the
+            # cheap gates pass, grant the auto-skill reflection extension INSTEAD of letting
+            # the loop exit on an exhausted budget. _process_response has ALREADY committed
+            # the assistant tool-call + FUNCTION result before returning, so the reflection
+            # prompt injected by _try_auto_skill_extension lands AFTER the FUNCTION message
+            # (order: assistant tool-call → FUNCTION result → user reflection-prompt). A
+            # tool-call turn `continue`s here and NEVER reaches Phase 5 in the same iteration,
+            # so this path and the natural-completion path cannot double-fire; the one-shot
+            # _auto_skill_proposed flag (checked inside _try_auto_skill_extension →
+            # _auto_skill_gates_met) also guarantees at most one extension per run. On a
+            # FAILED trigger (gates pass but auto_skill_qualifies returns no prompt) this
+            # condition is False and control falls through to the normal `yield; continue`
+            # below, so the loop exits on the exhausted budget with no flag poisoning.
+            if is_last_original_turn and \
+                    self._try_auto_skill_extension(
+                        instance, messages, llm_messages,
+                        loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
+                # Change 3 marker (todo149): the run did not end on a clean no-tool answer
+                # before reflecting → extract_instance_output must return the LAST reflection
+                # message, not the pre-reflection snapshot.
+                instance._auto_skill_dirty_stop = True
+                max_turns = self._grant_auto_skill_extension(instance)
+                suppress_budget_warnings = True
+                turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
+                yield response
+                return (_RunAction.CONTINUE_LOOP, max_turns, turns_available,
+                        suppress_budget_warnings)
+            # logger.debug("tool used - %s looping",
+            # instance.instance_name)
+            yield response
+            return (_RunAction.CONTINUE_LOOP, max_turns, turns_available,
+                    suppress_budget_warnings)
+        return _RunAction.PROCEED, max_turns, turns_available, suppress_budget_warnings
+
+    def _run_post_turn(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message],
+                       response: List[Message], max_turns: int, turns_available: int,
+                       suppress_budget_warnings: bool) -> Iterator[Tuple[_RunAction, int, int, bool]]:
+        """Run post-turn completion checks and the natural-completion reflection trigger.
+
+        Returns ``(action, max_turns, turns_available, suppress_budget_warnings)``.
+        """
+        # ── Phase 5: Post-Turn Checks ───────────────────────────────
+        completed = self._post_turn_checks(instance, messages, llm_messages, response)
+        if not completed:
+            # _post_turn_checks breaks on four paths (stop ×2, stall, genuine
+            # completion); only the last may reflect. _is_genuine_completion
+            # excludes stop/stall so a stopped or stalled agent never triggers.
+            if self._is_genuine_completion(instance, response):
+                # TG-STREAM F2: push the final answer NOW, at stream time —
+                # this no-tool assistant turn IS the natural end, and its committed text
+                # lives in `response` (no history lookback). Observed BEFORE/independently
+                # of _try_auto_skill_extension: the old `and` short-circuit only fired when
+                # reflection qualified, so a run that completed without reflecting never
+                # pushed. Phase is keyed on instance._auto_skill_proposed — False here means
+                # 'pre' (this is the pre-extension answer); after the extension fires below,
+                # the reflection's own final turn reaches this same point with the flag set
+                # and pushes 'post'. See _tg_push_final for dedup/retry semantics.
+                _tg_push_final(instance, response, self.pool,
+                               phase='post' if getattr(instance, '_auto_skill_proposed', False) else 'pre')
+                if self._try_auto_skill_extension(
+                        instance, messages, llm_messages,
+                        loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
+                    # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh
+                    # turns for the reflection. Instance-state mutations are shared with the
+                    # Phase-4 tool-call path via _grant_auto_skill_extension; the loop-local
+                    # reset + yield/continue stay here (run() frame locals).
+                    max_turns = self._grant_auto_skill_extension(instance)
+                    # 50%/90% warnings apply to the ORIGINAL budget, already exhausted here.
+                    # The reflection is a fresh phase (turns_available counts down from
+                    # AUTO_SKILL_EXTRA_TURNS while max_turns is extended), so those thresholds
+                    # are meaningless and would print misleading "N remaining out of {extended}"
+                    # messages. Suppress them; the final-turn warning (==1) still fires on the
+                    # reflection's last turn.
+                    suppress_budget_warnings = True
+                    # NOTE: this trigger fires at Phase 5 (natural completion), i.e. AFTER
+                    # _consume_turn has already decremented turns_available for the triggering
+                    # turn — so the reset is exactly AUTO_SKILL_EXTRA_TURNS (NOT +1). The old
+                    # budget-exhaustion design fired BEFORE _consume_turn, which is why its
+                    # reset carried a +1; that no longer applies at this call site.
+                    turns_available = self._get_pool_setting('auto_skill_extra_turns', AUTO_SKILL_EXTRA_TURNS)
+                    yield response
+                    return (_RunAction.CONTINUE_LOOP, max_turns, turns_available,
+                            suppress_budget_warnings)  # run the reflection turns
+            return (_RunAction.BREAK_LOOP, max_turns, turns_available,
+                    suppress_budget_warnings)
+        return _RunAction.PROCEED, max_turns, turns_available, suppress_budget_warnings
 
     def _run_budget_warnings(self, instance: AgentInstance, llm_messages: List[Message], turns_available: int,
                              max_turns: int, initial_turns_available: int, soft_turn_limit: bool,
