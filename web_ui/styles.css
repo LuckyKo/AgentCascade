@@ -269,11 +269,16 @@ body {
 
 .sidebar-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .sidebar-actions .btn {
-  flex: 1;
+  flex: 1 1 auto;
+}
+
+.sidebar-actions #restart-server-btn {
+  flex-basis: 100%;
 }
 
 /* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
