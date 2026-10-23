@@ -901,6 +901,10 @@ class LLMCallMixin:
             self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
             with instance._compression_lock:
                 instance._streaming_responses = []
+            # A clean termination is not an error: mark it handled so _finalize_llm_result
+            # does not emit the generic "[SYSTEM ERROR: Empty LLM response]" when last_output
+            # is None (P8-3). The keep-partial re-yield still runs when a partial exists.
+            state.error_already_yielded = True
             return True
 
         # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
@@ -914,6 +918,9 @@ class LLMCallMixin:
             self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
             with instance._compression_lock:
                 instance._streaming_responses = []
+            # Same as the AgentTerminatedError path: a clean termination is not an error, so
+            # suppress the generic empty-response message (P8-3).
+            state.error_already_yielded = True
             return True
 
         # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
