@@ -81,6 +81,12 @@
               </svg>
               <span>Refresh Soul</span>
             </button>
+            <button id="restart-server-btn" class="btn btn-danger" title="Restart the server process">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M13 3a9 9 0 1 0 3.5 7.5L13 11V8l-4 4 4 4v-3a7 7 0 1 1 2.6-5.4L13 3z" />
+              </svg>
+              <span>Restart Server</span>
+            </button>
           </div>
 
           <div class="sidebar-divider"></div>
@@ -356,21 +362,7 @@
               <div class="settings-section">
                 <h3 class="settings-section-title">MCP Extensions</h3>
                 <div class="settings-section-body">
-                  <label class="setting-field toggle-field">
-                    <span>Enable MCP</span>
-                    <input autocomplete="off" type="checkbox" id="setting-mcp-enabled" checked />
-                  </label>
-                  <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 8px;">
-                    <span>MCP Servers (JSON)</span>
-                    <textarea autocomplete="off" id="setting-mcp-servers"
-                      placeholder='{&#10;  "sqlite": {&#10;    "command": "npx",&#10;    "args": ["-y", "@modelcontextprotocol/server-sqlite", "db.sqlite"]&#10;  }&#10;}'
-                      rows="5"
-                      style="width: 100%; font-family: monospace; padding: 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;"></textarea>
-                  </label>
-                  <div style="display: flex; gap: 8px; margin-top: 8px;">
-                    <button id="apply-mcp-btn" class="btn btn-secondary" style="flex: 1;">Apply MCP Config</button>
-                    <button id="restart-server-btn" class="btn btn-danger" style="flex: 1;">Restart Server</button>
-                  </div>
+                  <button id="open-mcp-config-btn" class="btn btn-secondary">Open MCP Config</button>
                 </div>
               </div>
 

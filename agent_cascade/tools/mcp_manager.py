@@ -148,6 +148,9 @@ class MCPManager:
             # If the "env" key exists, it must be a dictionary
             if 'env' in server and not isinstance(server['env'], dict):
                 return False
+            # "enabled" is optional; when present it must be a boolean (defaults to true when absent)
+            if 'enabled' in server and not isinstance(server['enabled'], bool):
+                return False
         return True
 
     def initConfig(self, config: Dict):
@@ -168,24 +171,32 @@ class MCPManager:
         mcp_servers = config['mcpServers']
         for server_name in mcp_servers:
             server = mcp_servers[server_name]
-            # Config fingerprint: if the server config changes, force reconnection.
+            # Strip 'enabled' — it is a UI concern, not a connection parameter.
+            # The fingerprint must match what connect_server computes so toggles
+            # do not produce duplicate connections.
+            conn_config = {k: v for k, v in server.items() if k != 'enabled'}
             _cfg_fingerprint = hashlib.md5(
-                json.dumps(server, sort_keys=True, default=str).encode()
+                json.dumps(conn_config, sort_keys=True, default=str).encode()
             ).hexdigest()[:8]
             _guard_key = f"{server_name}:{_cfg_fingerprint}"
 
-            # Idempotency guard: return cached tools for already-connected servers (prevents
-            # process explosion when initConfig is called multiple times, e.g. on repeated
-            # UI config updates, while still allowing new agents to get tool registrations).
+            # Idempotency guard: return cached tools for already-connected servers
+            # (prevents process explosion when initConfig is called multiple times,
+            # e.g. on repeated UI config updates, while still allowing new agents
+            # to get tool registrations).  Uses a prefix scan so the guard is
+            # robust against hash differences from a prior connect_server call.
             with self._mcp_lock:
-                if _guard_key in self._connected_servers:
-                    logger.debug(f"MCP server '{server_name}' already connected, returning cached tools.")
+                existing = any(k.startswith(f'{server_name}:')
+                               for k in self._connected_servers)
+                if existing:
+                    logger.debug(f"MCP server '{server_name}' already connected, "
+                                 f"returning cached tools.")
                     tools.extend(self._server_tools.get(server_name, []))
                     continue
 
             client = MCPClient()
             await client.connection_server(mcp_server_name=server_name,
-                                           mcp_server=server)  # Attempt to connect to the server
+                                           mcp_server=conn_config)
 
             client_id = server_name + '_' + str(
                 uuid.uuid4())  # To allow the same server name be used across different running agents
@@ -318,7 +329,10 @@ class MCPManager:
                     tool_args = json.loads(params)
                 # Submit coroutine to the event loop and wait for the result
                 manager = MCPManager()
-                client = manager.clients[self.client_id]
+                try:
+                    client = manager.clients[self.client_id]
+                except KeyError:
+                    return 'Error: MCP server disconnected — this tool is no longer available.'
                 # Pass agent context so media saves can queue a path notification
                 agent_instance_name = kwargs.get('agent_instance_name')
                 agent_obj = kwargs.get('agent_obj')
@@ -336,6 +350,195 @@ class MCPManager:
 
         ToolClass.__name__ = f'{register_name}_Class'
         return ToolClass()
+
+    def disconnect_server(self, server_name: str, templates: list) -> bool:
+        """Disconnect one MCP server: remove its tools from agent templates, clean up
+        the client process, and clear all tracking state.  Idempotent: returns True
+        when the server is not connected (already in the desired state)."""
+        with self._mcp_lock:
+            # Find the guard key by prefix scan — the config hash is an internal
+            # detail and may differ from what connect_server would compute.
+            guard_key = None
+            for k in self._connected_servers:
+                if k.startswith(f'{server_name}:'):
+                    guard_key = k
+                    break
+            if guard_key is None:
+                return True  # not connected — already disabled
+
+            client_id = self._connected_servers[guard_key]
+            tools = self._server_tools.get(server_name, [])
+            client = self.clients.get(client_id)
+
+            # Remove tools from all templates' function_map (stops NEW tool offers).
+            for template in templates:
+                for tool in tools:
+                    if tool.name in template.function_map:
+                        del template.function_map[tool.name]
+
+            # Pop all tracking state inside the same lock so connect/status never
+            # see a half-disconnected server.
+            self.clients.pop(client_id, None)
+            self._connected_servers.pop(guard_key, None)
+            self._server_tools.pop(server_name, None)
+            # Remove this server's exact tool names from the global security set
+            # (prefix matching would collide across hyphenated server names).
+            exact_names = {t.name for t in tools}
+            self._registered_tool_names -= exact_names
+
+        # Clean up the client outside the lock (async, may block).
+        if client:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    client.cleanup(), self.loop).result(timeout=10)
+            except Exception as e:
+                logger.warning(
+                    "MCP client cleanup for '%s' failed (may already be dead): %s",
+                    server_name, e)
+
+        logger.info("MCP server '%s' disconnected (%d tools removed).",
+                    server_name, len(tools))
+        return True
+
+    def connect_server(self, server_name: str, server_config: dict,
+                       templates: list) -> bool:
+        """Connect one MCP server and register its tools with all agent templates.
+        Returns True on success (including if already connected), False on failure."""
+        # Strip 'enabled' before hashing — it is a UI concern, not a connection
+        # parameter, so the fingerprint stays stable across toggles.
+        conn_config = {k: v for k, v in server_config.items() if k != 'enabled'}
+        _cfg_fingerprint = hashlib.md5(
+            json.dumps(conn_config, sort_keys=True, default=str).encode()
+        ).hexdigest()[:8]
+        _guard_key = f'{server_name}:{_cfg_fingerprint}'
+
+        # Already connected?  Use a prefix scan so a hash mismatch from a
+        # startup that included 'enabled' in the config does not cause a
+        # duplicate connection.
+        with self._mcp_lock:
+            for k in self._connected_servers:
+                if k.startswith(f'{server_name}:'):
+                    return True
+
+        client = MCPClient()
+        try:
+            asyncio.run_coroutine_threadsafe(
+                client.connection_server(
+                    mcp_server_name=server_name, mcp_server=conn_config),
+                self.loop).result(timeout=30)
+        except Exception as e:
+            logger.error("Failed to connect MCP server '%s': %s", server_name, e)
+            return False
+
+        client_id = server_name + '_' + str(uuid.uuid4())
+        client.client_id = client_id
+
+        # Create tool classes (same logic as init_config_async).
+        new_tools: list = []
+        try:
+            for tool in client.tools:
+                parameters = tool.inputSchema
+                if 'required' not in parameters:
+                    parameters['required'] = []
+                required_fields = {'type', 'properties', 'required'}
+                missing_fields = required_fields - parameters.keys()
+                if missing_fields:
+                    raise ValueError(
+                        f'Missing required fields in schema: {missing_fields}')
+                cleaned_parameters = {
+                    'type': parameters['type'],
+                    'properties': parameters['properties'],
+                    'required': parameters['required'],
+                }
+                register_name = server_name + '-' + tool.name
+                agent_tool = self.create_tool_class(
+                    register_name=register_name,
+                    register_client_id=client_id,
+                    tool_name=tool.name,
+                    tool_desc=tool.description,
+                    tool_parameters=cleaned_parameters)
+                new_tools.append(agent_tool)
+
+            if client.resources:
+                list_resources_tool_name = server_name + '-list_resources'
+                list_resources_params = {
+                    'type': 'object', 'properties': {}, 'required': []}
+                list_resources_agent_tool = self.create_tool_class(
+                    register_name=list_resources_tool_name,
+                    register_client_id=client_id,
+                    tool_name='list_resources',
+                    tool_desc=(
+                        'Servers expose a list of concrete resources through this '
+                        'tool. By invoking it, you can discover the available '
+                        'resources and obtain resource templates, which help clients '
+                        'understand how to construct valid URIs. These URI formats '
+                        'will be used as input parameters for the read_resource '
+                        'function. '),
+                    tool_parameters=list_resources_params)
+                new_tools.append(list_resources_agent_tool)
+
+                resources_template_str = ''
+                try:
+                    list_resource_templates = asyncio.run_coroutine_threadsafe(
+                        client.session.list_resource_templates(),
+                        self.loop).result(timeout=10)
+                    if list_resource_templates.resourceTemplates:
+                        resources_template_str = '\n'.join(
+                            str(t) for t in list_resource_templates.resourceTemplates)
+                except Exception as e:
+                    logger.warning(
+                        'Failed in listing MCP resource templates: %s', e)
+
+                read_resource_tool_name = server_name + '-read_resource'
+                read_resource_params = {
+                    'type': 'object',
+                    'properties': {
+                        'uri': {
+                            'type': 'string',
+                            'description': 'The URI identifying the specific '
+                            'resource to access'}},
+                    'required': ['uri']}
+                original_tool_desc = (
+                    'Request to access a resource provided by a connected MCP '
+                    'server. Resources represent data sources that can be used as '
+                    'context, such as files, API responses, or system information.')
+                if resources_template_str:
+                    tool_desc = (original_tool_desc + '\nResource Templates:\n'
+                                 + resources_template_str)
+                else:
+                    tool_desc = original_tool_desc
+                read_resource_agent_tool = self.create_tool_class(
+                    register_name=read_resource_tool_name,
+                    register_client_id=client_id,
+                    tool_name='read_resource',
+                    tool_desc=tool_desc,
+                    tool_parameters=read_resource_params)
+                new_tools.append(read_resource_agent_tool)
+
+        except Exception as e:
+            logger.error(
+                "Failed to create tools for MCP server '%s': %s", server_name, e)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    client.cleanup(), self.loop).result(timeout=10)
+            except Exception:
+                pass
+            return False
+
+        # Register tools in all templates.
+        for template in templates:
+            for tool in new_tools:
+                if tool.name not in template.function_map:
+                    template.function_map[tool.name] = tool
+
+        with self._mcp_lock:
+            self.clients[client_id] = client
+            self._connected_servers[_guard_key] = client_id
+            self._server_tools[server_name] = new_tools
+
+        logger.info("MCP server '%s' connected (%d tools registered).",
+                    server_name, len(new_tools))
+        return True
 
     def shutdown(self):
         futures = []

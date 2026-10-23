@@ -1750,6 +1750,154 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         await _broadcast_state()
         return {'status': 'ok'}
 
+    # ── MCP Config Endpoints ──────────────────────────────────────────────────
+    # MCP server config lives at <AgentCascade_root>/config/mcp_servers.json — the single
+    # source of truth for MCP. api_server.py is inside agent_cascade/, so the project
+    # root is one level up (parent.parent).
+    _mcp_config_path = Path(__file__).resolve().parent.parent / 'config' / 'mcp_servers.json'
+
+    @app.get('/api/mcp-config')
+    async def get_mcp_config():
+        """Return the raw MCP server config (config/mcp_servers.json). {} if the file is absent."""
+        try:
+            if _mcp_config_path.exists():
+                return json.loads(_mcp_config_path.read_text(encoding='utf-8'))
+            return {}
+        except (OSError, ValueError) as e:
+            logger.warning('[mcp-config] read failed: %s', e)
+            return JSONResponse(status_code=500, content={'message': f'Failed to read MCP config: {e}'})
+
+    @app.put('/api/mcp-config')
+    async def put_mcp_config(data: dict):
+        """Validate and write the MCP server config to config/mcp_servers.json.
+
+        Body is the servers map: {server_name: {command, args, url, env, enabled?, ...}, ...}.
+        Validation reuses MCPManager.is_valid_mcp_servers (wrapped in its expected top-level form).
+        """
+        from agent_cascade.tools.mcp_manager import MCPManager
+        if not isinstance(data, dict):
+            return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
+        if not MCPManager().is_valid_mcp_servers({'mcpServers': data}):
+            return JSONResponse(status_code=400, content={'message': 'Invalid MCP server config'})
+        try:
+            _mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+            _mcp_config_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        except OSError as e:
+            return JSONResponse(status_code=500, content={'message': f'Failed to write MCP config: {e}'})
+        return data
+
+    @app.get('/api/mcp-status')
+    async def get_mcp_status():
+        """Return per-server connection status: [{name, enabled, connected, tool_count}].
+
+        Servers and their `enabled` flag come from config/mcp_servers.json (single source of truth);
+        live connection state is read from the MCPManager singleton under its lock. `_connected_servers`
+        is keyed by "server_name:config_hash", so a server counts as connected if any key starts with
+        "{name}:"; `_server_tools` is keyed by the bare server name.
+        """
+        try:
+            if _mcp_config_path.exists():
+                servers = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
+            else:
+                servers = {}
+        except (OSError, ValueError) as e:
+            logger.warning('[mcp-status] config read failed: %s', e)
+            return JSONResponse(status_code=500, content={'message': f'Failed to read MCP config: {e}'})
+        if not isinstance(servers, dict):
+            servers = {}
+
+        connected_keys: list[str] = []
+        tool_counts: dict[str, int] = {}
+        try:
+            from agent_cascade.tools.mcp_manager import MCPManager
+            mgr = MCPManager()
+            with mgr._mcp_lock:
+                connected_keys = list(mgr._connected_servers.keys())
+                tool_counts = {name: len(tools) for name, tools in mgr._server_tools.items()}
+        except Exception as e:  # noqa: BLE001 — MCP package not installed / manager not initialized
+            logger.debug('[mcp-status] MCPManager unavailable, reporting all disconnected: %s', e)
+
+        status = []
+        for name, cfg in servers.items():
+            enabled = True
+            if isinstance(cfg, dict) and 'enabled' in cfg:
+                enabled = bool(cfg['enabled'])
+            status.append({
+                'name': name,
+                'enabled': enabled,
+                'connected': any(k.startswith(f'{name}:') for k in connected_keys),
+                'tool_count': tool_counts.get(name, 0),
+            })
+        return status
+
+    @app.post('/api/mcp-toggle')
+    async def post_mcp_toggle(data: dict):
+        """Toggle one MCP server on/off: connect or disconnect it live, then persist
+        the 'enabled' flag in config/mcp_servers.json.
+
+        Body: {"server_name": str, "enabled": bool}
+        """
+        server_name = data.get('server_name')
+        enabled = data.get('enabled')
+        if not server_name or not isinstance(server_name, str):
+            return JSONResponse(status_code=400, content={
+                'message': 'server_name (str) required'})
+        if not isinstance(enabled, bool):
+            return JSONResponse(status_code=400, content={
+                'message': 'enabled (bool) required'})
+
+        # Read the current config from disk (single source of truth).
+        try:
+            if _mcp_config_path.exists():
+                config = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
+            else:
+                return JSONResponse(status_code=404, content={
+                    'message': 'mcp_servers.json not found'})
+        except (OSError, ValueError) as e:
+            return JSONResponse(status_code=500, content={
+                'message': f'Failed to read MCP config: {e}'})
+
+        if not isinstance(config, dict) or server_name not in config:
+            return JSONResponse(status_code=404, content={
+                'message': f"Server '{server_name}' not in config"})
+
+        if not isinstance(config[server_name], dict):
+            return JSONResponse(status_code=400, content={
+                'message': f"Config entry for '{server_name}' is not an object"})
+
+        try:
+            from agent_cascade.tools.mcp_manager import MCPManager
+            mcp_mgr = MCPManager()
+            templates = list(agent_pool.templates.values()) if agent_pool else []
+
+            if enabled:
+                server_cfg = {k: v for k, v in config[server_name].items()
+                              if k != 'enabled'}
+                success = mcp_mgr.connect_server(server_name, server_cfg, templates)
+            else:
+                success = mcp_mgr.disconnect_server(server_name, templates)
+        except Exception as e:
+            logger.warning('[mcp-toggle] MCPManager error: %s', e, exc_info=True)
+            return JSONResponse(status_code=500, content={
+                'message': f'MCPManager error: {e}'})
+
+        if not success:
+            return JSONResponse(status_code=500, content={
+                'message': f"Failed to {'enable' if enabled else 'disable'} "
+                           f"server '{server_name}'"})
+
+        # Persist the enabled state.
+        config[server_name]['enabled'] = enabled
+        try:
+            _mcp_config_path.write_text(json.dumps(config, indent=2),
+                                        encoding='utf-8')
+        except OSError as e:
+            logger.warning('[mcp-toggle] persist failed: %s', e)
+            return JSONResponse(status_code=500, content={
+                'message': f'Connected but failed to persist config: {e}'})
+
+        return {'server_name': server_name, 'enabled': enabled}
+
     # ── Image Gen Config Endpoints ─────────────────────────────────────────
     # Config lives at <AgentCascade_root>/config/image_gen.json. api_server.py is
     # inside agent_cascade/, so the project root is one level up (parent.parent).

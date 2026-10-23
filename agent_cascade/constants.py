@@ -224,8 +224,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'max_parallel_agents',
     'max_input_tokens',  # Execution control (input truncation threshold) — not an LLM API parameter
 
-    # MCP and workspace configuration
-    'mcpServers',
+    # Workspace configuration
     'work_access_folders',
 
     # Tool result limits

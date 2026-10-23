@@ -673,6 +673,135 @@ body {
   display: flex;
 }
 
+/* ─── MCP Config Panel (config/mcp_servers.json editor) ─────────────────── */
+.mcp-config-panel {
+  padding: 12px;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+/* Server list — populated by Phase 3 (per-server rows + toggles). */
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* JSON editor: monospace, full width, fills the panel, vertically resizable. */
+.mcp-config-panel #mcp-config-editor {
+  width: 100%;
+  min-height: 240px;
+  flex: 1;
+  font-family: monospace;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+.mcp-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.mcp-config-status {
+  font-size: 12px;
+}
+
+/* Server rows — name, toggle, status dot */
+.mcp-server-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.mcp-server-name {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 120px;
+}
+
+/* Toggle checkbox styled as a switch */
+.mcp-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+.mcp-toggle input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.15s;
+}
+.mcp-toggle input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s, background 0.15s;
+}
+.mcp-toggle input[type="checkbox"]:checked {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.mcp-toggle input[type="checkbox"]:checked::after {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+.mcp-toggle input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Status indicator dots */
+.mcp-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mcp-status-on {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+.mcp-status-disconnected {
+  background: var(--danger);
+  box-shadow: 0 0 4px var(--danger);
+}
+.mcp-status-off {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+.mcp-server-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Sub-agent panels fill the space like the chat panel */
 .sub-agent-panel {
   background: var(--bg-primary);
