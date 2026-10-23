@@ -5,6 +5,7 @@ sub-modules:
 
 - :mod:`agent_cascade.engine.helpers`          — module-level pure/near-pure helpers
 - :mod:`agent_cascade.engine.llm_call`         — LLM-call cluster (LLMCallMixin)
+- :mod:`agent_cascade.engine.auto_skill`        — in-loop auto-skill trigger (AutoSkillMixin)
 - :mod:`agent_cascade.engine.compression_exec` — engine-side compression (CompressionExecMixin)
 - :mod:`agent_cascade.engine.tool_execution`   — tool dispatch/execution (ToolExecMixin)
 - :mod:`agent_cascade.engine.memory_hint`      — memory-hint query/submit (MemoryHintMixin)

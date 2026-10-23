@@ -1486,8 +1486,8 @@ class TestInLoopTrigger:
         # so tests can inspect state. This guarantees the min-turns gate sees `min_turns`
         # (not the default 50) on every turn, natural-end or reflection.
         def _run():
-            with patch('agent_cascade.engine.core.AUTO_SKILL_MIN_TURNS', min_turns), \
-                    patch('agent_cascade.engine.core.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
+            with patch('agent_cascade.engine.auto_skill.AUTO_SKILL_MIN_TURNS', min_turns), \
+                    patch('agent_cascade.engine.auto_skill.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
                     patch('agent_cascade.skills.manager.AUTO_SKILL_MIN_TURNS', min_turns):
                 gen = engine.run(inst)
                 for _ in gen:

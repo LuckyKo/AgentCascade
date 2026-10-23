@@ -180,8 +180,8 @@ def _make_engine(fresh_manager, tmp_path, max_turns=3, min_turns=2, extra_turns=
     engine._post_turn_checks = MagicMock(side_effect=_post_turn_checks_driver)
 
     def run():
-        with patch('agent_cascade.engine.core.AUTO_SKILL_MIN_TURNS', min_turns), \
-                patch('agent_cascade.engine.core.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
+        with patch('agent_cascade.engine.auto_skill.AUTO_SKILL_MIN_TURNS', min_turns), \
+                patch('agent_cascade.engine.auto_skill.AUTO_SKILL_EXTRA_TURNS', extra_turns), \
                 patch('agent_cascade.skills.manager.AUTO_SKILL_MIN_TURNS', min_turns):
             gen = engine.run(inst)
             for _ in gen:
