@@ -9,6 +9,7 @@ sub-modules:
 - :mod:`agent_cascade.engine.tool_execution`   — tool dispatch/execution (ToolExecMixin)
 - :mod:`agent_cascade.engine.memory_hint`      — memory-hint query/submit (MemoryHintMixin)
 - :mod:`agent_cascade.engine.placeholder_cache` — rolling arg/output cache (PlaceholderCacheMixin)
+- :mod:`agent_cascade.engine.telegram_stream`  — stream-time Telegram pushes
 - :mod:`agent_cascade.engine.token_budget`     — context limits/token counting (TokenBudgetMixin)
 - :mod:`agent_cascade.engine.core`             — ExecutionEngine class composing the mixins
 
