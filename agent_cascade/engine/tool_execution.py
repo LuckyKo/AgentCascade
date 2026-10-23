@@ -191,12 +191,7 @@ class ToolExecMixin:
                         # (agent.py:_call_tool) — one compact root-cause line at ERROR, full traceback
                         # demoted to DEBUG and deduped per (root type+msg). The LLM-facing result stays
                         # compact (no multi-frame stack) for consistency with the tool-crash path.
-                        summary = format_crash(e)
-                        logger.error(f"Tool {tool_name} failed for {inst_name}: {summary}")
-                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
-                            logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
-                                         f"{traceback.format_exc()}")
-                        tool_result = f"Error: {summary}"
+                        tool_result = self._format_tool_dispatch_error(e, tool_name, inst_name)
                         _tool_success = False
                         _tool_error = str(e)
                     # Cache full output (if exceeds threshold)
@@ -533,6 +528,23 @@ class ToolExecMixin:
                     f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last media_gen; "
                     f"forcing the deferred KV restore")
                 self._restore_held_slot_state(mg_inst, inst_name, label=inst_name)
+
+    def _format_tool_dispatch_error(self, e: Exception, tool_name: str, inst_name: str) -> str:
+        """Log/dedupe a dispatcher/plumbing crash and return the compact ``Error: ...`` string.
+
+        R3: present dispatcher/plumbing crashes with the SAME shape as a tool crash
+        (agent.py:_call_tool) — one compact root-cause line at ERROR, full traceback
+        demoted to DEBUG and deduped per (root type+msg). The LLM-facing result stays
+        compact (no multi-frame stack) for consistency with the tool-crash path.
+        ``traceback.format_exc()`` still resolves the active exception because this is
+        called from within the caller's ``except`` handler scope.
+        """
+        summary = format_crash(e)
+        logger.error(f"Tool {tool_name} failed for {inst_name}: {summary}")
+        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+            logger.debug(f"Tool {tool_name} failed for {inst_name} — full traceback:\n"
+                         f"{traceback.format_exc()}")
+        return f"Error: {summary}"
 
     def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
