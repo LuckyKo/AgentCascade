@@ -82,14 +82,17 @@ class TestCrashFormatSurfacesReason(unittest.TestCase):
 class TestLlmTerminalBranchReachable(unittest.TestCase):
     def test_terminal_branch_uses_gte(self):
         """B-fix-1: llm_call.py's informative terminal branch must be reachable — the
-        guard is ``retry_count >= _max_attempts``, not ``>`` (which was unreachable and
-        silently dropped to the 'Empty LLM response' branch)."""
+        guard is ``state.retry_count >= max_attempts``, not ``>`` (which was unreachable
+        and silently dropped to the 'Empty LLM response' branch). Phase 7 Track A renamed
+        the local ``retry_count``/``_max_attempts`` to ``state.retry_count``/``max_attempts``
+        via the ``_LLMCallState`` holder and the retry-failure helper; the ``>=`` semantics
+        are unchanged."""
         import agent_cascade.engine.llm_call as lc
         src = inspect.getsource(lc)
-        self.assertIn('if retry_count >= _max_attempts:', src,
+        self.assertIn('if state.retry_count >= max_attempts:', src,
                       "llm_call terminal branch guard regressed to '>'")
         # And the dead guard is gone.
-        self.assertNotIn('if retry_count > _max_attempts:', src)
+        self.assertNotIn('if state.retry_count > max_attempts:', src)
 
 
 class TestLlmDeadlineRaised(unittest.TestCase):
