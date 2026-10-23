@@ -226,7 +226,10 @@ class AgentInstanceLogger:
 
         # Fallback for generic objects or Message dataclass
         msg_dict = {}
-        for k in ['role', 'content', 'name', 'function_call', 'extra', 'timestamp']:
+        # reasoning_blocks: provider encrypted-reasoning blobs (opaque). The Pydantic (model_dump)
+        # and dict branches above already carry it; add it here for parity so non-Pydantic message
+        # objects don't silently drop the blob.
+        for k in ['role', 'content', 'name', 'function_call', 'extra', 'timestamp', 'reasoning_blocks']:
             if hasattr(message, k):
                 val = getattr(message, k)
                 if val is not None:

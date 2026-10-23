@@ -168,6 +168,35 @@ def _should_send_include_usage(api_base: Optional[str]) -> bool:
         return False
 
 
+def _extract_reasoning_blocks(reasoning) -> Optional[List[dict]]:
+    """Normalize a provider encrypted-reasoning payload into the structured list
+    ``Message.reasoning_blocks`` expects: ``[{'id': str|None, 'encrypted_content': str}]``.
+
+    The Chat Completions surface exposes a single ``reasoning`` object/dict carrying
+    ``.id``/``.encrypted_content``; some gateways send a list of them. Accepts BOTH the
+    SDK-object form (streaming chunks are cast to SDK objects that keep unknown fields
+    as attributes) and the plain-dict form (non-stream / some proxies). Returns ``None``
+    when nothing usable is present, so ``model_dump``'s forced ``exclude_none=True`` drops
+    the key entirely — the strict "no echo" default. Distinct from plain-text
+    ``reasoning_content``; never merged with it.
+    """
+    if reasoning is None:
+        return None
+    items = reasoning if isinstance(reasoning, list) else [reasoning]
+    blocks = []
+    for item in items:
+        if isinstance(item, dict):
+            enc = item.get('encrypted_content')
+            rid = item.get('id')
+        else:
+            enc = getattr(item, 'encrypted_content', None)
+            rid = getattr(item, 'id', None)
+        if not enc:
+            continue
+        blocks.append({'id': rid, 'encrypted_content': enc})
+    return blocks or None
+
+
 def _extract_usage(usage_obj):
     """Extract usage data from an OpenAI/DashScope usage object, including completion_tokens_details.
 
@@ -361,6 +390,15 @@ class TextChatAtOAI(BaseFnCallModel):
         # A/B fingerprinting), while _server_model feeds context-window detection, which
         # needs to match the id the server exposes in /models.
         self._server_model = None
+
+        # Capability flag for echoing provider encrypted-reasoning blobs (OpenAI o-series /
+        # GPT-5.x, OpenRouter pass-through, xAI Grok). DEFAULT OFF → strict no-op: existing
+        # endpoints never emit the provider 'reasoning' echo key. Opt in per-endpoint via the
+        # config key 'supports_encrypted_reasoning' (top-level cfg or generate_cfg). NOT inferred
+        # from model name — explicit opt-in only.
+        self.supports_encrypted_reasoning = bool(
+            self.cfg.get('supports_encrypted_reasoning')
+            or self.generate_cfg.get('supports_encrypted_reasoning'))
 
         if api_base and self.model and 'max_input_tokens' not in self.generate_cfg:
             self._detect_context_window(api_base, api_key)
@@ -601,6 +639,9 @@ class TextChatAtOAI(BaseFnCallModel):
             else:
                 full_response = ''
                 full_reasoning_content = ''
+                # Encrypted-reasoning blobs arrive out-of-band from text deltas (the completed
+                # reasoning item is emitted as its own chunk). Accumulate separately.
+                full_reasoning_blocks = None
                 full_tool_calls = []
                 last_usage = None  # Track most recent usage; may arrive in a chunk without choices
                 _usage_emitted = False
@@ -650,6 +691,12 @@ class TextChatAtOAI(BaseFnCallModel):
                             full_reasoning_content += chunk.choices[0].delta.reasoning_content
                         if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
                             full_response += chunk.choices[0].delta.content
+                        # Encrypted-reasoning blob: the completed reasoning item arrives on its own
+                        # chunk's delta.reasoning (not as text deltas). Extract + accumulate.
+                        new_blocks = _extract_reasoning_blocks(getattr(chunk.choices[0].delta, 'reasoning', None))
+                        if new_blocks:
+                            full_reasoning_blocks = full_reasoning_blocks or []
+                            full_reasoning_blocks.extend(new_blocks)
                         if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
                             # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
                             _chunk_matched = set()
@@ -733,11 +780,12 @@ class TextChatAtOAI(BaseFnCallModel):
                             extra['usage'] = usage_to_attach
                             _usage_emitted = True
 
-                        if full_reasoning_content or full_response:
+                        if full_reasoning_content or full_response or full_reasoning_blocks:
                             res.append(
                                 Message(role=ASSISTANT,
                                         content=full_response,
                                         reasoning_content=full_reasoning_content,
+                                        reasoning_blocks=full_reasoning_blocks,
                                         extra=extra))
                         if full_tool_calls:
                             for tc in full_tool_calls:
@@ -756,17 +804,18 @@ class TextChatAtOAI(BaseFnCallModel):
 
                 # If usage arrived after the last choices chunk (usage-only final chunk),
                 # emit it now so telemetry can pick it up
-                if last_usage and not _usage_emitted and (full_response or full_reasoning_content or full_tool_calls):
+                if last_usage and not _usage_emitted and (full_response or full_reasoning_content or full_tool_calls or full_reasoning_blocks):
                     # Fire callback for late-arriving usage data
                     _fire_usage_callback(last_usage)
 
                     extra = {'usage': last_usage}
                     res = []
-                    if full_reasoning_content or full_response:
+                    if full_reasoning_content or full_response or full_reasoning_blocks:
                         res.append(
                             Message(role=ASSISTANT,
                                     content=full_response,
                                     reasoning_content=full_reasoning_content,
+                                    reasoning_blocks=full_reasoning_blocks,
                                     extra=extra))
                     if full_tool_calls:
                         for tc in full_tool_calls:
@@ -872,6 +921,10 @@ class TextChatAtOAI(BaseFnCallModel):
             msg = response.choices[0].message
             result = []
 
+            # Provider encrypted-reasoning blob (opaque; distinct from plain-text reasoning_content).
+            # Attached only to the content/reasoning-bearing message — never to per-tool-call messages.
+            reasoning_blocks = _extract_reasoning_blocks(getattr(msg, 'reasoning', None))
+
             # Handle tool_calls (native function calling mode)
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
                 for tc in msg.tool_calls:
@@ -887,13 +940,22 @@ class TextChatAtOAI(BaseFnCallModel):
                 # Also include content/reasoning if present alongside tool_calls
                 reasoning = getattr(msg, 'reasoning_content', None) or ''
                 content = msg.content or ''
-                if content or reasoning:
-                    result.insert(0, Message(role=ASSISTANT, content=content, reasoning_content=reasoning, extra=extra))
+                if content or reasoning or reasoning_blocks:
+                    result.insert(0,
+                                  Message(role=ASSISTANT,
+                                          content=content,
+                                          reasoning_content=reasoning,
+                                          reasoning_blocks=reasoning_blocks,
+                                          extra=extra))
             else:
                 # No tool_calls — standard text response
                 reasoning = getattr(msg, 'reasoning_content', None) or ''
                 result.append(
-                    Message(role=ASSISTANT, content=msg.content or '', reasoning_content=reasoning, extra=extra))
+                    Message(role=ASSISTANT,
+                            content=msg.content or '',
+                            reasoning_content=reasoning,
+                            reasoning_blocks=reasoning_blocks,
+                            extra=extra))
             return result
         except OpenAIError as ex:
             code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
@@ -927,7 +989,8 @@ class TextChatAtOAI(BaseFnCallModel):
         #  and reasoning content is currently not useful
         messages = [format_as_text_message(msg, add_upload_info=False) for msg in messages]
         messages = [msg.model_dump() for msg in messages]
-        messages = self._conv_agent_cascade_messages_to_oai(messages)
+        messages = self._conv_agent_cascade_messages_to_oai(
+            messages, echo_reasoning_blocks=self.supports_encrypted_reasoning)
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f'LLM Input: \n{pformat(messages, indent=2)}')

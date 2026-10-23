@@ -979,7 +979,12 @@ def serialize_message(
         d = dict(msg)
     else:
         d = {}
-        for k in ['role', 'content', 'name', 'function_call', 'reasoning_content']:
+        # reasoning_blocks: provider encrypted-reasoning blobs (opaque). Must be preserved here
+        # for parity with the model_dump() path above — silently dropping it would break the
+        # multi-turn echo. It is NOT char-counted by _get_msg_reasoning (opaque, billed by the
+        # provider as reasoning tokens, not visible text) and NOT added to the streaming-dedup
+        # fingerprint (it does not change mid-stream).
+        for k in ['role', 'content', 'name', 'function_call', 'reasoning_content', 'reasoning_blocks']:
             val = getattr(msg, k, None)
             if val is not None:
                 d[k] = val

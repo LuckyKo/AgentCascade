@@ -1076,3 +1076,78 @@ def mock_servers():
     }
     busy_srv.shutdown()
     healthy_srv.shutdown()
+
+
+class _EchoRequiredHandler(_http_server.BaseHTTPRequestHandler):
+    """Echo-required encrypted-reasoning mock (NEW handler; _MockLLMHandler untouched).
+
+    Reuses the mock_servers scaffolding (ThreadingHTTPServer + daemon thread + free_port).
+    Unlike _MockLLMHandler's busy/healthy retry semantics, this handler PARSES the request
+    body (the base handler discards it) and turns "did AC echo the blob?" into a HARD,
+    deterministic assertion:
+
+      - If the request carries an assistant message, it MUST carry reasoning.encrypted_content
+        AND reasoning.id. Missing either -> HTTP 400 with a distinctive string. (In production a
+        missing blob is NOT an error — the model silently restarts reasoning; we make it loud here.)
+      - Turn 1 (no assistant message) -> return a valid Chat Completions body WITH a byte-deterministic
+        reasoning blob (id + encrypted_content) so the round-trip can assert equality.
+    """
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        import json as _json
+        length = int(self.headers.get('Content-Length', 0))
+        raw = self.rfile.read(length) if length else b''
+        try:
+            req = _json.loads(raw)
+        except Exception:
+            req = {}
+        msgs = req.get('messages') or []
+        assistant_msgs = [m for m in msgs if m.get('role') == 'assistant']
+        if assistant_msgs:
+            # Validate every assistant message echoes a complete reasoning block.
+            for am in assistant_msgs:
+                r = am.get('reasoning')
+                if not (isinstance(r, dict) and r.get('encrypted_content') and r.get('id')):
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    body = {'error': {'message': 'missing reasoning.encrypted_content (or id)'}}
+                    self.wfile.write(_json.dumps(body).encode())
+                    return
+            body = {'choices': [{'message': {'role': 'assistant', 'content': 'answer-2'}}]}
+        else:
+            body = {'choices': [{
+                'message': {
+                    'role': 'assistant',
+                    'content': 'answer-1',
+                    'reasoning': {
+                        'id': 'rs_test_1',
+                        'encrypted_content': 'gAAAAABdeterministic_test_blob',
+                    },
+                }
+            }]}
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_json.dumps(body).encode())
+
+
+@pytest.fixture
+def echo_server():
+    """Single echo-required mock server for encrypted-reasoning round-trip tests (no cloud key)."""
+    import socket
+
+    def free_port():
+        s = socket.socket()
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    srv = _http_server.ThreadingHTTPServer(('127.0.0.1', free_port()), _EchoRequiredHandler)
+    t = _threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f'http://127.0.0.1:{srv.server_address[1]}/v1'
+    srv.shutdown()

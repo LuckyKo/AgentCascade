@@ -137,6 +137,7 @@ class QwenFnCallPrompt(BaseFnCallPrompt):
                 break
 
         # Convert plaintext responses to function_call responses:
+        # reasoning_blocks (encrypted-reasoning blobs) is intentionally NOT threaded here — the feature is native-path only.
         new_messages = []
         for msg in messages:
             role, content, extra = msg.role, msg.content, msg.extra

@@ -705,7 +705,7 @@ class BaseChatModel(ABC):
             return '{}'
 
     @staticmethod
-    def _conv_agent_cascade_messages_to_oai(messages: List[Union[Message, Dict]]):
+    def _conv_agent_cascade_messages_to_oai(messages: List[Union[Message, Dict]], echo_reasoning_blocks: bool = False):
         new_messages = []
         for msg in messages:
             if msg['role'] == ASSISTANT:
@@ -728,6 +728,22 @@ class BaseChatModel(ABC):
                     # No reasoning merged yet and none incoming -> ensure the field exists (empty) for models that require it.
                     new_messages[-1]['reasoning_content'] = ''
                 # else: a prior merged message already supplied non-empty reasoning; leave it untouched.
+                # Provider encrypted-reasoning blob echo (opaque; distinct from reasoning_content).
+                # Gated on the per-endpoint capability flag (default off → strict no-op). The Chat
+                # Completions echo surface carries a single 'reasoning' object, so echo the first
+                # block. Mirror the reasoning_content clobber-guard: a merged tool-call message carries
+                # no blob and must NOT clobber a blob already merged from a prior content message.
+                # Unlike reasoning_content, an absent blob emits NO key (never force an empty one).
+                if echo_reasoning_blocks:
+                    incoming_blocks = msg.get('reasoning_blocks')
+                    if incoming_blocks:
+                        first = incoming_blocks[0]
+                        blob = first.get('encrypted_content')
+                        if blob:
+                            reasoning = {'encrypted_content': blob}
+                            if first.get('id'):
+                                reasoning['id'] = first['id']
+                            new_messages[-1]['reasoning'] = reasoning
                 if msg.get('function_call'):
                     if not new_messages[-1].get('tool_calls'):
                         new_messages[-1]['tool_calls'] = []

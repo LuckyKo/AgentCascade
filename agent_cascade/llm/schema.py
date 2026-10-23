@@ -143,10 +143,33 @@ class ContentItem(BaseModelCompatibleDict):
         return v
 
 
+class ReasoningBlock(BaseModel):
+    """One provider encrypted-reasoning block (OpenAI o-series / OpenRouter / xAI Grok).
+
+    Opaque, provider-encrypted chain-of-thought — NOT the plain-text ``reasoning_content``
+    (DeepSeek/Qwen/llama.cpp visible thinking). Both ``id`` and ``encrypted_content`` must
+    be echoed back verbatim on the next turn for the chain to be replayable; a block missing
+    either is silently skipped by the provider (the model restarts reasoning — not an error).
+    A message may legitimately carry BOTH this blob and ``reasoning_content`` (OpenRouter),
+    so the two are kept strictly separate end-to-end.
+
+    See reports/encrypted_reasoning_blobs_RESEARCH.md for the full design and seam map.
+    """
+    id: Optional[str] = None
+    encrypted_content: str
+
+
 class Message(BaseModelCompatibleDict):
     role: str
     content: Union[str, List[ContentItem]]
     reasoning_content: Optional[Union[str, List[ContentItem]]] = None
+    # Provider encrypted-reasoning blobs (opaque; echo-gated per-endpoint). NOT exclude=True:
+    # model_dump()/model_dump_json() force exclude_none=True, so an absent blob emits no key
+    # (the strict "no echo" default) while a present blob survives serialization and can be
+    # replayed. Distinct from reasoning_content — see ReasoningBlock. The List form is capture-tolerance
+    # (some gateways return multiple reasoning items); the Chat-Completions echo intentionally collapses
+    # to the first block (providers return one reasoning item per turn) — deliberate, not a leak.
+    reasoning_blocks: Optional[List[ReasoningBlock]] = None
     name: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     extra: Optional[dict] = None
@@ -158,6 +181,7 @@ class Message(BaseModelCompatibleDict):
                  role: str,
                  content: Union[str, List[ContentItem]],
                  reasoning_content: Optional[Union[str, List[ContentItem]]] = None,
+                 reasoning_blocks: Optional[List[ReasoningBlock]] = None,
                  name: Optional[str] = None,
                  function_call: Optional[FunctionCall] = None,
                  extra: Optional[dict] = None,
@@ -167,6 +191,7 @@ class Message(BaseModelCompatibleDict):
         super().__init__(role=role,
                          content=content,
                          reasoning_content=reasoning_content,
+                         reasoning_blocks=reasoning_blocks,
                          name=name,
                          function_call=function_call,
                          extra=extra,

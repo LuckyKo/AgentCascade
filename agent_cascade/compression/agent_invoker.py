@@ -181,6 +181,12 @@ def _format_messages_for_summary(target_messages: List[Any]) -> str:
 
         # Check for reasoning_content even if content is populated (handles str and list types)
         # Only process reasoning for assistant messages — matches extract_text_from_message behavior
+        # NOTE: provider encrypted-reasoning blobs (Message.reasoning_blocks) are deliberately
+        # NOT folded here — they are opaque/encrypted and unsummarizable. Kept (post-compression)
+        # messages retain their reasoning_blocks field, so the echo still works for the surviving
+        # tail; blobs on the summarized portion drop with it. Consequence: the reasoning chain
+        # RESTARTS at the compression boundary — acceptable, compression already discards exact
+        # history and matches the provider's "starts from scratch" fallback (no hard error).
         rc = _msg_field_or_extra(msg, 'reasoning_content') or ''
 
         rc_text = _reasoning_to_text(rc)

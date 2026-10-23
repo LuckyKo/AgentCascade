@@ -691,6 +691,7 @@ def format_as_multimodal_message(
     msg = Message(role=msg.role,
                   content=content,
                   reasoning_content=msg.reasoning_content,
+                  reasoning_blocks=msg.reasoning_blocks,
                   name=msg.name if msg.role == FUNCTION else None,
                   function_call=msg.function_call,
                   extra=msg.extra)

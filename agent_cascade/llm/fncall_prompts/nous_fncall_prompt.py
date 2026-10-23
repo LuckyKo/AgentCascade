@@ -96,6 +96,7 @@ class NousFnCallPrompt(BaseFnCallPrompt):
 
         ori_messages = messages
 
+        # reasoning_blocks (encrypted-reasoning blobs) is intentionally NOT threaded here — the feature is native-path only.
         # Change function_call responses to plaintext responses:
         messages = []
         for msg in copy.deepcopy(ori_messages):
