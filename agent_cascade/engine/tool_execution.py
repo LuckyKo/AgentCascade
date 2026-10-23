@@ -53,27 +53,16 @@ class ToolExecMixin:
         # Shared with orphan handling via _resolve_tool_policy.
         _primary_template, _primary_disabled_tools, _primary_function_map = self._resolve_tool_policy(instance)
 
-        # ── Parallel-call_agent batch detection (single source of truth) ───────
-        # A parent may issue several call_agent tool calls in ONE turn_output. Their parent context
-        # is identical across the batch (no LLM generation between tool calls), so only the FIRST
-        # needs to arm the parent save and only the LAST needs to swap the parent model back in.
-        # turn_output is the complete, ordered tool-call list for this turn, already in memory, so the
-        # batch structure is known STATICALLY — no runtime in-flight counter. Use the SAME _detect_tool
-        # the loop uses so the detector cannot diverge from what actually runs. is_first_ca/is_last_ca
-        # are threaded per-call (never shared instance state) so nested/parallel agents stay correct.
-        ca_indices = []
-        # Same static batch detection for media_gen. A parent
-        # may issue several media_gen tool calls in ONE turn_output; each does a full save → unload → generate
-        # → restore VRAM cycle, but the model is already unloaded after the first and only the last needs to
-        # swap it back in. So only the FIRST saves and only the LAST restores. is_first_vram/is_last_vram are
+        # ── Parallel-call_agent / media_gen batch detection (single source of truth) ───────
+        # A parent may issue several call_agent (or media_gen) tool calls in ONE turn_output.
+        # Their parent context is identical across the batch (no LLM generation between tool
+        # calls), so only the FIRST needs to arm the parent save and only the LAST needs to swap
+        # the parent model back in. turn_output is the complete, ordered tool-call list for this
+        # turn, already in memory, so the batch structure is known STATICALLY — no runtime
+        # in-flight counter. _scan_tool_batch_indices uses the SAME _detect_tool the loop uses
+        # so the detector cannot diverge from what actually runs. is_first/is_last flags are
         # threaded per-call (never shared instance state) so nested/parallel agents stay correct.
-        mg_indices = []
-        for _idx, _out in enumerate(turn_output):
-            _use, _name, _, _ = self._detect_tool(_out)
-            if _use and _name == 'call_agent':
-                ca_indices.append(_idx)
-            elif _use and _name == 'media_gen':
-                mg_indices.append(_idx)
+        ca_indices, mg_indices = self._scan_tool_batch_indices(turn_output)
 
         # Whether any call_agent actually ran in this batch — gates the safety net below so it never
         # fires for a batch that contained no call_agent (nothing was ever deferred).
@@ -220,15 +209,13 @@ class ToolExecMixin:
                         # media_gen → both True → byte-identical to today; non-media_gen tools get True/True.
                         if tool_name == 'call_agent':
                             ran_ca = True
-                            is_first_ca = (_out_idx == ca_indices[0])
-                            is_last_ca = (_out_idx == ca_indices[-1])
+                            is_first_ca, is_last_ca = self._batch_position(_out_idx, ca_indices)
                             if is_last_ca:
                                 reached_last_ca = True
                             is_first_vram = is_last_vram = True
                         elif tool_name == 'media_gen':
                             ran_mg = True
-                            is_first_vram = (_out_idx == mg_indices[0])
-                            is_last_vram = (_out_idx == mg_indices[-1])
+                            is_first_vram, is_last_vram = self._batch_position(_out_idx, mg_indices)
                             if is_last_vram:
                                 reached_last_mg = True
                             is_first_ca = is_last_ca = True
@@ -571,6 +558,35 @@ class ToolExecMixin:
 
             function_map = getattr(template, 'function_map', {})
         return template, disabled_tools, function_map
+
+    def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
+        """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
+        and media_gen tool calls in ``turn_output``.
+
+        Static parallel-batch detection (single source of truth): ``turn_output`` is
+        the complete, ordered tool-call list for this turn, already in memory, so the
+        batch structure is known up-front — no runtime in-flight counter. Uses the
+        SAME ``_detect_tool`` the execution loop uses so the detector cannot diverge
+        from what actually runs. One ``_detect_tool`` call per element, in order.
+        """
+        ca_indices = []
+        mg_indices = []
+        for _idx, _out in enumerate(turn_output):
+            _use, _name, _, _ = self._detect_tool(_out)
+            if _use and _name == 'call_agent':
+                ca_indices.append(_idx)
+            elif _use and _name == 'media_gen':
+                mg_indices.append(_idx)
+        return ca_indices, mg_indices
+
+    def _batch_position(self, out_idx: int, indices: List[int]) -> tuple:
+        """Return ``(is_first, is_last)`` for ``out_idx`` within a batch's index list.
+
+        Called only from inside the matching call_agent/media_gen branch, where ``indices``
+        is non-empty by construction of the scan (the current tool's own index was just
+        appended) — never call with an empty list (would raise IndexError).
+        """
+        return (out_idx == indices[0]), (out_idx == indices[-1])
 
     @staticmethod
     def _has_images(messages):
