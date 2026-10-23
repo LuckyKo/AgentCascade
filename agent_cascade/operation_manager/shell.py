@@ -11,7 +11,8 @@ from typing import Callable, List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
 from agent_cascade.log import logger
-from agent_cascade.shell_utils import DRAIN_THREAD_JOIN_TIMEOUT, configure_windows_utf8, drain_pipe_chunks
+from agent_cascade.shell_utils import (DRAIN_THREAD_JOIN_TIMEOUT, build_shell_env, configure_windows_utf8,
+                                       drain_pipe_chunks, git_autogc_hint_for_output)
 from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── Named constants (avoid magic numbers) ──────────────────────────────
@@ -22,13 +23,6 @@ MAX_SHELL_TIMEOUT = 3600  # Maximum allowed shell command timeout (1 hour)
 
 # Platform flag (evaluated once at import time)
 ON_WINDOWS = os.name == 'nt'
-
-# Cached Windows environment dict (set PYTHONIOENCODING for child Python processes)
-if ON_WINDOWS:
-    _WIN_ENV = os.environ.copy()
-    _WIN_ENV['PYTHONIOENCODING'] = 'utf-8'
-else:
-    _WIN_ENV = None  # noqa: constant used only in method below
 
 # Matches a Python launcher (python / python3 / py) followed by a -c or -e flag.
 # Used by ShellMixin._detect_multiline_python (BUG_0012); the argument itself is
@@ -909,12 +903,13 @@ class ShellMixin:
 
             # ── Platform-specific setup ──────────────────────────────
             original_command = command  # keep for multi-line detection hint
+            # BUG_0139: build_shell_env() sets Windows UTF-8 handling and disables
+            # git auto-gc so a background "geometric repack" cannot stall the command.
+            env = build_shell_env()
             if ON_WINDOWS:
                 command, creationflags = self._configure_windows_utf8(command)
-                env = _WIN_ENV  # pre-cached dict with PYTHONIOENCODING set
             else:
                 creationflags = 0
-                env = None
 
             exec_start = time.time()  # Local elapsed timing (sync mode has no task record)
 
@@ -1033,6 +1028,13 @@ class ShellMixin:
                     final_msg = f"APPROVED: {status}\n"
                     if justification_text:
                         final_msg += f"Security Justification: {justification_text}\n"
+
+                # BUG_0139: a failed background auto-gc can make git exit non-zero
+                # even though the primary operation succeeded. Surface the hint next
+                # to the error instead of leaving a misleading bare exit code.
+                hint = git_autogc_hint_for_output(stdout + stderr) if proc.returncode != 0 else ''
+                if hint:
+                    return final_msg + f"\n{final_output}\n\n{hint}"
                 return final_msg + f"\n{final_output}"
 
             # ── Timeout path ────────────────────────────────────────
@@ -1053,6 +1055,13 @@ class ShellMixin:
             # Append multi-line python hint if applicable
             if ON_WINDOWS and self._detect_multiline_python(original_command):
                 timeout_msg += f"\n\n{self._multiline_python_hint()}"
+
+            # BUG_0139: partial output may already contain git's "geometric repack"
+            # failure. The commit/push/fetch often succeeded before auto-gc hung, so
+            # tell the agent to check state rather than blindly retrying.
+            autogc_hint = git_autogc_hint_for_output(stdout + stderr)
+            if autogc_hint:
+                timeout_msg += f"\n\n{autogc_hint}"
 
             if output.strip():
                 return f"{timeout_msg}\n\n{output}"

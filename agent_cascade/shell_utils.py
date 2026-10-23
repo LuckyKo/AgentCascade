@@ -18,6 +18,79 @@ PIPE_READ_SIZE = 4096  # Bytes per read call on stdout/stderr pipes
 DRAIN_THREAD_JOIN_TIMEOUT = 3  # Seconds to wait for drain threads after process ends
 WINDOWS_UTF8_CODE_PAGE = '65001'  # Windows code page for UTF-8 output
 
+# BUG_0139: git's automatic gc ("geometric repack") can outlive the user's git
+# command and hold the shell's stdout/stderr pipes open. The shell tool then times
+# out even though the commit/push/fetch already landed. The message below is the
+# unambiguous marker emitted by git; detect it in partial output on timeout (and on
+# non-zero completion) so agents get an actionable hint instead of a bare timeout.
+_GIT_AUTOGC_MARKERS = ('geometric repack', 'geometric-repack')
+
+GIT_AUTOGC_HINT = (
+    "[SYSTEM: git's automatic garbage collection ('geometric repack') failed or was "
+    'interrupted. Auto-gc is background maintenance, so the actual git operation '
+    '(commit/push/fetch) may already have succeeded — verify with `git log` or '
+    '`git status` before retrying. AgentCascade disables git auto-gc for shell '
+    'commands by default; if this recurs, run `git config gc.auto 0` in the '
+    'repository and run `git gc` manually when the host is idle.]'
+)
+
+
+def git_autogc_hint_for_output(output: str) -> str:
+    """Return the BUG_0139 hint when *output* contains git auto-gc repack noise.
+
+    Pure, case-insensitive substring check. Returns an empty string when the output
+    has no git-geometric-repack marker, so callers can append the result blindly.
+    """
+    if not output:
+        return ''
+    lowered = output.lower()
+    if any(marker in lowered for marker in _GIT_AUTOGC_MARKERS):
+        return GIT_AUTOGC_HINT
+    return ''
+
+
+def git_autogc_disabled_env(base_env=None) -> dict:
+    """Return a copy of *base_env* with git auto-gc disabled via ``GIT_CONFIG_*``.
+
+    ``gc.auto=0`` is injected as a per-process git config entry (supported by git
+    via ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_<n>``/``GIT_CONFIG_VALUE_<n>``) rather
+    than writing to the user's repository config. Existing ``GIT_CONFIG_*`` entries
+    are preserved and the new entry is appended. If the caller's ``GIT_CONFIG_COUNT``
+    is malformed, the environment is returned unchanged (git would fail on it anyway;
+    the timeout hint still covers that case).
+
+    BUG_0139: agent-driven repos routinely hit multi-second "geometric repack"
+    stalls under shell_cmd. Disabling auto-gc keeps commit/push/fetch bounded;
+    explicit ``git gc`` still works, and ``gc.auto`` can be restored by the user.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    try:
+        count = int(env.get('GIT_CONFIG_COUNT', '0') or '0')
+    except (TypeError, ValueError):
+        return env
+    if count < 0:
+        return env
+    env['GIT_CONFIG_COUNT'] = str(count + 1)
+    env[f'GIT_CONFIG_KEY_{count}'] = 'gc.auto'
+    env[f'GIT_CONFIG_VALUE_{count}'] = '0'
+    return env
+
+
+def build_shell_env() -> dict:
+    """Build the environment for shells spawned by the shell_cmd tool.
+
+    Includes the Windows UTF-8 child setting and disables git auto-gc so background
+    repacks cannot stall (or time out) the agent's git command (BUG_0139). Set
+    ``AGENT_CASCADE_GIT_AUTO_GC=1`` to keep git's normal auto-gc behavior.
+    """
+    env = os.environ.copy()
+    if os.name == 'nt':
+        env['PYTHONIOENCODING'] = 'utf-8'
+    keep_default = os.getenv('AGENT_CASCADE_GIT_AUTO_GC', '').strip().lower() in (
+        '1', 'true', 'on', 'yes')
+    return env if keep_default else git_autogc_disabled_env(env)
+
+
 # ─── Shared pipe drain function (line-based, used by async_shell) ──
 
 

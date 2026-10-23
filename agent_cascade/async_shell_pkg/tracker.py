@@ -24,11 +24,12 @@ from agent_cascade.async_shell_pkg.constants import LAUNCH_POLL_INTERVAL  # noqa
 from agent_cascade.async_shell_pkg.constants import (DRAIN_THREAD_FLUSH_DELAY, PROCESS_KILL_SETTLE_DELAY,
                                                      SPAWN_PUBLISH_TIMEOUT, VIEWER_EXIT_WAIT_TIMEOUT)
 from agent_cascade.async_shell_pkg.task import AsyncShellTask, _elapsed_for_task
-from agent_cascade.async_shell_pkg.windows import _WIN_ENV, ON_WINDOWS, _send_windows_ctrl_c
+from agent_cascade.async_shell_pkg.windows import ON_WINDOWS, _send_windows_ctrl_c
 from agent_cascade.log import logger
 from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, EARLY_OUTPUT_CHECK_TIMEOUT, HEARTBEAT_CHECK_INTERVAL,
                                     MAX_ASYNC_SHELL_PER_AGENT)
-from agent_cascade.shell_utils import DRAIN_THREAD_JOIN_TIMEOUT, configure_windows_utf8, drain_pipe_lines
+from agent_cascade.shell_utils import (DRAIN_THREAD_JOIN_TIMEOUT, build_shell_env, configure_windows_utf8,
+                                       drain_pipe_lines, git_autogc_hint_for_output)
 from agent_cascade.tool_utils import truncate_with_spillover
 
 
@@ -508,12 +509,13 @@ class AsyncShellTracker:
 
         original_command = command
         creationflags = 0
-        env = None
+        # BUG_0139: includes Windows UTF-8 setup and disables git auto-gc so a
+        # background "geometric repack" cannot hold the pipes open past timeout.
+        env = build_shell_env()
 
         if ON_WINDOWS:
             # Use shared UTF-8 config with console window popup for async shells
             command, creationflags = configure_windows_utf8(command, create_new_console=task.console_window)
-            env = _WIN_ENV
 
             # Add -NoProfile to PowerShell commands to suppress profile.ps1 loading errors.
             if original_command.strip().lower().startswith('powershell'):
@@ -891,9 +893,7 @@ class AsyncShellTracker:
                 # (a "final output" message followed by a "completed" message); merging
                 # them avoids the useless duplicate and keeps everything in one reply.
                 task = self._get_task(agent_name, tool_id)
-                header = self._build_completion_header(tool_id, task, timed_out=timed_out)
-                remaining_text = self._get_remaining_output_text(agent_name, tool_id)
-                msg = header if not remaining_text else f"{header}\n\nOutput:\n{remaining_text}"
+                msg = self._build_completion_message(agent_name, tool_id, task, timed_out=timed_out)
 
                 # Enqueue the merged message BEFORE the finally block removes the task
                 # from _tasks. Order matters: _enqueue() puts the message on the queue;
@@ -1308,6 +1308,30 @@ class AsyncShellTracker:
                 logger.debug(f"[AsyncShell] truncate_with_spillover failed in remaining output for {agent_name}: {e}")
 
         return output_text or None
+
+    # ────────────────────────────────────────────────────────────────
+    def _build_completion_message(
+        self,
+        agent_name: str,
+        tool_id: int,
+        task: Optional['AsyncShellTask'],
+        timed_out: bool = False,
+    ) -> str:
+        """Build the merged completion message (header + remaining output + hint).
+
+        On timeout, if the accumulated output mentions git's "geometric repack"
+        (BUG_0139), append an actionable hint: the primary git operation often
+        succeeded before auto-gc hung, so the agent should verify state instead of
+        blindly retrying.
+        """
+        header = self._build_completion_header(tool_id, task, timed_out=timed_out)
+        remaining_text = self._get_remaining_output_text(agent_name, tool_id)
+        msg = header if not remaining_text else f"{header}\n\nOutput:\n{remaining_text}"
+        if timed_out and task is not None:
+            hint = git_autogc_hint_for_output('\n'.join(self._get_combined_output(task)))
+            if hint:
+                msg += f"\n\n{hint}"
+        return msg
 
     # ────────────────────────────────────────────────────────────────
     def _build_completion_header(

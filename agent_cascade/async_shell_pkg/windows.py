@@ -1,7 +1,8 @@
 """Windows console / Ctrl+C helpers (moved verbatim from async_shell.py).
 
-Phase 3c pure-move refactor. Defines the ``ON_WINDOWS`` / ``_WIN_ENV`` module globals
-and the Ctrl+C helper used by the tracker on Windows.
+Phase 3c pure-move refactor. Defines the ``ON_WINDOWS`` global and the Ctrl+C
+helper used by the tracker on Windows. Shell environments (including UTF-8 setup
+and git auto-gc suppression) are built by ``shell_utils.build_shell_env``.
 """
 
 import os
@@ -10,13 +11,6 @@ import subprocess
 from agent_cascade.log import logger
 
 ON_WINDOWS = os.name == 'nt'
-
-# Pre-cached Windows environment dict with PYTHONIOENCODING set for child Python processes
-if ON_WINDOWS:
-    _WIN_ENV = os.environ.copy()
-    _WIN_ENV['PYTHONIOENCODING'] = 'utf-8'
-else:
-    _WIN_ENV = None
 
 
 def _send_windows_ctrl_c(pid: int) -> bool:
