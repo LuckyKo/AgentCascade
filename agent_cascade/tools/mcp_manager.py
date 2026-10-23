@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import base64
 import datetime
+import hashlib
 import json
 import threading
 import time
@@ -54,6 +55,9 @@ class MCPManager:
 
             load_dotenv()  # Load environment variables from .env file
             self.clients: dict = {}
+            self._connected_servers: dict[str, str] = {}  # server_name:config_hash → client_id
+            self._server_tools: dict[str, list] = {}  # server_name → cached tools (for re-registration)
+            self._mcp_lock = threading.Lock()  # Guards _connected_servers/_server_tools vs shutdown()
             self.loop = asyncio.new_event_loop()
             self.loop_thread = threading.Thread(target=self.start_loop, daemon=True)
             self.loop_thread.start()
@@ -163,8 +167,23 @@ class MCPManager:
         tools: list = []
         mcp_servers = config['mcpServers']
         for server_name in mcp_servers:
-            client = MCPClient()
             server = mcp_servers[server_name]
+            # Config fingerprint: if the server config changes, force reconnection.
+            _cfg_fingerprint = hashlib.md5(
+                json.dumps(server, sort_keys=True, default=str).encode()
+            ).hexdigest()[:8]
+            _guard_key = f"{server_name}:{_cfg_fingerprint}"
+
+            # Idempotency guard: return cached tools for already-connected servers (prevents
+            # process explosion when initConfig is called multiple times, e.g. on repeated
+            # UI config updates, while still allowing new agents to get tool registrations).
+            with self._mcp_lock:
+                if _guard_key in self._connected_servers:
+                    logger.debug(f"MCP server '{server_name}' already connected, returning cached tools.")
+                    tools.extend(self._server_tools.get(server_name, []))
+                    continue
+
+            client = MCPClient()
             await client.connection_server(mcp_server_name=server_name,
                                            mcp_server=server)  # Attempt to connect to the server
 
@@ -172,6 +191,7 @@ class MCPManager:
                 uuid.uuid4())  # To allow the same server name be used across different running agents
             client.client_id = client_id  # Ensure client_id is set on the client instance
             self.clients[client_id] = client  # Add to clients dict after successful connection
+            _server_tools_start = len(tools)  # Mark start index for per-server tool caching
             for tool in client.tools:
                 """MCP tool example:
                 {
@@ -270,6 +290,12 @@ class MCPManager:
                                                                   tool_parameters=read_resource_params)
                 tools.append(read_resource_agent_tool)
 
+            # Cache this server's tools and mark as connected (only after all tool creation
+            # succeeded — if an exception occurred above, the guard stays unset so retries work).
+            with self._mcp_lock:
+                self._server_tools[server_name] = tools[_server_tools_start:]
+                self._connected_servers[_guard_key] = client_id
+
         return tools
 
     def create_tool_class(self, register_name, register_client_id, tool_name, tool_desc, tool_parameters):
@@ -318,6 +344,9 @@ class MCPManager:
             future = asyncio.run_coroutine_threadsafe(client.cleanup(), self.loop)
             futures.append(future)
             del self.clients[client_id]
+        with self._mcp_lock:
+            self._connected_servers.clear()
+            self._server_tools.clear()
         time.sleep(1)  # Wait for the graceful cleanups, otherwise fall back
 
         # fallback

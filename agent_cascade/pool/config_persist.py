@@ -73,13 +73,17 @@ class ConfigPersistMixin:
                 # Preserve the one-time class-defaults migration sentinel across saves. This method
                 # rebuilds `data` from settings.to_dict() + live state, which would otherwise drop a
                 # disk-only key; carry it forward so _migrate_class_defaults_to_ui_config stays idempotent.
+                # Also carry forward mcpServers (not managed by UI settings form — disk-only config).
                 if self._pool_settings_path.exists():
                     try:
                         with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
-                            if json.load(f).get(_CLASS_DEFAULTS_MIGRATED):
+                            _existing = json.load(f)
+                            if _existing.get(_CLASS_DEFAULTS_MIGRATED):
                                 data[_CLASS_DEFAULTS_MIGRATED] = True
-                    except Exception:
-                        pass
+                            if 'mcpServers' in _existing and isinstance(_existing['mcpServers'], dict):
+                                data['mcpServers'] = _existing['mcpServers']
+                    except (OSError, json.JSONDecodeError) as e:
+                        logger.debug(f"[PoolSettings] Failed to read existing settings for key preservation: {e}")
 
                 # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
@@ -140,6 +144,7 @@ class ConfigPersistMixin:
             afk_enabled_raw = data.pop('afk_enabled', None)
             afk_message_raw = data.pop('afk_message', None)
             enable_async_shell_console_window_raw = data.pop('enable_async_shell_console_window', None)
+            mcp_servers_raw = data.pop('mcpServers', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
             self.settings = PoolSettings.from_dict(data)
@@ -185,6 +190,10 @@ class ConfigPersistMixin:
             # Apply async shell console window toggle from disk if present
             if enable_async_shell_console_window_raw is not None:
                 self._enable_async_shell_console_window = bool(enable_async_shell_console_window_raw)
+
+            # Store mcpServers config for deferred init (tool registration needs templates' function_map)
+            if mcp_servers_raw is not None and isinstance(mcp_servers_raw, dict) and mcp_servers_raw:
+                self._pending_mcp_servers = mcp_servers_raw
 
             # Apply compression_fraction from disk if present (BUG_0029 Phase 2: single writer)
             compression_fraction_raw = data.pop('compression_fraction', None)

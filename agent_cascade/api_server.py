@@ -2281,6 +2281,22 @@ if __name__ == '__main__':
         logger.error('[FATAL] Failed to create orchestrator instance: %s', e)
         raise SystemExit(1)
 
+    # Initialize MCP servers from pool_settings.json (deferred from _load_pool_settings
+    # because templates' function_map needs to exist before tool registration).
+    _pending_mcp = getattr(agent_pool, '_pending_mcp_servers', None)
+    if _pending_mcp:
+        try:
+            from agent_cascade.config_handlers import CONFIG_HANDLERS as _CH
+            _mcp_handler = _CH.get('mcpServers')
+            if _mcp_handler:
+                _all_templates = list(agent_pool.templates.values())
+                _mcp_handler({'mcpServers': _pending_mcp}, agent_pool, _all_templates)
+                logger.info(f"[INIT] MCP servers initialized from pool_settings.json: {list(_pending_mcp.keys())}")
+        except Exception as e:
+            logger.warning(f"[INIT] MCP server initialization failed: {e}")
+        finally:
+            agent_pool._pending_mcp_servers = None  # Clear to avoid re-init on subsequent saves
+
     # Start background services (idle checker thread, etc.)
     try:
         agent_pool.start()
