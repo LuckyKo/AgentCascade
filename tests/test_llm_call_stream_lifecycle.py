@@ -1,4 +1,4 @@
-"""Phase 8 — streaming-lifecycle behavior fix (P8-1: stream watchdog abort).
+"""Phase 8 — streaming-lifecycle behavior (P8-1 watchdog abort + P8-2 keep-partial guard).
 
 Each test drives the REAL ExecutionEngine streaming loop (via
 tests.phase8_stream_helpers) because only the real loop can exercise the watchdog
@@ -12,6 +12,7 @@ pop-guard at telemetry.py:531-533 already collapses any double-end to one event)
 
 from agent_cascade.telemetry import TelemetryCollector
 from tests.phase8_stream_helpers import (
+    chunk_gen,
     drive_stream,
     end_events,
     extract_assistant_contents,
@@ -103,3 +104,50 @@ def test_watchdog_total_duration_trips_abort_and_retries(tmp_path):
     assert _EMPTY_RESPONSE in extract_system_errors(results), (
         f"expected {_EMPTY_RESPONSE!r}, got: {extract_system_errors(results)}")
     assert len(end_events(collector)) == execute.call_count
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# P8-2 — REGRESSION GUARD (NOT a discriminator): a mid-stream stop must commit
+# the partial (keep-partial re-yield) with exactly one 'end', no [RETRYING],
+# and no empty-response error. This PASSES on current code — it pins the
+# keep-partial decision so a future "suppress the re-yield" change would break it.
+# Covers both stop sites: :776 (first-chunk) and :799 (after a UI update).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _assert_keep_partial_stop(collector, results):
+    contents = extract_assistant_contents(results)
+    assert 'partial-response' in contents, (
+        f'keep-partial: the partial must be committed on a mid-stream stop; got: {contents}')
+    assert len(end_events(collector)) == 1, (
+        f'a stopped attempt must record exactly one "end", got {len(end_events(collector))}')
+    assert retrying_messages(results) == [], 'a mid-stream stop is not a retry'
+    assert extract_system_errors(results) == [], (
+        'a mid-stream stop must not surface an empty-response error')
+
+
+def test_stop_after_first_chunk(tmp_path):
+    """GUARD: stop at the first-chunk site (llm_call.py:776)."""
+    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+    engine, instance = make_stream_engine(collector)
+    results, _execute = drive_stream(
+        engine, instance, chunk_gen('partial-response'), terminal_stop=True)
+    _assert_keep_partial_stop(collector, results)
+
+
+def test_stop_after_ui_update(tmp_path):
+    """GUARD: stop at the after-UI-update site (llm_call.py:799).
+
+    Forces should_update True (STREAM_UPDATE_MAX_CHUNKS=1) so the UI-sync block
+    runs, then _is_terminal_stop flips True only at the second check (:799).
+    """
+    from unittest.mock import patch
+    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+    engine, instance = make_stream_engine(collector)
+    results, _execute = drive_stream(
+        engine, instance, chunk_gen('partial-response'),
+        extra_patches=(
+            patch.object(engine, '_is_terminal_stop', side_effect=[False, True]),
+            patch('agent_cascade.engine.llm_call.STREAM_UPDATE_MAX_CHUNKS', 1),
+        ))
+    _assert_keep_partial_stop(collector, results)
