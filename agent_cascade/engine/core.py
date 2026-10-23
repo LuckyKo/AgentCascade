@@ -23,6 +23,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from enum import Enum, auto
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
@@ -59,6 +60,14 @@ _COMPRESSION_WAIT_TIMEOUT = 1.0  # Seconds to wait per iteration when suspended 
 
 # REACQUIRE_TIMEOUT relocated to settings.py (plan §3.4.1) so router.py's sticky-slot sync can
 # share the same bound without a circular import. Imported below with the other settings.
+
+
+
+class _RunAction(Enum):
+    """Control-flow result returned by the extracted run-loop phase helpers."""
+    PROCEED = auto()
+    CONTINUE_LOOP = auto()
+    BREAK_LOOP = auto()
 
 
 def _extract_instance_output(*args, **kwargs):
@@ -610,89 +619,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                 _is_last_original_turn = (turns_available == 1)
                 turns_available = self._consume_turn(instance, turns_available)
 
-                # ── Phase 3: LLM Call with Injection Points ────────────────
-                # logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name}
-                # with {len(llm_messages)} messages")
-                turn_output = []
-                partial_msgs = []  # Initialize to avoid undefined reference on early break
-                stream_tick = 0  # Counter for periodic termination checks during streaming
-                terminated_during_stream = False  # Track if we already yielded a termination result inside the loop
-
-                gen = self._call_llm_with_injection(instance, llm_messages)
-                try:
-                    for msg in gen:
-                        if msg is None:
-                            # Yield current partial conversation state to
-                            # trigger streaming broadcast in
-                            # run_agent_thread_unified.
-                            # We combine persisted history (response),
-                            # committed turn messages (turn_output),
-                            # and currently streaming partial messages
-                            # (instance._streaming_responses)
-                            # to provide a complete "current view" for activity
-                            # banners and UI rendering.
-                            with instance._compression_lock:
-                                partial_msgs = list(instance._streaming_responses)
-
-                            stream_tick += 1
-                            if (result := self._check_stream_termination(stream_tick, inst_name, response, turn_output,
-                                                                         partial_msgs)) is not None:
-                                yield result
-                                terminated_during_stream = True
-                                break
-
-                            yield (response + turn_output + partial_msgs, True)
-                            continue
-                        # FIX BOOL_LEAK: Validate message type before appending
-                        # to prevent bool/list leak
-                        if isinstance(msg, (Message, dict)):
-                            # Endpoint recovery: [RETRYING] messages are
-                            # transient UI notifications only — don't add to
-                            # conversation history
-                            content = msg_field(msg, 'content', '')
-                            is_retrying_msg = isinstance(content, str) and content.startswith('[RETRYING]')
-
-                            stream_tick += 1
-                            if (result := self._check_stream_termination(stream_tick, inst_name, response, turn_output,
-                                                                         partial_msgs)) is not None:
-                                yield result
-                                terminated_during_stream = True
-                                break
-
-                            # Yield for UI visibility (even transient messages)
-                            # Retry notifications show only the retry message;
-                            # normal messages show with streaming state
-                            if is_retrying_msg:
-                                yield (response + turn_output + [msg], True)
-                            else:
-                                yield (response + turn_output + partial_msgs, True)
-
-                            # Only append to turn_output if it's a real message
-                            # (not transient retry notification)
-                            if not is_retrying_msg:
-                                turn_output.append(msg)
-                        else:
-                            logger.warning(
-                                f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}"
-                            )
-                finally:
-                    gen.close()  # Ensure generator cleanup on early break (prevents resource leak)
-
-                # Check generation change (old run superseded by newer one)
-                # alongside stop
-                if not terminated_during_stream:
-                    if self._is_terminal_stop(instance.instance_name):
-                        logger.debug('terminal stop - %s', instance.instance_name)
-                        yield response
-                        break
-                    elif self._is_suspended_by_compression(instance.instance_name):
-                        # Compression-halt is a suspension, not termination — wait cooperatively.
-                        logger.debug('suspended by compression, waiting - %s', instance.instance_name)
-                        if not self._wait_for_compression_to_clear(instance.instance_name):
-                            yield response
-                            break  # Terminal stop during wait
-                        yield response
-                        continue  # Resumed (compression done), continue the main loop with this turn's output
+                action, turn_output = yield from self._run_llm_phase(instance, llm_messages, response)
+                if action == _RunAction.BREAK_LOOP:
+                    break
+                if action == _RunAction.CONTINUE_LOOP:
+                    continue
 
                 # Clean up last-turn tool disabling only if we set it this
                 # iteration
@@ -910,6 +841,99 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             # own 5-turn overage cadence.
             soft_limit_last_warn_past = 0
         return final_turn_tools_disabled, soft_limit_last_warn_past
+
+    def _run_llm_phase(self, instance: AgentInstance, llm_messages: List[Message],
+                       response: List[Message]) -> Iterator[Tuple[_RunAction, List[Message]]]:
+        """Drive the LLM call and streaming loop for one turn.
+
+        Yields the same streaming/termination tuples as before and returns
+        ``(action, turn_output)`` so the caller can apply main-loop control.
+        """
+        inst_name = instance.instance_name
+        # ── Phase 3: LLM Call with Injection Points ────────────────
+        # logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name}
+        # with {len(llm_messages)} messages")
+        turn_output = []
+        partial_msgs = []  # Initialize to avoid undefined reference on early break
+        stream_tick = 0  # Counter for periodic termination checks during streaming
+        terminated_during_stream = False  # Track if we already yielded a termination result inside the loop
+
+        gen = self._call_llm_with_injection(instance, llm_messages)
+        try:
+            for msg in gen:
+                if msg is None:
+                    # Yield current partial conversation state to
+                    # trigger streaming broadcast in
+                    # run_agent_thread_unified.
+                    # We combine persisted history (response),
+                    # committed turn messages (turn_output),
+                    # and currently streaming partial messages
+                    # (instance._streaming_responses)
+                    # to provide a complete "current view" for activity
+                    # banners and UI rendering.
+                    with instance._compression_lock:
+                        partial_msgs = list(instance._streaming_responses)
+
+                    stream_tick += 1
+                    if (result := self._check_stream_termination(stream_tick, inst_name, response, turn_output,
+                                                                 partial_msgs)) is not None:
+                        yield result
+                        terminated_during_stream = True
+                        break
+
+                    yield (response + turn_output + partial_msgs, True)
+                    continue
+                # FIX BOOL_LEAK: Validate message type before appending
+                # to prevent bool/list leak
+                if isinstance(msg, (Message, dict)):
+                    # Endpoint recovery: [RETRYING] messages are
+                    # transient UI notifications only — don't add to
+                    # conversation history
+                    content = msg_field(msg, 'content', '')
+                    is_retrying_msg = isinstance(content, str) and content.startswith('[RETRYING]')
+
+                    stream_tick += 1
+                    if (result := self._check_stream_termination(stream_tick, inst_name, response, turn_output,
+                                                                 partial_msgs)) is not None:
+                        yield result
+                        terminated_during_stream = True
+                        break
+
+                    # Yield for UI visibility (even transient messages)
+                    # Retry notifications show only the retry message;
+                    # normal messages show with streaming state
+                    if is_retrying_msg:
+                        yield (response + turn_output + [msg], True)
+                    else:
+                        yield (response + turn_output + partial_msgs, True)
+
+                    # Only append to turn_output if it's a real message
+                    # (not transient retry notification)
+                    if not is_retrying_msg:
+                        turn_output.append(msg)
+                else:
+                    logger.warning(
+                        f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}"
+                    )
+        finally:
+            gen.close()  # Ensure generator cleanup on early break (prevents resource leak)
+
+        # Check generation change (old run superseded by newer one)
+        # alongside stop
+        if not terminated_during_stream:
+            if self._is_terminal_stop(instance.instance_name):
+                logger.debug('terminal stop - %s', instance.instance_name)
+                yield response
+                return _RunAction.BREAK_LOOP, turn_output
+            elif self._is_suspended_by_compression(instance.instance_name):
+                # Compression-halt is a suspension, not termination — wait cooperatively.
+                logger.debug('suspended by compression, waiting - %s', instance.instance_name)
+                if not self._wait_for_compression_to_clear(instance.instance_name):
+                    yield response
+                    return _RunAction.BREAK_LOOP, turn_output  # Terminal stop during wait
+                yield response
+                return _RunAction.CONTINUE_LOOP, turn_output  # Resumed (compression done)
+        return _RunAction.PROCEED, turn_output
 
     def _run_preflight(self, instance: AgentInstance) -> None:
         """Prepare run state and generation before entering the guarded loop."""
