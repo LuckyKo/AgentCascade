@@ -47,33 +47,11 @@ class ToolExecMixin:
         used_any_tool = False
         executed_tools = []  # Track which tools were actually executed (for orphan handling)
 
-        # ── Hoist template lookup outside loop (performance optimization)
+        # ── Resolve tool policy (template, disabled tools, function map) once,
         # ────────
-        # Template and disabled tool list don't change during the loop.
-        # Centralized disabled_tools resolution — see
-        # agent_cascade.utils.disabled_tools
-        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
-
-        _primary_template = self.pool.get_template(instance.agent_class)
-        _primary_disabled_tools: set[str] = set()
-        _primary_function_map: dict = {}
-        if _primary_template:
-            # Use the centralized resolver instead of duplicating inline logic
-            agent_name = getattr(_primary_template, 'name', '') or ''
-            agent_type = getattr(_primary_template, 'agent_type', '') or ''
-            instance_override = (getattr(instance, '_generate_cfg_override', None) if hasattr(
-                instance, '_generate_cfg_override') else None)
-            template_cfg = (getattr(_primary_template.llm, 'generate_cfg', None) if getattr(
-                _primary_template, 'llm', None) is not None else {})
-
-            _primary_disabled_tools = resolve_disabled_tools_for_agent(
-                instance_override=instance_override,
-                template_cfg=template_cfg,
-                agent_name=agent_name,
-                agent_type=agent_type,
-            )
-
-            _primary_function_map = getattr(_primary_template, 'function_map', {})
+        # outside the loop. Template and disabled tool list don't change during the loop.
+        # Shared with orphan handling via _resolve_tool_policy.
+        _primary_template, _primary_disabled_tools, _primary_function_map = self._resolve_tool_policy(instance)
 
         # ── Parallel-call_agent batch detection (single source of truth) ───────
         # A parent may issue several call_agent tool calls in ONE turn_output. Their parent context
@@ -468,34 +446,9 @@ class ToolExecMixin:
             executed_set = set(executed_tools)  # Convert to set for O(1) lookup
             tools_processed = 0
 
-            # ── Hoist template lookup outside compression lock
-            # ──────────────────
-            # Template and disabled tool list don't change during the loop.
-            # Centralized disabled_tools resolution — see
-            # agent_cascade.utils.disabled_tools
-            from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
-
-            _orphan_template = self.pool.get_template(instance.agent_class)
-            _orphan_disabled_tools: set[str] = set()
-            _orphan_function_map: dict = {}
-            if _orphan_template:
-                # Use the centralized resolver instead of duplicating inline
-                # logic
-                agent_name = getattr(_orphan_template, 'name', '') or ''
-                agent_type = getattr(_orphan_template, 'agent_type', '') or ''
-                instance_override = (getattr(instance, '_generate_cfg_override', None) if hasattr(
-                    instance, '_generate_cfg_override') else None)
-                template_cfg = (getattr(_orphan_template.llm, 'generate_cfg', None) if getattr(
-                    _orphan_template, 'llm', None) is not None else {})
-
-                _orphan_disabled_tools = resolve_disabled_tools_for_agent(
-                    instance_override=instance_override,
-                    template_cfg=template_cfg,
-                    agent_name=agent_name,
-                    agent_type=agent_type,
-                )
-
-                _orphan_function_map = getattr(_orphan_template, 'function_map', {})
+            # Resolve tool policy (shared with the primary loop) outside the
+            # compression lock — template/disabled list don't change during the loop.
+            _orphan_template, _orphan_disabled_tools, _orphan_function_map = self._resolve_tool_policy(instance)
 
             with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
 
@@ -586,6 +539,38 @@ class ToolExecMixin:
             self._proactive_compression_check(instance, messages, llm_messages, response, check_label='post-tool')
 
         return used_any_tool
+
+    def _resolve_tool_policy(self, instance: AgentInstance) -> tuple:
+        """Resolve ``(template, disabled_tools, function_map)`` for an instance.
+
+        Shared by the primary tool loop and orphan handling. The disabled-tools
+        resolver is imported lazily *inside* this helper so the existing patch target
+        ``agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent`` keeps
+        intercepting. Returns ``(None, set(), {})`` when the agent has no template.
+        """
+        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
+        template = self.pool.get_template(instance.agent_class)
+        disabled_tools: set[str] = set()
+        function_map: dict = {}
+        if template:
+            # Use the centralized resolver instead of duplicating inline logic
+            agent_name = getattr(template, 'name', '') or ''
+            agent_type = getattr(template, 'agent_type', '') or ''
+            instance_override = (getattr(instance, '_generate_cfg_override', None) if hasattr(
+                instance, '_generate_cfg_override') else None)
+            template_cfg = (getattr(template.llm, 'generate_cfg', None) if getattr(
+                template, 'llm', None) is not None else {})
+
+            disabled_tools = resolve_disabled_tools_for_agent(
+                instance_override=instance_override,
+                template_cfg=template_cfg,
+                agent_name=agent_name,
+                agent_type=agent_type,
+            )
+
+            function_map = getattr(template, 'function_map', {})
+        return template, disabled_tools, function_map
 
     @staticmethod
     def _has_images(messages):
