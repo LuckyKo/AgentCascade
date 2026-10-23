@@ -157,3 +157,25 @@ def test_termination_after_partial_commits_partial(tmp_path):
         'a clean termination after a partial must not emit an empty-response error')
     events = [e for e in list(collector.events) if e.get('type') == 'llm_call']
     assert len(events) == 1, 'a terminated attempt must record exactly one end'
+
+
+def test_termination_abort_runtime_error_no_empty_response_message(tmp_path):
+    """Router-termination (RuntimeError matching 'has been terminated') BEFORE any output:
+    no [SYSTEM ERROR: Empty LLM response], no [RETRYING], exactly one telemetry 'end'.
+
+    Mirrors test_agent_terminated_before_output_emits_no_empty_response_error but exercises
+    the _is_termination_abort branch (llm_call.py:914) — the second branch the P8-3 fix
+    sets state.error_already_yielded on.
+    """
+    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+    engine, instance = _make_engine(collector)
+
+    results = _drive(engine, instance, RuntimeError("Instance 'test-agent' has been terminated"))
+
+    assert _system_errors(results) == [], (
+        f'router-termination must not emit an empty-response error; got: {_system_errors(results)}')
+    assert not any(isinstance(m, Message) and isinstance(m.content, str)
+                   and m.content.startswith('[RETRYING]') for m in results), \
+        'a clean termination is not a retry'
+    events = [e for e in list(collector.events) if e.get('type') == 'llm_call']
+    assert len(events) == 1, 'a terminated attempt must record exactly one end'
