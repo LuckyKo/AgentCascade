@@ -48,7 +48,7 @@ import pytest
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
-from agent_cascade.settings import AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS
+from agent_cascade.settings import AUTO_SKILL_EXTRA_TURNS
 
 
 class _FakeSkillManager:
@@ -606,3 +606,60 @@ class TestTurnLimitWarningAutoSkillReflection:
 
         assert _count_in_conversation(instance, 'Halfway through your turn budget') == 1
         assert _count_in_conversation(instance, 'Turn limit approaching') == 1
+
+
+# ── BUG_0140: single-turn run must not get last-turn messages after extension ──
+def _run_single_turn_with_one_reflection_turn():
+    """max_turns=1 run; reflection grants exactly 1 extra turn.
+
+    Pre-fix, the extension rewrote ``max_turns`` to 2, so the reflection's last turn
+    looked "multi-turn" to the ``max_turns != 1`` / ``max_turns > 1`` guards and the
+    run got both a "Final turn" warning and a "Turn limit reached" notice despite
+    only ever having 1 turn available. Post-fix both gates use the run-start
+    ``turns_available`` snapshot and stay silent.
+    """
+    pool = _FakePool(1)
+    pool._template.function_map['noop_1000'] = lambda **kw: '[stub] noop_1000 executed'
+    pool.settings.auto_skill_enabled = True
+    pool.settings.default_load_skill_mode = 'AUTO'  # != LOAD_SKILL_NONE
+    pool.settings.auto_skill_min_turns = 0          # single-turn run may reflect
+    pool.settings.auto_skill_extra_turns = 1        # fresh budget is exactly 1 turn
+    pool.skill_manager = _FakeSkillManager()
+
+    script = [
+        Message(role=ASSISTANT, content='Task complete. Here is the result.'),
+        _tool_call_msg(1000),  # one reflection turn, ends on a tool result
+    ]
+    llm = _ScriptedLLM(script)
+    instance = _make_instance(1)
+    engine = _build_engine(pool, instance, llm)
+    list(engine.run(instance))
+    return llm, instance
+
+
+class TestSingleTurnRunSuppressesBudgetMessages:
+    """BUG_0140: `turns_available` was 1 for the whole run → no last-turn noise."""
+
+    def test_no_final_turn_warning_or_turn_limit_notice_after_extension(self):
+        llm, instance = _run_single_turn_with_one_reflection_turn()
+
+        # Sanity: the reflection actually fired, so max_turns WAS extended mid-run.
+        assert getattr(instance, '_auto_skill_proposed', False) is True, \
+            'auto-skill reflection did not trigger — test harness misconfigured'
+        assert len(llm.calls) == 2, f'expected the task turn + 1 reflection turn, got {len(llm.calls)}'
+
+        assert _count_in_conversation(instance, '[SYSTEM WARNING: Final turn') == 0, \
+            'single-turn run must not receive the final-turn warning after a mid-run extension'
+        assert _count_in_conversation(instance, 'Turn limit reached') == 0, \
+            'single-turn run must not receive the turn-limit notice after a mid-run extension'
+
+    def test_multi_turn_control_still_gets_turn_limit_notice(self):
+        """Control: an ordinary 2-turn run that exhausts its budget must still get the
+        notice (the BUG_0140 gate must not over-suppress)."""
+        pool = _FakePool(2)
+        llm = _ScriptedLLM([_tool_call_msg(0), _tool_call_msg(1)])
+        instance = _make_instance(2)
+        engine = _build_engine(pool, instance, llm)
+        list(engine.run(instance))
+
+        assert _count_in_conversation(instance, 'Turn limit reached') == 1

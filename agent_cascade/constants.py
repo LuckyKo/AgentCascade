@@ -215,6 +215,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'auto_continue',
     'completion_classifier_enabled',
     'max_turns',
+    'soft_turn_limit',
     'enable_agent_budgeting',
     'allow_parallel_agents',
     'state_kv_save_enabled',

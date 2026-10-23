@@ -35,6 +35,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'safe_mode_auto_ram_floor_mb',
     'safe_mode_auto_vram_floor_mb',
     'max_turns',
+    'soft_turn_limit',
     'max_auto_rollbacks',
     'auto_rollback_on_loop',
     # Two-tier loop detection (2026-08 redesign)
@@ -665,6 +666,13 @@ def _handle_max_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> 
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg.get('max_turns', 50))
         agent_pool.settings.max_turns = max(1, val)
+
+
+@register_config_handler('soft_turn_limit')
+def _handle_soft_turn_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle soft turn-limit mode (warn past max_turns instead of hard-stopping)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.soft_turn_limit = bool(ui_cfg.get('soft_turn_limit', False))
 
 
 @register_config_handler('max_auto_rollbacks')

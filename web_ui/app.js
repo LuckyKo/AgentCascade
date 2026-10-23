@@ -157,6 +157,7 @@ function clearAutoSecurityTimers() {
 const POOL_SETTINGS_MAP = [
   // Core agent settings
   { id: '#setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
+  { id: '#setting-soft-turn-limit', prop: 'checked', key: 'soft_turn_limit', localKey: 'soft_turn_limit' },
   { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max_auto_rollbacks' },
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
@@ -1214,6 +1215,7 @@ function saveSettings(sendToServer) {
   });
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
+  if ($('#setting-soft-turn-limit')) s['soft_turn_limit'] = $('#setting-soft-turn-limit').checked;
   // Store the raw value under the underscore key so the respect-local guard in syncPoolSettings()
   // (POOL_SETTINGS_MAP localKey='max_auto_rollbacks') has data to protect against server stomps.
   if ($('#setting-max-rollbacks')) s['max_auto_rollbacks'] = $('#setting-max-rollbacks').value;
@@ -1415,6 +1417,7 @@ function loadSettings() {
 
     if (_present(s['vision-enabled'])) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (_isFiniteRestore(s['max-turns'])) $('#setting-max-turns').value = s['max-turns'];
+    if (_present(s['soft_turn_limit'])) $('#setting-soft-turn-limit').checked = s['soft_turn_limit'];
     if (_present(s['auto-continue'])) $('#setting-auto-continue').checked = s['auto-continue'];
     if (_present(s['completion-classifier'])) $('#setting-completion-classifier').checked = s['completion-classifier'];
     if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
@@ -5868,6 +5871,7 @@ function getGenerateCfg() {
   if ($('#setting-max-context')) cfg.max_input_tokens = parseInt($('#setting-max-context').value) || 32768;
 
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
+  if ($('#setting-soft-turn-limit')) cfg.soft_turn_limit = $('#setting-soft-turn-limit').checked;
   if ($('#setting-agent-budgeting')) cfg.enable_agent_budgeting = $('#setting-agent-budgeting').checked;
   if ($('#setting-allow-parallel')) cfg.allow_parallel_agents = $('#setting-allow-parallel').checked;
   if ($('#setting-state-kv-save')) cfg.state_kv_save_enabled = $('#setting-state-kv-save').checked;

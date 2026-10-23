@@ -27,6 +27,16 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('AGENT_CASCADE_MAX_LLM_CALL_PER_RUN', 250))
 DEFAULT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_DEFAULT_MAX_TURNS',
                                        250))  # Default turn limit per agent execution
+# ── Soft turn limit (todo.md:107) ────────────────────────────────────────────
+# When enabled in the UI, a run keeps going past the configured max_turns while
+# still emitting the normal budget warnings plus a wrap-up nudge every
+# SOFT_TURN_LIMIT_WARNING_INTERVAL over-limit turns. This absolute ceiling is the
+# safety net: even a pathological tool-calling loop is hard-stopped here.
+SOFT_TURN_LIMIT: bool = False
+SOFT_TURN_LIMIT_WARNING_INTERVAL: int = 5
+SOFT_TURN_LIMIT_ABSOLUTE_MAX: int = int(
+    os.getenv('AGENT_CASCADE_SOFT_TURN_LIMIT_ABSOLUTE_MAX',
+              1000))  # Hard ceiling for soft mode (effectuated turns per run)
 SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_SECURITY_AGENT_MAX_TURNS',
                                               10))  # Turn limit for system-launched Security advisor
 # Skill Advisor: single semantic-match decision (read skill list + emit JSON verdict) — tight budget.

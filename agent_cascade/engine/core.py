@@ -40,6 +40,7 @@ from agent_cascade.settings import (AGENT_SLEEPING_MAX_WAIT_SECONDS, AUTO_SKILL_
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY,
                                     LLM_RETRY_MAX_BACKOFF, LOAD_SKILL_AUTO, LOAD_SKILL_NONE, MAX_AUTO_CONTINUE_ATTEMPTS,
                                     REACQUIRE_TIMEOUT, REASONING_ONLY_CONTINUE_ATTEMPTS, SOFT_CONTINUE_NUDGE_ENABLED,
+                                    SOFT_TURN_LIMIT, SOFT_TURN_LIMIT_ABSOLUTE_MAX, SOFT_TURN_LIMIT_WARNING_INTERVAL,
                                     POST_YIELD_REACQUIRE_TIMEOUT,
                                     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS, TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.settings import InnerLoopSettings as _InnerLoopSettings
@@ -1196,6 +1197,19 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
 
             max_turns = instance.max_turns or DEFAULT_MAX_TURNS
             turns_available = max_turns
+            # BUG_0140: number of turns available for THIS run, frozen at start. The
+            # last-turn/turn-limit messages must only fire when the run had > 1 turn
+            # available; max_turns is mutable (auto-skill reflection extends it), so
+            # it cannot answer that question at injection time.
+            initial_turns_available = turns_available
+            # Soft turn limit (todo.md:107): snapshot the pool toggle for this run. When
+            # ON, the loop may continue past max_turns while still emitting the normal
+            # budget warnings; SOFT_TURN_LIMIT_ABSOLUTE_MAX is the safety ceiling (never
+            # below the configured hard cap). Default OFF preserves the hard stop.
+            soft_turn_limit = bool(self._get_pool_setting('soft_turn_limit', SOFT_TURN_LIMIT))
+            soft_limit_absolute_cap = max(initial_turns_available, SOFT_TURN_LIMIT_ABSOLUTE_MAX)
+            # Over-limit warning bookkeeping (only used when soft_turn_limit is ON).
+            _soft_limit_last_warn_past = 0
             inst_name = instance.instance_name
             turns_90pct = max(2, int(max_turns * 0.1))  # 90% threshold, min 2 to avoid collision with final turn
             turns_50pct = max(3, int(max_turns * 0.5))  # 50% mid-point warning, min 3 to avoid overlap with 90%/final
@@ -1203,7 +1217,8 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
             # suppress the 50%/90% budget warnings for the fresh reflection turns (reset block below).
             _suppress_budget_warnings = False
 
-            while turns_available > 0:
+            while turns_available > 0 or (soft_turn_limit and
+                                          max_turns - turns_available < soft_limit_absolute_cap):
                 # Track current turn on instance for system_info tool access
                 instance._current_turn = max_turns - turns_available + 1
 
@@ -1280,9 +1295,11 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # Final turn warning: insert as a separate user message
                     # (not inline) so it's treated as a distinct conversational
                     # turn, not appended to the last message.
-                    # Muted for max_turns=1 agents: this is their only turn and
+                    # Muted for single-turn runs: this is their only turn and
                     # tools are being disabled below regardless, so the warning
                     # adds no information — just noise in the transcript.
+                    # BUG_0140: gate on the run-start turn count, not max_turns
+                    # (which auto-skill reflection may have extended mid-run).
                     # Change 1 (todo149): always warn on the final turn regardless of
                     # _auto_skill_will_extend — when gates pass a reflection extension may be
                     # granted this turn, and hiding the "you are out of turns" signal would be
@@ -1290,15 +1307,23 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     # tools stay enabled in the gates-pass case; the "tools have been disabled"
                     # clause is then slightly inaccurate but acceptable (all assertions match on
                     # the '[SYSTEM WARNING: Final turn' prefix).
-                    if max_turns != 1:
-                        final_msg = self._make_user_message(
-                            f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
-                            f"Wrap up and deliver your results now.]")
+                    if initial_turns_available > 1:
+                        if soft_turn_limit:
+                            final_msg = self._make_user_message(
+                                '[SYSTEM WARNING: Final turn. You have 1 turn left before the '
+                                'soft turn limit; tools stay enabled and the run will continue '
+                                'past the limit. Wrap up and deliver your results now.]')
+                        else:
+                            final_msg = self._make_user_message(
+                                f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
+                                f"Wrap up and deliver your results now.]")
                         self._append_and_log_to_llm(instance, final_msg, llm_messages)
 
                     # Disable ALL tools on the last turn so agent is forced to
-                    # return a final answer
-                    if not _auto_skill_will_extend:
+                    # return a final answer. Soft turn-limit mode deliberately keeps
+                    # tools enabled — forcing a text-only answer here would stop the
+                    # run at the hard cap, which is exactly what the toggle disables.
+                    if not _auto_skill_will_extend and not soft_turn_limit:
                         template = self.pool.get_template(instance.agent_class)
                         if template and hasattr(template, 'function_map'):
                             all_tools = list(template.function_map.keys())
@@ -1308,6 +1333,24 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                                     instance._generate_cfg_override = {}
                                 instance._generate_cfg_override['disabled_tools'] = all_tools
                                 final_turn_tools_disabled = True
+
+                # Soft turn limit: keep nudging the agent every N turns past max_turns.
+                # `turns_past_limit` counts the turn currently about to run: the first
+                # over-budget turn is 1, the fifth is 5, etc. Using `last_warn_past`
+                # (instead of exact modulo) guarantees a warning even if a pre-LLM
+                # real-cycle check consumes several turns before this block runs.
+                if soft_turn_limit and turns_available <= 0:
+                    turns_past_limit = 1 - turns_available
+                    if turns_past_limit - _soft_limit_last_warn_past >= SOFT_TURN_LIMIT_WARNING_INTERVAL:
+                        over_msg = self._make_user_message(
+                            f"[SYSTEM WARNING: You are over the turn limit, please wrap up. "
+                            f"{turns_past_limit} turn(s) past the {max_turns}-turn limit.]")
+                        self._append_and_log_to_llm(instance, over_msg, llm_messages)
+                        _soft_limit_last_warn_past = turns_past_limit
+                elif turns_available > 0:
+                    # A fresh budget (including an auto-skill reflection reset) gets its
+                    # own 5-turn overage cadence.
+                    _soft_limit_last_warn_past = 0
 
                 # Change 2 gate signal (todo149): True exactly when turns_available was 1 at the
                 # top of this iteration (i.e. this is the last turn of the ORIGINAL budget).
@@ -1499,9 +1542,20 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin):
                     break
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
-            # Muted for max_turns=1 agents: their single turn IS the complete task,
+            # Muted for single-turn runs: their single turn IS the complete task,
             # so there is no "incomplete" state — the notice would be pure noise.
-            if turns_available <= 0 and max_turns > 1:
+            # BUG_0140: use the run-start turn count (max_turns may have been
+            # extended mid-run by auto-skill reflection).
+            # BUG_0141: in soft mode there is no max_turns hard stop, so this notice
+            # is only correct when the absolute safety ceiling stopped the run.
+            soft_limit_hard_stop = (
+                soft_turn_limit and turns_available <= 0
+                and (max_turns - turns_available) >= soft_limit_absolute_cap)
+            if soft_limit_hard_stop:
+                logger.warning('[SOFT_TURN_LIMIT] %s hit the absolute safety cap (%d turns)',
+                               inst_name, soft_limit_absolute_cap)
+            if turns_available <= 0 and ((not soft_turn_limit and initial_turns_available > 1)
+                                         or soft_limit_hard_stop):
                 # Inject turn limit notice into the LAST assistant message
                 # content
                 # instead of appending a new message. This ensures

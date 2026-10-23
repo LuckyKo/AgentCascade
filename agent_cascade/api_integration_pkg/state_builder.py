@@ -435,6 +435,8 @@ def build_state_from_pool(
                 getattr(ps, 'state_kv_save_enabled', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
+            'soft_turn_limit':
+                getattr(ps, 'soft_turn_limit', False),
             'max_auto_rollbacks':
                 getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop':
@@ -690,6 +692,8 @@ def build_stream_update_from_pool(
                 getattr(ps, 'state_kv_save_enabled', True),
             'max_turns':
                 getattr(ps, 'max_turns', 50),
+            'soft_turn_limit':
+                getattr(ps, 'soft_turn_limit', False),
             'max_auto_rollbacks':
                 getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop':

@@ -564,6 +564,10 @@
                           <input autocomplete="off" type="number" id="setting-max-turns" min="1" max="500" value="50" />
                         </label>
                         <label class="setting-field toggle-field">
+                          <span title="When enabled, the agent is not hard-stopped at Max Turns per Run. The normal 50%/90%/final warnings still fire, tools stay enabled, and a wrap-up warning is injected every 5 turns past the limit. A safety ceiling (SOFT_TURN_LIMIT_ABSOLUTE_MAX) still applies.">Soft Turn Limit</span>
+                          <input autocomplete="off" type="checkbox" id="setting-soft-turn-limit" />
+                        </label>
+                        <label class="setting-field toggle-field">
                           <span title="When disabled, all agents use the Max Turns setting regardless of call_agent max_turns args">Enable Agent Budgeting</span>
                           <input autocomplete="off" type="checkbox" id="setting-agent-budgeting" checked />
                         </label>
