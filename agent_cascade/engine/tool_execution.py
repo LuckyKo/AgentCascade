@@ -47,9 +47,8 @@ class ToolExecMixin:
         used_any_tool = False
         executed_tools = []  # Track which tools were actually executed (for orphan handling)
 
-        # ── Resolve tool policy (template, disabled tools, function map) once,
-        # ────────
-        # outside the loop. Template and disabled tool list don't change during the loop.
+        # ── Resolve tool policy once (template, disabled tools, function map) ────────
+        # Outside the loop. Template and disabled tool list don't change during the loop.
         # Shared with orphan handling via _resolve_tool_policy.
         _primary_template, _primary_disabled_tools, _primary_function_map = self._resolve_tool_policy(instance)
 
@@ -279,7 +278,9 @@ class ToolExecMixin:
             # the media_gen net; both gate on their ran_*/reached_last_* markers plus a still-pending
             # _state_label. Full gate rationale lives in _run_deferred_state_restore_safety_nets.
             self._run_deferred_state_restore_safety_nets(
-                instance, inst_name, ran_ca, reached_last_ca, ran_mg, reached_last_mg)
+                instance, inst_name,
+                ran_ca=ran_ca, reached_last_ca=reached_last_ca,
+                ran_mg=ran_mg, reached_last_mg=reached_last_mg)
 
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────
@@ -296,7 +297,7 @@ class ToolExecMixin:
 
         return used_any_tool
 
-    def _resolve_tool_policy(self, instance: AgentInstance) -> tuple:
+    def _resolve_tool_policy(self, instance: AgentInstance) -> tuple[object, set[str], dict]:
         """Resolve ``(template, disabled_tools, function_map)`` for an instance.
 
         Shared by the primary tool loop and orphan handling. The disabled-tools
@@ -496,7 +497,7 @@ class ToolExecMixin:
                          f"{traceback.format_exc()}")
         return f"Error: {summary}"
 
-    def _detect_tool_result_failure(self, tool_result) -> tuple:
+    def _detect_tool_result_failure(self, tool_result: str) -> tuple[bool, str]:
         """Return ``(tool_success, tool_error)`` from the first-line error heuristic.
 
         Pure decision helper — does NOT log, cache, or mutate ``tool_result``. Scans the
@@ -519,7 +520,7 @@ class ToolExecMixin:
         return True, ''
 
     def _postprocess_tool_result(self, instance: AgentInstance, inst_name: str, tool_name: str,
-                                 tool_result) -> object:
+                                 tool_result: object) -> object:
         """Assemble the final tool result with a consistent layout of warnings, output,
         and truncation (truncation/drain post-processing).
 
@@ -575,7 +576,7 @@ class ToolExecMixin:
                     tool_result = str(tool_result) if tool_result is not None else ''
         return tool_result
 
-    def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple:
+    def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple[List[int], List[int]]:
         """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
         and media_gen tool calls in ``turn_output``.
 
@@ -595,7 +596,7 @@ class ToolExecMixin:
                 mg_indices.append(_idx)
         return ca_indices, mg_indices
 
-    def _batch_position(self, out_idx: int, indices: List[int]) -> tuple:
+    def _batch_position(self, out_idx: int, indices: List[int]) -> tuple[bool, bool]:
         """Return ``(is_first, is_last)`` for ``out_idx`` within a batch's index list.
 
         Called only from inside the matching call_agent/media_gen branch, where ``indices``
@@ -604,7 +605,7 @@ class ToolExecMixin:
         """
         return (out_idx == indices[0]), (out_idx == indices[-1])
 
-    def _auto_deny_reason(self, template, disabled_tools: set[str], function_map: dict,
+    def _auto_deny_reason(self, template: object, disabled_tools: set[str], function_map: dict,
                           tool_name: str) -> Optional[str]:
         """Return the auto-deny reason for a tool call, or ``None`` if it is allowed.
 
@@ -623,7 +624,7 @@ class ToolExecMixin:
         else:
             return 'does not exist'
 
-    def _auto_deny_tool_call(self, instance: AgentInstance, inst_name: str, out, tool_name: str,
+    def _auto_deny_tool_call(self, instance: AgentInstance, inst_name: str, out: Message, tool_name: str,
                              deny_reason: str, response: List[Message],
                              executed_tools: List[str]) -> None:
         """Build and append the auto-deny FUNCTION result for a disabled/absent tool.
