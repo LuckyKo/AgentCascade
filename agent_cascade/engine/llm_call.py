@@ -651,13 +651,16 @@ class LLMCallMixin:
                     logger.info(
                         f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
                         f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
-                    self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                    # yield from: _abort_llm_stream is a GENERATOR — a bare call is
+                    # discarded and never runs, so the stream is never closed, no 'end'
+                    # recorded, and the partial is wrongly committed as a success.
+                    yield from self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
                     break  # Exit loop after aborting; will retry in outer while
             # Total timeout applies from stream start regardless of first output timing
             if (_now - _engine_stream_start) > _engine_max_total:
                 logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
                             f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
-                self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                yield from self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
                 break  # Exit loop after aborting; will retry in outer while
             if _engine_first_output:
                 _engine_first_output = False
