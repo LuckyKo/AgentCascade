@@ -595,101 +595,10 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                     turns_available = _turns[0]  # Sync back after possible decrement
                     continue
 
-                # Turn limit warnings (50%, 90%, final) — one-time only, emitted as SEPARATE USER messages.
-                # Checked BEFORE decrement so max_turns=1 agents still get the final warning.
-                # Each threshold fires at most once (exact integer equality + single-step decrement).
-                # Pattern: _make_user_message → _append_and_log_to_llm, which appends to
-                # conversation + JSONL log and mirrors into llm_messages exactly once.
-                # NOTE: these are NOT added to the local `messages` list because _setup_turn()
-                # runs ONCE per run (not per iteration); loop detection/compression thus see a view
-                # that omits them — same as the final-turn warning. Bounded (<=2 messages) and does
-                # not affect LLM context, which uses llm_messages.
-                if not _suppress_budget_warnings and turns_available == turns_50pct:
-                    warn_msg = (f"[SYSTEM WARNING: Halfway through your turn budget. "
-                                f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
-                                f"Assess your progress and plan remaining steps.]")
-                    warn_user = self._make_user_message(warn_msg)
-                    self._append_and_log_to_llm(instance, warn_user, llm_messages)
-                if not _suppress_budget_warnings and turns_available == turns_90pct:
-                    warn_msg = (f"[SYSTEM WARNING: Turn limit approaching. "
-                                f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
-                                f"Plan your remaining steps carefully.]")
-                    warn_user = self._make_user_message(warn_msg)
-                    self._append_and_log_to_llm(instance, warn_user, llm_messages)
-                if turns_available == 1:
-                    # If the auto-skill reflection extension is going to fire, keep tools enabled:
-                    # disabling them changes the request function schema -> KV full reprocess, and
-                    # the extension would force a second one on the first reflection turn. Keeping
-                    # tools on keeps the prefix stable so this "last turn" behaves like a normal
-                    # mid-run turn. (The trigger itself fires later at Phase 5; these cheap gates
-                    # are fully knowable here, before the LLM call.)
-                    _auto_skill_will_extend = self._auto_skill_gates_met(instance)
-
-                    # Final-turn handling for a run that is genuinely ending on its last
-                    # turn. The auto-skill reflection trigger no longer lives here — it
-                    # now fires at the natural-completion point (Phase 5, below), which is
-                    # reached only when _post_turn_checks reports completion. So this block
-                    # always applies to non-extended runs: warn and disable tools so the
-                    # agent is forced to deliver a final answer on its last turn.
-                    # Final turn warning: insert as a separate user message
-                    # (not inline) so it's treated as a distinct conversational
-                    # turn, not appended to the last message.
-                    # Muted for single-turn runs: this is their only turn and
-                    # tools are being disabled below regardless, so the warning
-                    # adds no information — just noise in the transcript.
-                    # BUG_0140: gate on the run-start turn count, not max_turns
-                    # (which auto-skill reflection may have extended mid-run).
-                    # Change 1 (todo149): always warn on the final turn regardless of
-                    # _auto_skill_will_extend — when gates pass a reflection extension may be
-                    # granted this turn, and hiding the "you are out of turns" signal would be
-                    # misleading. The tool-disable gate below (core.py:909) is UNCHANGED, so
-                    # tools stay enabled in the gates-pass case; the "tools have been disabled"
-                    # clause is then slightly inaccurate but acceptable (all assertions match on
-                    # the '[SYSTEM WARNING: Final turn' prefix).
-                    if initial_turns_available > 1:
-                        if soft_turn_limit:
-                            final_msg = self._make_user_message(
-                                '[SYSTEM WARNING: Final turn. You have 1 turn left before the '
-                                'soft turn limit; tools stay enabled and the run will continue '
-                                'past the limit. Wrap up and deliver your results now.]')
-                        else:
-                            final_msg = self._make_user_message(
-                                f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
-                                f"Wrap up and deliver your results now.]")
-                        self._append_and_log_to_llm(instance, final_msg, llm_messages)
-
-                    # Disable ALL tools on the last turn so agent is forced to
-                    # return a final answer. Soft turn-limit mode deliberately keeps
-                    # tools enabled — forcing a text-only answer here would stop the
-                    # run at the hard cap, which is exactly what the toggle disables.
-                    if not _auto_skill_will_extend and not soft_turn_limit:
-                        template = self.pool.get_template(instance.agent_class)
-                        if template and hasattr(template, 'function_map'):
-                            all_tools = list(template.function_map.keys())
-                            if all_tools:
-                                if not hasattr(instance,
-                                               '_generate_cfg_override') or instance._generate_cfg_override is None:
-                                    instance._generate_cfg_override = {}
-                                instance._generate_cfg_override['disabled_tools'] = all_tools
-                                final_turn_tools_disabled = True
-
-                # Soft turn limit: keep nudging the agent every N turns past max_turns.
-                # `turns_past_limit` counts the turn currently about to run: the first
-                # over-budget turn is 1, the fifth is 5, etc. Using `last_warn_past`
-                # (instead of exact modulo) guarantees a warning even if a pre-LLM
-                # real-cycle check consumes several turns before this block runs.
-                if soft_turn_limit and turns_available <= 0:
-                    turns_past_limit = 1 - turns_available
-                    if turns_past_limit - _soft_limit_last_warn_past >= SOFT_TURN_LIMIT_WARNING_INTERVAL:
-                        over_msg = self._make_user_message(
-                            f"[SYSTEM WARNING: You are over the turn limit, please wrap up. "
-                            f"{turns_past_limit} turn(s) past the {max_turns}-turn limit.]")
-                        self._append_and_log_to_llm(instance, over_msg, llm_messages)
-                        _soft_limit_last_warn_past = turns_past_limit
-                elif turns_available > 0:
-                    # A fresh budget (including an auto-skill reflection reset) gets its
-                    # own 5-turn overage cadence.
-                    _soft_limit_last_warn_past = 0
+                final_turn_tools_disabled, _soft_limit_last_warn_past = self._run_budget_warnings(
+                    instance, llm_messages, turns_available, max_turns, initial_turns_available,
+                    soft_turn_limit, turns_50pct, turns_90pct, _suppress_budget_warnings,
+                    _soft_limit_last_warn_past)
 
                 # Change 2 gate signal (todo149): True exactly when turns_available was 1 at the
                 # top of this iteration (i.e. this is the last turn of the ORIGINAL budget).
@@ -895,6 +804,112 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             yield [error_msg]
         finally:
             self._run_finalize(instance, early_exit)
+
+    def _run_budget_warnings(self, instance: AgentInstance, llm_messages: List[Message], turns_available: int,
+                             max_turns: int, initial_turns_available: int, soft_turn_limit: bool,
+                             turns_50pct: int, turns_90pct: int, suppress_budget_warnings: bool,
+                             soft_limit_last_warn_past: int) -> Tuple[bool, int]:
+        """Emit 50%/90%/final/soft-overage warnings for the current turn.
+
+        Returns ``(final_turn_tools_disabled, soft_limit_last_warn_past)``.
+        """
+        final_turn_tools_disabled = False
+        # Turn limit warnings (50%, 90%, final) — one-time only, emitted as SEPARATE USER messages.
+        # Checked BEFORE decrement so max_turns=1 agents still get the final warning.
+        # Each threshold fires at most once (exact integer equality + single-step decrement).
+        # Pattern: _make_user_message → _append_and_log_to_llm, which appends to
+        # conversation + JSONL log and mirrors into llm_messages exactly once.
+        # NOTE: these are NOT added to the local `messages` list because _setup_turn()
+        # runs ONCE per run (not per iteration); loop detection/compression thus see a view
+        # that omits them — same as the final-turn warning. Bounded (<=2 messages) and does
+        # not affect LLM context, which uses llm_messages.
+        if not suppress_budget_warnings and turns_available == turns_50pct:
+            warn_msg = (f"[SYSTEM WARNING: Halfway through your turn budget. "
+                        f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
+                        f"Assess your progress and plan remaining steps.]")
+            warn_user = self._make_user_message(warn_msg)
+            self._append_and_log_to_llm(instance, warn_user, llm_messages)
+        if not suppress_budget_warnings and turns_available == turns_90pct:
+            warn_msg = (f"[SYSTEM WARNING: Turn limit approaching. "
+                        f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
+                        f"Plan your remaining steps carefully.]")
+            warn_user = self._make_user_message(warn_msg)
+            self._append_and_log_to_llm(instance, warn_user, llm_messages)
+        if turns_available == 1:
+            # If the auto-skill reflection extension is going to fire, keep tools enabled:
+            # disabling them changes the request function schema -> KV full reprocess, and
+            # the extension would force a second one on the first reflection turn. Keeping
+            # tools on keeps the prefix stable so this "last turn" behaves like a normal
+            # mid-run turn. (The trigger itself fires later at Phase 5; these cheap gates
+            # are fully knowable here, before the LLM call.)
+            _auto_skill_will_extend = self._auto_skill_gates_met(instance)
+
+            # Final-turn handling for a run that is genuinely ending on its last
+            # turn. The auto-skill reflection trigger no longer lives here — it
+            # now fires at the natural-completion point (Phase 5, below), which is
+            # reached only when _post_turn_checks reports completion. So this block
+            # always applies to non-extended runs: warn and disable tools so the
+            # agent is forced to deliver a final answer on its last turn.
+            # Final turn warning: insert as a separate user message
+            # (not inline) so it's treated as a distinct conversational
+            # turn, not appended to the last message.
+            # Muted for single-turn runs: this is their only turn and
+            # tools are being disabled below regardless, so the warning
+            # adds no information — just noise in the transcript.
+            # BUG_0140: gate on the run-start turn count, not max_turns
+            # (which auto-skill reflection may have extended mid-run).
+            # Change 1 (todo149): always warn on the final turn regardless of
+            # _auto_skill_will_extend — when gates pass a reflection extension may be
+            # granted this turn, and hiding the "you are out of turns" signal would be
+            # misleading. The tool-disable gate below (core.py:909) is UNCHANGED, so
+            # tools stay enabled in the gates-pass case; the "tools have been disabled"
+            # clause is then slightly inaccurate but acceptable (all assertions match on
+            # the '[SYSTEM WARNING: Final turn' prefix).
+            if initial_turns_available > 1:
+                if soft_turn_limit:
+                    final_msg = self._make_user_message(
+                        '[SYSTEM WARNING: Final turn. You have 1 turn left before the '
+                        'soft turn limit; tools stay enabled and the run will continue '
+                        'past the limit. Wrap up and deliver your results now.]')
+                else:
+                    final_msg = self._make_user_message(
+                        f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
+                        f"Wrap up and deliver your results now.]")
+                self._append_and_log_to_llm(instance, final_msg, llm_messages)
+
+            # Disable ALL tools on the last turn so agent is forced to
+            # return a final answer. Soft turn-limit mode deliberately keeps
+            # tools enabled — forcing a text-only answer here would stop the
+            # run at the hard cap, which is exactly what the toggle disables.
+            if not _auto_skill_will_extend and not soft_turn_limit:
+                template = self.pool.get_template(instance.agent_class)
+                if template and hasattr(template, 'function_map'):
+                    all_tools = list(template.function_map.keys())
+                    if all_tools:
+                        if not hasattr(instance,
+                                       '_generate_cfg_override') or instance._generate_cfg_override is None:
+                            instance._generate_cfg_override = {}
+                        instance._generate_cfg_override['disabled_tools'] = all_tools
+                        final_turn_tools_disabled = True
+
+        # Soft turn limit: keep nudging the agent every N turns past max_turns.
+        # `turns_past_limit` counts the turn currently about to run: the first
+        # over-budget turn is 1, the fifth is 5, etc. Using `last_warn_past`
+        # (instead of exact modulo) guarantees a warning even if a pre-LLM
+        # real-cycle check consumes several turns before this block runs.
+        if soft_turn_limit and turns_available <= 0:
+            turns_past_limit = 1 - turns_available
+            if turns_past_limit - soft_limit_last_warn_past >= SOFT_TURN_LIMIT_WARNING_INTERVAL:
+                over_msg = self._make_user_message(
+                    f"[SYSTEM WARNING: You are over the turn limit, please wrap up. "
+                    f"{turns_past_limit} turn(s) past the {max_turns}-turn limit.]")
+                self._append_and_log_to_llm(instance, over_msg, llm_messages)
+                soft_limit_last_warn_past = turns_past_limit
+        elif turns_available > 0:
+            # A fresh budget (including an auto-skill reflection reset) gets its
+            # own 5-turn overage cadence.
+            soft_limit_last_warn_past = 0
+        return final_turn_tools_disabled, soft_limit_last_warn_past
 
     def _run_preflight(self, instance: AgentInstance) -> None:
         """Prepare run state and generation before entering the guarded loop."""
