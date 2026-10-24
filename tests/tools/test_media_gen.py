@@ -35,6 +35,7 @@ from agent_cascade.tools.media_backends.sdcpp import SdcppBackend
 from agent_cascade.tools.media_backends.comfyui import ComfyUIBackend, _infer_media_type
 from agent_cascade.tools.media_backends.kobold_tts import KoboldTTSBackend
 from agent_cascade.tools.media_backends.chatterbox import ChatterboxBackend
+from agent_cascade.tools.media_backends.svg2png import Svg2PngBackend
 from agent_cascade.tools.image_gen import _fmt_elapsed
 
 
@@ -187,7 +188,7 @@ def _prepared_chatterbox_req():
 class TestMediaGenRegistry:
     def test_registry_populated(self):
         assert set(BACKENDS) == {'sdcpp', 'comfyui', 'kobold_tts', 'chatterbox',
-                                 'voice_to_text'}
+                                 'voice_to_text', 'svg2png'}
 
     def test_manifest_matches_registry(self):
         """T12: composed manifest == registry, same order (guards the empty-manifest trap)."""
@@ -277,6 +278,47 @@ class TestSdcppBackendWiring:
             res = SdcppBackend().run(req)
         assert res.data == b'\x89PNG-bytes'
         assert res.ext == 'png'
+
+
+# ── svg2png backend wiring (file-read + raw-SVG input modes) ──────────────────
+
+class TestSvg2PngBackend:
+    def test_preflight_reads_reference_file(self, tmp_path):
+        svg = tmp_path / 'art.svg'
+        svg.write_text('<svg><rect/></svg>', encoding='utf-8')
+        req = _req(backend_id='svg2png', prompt='', reference_file=str(svg))
+        with patch('agent_cascade.tools.media_backends.svg2png.resolve_tool_path',
+                   return_value=svg):
+            Svg2PngBackend().preflight(req)
+        assert req.prepared['svg_text'] == '<svg><rect/></svg>'
+
+    def test_preflight_uses_prompt_when_no_reference_file(self):
+        req = _req(backend_id='svg2png', prompt='<svg><circle/></svg>')
+        Svg2PngBackend().preflight(req)
+        assert req.prepared['svg_text'] == '<svg><circle/></svg>'
+
+    def test_preflight_neither_input_errors(self):
+        req = _req(backend_id='svg2png', prompt='')
+        with pytest.raises(RuntimeError) as e:
+            Svg2PngBackend().preflight(req)
+        assert 'requires either reference_file' in str(e.value)
+
+    def test_preflight_rejects_non_svg_reference_file(self, tmp_path):
+        txt = tmp_path / 'art.txt'
+        txt.write_text('not svg', encoding='utf-8')
+        req = _req(backend_id='svg2png', prompt='', reference_file=str(txt))
+        with pytest.raises(RuntimeError) as e:
+            Svg2PngBackend().preflight(req)
+        assert 'must be a .svg file' in str(e.value)
+
+    def test_call_reaches_preflight_without_prompt(self):
+        # Regression for the caller gate: svg2png opts into prompt_optional_with_reference_file,
+        # so a request with NO prompt must reach preflight's "neither" error — NOT be rejected
+        # by the blanket "prompt is required" check that guards every other media backend.
+        tool = MediaGen()
+        with patch('agent_cascade.tools.media_gen._get_media_gen_config', return_value={}):
+            result = tool.call({'backend': 'svg2png'})
+        assert 'requires either reference_file' in result[0].text
 
 
 # ── chatterbox one-shot CLI backend wiring (no live generation) ───────────────

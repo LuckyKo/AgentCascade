@@ -45,6 +45,13 @@ class BackendManifest:
                                         # test, and media_gen.call() branches on this to skip save_media_to_media
                                         # and return the transcript inline. Orthogonal to MEDIA_TYPES (which stays
                                         # exactly image/video/audio — see base.py).
+    prompt_optional_with_reference_file: bool = False
+                                        # When True, media_gen.call() does NOT hard-require a non-empty
+                                        # prompt for this backend: the required input may instead come from
+                                        # reference_file (e.g. svg2png reading a .svg file). The backend's
+                                        # preflight() is then solely responsible for rejecting a request that
+                                        # supplies neither. Opt-in; default False keeps every other backend's
+                                        # prompt requirement intact.
     agent_args: tuple = ()              # tool args this backend honours, for __help
     overrides_keys: tuple = ()          # voice/config keys passable via overrides={...}
     release_model_supported: bool = True
@@ -75,6 +82,7 @@ def build_manifest(backend) -> dict:
         'advanced_fields': [asdict(f) for f in m.advanced_fields],
         'availability': m.availability,
         'output_kind': m.output_kind,
+        'prompt_optional_with_reference_file': m.prompt_optional_with_reference_file,
         'agent_args': list(m.agent_args),
         'overrides_keys': list(m.overrides_keys),
         'defaults': dict(m.defaults),

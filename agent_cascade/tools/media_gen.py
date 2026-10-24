@@ -421,9 +421,15 @@ class MediaGen(BaseTool):
         # their required input is reference_file, validated in preflight. Detect from the requested
         # backend's manifest (the registry is the single source of truth for output_kind).
         requested_backend = (params.get('backend') or '').strip()
-        is_text_output = (BACKEND_MANIFEST.get(requested_backend) or {}).get('output_kind') == 'text'
+        _m = BACKEND_MANIFEST.get(requested_backend) or {}
+        is_text_output = _m.get('output_kind') == 'text'
+        # Backends that can source their required input from reference_file (e.g. svg2png
+        # reading a .svg file) opt out of the prompt requirement here; their preflight()
+        # then owns the "neither supplied" rejection. Default False keeps every other
+        # backend's prompt requirement intact.
+        prompt_optional = _m.get('prompt_optional_with_reference_file', False)
 
-        if not is_text_output and (not isinstance(prompt, str) or not prompt.strip()):
+        if not (is_text_output or prompt_optional) and (not isinstance(prompt, str) or not prompt.strip()):
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
 
         # Build the normalised request. media_type is DERIVED (single-type backends
