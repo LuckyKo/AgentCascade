@@ -130,3 +130,16 @@ tests/_crash_dumps/
 
 # git filter-branch / filter-repo scratch dir (accidentally committed; do not track)
 .git-rewrite/
+
+# Model cache (large local downloads)
+model_cache/
+
+# pytest parallel-case scratch dirs + captured test output (runtime artifacts)
+tests/_tmp_p_case*/
+tests/_test_output*
+
+# Timestamped runtime settings dumps (same family as pool_settings/secrets)
+config/agent-cascade-settings-*.json
+
+# Chatterbox-TTS-Server local config (dominated by runtime ui_state, not shared)
+/config.yaml
