@@ -53,15 +53,20 @@ def _empty_output_msg() -> Message:
     return Message(role=ASSISTANT, content='')
 
 
-def _broken_json_msg() -> dict:
-    """A broken-json assistant message (tool call with mismatched braces).
+def _broken_json_msg() -> Message:
+    """A broken-json assistant message using the live LLM-output shape.
 
-    NOTE: built as a plain dict, not a ``Message``. ``_is_incomplete_state`` reads the
-    tool-call arguments via ``func_call.get('arguments')`` only when ``func_call`` is a
-    *dict* (helpers.py:338); a pydantic ``FunctionCall`` object falls through to ``''`` and
-    would never be flagged. This pre-existing quirk is out of scope — we exercise the
-    detection with the shape it actually handles.
+    ``_is_incomplete_state`` must read ``function_call.arguments`` from both a plain
+    dict and a pydantic ``FunctionCall``. Live streamed output uses the latter, so this
+    is the shape that matters for preventing a truncated tool call from being committed.
     """
+    return Message(role=ASSISTANT,
+                   content='',
+                   function_call={'name': 'some_tool', 'arguments': '{'})
+
+
+def _broken_json_dict() -> dict:
+    """The restored/hand-built dict shape, which must stay supported."""
     return {
         'role': ASSISTANT,
         'content': '',
@@ -199,17 +204,26 @@ class TestIsIncompleteStateRegression:
     def test_empty_output(self):
         assert _is_incomplete_state([_empty_output_msg()]) == 'empty-output'
 
-    def test_broken_json(self):
-        # Dict-shaped message (the shape _is_incomplete_state actually inspects — see helper note).
+    def test_broken_json_message_object(self):
+        """Live LLM output uses a pydantic FunctionCall; truncated args must be flagged."""
         assert _is_incomplete_state([_broken_json_msg()]) == 'broken-json'
 
-    def test_broken_json_message_object_not_flagged(self):
-        """Regression guard for a pre-existing quirk: a pydantic FunctionCall object's arguments
-        are read as '' by helpers.py:338, so it is NOT flagged broken-json. We must not change this
-        behavior (out of scope); the test documents it so a future fix is deliberate."""
-        from agent_cascade.llm.schema import FunctionCall
-        msg = Message(role=ASSISTANT, content='', function_call=FunctionCall(name='t', arguments='{"a": 1'))
+    def test_broken_json_dict_fixture(self):
+        """Restored/hand-built dict histories must keep the same detection."""
+        assert _is_incomplete_state([_broken_json_dict()]) == 'broken-json'
+
+    def test_valid_arguments_with_braces_in_string_not_flagged(self):
+        """Structural characters inside JSON strings must not look like truncation."""
+        msg = Message(role=ASSISTANT,
+                      content='',
+                      function_call={'name': 'shell_cmd', 'arguments': '{"command": "echo \\"{\\""}'})
         assert _is_incomplete_state([msg]) is None
+
+    def test_non_object_arguments_are_flagged(self):
+        msg = Message(role=ASSISTANT,
+                      content='',
+                      function_call={'name': 'shell_cmd', 'arguments': '[]'})
+        assert _is_incomplete_state([msg]) == 'broken-json'
 
     def test_complete_content_is_none(self):
         msg = Message(role=ASSISTANT, content='here is the answer')

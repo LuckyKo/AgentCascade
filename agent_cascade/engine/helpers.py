@@ -8,6 +8,7 @@ module scope in the original file; they keep their names and bodies unchanged.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 from enum import Enum, auto
@@ -25,7 +26,6 @@ from agent_cascade.utils.utils import estimate_functions_tokens, msg_field, msg_
 # so their natural home is here. core.py re-imports them from this module (core
 # already imports helpers, so no circular import is introduced).
 MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000  # Threshold to skip expensive regex ops
-MIN_OUTPUT_LENGTH = 200  # Minimum output length for broken-json detection
 
 # ── Skill runtime-injection header (shared constant, D3) ──────────────────────
 # The runtime ``load_skill`` tool injects a skill as a USER message whose content
@@ -416,7 +416,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
 
     Detects three cases of malformed messages (dump and continue):
     1. Reasoning-only block: has reasoning but no content and no tool calls
-    2. Incomplete tool call: broken JSON arguments (bracket/brace mismatch)
+    2. Incomplete tool call: arguments are not a valid JSON object
     3. Empty output: no reasoning, no content, no tool calls
 
     Only checks the last assistant message (the one sent back to the caller).
@@ -457,17 +457,20 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
             return 'reasoning-only' if has_reasoning else 'empty-output'
 
         if has_tool_call:
-            args = func_call.get('arguments', '') if isinstance(func_call, dict) else ''
+            # ``function_call`` is a plain dict in restored/hand-built histories but a
+            # pydantic ``FunctionCall`` on live LLM output. Read both shapes; using
+            # ``func_call.get`` only for dicts silently skipped the live shape and let
+            # truncated arguments (e.g. ``'{'``) be committed.
+            args = msg_field(func_call, 'arguments', '')
             if args and isinstance(args, str):
-                stripped = args.strip()
-                # Count all bracket types for robustness
-                open_braces = stripped.count('{')
-                close_braces = stripped.count('}')
-                open_brackets = stripped.count('[')
-                close_brackets = stripped.count(']')
-                has_mismatch = (open_braces > close_braces) or (open_brackets > close_brackets)
-                # Only flag if mismatch exists, or ends with comma/quote AND has some content
-                if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < MIN_OUTPUT_LENGTH):
+                # Parse rather than counting braces: a valid argument value can contain
+                # unbalanced braces/brackets inside a JSON string (e.g. a shell command
+                # echoing "{"), and that must not look like a truncated tool call.
+                try:
+                    parsed_args = json.loads(args)
+                except (TypeError, ValueError):
+                    return 'broken-json'
+                if not isinstance(parsed_args, dict):
                     return 'broken-json'
 
         break  # Only check the last assistant message

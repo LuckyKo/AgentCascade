@@ -675,7 +675,12 @@ class BaseChatModel(ABC):
         OpenAI spec requires tool_call.arguments to be a JSON string. This method:
         - Serializes dict arguments to JSON
         - Validates string arguments (must parse as a JSON object)
-        - Falls back to '{}' for empty/invalid arguments (with a warning)
+        - Falls back to '{}' for empty/invalid arguments
+
+        Invalid JSON is only debug-logged: a malformed tool call can already be present
+        in restored history and is re-sanitized on every request, so a warning there
+        would repeat forever. A valid non-object value is still warned about because it
+        indicates a shape violation rather than a truncated/unparseable call.
 
         Returns a str that is valid JSON representing an object.
         """
@@ -695,13 +700,21 @@ class BaseChatModel(ABC):
             parsed = json_loads(fn_args)
             if isinstance(parsed, dict):
                 return fn_args
+            # json_loads() deliberately falls back to returning the stripped input
+            # when it cannot parse. That is the invalid-JSON case, not a successful
+            # parse into a non-object. Keep it at debug so a malformed historical
+            # call does not warn on every subsequent LLM request.
+            if isinstance(parsed, str) and parsed.strip() == fn_args.strip():
+                logger.debug('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s',
+                             repr(fn_args[:200]))
+                return '{}'
             logger.warning(
                 'Tool call arguments parsed but were not a JSON object (got %s); defaulting to "{}". Original: %s',
                 type(parsed).__name__, repr(fn_args[:200]))
             return '{}'
         except (ValueError, TypeError):
-            logger.warning('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s',
-                           repr(fn_args[:200]))
+            logger.debug('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s',
+                         repr(fn_args[:200]))
             return '{}'
 
     @staticmethod

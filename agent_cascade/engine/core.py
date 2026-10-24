@@ -38,8 +38,8 @@ from agent_cascade.utils.utils import msg_field, msg_set
 # share the same bound without a circular import. Imported below with the other settings.
 
 
-# MAX_TEXT_LENGTH_FOR_REGEX / MIN_OUTPUT_LENGTH now live in helpers.py (their true
-# home — used by the helper functions there); re-imported below alongside helpers.
+# MAX_TEXT_LENGTH_FOR_REGEX now lives in helpers.py (its true home — used by the
+# helper functions there).
 # SAMPLING_AND_LIMIT_KEYS lives in llm_call.py (used by _build_merged_cfg).
 
 from agent_cascade.engine.auto_skill import AutoSkillMixin
