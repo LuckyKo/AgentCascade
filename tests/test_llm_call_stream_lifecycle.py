@@ -45,7 +45,7 @@ from tests.phase8_stream_helpers import (
 _EMPTY_RESPONSE = '[SYSTEM ERROR: Empty LLM response]'
 
 
-def _run_watchdog_abort(collector, tmp_path, *, silence_limit, total_limit):
+def _run_watchdog_abort(collector, *, silence_limit, total_limit):
     """Drive a stream that stalls on the 2nd chunk; return (results, execute)."""
     engine, instance = make_stream_engine(collector)
     # Bound the retry budget deterministically and set ONLY the targeted watchdog.
@@ -59,7 +59,7 @@ def _run_watchdog_abort(collector, tmp_path, *, silence_limit, total_limit):
     gen = stalling_gen(['chunk-0', 'chunk-1'], clock, advance=5.0)
     results, execute = drive_stream(
         engine, instance, gen, clock=clock, deadline_seconds=10000)
-    return results, execute, engine
+    return results, execute
 
 
 def _make_clock():
@@ -67,14 +67,13 @@ def _make_clock():
     return FakeClock(start=1000.0)
 
 
-def test_watchdog_silence_trips_abort_and_retries(tmp_path):
-    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
-    results, execute, engine = _run_watchdog_abort(
-        collector, tmp_path, silence_limit=1.0, total_limit=1e9)
-
+def _assert_watchdog_abort(collector, results, execute):
+    """Shared discriminators for both watchdog-abort tests. The only real
+    difference between them is which limit the fixture lowers; that stays in the
+    fixture call, not here."""
     # (a) silent retry fired: the attempt was retried, not treated as success.
     assert execute.call_count >= 2, (
-        f"silence watchdog must abort+retry, but _execute_llm_call was called "
+        f"watchdog must abort+retry, but _execute_llm_call was called "
         f"{execute.call_count}x (pre-fix: the bare abort is a no-op → no retry)")
     # (b) the partial is NOT committed (the abort cleared last_output).
     contents = extract_assistant_contents(results)
@@ -89,21 +88,19 @@ def test_watchdog_silence_trips_abort_and_retries(tmp_path):
     assert len(end_events(collector)) == execute.call_count
 
 
+def test_watchdog_silence_trips_abort_and_retries(tmp_path):
+    collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+    # Silence watchdog: lower only the silence limit.
+    results, execute = _run_watchdog_abort(collector, silence_limit=1.0, total_limit=1e9)
+    _assert_watchdog_abort(collector, results, execute)
+
+
 def test_watchdog_total_duration_trips_abort_and_retries(tmp_path):
     collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
-    results, execute, engine = _run_watchdog_abort(
-        collector, tmp_path, silence_limit=1e9, total_limit=1.0)
-
-    # Same discriminators as the silence test, but the TOTAL-duration watchdog
-    # trips (after a chunk set last_output, exercising the last_output-set path).
-    assert execute.call_count >= 2, (
-        'total-duration watchdog must abort+retry, not treat a stalled stream as success')
-    contents = extract_assistant_contents(results)
-    assert 'chunk-0' not in contents, 'watchdog abort must not commit the partial'
-    assert retrying_messages(results) == [], 'watchdog retry must be silent'
-    assert _EMPTY_RESPONSE in extract_system_errors(results), (
-        f"expected {_EMPTY_RESPONSE!r}, got: {extract_system_errors(results)}")
-    assert len(end_events(collector)) == execute.call_count
+    # Total-duration watchdog: lower only the total limit (trips after a chunk
+    # set last_output, exercising the last_output-set path).
+    results, execute = _run_watchdog_abort(collector, silence_limit=1e9, total_limit=1.0)
+    _assert_watchdog_abort(collector, results, execute)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

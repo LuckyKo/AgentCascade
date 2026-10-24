@@ -96,7 +96,7 @@ def make_stream_engine(collector):
     return engine, instance
 
 
-def make_template():
+def _make_template():
     t = MagicMock()
     t.llm_cfg = {'model': 'test'}
     t.function_map = {}
@@ -162,14 +162,10 @@ def raise_after_gen(contents, exc):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def llm_call_events(collector):
+def end_events(collector):
     # Only record_llm_call_end emits a 'llm_call' event (record_llm_call_start just
     # opens a timer), so this list is exactly the sequence of 'end' recordings.
     return [e for e in list(collector.events) if e.get('type') == 'llm_call']
-
-
-def end_events(collector):
-    return llm_call_events(collector)
 
 
 def _str_content_startswith(item, prefix):
@@ -252,5 +248,5 @@ def drive_stream(engine, instance, gen_factory, *,
             stack.enter_context(p)
 
         results = list(engine._execute_llm_call_with_retry(
-            instance, [Message(role='user', content='hi')], make_template(), []))
+            instance, [Message(role='user', content='hi')], _make_template(), []))
         return results, execute
