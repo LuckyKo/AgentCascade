@@ -12,7 +12,7 @@ Reuses the batch harness from tests.test_call_agent_parallel_batch_state_deferra
 (its _make_pool/_make_engine drive the real _execute_detected_tools loop).
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -79,7 +79,6 @@ def test_terminated_tool_records_failed_tool_call_end():
 def test_mid_batch_termination_clears_thread_local():
     """GUARD (not a discriminator): a termination mid-batch must still clear the
     thread-local instance name (the finally always runs) and surface AgentTerminatedError."""
-    from unittest.mock import patch
     engine, caller = _terminated_engine(compression_handler=object())
     with patch('agent_cascade.engine.tool_execution.clear_current_instance_name') as cleared:
         with pytest.raises(AgentTerminatedError):

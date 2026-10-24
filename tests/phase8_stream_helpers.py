@@ -130,7 +130,7 @@ def stalling_gen(contents, clock, advance):
     """Yield one chunk per content; before each chunk AFTER the first, advance
     ``clock.now`` by ``advance``.
 
-    The engine reads ``time.monotonic()`` at the top of the for-loop (line 643)
+    The engine reads ``time.monotonic()`` at the top of the for-loop in _stream_llm_attempt
     right after ``next(gen)`` returns, so advancing before yielding makes the
     watchdog see the elapsed gap on the targeted iteration while the first chunk
     stays within every limit.

@@ -51,7 +51,7 @@ def test_termination_abort_runtime_error_records_one_llm_call_end(tmp_path):
 #
 # A termination branch in _handle_llm_retry_failure returns True (break the retry
 # loop) but never sets state.error_already_yielded. _finalize_llm_result then sees
-# last_output is None and emits "[SYSTEM ERROR: Empty LLM response]" (llm_call.py:549)
+# last_output is None and emits "[SYSTEM ERROR: Empty LLM response]" (the _finalize_llm_result empty branch)
 # even though the instance terminated cleanly (no error). Setting
 # error_already_yielded=True in both termination branches suppresses it.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ def test_termination_abort_runtime_error_no_empty_response_message(tmp_path):
     no [SYSTEM ERROR: Empty LLM response], no [RETRYING], exactly one telemetry 'end'.
 
     Mirrors test_agent_terminated_before_output_emits_no_empty_response_error but exercises
-    the _is_termination_abort branch (llm_call.py:914) — the second branch the P8-3 fix
+    the _is_termination_abort branch in _handle_llm_retry_failure — the second branch the P8-3 fix
     sets state.error_already_yielded on.
     """
     collector = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')

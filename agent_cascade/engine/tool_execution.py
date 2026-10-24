@@ -146,7 +146,7 @@ class ToolExecMixin:
                 function_id = extra_data.get('function_id')
 
                 # P8-4: bind tool_result before the try. The finally block references tool_result
-                # unconditionally (post-processing at ~line 238); on the AgentTerminatedError re-raise
+                # unconditionally (the _postprocess_tool_result call in the finally); on the AgentTerminatedError re-raise
                 # path execute_tool never binds it, so an UnboundLocalError there would mask the
                 # AgentTerminatedError. An empty string is a safe, post-processable default.
                 tool_result = ''
@@ -537,11 +537,10 @@ class ToolExecMixin:
         Called ONLY when a compression handler is present (the caller guards that check).
         ``tool_result`` is always bound at the call site (initialized to '' before the per-tool
         try), so this runs safely even on the AgentTerminatedError / early-raise paths. Resolves
-        truncation params from config,
-        gets ``base_dir`` from ``pool.operation_manager``, and uses agent-specific endpoint
-        config (``api_router.get_llm_config`` with a ``pool.llm_cfg`` fallback) for the vision
-        capability check. Assembles via ``_assemble_tool_result``; on failure, logs and falls
-        back to a thin drain chain (``_legacy_drain_tool_result``), coercing to a string so the
+        truncation params from config, gets ``base_dir`` from ``pool.operation_manager``, and
+        uses agent-specific endpoint config (``api_router.get_llm_config`` with a ``pool.llm_cfg``
+        fallback) for the vision capability check. Assembles via ``_assemble_tool_result``; on failure,
+        logs and falls back to a thin drain chain (``_legacy_drain_tool_result``), coercing to a string so the
         result is never None. Returns the final result.
         """
         try:
