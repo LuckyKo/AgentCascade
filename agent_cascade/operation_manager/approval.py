@@ -151,6 +151,31 @@ class ApprovalMixin:
             self.user_reject(request_id, self._afk_reject_reason())
             return False, self._afk_reject_reason()
 
+        # ── Telegram approval notification (fire-and-forget; the phone can reply /yes or /no) ──
+        # Only push when a human will actually be asked: the AFK auto-reject above already
+        # returned, and when Auto-Ask Security is active the security advisor vets the approval
+        # and auto-applies a verdict — no human decision is pending, so skip the push. Sub-agent
+        # approvals DO push (a sub-agent's approval is still a real user decision). No dedup:
+        # approvals are unique events. Mirrors the send_message.py / engine/core.py bridge idiom
+        # (hasattr guard + try/except) so a bridge failure never breaks the approval flow.
+        # request_id is embedded in the body because notify_user's instance_name is log-only.
+        if not _auto_security:
+            sup = getattr(self.agent_pool, 'telegram_supervisor', None) if self.agent_pool else None
+            if sup is not None and hasattr(sup, 'notify_user'):
+                try:
+                    label = f'{tool_name} ({request_id})'
+                    msg_lines = [f'⚠️ Approval needed: {label}']
+                    if description:
+                        msg_lines.append(description)
+                    if just:
+                        msg_lines.append(f'Reason: {just}')
+                    msg_lines.append('Reply /yes to approve or /no to reject.')
+                    sup.notify_user('\n'.join(msg_lines), instance_name=agent_name)
+                except Exception:
+                    from agent_cascade.log import logger
+                    logger.warning('[APPROVAL-TG] approval notify failed (non-fatal) for %s',
+                                   agent_name, exc_info=True)
+
         # Block until user responds, timeout, or agent is stopped (FIX 5)
         timeout_val = self.approval_timeout_seconds if self.enable_timeout else 3600
         start_time = time.time()

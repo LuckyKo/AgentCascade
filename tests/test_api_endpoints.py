@@ -1908,6 +1908,118 @@ class TestAfkServerAutoReject:
             _runtime_state.approval_timeout_seconds = saved_timeout
 
 
+class TestApprovalTelegramNotify:
+    """request_user_approval pushes an approval notification to the attached Telegram
+    bridge ONLY when a human will actually decide: not when AFK auto-rejects, not when
+    Auto-Ask Security will vet it. Sub-agent approvals still push. Bridge-absent is a
+    silent no-op. Uses a real OperationManager (the push is a side effect of the real
+    request_user_approval path)."""
+
+    def _make_om(self):
+        from agent_cascade.operation_manager import OperationManager
+        return OperationManager(base_dir='/tmp/tg_notify_ws')
+
+    def _make_pool(self, auto_security, supervisor=None):
+        """Pool double exposing auto_security + stopped (the wait loop reads .stopped)
+        and optionally a recording telegram_supervisor. Plain attributes — NOT the
+        state-delegating _FakePool — so auto_security is per-test isolated."""
+        class _Pool:
+            pass
+        pool = _Pool()
+        pool.auto_security = auto_security
+        pool.stopped = False
+        if supervisor is not None:
+            pool.telegram_supervisor = supervisor
+        return pool
+
+    def _make_sup(self):
+        class _Sup:
+            def __init__(self):
+                self.calls = []
+
+            def notify_user(self, message, instance_name=None, run_generation=None):
+                self.calls.append({'message': message, 'instance_name': instance_name})
+                return True
+        return _Sup()
+
+    def _run_blocking(self, om, agent_name='agent1', just='why'):
+        """Drive request_user_approval to a resolved state on a worker thread and capture
+        its return value. The push happens before the blocking wait, so after join() it
+        has definitely run; asserting the worker returned a verdict (no exception) is a
+        real witness that the push block did not crash the approval flow."""
+        import threading
+        result = {}
+
+        def _worker():
+            try:
+                result['verdict'] = om.request_user_approval(
+                    agent_name, 'shell_cmd', {'command': 'x', 'justification': just})
+            except BaseException as exc:  # noqa: BLE001 — surface any crash to the assertion
+                result['exc'] = exc
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        deadline = time.time() + 5
+        while not om.pending and time.time() < deadline:
+            time.sleep(0.01)
+        assert om.pending, 'request should be pending (not auto-rejected)'
+        rid = next(iter(om.pending))
+        om.user_approve(rid, 'ok')
+        t.join(timeout=5)
+        assert 'exc' not in result, f'worker raised: {result.get('exc')!r}'
+        return result
+
+    def test_bridge_live_pushes_once(self):
+        om = self._make_om()
+        om.afk_enabled = False
+        sup = self._make_sup()
+        om.agent_pool = self._make_pool(auto_security=False, supervisor=sup)
+        self._run_blocking(om)
+        assert len(sup.calls) == 1
+        msg = sup.calls[0]['message']
+        assert 'Approval needed' in msg
+        assert 'shell_cmd' in msg
+        assert 'Reason: why' in msg          # justification surfaced
+        assert '/yes' in msg and '/no' in msg  # actionable reply hint
+        # request_id must be in the body: instance_name is log-only.
+        assert 'op_' in msg
+        assert sup.calls[0]['instance_name'] == 'agent1'
+
+    def test_afk_auto_reject_suppresses_push(self):
+        om = self._make_om()
+        om.afk_enabled = True
+        sup = self._make_sup()
+        om.agent_pool = self._make_pool(auto_security=False, supervisor=sup)
+        ok, reason = om.request_user_approval('agent1', 'shell_cmd', {'command': 'x'})
+        assert ok is False  # auto-rejected, no human asked
+        assert sup.calls == []
+
+    def test_auto_security_suppresses_push(self):
+        om = self._make_om()
+        om.afk_enabled = False
+        sup = self._make_sup()
+        om.agent_pool = self._make_pool(auto_security=True, supervisor=sup)
+        self._run_blocking(om)  # security advisor would vet in prod; resolve manually here
+        assert sup.calls == []
+
+    def test_bridge_absent_is_silent_noop(self):
+        om = self._make_om()
+        om.afk_enabled = False
+        om.agent_pool = self._make_pool(auto_security=False)  # no telegram_supervisor
+        result = self._run_blocking(om)  # must not raise; resolves normally
+        assert result['verdict'][0] is True  # worker completed cleanly (approved)
+        assert om.pending == {}
+
+    def test_subagent_approval_still_pushes(self):
+        om = self._make_om()
+        om.afk_enabled = False
+        sup = self._make_sup()
+        om.agent_pool = self._make_pool(auto_security=False, supervisor=sup)
+        self._run_blocking(om, agent_name='coder_sub')
+        assert len(sup.calls) == 1
+        assert sup.calls[0]['instance_name'] == 'coder_sub'
+
+
 class _AfkNudgePool:
     """Minimal pool double for the pure afk_should_nudge() tests."""
 
