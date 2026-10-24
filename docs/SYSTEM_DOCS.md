@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 1.0 (based on DESIGN_REWRITE.md)
-**Last Updated:** 2026-07-16
+**Version:** 0.3.117 (keep in sync with `agent_cascade.__version__`)
+**Last Updated:** 2026-10-24
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -206,7 +206,7 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 
 ### 3.4 API Server
 
-**What it represents:** A pure state broadcaster. It does not execute agents or manage conversation state. Its sole responsibility is receiving WebSocket connections, broadcasting pool state updates, and relaying user messages into the pool's queue system.
+**What it represents:** The WebSocket state broadcaster **and** the configuration / control REST surface. It does not execute agents or own conversation state. It receives WebSocket connections, broadcasts pool state updates, relays user messages into the pool's queue system, and exposes an HTTP API for reading and mutating server-side configuration and control state.
 
 **Key responsibilities:**
 
@@ -214,6 +214,16 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 - **Message Ingestion:** Receives user input through the API router and enqueues it into the appropriate agent's message queue
 - **State Serialization:** Converts `AgentInstance` data into JSON-serializable formats for UI rendering, always reading from `pool.instances`
 - **Security Review Orchestration:** When a tool call requires approval, triggers the Security Advisor agent and waits for its verdict
+- **Configuration / Control REST Surface:** Serves HTTP endpoints that read and mutate server-side configuration and control state (the UI's settings panels call these). Endpoint families, by name:
+  - **Endpoint config:** `/api/endpoints` (GET / PUT / DELETE, bulk update, priorities)
+  - **MCP server config:** `/api/mcp-config` (GET / PUT), `/api/mcp-status` (GET), `/api/mcp-toggle` (POST) — see the MCP subsection below
+  - **Media-gen config:** `/api/image_gen*`, `/api/media_gen*`
+  - **Skills:** `/api/skills*` (including threshold, toggle, migrate)
+  - **Sessions:** `/api/sessions`, `/api/session/restore`, `/api/state/save`, `/api/state/load`
+  - **Control:** `/api/restart`, `/api/approve`, `/api/reject`, `/api/afk`, `/api/auto_security`
+  - **Diagnostics / utility:** `/api/telemetry*`, `/api/find_file`, `/api/parse`
+
+  These endpoints read and write config files and pool flags; they do not run agent loops.
 
 **What it does NOT do:**
 
@@ -221,6 +231,25 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 - ❌ Does not execute agents directly
 - ❌ Does not manage agent lifecycle (creation, dismissal, resurrection)
 - ❌ Does not perform compression or loop detection
+
+#### MCP Server Configuration
+
+The API Server also owns the MCP (Model Context Protocol) server configuration — the set of external tool servers the system can connect to. This is a self-contained config/control feature:
+
+**Source of truth:** `config/mcp_servers.json` — a raw servers-map keyed by server name. Each entry holds `command`, `args`, optional `env`, and an `enabled` boolean. A server's `enabled` flag **defaults to true when the key is absent** (the status handler treats a missing flag as enabled); the shipped file sets both of its entries to `false`, so they are present but disabled until toggled on. Servers are initialized at startup from this file — it is not derived from `PoolSettings`.
+
+**REST surface** (in `agent_cascade/api_server.py`; cite by route name, as this file's line numbers shift between edits):
+
+| Route | Method | Behavior |
+|-------|--------|----------|
+| `/api/mcp-config` | GET | Return the raw `config/mcp_servers.json` contents (`{}` if the file is absent) |
+| `/api/mcp-config` | PUT | Validate and write the servers-map back to `config/mcp_servers.json` |
+| `/api/mcp-status` | GET | Per-server `[{name, enabled, connected, tool_count}]` — config from the file, live connection state read from the `MCPManager` singleton |
+| `/api/mcp-toggle` | POST | Toggle one server on/off: connect/disconnect it live, then persist the `enabled` flag to the file |
+
+`config/mcp_servers.json` is the single source of truth for the `enabled` flag; live connection state is read separately from `MCPManager` under its lock.
+
+**WebUI:** an on-demand settings tab, `sub-mcp-config`, that edits `config/mcp_servers.json`. It is **not** part of the normal sub-agent tab set — it is opened only when the user clicks the "Open MCP Config" button, and is deliberately excluded from sub-agent tab cleanup so it is never auto-closed.
 
 ### 3.5 API Router
 
@@ -241,7 +270,7 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 
 | Path | Trigger | Process |
 |------|---------|---------|
-| **System-Triggered (Forced)** | Token usage exceeds 95% threshold | Runs inline within the agent's execution thread via `_pre_llm_checks()`. Optimized for speed — no agent overhead. |
+| **System-Triggered (Forced)** | Token usage exceeds the force threshold (`compression_force_threshold`, default 96%) | Runs inline within the agent's execution thread via `_pre_llm_checks()`. Optimized for speed — no agent overhead. |
 | **Tool-Triggered (Explicit)** | Agent calls `compress_context` tool | Delegates to a dedicated Compression Agent for quality control. Better prompts and reasoning about what to preserve. |
 
 Both paths ultimately call the same underlying compression logic in `agent_cascade/compression/core.py`, but they differ in their approach: system-triggered is fast and automatic, while tool-triggered produces higher-quality summaries through deliberate agent reasoning.
@@ -415,7 +444,7 @@ Context compression is how Agent Cascade manages conversations that grow beyond 
 ```
 Step 1: Compression Triggered
   Three trigger paths:
-    a) Auto-trigger: token usage exceeds 95% of context window
+    a) Auto-trigger: token usage exceeds the force threshold (compression_force_threshold, default 96% of context window). A separate proactive path fires at 95% and a warning at 90%; the forced path is the one described here.
     b) Agent tool call: agent invokes compress_context() during conversation
     c) Supervisor command: user types /compress in the chat interface to manually trigger compression for any active agent instance
 
@@ -547,122 +576,111 @@ If JSONL sync fails, a warning is logged: "pool is authoritative; JSONL will be 
 
 Agent Cascade uses two complementary loop detection systems: one operates at the turn level (inter-turn), and the other operates in real time during LLM streaming (intra-generation).
 
-#### Inter-Turn Loop Detection (Legacy System)
+#### Inter-Turn Loop Detection (Two-Tier: Exact + Fuzzy)
 
-Agents can get stuck in repetitive behavior patterns — requesting the same tool repeatedly, producing similar responses, or cycling through failed attempts without making progress. The system detects and recovers from these loops automatically.
+Agents can get stuck in repetitive behavior patterns — requesting the same tool repeatedly, producing similar responses, or cycling through failed attempts without making progress. Detection runs **inline** inside `ExecutionEngine._pre_llm_checks()` (in `engine/llm_call.py`); it is no longer raised as an exception to a consumer. Two tiers run in priority order:
 
-**Detection:**
+> The old single matcher `agent_cascade/loop_detection.py` (window 40 / max period 20) was removed in the 2026-08 two-tier redesign. That module is now a **deprecated backward-compatibility stub**. `LoopDetectedError` still exists there but is **no longer raised by production code** — it is kept only because `api_integration_pkg/runner.py` and existing tests import it.
 
-- Runs during Phase 2 (pre-LLM checks), every N turns
-- Examines the last 40 messages in the agent's conversation
-- Extracts identifying features (role + content signature) from each message
-- Checks for repeated patterns: shorter patterns need fewer repetitions to flag (3 occurrences of a 1-message pattern), longer patterns are more lenient (2 occurrences of an 8-message pattern)
-- Pattern lengths checked range from 1 to 20 messages
+**Tier 1 — Exact matcher (rollback):** `agent_cascade/exact_loop_detect.py`
 
-**Recovery:**
+- `detect_exact_loop(messages)` scans a window of the last **60** non-SYSTEM messages (minimum 6) for a contiguous, byte-for-byte repeating period of length **1 up to 12**.
+- Features are role + content signatures; FUNCTION features are wrapper-stripped so tool calls compare on their canonical content. SYSTEM messages are excluded from the window.
+- Guards carried over from the old detector: skip length-1 FUNCTION/USER periods, skip all-FUNCTION periods, contiguity required.
+- On a hit it returns `(reason, pop_count)` — the number of trailing messages to remove so that exactly one occurrence of the period remains.
+- Gated by `loop_exact_rollback_enabled`. An exact hit returns **before** Tier 2 runs, so it has priority.
+
+**Tier 2 — Fuzzy tool-call detector (warning-first):** `agent_cascade/tool_loop_detect.py`
+
+- `detect_tool_loop(messages)` scans trailing runs of (function_call, function_output) pairs:
+  - **Layer 1:** ≥5 trailing same-action pairs with byte-identical or terminal-error outputs (e.g. async-shell polling loops).
+  - **Layer 2:** ≥6 trailing same-tool failing pairs with near-duplicate argument cores and an identical failure class.
+- This tier is **advisory**: it emits a warning by default. A full rollback happens only when `tool_loop_fuzzy_rollback_enabled` is set (**default off**, `settings.py`).
+- Gated by `loop_fuzzy_warning_enabled` AND the legacy kill switch `tool_loop_detection_enabled`.
+
+Both tiers are skipped on the turn immediately after a compression, because compressed state concentrates patterns that false-positive easily.
+
+**Recovery (exact tier):**
 
 ```
-Loop Detected (LoopDetectedError raised in Phase 4)
-       │
-       ▼
-┌─────────────────────┐
-│ Consumer catches    │ ← Wrap ExecutionEngine.run() in try/except
-│ LoopDetectedError   │   Max retries: pool.settings.max_auto_rollbacks (default 3)
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Surgical Rollback   │ ← Remove the repetitive messages from conversation
-│ pool.surgical_      │   Never removes SYSTEM or first USER message
-│ rollback()          │   Caps at 50% of removable history per operation
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Inject Corrective   │ ← Add a SYSTEM hint:
-│ Hint Message        │   "Your last actions resulted in a repetitive loop.
-│                     │    Try a different approach."
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Restart Generator   │ ← ExecutionEngine.run() starts again from Phase 1
-└─────────────────────┘
+Exact Loop Detected in _pre_llm_checks()
+   │
+   ▼
+┌───────────────────────────────────┐
+│ auto_rollback_on_loop?            │ ← If False: log + continue to the LLM call (no rollback)
+└───────────┬───────────────────────┘
+            │ True
+            ▼
+┌───────────────────────────────────┐
+│ _inline_rollback_and_hint()       │ ← engine/compression_exec.py
+│ pool._rollback_instance(pop_count)│   Pops N messages, clears caches, syncs logger
+└───────────┬───────────────────────┘
+            │
+            ▼
+┌───────────────────────────────────┐
+│ Inject Corrective Hint            │ ← Random message from LOOP_FEEDBACK_MESSAGES
+└───────────┬───────────────────────┘
+            │
+            ▼
+┌───────────────────────────────────┐
+│ Enforce max_auto_rollbacks        │ ← pool.settings.max_auto_rollbacks (default 5; -1 = unlimited)
+│ rollbacks > limit → terminate     │   Terminates this instance (and its children), not the pool
+└───────────────────────────────────┘
 ```
 
-**Safety Guarantees:**
+**Safety Guarantees** (enforced in `pool/rollback.py::_rollback_instance`):
 
-- Never removes the SYSTEM message or first USER message (conversation core)
-- Caps rollback at 50% of removable history per operation to avoid excessive data loss
-- Refines rollback count to avoid leaving dangling tool calls (rolls back an extra message if needed)
-- Maximum of 3 automatic retries — beyond that, the error propagates up
+- Never removes the SYSTEM message or the first USER message (conversation core)
+- Refines the pop count to avoid leaving dangling tool calls at the cut boundary
+- Bounded by `max_auto_rollbacks` (default 5); beyond that the instance is terminated with a diagnostic that names the detected pattern
 
 #### Intra-Generation Loop Detection (Inner Loop Detector)
 
-While inter-turn detection catches repetitive patterns across completed turns, the inner loop detector operates in real time during LLM streaming, catching degenerate output before the model wastes excessive tokens.
+While inter-turn detection catches repetitive patterns across completed turns, the inner-loop detector operates in real time during LLM streaming, catching degenerate output before the model wastes excessive tokens. A fresh `InnerLoopDetector` is created for each LLM-call attempt; each streaming delta is fed via `InnerLoopDetector.feed(delta)` (`agent_cascade/inner_loop_detect.py`), which returns `None` or a loop-event dict `{loop, reason, score}`.
 
-**What It Does:**
+> The earlier scoring-based design (five signals — sentence / n-gram / block repetition, entropy collapse — accumulating toward a 300-point threshold) was removed in the Phase 3 cleanup. The `InnerLoopSettings` dataclass still exists, but its scoring fields are deprecated and unused.
 
-Monitors each streaming chunk as it arrives from the LLM and analyzes the text for five distinct signals of repetitive or stalled generation. When a loop is detected, the stream is aborted immediately and the generation is retried.
+**Active detection modes** (in priority order, per `InnerLoopDetector.feed`):
 
-**Detection Signals:**
+| Mode | Mechanism | Trigger |
+|------|-----------|---------|
+| Max-chars guard | Counts total characters fed | Total chars ≥ `default_max_chars` (default 40960, ~8K tokens) — force-triggers |
+| Character run | Consecutive identical characters | A run longer than `char_run_limit` (default 129) — strong signal, returns immediately |
+| Two-phase semantic loop | `TwoPhaseLoopDetector` (`two_phase_loop_detect.py`) | An n-gram occurrence count reaching `loop_suspicion_threshold` (default 7) confirmed by `loop_confirm_required` exact matches (default 5); a `loop_cooldown_feeds` (default 50) cooldown follows a failed confirmation |
 
-| Signal | Method | Score | Trigger Condition |
-|--------|--------|-------|-------------------|
-| Character Runs | Consecutive identical character count | +100 (instant) | >70 identical chars in a row |
-| Sentence Repetition | Normalized sentence counter | +80 | Any sentence appears >=7 times |
-| N-gram Repetition | 64-token sliding window counter | +60 | Same n-gram repeats >=5 times |
-| Block Repetition | 128-token sliding window counter | +70 | Same block repeats >=4 times |
-| Entropy Collapse | Shannon entropy of token distribution | +30 (one-time) | Entropy drops below 2.0 bits, scores only once per low-entropy period; resets when entropy recovers |
-
-Signals accumulate toward a cumulative score threshold (default: 300 points). Score decays by 3% per feed cycle to prevent transient repetitions from triggering false positives. A hard cap of 500 prevents unbounded growth from edge cases.
+The two-phase detector only starts evaluating once accumulated output reaches `default_min_chars` (default 4000); the character-run and max-chars guards run from the first chunk.
 
 **How It Works:**
 
 ```
-LLM Streaming Chunk Arrives
-        │
-        ▼
-┌─────────────────────┐
-│ InnerLoopDetector   │ ← Fresh instance per retry attempt
-│ .feed(chunk)        │   Activated after min_chars threshold (default: 4000)
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Check 5 Signals     │ ← Character runs (always), others (after min_chars)
-│ + Accumulate Score  │   Heavy checks also respect batch_interval gate
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Score >= Threshold? │ ← Default: 300 points (cap: 500)
-└───────┬─────────────┘
-        │ Yes
-        ▼
-┌─────────────────────┐
-│ Abort Stream        │ ← Stop LLM generation, save sample for debugging
-│ + Raise Exception   │   inner_loop: or max_tokens: error raised
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ API Router catches  │ ← In api_router.py call_with_fallback()
-│ exception           │    Treats as early exit signal, advances to next endpoint
-└─────────────────────┘
+LLM Streaming Delta Arrives
+   │
+   ▼
+┌───────────────────────────────────┐
+│ inner_loop_detect_enabled?        │ ← Gated by pool.settings.inner_loop_detect_enabled
+└───────────┬───────────────────────┘
+            │ True
+            ▼
+┌───────────────────────────────────┐
+│ InnerLoopDetector.feed(delta)     │ ← Fresh instance per LLM-call attempt
+└───────────┬───────────────────────┘
+            │ returns loop event
+            ▼
+┌───────────────────────────────────┐
+│ save_loop_sample(...)             │ ← Debug sample under workspace/logs/loop_samples/
+│ _abort_llm_stream(...)            │   Stop generation immediately
+└───────────┬───────────────────────┘
+            │
+            ▼
+┌───────────────────────────────────┐
+│ raise CharacterRunDetected        │ ← "inner_loop: ..."; once the bounded retry
+│   retry budget = retry_max_attempts   │   budget is spent, "inner_loop_exhausted" instead
+└───────────────────────────────────┘
 ```
 
-**Configuration:**
+**Separate safety net:** independently of the detector, a max-output-token guard aborts the stream and raises `MaxTokenExceeded` if generated output exceeds the configured token budget — a backstop if the detector misses a loop.
 
-All tunable parameters are centralized in the `InnerLoopSettings` dataclass in `settings.py`. This includes memory bounds (max tokens, counter entries), activation thresholds (min chars, batch interval), structural parameters (n-gram size, block size, entropy window), detection thresholds (sentence/n-gram/block repetition counts, entropy limit), and scoring parameters (score threshold, decay rate). The UI provides a toggle to enable or disable detection, which takes effect in real time on the next streaming chunk.
-
-**Integration:**
-
-- A fresh `InnerLoopDetector` is created at the start of each retry attempt
-- Each streaming chunk is checked against the toggle setting (gated by `pool.settings.inner_loop_detect_enabled`)
-- On detection: the stream is aborted, a sample is saved for debugging, and an exception (`inner_loop:` or `max_tokens:`) is raised
-- The API router catches this exception and treats it as an early exit signal, advancing to the next endpoint in the chain rather than retrying the same model
-- A max-output-token guard (default: 2048, configurable via max_tokens) serves as a safety net if the detector misses a loop
+**Configuration:** all tunables live in the `InnerLoopSettings` dataclass in `settings.py` (character-run limit, max-chars guard, two-phase suspicion / confirm / cooldown thresholds, min-chars activation). The `inner_loop_detect_enabled` toggle gates the whole feature and takes effect on the next streaming chunk.
 
 ### 5.4 Parallel Execution
 
@@ -682,7 +700,7 @@ Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
             │
             ▼
 ┌───────────────────────────┐
-│ Check if caller holds     │ ← Lines 230-240, tool_dispatcher.py
+│ Check if caller holds     │ ← tool_dispatcher.py (_run_child_sync / _run_child_async decision)
 │ a concurrency slot?       │ (detects deadlock risk)
 └───────────┬───────────────┘
             │
@@ -720,13 +738,13 @@ Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
 
 **Key Details:**
 
-- All `call_agent` invocations go through the async path via `register_async_call()` → `AsyncToolRegistry` → `ThreadPoolExecutor` by default
-- **Automatic sync fallback**: If the caller already holds a concurrency slot, `_run_child_sync()` is invoked directly (no thread pool) to prevent deadlock — this occurs when the same thread would otherwise hold the semaphore while trying to spawn a child that also needs it (lines 230-240, tool_dispatcher.py)
+- All `call_agent` invocations go through the async path via `register_async_call()` (in `pool/slots.py`) → `AsyncToolRegistry` → `ThreadPoolExecutor` by default
+- **Automatic sync fallback**: If the caller already holds a concurrency slot, `_run_child_sync()` is invoked directly (no thread pool) to prevent deadlock — this occurs when the same thread would otherwise hold the semaphore while trying to spawn a child that also needs it (the sync/async decision in `tool_dispatcher.py`)
 - **Concurrency control** is enforced by `EndpointScheduler` per API endpoint:
   - `concurrency_limit = -1`: unlimited (no scheduling)
   - `concurrency_limit = 0`: sequential — agents run one at a time; all seq endpoints share the same slot to avoid cache trashing
   - `concurrency_limit = N>0`: up to N agents can run simultaneously on that endpoint
-- Slot acquisition happens via `_acquire_slot()` in `agent_pool.py` → `router.scheduler.acquire()`
+- Slot acquisition happens via `_acquire_slot()` (in `pool/slots.py`) → `router.scheduler.acquire()`
 - The caller continues its turn and transitions to **SLEEPING** at end-of-turn if pending async calls exist. It wakes up to drain results from `pool.drain_async_results()`, which returns `[Parallel Agent ...]` prefixed messages
 - Completion is communicated via the message queue system — the caller drains its queue on the next iteration and sees the result
 - If the pool reaches capacity, new requests block until a slot opens (via endpoint slot acquisition)
@@ -850,7 +868,7 @@ Idle agents are automatically removed from the pool to prevent resource accumula
 **Auto-Dismiss Conditions (ALL must be true):**
 
 1. Agent is NOT currently executing (not in `active_stack`)
-2. Last activity exceeds `idle_timeout_seconds` (default: 300 seconds / 5 minutes)
+2. Last activity exceeds `idle_timeout_seconds` (default: 1600 seconds / ~27 minutes). System agents (Compressor, Security) use a separate, shorter `system_agent_idle_timeout_seconds` (default 300 seconds / 5 minutes)
 3. Agent is NOT the main orchestrator ("Maine")
 4. Agent is NOT currently halted (halted agents are intentionally paused)
 
@@ -871,6 +889,25 @@ When the orchestrator calls `call_agent` with a `log_file` parameter pointing to
 4. New task message appended and execution begins
 
 This means auto-dismissal is **non-destructive**. Only the in-memory state is cleared; the full history remains available for restoration.
+
+### 5.7 Approval & Security Flow
+
+Sensitive tool calls (shell commands, file writes, etc.) are gated by an approval step before execution. The flow lives in `agent_cascade/operation_manager/approval.py`. Each pending approval is registered with a unique `request_id`; the user answers with `/yes` or `/no` (or the WebUI approve/reject controls, backed by `/api/approve/{request_id}` and `/api/reject/{request_id}`).
+
+**AFK auto-reject (server-side):**
+
+When the user is away-from-keyboard (AFK), an approval is auto-rejected **once, at registration** — this replaced the browser's renderApprovals loop, so the rejection is deterministic and race-free. It is **skipped while Auto-Ask Security is active**: in that case the pending approval must reach the Security Advisor, which vets it and auto-applies a YES/NO verdict. Only when no automated review will handle the call (security off) does AFK reject immediately, so the call never waits on an absent user.
+
+**Telegram approval notification (fire-and-forget):**
+
+When a real human decision is pending, the system pushes a fire-and-forget notification to the Telegram bridge (the phone can reply `/yes` or `/no`). The push is **suppressed** in two cases:
+
+- The AFK auto-reject above already returned (no decision is pending).
+- Auto-Ask Security is active (the Security Advisor auto-applies a verdict — no human decision is pending).
+
+Sub-agent approvals **do** push: a sub-agent's approval is still a real user decision. There is no dedup (approvals are unique events), and the `request_id` is embedded in the message body because the bridge's `instance_name` is log-only. A bridge failure never breaks the approval flow (guarded with a `hasattr` check + `try/except`).
+
+**Auto-Ask Security:** when enabled, the Security Advisor vets each pending approval and auto-applies a verdict, so no human prompt is surfaced and no Telegram push is sent. The `/api/auto_security` control endpoint toggles this.
 
 ---
 
@@ -1276,15 +1313,16 @@ Run the full `tests/memory_hint/` suite serially (per lesson `pytest-docker-subp
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `idle_timeout_seconds` | 300 | Auto-dismiss agents after this much inactivity |
+| `idle_timeout_seconds` | 1600 | Auto-dismiss regular agents after this much inactivity |
+| `system_agent_idle_timeout_seconds` | 300 | Auto-dismiss system agents (Compressor, Security) after this much inactivity |
 | `idle_check_interval` | 60 | Check for idle agents every N seconds |
-| `compression_force_threshold` | 95.0 | Force compression at X% token usage |
-| `compression_warning_threshold` | 85.0 | Warn agent at X% token usage |
+| `compression_force_threshold` | 96.0 | Force compression at X% token usage |
+| `compression_warning_threshold` | 90.0 | Warn agent at X% token usage |
 | `compression_timeout` | 120 | Max seconds for compression to complete |
 | `compression_consolidation_threshold` | 8 | Trigger L2 consolidation when marker count reaches this value |
 | `compression_max_consolidation_tokens` | 100,000 | Abort consolidation if input summaries exceed this token count |
 | `security_check_timeout` | 120 | Max seconds for Security Advisor response |
-| `max_auto_rollbacks` | 3 | Max loop recovery retries before escalation |
+| `max_auto_rollbacks` | 5 | Max loop recovery retries before escalation |
 
 ### Agent Instance Lifecycle
 
@@ -1307,12 +1345,17 @@ Active Execution ──→ Phases 1-5 repeat until completion
 
 | Component | Primary File(s) |
 |-----------|----------------|
-| AgentPool + Managers | `agent_pool.py` (includes ParallelAgentManager, LoggerManager, IdleManager) |
-| ExecutionEngine | `execution_engine.py` |
-| Loop Detection | `loop_detection.py` (standalone module) |
-| API Server | `api_server.py` (single file, ~140KB) |
-| API Router | `api_router.py` |
-| Compression | `compression/core.py`, `compression/agent_invoker.py` |
+| AgentPool + Managers | `agent_pool.py` is a **facade** re-exporting `from .pool.core import AgentPool`. Real implementation is the package `pool/` (e.g. `core.py`, `conversation_map.py`, `parallel_manager.py`, `idle_manager.py`, `logger_mgr.py`, `slots.py`, `lifecycle.py`, `session_io.py`, `config_persist.py`, `rollback.py`) |
+| ExecutionEngine | `execution_engine.py` is a **facade** re-exporting `from agent_cascade.engine.core import ExecutionEngine`. Real implementation is the package `engine/` (e.g. `core.py`, `run_loop.py`, `turn_setup.py`, `llm_call.py`, `response_pipeline.py`, `tool_execution.py`, `slot_lifecycle.py`, `compression_exec.py`, `auto_skill.py`) |
+| Loop Detection | `loop_detection.py` is a **deprecated stub** (holds only `LoopDetectedError`). Real detectors: `exact_loop_detect.py` (Tier 1 exact), `tool_loop_detect.py` (Tier 2 fuzzy), `inner_loop_detect.py` + `two_phase_loop_detect.py` (intra-generation) |
+| API Server | `api_server.py` (single file; also hosts the config/control REST surface and MCP config — see §3.4) |
+| API Router | `api_router.py` is a **facade** re-exporting `from agent_cascade.api_router_pkg.router import APIRouter`. Real implementation is the package `api_router_pkg/` (e.g. `router.py`, `scheduler.py`, `endpoints.py`, `breaker_gate.py`, `helpers.py`) |
+| MCP Server Config | `config/mcp_servers.json` (raw servers-map; `enabled` defaults true when absent) — served by `api_server.py` MCP routes (see §3.4) |
+| Compression | `compression/core.py`, `compression/agent_invoker.py` (also `handler.py`, `helpers.py`) |
 | Memory-Hint System | `memory_hint/manager.py`, `memory_hint/matcher.py`, `memory_hint/vault.py`, `memory_hint/stats.py` (see §9) |
 | Agent Base Classes | `agent_cascade/agent.py`, `agent_cascade/agent_instance.py`, `agent_cascade/agents/fncall_agent.py`, `agent_cascade/agents/assistant.py` |
-| Tools | `tools/*.py` (unchanged) |
+| Tools | `tools/*.py` |
+
+### Testing & CI
+
+Test selection, capability markers (`requires_docker`, `heavy_concurrency`, `windows_only`, `skip_if_no_local`), pytest plugins, and the CI job matrix are documented in **`docs/ci_testing.md`** — see it rather than duplicating the policy here.
