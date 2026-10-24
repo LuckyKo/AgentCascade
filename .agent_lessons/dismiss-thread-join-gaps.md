@@ -1,7 +1,7 @@
 ---
 tags: [dismiss-agent, threading, zombie-threads, agent-pool, thread-join]
 aliases: [thread-join-dismiss-fails, instance-threads-registry-gaps]
-related: [[dismiss-agent-cooperative-termination]], [[agent-pool-no-instance-lock]], [[deadlock_detection_dismiss_fix]]
+related: ["[[dismiss-agent-cooperative-termination]]", "[[agent-pool-no-instance-lock]]", "[[deadlock_detection_dismiss_fix]]"]
 confidence: verified
 ---
 

@@ -1,7 +1,7 @@
 ---
 tags: [async-shell, compression, halt, inter-agent, race]
 aliases: [async-interrupt-compression-halt, sync-agent-stopped-by-async]
-related: [[compression-bug-root-cause-analysis]], [[stop-resume-fix]]
+related: ["[[compression-bug-root-cause-analysis]]", "[[stop-resume-fix]]"]
 confidence: verified
 ---
 

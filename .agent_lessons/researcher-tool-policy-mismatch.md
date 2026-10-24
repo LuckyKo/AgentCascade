@@ -1,7 +1,7 @@
 ---
 tags: [disabled-tools, tool-policy, researcher, system-info, layer4]
 aliases: [researcher-tool-policy-mismatch, system-info-disabled-tools-false-positive]
-related: [[lessons-disabled-tool-auto-deny-fix]], [[lessons-realtime-tool-assignment]]
+related: ["[[lessons-disabled-tool-auto-deny-fix]]", "[[lessons-realtime-tool-assignment]]"]
 confidence: verified
 ---
 
@@ -48,7 +48,7 @@ never actually disables these tools for spawned researchers — but system_info 
   write_file` — this is `DEFAULT_NEW_AGENT_DISABLED_TOOLS` minus the `__all_mcp_tools__` sentinel.
 - `write_file` probe to `N:\work\WD\AgentWorkspace\temp\researcher_write_file_probe.txt` succeeded.
 - `code_interpreter` executed successfully (the simulation scripts above).
-- Resolver test: `resolve(None, {}, 'Researcher','Researcher')` → baseline; 
+- Resolver test: `resolve(None, {}, 'Researcher','Researcher')` → baseline;
   `resolve({'disabled_tools': ['forget_last']}, {}, ...)` → only ['forget_last'] (no baseline).
 - Saved `config/pool_settings.json` has `"Researcher": []` (explicit empty = user grant),
   but template-level template-only resolution ignores that dict entirely.
