@@ -1,6 +1,8 @@
 ---
 name: self-augmentation
 description: Protocol for discovering, loading, and creating specialized skills at runtime — scan for and load relevant skills before tasks needing domain expertise, pass skills to sub-agents, and capture recurring patterns as new skills.
+source: auto-generated
+version: 1.1.0
 triggers:
   - "skill discovery"
   - "loading skills"
@@ -15,10 +17,22 @@ Discover and load specialized skills when a task needs domain expertise.
 
 ## When to act
 
-- **Task mentions any technology/framework/library/tool** (Docker, React, TensorFlow, …) → invoke `scan_skills` with query='that technology' immediately.
+- **Task mentions any technology/framework/library/tool** → `scan_skills` with query='that technology' immediately.
 - **Delegating to sub-agents** → include `load_skill=[...]` in `call_agent`.
-- **You notice a recurring pattern worth capturing** (multi-step procedure, domain knowledge not covered by existing skills, ≥5 tool calls with a coherent workflow) → load the `skill-creator` skill for instructions, then create the new skill via `propose_skill`.
-- **You hit an unrelated bug/issue in the harness or project you're working on** (not part of your task) → don't fix it inline; log it via the `bug-tracker-entry-format` skill so it's tracked separately.
+- **Recurring pattern worth capturing** (multi-step procedure, ≥5 tool calls with coherent workflow) → load `skill-creator`, then `propose_skill`.
+- **Unrelated bug/issue in the harness** (not part of your task) → don't fix inline; log via `bug-tracker-entry-format`.
+
+## MEMORY HINT response protocol
+
+The hint system matches your **assistant text and reasoning only** — tool calls, file contents, and code are invisible to it. This means:
+
+1. **Verbalize what you're doing.** Before a multi-step operation or when you encounter an issue, state in one sentence what the problem is or what you're about to do and why. This gives the matcher far better signal than silence followed by 8 tool calls.
+
+2. **Treat name-matched hints as mandatory.** If a hinted skill's name directly describes your current action (e.g., `reroute-module-logger-audit-downstream-sinks` while you're changing which logger a module uses), load it before proceeding. "You may want to" is the system's politeness, not an invitation to skip.
+
+3. **Ignore tangential hints.** A skill hinted at 0.3 relevance while you're mid-refactor of an unrelated subsystem is noise. Load only when the name/description maps to what you're doing *right now*.
+
+4. **Repeated hints escalate.** If the same skill appears in 2+ separate hints, the system considers it highly relevant. Ignoring a third appearance is a process failure, not a judgment call.
 
 ## Tool reference
 
@@ -34,15 +48,16 @@ Discover and load specialized skills when a task needs domain expertise.
 2. **Load** — `load_skill` to inject expertise.
 3. **Execute** — follow loaded guidelines.
 4. **Delegate** — pass relevant skills to sub-agents when needed.
-5. **Improve** — after using a skill, if you spot issues or gaps, submit a new version under the same name via `propose_skill`.
+5. **Improve** — after using a skill, if you spot issues or gaps, submit a new version via `propose_skill`.
 
 ## Project memories
 
-Skills are cross-project reusable procedures ("how to do X"). Project memories are facts specific to the current project ("what happened with Y", "architecture decision Z") — markdown files in `.agent_lessons/` (the standard per-project memory location).
-- **When debugging X** → grep for X and related terms in `.agent_lessons/` before starting fresh.
-- **Working on a known component** → check if past investigations exist before reinvestigating (e.g. grep "compression" when fixing compression bugs).
-- **You get `[MEMORY HINT]` hits** → actually read the referenced lesson files before proceeding; they usually contain the exact gotcha you're about to hit.
-- **Before saving a new memory** → load the `project-memory-writing` skill for formatting guidance.
-- Use Obsidian-style backlinks `[[memory-name]]` to connect related memories; they're lightweight and discoverable via plain-text search.
+Skills are cross-project procedures ("how to do X"). Memories are project-specific facts ("what happened with Y") in `.agent_lessons/`.
 
-Skills teach you HOW to work; project memories tell you WHAT already happened here.
+- **Debugging X** → grep `.agent_lessons/` for X before starting fresh.
+- **Known component** → check past investigations before reinvestigating.
+- **`[MEMORY HINT]` memory hits** → read the referenced lesson files before proceeding; they usually contain the exact gotcha.
+- **Before saving a new memory** → load `project-memory-writing` for formatting guidance.
+- Use `[[memory-name]]` backlinks to connect related memories.
+
+Skills teach HOW to work; memories tell WHAT already happened here.

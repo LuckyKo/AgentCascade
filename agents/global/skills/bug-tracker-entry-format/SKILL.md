@@ -2,7 +2,7 @@
 name: bug-tracker-entry-format
 description: Consistent format + lifecycle for .bug_tracker/BUG_XXXX.md entries (one file per bug, /fixed/ subfolder on resolution).
 source: auto-generated
-version: "1.0.0"
+version: 1.0.1
 triggers:
   - "log a bug"
   - "file a bug"
@@ -10,6 +10,8 @@ triggers:
   - "BUG_XXXX"
   - "record this bug"
   - ".bug_tracker"
+generated_by: coder
+generated_from_task: "Closing a fixed-but-left-open BUG_0042 entry and reconciling a duplicate same-number file during an AFK bug-tracker pass"
 ---
 
 ## Goal
@@ -67,6 +69,14 @@ How the fix was confirmed (test that now passes, before/after numbers). Required
 4. **On resolution**: fill Fix + Verification, set `Status: FIXED`, then **move** to `.bug_tracker/fixed/`. Don't edit in place and leave it at the root.
 5. **Cross-link**: add a `[[memory-name]]` link to any related `.agent_lessons/` memory (and vice-versa) so bug + root-cause knowledge are discoverable from both sides.
 
+### Closing an entry that is "fixed in code but left OPEN at root"
+A common AFK/triage finding: the fix is already committed, but the tracker entry was never moved to `fixed/`. Do NOT just move the file — verify first, then reconcile:
+1. **Confirm the fix is actually in-tree.** Grep the cited code location for the removed/changed symbol (e.g. the stray flag, the old message string). A stale "OPEN" label is a claim, not evidence.
+2. **Run the regression test** that guards the fix and confirm it passes *now* (not "passed at filing time"). Only then fill Fix + Verification with the concrete commit/test refs and set `Status: FIXED`.
+3. **Check for a duplicate same-number entry before moving.** `list_dir .bug_tracker/fixed/ include=BUG_NNNN*` — if two files already claim the same number, read both and keep the **canonical** one (the more complete entry: has the commit hash, empirical evidence, root cause, resolution). Delete the redundant duplicate; never leave two files under one number.
+4. **Move/delete with the right tool.** `.bug_tracker/` entries are usually **untracked** (not in git), so `git mv` fails with "fatal: not under version control". Use a plain OS move (`move src dst` on Windows, `mv` elsewhere). Deletions go to backup automatically.
+5. **Re-check side-findings.** A canonical entry often notes a related defect "tracked separately" — verify whether that sibling issue is still open or was itself already fixed, so you don't leave a dangling pointer.
+
 ## Tips
 
 - **Evidence over narrative.** An entry without verbatim log lines or numbers is an opinion, not a report; "Found in" must let someone reproduce it.
@@ -74,3 +84,5 @@ How the fix was confirmed (test that now passes, before/after numbers). Required
 - **Keep README.txt terse** (3–5 lines); the template lives here, not in the README.
 - **One atomic bug per file.** 3 distinct bugs from one run = 3 files, not one giant entry.
 - **Fixed ≠ deleted.** `fixed/` is the regression history — future agents check it to avoid re-filing known-and-fixed issues.
+- **"OPEN" at root with a matching in-tree fix = hygiene gap, not a live bug.** Verify-then-close per the procedure above; don't trust the label and don't move blindly.
+- **Leftover verification reports** (`BUG_NNNN_verification.md`, `..._e2e_verification.md`) are dated *reports*, not open bugs. They clutter the root "what's broken" list — but archiving them is an organizational preference, so flag it to the user rather than moving them unilaterally.

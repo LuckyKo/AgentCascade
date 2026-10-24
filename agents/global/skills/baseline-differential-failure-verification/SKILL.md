@@ -2,62 +2,45 @@
 name: baseline-differential-failure-verification
 description: Prove which test failures a change actually introduced by stashing the task's files and re-running at baseline, separating real regressions from pre-existing AND environmental (shared-state pollution) failures.
 source: auto-generated
-version: "1.0.0"
+version: "1.0.1"
 triggers:
-  - "pre-existing failures"
-  - "verify test failures are not mine"
-  - "baseline comparison"
-  - "regression triage"
-  - "test suite fails after change"
-  - "stash and re-run baseline"
-generated_by: orchestrator
-generated_from_task: "Skill candidate registration flow fix — coder claimed all 15 failures pre-existing; had to prove which were real regressions vs environmental pollution of a shared metrics file."
+  - "regression verification"
+  - "baseline test comparison"
+  - "which failures did my change cause"
+  - "pre-existing test failure"
+  - "flaky under xdist load"
+generated_by: coder
+generated_from_task: "Full regression triage for todo 135 slow-streaming fix — 3 watchdog failures appeared only in the full-suite xdist run but passed standalone (-n0 and isolated xdist)"
 ---
 
 ## Goal
-When a change lands in a suite with N failures, determine EXACTLY which failures the change introduced vs which are pre-existing or environmental — so you never commit on an unverified "it's all pre-existing" claim and never waste cycles fixing someone else's bug.
-
-## Why this matters
-Coders/reviewers frequently report "N failures, all pre-existing." That framing is often HALF right: some may be genuine regressions from the change (e.g. removing a default-rating seed breaks `test_new_skill_gets_initial_5_0`), while others are environmental (a shared file clobbered by an earlier suite in the same process). Accepting the claim at face value ships broken code or chases phantom bugs.
+Attribute test failures correctly after a change: distinguish (a) regressions your change introduced, (b) pre-existing flakes, and (c) environmental failures that only appear under full-suite parallel load.
 
 ## Procedure
+### Step 1 — Establish the baseline BEFORE changing anything
+Run the named test files (and ideally a full-suite collection count) at HEAD and record output verbatim. This makes every later delta attributable.
 
-### Step 1 — Capture the "with change" failure set
-Run the full relevant command and record every failing test name + count:
+### Step 2 — Prove your new tests fail pre-fix (revert-proof)
 ```bash
-python -m pytest tests/test_a.py tests/test_b.py -n 0 -q 2>&1 | tail -40
-```
-Use `-n 0` (serial) first — xdist can mask or fabricate order-dependent failures.
-
-### Step 2 — Establish the baseline by stashing ONLY your task files
-Do NOT stash the whole tree (it may carry unrelated work you must preserve). Stage nothing; use `git stash push -- <your-task-files>`:
-```bash
-git stash push -m "baseline-check" agent_cascade/skills/manager.py tests/test_skill_generation.py
-python -m pytest tests/test_a.py tests/test_b.py -n 0 -q   # baseline failure set
+git stash push -- <your production files>   # keep ONLY the new test file
+python -m pytest tests/test_new_thing.py -q  # expect the bug-proving test to FAIL
 git stash pop
 ```
-Confirm the pop restored your files (`git status`). Now you have two comparable sets.
+A regression test that passes on unpatched code proves nothing.
 
-### Step 3 — Diff the two failure sets
-Classify each failing test:
-- **In BOTH sets** → pre-existing (not yours). Leave it; note it.
-- **Only in "with change"** → REGRESSION introduced by your change. Must fix before commit.
-- **Only in baseline** → your change fixed it (good).
+### Step 3 — Post-fix full regression: compare counts, then triage each failure
+For every failure in the post-fix run, ask "is this caused by my change?" with escalating evidence:
+1. **Standalone serial**: `python -m pytest <file> -q -n 0` → passes?
+2. **Standalone under xdist** (same parallelism as the full run): `python -m pytest <file> -q` → passes?
+3. If it passes both ways but failed in the full suite, it is an **environmental flake**: shared resources (ZMQ sockets — "No buffer space available", ports, temp dirs) or worker crashes under load ("[gwN] node down: Not properly terminated" + "worker crashed while running").
 
-### Step 4 — Check for ENVIRONMENTAL pollution (the trap that hides real regressions)
-Some "pre-existing" failures are actually order-dependent: an earlier suite mutates shared state (a gitignored production file, a global registry, a temp dir) that later suites read. Detect it:
-- Identify the shared artifact (e.g. `agents/global/skills-metrics.json`) and inspect its on-disk state AFTER the run vs BEFORE (count entries, check specific keys/statuses).
-- Re-run ONLY the later suite in ISOLATION (fresh process, clean artifact). If it passes alone but failed after the earlier suite → cross-suite pollution, environmental, not your change's fault.
-- Reset the polluted artifact to a known-clean state before final verification so your commit is judged fairly.
-
-### Step 5 — Re-run the hermetic subset for the commit gate
-Run only YOUR tests + the directly-affected ones (not the whole polluted suite) and confirm they pass:
-```bash
-python -m pytest tests/test_a.py::TestNewFeature <directly-affected-tests> -n 0 -q
-```
+### Step 4 — Report with attribution
+- Pass counts vs baseline, explained delta (= your new tests).
+- Each failure: which of the three categories, with the command that proved it.
+- Never silently drop a failing file from the comparison; never claim "all green" when you excluded something.
 
 ## Tips
-- A subset of "pre-existing" may be newly-broken-by-your-change. ALWAYS split the set; never trust a single aggregate number.
-- If a test fails only when run after another suite, it's order-dependent — usually shared mutable state. Grep for where that state is written and whether the writing tests redirect it to a tmp path (hermetic) or write to the real file (polluting).
-- Log environmental pollution bugs to project memory / bug tracker per policy; don't silently fix them inline as part of an unrelated task.
-- Related: [[reported-regression-self-consistency-check]] (validate the report's arithmetic), [[subagent-deliverable-verification]] (re-run tests yourself, treat agent reports as claims). This skill is the baseline-stash differential that separates regressions from pre-existing AND environmental causes.
+- xdist worker crashes are NOT assertion failures — the test may have passed fine; the worker process died (OOM, socket exhaustion). The crash line names the test but the cause is environmental. Running the file alone (same `-n` config) isolating it from the load is the decisive A/B.
+- Windows + xdist: ZMQ "No buffer space available" thread exceptions in jupyter_client during teardown are a known symptom of socket exhaustion under parallel load — not a code regression.
+- If a failure's file is unrelated to your diff (check `git diff --stat` overlap), category (b)/(c) is almost always right — but still prove it with Step 3, don't just assert it.
+- Record the exact commands in the report so a reviewer can re-run the attribution themselves.

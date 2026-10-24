@@ -1,22 +1,18 @@
 ---
 name: uvicorn-port-rebind-restart
-description: Diagnose & fix a uvicorn/asyncio server that dies on process restart because the re-launched process can't rebind its port (EADDRINUSE), incl. Windows detached relaunch.
+description: Diagnose & fix a uvicorn/asyncio server that dies on process restart because the re-launched process can't rebind its port (EADDRINUSE), incl. Windows detached relaunch and isolated-port e2e verification when the live instance hosts your own session.
 source: auto-generated
-version: "1.0.0"
+version: 1.1.0
 triggers:
   - "uvicorn restart"
+  - "port rebind"
   - "EADDRINUSE"
-  - "port already in use"
-  - "SO_REUSEADDR"
-  - "server won't restart"
-  - "rebind port"
-  - "restart kills server"
-generated_by: researcher
-generated_from_task: "Deduplicate + fix AgentCascade server restart so it works on Windows (detached child hits EADDRINUSE, exits FATAL without retrying)."
+  - "detached relaunch"
+  - "server restart e2e verification"
 ---
 
 ## Goal
-Reliably diagnose and fix a uvicorn/asyncio ASGI server that dies on restart because the re-launched process can't rebind its port (EADDRINUSE), especially on Windows.
+Reliably diagnose and fix a uvicorn/asyncio ASGI server that dies on restart because the re-launched process can't rebind its port (EADDRINUSE), especially on Windows — and verify the fix end-to-end even when the live instance is off-limits.
 
 ## Core gotchas — verify empirically, don't assume
 1. **uvicorn's standard `server.run()` does NOT use `Config.bind_socket()`.** With no pre-created sockets, `Server.startup(sockets=None)` calls `loop.create_server(host, port)` — *asyncio* creates the socket. So `SO_REUSEADDR` may be UNSET even though `Config.bind_socket()` (the gunicorn/pre-bind path) sets it. MEASURE it:
@@ -49,11 +45,23 @@ Do NOT rely on catching the exception from `server.run()` (fragile: uvicorn has 
 
 ## Restart re-launch (Windows)
 - Detached relaunch: `subprocess.Popen([sys.executable, *sys.argv], creationflags=CREATE_NO_WINDOW|DETACHED_PROCESS, close_fds=True, cwd=os.getcwd())` then `os._exit(0)` — ONLY after a successful spawn (if Popen raises, propagate so the running server stays alive).
+- **Set the child's std handles explicitly** (see [[windows-detached-child-stdio-silent-failure]]): with no stdin/stdout/stderr given, the detached no-window child inherits the parent's console std handles which are invalid for it -> silent death/hang before binding. Use `stdin=DEVNULL`, `stdout=<log file append>` (try/except OSError -> DEVNULL fallback), `stderr=STDOUT`.
 - POSIX: `os.execl(sys.executable, sys.executable, *sys.argv)`.
 - Env vars carry over automatically (Popen inherits os.environ; execl preserves env). DETACHED_PROCESS means the child has NO console/stdin — any stdin-reading feature dies after a restart (document it).
+
+## E2E verification when the LIVE instance hosts your own session
+A task may say "restart the server on port X and verify." If port X hosts the running orchestrator/session you're operating under, restarting it is SELF-DESTRUCTIVE (kills your context) — the approval layer will reject it. Do NOT force it; prove the SAME code path on an isolated port:
+1. **Confirm off-limits first:** `netstat -ano | findstr :<port>` -> PID -> `wmic process where "ProcessId=<pid>" get CommandLine`. If it's your live session, state in the report "e2e on live port not feasible because <reason>; verified on isolated port instead."
+2. **Pick a free non-colliding port** (live=8126 -> use 8130). Never reuse the live port.
+3. **Launch an isolated instance of the REAL entrypoint** detached with stdout->a log file; wait for it to bind (poll socket connect, bounded deadline).
+4. **Exercise the EXACT helper in-process** (e.g. call `restart_server_process()` directly with `sys.argv` set to the launch args) — NOT a mock. The helper's `os._exit(0)` kills that script, so...
+5. **Use an external SUPERVISOR process** that `subprocess.run`s the isolated script, then polls until a NEW pid binds the port, records wall-clock timestamps (start -> helper-exit -> new-ready), dumps the captured log tail (should contain `[OK] ... ready!`), and finally `taskkill /F` the relaunched instance so no strays remain. "Came up in ~0.3s" is the evidence that beats "unit tests pass."
+6. **Prove cleanup:** `netstat | findstr :<isolated>` -> only TIME_WAIT (no LISTEN); `tasklist` + `wmic ... get CommandLine` for any leftover PID to confirm it's unrelated, not a stray you spawned.
 
 ## Tips
 - Keep broadcast/"restarting..." notice in each CALLER, not in a shared re-exec helper (callers use different broadcast mechanisms; keeps the helper pure/sync and NoReturn).
 - Read `os.name` at call time (not import) so unit tests can monkeypatch the branch.
 - A parent-side "sleep before exit" is counterproductive (holds the port longer); fix the race in the CHILD's bind instead.
-- Unit-test the retry hermetically: hold a real socket and release it mid-retry (transient success), or never release (gives up clearly). Mock os.execl / Popen / os._exit for the helper branch tests.
+- Unit-test the retry hermetically: hold a real socket and release it mid-retry (transient success), or never release (gives up clearly). Mock os.execl / Popen / os._exit for the helper branch tests; use `monkeypatch.chdir(tmp_path)` so any log file lands in tmp, not the real CWD.
+- **Timestamp gotcha:** `time.strftime('%H:%M:%S.%f')` is INVALID — `%f` is not a strftime directive and raises `ValueError`. Use `t=time.time(); f'{strftime("%H:%M:%S", localtime(t))}.{int((t%1)*1000):03d}'`.
+- The isolated-port rebind is a single-variable control (everything identical except the port), so a fast rebind there is valid evidence for the live port.

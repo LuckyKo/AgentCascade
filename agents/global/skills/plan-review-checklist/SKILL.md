@@ -1,6 +1,6 @@
 ---
 name: plan-review-checklist
-description: Systematic methodology for independently reviewing implementation plans before code is written. Covers anchor verification, control flow, test expectations, and edge cases.
+description: Systematic methodology for independently reviewing implementation plans before code is written. Covers anchor verification, stated-count re-derivation, cross-section contract contradictions, pseudocode execution, and test-citation checking.
 source: auto-generated
 version: "1.0.0"
 triggers:
@@ -8,86 +8,95 @@ triggers:
   - "implementation plan"
   - "code review plan"
   - "verify before implement"
-generated_by: plan_review_149b
-generated_from_task: "Independent plan review for AgentCascade todo149 fix"
+  - "review the plan, no implementation"
+generated_by: coder
+generated_from_task: "Review a DIG-phase plan against the live tree at a pinned HEAD; verdict on whether a coder could execute it without guessing"
 ---
 
 ## Goal
 
-Provide a repeatable, adversarial review process to catch bugs, logic flaws, and missing changes in an implementation plan before any code is written.
+Provide a repeatable, adversarial review process that catches broken anchors, false "verified" claims,
+self-contradictions between sections, and pseudocode that would not behave as the plan claims —
+**before any code is written**.
 
 ## Procedure
 
-### Step 1 — Read the full plan and understand the bug context
-- Read the entire plan document thoroughly.
-- Identify the exact bug being fixed and the three-part solution (or however many parts).
-- Note which files are touched and what the intended behavior changes are.
+### Step 0 — Pin the tree first
+Confirm the HEAD the plan claims (`git rev-parse HEAD`) and that the cited paths are clean
+(`git status --porcelain -- <cited paths>` → empty). Every line number is only valid against that SHA.
+Read the whole plan before touching the tree; never review blind.
 
-### Step 2 — Verify every anchor line exactly
-For each "Before" block referenced in the plan:
-- Open the exact file and line numbers.
-- Confirm the code matches **exactly** (whitespace/indentation included).
-- Flag any drift, even a single space change.
-- Critical anchors to verify:
-  - Core loop guards and decrement sites
-  - Condition gates that will be removed or modified
-  - Phase-specific blocks (e.g., Phase 4 vs Phase 5)
-  - Instance field definitions
-  - Reset sites for stateful fields
+### Step 1 — Batch-verify anchors, don't grep one at a time
+A plan can carry 40+ `file:line` citations. Do them in **one scripted pass** (a Python snippet that,
+per file, prints the numbered lines or greps a list of patterns) instead of dozens of tool calls:
+- for each cited range, print the lines and check the claimed symbol/behaviour is actually there;
+- resolve bare filenames to real paths first (`os.walk`) — repos hold near-duplicate files
+  (`path_security.py` vs `operation_manager/path_security.py`, `config.py` in two packages);
+- a ±1–2 line offset in a prose citation is a nit; a cited line showing a *different symbol* is a defect.
 
-### Step 3 — Mentally compile each "After" diff
-- Check indentation is correct relative to surrounding control flow.
-- Ensure all names are defined in scope.
-- Verify new helper methods are correctly defined as `self` methods with proper return types.
-- Confirm both call sites of any new helper use it consistently.
+### Step 2 — Re-derive every number the plan asserts
+Counts are the most trusted and least checked thing in a plan. Recompute them from the tree:
+- "N callers of X" → grep the call sites repo-wide, then subtract the one being modified ("N other" is
+  usually off by one).
+- "expected baseline: K passed" → count `def test_` **plus parametrize expansion** per file
+  (`defs - 1 + len(params)`), then sum across the files the command lists.
+- "exactly one hit" audits → re-run the grep with the plan's own pattern.
+Flag any count that does not reproduce, and check that a test recipe's *source* matches its count
+(e.g. "copy the fixed strings the 11 callers pass, from `bot.py:198-403`" yields only 9 if two callers
+live elsewhere).
 
-### Step 4 — Trace the new control flow
-- For each new branch (e.g., Phase-4 trigger), confirm it sits inside the correct conditional so it only runs on intended paths.
-- Verify that when a new condition fails, control correctly falls through to existing logic.
-- Ensure no infinite loops or skipped cleanup are introduced.
-- Check that one-shot flags prevent double-firing.
+### Step 3 — Hunt cross-section contradictions
+Diff the *behavioural* statements between sections, not just the anchors. The classic shape: §A says the
+parser removes matched spans, §B says the sender removes only successfully-sent spans — both cannot hold.
+Also check a declared-pure function isn't assigned I/O-dependent knowledge (a no-I/O parser cannot know
+'missing'/'oversized'), and that span offsets stay well-defined after any removal.
 
-### Step 5 — Validate test expectations against harness behavior
-For each new or flipped test:
-- Trace the harness setup (`_make_pool`, `fake_llm`, `_post_turn_checks_driver`, etc.).
-- Confirm the assertions are arithmetically and logically correct.
-- Especially verify:
-  - Turn counts and indices line up with expected iteration numbers.
-  - Tool-call shapes are recognized by the actual detection code.
-  - The returned output path matches the intended behavior (snapshot vs messages[-1]).
-  - Expected warning positions are feasible.
+### Step 4 — Execute the plan's own pseudocode against its own edge-case table
+Copy the plan's regex/normalizer/branch into a sandbox and run every case the plan lists (plus the
+traps that class always hides: scheme prefixes, drive letters, query/fragment, malformed syntax, empty
+input, over-long fields). Empirical execution beats mental tracing for regexes.
 
-### Step 6 — Check harness feasibility
-- Read the actual detection/execution functions (e.g., `_check_for_tool_calls_in_output`).
-- Confirm that the proposed test drive (e.g., tool-call message shape) will actually be detected.
-- If the harness cannot cleanly drive the scenario, flag it as a blocker.
+### Step 5 — Audit test citations by symbol, not by line
+If the plan says "tests exercise `_send_one` directly at :787, :1855", grep the named symbol at those
+lines. A cited test that calls the *wrapper* is a wrong citation, and the real direct-call tests often
+carry the invariants the refactor must preserve (attempt bounds, no-retry-on-X) — add those to the
+plan's "tests that constrain the implementation" list if missing.
 
-### Step 7 — Audit cross-file impact
-- Open other test files that might be affected by the changes (e.g., warning count tests).
-- Verify whether the fixtures enable the conditions that would change their expectations.
-- Recommend running them post-implementation to confirm.
+### Step 6 — Treat absolute negatives as working-tree checks
+"No `X` anywhere in the repo", "no other call sites", "nothing else sends text to the phone": check
+the **filesystem**, not only git-tracked files (untracked configs/artifacts exist and may be
+functionally referenced by code), and grep the sink symbol (e.g. `bot.send_message(`) repo-wide to
+prove the claimed single funnel really is one.
 
-### Step 8 — Analyze edge cases
-For each edge case mentioned in the plan:
-- Confirm the described behavior is correct by tracing the code paths.
-- Verify that state is properly initialized or reset (e.g., new fields in `_make_inst`).
-- Check that no unintended side effects leak into non-triggered runs.
+### Step 7 — Verify external-library claims against the installed copy
+Version, type aliases, docstring limits ("10 MB", "0-1024"): introspect the **installed** package
+(`python -c "import pkg; print(pkg.__version__)"`, `inspect.signature`, docstring greps). Note where
+the symbol actually lives (`telegram.Bot`, not `telegram.ext.Bot`). Prefer the docstring's own
+constant name over quoting the website.
 
-### Step 9 — Scope check
-- Ensure nothing in scope shouldn't be, and that all required changes are present.
-- Example: Does `_make_inst` need explicit field initialization because `__new__` bypasses defaults?
+### Step 8 — Check the change list against the requirements
+Every MUST behaviour needs a named place in the file-by-file change list: a config gate that exists only
+in the risk section but not in the change list is unimplementable; a "draft regex in §2" that §2 never
+drafts forces the coder to invent the core matcher. List missing edge cases (length limits, double-decoding,
+feature-flag location) as concrete additions.
+
+## Report format
+Numbered findings, each with `file:line` evidence and severity (🔴 Critical, 🟠 Major, 🟡 Minor, 🔵 Nit),
+a concrete fix per finding, a short "what checks out" section (proves you actually looked), then
+**required changes** followed by a verdict: PASS / NEEDS WORK / FAIL. Answer the question actually asked
+(e.g. "could a coder execute this without guessing?") — do not silently substitute "is it correct?".
 
 ## Tips
-- **Be adversarial**: Your job is to find what will break, not to rubber-stamp.
-- **Never trust claims**: Read the actual code; anchors can drift.
-- **Focus on surgical edits**: Whitespace and indentation matter in diffs.
-- **Rate severity**: Use 🟠 Major, 🟡 Minor, 🔵 Nit for each finding.
-- **Always provide a concrete fix** for every issue raised.
-- **End with a clear verdict**: PASS, NEEDS WORK, or FAIL.
+- Be adversarial; never write "looks good" about anything you did not open.
+- The highest-yield defects are rarely wrong line numbers: they are contradicted contracts, unmet MUST
+  requirements with no drafted code, and numbers that don't reproduce.
+- A plan's own honesty section ("not verified / moderate confidence") is a feature — do not re-flag
+  what it already labels as unverified; flag only what it claims is confirmed but isn't.
+- Do not edit the plan when only a review was asked for.
 
 ## Common Pitfalls
-- Assuming `_consume_turn` always decrements by 1 without verifying.
-- Forgetting that `AgentInstance.__new__` bypasses dataclass defaults in tests.
-- Overlooking that a new branch must be inside the correct conditional.
-- Not checking if a harness can actually produce the needed message shapes.
-- Missing that one-shot flags block re-entry across iterations.
+- Verifying anchors but never the counts, contracts, or pseudocode the anchors support.
+- Trusting a memory/skill's line numbers instead of re-deriving from the symbol.
+- Grepping git-tracked files only, then asserting a file "does not exist".
+- Citing a test as exercising symbol X because it is near the code for X, without grepping X at that line.
+- Reviewing from the plan's summary instead of reading the full document first.

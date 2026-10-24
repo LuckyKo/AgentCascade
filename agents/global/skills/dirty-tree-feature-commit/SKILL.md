@@ -1,37 +1,44 @@
 ---
 name: dirty-tree-feature-commit
-description: Git commit scoping discipline for a dirty working tree — inventory all uncommitted changes, attribute each to your session vs the user, stage only your files by explicit path, and never revert pre-existing user edits you didn't make.
+description: Commit a single feature cleanly from a working tree that contains other unrelated uncommitted changes — staged-file isolation, pre-commit hook fixes, and the no-revert discipline.
 source: auto-generated
-version: "1.0.0"
+version: 1.0.2
 triggers:
   - "git commit"
-  - "working tree"
-  - "uncommitted changes"
-  - "commit scoping"
-  - "git checkout -- file"
-  - "revert stray change"
-  - "git add"
+  - "dirty working tree"
+  - "unrelated changes"
+  - "pre-commit hooks"
+  - "partial commit"
 generated_by: orchestrator
-generated_from_task: "Git commit of the heuristic edit_file indentation fix in a dirty working tree that also contained the user's own unrelated uncommitted changes; I wrongly reverted them as 'stray' during commit scoping and had to restore them after the user corrected me."
+generated_from_task: "Commit propose_skill similarity gate while preserving unrelated uncommitted settings changes in AgentCascade"
 ---
 
 ## Goal
-Land a scoped git commit for your reviewed change without destroying or disturbing the user's own uncommitted work in the same working tree.
+Ship one reviewed feature as a clean, minimal commit even when the working tree carries other people's (or earlier sessions') uncommitted edits.
 
 ## Procedure
-### Step 1 — Inventory the dirty tree BEFORE staging
-Run `git status --short` + `git diff --stat` (and `git diff <file>` for anything outside your task's file list). Attribute every change: **mine** (produced by this session or its sub-agents — verify via their reports/logs) vs **pre-existing user work**.
 
-### Step 2 — Never revert changes you didn't make
-A change in a file outside your task scope is NOT automatically "stray noise" — it may be the user's intentional, uncommitted work (e.g., a commented-out noisy debug log). `git checkout -- <file>` on it destroys their intent. If it blocks nothing, simply DON'T stage it; leave it in the working tree. Committing while unrelated changes sit unstaged is normal and fine.
+### Step 1 — Map the dirty tree BEFORE touching anything
+Run `git status --short` and `git diff <feature-files>` on exactly the files your feature touched. Classify every changed file: feature-owned vs pre-existing unrelated. Expect surprises — implementers may have drifted whitespace or left stray edits in "their" files.
 
-### Step 3 — Stage explicitly by path
-`git add <your-file-1> <your-file-2>` — never `git add -A`. Verify with `git diff --cached --stat` that only your files are staged before committing.
+### Step 2 — Never revert a shared file to isolate a hunk
+`git checkout -- <file>` discards ALL uncommitted changes in that file and is usually auto-rejected for good reason. If a feature-owned file also contains unrelated pre-existing edits (e.g., a threshold someone else changed), leave the unrelated edit in place or note it; do not destroy it to make the diff prettier.
 
-### Step 4 — When in doubt, ask
-If a pre-existing change is in the SAME file you're modifying (so it would ride along in your commit), ask the user whether to include or exclude it instead of guessing.
+### Step 3 — Strip incidental drift from your own hunks
+If your implementer incidentally re-aligned an unrelated line inside a feature file, restore that single line to its HEAD form with a surgical `edit_file` (verify exact whitespace first via `read_file`; heuristic match mode helps). Re-run `git diff <file>` until only intended changes remain.
+
+### Step 4 — Stage by explicit path list only
+`git add file1 file2 ...` — never `-A`, never globs. This keeps pre-existing unrelated edits and untracked files out of the commit while still letting hooks run on staged content.
+
+### Step 5 — Expect the first commit to fail on auto-fixing hooks
+pre-commit hooks like `double-quote-string-fixer` or `mixed-line-ending` MODIFY working-tree files and fail the commit, then restore unstaged changes from their stash. The fix is mechanical: inspect `git status` (look for `MM` entries), review the unstaged hook modifications with `git diff <file>`, re-`git add` the same explicit paths, and re-run `git commit`. Do not fight the hooks by disabling them. For `mixed-line-ending` specifically: the file now shows modified AGAIN after you staged it (working tree ≠ index) — that is expected, not a regression; never `git checkout`/revert it, just re-stage and retry. The "CRLF will be replaced by LF the next time Git touches it" warning on the failed run is the tell that this is coming.
+
+### Step 6 — Verify after commit
+Re-run the feature's tests once more (hook rewrites can touch committed lines) and confirm `git status` still shows exactly the pre-existing unrelated changes you left behind.
 
 ## Tips
-- "Stray" is a valid label only for changes YOUR sub-agents produced; user-attributed changes are protected.
-- After committing, re-run `git status --short` and confirm the user's pre-existing edits are still present and untouched.
-- Pre-commit hooks that auto-modify staged files (line-ending fixers etc.) are a different case — see `precommit-hook-commit-retry`; hook-driven changes to YOUR files can be re-staged safely, user changes in other files cannot.
+- A commented-out debug line or a config value change in a non-feature file is NOT yours to commit — leave it, mention it in your final report.
+- Pre-commit stashing of unstaged files is normal noise (`[INFO] Stashing unstaged files...`), not data loss; the restore line confirms it round-tripped.
+- Version-bump hooks may fire on commit (e.g., `version bumped: 0.1.78 -> 0.1.79`) — check the hook output so your report reflects what actually landed.
+- Keep the rejection-message/commit-message discipline: the commit message should describe only what is in the commit, not what was in the working tree.
+- If you ever must normalize line endings manually (hook disabled), read `.gitattributes` / `core.autocrlf` first to learn the canonical ending (e.g. `* text=auto eol=lf` → LF) and convert the WHOLE file, not just changed lines — a partial convert recreates the mixed state that triggered the hook.

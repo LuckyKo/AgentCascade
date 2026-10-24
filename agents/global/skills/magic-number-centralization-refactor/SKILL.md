@@ -1,46 +1,72 @@
 ---
 name: magic-number-centralization-refactor
-description: Centralize scattered magic numbers into a settings module as named env-overridable constants while preserving existing user-facing env var names and live-config back-compat.
+description: How to replace hardcoded magic numbers in tests and source with named constants when a POLISH/review round flags them — including circular-import checks, house-style precedent matching, and contract-pin comments for module-level constants that live outside settings.py
 source: auto-generated
-version: "1.0.0"
+version: 1.0.1
 triggers:
-  - "centralize magic numbers"
-  - "settings.py constants"
-  - "env override refactor"
-  - "back-compat config default"
-  - "tunable policy knobs"
+  - "magic number"
+  - "hardcoded constant"
+  - "POLISH nits"
+  - "named constant"
+  - "circular import check"
 generated_by: coder
-generated_from_task: "Consolidate Telegram bridge scattered magic numbers into agent_cascade/settings.py as named, env-overridable constants; raise per-task timeout default to 28800s without breaking existing TG_* env overrides."
+generated_from_task: "POLISH rev122 nits — todo 122+123 skill matching"
 ---
 
 ## Goal
-Move hardcoded literals from feature modules into a central settings module as named constants with env overrides — behavior identical except for any explicitly intended default change — without breaking env vars that live deployments already set.
+Replace hardcoded magic numbers in tests and source with named constants, safely (no circular imports), matching house style, and leaving contract-pin comments where the constant lives outside settings.py.
 
 ## Procedure
 
-### Step 1 — Build the inventory before touching anything
-Grep for every literal and its usages (including tests, docstrings, READMEs, CLI help). A verified inventory with file:line entries is the contract you refactor against; also note which literals are *policy knobs* (tunable) vs. protocol facts (e.g. a hard API limit — still centralize, but comment it as such).
+### Step 1 — Locate every occurrence of the magic number
+Grep for the literal value across both source and test files:
+```bash
+grep -rn '== 20\|range(20)\|> 20' tests/ agent_cascade/
+```
+Classify each hit: does it represent the constant's semantic meaning (e.g., "max candidates"), or is it an unrelated number that happens to equal the constant? Only replace the former.
 
-### Step 2 — Decide env-var names BEFORE writing constants
-The critical decision: for each knob, does an existing user-facing env var already exist?
-- **Knob with an existing env var** → the new settings constant must read that SAME name (no prefix change), or live deployments silently lose their override. This intentionally deviates from the module's naming convention — add a comment block explaining why.
-- **New knob, no prior env var** → follow the module's standard prefix convention (e.g. `AGENT_CASCADE_`).
-Document in comments which knob reads which env var.
+### Step 2 — Check circular-import risk before hoisting to module top
+Before moving a local import to module level, verify the target module's own imports:
+```bash
+grep -n '^import\|^from' agent_cascade/settings.py
+```
+If the target only imports stdlib (os, ast, pathlib, dataclasses, typing), it is safe to import at module top. If it imports from the same package subtree (e.g., `agent_cascade.skills.*`), there IS circular risk — keep one local import and delete duplicates instead.
 
-### Step 3 — Write constants matching the existing module convention exactly
-Match style: `NAME: type = type(os.getenv('ENV', default))  # one-line comment`. Group under a clearly-commented section header. Keep defaults as literals, not chained imports.
+### Step 3 — Match house style for test constant imports
+Check how OTHER tests in the same file (or conftest.py) handle settings/module constants:
+```bash
+grep -n 'from agent_cascade.settings import\|from agent_cascade.tools' tests/test_*.py
+```
+- If tests import constants directly (even private ones like `SKILL_SCAN_MAX_RESULTS`), keep the import and add a **contract-pin comment** in the docstring: "If this constant is ever moved, update this import — assert against the live value, never hardcode."
+- If house style forbids importing private names, use the constant's VALUE behavior (e.g., create N+5 items and assert exactly N are shown) without naming the constant.
 
-### Step 4 — Wire modules, preserving the env-read layer
-Where a loader does `os.environ.get('LEGACY_VAR', 'literal')`, keep reading the legacy var but swap the fallback for the constant: `os.environ.get('LEGACY_VAR', str(CONST)) or CONST`. The double-read (constant reads env too, loader re-reads) is redundant but safe and keeps precedence obvious. Function-signature defaults (`timeout=1800.0`) become `timeout=CONST` — verify with `inspect.signature` that the default tracks the constant.
+### Step 4 — Replace in tests with the named constant
+```python
+from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES
 
-### Step 5 — Update ALL docs in the same pass
-Docstrings, CLI `--help` text, README tables, example blocks. Stale "Default: X" strings are the most common miss — grep for the old numeric literal across `.py` and `.md`.
+# Before:
+assert len(skill_lines) == 20
+names = self._names(20)  # boundary test
 
-### Step 6 — Verify back-compat at runtime, not just by inspection
-Run a subprocess in the repo venv that (a) loads config with no env → asserts new defaults, (b) sets the legacy env vars → asserts they still win, (c) checks signature defaults. Then run the feature's full test files. Delegate an independent review checking: leftover literals, precedence bugs, circular imports (settings must not import from the feature), style consistency.
+# After:
+assert len(skill_lines) == SKILL_ADVISOR_MAX_CANDIDATES
+names = self._names(SKILL_ADVISOR_MAX_CANDIDATES)  # boundary test
+```
+Update docstrings that reference the number ("total (30) > N=20") to use "N" instead.
+
+### Step 5 — For source: make mutable constants immutable + extract duplicated logic
+- Mutable dict constant → `frozenset` of pairs (immutable); derive a `dict()` view once at module level if O(1) lookup is needed in a hot loop.
+- Duplicated slice/fallback logic across two code paths → extract a small private helper (`_name_slice_fallback(entries, n)`) and call it from both sites. This guarantees identical semantics and makes the invariant auditable in one place.
+
+### Step 6 — Run affected test files together
+```bash
+python -m pytest tests/test_skills_system.py tests/test_skill_advisor.py -q
+```
+All must pass before committing.
 
 ## Tips
-- **Do NOT commit if the task says "I will review and commit"** — deliver edits + verification only.
-- Local `DEFAULT_*` blocks inside a module that are internal policy (not user-facing env knobs) may stay put; moving them adds indirection without benefit. Use judgment per the task's allowance.
-- Tests often pass values explicitly or as None — grep tests for the old literal before assuming the default change is safe; confirm by running, not by reading.
-- Intentional behavior changes (e.g. 1800→28800) must be the ONLY delta; enumerate every other literal and confirm its value is unchanged.
+- **Don't replace numbers that are fixture sizes, not cap references.** `self._names(30)` is a corpus size (deliberately > N); only the assertion `== 20` represents the constant. Replacing the fixture size would break the test's intent.
+- **Boundary tests use the constant as the corpus size** (`_names(SKILL_ADVISOR_MAX_CANDIDATES)`) — this is correct and self-documenting: "total == N exactly → NOT filtered."
+- **Contract-pin comments matter most for module-level constants** (not in settings.py). They tell future developers WHY the import exists and what to do if the constant moves.
+- **frozenset-of-pairs vs frozen dict**: Python has no frozen dict. `frozenset((k, v), ...)` is immutable but O(n) lookup. For ≤5 entries with a derived `dict()` view, this is fine. For larger maps, consider `types.MappingProxyType` (read-only view over a dict).
+- **Pre-commit two-pass**: on Windows + AgentCascade, the first commit often aborts after `mixed-line-ending` auto-fixes staged files. Re-stage the same explicit file list and re-commit.

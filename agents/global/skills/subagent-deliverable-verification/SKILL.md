@@ -1,13 +1,15 @@
 ---
 name: subagent-deliverable-verification
-description: Orchestrator protocol for verifying a sub-agent's completed implementation before review/commit — re-run tests yourself, read the actual diffs, probe edge paths independently, and treat agent reports as claims to be checked.
+description: Orchestrator protocol for verifying a sub-agent's completed implementation before review/commit — re-run tests yourself, read the actual diffs, prove the fix is real (regression test fails on pre-fix code), separate xdist flakiness from regressions by running serially, and treat agent reports as claims to be checked.
 source: auto-generated
-version: "1.0.0"
+version: 1.0.1
 triggers:
   - "verify sub-agent work"
   - "review implementation output"
   - "agent reported tests pass"
   - "pre-commit verification"
+  - "prove regression test fails on pre-fix code"
+  - "distinguish flaky xdist failures from real regressions"
 generated_by: orchestrator
 generated_from_task: "Candidate-flow skill upgrade feature — verifying coder agent's uncommitted implementation in AgentCascade before independent review and commit"
 ---
@@ -36,7 +38,23 @@ The agent's tests cover what the agent thought of. Pick 1-2 error paths the plan
 - Legacy data formats hitting new code paths
 Delete probe scripts when done.
 
-### Step 4 — Fix cycle, then commit with targeted staging
+### Step 4 — Prove the fix is REAL: the regression test must FAIL on pre-fix code
+A passing test proves nothing if it would have passed before the change too (a tautological assertion). For any bugfix, demonstrate the new/updated regression test actually guards the bug by reverting ONLY the production change and confirming the test flips to failing:
+```
+git stash push <prod-file> -m "temp-revert"          # keep the new test file in place
+python -m pytest tests/test_x.py::test_the_regression -q   # MUST fail here (e.g. assert None == ['expected'])
+git stash pop                                          # restore the fix, re-run to confirm it passes
+```
+If the test passes on pre-fix code, it is not a regression guard — tighten its assertion until it fails without the fix. This catches "the agent added a test that doesn't actually test the bug."
+
+### Step 5 — Separate flaky parallelism failures from genuine regressions
+Repos that default to xdist (`-n auto`) frequently show spurious failures on shared on-disk resources (e.g. a shared `pending-skills/` tree → `[Errno 2] No such file` / `[Errno 13] Permission denied` in teardown). Do NOT attribute these to the change. Re-run the failing suite serially:
+```
+python -m pytest tests/test_y.py -q -n 0
+```
+Serial-green + parallel-red = xdist flake (shared resource race), not a regression — document it and move on. Serial-red = a real problem; investigate before committing.
+
+### Step 6 — Fix cycle, then commit with targeted staging
 After reviewer PASS: `git add <explicit file list>` — never `git add -A` in a tree with user edits. Pre-commit hooks that auto-fix formatting (isort/yapf/line endings) will fail the first commit and fix the files; just retry once. Verify post-commit: `git status --short` shows only the expected unstaged user edits, re-run one test suite to confirm hook reformatting didn't break anything.
 
 ## Tips
@@ -44,3 +62,4 @@ After reviewer PASS: `git add <explicit file list>` — never `git add -A` in a 
 - When an agent's root-cause explanation differs from yours (e.g., "registry wipe" vs actual version-key collision), trust the failing test output over both narratives.
 - Keep the approved plan file path in every delegation message so fixes stay anchored to locked semantics.
 - A reviewer FAIL verdict with a specific blocker is worth more than a PASS with vague praise — fix exactly what was cited, re-run tests, and only then commit.
+- "The agent reported N pre-existing failures" is itself a claim — reproduce it (stash the change, re-run) before accepting that they're unrelated to your edit.

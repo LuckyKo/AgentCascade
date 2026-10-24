@@ -1,42 +1,64 @@
 ---
 name: verify-verbatim-plan-code-edge-cases
-description: Verify "use verbatim" plan code against the plan's own stated edge-case requirements before trusting it; catch latent bugs like lstrip() dropping blank lines.
+description: Verify a concrete implementation plan's proposed code blocks by re-implementing them verbatim in a sandbox and running every claimed edge case, break-test input, and oracle grid against the new logic before build.
 source: auto-generated
-version: "1.0.0"
+version: 1.0.1
 triggers:
-  - "use it verbatim"
-  - "plan-driven implementation"
-  - "implement the reviewed plan"
-  - "exact replacement code is in the plan"
-  - "stays empty"
-generated_by: coder
-generated_from_task: "Implement heuristic edit_file flattening fix from a reviewed plan; plan's verbatim Phase 2 loop dropped truly-empty lines via lstrip()."
+  - "plan review"
+  - "implementation plan"
+  - "pre-build review"
+  - "verify plan code"
+  - "edge case verification"
+generated_by: ponytail
+generated_from_task: "Pre-build critical review of a concrete implementation plan for the tolerant skill frontmatter parser — verifying proposed _lenient_parse/_normalize_frontmatter logic, 5 break-test re-pointing inputs, and oracle grid claims against live source."
 ---
 
 ## Goal
-When a task says to implement a reviewed plan by copying its code **verbatim**, still verify that the code actually satisfies every behavior the plan *claims* — because "use it verbatim" does not mean "the code is correct." A reviewed plan's code can contain a latent edge-case bug that the plan's own test list covers but its code doesn't.
+Catch correctness gaps in a concrete implementation plan BEFORE it reaches a coder, by running the plan's proposed code (not just reading it) against every claimed edge case.
 
 ## Procedure
-### Step 1 — Extract the plan's stated behavioral requirements, not just its code
-Read the plan twice: once for the exact code to paste, once for every sentence of the form "X stays Y", "preserves Z", "a truly empty line stays empty", "works for blank and non-blank lines". These are *requirements*. Treat each as an assertion your implementation must satisfy. The plan's "recommended extra test cases" section is where discrepancies most often live — it lists edge cases the author intended but whose code path may not handle them.
 
-### Step 2 — Before pasting, dry-run the verbatim code on every stated edge case in isolation
-Reproduce the core loop/expression in a scratch `code_interpreter` snippet and feed it each named edge case (empty line, whitespace-only line, last line without trailing newline, tabs, deep nesting). Compare output to the plan's claim. Do this BEFORE editing the real file — it is cheap and catches bugs that only surface on an edge the main path never hits.
+### Step 1 — Extract the plan's proposed code blocks verbatim
+For each new/rewritten function the plan specifies (e.g. `_lenient_parse`, `_normalize_frontmatter`), copy the EXACT code from the plan into a sandbox script. Do NOT paraphrase or "improve" it — you're testing what the coder will write, not what you'd write.
 
-### Step 3 — When a verbatim-code bug is found, apply the minimal fix and document the deviation
-Fix only what's broken; keep the rest byte-identical to the plan. In your report, call out the deviation explicitly ("deviation from 'use it verbatim'") with the reason (which stated requirement the verbatim code violated) so the reviewer/user can adjudicate. Do not silently "improve" beyond the required fix.
+### Step 2 — Run every claimed edge case
+For each input→expected pair in the plan's test strategy table:
+- Feed the input through the proposed code path (strict → lenient fallback → normalize).
+- Compare actual output to the plan's claimed expected value.
+- Any mismatch is a plan defect, not a sandbox bug.
 
-### Step 4 — Prove the new test is a real regression guard
-After adding the edge-case test, confirm it FAILS on the pre-fix code (e.g., `git stash` / revert and run) and PASSES on the fix. A test that passes on both is a tautology, not a guard.
+### Step 3 — Verify break-test re-pointing inputs empirically
+For each test the plan says "breaks and must be re-pointed":
+- Run the OLD input through the NEW logic → confirm it genuinely changes behavior (the old assertion would fail).
+- Run the NEW re-pointed input through the NEW logic → confirm it produces exactly what the new assertions expect.
+- For tests asserting on error message strings (e.g. PyYAML wording), run the actual library and capture the exact string — do NOT trust the plan's quoted wording.
+
+### Step 4 — Run an oracle grid (if the plan claims strict/lenient agreement)
+Build a small cartesian product of well-formed inputs (vary each field across its forms: block-list, inline-list, bare-string). For each:
+- `strict = yaml.safe_load(block)` (or equivalent strict parser)
+- `lenient = _lenient_parse(block_lines)`
+- Assert `_normalize(strict)[k] == _normalize(lenient)[k]` for every consumed key.
+- Any divergence is a plan defect in the normalization layer.
+
+### Step 5 — Regression-diff against real data
+If the repo has real data files (e.g. SKILL.md files, config files), run BOTH old and new logic over all of them. Count differences. Zero differences = safe; any difference must be explained by the plan as intended behavior change.
+
+```python
+# Pattern: old vs new regression diff
+for path in real_data_dir.rglob('*.md'):
+    content = path.read_text()
+    old_result = old_logic(content)
+    new_result = new_logic(content)
+    if old_result != new_result:
+        print(f"CHANGED: {path}: {old_result} -> {new_result}")
+```
+
+### Step 6 — Check the plan's "stays green" list for completeness
+Read every test in the affected test files. For each test NOT in the plan's break-list, verify it would still pass under the new logic. The plan may have missed tests that feed raw shapes directly into functions (bypassing the parser) — those are the ones most likely to be overlooked.
 
 ## Tips
-- **The `lstrip()` newline gotcha (root cause of this task):** for a truly-empty line `'\n'`, `str.lstrip()` returns `''` because the newline *is* leading whitespace. So `indent + line.lstrip()` becomes `indent + '' = indent`, and if indent is empty the whole line vanishes. A space-only blank line `' \n'` does NOT trigger it (`lstrip()` returns `'\n'`), which is why a naive isolated repro using spaces can mask the bug. Correct pattern to preserve a blank line:
-  ```python
-  body = line.lstrip()
-  if not body:                       # blank/whitespace-only line
-      body = line[len(own_ws.rstrip(' \t')):] or '\n'   # recover trailing newline
-  ```
-  where `own_ws` is the line's leading whitespace. Non-blank lines are untouched (their `lstrip()` is truthy).
-- **Isolated repros can lie:** if your scratch simulation uses a slightly different input than the real pipeline (e.g., space-only vs truly-empty blank), it will disagree with production. When an isolated sim and the real run disagree, instrument the *real* code path (temporary stderr prints of intermediate values) rather than trusting the sim.
-- **`rstrip(' \t')` vs `rstrip()`:** to recover a newline from leading whitespace, strip only indent chars (`' \t'`), never all whitespace — `own_ws.rstrip()` would also eat the newline and leave nothing.
-- A reviewed plan is a strong prior but not proof; "CONFIRMED by reviewer" usually means line refs and design were checked, not that every edge-case code path was executed.
+- The riskiest plan claims are error-message string assertions (library-specific wording like PyYAML's "cannot start any token"). ALWAYS run the actual library to confirm — never trust a quoted string in a plan.
+- When the plan says "replace with a one-line assert" or "a plain guarded join" without specifying the exact code, flag it as a must-fix: the coder will invent something different. Pin the exact body in the plan.
+- A plan's "5 tests break" claim is only as good as the test list being COMPLETE. Read every `def test_` in the affected files and simulate each one — don't trust that the researcher found them all.
+- The oracle grid catches normalization-layer bugs that individual edge cases miss (e.g. a field that's correct for block-list but wrong for inline-list). Keep the grid small (2×2×3) but cover every form variant.
+- Regression-diff against real data is the strongest evidence of safety: if 152 real files parse identically, the change is low-risk regardless of how many edge cases you tested.
