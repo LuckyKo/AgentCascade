@@ -1,8 +1,23 @@
 {
   "timeout": 600,
+  "sdcpp": {
+    "binary": "N:/work/stuff/Beta/image/sd-master-228c707-bin-win-cuda12-x64/sd-cli.exe",
+    "models_dir": "N:/work/stuff/ComfyUI_models/models",
+    "config_dir": "N:/work/WD/AgentCascade/config/sdcpp",
+    "default_sdcpp_config": "z_image_turbo",
+    "timeout": 900,
+    "media_types": {
+      "image": [
+        "anima",
+        "flux2_klein_9b",
+        "z_image_turbo"
+      ]
+    }
+  },
   "comfyui": {
     "url": "http://127.0.0.1:8188",
     "workflow_dir": "N:/work/WD/AgentCascade/config/workflows",
+    "timeout": 300,
     "output_dir": "n:\\work\\WD\\AgentWorkspace\\logs\\media",
     "default_image_workflow": "Anima_INT8",
     "default_video_workflow": "video_wan2_2_14B_i2v",
@@ -22,26 +37,13 @@
       ]
     }
   },
-  "sdcpp": {
-    "binary": "N:/work/stuff/Beta/image/sd-master-228c707-bin-win-cuda12-x64/sd-cli.exe",
-    "models_dir": "N:/work/stuff/ComfyUI_models/models",
-    "config_dir": "N:/work/WD/AgentCascade/config/sdcpp",
-    "default_sdcpp_config": "z_image_turbo",
-    "timeout": 900,
-    "media_types": {
-      "image": [
-        "anima",
-        "flux2_klein_9b",
-        "z_image_turbo"
-      ]
-    }
-  },
   "kobold_tts": {
     "binary": "N:/work/stuff/Beta/koboldcpp.exe",
     "models_dir": "N:/work/stuff/Beta/audio",
     "config_dir": "N:/work/WD/AgentCascade/config/media_gen/tts",
-    "default_config": "kokoro_default",
+    "default_config": "af_bella",
     "timeout": 200,
+    "release_model_around_call": false,
     "ready_timeout": 120,
     "port_range": [
       5100,
@@ -58,8 +60,8 @@
     "python": "N:/work/WD/Chatterbox-TTS-Server/chatterbox_env/Scripts/python.exe",
     "cli_script": "N:/work/WD/Chatterbox-TTS-Server/chatterbox_tts.py",
     "config_dir": "N:/work/WD/AgentCascade/config/media_gen/tts",
-    "default_config": "chatterbox_default",
     "voices_dir": "N:/work/WD/Chatterbox-TTS-Server/voices",
+    "default_config": "chatterbox_default",
     "default_voice": "af_Bella.wav",
     "timeout": 600,
     "media_types": {

@@ -4,6 +4,5 @@
   "model": "Kokoro_no_espeak_Q4.gguf",
   "companion_model": null,
   "voice": "af_bella",
-  "speed": 1.0,
   "reference_audio": null
 }

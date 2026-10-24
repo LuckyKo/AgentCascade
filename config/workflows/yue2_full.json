@@ -59,7 +59,7 @@
       "filename_prefix": "audio/YuE2",
       "format": "flac",
       "audio": [
-        "17",
+        "24",
         0
       ]
     },
@@ -153,6 +153,18 @@
     "class_type": "YuE2GenerateABC",
     "_meta": {
       "title": "YuE2 Generate ABC"
+    }
+  },
+  "24": {
+    "inputs": {
+      "anything": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
     }
   }
 }
