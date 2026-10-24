@@ -360,3 +360,51 @@ class TestVisionToolCallFullFlow:
 
         assert not has_markdown_bug, \
             'BUG DETECTED: Markdown image link found (ContentItem list was stringified)'
+
+
+class TestAudioVideoGatingUnsupported:
+    """qwenvl_oai.convert_messages_to_dicts must NOT emit input_audio/video_url
+    for a model that lacks audio/video input support (QwenVL via llama.cpp mmproj
+    is image-only). Instead the media must be kept as a TEXT path-reference so the
+    agent still sees the file the tool produced. Regression for the media_gen audio
+    loop bug ('audio input is not supported')."""
+
+    def test_audio_and_video_gated_to_text(self):
+        from agent_cascade.llm.qwenvl_oai import QwenVLChatAtOAI
+        from agent_cascade.llm.schema import ContentItem, Message
+
+        audio_path = r'N:/work/WD/AgentWorkspace/logs/media/audio/fake.mp3'
+        video_path = r'N:/work/WD/AgentWorkspace/logs/media/video/fake.mp4'
+
+        messages = [
+            Message(role='user', content='Generate me some media'),
+            Message(role='function',
+                    name='media_gen',
+                    content=[ContentItem(audio=audio_path),
+                             ContentItem(video=video_path),
+                             ContentItem(text='Generated media.')]),
+        ]
+
+        llm = QwenVLChatAtOAI(cfg={'model': 'test-model', 'api_base': 'http://localhost:9999/v1'})
+        converted = llm.convert_messages_to_dicts(messages)
+
+        # Flatten all content parts across all messages.
+        all_parts = []
+        for msg in converted:
+            content = msg.get('content')
+            if isinstance(content, list):
+                all_parts.extend(p for p in content if isinstance(p, dict))
+            elif isinstance(content, str):
+                all_parts.append({'type': 'text', 'text': content})
+
+        # Core: NO multimodal audio/video parts may be emitted for this adapter.
+        bad = [p for p in all_parts
+               if p.get('type') in ('input_audio', 'video_url', 'video')]
+        assert not bad, (
+            f'BUG: unsupported modality emitted to LLM: {bad}'
+        )
+
+        # The produced files must remain visible as text path-references.
+        joined = '\n'.join(p.get('text', '') for p in all_parts if p.get('type') == 'text')
+        assert audio_path in joined, 'audio path lost — not surfaced as text content'
+        assert video_path in joined, 'video path lost — not surfaced as text content'
