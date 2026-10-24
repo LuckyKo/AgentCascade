@@ -6462,7 +6462,8 @@ document.addEventListener('visibilitychange', () => {
 connect();
 startTelemetryPoll(); // WS-independent ~30s refresh of the full telemetry tables (created once)
 initAgentMessagesTab(); // NEW: initialize Agent Messages tab
-initMcpConfigTab(); // NEW: initialize MCP Config tab (config/mcp_servers.json editor)
+// MCP Config tab is intentionally NOT created at startup — it opens only on request
+// via the "Open MCP Config" button handler below (initMcpConfigTab() runs on demand).
 if ($('#open-mcp-config-btn')) {
   $('#open-mcp-config-btn').addEventListener('click', () => {
     // Re-create the tab if it was closed
