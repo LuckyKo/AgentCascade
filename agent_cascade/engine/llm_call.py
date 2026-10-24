@@ -91,6 +91,7 @@ class _LLMCallState:
     retry_count: int = 0
     loop_retry_count: int = 0
     last_output: Optional[List[Message]] = None
+    # Set when the finalization message has already been handled — yielded by an error branch, or intentionally suppressed by a clean-termination/terminal-stop branch.
     error_already_yielded: bool = False
 
 
@@ -823,7 +824,9 @@ class LLMCallMixin:
         return False
 
     def _abort_llm_stream(self, instance, inst_name, gen, reason_msg, state) -> Iterator[None]:
-        """Abort an in-flight stream from an inner-loop/max-token guard.
+        """Abort an in-flight stream from a stream guard (inner-loop, max-token, engine watchdog).
+
+        Generator: must be consumed (`yield from`) — a bare call never runs.
 
         Replaces the nested _abort_stream closure (Phase 7 A4). Mutates state (clears
         last_output, bumps retry/loop counters) BEFORE yielding None so the counters

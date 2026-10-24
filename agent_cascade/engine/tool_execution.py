@@ -240,8 +240,6 @@ class ToolExecMixin:
 
                     # Assemble final tool result with consistent layout of warnings,
                     # output, and truncation (always runs even on exceptions).
-                    # Only assemble when tool_result is defined to avoid errors from
-                    # early failures.
                     if self.compression_handler:
                         # Only post-process when a compression handler is configured. tool_result is
                         # always bound here (initialized to '' before the try), so this reference is
