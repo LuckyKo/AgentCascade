@@ -563,6 +563,49 @@ def build_state_from_pool(
     }
 
 
+def build_instance_status_from_pool(pool) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Cheap per-instance liveness snapshot — no messages, no history, no telemetry.
+
+    Used by the WebSocket idle-status heartbeat (``api_server._idle_status_loop``,
+    BUG_0142). The frontend's ``state.generating`` is a one-way latch: only a full
+    ``state``/``done`` frame lowers it. When the closing ``done`` frame is lost the UI
+    stayed on "Generating..." until a page refresh. This snapshot lets a tiny periodic
+    frame re-state the authoritative ``generating`` flag *and* per-agent activity, so the
+    client can recover without paying for a full state build (which serializes history).
+
+    Field semantics mirror ``_serialize_instance`` exactly: ``active`` is
+    ``state == AgentState.RUNNING`` (the value the frontend already treats as "streaming").
+
+    Returns ``None`` when the snapshot is UNRELIABLE — the pool/instances can't be read,
+    or any single instance's state read throws. The caller must then OMIT the ``instances``
+    key entirely: the client only lowers ``generating`` when it can prove NO instance is
+    active, so a partial map must never be mistaken for complete proof (a dropped-but-RUNNING
+    instance would otherwise fake-idle a live run). A valid but empty pool returns ``{}``
+    (genuinely nothing active).
+    """
+    status: Dict[str, Dict[str, Any]] = {}
+    instances = getattr(pool, 'instances', None) if pool is not None else None
+    if not isinstance(instances, dict):
+        return None
+    for name, inst in list(instances.items()):
+        try:
+            lock = getattr(inst, '_state_lock', None)
+            if lock is not None:
+                with lock:
+                    current_state = inst.state
+            else:
+                current_state = inst.state
+            status[name] = {
+                'active': current_state == AgentState.RUNNING,
+                'agent_state': current_state.name,
+                'is_halted': bool(pool.is_instance_halted(name)),
+            }
+        except Exception as e:
+            logger.debug(f"Idle-status snapshot unreliable (instance {name!r}): {e}")
+            return None
+    return status
+
+
 def build_stream_update_from_pool(
     pool: AgentPool,
     instance_name: str,

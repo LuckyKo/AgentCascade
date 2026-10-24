@@ -2075,6 +2075,93 @@ function withRetry(conditionFn, actionFn) {
   setTimeout(execute, IMPORT_RETRY_INITIAL_DELAY_MS);
 }
 
+/**
+ * Apply a lightweight `status` heartbeat frame from the server (BUG_0142).
+ *
+ * The server pushes this frame only when the WebSocket has been quiet for a while
+ * (api_server._idle_status_loop). Its job is to repair the one-way `state.generating`
+ * latch: the flag goes true on every stream_update but is only ever lowered by a full
+ * state/done frame, so a lost closing `done` frame left the UI stuck on "Generating..."
+ * (messages then inject into the "active" run, Continue/Retry disabled) until a refresh.
+ *
+ * Safety rules:
+ *  - Per-instance flags from the frame are always applied — they are authoritative and cheap.
+ *  - `generating` is only LOWERED, and only when the frame also proves nothing is active
+ *    (`generating === false` and no `instances[*].active`). It is never raised here: a
+ *    stream_update does that, so a stale heartbeat can never fake or kill a live run.
+ */
+function applyServerStatus(data) {
+  const instances = (data && data.instances && typeof data.instances === 'object')
+    ? data.instances
+    : null;
+
+  let instanceFlagsChanged = false;
+  if (instances) {
+    for (const [name, flags] of Object.entries(instances)) {
+      const sa = state.subAgents[name];
+      if (!sa || !flags) continue;
+      if (typeof flags.active === 'boolean' && sa.active !== flags.active) {
+        sa.active = flags.active;
+        instanceFlagsChanged = true;
+      }
+      if (flags.agent_state && sa.agent_state !== flags.agent_state) {
+        sa.agent_state = flags.agent_state;
+        instanceFlagsChanged = true;
+      }
+      if (typeof flags.is_halted === 'boolean' && sa.is_halted !== flags.is_halted) {
+        sa.is_halted = flags.is_halted;
+        instanceFlagsChanged = true;
+      }
+    }
+  }
+
+  // Treat "no instance map" as "cannot prove idle" — never heal on incomplete evidence.
+  const anyActive = instances ? Object.values(instances).some(f => f && f.active) : true;
+  const heal = Boolean(data) && data.generating === false && state.generating && !anyActive;
+  if (heal) {
+    console.warn('[WS] Server reports idle while the UI still shows generation — '
+      + 'clearing stale flag (missed done frame?)');
+    state.generating = false;
+    renderAndResetThrottle();
+    updateControls();
+    finalizeGeneration();
+    return;
+  }
+  if (instanceFlagsChanged) {
+    renderAndResetThrottle();
+    updateControls();
+  }
+}
+
+/**
+ * BUG_0142: shared turn-end finalization. Both the done-frame path (handleServerMessage)
+ * and the idle-status recovery path (applyServerStatus) must run the SAME sequence when a
+ * run ends, so the two cannot drift apart. Order is load-bearing: updateGenStats early-returns
+ * unless state.genStats.active, so it must run BEFORE that flag is cleared.
+ */
+function finalizeGeneration() {
+  const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
+  updateGenStats(activeMsgs, true);
+  state.genStats.active = false;
+  // Invalidate activity preview cache so the next turn computes a fresh preview.
+  delete state._lastActivityPreviewKey;
+  delete state._lastActivityPreview;
+  // Refresh telemetry config comparison after the turn ends.
+  fetchTelemetry();
+}
+
+/**
+ * Render all agents through the standard path, then reset the render-throttle timer so the
+ * next stream_update is not throttled behind a full render. The done path already set the
+ * timer immediately after renderSubAgents; both call sites must stay paired, so this is
+ * shared (BUG_0142) rather than duplicated.
+ */
+function renderAndResetThrottle() {
+  renderSubAgents();
+  state.genStats.lastSubAgentRender = performance.now();
+  state.genStats.lastSubAgentRenderDuration = 0;
+}
+
 function handleServerMessage(data) {
   const wasGenerating = state.generating;
   const prevApprovalsCount = (state.approvals || []).length;
@@ -2105,14 +2192,27 @@ function handleServerMessage(data) {
         }
       }
 
+      // BUG_0142: apply the authoritative generating flag BEFORE the (fallible) instance
+      // merge below. It must stay after the paused-partial capture above, which needs the
+      // PRE-frame value. Hoisting it here means a throw inside the merge/cleanup can no
+      // longer strand the flag at `true` forever — ws.onmessage only console.errors the
+      // frame, so the UI would otherwise stay on "Generating..." until a page refresh.
+      state.generating = data.generating ?? false;
+
       // Merge ALL agent_instances including root — single source of truth, no legacy fallbacks
       if (data.agent_instances) {
-        for (const [name, sa] of Object.entries(data.agent_instances)) {
-          sa._lastHistoryCount = sa.history_count || 0;   // R2: anchor staleness gate on full frames
-          state.subAgents[name] = sa;
+        try {
+          for (const [name, sa] of Object.entries(data.agent_instances)) {
+            sa._lastHistoryCount = sa.history_count || 0;   // R2: anchor staleness gate on full frames
+            state.subAgents[name] = sa;
+          }
+          // Remove agents that no longer exist on the server (e.g., dismissed agents)
+          cleanupStaleSubAgents(data, state);
+        } catch (err) {
+          // Keep the frame's already-applied scalar state; a bad instance entry must not
+          // abort the rest of the handler (generating/controls/render all run below).
+          console.error(`[WS] Failed to merge agent_instances from '${data.type}' frame:`, err);
         }
-        // Remove agents that no longer exist on the server (e.g., dismissed agents)
-        cleanupStaleSubAgents(data, state);
       }
       // Restore partial content for each halted agent if server didn't already include it
       for (const [name, partialContent] of Object.entries(partialContents)) {
@@ -2124,7 +2224,6 @@ function handleServerMessage(data) {
       }
       // Normalize active_stack: backend sends tuples [name, depth], extract just name
       state.activeStack = (data.active_stack || []).map(e => Array.isArray(e) ? e[0] : e);
-      state.generating = data.generating ?? false;
       if (data.agents) {
         const firstLoad = state.agents.length === 0;
         state.agents = data.agents;
@@ -2260,11 +2359,10 @@ function handleServerMessage(data) {
         invalidateAllPanelCaches();
       }
 
-      // Render all agents through the same path — no root/sub distinction
-      renderSubAgents();
-      // Reset throttle timer after full state render so subsequent stream_updates aren't throttled
-      state.genStats.lastSubAgentRender = performance.now();
-      state.genStats.lastSubAgentRenderDuration = 0;
+      // Render all agents through the same path — no root/sub distinction.
+      // BUG_0142: render + throttle-reset are always paired; shared with the idle-status
+      // recovery path via renderAndResetThrottle() so the two cannot drift.
+      renderAndResetThrottle();
 
       // Ensure API endpoints and assignments are rendered after full state update.
       // Only re-render here if api_router wasn't in this message (already handled above).
@@ -2280,17 +2378,9 @@ function handleServerMessage(data) {
         const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
         updateGenStats(activeMsgs);
       } else if (wasGenerating) {
-        // Final update for stats — use active agent messages
-        const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
-        updateGenStats(activeMsgs, true);
-        state.genStats.active = false;
-
-        // Invalidate activity preview cache so next turn computes fresh preview
-        delete state._lastActivityPreviewKey;
-        delete state._lastActivityPreview;
-
-        // Refresh telemetry config comparison after turn ends
-        fetchTelemetry();
+        // BUG_0142: shared turn-end finalization (also used by the idle-status recovery
+        // path) — kept in one place so the two paths cannot drift.
+        finalizeGeneration();
       }
 
 
@@ -2605,6 +2695,11 @@ function handleServerMessage(data) {
       }
     }
     break;
+
+    case 'status':
+      // BUG_0142: authoritative quiet-period heartbeat (see applyServerStatus).
+      applyServerStatus(data);
+      break;
 
     case 'approvals':
     // FIX: Use Array.isArray check to update approvals (including empty array to clear all)

@@ -275,7 +275,12 @@ def run_agent_thread_unified(
         except Exception as e:
             # Non-critical: the run already finished; a failed final broadcast must not
             # prevent the generator from being closed (the inner finally above handles it).
-            logger.debug(f"Final state broadcast failed (non-critical): {e}")
+            # WARNING (not debug): this frame is the ONLY thing that lowers the UI's
+            # `generating` latch, so losing it leaves the client on "Generating..." until a
+            # refresh (BUG_0142). The idle-status heartbeat recovers the client, but the
+            # failure itself must still be visible in the logs.
+            logger.warning(f"Final 'done' state broadcast failed for {instance_name} — "
+                           f"UI will need the idle-status heartbeat to clear 'generating': {e}")
 
     except (KeyboardInterrupt, SystemExit):
         # Never swallow user interrupts or explicit exits

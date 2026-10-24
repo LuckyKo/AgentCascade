@@ -77,6 +77,38 @@ session_lock = threading.Lock()
 # client. On timeout the offending connection is closed and discarded.
 WS_SEND_TIMEOUT = 5.0
 
+# ── Idle status heartbeat (BUG_0142) ─────────────────────────────────────────
+# The frontend's `state.generating` is a one-way latch: it goes true on every
+# stream_update and is only lowered by a full `state`/`done` frame or an `error`
+# frame (web_ui/app.js). If the closing `done` frame for a run never reaches the
+# client (slow client dropped by WS_SEND_TIMEOUT, handler throw, ...), the UI stays
+# on "Generating..." until a manual page refresh — blocking new input (messages get
+# injected into the "active" run) and disabling Continue/Retry.
+# `_idle_status_loop` re-states the authoritative flag (plus per-instance liveness)
+# in a tiny `status` frame whenever the socket has been quiet, so the client heals
+# itself. Quiet-gated so it never interleaves with an active stream.
+WS_IDLE_STATUS_TICK_SECS = 5.0     # how often the loop wakes up
+WS_IDLE_STATUS_QUIET_SECS = 20.0   # required gap since the last broadcast
+
+
+def should_push_idle_status(*, now: float, last_broadcast: float, connection_count: int) -> bool:
+    """Decide whether the idle-status heartbeat should push a frame now (BUG_0142).
+
+    Pure so it is unit-testable without an event loop. ``last_broadcast`` is a
+    ``time.monotonic()`` timestamp of the last frame handed to clients (0.0 when
+    nothing has been broadcast yet).
+    """
+    if connection_count <= 0:
+        return False
+    if last_broadcast <= 0.0:
+        # Nothing has been broadcast on this server instance yet. The gate is GLOBAL
+        # (broadcast() fans every frame to every client), not per-connection — a fresh
+        # client already receives a full `state` frame on accept, so this only guarantees
+        # a status frame exists before the first real broadcast. Harmless and self-limiting.
+        return True
+    return (now - last_broadcast) >= WS_IDLE_STATUS_QUIET_SECS
+
+
 
 def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
     """Validate disabled_tools in a generate_cfg dict against the tool registry.
@@ -484,6 +516,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.api_integration import (_build_agents_list, _get_approvals, _resolve_max_tokens,
                                                build_state_from_pool, build_stream_update_from_pool,
                                                create_main_agent_instance, serialize_message)
+    from agent_cascade.api_integration_pkg.state_builder import build_instance_status_from_pool
     from agent_cascade.run_agent_unified import run_agent_thread_unified
     from agent_cascade.ws_handlers import WsMessageHandler
 
@@ -807,6 +840,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         return result
 
+    # Monotonic timestamp of the last frame broadcast to clients (0.0 = never).
+    # Drives the quiet-gate for _idle_status_loop (BUG_0142).
+    _last_broadcast_mono = 0.0
+
     async def broadcast(data):
         """Send JSON to all connected WebSocket clients.
 
@@ -821,7 +858,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         Dead/slow connections are reaped *after* the gather (iterating results),
         never during, so no live send is disturbed.
         """
-        nonlocal ws_connections
+        nonlocal ws_connections, _last_broadcast_mono
+        _last_broadcast_mono = time.monotonic()
         text = json.dumps(data, ensure_ascii=False, default=str)
         # Snapshot the set so concurrent add/discard from other coroutines
         # (e.g. a new client connecting) won't raise RuntimeError.
@@ -859,6 +897,47 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             if err is not None:
                 logger.debug(f"WebSocket send failed, removing connection: {err}")
                 ws_connections.discard(conn)
+
+    # ── Idle status heartbeat (BUG_0142) ──────────────────────────────────
+
+    def _build_status_frame() -> Dict[str, Any]:
+        """Minimal authoritative liveness frame — no history, a few hundred bytes.
+
+        Carries the session's `generating` flag plus per-instance activity so the
+        client can repair a one-way `state.generating` latch after a missed `done`
+        frame. See WS_IDLE_STATUS_* above.
+        """
+        frame: Dict[str, Any] = {'type': 'status', 'generating': _is_generating(session)}
+        try:
+            snapshot = build_instance_status_from_pool(agent_pool)
+            if snapshot is not None:
+                frame['instances'] = snapshot
+        except Exception as e:
+            # Leave `instances` out entirely: the client only heals when it can prove
+            # no agent is active, so a missing map means "no heal this round".
+            logger.debug(f"Idle status: instance snapshot failed (non-critical): {e}")
+        return frame
+
+    async def _idle_status_loop():
+        """Push a `status` frame whenever the WebSocket has gone quiet (BUG_0142).
+
+        Routed through the shared send queue (not `broadcast` directly) so it is
+        ordered behind any in-flight `done`/`stream_update` frames produced by the
+        engine threads — the client must never see a stale status overtake a live frame.
+        """
+        while True:
+            try:
+                await asyncio.sleep(WS_IDLE_STATUS_TICK_SECS)
+                if not should_push_idle_status(
+                        now=time.monotonic(),
+                        last_broadcast=_last_broadcast_mono,
+                        connection_count=len(ws_connections)):
+                    continue
+                await _get_send_queue().put(_build_status_frame())
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Idle status frame failed (non-critical): {e}")
 
     # ── Agent execution thread ────────────────────────────────────────────
 
@@ -975,6 +1054,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         _get_send_queue()
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
+        # BUG_0142: quiet-period status heartbeat so a lost `done` frame cannot leave
+        # the UI stuck on "Generating..." until a page refresh.
+        asyncio.create_task(_idle_status_loop())
 
         # Start-on-boot: if the Telegram bridge toggle was persisted ON, start the
         # in-process daemon thread now (uvicorn is serving, so the client can reach AC).
