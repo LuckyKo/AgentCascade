@@ -18,6 +18,7 @@ import random
 import sys
 import time
 import traceback
+from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
@@ -78,6 +79,20 @@ SAMPLING_AND_LIMIT_KEYS = frozenset({
     'frequency_penalty',
     'max_tokens',
 })
+
+
+@dataclass
+class _LLMCallState:
+    """Mutable per-call state shared across the extracted retry/stream
+    helpers. Holds the retry counters and the last accumulated output so
+    those helpers can share them without changing increment timing
+    (see the _abort_llm_stream 'mutate-before-yield' contract). Purely mechanical.
+    """
+    retry_count: int = 0
+    loop_retry_count: int = 0
+    last_output: Optional[List[Message]] = None
+    # Set when the finalization message has already been handled — yielded by an error branch, or intentionally suppressed by a clean-termination/terminal-stop branch.
+    error_already_yielded: bool = False
 
 
 class LLMCallMixin:
@@ -414,11 +429,12 @@ class LLMCallMixin:
 
         Extracted from _call_llm_with_injection() - Phase 3.6
 
-        This method handles:
-        - Retry loop with exponential backoff
-        - Error classification (timeout, network, API error)
-        - Streaming response handling
-        - [RETRYING] message injection for UI
+        Orchestrates the retry loop, delegating streaming to
+        _stream_llm_attempt, error/retry handling to
+        _handle_llm_retry_failure, fallback compression to
+        _handle_fallback_compression_rounds, and finalization to
+        _finalize_llm_result. The retry loop uses exponential backoff and
+        injects [RETRYING] messages for the UI.
 
         Args:
             instance: Agent instance making the call
@@ -430,10 +446,7 @@ class LLMCallMixin:
             Message objects or None for progress updates
         """
         inst_name = instance.instance_name
-        last_output = None
-        retry_count = 0
-        loop_retry_count = 0  # Dedicated counter for inner-loop retries (gated by pool.settings.retry_max_attempts)
-        error_already_yielded = False
+        state = _LLMCallState()
         _max_attempts = self.pool.settings.retry_max_attempts  # At least 1 retry to avoid instant failure
 
         # Phase 1: Fix A2 — absolute wall-clock deadline for this entire call (all
@@ -468,7 +481,7 @@ class LLMCallMixin:
             )
 
         try:
-            while retry_count < _max_attempts:
+            while state.retry_count < _max_attempts:
                 # Phase 1: Fix A2 — wall-clock deadline check. Placed at the TOP of the
                 # loop, OUTSIDE the inner try/except, so the yield+break below is NOT
                 # caught by the per-attempt `except Exception` (which would swallow it).
@@ -479,312 +492,14 @@ class LLMCallMixin:
                     yield Message(
                         role=ASSISTANT,
                         content=(f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
-                    error_already_yielded = True
+                    state.error_already_yielded = True
                     break
 
                 try:
-                    # Telemetry: record LLM call start (non-blocking)
-                    self._record_telemetry_event(
-                        inst_name,
-                        'start',
-                        input_tokens_est=_input_tokens_est,
-                        model=getattr(template.llm, 'model', '') or '',
-                    )
-
-                    # Streaming UI Content Update: Track partial LLM content
-                    # for UI updates every ~100ms or on fast bursts
-                    last_streaming_update_time = time.monotonic()
-                    _chunks_since_last_update = 0
-                    _chars_since_last_update = 0
-
-                    # Inner-loop detector: fresh instance per retry attempt to
-                    # catch generation loops mid-stream. Uses char_run + max_chars
-                    # (last line of defense) and optional two-phase semantic detection.
-                    _ps = self.pool.settings
-                    _inner_settings = _InnerLoopSettings(
-                        default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
-                        default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
-                        char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
-                        char_run_limit=getattr(_ps, 'loop_char_run_limit', 129),
-                        loop_max_chars_enabled=getattr(_ps, 'loop_max_chars_enabled', True),
-                        loop_two_phase_enabled=getattr(_ps, 'loop_two_phase_enabled', False),
-                        loop_suspicion_threshold=getattr(_ps, 'loop_suspicion_threshold', 7),
-                        loop_confirm_required=getattr(_ps, 'loop_confirm_required', 3),
-                        loop_cooldown_feeds=getattr(_ps, 'loop_cooldown_feeds', 50),
-                    )
-                    _inner_detector = InnerLoopDetector(settings=_inner_settings)
-                    _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
-
-                    # Max-output-token guard: safety net against LLMs exceeding
-                    # their token budget
-                    # Resolve the output token limit from generate_cfg override,
-                    # template config, or default
-                    _max_output_tokens = 8192  # Default cap per single response
-                    _gen_override = getattr(instance, '_generate_cfg_override', None)
-                    if _gen_override and isinstance(_gen_override, dict):
-                        _mt = _gen_override.get('max_tokens') or _gen_override.get(
-                            'max_output_tokens') or _gen_override.get('max_input_tokens')
-                        if isinstance(_mt, int) and _mt > 0:
-                            _max_output_tokens = _mt
-                    # Also check template LLM generate_cfg as fallback
-                    if _max_output_tokens == 8192:
-                        _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
-                        _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get(
-                            'max_input_tokens')
-                        if isinstance(_mt, int) and _mt > 0:
-                            _max_output_tokens = _mt
-
-                    _token_guard_triggered = False  # Prevent double-trigger within same iteration
-
-                    gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
-                    _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
-
-                    # --- Interrupt helper (shared by inner-loop and max-token
-                    # guards) ---
-                    # Defined ONCE per retry attempt before the loop to avoid
-                    # recreating on every iteration.
-                    # Counter increments happen BEFORE yield so they update even if
-                    # consumer drops the iterator.
-                    def _abort_stream(reason_msg):
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
-                        # Clean up async tasks (same as stop condition handler)
-                        if hasattr(self.pool, '_async_registry'):
-                            try:
-                                self.pool._async_registry.clear_pending(inst_name)
-                            except Exception:
-                                pass
-                        # Record telemetry end for aborted call
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        try:
-                            gen.close()
-                        except RuntimeError:
-                            pass  # Already closed/exhausted
-                        logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
-                        # Increment counters BEFORE yield — ensures update even if
-                        # consumer drops iterator mid-yield
-                        nonlocal last_output, retry_count, loop_retry_count
-                        last_output = None
-                        retry_count += 1
-                        loop_retry_count += 1
-                        yield None  # Signal UI
-
-                    # Engine-level streaming watchdog: detect mid-stream stalls at the
-                    # execution engine layer (last defense if backend didn't raise).
-                    # Read configured values from pool settings, falling back to module defaults.
-                    _engine_max_silence = getattr(self.pool.settings, 'stream_max_silence_seconds',
-                                                  STREAM_MAX_SILENCE_SECONDS)
-                    _engine_max_total = getattr(self.pool.settings, 'stream_max_total_seconds',
-                                                STREAM_MAX_TOTAL_SECONDS)
-                    _engine_stream_start = time.monotonic()
-                    _engine_first_output = True
-                    _engine_last_output_time = None
-
-                    for output in gen:
-                        # Watchdog check on each consumed output
-                        _now = time.monotonic()
-                        # FIFO head-stall alarm (plan §3.2 write site B): stamp the
-                        # holder's last-LLM-activity timestamp. Zero added cost — the
-                        # watchdog already takes this timestamp every iteration.
-                        self._stamp_llm_activity(instance, 'chunk')
-                        # Silence check only after first output; slow reasoning models may take >120s to produce first token
-                        if not _engine_first_output and _engine_last_output_time is not None:
-                            if (_now - _engine_last_output_time) > _engine_max_silence:
-                                logger.info(
-                                    f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
-                                    f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
-                                _abort_stream('Engine watchdog: stream_stalled')
-                                break  # Exit loop after aborting; will retry in outer while
-                        # Total timeout applies from stream start regardless of first output timing
-                        if (_now - _engine_stream_start) > _engine_max_total:
-                            logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
-                                        f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
-                            _abort_stream('Engine watchdog: stream_stalled')
-                            break  # Exit loop after aborting; will retry in outer while
-                        if _engine_first_output:
-                            _engine_first_output = False
-                        _engine_last_output_time = _now
-
-                        last_output = output
-
-                        # Feed delta text to inner-loop detector (extracts new
-                        # content from accumulated response)
-                        try:
-                            _last_msg = output[-1] if output else None
-                            if _last_msg is not None:
-                                _content = msg_field(_last_msg, 'content', '') or ''
-                                _reasoning = msg_field(_last_msg, 'reasoning_content') or ''
-                                # Handle multimodal content (list of items) for
-                                # both fields
-                                if isinstance(_content, list):
-                                    _content = ' '.join(str(c) for c in _content if isinstance(c, str))
-                                else:
-                                    _content = str(_content)
-                                if isinstance(_reasoning, list):
-                                    _reasoning = ' '.join(str(c) for c in _reasoning if isinstance(c, str))
-                                else:
-                                    _reasoning = str(_reasoning)
-                                _total_text = _reasoning + _content
-
-                                # Also feed function_call data so tool-call streaming
-                                # (where content is empty but payload is in name+arguments)
-                                # is detected by the inner-loop detector.
-                                _fc = msg_field(_last_msg, 'function_call')
-                                if _fc:
-                                    if isinstance(_fc, dict):
-                                        _fc_name = _fc.get('name', '') or ''
-                                        _fc_args = _fc.get('arguments', '') or ''
-                                    else:
-                                        _fc_name = getattr(_fc, 'name', '') or ''
-                                        _fc_args = getattr(_fc, 'arguments', '') or ''
-                                    if _fc_name or _fc_args:
-                                        _total_text += f"\n{_fc_name}: {_fc_args}"
-
-                                # Generator is append-only (delta_stream=False), so
-                                # slicing by previous length gives the new delta
-                                _delta_text = _total_text[_prev_text_len:]
-                                _prev_text_len = len(_total_text)
-
-                                if _delta_text:
-                                    _chars_since_last_update += len(_delta_text)
-                                    # Inner-loop detection (gated by pool settings
-                                    # toggle)
-                                    if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
-                                        _ev = _inner_detector.feed(_delta_text)
-                                        if _ev:  # Loop detected mid-stream
-                                            _sample_path = save_loop_sample(
-                                                text=_total_text[:4000],
-                                                reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
-                                                instance_name=inst_name,
-                                            )
-                                            yield from _abort_stream(
-                                                f"Detected generation loop: {_ev['reason']} (score={_ev['score']})")
-                                            if _sample_path:
-                                                logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                            # Check dedicated loop retry budget
-                                            # (gated by _max_attempts from pool.settings.retry_max_attempts)
-                                            if loop_retry_count >= _max_attempts:
-                                                raise CharacterRunDetected(
-                                                    f"inner_loop_exhausted: retried {_max_attempts} times, "
-                                                    f"giving up — last reason: {_ev['reason']}",
-                                                    detection_reason=_ev['reason'],
-                                                )
-                                            raise CharacterRunDetected(
-                                                f"inner_loop: {_ev['reason']}",
-                                                detection_reason=_ev['reason'],
-                                            )
-
-                                # Max-output-token guard: safety net — if LLM
-                                # exceeds token budget it's likely looping
-                                if not _token_guard_triggered:
-                                    _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
-                                    if _est_tokens > _max_output_tokens:
-                                        _sample_path = save_loop_sample(
-                                            text=_total_text[:4000],
-                                            reason=
-                                            f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
-                                            instance_name=inst_name,
-                                        )
-                                        yield from _abort_stream(
-                                            f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})"
-                                        )
-                                        if _sample_path:
-                                            logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                        _token_guard_triggered = True
-                                        raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
-                        except Exception as e:
-                            logger.warning(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
-                            # Re-raise if this is an explicit inner-loop or
-                            # max-tokens detection exception
-                            if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                                raise
-
-                        # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
-                        if not _first_token_received:
-                            self._record_telemetry_event(inst_name, 'first_token')
-                            _first_token_received = True
-
-                        # Check stop/halt mid-stream FIRST (before any work) —
-                        # ensures fastest response to stop.
-                        # Also checks generation change (old run superseded by
-                        # newer one on resume).
-                        # This is defense-in-depth: _check_stop_conditions() runs
-                        # before the LLM call, but stop
-                        # can also be triggered DURING the streaming call itself
-                        # (while chunks are arriving).
-                        if self._is_terminal_stop(inst_name):
-                            # Telemetry: record LLM call end for mid-stream stop (non-blocking)
-                            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                            with instance._compression_lock:
-                                instance._streaming_responses = []
-                            # Clear pending async tool registrations so the stop is clean
-                            if hasattr(self.pool, '_async_registry'):
-                                try:
-                                    self.pool._async_registry.clear_pending(inst_name)
-                                except Exception:
-                                    pass  # Non-critical cleanup
-                            try:
-                                gen.close(
-                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
-                            except RuntimeError:
-                                pass  # Already closed/exhausted
-                            yield None  # Signal UI that stop was detected mid-stream
-                            break
-                        # Compression-halt during streaming: let the stream complete, handle at Site 3
-
-                        _chunks_since_last_update += 1
-
-                        # Update _streaming_responses on a time floor OR on rapid bursts
-                        # (chunk/char volume thresholds), whichever comes first.
-                        current_time = time.monotonic()
-                        should_update = ((current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
-                                         or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS) or
-                                         (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
-                        if should_update:
-                            with instance._compression_lock:
-                                self._update_streaming_responses(instance, last_output)
-                            last_streaming_update_time = current_time
-                            _chunks_since_last_update = 0
-                            _chars_since_last_update = 0
-
-                        # Re-check stop/halt after UI update (defense in depth —
-                        # catches stop during slow streaming)
-                        if self._is_terminal_stop(inst_name):
-                            # Telemetry: record LLM call end for mid-stream stop (non-blocking)
-                            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                            with instance._compression_lock:
-                                instance._streaming_responses = []
-                            # Clear pending async tool registrations so the stop is clean
-                            if hasattr(self.pool, '_async_registry'):
-                                try:
-                                    self.pool._async_registry.clear_pending(inst_name)
-                                except Exception:
-                                    pass  # Non-critical cleanup
-                            try:
-                                gen.close(
-                                )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
-                            except RuntimeError:
-                                pass  # Already closed/exhausted
-                            yield None  # Signal UI that stop was detected mid-stream
-                            break
-
-                        # Yield partial content for UI update only when responses were updated
-                        if should_update:
-                            yield None
-
-                    if last_output is not None:
-                        # Ensure any remaining in-flight tokens from the final burst are synced
-                        if _chunks_since_last_update > 0:
-                            with instance._compression_lock:
-                                self._update_streaming_responses(instance, last_output)
-                        # Token counts captured at streaming layer via _on_usage callback.
-                        # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=last_output)
+                    _got_output = yield from self._stream_llm_attempt(
+                        instance, inst_name, template, llm_messages, active_functions, _input_tokens_est, state, _max_attempts)
+                    if _got_output:
                         break
-
-                    # Telemetry: record LLM call end for empty response before retrying (non-blocking)
-                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-
                 except FallbackCompressionRequired as fcr:
                     # Context window exceeded during fallback to smaller endpoint.
                     # Use SMART SLICE-FIRST iterative compression: before each compression,
@@ -798,496 +513,19 @@ class LLMCallMixin:
                     if not instance:
                         logger.error(f"[FALLBACK_COMPRESSION] Instance {inst_name} not found in pool. "
                                      f"Cannot compress after context-exceeded on '{fcr.failed_endpoint}'.")
-                        retry_count += 1
+                        state.retry_count += 1
                         continue
 
-                    # Clear streaming responses under lock (matching existing pattern)
-                    with instance._compression_lock:
-                        instance._streaming_responses = []
-
-                    logger.info(f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
-                                f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'.")
-
-                    agent_type = fcr.agent_type
-
-                    for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
-                        logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
-                                     f"for {inst_name} ===")
-
-                        # Stop-check at the TOP of each round: after a user Stop
-                        # (or generation supersede), do NOT spawn another compressor.
-                        # Raise AgentTerminatedError — the outer retry loop treats it
-                        # as a clean abort signal (no retry, no error message), so the
-                        # turn ends normally instead of exhausting rounds into a
-                        # spurious ContextWindowExceeded.
-                        if self._is_terminal_stop(inst_name):
-                            logger.info(f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
-                                        f"before round {round_num} for {inst_name}.")
-                            raise AgentTerminatedError(inst_name)
-
-                        # Check overfeeding before each round
-                        conv = self.pool.get_conversation(inst_name)
-                        if not conv:
-                            logger.error(f"[FALLBACK_COMPRESSION] No conversation found for {inst_name}")
-                            break
-
-                        messages = []
-                        llm_messages.clear()  # Preserve object identity with caller's list
-                        self._rebuild_working_set(messages, llm_messages, inst_name)
-
-                        if not llm_messages:
-                            logger.error(f"[FALLBACK_COMPRESSION] Empty working set for {inst_name}")
-                            break
-
-                        if self.compression_handler.check_overfeeding(instance, llm_messages):
-                            logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
-                                           f"at round {round_num}. Raising ContextWindowExceeded.")
-                            raise ContextWindowExceeded(
-                                f"Overfeeding detected during fallback compression for {inst_name} "
-                                f"(context exceeded on '{fcr.failed_endpoint}')") from fcr
-
-                        # Get compressor's available window (same logic as core.py lines 131-163)
-                        available_for_messages = None
-                        try:
-                            comp_chain = self.pool.api_router.get_endpoint_chain('Compressor')
-                            max_compressor_tokens = 0
-                            for cfg in comp_chain:
-                                ep_limit = cfg.get('max_input_tokens', 0)
-                                if ep_limit and ep_limit > max_compressor_tokens:
-                                    max_compressor_tokens = ep_limit
-
-                            # Fallback: check compressor agent config directly if endpoint chain lookup fails
-                            if not max_compressor_tokens:
-                                comp_agent = self.pool.get_agent('Compressor')
-                                if comp_agent:
-                                    max_tokens = None
-                                    if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
-                                        max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
-                                    elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
-                                        max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
-                                    if max_tokens:
-                                        max_compressor_tokens = max_tokens
-
-                            if max_compressor_tokens:
-                                available_for_messages = int(max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
-                        except Exception as e:
-                            logger.debug(f"[FALLBACK_COMPRESSION] Could not determine compressor window: {e}")
-
-                        # Get active set for slicing
-                        history = self.pool.get_conversation(inst_name)
-                        active_start_idx, active_set, latest_summary_idx = (
-                            self.pool.get_compression_target_set_from_conversation(inst_name, history))
-
-                        if not active_set or len(active_set) < 3:
-                            logger.warning(
-                                f"[FALLBACK_COMPRESSION] Active set too small ({len(active_set) if active_set else 0}) "
-                                f"for safe compression at round {round_num}.")
-                            break
-
-                        # Use helper to find a slice that fits the compressor window.
-                        slice_result = self._find_compression_slice(
-                            active_set=active_set,
-                            history=history,
-                            active_start_idx=active_start_idx,
-                            latest_summary_idx=latest_summary_idx,
-                            compressor_window=available_for_messages,
-                            min_fraction=FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
-                        )
-
-                        if slice_result is None:
-                            logger.error(f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
-                                         f"for {inst_name} at round {round_num}. Giving up.")
-                            raise ContextWindowExceeded(
-                                f"Smart slicing failed for {inst_name}: no slice of active history "
-                                f"fits the compressor's context window. Cannot compress further.") from fcr
-
-                        final_fraction, discard_count, _target_messages = slice_result
-
-                        # Invoke compression with the validated fraction.
-                        # Lazy import to avoid circular dependency (see module-level comment).
-                        try:
-                            from agent_cascade.compression.core import compress_context as _compress_local
-
-                            result = _compress_local(
-                                agent_pool=self.pool,
-                                target_agent_name=inst_name,
-                                fraction=final_fraction,
-                                mode='auto',
-                                force=True,
-                            )
-
-                            if not result.success:
-                                logger.warning(f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
-                                               f"{inst_name}: {result.error}. Trying next round.")
-                                continue
-
-                            # Compression succeeded — rebuild working set from compressed pool state
-                            self._rebuild_working_set(messages, llm_messages, inst_name)
-
-                            # Update instance metadata (matching execute_force_compression pattern)
-                            instance.compression_summary = result.summary_text
-                            conv = self.pool.get_conversation(inst_name)
-                            if conv:
-                                for idx, msg in enumerate(conv):
-                                    c = msg_field(msg, 'content', '')
-                                    if isinstance(c, str) and '<context_summary>' in c:
-                                        instance.latest_marker_index = idx
-
-                            logger.debug(
-                                f"[FALLBACK_COMPRESSION] Round {round_num} succeeded for {inst_name}: "
-                                f"fraction={final_fraction:.4f}, discarded {result.messages_discarded} messages, "
-                                f"tokens {result.tokens_before} → {result.tokens_after}")
-
-                            # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
-                            # compress_context() rewrote instance.conversation (the pool) but does NOT
-                            # touch the JSONL logger — that is the caller's responsibility. The forced
-                            # path calls _sync_logger_after_compression(); the fallback path previously
-                            # did not, so after a successful round the pool was compressed while the
-                            # log still held the OLD large history. Any path reading back from the log
-                            # (recovery at handler.py:140-149, session reload) then re-inflated the pool
-                            # → context-exceeded re-fired next turn → infinite loop.
-                            #
-                            # Order matters (see handler._sync_logger_after_compression docstring): sync
-                            # BEFORE appending the notification below — reset_history(rewrite=True) would
-                            # otherwise double-log it. A sync failure must NOT abort the retry loop.
-                            try:
-                                # Unconditional call: self.compression_handler is always set on the engine
-                                # (core.py constructor) and a None handler would be caught by this try/except.
-                                self.compression_handler._sync_logger_after_compression(
-                                    inst_name,
-                                    instance.agent_class,
-                                    'fallback compression',
-                                    instance,
-                                )
-                            except Exception as sync_err:
-                                # Best-effort: reset_history(rewrite=True) is a single non-atomic write, so on
-                                # failure the JSONL may be left half-written / out of sync with the pool. We do
-                                # not make it atomic (larger, higher-risk change); log loudly instead so operators
-                                # know recovery/reload could re-inflate. The retry loop continues regardless.
-                                logger.warning(
-                                    f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
-                                    f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
-                                    f"compressed pool (possibly half-written) — recovery/reload could "
-                                    f"re-inflate it. Continuing retry.")
-
-                            # Post-compression check: does compressed payload fit next endpoint?
-                            try:
-                                chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
-                                if chain:
-                                    # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
-                                    next_limit = chain[0].get('max_input_tokens') or 0
-
-                                    # FIX (trigger b): when the router chain reports no limit
-                                    # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
-                                    # fall back to the context size dynamically detected on the agent's
-                                    # LLM instance (llm/oai.py sets generate_cfg['max_input_tokens']).
-                                    # This mirrors the compressor-window lookup above and avoids the old
-                                    # "no limit → assume it fits" path that never verified against the
-                                    # real server limit. Only when BOTH are unavailable do we assume fit.
-                                    if next_limit <= 0:
-                                        detected_limit = None
-                                        try:
-                                            _llm = getattr(instance, 'llm', None)
-                                            if _llm is not None and hasattr(_llm, 'generate_cfg'):
-                                                detected_limit = _llm.generate_cfg.get('max_input_tokens')
-                                            elif _llm is not None and hasattr(_llm, 'cfg'):
-                                                detected_limit = _llm.cfg.get('max_input_tokens')
-                                        except Exception:
-                                            detected_limit = None
-                                        if detected_limit and detected_limit > 0:
-                                            next_limit = int(detected_limit)
-                                            logger.debug(
-                                                f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
-                                                f"using LLM-instance detected limit {next_limit} for {inst_name}.")
-
-                                    if next_limit > 0:
-                                        # Full message stats (reasoning, tool_calls, template overhead) —
-                                        # prevents the undercount that caused "chain of compressions".
-                                        estimated = sum(get_message_stats(msg)['tokens'] for msg in llm_messages)
-
-                                        logger.debug(
-                                            f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
-                                            f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}")
-
-                                        if estimated <= next_limit * 0.95:  # 5% safety margin
-                                            # Payload fits — inject notification and resume agent
-                                            from agent_cascade.compression.handler import CompressionHandler
-                                            # Denominator priority: next_limit (the endpoint we are about to
-                                            # resume against, and the same number the 95% gate above used) must
-                                            # win over instance._allocated_max_input_tokens — that attribute is a
-                                            # per-call cache of the PREVIOUS request's budget, possibly a different
-                                            # endpoint's entirely. Deliberately NOT routed through
-                                            # measure_context_usage: its denominator is endpoint-relative by
-                                            # construction, and _get_effective_limit would report the CURRENT
-                                            # endpoint's limit, contradicting the 95% gate printed above.
-                                            max_tokens = next_limit or instance._allocated_max_input_tokens or 0
-                                            notif_msg = Message(role=USER,
-                                                                content=CompressionHandler._format_compression_feedback(
-                                                                    'fallback', 0, estimated, max_tokens))
-                                            self._append_and_log(instance, notif_msg)
-
-                                            # Resume all instances (compression may have halted them)
-                                            try:
-                                                self.pool.resume_all_instances()
-                                            except Exception:
-                                                pass
-
-                                            logger.info(f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
-                                                        f"{round_num} compression round(s). Resuming {inst_name}.")
-
-                                            # Continue outer retry loop with compressed messages
-                                            break
-                                        else:
-                                            logger.warning(
-                                                f"[FALLBACK_COMPRESSION] Compressed payload (~{estimated} tokens) "
-                                                f"still exceeds next endpoint limit ({next_limit}). "
-                                                f"Continuing to round {round_num + 1}...")
-                                    else:
-                                        # No limit from the router chain AND no detected limit on the LLM
-                                        # instance — we cannot verify the payload against any real server
-                                        # limit. Do NOT silently "assume it fits" here: that was exactly the
-                                        # escape hatch that caused the original infinite loop (the payload
-                                        # was accepted without ever being checked, then re-fired context-
-                                        # exceeded on the next turn). Instead log a WARNING and do NOT break —
-                                        # fall through to the outer retry loop's `continue` so the LLM call is
-                                        # retried with the now-compressed payload. If it still exceeds the real
-                                        # (unknown) limit, FallbackCompressionRequired re-fires and the existing
-                                        # context-exceeded guard drives another compression round. This path is
-                                        # therefore bounded by FALLBACK_COMPRESSION_MAX_ROUNDS — no infinite loop.
-                                        logger.warning(
-                                            f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
-                                            f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
-                                            f"compressed payload size; NOT assuming it fits. Retrying so the "
-                                            f"context-exceeded guard re-checks against the real limit.")
-                            except Exception as chain_err:
-                                # Non-fatal — continue retry anyway
-                                logger.debug(
-                                    f"[FALLBACK_COMPRESSION] Could not verify next endpoint limit for {inst_name}: "
-                                    f"{chain_err}. Continuing retry.")
-                                break
-
-                        except ContextWindowExceeded:
-                            raise
-                        except AgentTerminatedError:
-                            # Stop landed DURING the compression call (e.g. the
-                            # compressor invoker aborts on pool.stopped). Propagate
-                            # immediately — do not log as a compression failure or
-                            # burn another round after the user pressed Stop.
-                            raise
-                        except Exception as comp_err:
-                            logger.error(
-                                f"[FALLBACK_COMPRESSION] Round {round_num} raised exception for {inst_name}: "
-                                f"{comp_err}",
-                                exc_info=True)
-                            # Continue to next round
-
-                        # After each round, check if we should trigger automatic forced compression
-                        # via the normal pre-LLM checks (usage_pct > 95%). The retry loop will
-                        # naturally hit _pre_llm_checks on the next iteration if needed.
-
-                    else:
-                        # Exhausted all compression rounds without success
-                        logger.error(
-                            f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
-                            f"for {inst_name}. Raising ContextWindowExceeded.")
-                        raise ContextWindowExceeded(
-                            f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
-                            f"Context still exceeds available endpoint limits after aggressive compression. "
-                            f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
-
-                    # If we got here, compression succeeded and payload fits — continue retry loop
-                    # llm_messages has been updated in-place by _rebuild_working_set
-
-                    # Guard: ensure llm_messages identity matches _cached_llm_messages to prevent stale payload.
-                    if instance._cached_llm_messages is not llm_messages:
-                        logger.warning(
-                            f"[FALLBACK_COMPRESSION] llm_messages identity diverged from "
-                            f"_cached_llm_messages for {inst_name} "
-                            f"(id={id(llm_messages)} vs id={id(instance._cached_llm_messages)}). "
-                            f"Next turn may send stale payload.")
-
+                    self._handle_fallback_compression_rounds(instance, inst_name, llm_messages, fcr)
                     continue
 
                 except Exception as e:
-                    with instance._compression_lock:
-                        instance._streaming_responses = []
-
-                    # Handle AgentTerminatedError — clean abort signal from stop-checks during blocking ops.
-                    # This is NOT an error; exit cleanly without retry or error message.
-                    if isinstance(e, AgentTerminatedError):
-                        logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
-                        # Close the in-flight telemetry call so its latency is counted
-                        # (BUG_0128) — every other abort path in this loop records 'end'.
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
+                    _break = yield from self._handle_llm_retry_failure(
+                        instance, inst_name, e, state, _max_attempts, _retry_policy, _deadline)
+                    if _break:
                         break
 
-                    # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
-                    _is_termination_abort = (isinstance(e, RuntimeError) and len(e.args) >= 1 and e.args[0] and
-                                             'has been terminated' in str(e.args[0]))
-
-                    if _is_termination_abort:
-                        # Instance was terminated — abort LLM call cleanly without retry or error message.
-                        logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
-                        # Close the in-flight telemetry call (BUG_0128).
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        with instance._compression_lock:
-                            instance._streaming_responses = []
-                        break
-
-                    # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
-                    # holding the truncated accumulation. Reset it here — AFTER the termination/dismissal breaks
-                    # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
-                    # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
-                    # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
-                    # Mirrors the `nonlocal last_output … = None` reset in _abort_stream. Plain assignment: last_output
-                    # is a local of this method, not a closure variable here.
-                    last_output = None
-
-                    if retry_count >= _max_attempts:
-                        # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
-                        # retry_count for EVERY non-loop exception, so after _max_attempts
-                        # failures retry_count == _max_attempts and the `while
-                        # retry_count < _max_attempts` loop guard exits the loop — `>` was
-                        # therefore UNREACHABLE, and control fell through to the
-                        # `[SYSTEM ERROR: Empty LLM response]` branch with last_output=None.
-                        # Any plain-raising exception that exhausted the retry budget
-                        # (slot timeouts included) produced a useless message. `>=` makes
-                        # this informative terminal branch actually reachable.
-                        # Telemetry: record LLM call end for exhausted retries (non-blocking)
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
-                        # Give clearer message for loop detection failures
-                        if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
-                            display_msg = f"LLM generation loop detected (exceeded {_max_attempts} max attempts)"
-                        elif isinstance(e, CharacterRunDetected):
-                            display_msg = f"LLM generation loop detected (tried {_max_attempts} times)"
-                        elif isinstance(e, MaxTokenExceeded):
-                            display_msg = f"LLM exceeded token limit (tried {_max_attempts} times)"
-                        elif isinstance(e, ContextWindowExceeded):
-                            display_msg = f"LLM context window exceeded (tried {_max_attempts} times)"
-                        else:
-                            # Terminal LLM failure — build a human-readable, multi-line message from
-                            # the router's structured .endpoint_failures (plan §3.4). The log line uses
-                            # a compact digest so the full concatenated stack dumps are never re-printed.
-                            display_msg = build_terminal_message(e, _max_attempts)
-                        logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} "
-                                     f"retry attempts: {summarize_exhaustion(e)}")
-                        # Deduped full traceback at DEBUG — this is the user-visible failure point.
-                        if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
-                            logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
-                                         f"({inst_name}):\n{traceback.format_exc()}")
-                        yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
-                        error_already_yielded = True
-                        break
-
-                    # _abort_stream already increments retry_count before raising.
-                    # For regular exceptions, increment if we haven't yet
-                    # (retry_count==0).
-                    if retry_count == 0:
-                        retry_count += 1
-                    else:
-                        # Already incremented by _abort_stream OR previous round —
-                        # check if we need another increment (only if _abort_stream
-                        # didn't do it).
-                        # We know _abort_stream incremented if the error message
-                        # contains our markers.
-                        if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            retry_count += 1
-
-                        # Handle inner-loop detection: budget check and endpoint advancement
-                        if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                            self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
-
-                    # Classify error type using centralized policy (Phase 4a)
-                    error_type = classify_error(e)
-
-                    # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
-                    # Skip for fatal errors — they have their own end call below
-                    if error_type != 'fatal':
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-
-                    if error_type == 'fatal':
-                        # Telemetry: record LLM call end for fatal error (non-blocking)
-                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
-                        # D-7 wording guard: a terminal stop (SlotCancelled /
-                        # AgentTerminatedError) is not an LLM failure — break
-                        # silently without yielding a SYSTEM ERROR line.
-                        try:
-                            _is_stop = self._is_terminal_stop(inst_name)
-                        except AttributeError:
-                            _is_stop = False
-                        if _is_stop:
-                            logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
-                                        f"is a terminal stop — no SYSTEM ERROR emitted")
-                            error_already_yielded = True
-                            break
-                        error_msg = str(e).split('\n')[0] if e else 'Unknown error'
-                        logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
-                                       f"error: {summarize_exhaustion(e)}")
-                        yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
-                        error_already_yielded = True
-                        break
-
-                    # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
-                    backoff = calculate_backoff(retry_count, _retry_policy)
-
-                    # Only claim "new endpoint" when cursor was actually advanced.
-                    # Matches _handle_inner_loop_detection logic: character-run and max-token
-                    # advance the cursor; other detections (sentence, ngram, block, entropy)
-                    # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
-                    _det_reason = getattr(e, 'detection_reason', '')
-                    advancing_endpoint = isinstance(
-                        e, (MaxTokenExceeded, ContextWindowExceeded)) or (isinstance(e, CharacterRunDetected) and
-                                                                          _det_reason.startswith('character run'))
-                    endpoint_str = ' with new endpoint' if advancing_endpoint else ''
-
-                    logger.warning(
-                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
-                        f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
-
-                    # Signal retry to UI before blocking on sleep (pass the error so the message
-                    # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
-                    # "Connection lost"; plan §3.5).
-                    yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff, error=e)
-
-                    # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
-                    # no time left, abort now; otherwise cap the backoff to what remains so
-                    # the next iteration's top-of-loop check fires promptly.
-                    _remaining = _deadline - time.monotonic()
-                    if _remaining <= 0:
-                        yield Message(
-                            role=ASSISTANT,
-                            content=(
-                                f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
-                        error_already_yielded = True
-                        break
-                    # D-7: re-check stop before sleeping — a stop that did not
-                    # close the generator would otherwise sleep and retry.
-                    try:
-                        _terminal = self._is_terminal_stop(inst_name)
-                    except AttributeError:
-                        _terminal = False   # test doubles may lack pool
-                    if _terminal:
-                        logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
-                                    f"(error was: {summarize_exhaustion(e)})")
-                        error_already_yielded = True
-                        break
-                    time.sleep(min(backoff, _remaining))
-                    yield None
-
-            # Final update before yielding results
-            if last_output is not None:
-                with instance._compression_lock:
-                    self._update_streaming_responses(instance, last_output)
-
-            if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
-                if not error_already_yielded:
-                    yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
-            else:
-                for msg in last_output:
-                    yield msg
+            yield from self._finalize_llm_result(instance, state)
         finally:
             # Turn-boundary cursor reset: the endpoint cursor is a transient
             # per-turn failover mechanism. Clear it unconditionally so the next
@@ -1295,7 +533,861 @@ class LLMCallMixin:
             if hasattr(self.pool.api_router, 'reset_instance_endpoint'):
                 self.pool.api_router.reset_instance_endpoint(inst_name)
 
+    def _finalize_llm_result(self, instance, state) -> Iterator[Message]:
+        """Commit and yield the final turn output after the retry loop exits.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A5). Syncs any
+        remaining streaming responses, then yields either the empty-response
+        system error (unless an error was already surfaced) or the accumulated
+        messages. The owner's outer try/finally (cursor reset) is unchanged.
+        """
+        if state.last_output is not None:
+            with instance._compression_lock:
+                self._update_streaming_responses(instance, state.last_output)
+
+        if not state.last_output or (isinstance(state.last_output, list) and len(state.last_output) == 0):
+            if not state.error_already_yielded:
+                yield Message(role=ASSISTANT, content='[SYSTEM ERROR: Empty LLM response]')
+        else:
+            for msg in state.last_output:
+                yield msg
+
+    def _stream_llm_attempt(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        template,
+        llm_messages: List[Message],
+        active_functions,
+        input_tokens_est: int,
+        state: _LLMCallState,
+        max_attempts: int,
+    ) -> Iterator[Optional[Message]]:
+        """Run one streaming LLM attempt: telemetry start, inner-loop/max-token
+        guards, engine watchdog, mid-stream stop handling and UI throttling.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A4). Returns True when
+        an attempt produced state.last_output (caller breaks the retry loop), False
+        for empty/aborted attempts (caller retries). Does NOT catch FallbackCompression
+        Required and does NOT own the outer while-break; the guard exceptions propagate
+        to the caller.
+        """
+        # Telemetry: record LLM call start (non-blocking)
+        self._record_telemetry_event(
+            inst_name,
+            'start',
+            input_tokens_est=input_tokens_est,
+            model=getattr(template.llm, 'model', '') or '',
+        )
+
+        # Streaming UI Content Update: Track partial LLM content
+        # for UI updates every ~100ms or on fast bursts
+        last_streaming_update_time = time.monotonic()
+        _chunks_since_last_update = 0
+        _chars_since_last_update = 0
+
+        # Inner-loop detector: fresh instance per retry attempt to
+        # catch generation loops mid-stream. Uses char_run + max_chars
+        # (last line of defense) and optional two-phase semantic detection.
+        _ps = self.pool.settings
+        _inner_settings = _InnerLoopSettings(
+            default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
+            default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
+            char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
+            char_run_limit=getattr(_ps, 'loop_char_run_limit', 129),
+            loop_max_chars_enabled=getattr(_ps, 'loop_max_chars_enabled', True),
+            loop_two_phase_enabled=getattr(_ps, 'loop_two_phase_enabled', False),
+            loop_suspicion_threshold=getattr(_ps, 'loop_suspicion_threshold', 7),
+            loop_confirm_required=getattr(_ps, 'loop_confirm_required', 3),
+            loop_cooldown_feeds=getattr(_ps, 'loop_cooldown_feeds', 50),
+        )
+        _inner_detector = InnerLoopDetector(settings=_inner_settings)
+        _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
+
+        # Max-output-token guard: safety net against LLMs exceeding
+        # their token budget
+        # Resolve the output token limit from generate_cfg override,
+        # template config, or default
+        _max_output_tokens = 8192  # Default cap per single response
+        _gen_override = getattr(instance, '_generate_cfg_override', None)
+        if _gen_override and isinstance(_gen_override, dict):
+            _mt = _gen_override.get('max_tokens') or _gen_override.get(
+                'max_output_tokens') or _gen_override.get('max_input_tokens')
+            if isinstance(_mt, int) and _mt > 0:
+                _max_output_tokens = _mt
+        # Also check template LLM generate_cfg as fallback
+        if _max_output_tokens == 8192:
+            _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+            _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get(
+                'max_input_tokens')
+            if isinstance(_mt, int) and _mt > 0:
+                _max_output_tokens = _mt
+
+        _token_guard_triggered = False  # Prevent double-trigger within same iteration
+
+        gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
+        _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
+
+        # Engine-level streaming watchdog: detect mid-stream stalls at the
+        # execution engine layer (last defense if backend didn't raise).
+        # Read configured values from pool settings, falling back to module defaults.
+        _engine_max_silence = getattr(self.pool.settings, 'stream_max_silence_seconds',
+                                      STREAM_MAX_SILENCE_SECONDS)
+        _engine_max_total = getattr(self.pool.settings, 'stream_max_total_seconds',
+                                    STREAM_MAX_TOTAL_SECONDS)
+        _engine_stream_start = time.monotonic()
+        _engine_first_output = True
+        _engine_last_output_time = None
+
+        for output in gen:
+            # Watchdog check on each consumed output
+            _now = time.monotonic()
+            # FIFO head-stall alarm (plan §3.2 write site B): stamp the
+            # holder's last-LLM-activity timestamp. Zero added cost — the
+            # watchdog already takes this timestamp every iteration.
+            self._stamp_llm_activity(instance, 'chunk')
+            # Silence check only after first output; slow reasoning models may take >120s to produce first token
+            if not _engine_first_output and _engine_last_output_time is not None:
+                if (_now - _engine_last_output_time) > _engine_max_silence:
+                    logger.info(
+                        f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
+                        f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)")
+                    # yield from: _abort_llm_stream is a GENERATOR — a bare call is
+                    # discarded and never runs, so the stream is never closed, no 'end'
+                    # recorded, and the partial is wrongly committed as a success.
+                    yield from self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                    break  # Exit loop after aborting; will retry in outer while
+            # Total timeout applies from stream start regardless of first output timing
+            if (_now - _engine_stream_start) > _engine_max_total:
+                logger.info(f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
+                            f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)")
+                yield from self._abort_llm_stream(instance, inst_name, gen, 'Engine watchdog: stream_stalled', state)
+                break  # Exit loop after aborting; will retry in outer while
+            if _engine_first_output:
+                _engine_first_output = False
+            _engine_last_output_time = _now
+
+            state.last_output = output
+
+            # Feed delta text to inner-loop detector (extracts new
+            # content from accumulated response)
+            try:
+                _last_msg = output[-1] if output else None
+                if _last_msg is not None:
+                    _content = msg_field(_last_msg, 'content', '') or ''
+                    _reasoning = msg_field(_last_msg, 'reasoning_content') or ''
+                    # Handle multimodal content (list of items) for
+                    # both fields
+                    if isinstance(_content, list):
+                        _content = ' '.join(str(c) for c in _content if isinstance(c, str))
+                    else:
+                        _content = str(_content)
+                    if isinstance(_reasoning, list):
+                        _reasoning = ' '.join(str(c) for c in _reasoning if isinstance(c, str))
+                    else:
+                        _reasoning = str(_reasoning)
+                    _total_text = _reasoning + _content
+
+                    # Also feed function_call data so tool-call streaming
+                    # (where content is empty but payload is in name+arguments)
+                    # is detected by the inner-loop detector.
+                    _fc = msg_field(_last_msg, 'function_call')
+                    if _fc:
+                        if isinstance(_fc, dict):
+                            _fc_name = _fc.get('name', '') or ''
+                            _fc_args = _fc.get('arguments', '') or ''
+                        else:
+                            _fc_name = getattr(_fc, 'name', '') or ''
+                            _fc_args = getattr(_fc, 'arguments', '') or ''
+                        if _fc_name or _fc_args:
+                            _total_text += f"\n{_fc_name}: {_fc_args}"
+
+                    # Generator is append-only (delta_stream=False), so
+                    # slicing by previous length gives the new delta
+                    _delta_text = _total_text[_prev_text_len:]
+                    _prev_text_len = len(_total_text)
+
+                    if _delta_text:
+                        _chars_since_last_update += len(_delta_text)
+                        # Inner-loop detection (gated by pool settings
+                        # toggle)
+                        if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
+                            _ev = _inner_detector.feed(_delta_text)
+                            if _ev:  # Loop detected mid-stream
+                                _sample_path = save_loop_sample(
+                                    text=_total_text[:4000],
+                                    reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
+                                    instance_name=inst_name,
+                                )
+                                yield from self._abort_llm_stream(
+                                    instance, inst_name, gen,
+                                    f"Detected generation loop: {_ev['reason']} (score={_ev['score']})",
+                                    state)
+                                if _sample_path:
+                                    logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                                # Check dedicated loop retry budget
+                                # (gated by max_attempts from pool.settings.retry_max_attempts)
+                                if state.loop_retry_count >= max_attempts:
+                                    raise CharacterRunDetected(
+                                        f"inner_loop_exhausted: retried {max_attempts} times, "
+                                        f"giving up — last reason: {_ev['reason']}",
+                                        detection_reason=_ev['reason'],
+                                    )
+                                raise CharacterRunDetected(
+                                    f"inner_loop: {_ev['reason']}",
+                                    detection_reason=_ev['reason'],
+                                )
+
+                    # Max-output-token guard: safety net — if LLM
+                    # exceeds token budget it's likely looping
+                    if not _token_guard_triggered:
+                        _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                        if _est_tokens > _max_output_tokens:
+                            _sample_path = save_loop_sample(
+                                text=_total_text[:4000],
+                                reason=
+                                f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
+                                instance_name=inst_name,
+                            )
+                            yield from self._abort_llm_stream(
+                                instance, inst_name, gen,
+                                f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})",
+                                state)
+                            if _sample_path:
+                                logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                            _token_guard_triggered = True
+                            raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
+            except Exception as e:
+                logger.warning(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
+                # Re-raise if this is an explicit inner-loop or
+                # max-tokens detection exception
+                if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                    raise
+
+            # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
+            if not _first_token_received:
+                self._record_telemetry_event(inst_name, 'first_token')
+                _first_token_received = True
+
+            # Check stop/halt mid-stream FIRST (before any work) —
+            # ensures fastest response to stop.
+            # Also checks generation change (old run superseded by
+            # newer one on resume).
+            # This is defense-in-depth: _check_stop_conditions() runs
+            # before the LLM call, but stop
+            # can also be triggered DURING the streaming call itself
+            # (while chunks are arriving).
+            if self._is_terminal_stop(inst_name):
+                self._stop_mid_stream(instance, inst_name, gen)
+                yield None  # Signal UI that stop was detected mid-stream
+                break
+            # Compression-halt during streaming: let the stream complete, handle at Site 3
+
+            _chunks_since_last_update += 1
+
+            # Update _streaming_responses on a time floor OR on rapid bursts
+            # (chunk/char volume thresholds), whichever comes first.
+            current_time = time.monotonic()
+            should_update = ((current_time - last_streaming_update_time >= STREAM_UPDATE_MIN_INTERVAL_SEC)
+                             or (_chunks_since_last_update >= STREAM_UPDATE_MAX_CHUNKS) or
+                             (_chars_since_last_update >= STREAM_UPDATE_MAX_CHARS))
+            if should_update:
+                with instance._compression_lock:
+                    self._update_streaming_responses(instance, state.last_output)
+                last_streaming_update_time = current_time
+                _chunks_since_last_update = 0
+                _chars_since_last_update = 0
+
+            # Re-check stop/halt after UI update (defense in depth —
+            # catches stop during slow streaming)
+            if self._is_terminal_stop(inst_name):
+                self._stop_mid_stream(instance, inst_name, gen)
+                yield None  # Signal UI that stop was detected mid-stream
+                break
+
+            # Yield partial content for UI update only when responses were updated
+            if should_update:
+                yield None
+
+        if state.last_output is not None:
+            # Ensure any remaining in-flight tokens from the final burst are synced
+            if _chunks_since_last_update > 0:
+                with instance._compression_lock:
+                    self._update_streaming_responses(instance, state.last_output)
+            # Token counts captured at streaming layer via _on_usage callback.
+            # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=state.last_output)
+            return True
+
+        # Telemetry: record LLM call end for empty response before retrying (non-blocking)
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        return False
+
+    def _abort_llm_stream(self, instance, inst_name, gen, reason_msg, state) -> Iterator[None]:
+        """Abort an in-flight stream from a stream guard (inner-loop, max-token, engine watchdog).
+
+        Generator: must be consumed (`yield from`) — a bare call never runs.
+
+        Replaces the nested _abort_stream closure (Phase 7 A4). Mutates state (clears
+        last_output, bumps retry/loop counters) BEFORE yielding None so the counters
+        update even if the consumer drops the iterator mid-yield.
+        """
+        with instance._compression_lock:
+            instance._streaming_responses = []
+        # Clean up async tasks (same as stop condition handler)
+        if hasattr(self.pool, '_async_registry'):
+            try:
+                self.pool._async_registry.clear_pending(inst_name)
+            except Exception:
+                pass
+        # Record telemetry end for aborted call
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        try:
+            gen.close()
+        except RuntimeError:
+            pass  # Already closed/exhausted
+        logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
+        # Increment counters BEFORE yield — ensures update even if
+        # consumer drops iterator mid-yield
+        state.last_output = None
+        state.retry_count += 1
+        state.loop_retry_count += 1
+        yield None  # Signal UI
+
+    def _stop_mid_stream(self, instance, inst_name, gen) -> None:
+        """Mid-stream stop cleanup: close the in-flight stream and clear pending state.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A4). Does NOT touch retry
+        counters or state.last_output - the caller still breaks the loop itself.
+        """
+        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+        with instance._compression_lock:
+            instance._streaming_responses = []
+        # Clear pending async tool registrations so the stop is clean
+        if hasattr(self.pool, '_async_registry'):
+            try:
+                self.pool._async_registry.clear_pending(inst_name)
+            except Exception:
+                pass  # Non-critical cleanup
+        try:
+            gen.close(
+            )  # Explicitly close generator → triggers finally blocks → releases HTTP connection immediately
+        except RuntimeError:
+            pass  # Already closed/exhausted
+
+    def _handle_llm_retry_failure(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        e: Exception,
+        state: _LLMCallState,
+        max_attempts: int,
+        retry_policy: RetryPolicy,
+        deadline: float,
+    ) -> Iterator[Optional[Message]]:
+        """Handle a failed LLM attempt: termination clean-exits, retry-budget
+        exhaustion, error classification, backoff and the [RETRYING] UI signal.
+
+        Extracted from _execute_llm_call_with_retry (Phase 7 A3). Returns True
+        when the caller should break out of the retry loop, False to continue.
+        """
+        with instance._compression_lock:
+            instance._streaming_responses = []
+
+        # Handle AgentTerminatedError — clean abort signal from stop-checks during blocking ops.
+        # This is NOT an error; exit cleanly without retry or error message.
+        if isinstance(e, AgentTerminatedError):
+            logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
+            # Close the in-flight telemetry call so its latency is counted
+            # (BUG_0128) — every other abort path in this loop records 'end'.
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            with instance._compression_lock:
+                instance._streaming_responses = []
+            # A clean termination is not an error: mark it handled so _finalize_llm_result
+            # does not emit the generic "[SYSTEM ERROR: Empty LLM response]" when last_output
+            # is None (P8-3). The keep-partial re-yield still runs when a partial exists.
+            state.error_already_yielded = True
+            return True
+
+        # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
+        _is_termination_abort = (isinstance(e, RuntimeError) and len(e.args) >= 1 and e.args[0] and
+                                 'has been terminated' in str(e.args[0]))
+
+        if _is_termination_abort:
+            # Instance was terminated — abort LLM call cleanly without retry or error message.
+            logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
+            # Close the in-flight telemetry call (BUG_0128).
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            with instance._compression_lock:
+                instance._streaming_responses = []
+            # Same as the AgentTerminatedError path: a clean termination is not an error, so
+            # suppress the generic empty-response message (P8-3).
+            state.error_already_yielded = True
+            return True
+
+        # BUG_0099: a mid-stream error (e.g. connection drop after some chunks) leaves last_output
+        # holding the truncated accumulation. Reset it here — AFTER the termination/dismissal breaks
+        # above (which must keep their existing behavior) and BEFORE the retry/exhaustion paths below —
+        # so a failed attempt's partial is never committed: on exhaustion the final block sees last_output
+        # is None and emits only the [SYSTEM ERROR], and a successful retry repopulates it normally.
+        # Mirrors the `nonlocal last_output … = None` reset in _abort_llm_stream. Plain assignment: last_output
+        # is a local of this method, not a closure variable here.
+        state.last_output = None
+
+        if state.retry_count >= max_attempts:
+            # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
+            # retry_count for EVERY non-loop exception, so after max_attempts
+            # failures retry_count == max_attempts and the `while
+            # retry_count < max_attempts` loop guard exits the loop — `>` was
+            # therefore UNREACHABLE, and control fell through to the
+            # `[SYSTEM ERROR: Empty LLM response]` branch with last_output=None.
+            # Any plain-raising exception that exhausted the retry budget
+            # (slot timeouts included) produced a useless message. `>=` makes
+            # this informative terminal branch actually reachable.
+            # Telemetry: record LLM call end for exhausted retries (non-blocking)
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            error_msg = str(e).split('\n')[0] if e else 'Unknown error'
+            # Give clearer message for loop detection failures
+            if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
+                display_msg = f"LLM generation loop detected (exceeded {max_attempts} max attempts)"
+            elif isinstance(e, CharacterRunDetected):
+                display_msg = f"LLM generation loop detected (tried {max_attempts} times)"
+            elif isinstance(e, MaxTokenExceeded):
+                display_msg = f"LLM exceeded token limit (tried {max_attempts} times)"
+            elif isinstance(e, ContextWindowExceeded):
+                display_msg = f"LLM context window exceeded (tried {max_attempts} times)"
+            else:
+                # Terminal LLM failure — build a human-readable, multi-line message from
+                # the router's structured .endpoint_failures (plan §3.4). The log line uses
+                # a compact digest so the full concatenated stack dumps are never re-printed.
+                display_msg = build_terminal_message(e, max_attempts)
+            logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {max_attempts} "
+                         f"retry attempts: {summarize_exhaustion(e)}")
+            # Deduped full traceback at DEBUG — this is the user-visible failure point.
+            if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
+                             f"({inst_name}):\n{traceback.format_exc()}")
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
+            state.error_already_yielded = True
+            return True
+
+        # _abort_llm_stream already increments retry_count before raising.
+        # For regular exceptions, increment if we haven't yet
+        # (retry_count==0).
+        if state.retry_count == 0:
+            state.retry_count += 1
+        else:
+            # Already incremented by _abort_llm_stream OR previous round —
+            # check if we need another increment (only if _abort_llm_stream
+            # didn't do it).
+            # We know _abort_llm_stream incremented if the error message
+            # contains our markers.
+            if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                state.retry_count += 1
+
+            # Handle inner-loop detection: budget check and endpoint advancement
+            if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, max_attempts)
+
+        # Classify error type using centralized policy (Phase 4a)
+        error_type = classify_error(e)
+
+        # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
+        # Skip for fatal errors — they have their own end call below
+        if error_type != 'fatal':
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+
+        if error_type == 'fatal':
+            # Telemetry: record LLM call end for fatal error (non-blocking)
+            self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
+            # D-7 wording guard: a terminal stop (SlotCancelled /
+            # AgentTerminatedError) is not an LLM failure — break
+            # silently without yielding a SYSTEM ERROR line.
+            try:
+                _is_stop = self._is_terminal_stop(inst_name)
+            except AttributeError:
+                _is_stop = False
+            if _is_stop:
+                logger.info(f"[ENDPOINT_RETRY] Fatal classification for {inst_name} "
+                            f"is a terminal stop — no SYSTEM ERROR emitted")
+                state.error_already_yielded = True
+                return True
+            error_msg = str(e).split('\n')[0] if e else 'Unknown error'
+            logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable "
+                           f"error: {summarize_exhaustion(e)}")
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
+            state.error_already_yielded = True
+            return True
+
+        # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
+        backoff = calculate_backoff(state.retry_count, retry_policy)
+
+        # Only claim "new endpoint" when cursor was actually advanced.
+        # Matches _handle_inner_loop_detection logic: character-run and max-token
+        # advance the cursor; other detections (sentence, ngram, block, entropy)
+        # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
+        _det_reason = getattr(e, 'detection_reason', '')
+        advancing_endpoint = isinstance(
+            e, (MaxTokenExceeded, ContextWindowExceeded)) or (isinstance(e, CharacterRunDetected) and
+                                                              _det_reason.startswith('character run'))
+        endpoint_str = ' with new endpoint' if advancing_endpoint else ''
+
+        logger.warning(
+            f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {state.retry_count}/{max_attempts}. "
+            f"Retrying in {backoff:.1f}s{endpoint_str}... {summarize_exhaustion(e)}")
+
+        # Signal retry to UI before blocking on sleep (pass the error so the message
+        # names the actual cause — e.g. "server error (HTTP 502)" instead of a generic
+        # "Connection lost"; plan §3.5).
+        yield self._make_retrying_message(instance, state.retry_count, max_attempts, backoff, error=e)
+
+        # Phase 1: Fix A2 — don't sleep past the wall-clock deadline. If there's
+        # no time left, abort now; otherwise cap the backoff to what remains so
+        # the next iteration's top-of-loop check fires promptly.
+        _remaining = deadline - time.monotonic()
+        if _remaining <= 0:
+            yield Message(
+                role=ASSISTANT,
+                content=(
+                    f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s wall-clock deadline]"))
+            state.error_already_yielded = True
+            return True
+        # D-7: re-check stop before sleeping — a stop that did not
+        # close the generator would otherwise sleep and retry.
+        try:
+            _terminal = self._is_terminal_stop(inst_name)
+        except AttributeError:
+            _terminal = False   # test doubles may lack pool
+        if _terminal:
+            logger.info(f"[ENDPOINT_RETRY] Aborting retry for {inst_name} — terminal stop "
+                        f"(error was: {summarize_exhaustion(e)})")
+            state.error_already_yielded = True
+            return True
+        time.sleep(min(backoff, _remaining))
+        yield None
+        return False
+
     # ═══════════════════════════════════════════════════════════════════════
+
+    def _handle_fallback_compression_rounds(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        llm_messages: List[Message],
+        fcr: FallbackCompressionRequired,
+    ) -> None:
+        """Run smart slice-first fallback compression rounds after context overflow.
+
+        Extracted verbatim from _execute_llm_call_with_retry. Returns when the caller
+        should continue the outer retry loop; raises the same terminal exceptions as
+        before. The caller handles the missing-instance retry increment.
+        """
+        # Clear streaming responses under lock (matching existing pattern)
+        with instance._compression_lock:
+            instance._streaming_responses = []
+
+        logger.info(f"[FALLBACK_COMPRESSION] Starting smart slice-first iterative compression "
+                    f"for {inst_name} after context-exceeded on '{fcr.failed_endpoint}'.")
+
+        agent_type = fcr.agent_type
+
+        for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
+            logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
+                         f"for {inst_name} ===")
+
+            # Stop-check at the TOP of each round: after a user Stop
+            # (or generation supersede), do NOT spawn another compressor.
+            # Raise AgentTerminatedError — the outer retry loop treats it
+            # as a clean abort signal (no retry, no error message), so the
+            # turn ends normally instead of exhausting rounds into a
+            # spurious ContextWindowExceeded.
+            if self._is_terminal_stop(inst_name):
+                logger.info(f"[FALLBACK_COMPRESSION] Fallback compression aborted by stop "
+                            f"before round {round_num} for {inst_name}.")
+                raise AgentTerminatedError(inst_name)
+
+            # Check overfeeding before each round
+            conv = self.pool.get_conversation(inst_name)
+            if not conv:
+                logger.error(f"[FALLBACK_COMPRESSION] No conversation found for {inst_name}")
+                break
+
+            messages = []
+            llm_messages.clear()  # Preserve object identity with caller's list
+            self._rebuild_working_set(messages, llm_messages, inst_name)
+
+            if not llm_messages:
+                logger.error(f"[FALLBACK_COMPRESSION] Empty working set for {inst_name}")
+                break
+
+            if self.compression_handler.check_overfeeding(instance, llm_messages):
+                logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
+                               f"at round {round_num}. Raising ContextWindowExceeded.")
+                raise ContextWindowExceeded(
+                    f"Overfeeding detected during fallback compression for {inst_name} "
+                    f"(context exceeded on '{fcr.failed_endpoint}')") from fcr
+
+            # Get compressor's available window (same logic as core.py lines 131-163)
+            available_for_messages = None
+            try:
+                comp_chain = self.pool.api_router.get_endpoint_chain('Compressor')
+                max_compressor_tokens = 0
+                for cfg in comp_chain:
+                    ep_limit = cfg.get('max_input_tokens', 0)
+                    if ep_limit and ep_limit > max_compressor_tokens:
+                        max_compressor_tokens = ep_limit
+
+                # Fallback: check compressor agent config directly if endpoint chain lookup fails
+                if not max_compressor_tokens:
+                    comp_agent = self.pool.get_agent('Compressor')
+                    if comp_agent:
+                        max_tokens = None
+                        if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
+                            max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
+                        elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
+                            max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+                        if max_tokens:
+                            max_compressor_tokens = max_tokens
+
+                if max_compressor_tokens:
+                    available_for_messages = int(max_compressor_tokens * _COMPRESSOR_WINDOW_SAFETY_FACTOR)
+            except Exception as e:
+                logger.debug(f"[FALLBACK_COMPRESSION] Could not determine compressor window: {e}")
+
+            # Get active set for slicing
+            history = self.pool.get_conversation(inst_name)
+            active_start_idx, active_set, latest_summary_idx = (
+                self.pool.get_compression_target_set_from_conversation(inst_name, history))
+
+            if not active_set or len(active_set) < 3:
+                logger.warning(
+                    f"[FALLBACK_COMPRESSION] Active set too small ({len(active_set) if active_set else 0}) "
+                    f"for safe compression at round {round_num}.")
+                break
+
+            # Use helper to find a slice that fits the compressor window.
+            slice_result = self._find_compression_slice(
+                active_set=active_set,
+                history=history,
+                active_start_idx=active_start_idx,
+                latest_summary_idx=latest_summary_idx,
+                compressor_window=available_for_messages,
+                min_fraction=FALLBACK_COMPRESSION_MIN_SLICE_FRACTION,
+            )
+
+            if slice_result is None:
+                logger.error(f"[FALLBACK_COMPRESSION] Could not find a slice that fits compressor window "
+                             f"for {inst_name} at round {round_num}. Giving up.")
+                raise ContextWindowExceeded(
+                    f"Smart slicing failed for {inst_name}: no slice of active history "
+                    f"fits the compressor's context window. Cannot compress further.") from fcr
+
+            final_fraction, discard_count, _target_messages = slice_result
+
+            # Invoke compression with the validated fraction.
+            # Lazy import to avoid circular dependency (see module-level comment).
+            try:
+                from agent_cascade.compression.core import compress_context as _compress_local
+
+                result = _compress_local(
+                    agent_pool=self.pool,
+                    target_agent_name=inst_name,
+                    fraction=final_fraction,
+                    mode='auto',
+                    force=True,
+                )
+
+                if not result.success:
+                    logger.warning(f"[FALLBACK_COMPRESSION] Round {round_num} compression failed for "
+                                   f"{inst_name}: {result.error}. Trying next round.")
+                    continue
+
+                # Compression succeeded — rebuild working set from compressed pool state
+                self._rebuild_working_set(messages, llm_messages, inst_name)
+
+                # Update instance metadata (matching execute_force_compression pattern)
+                instance.compression_summary = result.summary_text
+                conv = self.pool.get_conversation(inst_name)
+                if conv:
+                    for idx, msg in enumerate(conv):
+                        c = msg_field(msg, 'content', '')
+                        if isinstance(c, str) and '<context_summary>' in c:
+                            instance.latest_marker_index = idx
+
+                logger.debug(
+                    f"[FALLBACK_COMPRESSION] Round {round_num} succeeded for {inst_name}: "
+                    f"fraction={final_fraction:.4f}, discarded {result.messages_discarded} messages, "
+                    f"tokens {result.tokens_before} → {result.tokens_after}")
+
+                # ── Sync JSONL logger to match the compressed pool (root-cause fix) ──
+                # compress_context() rewrote instance.conversation (the pool) but does NOT
+                # touch the JSONL logger — that is the caller's responsibility. The forced
+                # path calls _sync_logger_after_compression(); the fallback path previously
+                # did not, so after a successful round the pool was compressed while the
+                # log still held the OLD large history. Any path reading back from the log
+                # (recovery at handler.py:140-149, session reload) then re-inflated the pool
+                # → context-exceeded re-fired next turn → infinite loop.
+                #
+                # Order matters (see handler._sync_logger_after_compression docstring): sync
+                # BEFORE appending the notification below — reset_history(rewrite=True) would
+                # otherwise double-log it. A sync failure must NOT abort the retry loop.
+                try:
+                    # Unconditional call: self.compression_handler is always set on the engine
+                    # (core.py constructor) and a None handler would be caught by this try/except.
+                    self.compression_handler._sync_logger_after_compression(
+                        inst_name,
+                        instance.agent_class,
+                        'fallback compression',
+                        instance,
+                    )
+                except Exception as sync_err:
+                    # Best-effort: reset_history(rewrite=True) is a single non-atomic write, so on
+                    # failure the JSONL may be left half-written / out of sync with the pool. We do
+                    # not make it atomic (larger, higher-risk change); log loudly instead so operators
+                    # know recovery/reload could re-inflate. The retry loop continues regardless.
+                    logger.warning(
+                        f"[FALLBACK_COMPRESSION] Logger sync after compression FAILED for "
+                        f"{inst_name}: {sync_err}. The JSONL log may now be out of sync with the "
+                        f"compressed pool (possibly half-written) — recovery/reload could "
+                        f"re-inflate it. Continuing retry.")
+
+                # Post-compression check: does compressed payload fit next endpoint?
+                try:
+                    chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
+                    if chain:
+                        # `or 0` tolerates a literal None (e.g. "max_input_tokens": null in config).
+                        next_limit = chain[0].get('max_input_tokens') or 0
+
+                        # FIX (trigger b): when the router chain reports no limit
+                        # (max_input_tokens == 0, e.g. no endpoint assigned / default cfg),
+                        # fall back to the context size dynamically detected on the agent's
+                        # LLM instance (llm/oai.py sets generate_cfg['max_input_tokens']).
+                        # This mirrors the compressor-window lookup above and avoids the old
+                        # "no limit → assume it fits" path that never verified against the
+                        # real server limit. Only when BOTH are unavailable do we assume fit.
+                        if next_limit <= 0:
+                            detected_limit = None
+                            try:
+                                _llm = getattr(instance, 'llm', None)
+                                if _llm is not None and hasattr(_llm, 'generate_cfg'):
+                                    detected_limit = _llm.generate_cfg.get('max_input_tokens')
+                                elif _llm is not None and hasattr(_llm, 'cfg'):
+                                    detected_limit = _llm.cfg.get('max_input_tokens')
+                            except Exception:
+                                detected_limit = None
+                            if detected_limit and detected_limit > 0:
+                                next_limit = int(detected_limit)
+                                logger.debug(
+                                    f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens; "
+                                    f"using LLM-instance detected limit {next_limit} for {inst_name}.")
+
+                        if next_limit > 0:
+                            # Full message stats (reasoning, tool_calls, template overhead) —
+                            # prevents the undercount that caused "chain of compressions".
+                            estimated = sum(get_message_stats(msg)['tokens'] for msg in llm_messages)
+
+                            logger.debug(
+                                f"[FALLBACK_COMPRESSION] Post-compression check for {inst_name}: "
+                                f"estimated ~{estimated} tokens vs next endpoint limit {next_limit}")
+
+                            if estimated <= next_limit * 0.95:  # 5% safety margin
+                                # Payload fits — inject notification and resume agent
+                                from agent_cascade.compression.handler import CompressionHandler
+                                # Denominator priority: next_limit (the endpoint we are about to
+                                # resume against, and the same number the 95% gate above used) must
+                                # win over instance._allocated_max_input_tokens — that attribute is a
+                                # per-call cache of the PREVIOUS request's budget, possibly a different
+                                # endpoint's entirely. Deliberately NOT routed through
+                                # measure_context_usage: its denominator is endpoint-relative by
+                                # construction, and _get_effective_limit would report the CURRENT
+                                # endpoint's limit, contradicting the 95% gate printed above.
+                                max_tokens = next_limit or instance._allocated_max_input_tokens or 0
+                                notif_msg = Message(role=USER,
+                                                    content=CompressionHandler._format_compression_feedback(
+                                                        'fallback', 0, estimated, max_tokens))
+                                self._append_and_log(instance, notif_msg)
+
+                                # Resume all instances (compression may have halted them)
+                                try:
+                                    self.pool.resume_all_instances()
+                                except Exception:
+                                    pass
+
+                                logger.info(f"[FALLBACK_COMPRESSION] Payload fits next endpoint after "
+                                            f"{round_num} compression round(s). Resuming {inst_name}.")
+
+                                # Continue outer retry loop with compressed messages
+                                break
+                            else:
+                                logger.warning(
+                                    f"[FALLBACK_COMPRESSION] Compressed payload (~{estimated} tokens) "
+                                    f"still exceeds next endpoint limit ({next_limit}). "
+                                    f"Continuing to round {round_num + 1}...")
+                        else:
+                            # No limit from the router chain AND no detected limit on the LLM
+                            # instance — we cannot verify the payload against any real server
+                            # limit. Do NOT silently "assume it fits" here: that was exactly the
+                            # escape hatch that caused the original infinite loop (the payload
+                            # was accepted without ever being checked, then re-fired context-
+                            # exceeded on the next turn). Instead log a WARNING and do NOT break —
+                            # fall through to the outer retry loop's `continue` so the LLM call is
+                            # retried with the now-compressed payload. If it still exceeds the real
+                            # (unknown) limit, FallbackCompressionRequired re-fires and the existing
+                            # context-exceeded guard drives another compression round. This path is
+                            # therefore bounded by FALLBACK_COMPRESSION_MAX_ROUNDS — no infinite loop.
+                            logger.warning(
+                                f"[FALLBACK_COMPRESSION] Next endpoint has no max_input_tokens configured "
+                                f"and no detected limit on the LLM instance for {inst_name}. Cannot verify "
+                                f"compressed payload size; NOT assuming it fits. Retrying so the "
+                                f"context-exceeded guard re-checks against the real limit.")
+                except Exception as chain_err:
+                    # Non-fatal — continue retry anyway
+                    logger.debug(
+                        f"[FALLBACK_COMPRESSION] Could not verify next endpoint limit for {inst_name}: "
+                        f"{chain_err}. Continuing retry.")
+                    break
+
+            except ContextWindowExceeded:
+                raise
+            except AgentTerminatedError:
+                # Stop landed DURING the compression call (e.g. the
+                # compressor invoker aborts on pool.stopped). Propagate
+                # immediately — do not log as a compression failure or
+                # burn another round after the user pressed Stop.
+                raise
+            except Exception as comp_err:
+                logger.error(
+                    f"[FALLBACK_COMPRESSION] Round {round_num} raised exception for {inst_name}: "
+                    f"{comp_err}",
+                    exc_info=True)
+                # Continue to next round
+
+            # After each round, check if we should trigger automatic forced compression
+            # via the normal pre-LLM checks (usage_pct > 95%). The retry loop will
+            # naturally hit _pre_llm_checks on the next iteration if needed.
+
+        else:
+            # Exhausted all compression rounds without success
+            logger.error(
+                f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
+                f"for {inst_name}. Raising ContextWindowExceeded.")
+            raise ContextWindowExceeded(
+                f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
+                f"Context still exceeds available endpoint limits after aggressive compression. "
+                f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
+
+        # If we got here, compression succeeded and payload fits — continue retry loop
+        # llm_messages has been updated in-place by _rebuild_working_set
+
+        # Guard: ensure llm_messages identity matches _cached_llm_messages to prevent stale payload.
+        if instance._cached_llm_messages is not llm_messages:
+            logger.warning(
+                f"[FALLBACK_COMPRESSION] llm_messages identity diverged from "
+                f"_cached_llm_messages for {inst_name} "
+                f"(id={id(llm_messages)} vs id={id(instance._cached_llm_messages)}). "
+                f"Next turn may send stale payload.")
+        return
 
     def _call_llm_with_injection(self, instance: AgentInstance, llm_messages: List[Message]) -> Iterator[Message]:
         """Delegate to retry logic — now ~15 lines.
