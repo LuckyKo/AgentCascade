@@ -59,6 +59,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+import httpx
+
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -129,6 +131,22 @@ def _invalidate_media_gen_config() -> None:
     global _config_cache
     with _config_lock:
         _config_cache = {}
+
+
+def _probe_server_status(url: str) -> str:
+    """Probe a backend server's reachability for __help status reporting.
+
+    Any HTTP response — even 404 — means the server is up, so this returns 'LIVE';
+    a failed connection or timeout means it is not, returning 'OFFLINE'. Never raises.
+    The 1.5s timeout bounds the wait so an unreachable host fails fast (connection
+    refused is near-instant). Mirrors the bare ``httpx.get(url, timeout=...)`` shape
+    used in kobold_tts — a single request, no polling loop.
+    """
+    try:
+        httpx.get(url, timeout=1.5)
+        return 'LIVE'
+    except Exception:
+        return 'OFFLINE'
 
 
 @register_tool('media_gen')
@@ -658,6 +676,23 @@ class MediaGen(BaseTool):
             lines.append(f"  honors:    {', '.join(manifest['agent_args'])}")
         if manifest['overrides_keys']:
             lines.append(f"  overrides: {', '.join(manifest['overrides_keys'])}")
+
+        # Server status: driven by any FieldSpec(kind='url') in the manifest, so a future
+        # server-backed backend gets this for free (no hardcoded backend id). The live value
+        # comes from the backend's own config block (same source as the rest of this section).
+        # _probe_server_status never raises; this block is additionally guarded so a
+        # malformed manifest/config value here cannot suppress the rest of the section.
+        try:
+            for spec in manifest.get('connection_fields') or []:
+                if not isinstance(spec, dict) or spec.get('kind') != 'url':
+                    continue
+                url = (block.get(spec.get('key')) or '').strip()
+                if not url:
+                    lines.append('  server:    (not configured)')
+                else:
+                    lines.append(f"  server:    {url} — {_probe_server_status(url)}")
+        except Exception:  # malformed field/config shape must not break __help
+            logger.debug('[MediaGen] __help server status failed for %s', bid)
 
         # TEXT-output backends (output_kind='text'): show the exact params inline. The generic
         # _usage_for fallback always prepends prompt="<...>" and is unreachable for availability='none',
