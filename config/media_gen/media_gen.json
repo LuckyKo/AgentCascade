@@ -78,5 +78,8 @@
     "model": "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
     "timeout": 300,
     "release_model_around_call": true
+  },
+  "svg2png": {
+    "release_model_around_call": false
   }
 }
