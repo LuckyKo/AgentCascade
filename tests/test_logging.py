@@ -16,12 +16,14 @@ No event loop and no sockets: the asyncio record shapes are built by hand exactl
 `exc_info`).
 """
 
+import io
 import logging
 
 import pytest
 
 import agent_cascade.log as log_module
-from agent_cascade.log import _AppLogBridgeHandler, _ProactorTeardownFilter, _install_asyncio_log_bridge
+from agent_cascade.log import (_AppLogBridgeHandler, _ProactorTeardownFilter, _install_asyncio_log_bridge,
+                               _install_http_client_log_bridges, install_uvicorn_log_bridge)
 
 # The exact message `events.Handle._run` puts in context['message'] (plus the 'handle:' line
 # that BaseEventLoop.default_exception_handler appends).
@@ -230,3 +232,159 @@ def test_installed_bridge_silences_the_real_proactor_scenario(app_log):
         asyncio_logger.error(_PROACTOR_MSG,
                              exc_info=(ConnectionResetError, ConnectionResetError(10054, 'reset'), None))
         assert recorder.records == []
+
+
+# ── BUG_0148: uvicorn / httpx loggers — bridge once, never twice ─────────────
+
+
+class _uvicorn_configured:
+    """Reproduce uvicorn 0.34's LOGGING_CONFIG graph: own StreamHandlers, propagate=False.
+
+    The ``StreamHandler``s stand in for the stderr/stdout handlers uvicorn installs; whatever they
+    receive is what AC's ``_CapturingStream`` would re-log as a nameless WARNING, and what the
+    bridge must therefore prevent from firing at all.
+    """
+
+    def __enter__(self):
+        self._saved = {}
+        for name in ('uvicorn', 'uvicorn.error', 'uvicorn.access'):
+            lg = logging.getLogger(name)
+            self._saved[name] = (list(lg.handlers), lg.level, lg.propagate)
+            lg.handlers = []
+            lg.setLevel(logging.INFO)
+
+        # uvicorn / uvicorn.access carry handlers and do not propagate.
+        self.stderr_stream = io.StringIO()
+        self.stdout_stream = io.StringIO()
+        logging.getLogger('uvicorn').addHandler(logging.StreamHandler(self.stderr_stream))
+        logging.getLogger('uvicorn').propagate = False
+        logging.getLogger('uvicorn.access').addHandler(logging.StreamHandler(self.stdout_stream))
+        logging.getLogger('uvicorn.access').propagate = False
+        logging.getLogger('uvicorn.error').propagate = True
+        return self
+
+    def __exit__(self, *exc_info):
+        for name, (handlers, level, propagate) in self._saved.items():
+            lg = logging.getLogger(name)
+            lg.handlers = handlers
+            lg.setLevel(level)
+            lg.propagate = propagate
+        return False
+
+
+def _bridges(logger_name):
+    return [h for h in logging.getLogger(logger_name).handlers if isinstance(h, _AppLogBridgeHandler)]
+
+
+def test_uvicorn_bridge_removes_upstream_handlers_and_bridges_only_the_root(app_log):
+    with _uvicorn_configured():
+        # Same as uvicorn 0.34: uvicorn + uvicorn.access carry the StreamHandlers.
+        for name in ('uvicorn', 'uvicorn.access'):
+            assert any(isinstance(h, logging.StreamHandler) for h in logging.getLogger(name).handlers), name
+
+        install_uvicorn_log_bridge()
+
+        for name in ('uvicorn', 'uvicorn.error', 'uvicorn.access'):
+            assert not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger(name).handlers), name
+        # One bridge on the tree root only: the children reach it through the handler walk.
+        assert len(_bridges('uvicorn')) == 1
+        assert _bridges('uvicorn.error') == []
+        assert _bridges('uvicorn.access') == []
+
+
+def test_uvicorn_error_is_logged_once_with_its_real_name(app_log):
+    _, recorder = app_log
+    with _uvicorn_configured() as state:
+        install_uvicorn_log_bridge()
+
+        logging.getLogger('uvicorn.error').warning('Invalid HTTP request received.')
+
+        assert [r.getMessage() for r in recorder.records] == ['Invalid HTTP request received.']
+        assert recorder.records[0].levelno == logging.WARNING
+        assert recorder.records[0].name == 'uvicorn.error'
+        # The upstream stderr handler is detached, so nothing is re-captured as a second line.
+        assert state.stderr_stream.getvalue() == ''
+
+
+def test_uvicorn_access_record_is_logged_once_with_args_expanded(app_log):
+    _, recorder = app_log
+    with _uvicorn_configured() as state:
+        install_uvicorn_log_bridge()
+
+        logging.getLogger('uvicorn.access').info('%s - "%s %s HTTP/%s" %d',
+                                                 '127.0.0.1:41000', 'GET', '/api/state', '1.1', 200)
+
+        assert len(recorder.records) == 1
+        assert recorder.records[0].getMessage() == '127.0.0.1:41000 - "GET /api/state HTTP/1.1" 200'
+        assert recorder.records[0].levelno == logging.INFO
+        assert state.stdout_stream.getvalue() == ''
+
+
+def test_uvicorn_bridge_preserves_levels_and_is_idempotent(app_log):
+    with _uvicorn_configured():
+        uvicorn_logger = install_uvicorn_log_bridge()
+        install_uvicorn_log_bridge()
+
+        assert len(_bridges('uvicorn')) == 1
+        assert uvicorn_logger.propagate is False
+        # uvicorn's quietness policy (log_level='warning') is untouched.
+        assert uvicorn_logger.level == logging.INFO
+        assert logging.getLogger('uvicorn.access').level == logging.INFO
+        assert logging.getLogger('uvicorn.error').propagate is True
+
+
+@pytest.mark.parametrize('app_level,expected', [(logging.INFO, logging.WARNING), (logging.DEBUG, logging.DEBUG)])
+def test_http_client_loggers_bridge_with_a_quiet_default(app_log, app_level, expected):
+    saved = {}
+    try:
+        for name in ('httpx', 'httpcore'):
+            lg = logging.getLogger(name)
+            saved[name] = (list(lg.handlers), lg.level, lg.propagate)
+            lg.handlers = []
+            lg.setLevel(logging.NOTSET)
+
+        assert _install_http_client_log_bridges(app_level) == expected
+        for name in ('httpx', 'httpcore'):
+            lg = logging.getLogger(name)
+            assert lg.level == expected
+            assert lg.propagate is False
+            assert len(_bridges(name)) == 1
+        # Idempotent: a second install must not stack a second bridge.
+        _install_http_client_log_bridges(app_level)
+        assert len(_bridges('httpx')) == 1
+    finally:
+        for name, (handlers, level, propagate) in saved.items():
+            lg = logging.getLogger(name)
+            lg.handlers = handlers
+            lg.setLevel(level)
+            lg.propagate = propagate
+
+
+def test_http_client_request_lines_are_quiet_by_default_but_visible_in_debug(app_log):
+    _, recorder = app_log
+    saved = {}
+    try:
+        for name in ('httpx', 'httpcore'):
+            lg = logging.getLogger(name)
+            saved[name] = (list(lg.handlers), lg.level, lg.propagate)
+            lg.handlers = []
+            lg.setLevel(logging.NOTSET)
+
+        _install_http_client_log_bridges(logging.INFO)
+        httpx_logger = logging.getLogger('httpx')
+        httpx_logger.info('HTTP Request: GET http://127.0.0.1:1234/v1/models "HTTP/1.1 200 OK"')
+        assert recorder.records == []  # one line per request would flood console.log
+
+        httpx_logger.warning('connection pool exhausted')
+        assert [r.levelno for r in recorder.records] == [logging.WARNING]
+
+        recorder.records.clear()
+        _install_http_client_log_bridges(logging.DEBUG)
+        httpx_logger.info('HTTP Request: GET http://127.0.0.1:1234/v1/models "HTTP/1.1 200 OK"')
+        assert [r.levelno for r in recorder.records] == [logging.INFO]
+    finally:
+        for name, (handlers, level, propagate) in saved.items():
+            lg = logging.getLogger(name)
+            lg.handlers = handlers
+            lg.setLevel(level)
+            lg.propagate = propagate

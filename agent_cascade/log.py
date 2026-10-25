@@ -241,6 +241,61 @@ def _install_asyncio_log_bridge():
     _asyncio_bridge_installed = True
 
 
+# HTTP client loggers. They install no handlers of their own, so a bridge cannot double-log.
+# `httpx` emits one INFO line PER REQUEST, so the default stays WARNING (today's effective level
+# under a handler-less root); debug runs get the request lines (BUG_0148).
+_HTTP_CLIENT_LOGGERS = ('httpx', 'httpcore')
+
+
+def _install_http_client_log_bridges(app_level):
+    """Bridge ``httpx``/``httpcore`` into the app log, quiet by default (BUG_0148).
+
+    Returns the level applied to them (``DEBUG`` when the app itself runs at DEBUG, else
+    ``WARNING``) so a caller/test can assert the policy.
+    """
+    http_level = logging.DEBUG if app_level <= logging.DEBUG else logging.WARNING
+    for name in _HTTP_CLIENT_LOGGERS:
+        http_logger = logging.getLogger(name)
+        if not any(isinstance(h, _AppLogBridgeHandler) for h in http_logger.handlers):
+            http_logger.addHandler(_AppLogBridgeHandler())
+        http_logger.propagate = False
+        http_logger.setLevel(http_level)
+    return http_level
+
+
+_UVICORN_LOGGERS = ('uvicorn', 'uvicorn.error', 'uvicorn.access')
+
+
+def install_uvicorn_log_bridge():
+    """Route uvicorn's loggers into the app log exactly once, without double-logging (BUG_0148).
+
+    uvicorn installs its own ``StreamHandler``s (``ext://sys.stderr`` / ``ext://sys.stdout``, both
+    resolving to AC's capturing streams) and sets ``propagate=False``. Left in place, every uvicorn
+    line is written to stderr, re-captured by :class:`_CapturingStream` and re-logged as a nameless
+    WARNING from ``log.py`` — and a record would ALSO be emitted by the bridge, i.e. twice.
+
+    So: drop the upstream ``StreamHandler``s, let all three uvicorn loggers propagate, and attach a
+    single bridge to the tree root (``uvicorn``) where records from ``uvicorn.error`` /
+    ``uvicorn.access`` arrive via the normal handler walk. Levels are never touched — uvicorn's
+    ``log_level`` quietness is preserved. Must be called AFTER uvicorn applies its LOGGING_CONFIG
+    (``api_server``'s startup hook); uvicorn's non-incremental ``dictConfig`` wipes handlers.
+
+    Idempotent: safe to call repeatedly.
+    """
+    for name in _UVICORN_LOGGERS:
+        uvicorn_logger = logging.getLogger(name)
+        for handler in list(uvicorn_logger.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                uvicorn_logger.removeHandler(handler)
+        uvicorn_logger.propagate = True
+
+    root = logging.getLogger(_UVICORN_LOGGERS[0])
+    if not any(isinstance(h, _AppLogBridgeHandler) for h in root.handlers):
+        root.addHandler(_AppLogBridgeHandler())
+    root.propagate = False
+    return root
+
+
 def setup_logger(level=None):
     if level is None:
         if os.getenv('AGENT_CASCADE_DEBUG', '0').strip().lower() in ('1', 'true'):
@@ -294,8 +349,9 @@ def setup_logger(level=None):
         file_handler.setFormatter(formatter)
         _logger.addHandler(file_handler)
 
-    # BUG_0147: give third-party loggers (starting with asyncio) a path into the app log.
+    # BUG_0147/0148: give handler-less third-party loggers a path into the app log.
     _install_asyncio_log_bridge()
+    _install_http_client_log_bridges(level)
 
     return _logger, _original_stdout, _original_stderr
 

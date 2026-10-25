@@ -377,7 +377,7 @@ def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance
 
 
 def create_app(agents, agent_pool, config=None, auto_security=True):
-    from agent_cascade.log import logger
+    from agent_cascade.log import install_uvicorn_log_bridge, logger
 
     """
     Create the FastAPI application.
@@ -1049,6 +1049,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.on_event('startup')
     async def startup():
+        # BUG_0148: take over uvicorn's loggers now that uvicorn has applied its
+        # LOGGING_CONFIG (its dictConfig wipes handlers, so this cannot run earlier).
+        # Removes uvicorn's stderr/stdout StreamHandlers (whose output AC captures as
+        # nameless WARNINGs) and routes its records through the app logger exactly once.
+        try:
+            install_uvicorn_log_bridge()
+        except Exception as e:  # noqa: BLE001 - logging setup must never block startup
+            logger.warning(f"uvicorn log bridge install failed (non-critical): {e}")
+
         # Create the send queue against THIS loop before spawning the sender task so it is
         # bound to the correct (current) event loop, not a stale one from create_app() time.
         _get_send_queue()
