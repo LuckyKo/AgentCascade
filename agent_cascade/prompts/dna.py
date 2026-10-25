@@ -582,7 +582,7 @@ TOOL_METADATA = {
                 'type':
                     'string',
                 'description':
-                    'The class of agent to call (e.g. "coder", "researcher"). Only required when starting a NEW instance.'
+                    'The class of agent to call (e.g. "coder", "researcher"). Required only when starting a NEW instance; when instance_name already exists its own class is used, so you may omit this (if given, it must match the existing instance).'
             },
             'instance_name': {
                 'type':
@@ -637,7 +637,7 @@ TOOL_METADATA = {
                     'Controls which specialized skills are loaded for this agent call. Must be a real JSON array of skill names (e.g. ["skill-a", "skill-b"]), or one of the strings "AUTO" / "NONE", or omitted. Do NOT pass a string representation of an array like "[\\"skill-a\\"]". Use scan_skills to discover available skills.'
             },
         },
-        'required': ['agent_class', 'instance_name', 'task'],
+        'required': ['instance_name', 'task'],
     },
     'dismiss_agent': {
         'description': ("End a sub-agent instance's current task and clear its conversation context. "
