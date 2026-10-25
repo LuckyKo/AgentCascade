@@ -1,5 +1,6 @@
 """Grep subsystem — pattern compilation, tool availability check, and mixin for file search."""
 
+import base64
 import fnmatch
 import json
 import re
@@ -53,6 +54,25 @@ def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str =
     here so their byte-level output cannot drift apart.
     """
     return f"{rel_path}:{line_num}: {marker}{content}"
+
+
+def _rg_lines_text(lines_data: dict) -> str:
+    """Extract one line's text from a ripgrep ``--json`` ``lines`` object.
+
+    ripgrep carries the content in exactly one of two mutually exclusive fields:
+    ``lines.text`` when the line is valid UTF-8, or ``lines.bytes`` (base64 of the raw
+    line bytes, newline included) when it is not. Reading only ``text`` silently rendered
+    every non-UTF-8 match and context line with an EMPTY content column (BUG_0145) — the
+    path/line metadata still arrived, so the result looked like a genuine blank line.
+
+    The ``bytes`` fallback is decoded with ``errors='replace'``, matching the lossy
+    decoding used for the subprocess's stdout and for ``read_file`` (so the content column
+    shows what the canonical read view shows instead of dropping the bytes).
+    """
+    text = lines_data.get('text')
+    if text is None:
+        text = base64.b64decode(lines_data.get('bytes', '')).decode('utf-8', errors='replace')
+    return text.rstrip('\r\n')
 
 
 @lru_cache(maxsize=1)
@@ -454,10 +474,12 @@ class GrepMixin:
                             else:
                                 line_num = line_num_data
 
-                            # rg's lines.text always carries a trailing newline
-                            # ('\n' on POSIX, '\r\n' on Windows) — strip it so the
-                            # entries don't gain blank lines when joined below.
-                            match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
+                            # rg's line payload always carries a trailing newline
+                            # ('\n' on POSIX, '\r\n' on Windows) — _rg_lines_text strips it
+                            # so the entries don't gain blank lines when joined below.
+                            # BUG_0145: the shared extractor also decodes lines.bytes, which
+                            # rg emits for non-UTF-8 lines, instead of rendering them blank.
+                            match_text = _rg_lines_text(data.get('lines', {}))
 
                             normalized_path = file_path.replace('\\', '/')
 
@@ -475,9 +497,10 @@ class GrepMixin:
                             else:
                                 line_num = line_num_data
 
-                            # Strip rg's trailing newline (same as 'match' branch above) —
+                            # Strip the trailing newline (same as 'match' branch above) —
                             # would otherwise create blank lines between entries.
-                            match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
+                            # BUG_0145: lines.bytes fallback lives in _rg_lines_text.
+                            match_text = _rg_lines_text(data.get('lines', {}))
                             normalized_path = file_path.replace('\\', '/')
                             # BUG_0144: no indent on context lines — raw file bytes only.
                             formatted.append(_format_grep_entry(normalized_path, line_num, match_text))
@@ -665,7 +688,10 @@ class GrepMixin:
             return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
         try:
-            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            # BUG_0145: decode with 'replace' (not 'ignore') so a line containing invalid
+            # bytes still shows the surrounding text, matching read_file and the rg fast
+            # path's lines.bytes decoding. 'ignore' silently deleted those bytes.
+            content = file_path.read_text(encoding='utf-8', errors='replace')
         except Exception as e:
             return f"Error reading file {file_path.name}: {str(e)}"
 
@@ -1002,7 +1028,9 @@ class GrepMixin:
 
                 # File reading and pattern matching — OUTSIDE the exclude block so it runs regardless
                 try:
-                    content = file_path.read_text(encoding='utf-8', errors='ignore')
+                    # BUG_0145: 'replace' (not 'ignore') keeps non-UTF-8 lines renderable,
+                    # matching read_file and the rg fast path (see _rg_lines_text).
+                    content = file_path.read_text(encoding='utf-8', errors='replace')
                     lines = content.split('\n')
 
                     if context > 0:

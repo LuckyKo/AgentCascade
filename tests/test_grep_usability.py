@@ -493,6 +493,58 @@ def test_grep_context_lines_are_verbatim():
     print('[PASS] test_grep_context_lines_are_verbatim')
 
 
+def test_grep_non_utf8_line_content_surfaced():
+    """BUG_0145: a line with invalid UTF-8 bytes must still render its text.
+
+    ripgrep's ``--json`` protocol reports such a line as ``lines.bytes`` (base64) instead
+    of ``lines.text``. The parser only read ``text``, so the match was counted and
+    attributed to the right line but its content column came out empty — indistinguishable
+    from a genuinely blank line. Both the fast path and the Python fallback must surface
+    the readable text (U+FFFD for the undecodable byte), matching ``read_file``.
+    """
+    import unittest.mock as mock
+
+    import agent_cascade.operation_manager.grep as grep_module
+    from agent_cascade.operation_manager import OperationManager
+
+    # 0x97 is an em dash in cp1252 and an invalid UTF-8 byte.
+    raw_content = b'before\nExact rule \x97 bad byte\nafter\n'
+    expected_match = 'Exact rule \ufffd bad byte'
+
+    def _check(label):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, 'latin1.md').write_bytes(raw_content)
+            om = OperationManager(base_dir=tmpdir)
+            for ctx in (0, 2):
+                result = om.grep(pattern='Exact rule', path='.', context=ctx)
+                assert 'Found 1 matches' in result, f"Expected 1 match ({label}, ctx={ctx}): {result}"
+                body = result.split('\n\n', 1)[1]
+                entries = [ln for ln in body.splitlines() if ln and ln != '---']
+                match_lines = [
+                    ln for ln in entries
+                    if (ln.split(':', 2)[2][1:].startswith('>>>'))
+                    or expected_match in ln.split(':', 2)[2]
+                ]
+                assert len(match_lines) == 1, \
+                    f"Match line missing from output ({label}, ctx={ctx}): {body!r}"
+                rendered = match_lines[0].split(':', 2)[2][1:]
+                if rendered.startswith('>>>'):
+                    rendered = rendered[3:]
+                assert rendered == expected_match, (
+                    f"{label} (ctx={ctx}): non-UTF-8 line content not surfaced verbatim.\n"
+                    f"  expected={expected_match!r}\n  rendered={rendered!r}")
+                if ctx:
+                    # Neighbouring (valid UTF-8) context lines are unaffected.
+                    assert any(ln.endswith('before') for ln in entries), f"missing context: {body!r}"
+                    assert any(ln.endswith('after') for ln in entries), f"missing context: {body!r}"
+
+    if _require_subprocess_grep('test_grep_non_utf8_line_content_surfaced (fast path)'):
+        _check('subprocess fast path')
+    with mock.patch.object(grep_module, '_check_tool_availability', return_value=(False, False)):
+        _check('python fallback')
+    print('[PASS] test_grep_non_utf8_line_content_surfaced')
+
+
 def test_grep_comma_glob_supported():
     """BUG_0056: comma-separated glob patterns are split and applied per-pattern in all grep paths."""
     # Verify the splitting logic used by ripgrep/GNU-grep/Python-fallback paths.
@@ -766,6 +818,7 @@ if __name__ == '__main__':
         test_grep_fast_path_no_blank_lines_between_matches,
         test_grep_fast_path_context_no_blank_lines,
         test_grep_context_lines_are_verbatim,
+        test_grep_non_utf8_line_content_surfaced,
         test_grep_comma_glob_supported,
         test_list_exclude_prunes_git_subtree,
         test_list_exclude_git_glob_form,

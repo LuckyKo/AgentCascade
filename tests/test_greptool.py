@@ -433,6 +433,30 @@ def test_context_lines():
         fixture.teardown()
 
 
+def test_rg_json_lines_bytes_decoded():
+    """BUG_0145: rg --json emits `lines.bytes` (base64) instead of `lines.text` when the
+    line is not valid UTF-8; the shared extractor must decode it instead of returning ''.
+    """
+    print('\n--- Test: rg --json lines.bytes fallback (BUG_0145) ---')
+    import base64
+
+    from agent_cascade.operation_manager.grep import _rg_lines_text
+
+    # Valid UTF-8 lines still come through `text`, with rg's trailing newline stripped.
+    assert _rg_lines_text({'text': 'plain text\r\n'}) == 'plain text'
+    assert _rg_lines_text({'text': 'plain text\n'}) == 'plain text'
+
+    # Invalid UTF-8 arrives as base64 `bytes`; the readable text must survive.
+    decoded = _rg_lines_text({'bytes': base64.b64encode(b'Exact rule \x97 bad byte\n').decode('ascii')})
+    assert decoded == 'Exact rule \ufffd bad byte', f'lines.bytes not decoded: {decoded!r}'
+
+    # Defensive: neither field present -> empty content, never a crash.
+    assert _rg_lines_text({}) == ''
+
+    print('  text passthrough, bytes fallback, and empty-object case OK')
+    print('  [PASS]')
+
+
 def test_smart_case_behavior():
     """Test: smart_case=True (default) — lowercase pattern is case-insensitive, uppercase is case-sensitive."""
     print('\n--- Test: Smart case behavior ---')
@@ -1393,6 +1417,7 @@ def main():
         ('Non-existent path', test_non_existent_path),
         ('Invalid regex', test_invalid_regex),
         ('Context lines', test_context_lines),
+        ('BUG_0145 rg --json lines.bytes decoded', test_rg_json_lines_bytes_decoded),
         ('Smart case behavior', test_smart_case_behavior),
         ('ignore_vcs=False', test_ignore_vcs_false),
         # Regression tests
