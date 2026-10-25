@@ -1138,6 +1138,11 @@ class ShellCmd(BaseTool):
         after the unload, or came back mid-command (another session reloading them), the note
         says the guarantee was broken and the results are void. Endpoints that cannot report
         residency make no claim at all.
+
+        BUG_0152: a failed ``POST /v1/unload_all`` (the autoloader returns 500 and keeps the
+        model tracked when it could not verify the tree drain) is NOT reported as "unloaded".
+        When residency is also unverifiable the note says the unload failed and the results are
+        void, rather than asserting a release that never happened.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -1176,6 +1181,10 @@ class ShellCmd(BaseTool):
         resident_before = resident_after = None
         watch_t0 = None
         elapsed = None
+        # BUG_0152: the autoloader answers 500 when it could not verify the release (e.g. a
+        # tree drain timed out on an orphaned engine child) and keeps the model tracked. That
+        # is not "unloaded", so the result is carried into the note instead of being dropped.
+        unload_ok = None
         if capable and not advisor_will_run:
             from agent_cascade.state_ops import save_instance_state
             # Lock around the save to match ExecutionEngine.save_before_slot_yield: makes the
@@ -1189,10 +1198,14 @@ class ShellCmd(BaseTool):
             # First statement inside the try in ShellMixin.execute_shell_command → its
             # exceptions hit that method's except, and this method's own finally still
             # restores.
-            nonlocal freed, resident_before, watch_t0
+            nonlocal freed, resident_before, watch_t0, unload_ok
             freed = True  # set BEFORE the POST (media_gen V2/F1 discipline)
             from agent_cascade.state_ops import probe_resident_models, unload_all_models
-            if not unload_all_models(ep['api_base']):
+            # Until the autoloader says otherwise the release did NOT happen: an exception
+            # here must not leave `unload_ok` at its "never attempted" None.
+            unload_ok = False
+            unload_ok = unload_all_models(ep['api_base'])
+            if not unload_ok:
                 logger.warning('[shell_cmd] model not unloaded before command')
             # BUG_0150 baseline: if the cards are still held after a successful 200, the
             # unload was a no-op (pinned model / control-plane miss) and the run is doomed
@@ -1260,9 +1273,25 @@ class ShellCmd(BaseTool):
         note = ''
         if freed:
             violation_kind, violation_text = _safe_mode_violation(resident_before, resident_after, elapsed)
-            head = '[safe] Local model(s) unloaded before the command'
+            unload_failed = unload_ok is False
             if violation_kind is None:
-                head += f' and verified free for its full duration ({elapsed:.0f}s)'
+                head = (f'[safe] Local model(s) unloaded before the command and verified free '
+                        f'for its full duration ({elapsed:.0f}s)')
+            elif violation_kind == 'unknown' and unload_failed:
+                # BUG_0152: the POST failed AND nothing can confirm the release. The old wording
+                # ("unloaded before the command") was an outright false claim here — this is the
+                # 2026-10-25 shape: a 500 tree-drain timeout, the model still tracked, and the
+                # loader free to reload it mid-command.
+                head = ('[safe] WARNING: the pre-command unload FAILED and this endpoint cannot '
+                        'report what is resident')
+                violation_kind = 'unload_failed'
+                violation_text = ('the autoloader did not confirm the release, so the model may have '
+                                  'stayed loaded while the command ran. Any result that needed free '
+                                  'VRAM/RAM is VOID; re-run with the cards free.')
+            else:
+                head = '[safe] Local model(s) unloaded before the command'
+                if unload_failed and violation_text:
+                    violation_text += ' (the pre-command unload request itself failed)'
             if restored:
                 tail = 'KV state restored after.'
             elif saved or advisor_will_run:

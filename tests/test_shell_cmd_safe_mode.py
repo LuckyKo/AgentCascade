@@ -998,3 +998,64 @@ class TestProbeResidentModels:
     def test_non_dict_body_degrades_to_none(self):
         with patch('agent_cascade.state_ops.probe_memory_status', return_value=['not', 'a', 'status']):
             assert probe_resident_models('http://127.0.0.1:1234/v1') is None
+
+
+class TestUnloadFailureIsNotClaimedAsUnloaded:
+    """BUG_0152: the autoloader answers 500 and keeps the model tracked when it cannot verify
+    the tree drain. Reporting that as "unloaded before the command" is a false claim — the
+    2026-10-25 incident had exactly that (500 at 08:20:56, model still tracked, reloaded by
+    the loader at 08:21:04 straight into a running GPU test)."""
+
+    def _run(self, order, *, unload_factory, probe):
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+        with _seam_patches(order, unload_factory=unload_factory, probe=probe):
+            return tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                      justification='run it', cwd='.', timeout=None)
+
+    def test_failed_unload_with_unverifiable_residency_is_a_warning_not_a_claim(self):
+        order = []
+        result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
+                           probe=None)
+
+        assert order == ['save', 'approval', 'unload', 'run', 'restore']  # still ran
+        assert 'unloaded before the command' not in result
+        assert 'verified free' not in result
+        assert '[safe] WARNING: the pre-command unload FAILED' in result
+        assert 'VOID' in result
+
+    def test_failed_unload_but_verified_free_still_states_the_guarantee(self):
+        # The probe is stronger evidence than the POST result: a failed unload whose cards are
+        # observably empty is a clean run, not a warning.
+        order = []
+        result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
+                           probe=[[], []])
+
+        assert 'verified free for its full duration' in result
+        assert 'WARNING' not in result
+
+    def test_failed_unload_with_resident_models_names_the_failure_too(self):
+        resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
+        order = []
+        result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
+                           probe=[resident, resident])
+
+        assert '[safe] WARNING:' in result
+        assert 'were still resident right after the pre-command unload' in result
+        assert 'the pre-command unload request itself failed' in result
+        assert 'VOID' in result
+
+    def test_unload_that_raises_is_also_not_claimed(self):
+        order = []
+
+        def _boom(base):
+            order.append('unload')
+            raise RuntimeError('socket exploded')
+
+        result = self._run(order, unload_factory=_boom, probe=None)
+
+        assert 'unloaded before the command' not in result
+        assert 'the pre-command unload FAILED' in result
+        assert 'ERROR: Approved but execution failed' in result
