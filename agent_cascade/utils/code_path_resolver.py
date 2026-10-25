@@ -71,8 +71,17 @@ def set_active_mappings(host_to_container: dict):
             raise ValueError(f"Mount entry '{mount_key}' missing required keys ('host', 'container'): {mapping}")
         host_path = mapping['host']
         container_path = mapping['container']
-        # Normalize host path to forward slashes for consistent matching
-        normalized_host = host_path.replace('\\', '/')
+        # Normalize host path for consistent matching: forward slashes and no trailing
+        # slash, so 'N:\\x' / 'N:/x' / 'N:/x/' are one mapping (BUG_0100).
+        normalized_host = _normalize_host_prefix(host_path)
+
+        if not normalized_host:
+            _logger.warning(
+                "Ignoring mount '%s': host path %r normalizes to an empty prefix.",
+                mount_key,
+                host_path,
+            )
+            continue
 
         if normalized_host in new_mappings:
             _logger.warning(
@@ -94,11 +103,27 @@ def get_active_mappings() -> dict:
     return dict(_ACTIVE_PATH_MAPPINGS)
 
 
+def _normalize_host_prefix(host_path: str) -> str:
+    """Normalize a host mount path into the form used for prefix matching.
+
+    Forward slashes everywhere (so ``N:\\x`` and ``N:/x`` compare equal) and no
+    trailing slash (so ``N:/x`` and ``N:/x/`` collapse to the same mapping).
+    """
+    return host_path.replace('\\', '/').rstrip('/')
+
+
 def _resolve_single_path(path: str) -> str:
     r"""Resolve a single Windows path to its Docker container equivalent.
 
     Uses longest-prefix matching to handle nested directory structures correctly.
     e.g., AgentCascade_unified (longer) matches before AgentWorkspace (shorter).
+
+    A mapping only matches on a **path-segment boundary**: the host prefix must
+    cover either the whole path or a complete leading segment. Without that check
+    a mapping for ``N:/work/WD/AgentCascade`` also matched the sibling directory
+    ``N:/work/WD/AgentCascade-phase7`` and rewrote it to
+    ``<container>/-phase7/...`` (BUG_0100). Unmapped siblings are now returned
+    unchanged, so the caller sees the real host path in any resulting error.
 
     Args:
         path: A Windows-style absolute path string
@@ -114,20 +139,26 @@ def _resolve_single_path(path: str) -> str:
     # Normalize to forward slashes for consistent matching
     normalized = path.replace('\\', '/')
 
-    # Sort by length descending so longer prefixes match first
+    # Sort by length descending so longer (more specific) prefixes match first
     sorted_mappings = sorted(_ACTIVE_PATH_MAPPINGS.items(), key=lambda x: len(x[0]), reverse=True)
 
     for host_prefix, container_prefix in sorted_mappings:
-        normalized_host = host_prefix.replace('\\', '/')
+        normalized_host = _normalize_host_prefix(host_prefix)
+        if not normalized_host:
+            # Defensive: an empty prefix would match every path.
+            continue
 
-        if normalized.startswith(normalized_host):
-            # Extract relative part after the mapped prefix
-            relative_part = normalized[len(normalized_host):].lstrip('/')
+        if normalized == normalized_host:
+            return container_prefix
 
-            if relative_part:
-                return f"{container_prefix}/{relative_part}"
-            else:
-                return container_prefix
+        # Require a segment boundary after the prefix (BUG_0100).
+        if not normalized.startswith(normalized_host + '/'):
+            continue
+
+        relative_part = normalized[len(normalized_host) + 1:]
+        if relative_part:
+            return f"{container_prefix}/{relative_part}"
+        return container_prefix
 
     # No mapping found, return original path unchanged
     return path
