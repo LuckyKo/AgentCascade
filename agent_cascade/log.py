@@ -152,6 +152,95 @@ class _CapturingStream:
             raise io.UnsupportedOperation('fileno') from None
 
 
+class _AppLogBridgeHandler(logging.Handler):
+    """Forward a third-party logger's records into the app logger (BUG_0147).
+
+    Records from loggers that use ``logging.getLogger(__name__)`` (asyncio, httpx, uvicorn,
+    MCP, …) have no handler on their own logger and none on root, so ``logging`` sends them
+    to ``logging.lastResort``: a WARNING-level ``_StderrHandler`` bound to ``sys.stderr`` at
+    emit time. Since ``init_logging()`` replaces ``sys.stderr`` with :class:`_CapturingStream`,
+    that turns an asyncio **ERROR** into a nameless **WARNING** attributed to ``log.py`` — and
+    silently drops every INFO/DEBUG record.
+
+    This handler re-dispatches the *record object* (not formatted text) to the live app logger,
+    so the emitting library's level, ``filename``/``lineno`` and traceback all survive.
+    """
+
+    def emit(self, record):
+        try:
+            # Enforce the app logger's level: Logger.handle() bypasses isEnabledFor(), so a
+            # record that passed the source logger's gate must still respect ours.
+            if not logger.isEnabledFor(record.levelno):
+                return
+            logger.handle(record)
+        except Exception:  # noqa: BLE001 - logging must never raise into the emitter
+            self.handleError(record)
+
+
+# Profile callback that CPython 3.12 runs on the Windows Proactor loop when a transport dies.
+_PROACTOR_TEARDOWN_CALLBACK = '_ProactorBasePipeTransport._call_connection_lost'
+
+
+class _ProactorTeardownFilter(logging.Filter):
+    """Downgrade the benign Windows proactor teardown traceback to one DEBUG line (BUG_0146).
+
+    ``asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost`` closes the
+    socket with an unguarded ``sock.shutdown(SHUT_RDWR)`` inside a ``finally``. When the peer
+    has already reset the connection, that raises ``ConnectionResetError`` (WSAECONNRESET 10054)
+    out of the callback, and asyncio reports "Exception in callback …" plus a traceback. It
+    means only "the other end went away" — most often a browser tab reload dropping its
+    WebSocket and idle keep-alive HTTP connections to uvicorn.
+
+    Filtered records are DROPPED (not mutated), and a single DEBUG line is emitted so the event
+    stays traceable under ``AGENT_CASCADE_DEBUG=1`` without a 6-line traceback in normal runs.
+    Anything else — a different callback, a different exception type, a real asyncio failure —
+    passes through untouched.
+    """
+
+    _BENIGN = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+    def filter(self, record):
+        exc = record.exc_info[1] if record.exc_info else None
+        if not isinstance(exc, self._BENIGN):
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - malformed record: let the normal path report it
+            return True
+        if _PROACTOR_TEARDOWN_CALLBACK not in message:
+            return True
+        try:
+            logger.debug('Suppressed benign Windows proactor teardown (%s) on %s - peer closed the socket',
+                         type(exc).__name__,
+                         _PROACTOR_TEARDOWN_CALLBACK)
+        except Exception:  # noqa: BLE001 - never let the downgrade itself break logging
+            pass
+        return False
+
+
+_asyncio_bridge_installed = False
+
+
+def _install_asyncio_log_bridge():
+    """Route the ``asyncio`` logger into the app log instead of ``logging.lastResort``.
+
+    Idempotent and lock-free on purpose: it is called from :func:`setup_logger`, which
+    ``init_logging()`` already invokes under ``_init_lock``. ``propagate=False`` is set on the
+    *asyncio* logger only — the app logger keeps propagating to root so ``caplog`` and any
+    root-level handler still see AC's own records.
+    """
+    global _asyncio_bridge_installed
+    asyncio_logger = logging.getLogger('asyncio')
+    if _asyncio_bridge_installed or any(isinstance(h, _AppLogBridgeHandler) for h in asyncio_logger.handlers):
+        _asyncio_bridge_installed = True
+        return
+    bridge = _AppLogBridgeHandler()
+    bridge.addFilter(_ProactorTeardownFilter())
+    asyncio_logger.addHandler(bridge)
+    asyncio_logger.propagate = False
+    _asyncio_bridge_installed = True
+
+
 def setup_logger(level=None):
     if level is None:
         if os.getenv('AGENT_CASCADE_DEBUG', '0').strip().lower() in ('1', 'true'):
@@ -204,6 +293,9 @@ def setup_logger(level=None):
 
         file_handler.setFormatter(formatter)
         _logger.addHandler(file_handler)
+
+    # BUG_0147: give third-party loggers (starting with asyncio) a path into the app log.
+    _install_asyncio_log_bridge()
 
     return _logger, _original_stdout, _original_stderr
 
