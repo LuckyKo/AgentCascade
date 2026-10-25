@@ -546,7 +546,10 @@
       "frames": [
         "129_165",
         0
-      ]
+      ],
+      "dtype": "float16",
+      "torch_compile": false,
+      "batch_size": 1
     },
     "class_type": "RIFE VFI",
     "_meta": {

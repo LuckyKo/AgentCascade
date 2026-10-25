@@ -208,10 +208,26 @@
       "title": "Flux2Scheduler"
     }
   },
+  "75:75": {
+    "inputs": {
+      "text": [
+        "128",
+        0
+      ],
+      "clip": [
+        "75:71",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
   "75:79:77": {
     "inputs": {
       "conditioning": [
-        "128",
+        "75:75",
         0
       ],
       "latent": [
