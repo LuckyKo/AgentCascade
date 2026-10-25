@@ -110,6 +110,51 @@ def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> 
             return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} (elapsed {task_elapsed:.0f}s)\n{truncated}"
 
 
+def _safe_mode_violation(resident_before, resident_after, elapsed_s):
+    """Classify a broken safe-mode "cards are free" guarantee (BUG_0150).
+
+    ``resident_before`` / ``resident_after`` are :func:`state_ops.probe_resident_models`
+    results — a list of ``{'id', 'uptime_s'}``, or ``None`` when the endpoint cannot report
+    residency. ``elapsed_s`` is how long the command ran.
+
+    Returns ``(kind, text)``:
+      ``(None, '')``                  — verified: nothing was resident after the unload and
+                                        nothing came back while the command ran.
+      ``('unknown', '')``             — the endpoint cannot report residency; make no claim.
+      ``('resident_at_start', text)`` — models were STILL loaded right after the pre-command
+                                        unload (pinned, or governed by another control plane),
+                                        so the cards were never free.
+      ``('reloaded', text)``          — something loaded a model mid-command. ``uptime_s`` is
+                                        the model process's own uptime, so ``elapsed - uptime``
+                                        is *when* it came back ("T+Ns").
+
+    Pure function: the caller does the probing and the note formatting.
+    """
+    if resident_before is None or resident_after is None:
+        return 'unknown', ''
+    if resident_before:
+        names = ', '.join(sorted({m.get('id') or 'unknown model' for m in resident_before}))
+        return 'resident_at_start', (
+            f'local model(s) {names} were still resident right after the pre-command unload, so '
+            'the cards were never free (pinned model, or a control plane this endpoint does not '
+            'govern). Any result that needed free VRAM/RAM is VOID.')
+    if resident_after:
+        names = ', '.join(sorted({m.get('id') or 'unknown model' for m in resident_after}))
+        uptimes = [m.get('uptime_s') for m in resident_after
+                   if isinstance(m.get('uptime_s'), (int, float))]
+        if isinstance(elapsed_s, (int, float)) and uptimes and min(uptimes) < elapsed_s:
+            when = f'T+{max(0.0, elapsed_s - min(uptimes)):.0f}s'
+            return 'reloaded', (
+                f'local model(s) {names} were loaded again {when} into the command by a '
+                'concurrent session, so safe mode did NOT have the cards to itself. Any result '
+                'that needed free VRAM/RAM is VOID; re-run with the cards free.')
+        return 'reloaded', (
+            f'local model(s) {names} were resident again when the command finished, so a '
+            'concurrent session reloaded them mid-run. Any result that needed free VRAM/RAM is '
+            'VOID; re-run with the cards free.')
+    return None, ''
+
+
 @register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):
     """Execute a shell command (auto-approved for safe read-only commands like find/dir/ls, requires user approval for everything else)."""
@@ -1086,6 +1131,13 @@ class ShellCmd(BaseTool):
         a stale one); RAM safety still wins, so the unload is not rolled back. The advisor
         path keeps its stable-label restore — the advisor saved under the same label and the
         state FILE survives.
+
+        BUG_0150: the unload is a one-shot action, so the "cards are free" guarantee is
+        VERIFIED, not assumed — residency is probed right after the unload and again when the
+        command returns (before the restore loads our own model). If models were still loaded
+        after the unload, or came back mid-command (another session reloading them), the note
+        says the guarantee was broken and the results are void. Endpoints that cannot report
+        residency make no claim at all.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -1116,6 +1168,14 @@ class ShellCmd(BaseTool):
 
         saved = freed = False
         restored = False
+        # BUG_0150: the unload is a one-shot action — nothing stops another session from
+        # reloading the model one second later. Verify the guarantee instead of asserting it:
+        # probe residency right after the unload (cards actually free?) and again when the
+        # command returns (did they stay free?). Both probes are best-effort; None means the
+        # endpoint cannot report residency and no claim is made.
+        resident_before = resident_after = None
+        watch_t0 = None
+        elapsed = None
         if capable and not advisor_will_run:
             from agent_cascade.state_ops import save_instance_state
             # Lock around the save to match ExecutionEngine.save_before_slot_yield: makes the
@@ -1129,11 +1189,17 @@ class ShellCmd(BaseTool):
             # First statement inside the try in ShellMixin.execute_shell_command → its
             # exceptions hit that method's except, and this method's own finally still
             # restores.
-            nonlocal freed
+            nonlocal freed, resident_before, watch_t0
             freed = True  # set BEFORE the POST (media_gen V2/F1 discipline)
-            from agent_cascade.state_ops import unload_all_models
+            from agent_cascade.state_ops import probe_resident_models, unload_all_models
             if not unload_all_models(ep['api_base']):
                 logger.warning('[shell_cmd] model not unloaded before command')
+            # BUG_0150 baseline: if the cards are still held after a successful 200, the
+            # unload was a no-op (pinned model / control-plane miss) and the run is doomed
+            # regardless of what happens next. Start the clock AFTER the unload so "elapsed"
+            # is command time, not unload time.
+            resident_before = probe_resident_models(ep['api_base'])
+            watch_t0 = time.monotonic()
 
         try:
             result = pool.operation_manager.execute_shell_command(
@@ -1145,6 +1211,12 @@ class ShellCmd(BaseTool):
                 before_execute=(_release_model if capable else None),
             )
         finally:
+            # BUG_0150: probe BEFORE the restore below — that restore loads OUR model, which
+            # would otherwise be indistinguishable from a concurrent reload.
+            if freed:
+                from agent_cascade.state_ops import probe_resident_models
+                resident_after = probe_resident_models(ep['api_base'])
+                elapsed = time.monotonic() - watch_t0 if watch_t0 is not None else None
             try:
                 if freed and (saved or advisor_will_run):
                     # Model was released → restore KV to the endpoint we actually hold
@@ -1182,16 +1254,26 @@ class ShellCmd(BaseTool):
         # half of the note is driven by what actually ran: the restore is skipped when the
         # save failed and may itself fail, so claiming "KV state restored" unconditionally
         # made the tool output contradict the autoloader log in both incident reports.
+        # BUG_0150: the model half is now VERIFIED, not assumed — a concurrent session can
+        # reload the model mid-command, and a "successfully" run under memory starvation
+        # silently skips rows. Say so instead of implying a guarantee that never existed.
         note = ''
         if freed:
+            violation_kind, violation_text = _safe_mode_violation(resident_before, resident_after, elapsed)
+            head = '[safe] Local model(s) unloaded before the command'
+            if violation_kind is None:
+                head += f' and verified free for its full duration ({elapsed:.0f}s)'
             if restored:
-                note = ('[safe] Local model(s) unloaded before the command; KV state restored after.\n')
+                tail = 'KV state restored after.'
             elif saved or advisor_will_run:
                 # The restore ran but did not succeed (or was skipped because the held
                 # endpoint moved) — the KV is cold and the next turn reprocesses.
-                note = ('[safe] Local model(s) unloaded before the command; KV state could NOT be '
-                        'restored (the conversation will be reprocessed).\n')
+                tail = 'KV state could NOT be restored (the conversation will be reprocessed).'
             else:
-                note = ('[safe] Local model(s) unloaded before the command; KV state save failed, '
-                        'no restore attempted (the conversation will be reprocessed).\n')
+                tail = 'KV state save failed, no restore attempted (the conversation will be reprocessed).'
+            note = f'{head}; {tail}\n'
+            if violation_text:
+                note += f'[safe] WARNING: {violation_text}\n'
+                logger.warning('[shell_cmd] safe-mode guarantee broken (%s): %s',
+                               violation_kind, violation_text)
         return note + result

@@ -24,9 +24,9 @@ import pytest
 
 from agent_cascade.operation_manager import OperationManager
 from agent_cascade.operation_manager.shell import ShellMixin
-from agent_cascade.tools.custom.shell_cmd import ShellCmd
+from agent_cascade.tools.custom.shell_cmd import ShellCmd, _safe_mode_violation
 from agent_cascade.engine.core import ExecutionEngine
-from agent_cascade.state_ops import restore_held_slot_state
+from agent_cascade.state_ops import probe_resident_models, restore_held_slot_state
 from jsonschema import ValidationError
 
 CAPABLE_EP = {
@@ -156,16 +156,23 @@ def _router_held(api_base, model):
 
 def _seam_patches(order, *, save=True, unload=True, restore=True, popen=True,
                  save_factory=None, unload_factory=None, restore_factory=None,
-                 popen_factory=None):
+                 popen_factory=None, probe=None):
     """Install the seam's four patches (save/unload/restore/Popen) as order-recorders.
 
     Each boolean opts a patch out; each ``*_factory`` overrides that patch's
     side_effect (default = append the step name to ``order``). Also zeroes the
     drain-thread join timeout in ShellMixin.execute_shell_command so the plain-sync
     path doesn't burn real sleeps — the tests assert on call ORDER, not output.
+    ``probe`` feeds ``state_ops.probe_resident_models`` (BUG_0150): by default it returns
+    ``None`` (unverifiable) so no test ever touches the real autoloader and the note keeps
+    its pre-BUG_0150 wording; pass a value or a side_effect list to drive the guarantee check.
     Returns a contextlib.ExitStack for ``with _seam_patches(order):``.
     """
     stack = contextlib.ExitStack()
+    if probe is None:
+        stack.enter_context(patch('agent_cascade.state_ops.probe_resident_models', return_value=None))
+    else:
+        stack.enter_context(patch('agent_cascade.state_ops.probe_resident_models', side_effect=probe))
     if save:
         stack.enter_context(patch(
             'agent_cascade.state_ops.save_instance_state',
@@ -610,6 +617,7 @@ def _http_seam(order, *, restore_factory=None, save_factory=None):
         return True
 
     stack = contextlib.ExitStack()
+    stack.enter_context(patch('agent_cascade.state_ops.probe_resident_models', return_value=None))
     stack.enter_context(patch('agent_cascade.state_ops.restore_state', side_effect=_record_restore))
     if save_factory is not None:
         stack.enter_context(patch('agent_cascade.state_ops.save_state', side_effect=save_factory))
@@ -843,3 +851,150 @@ class TestSaveFailureGate:
 
         assert 'unload' not in order
         assert not result.startswith('[safe]')
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 20. BUG_0150: the unload is a ONE-SHOT action — verify the "cards are free"
+#     guarantee instead of asserting it. A concurrent session (supervisor, peer
+#     agent) can reload the model mid-command; the old note still claimed
+#     "unloaded before the command" and the run's rows silently degraded.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestSafeModeGuaranteeVerification:
+    def _run(self, order, *, probe):
+        inst = _make_instance()
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+        with _seam_patches(order, probe=probe):
+            return tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                      justification='run it', cwd='.', timeout=None)
+
+    def test_probes_straddle_the_command_before_the_restore(self):
+        order = []
+
+        def _probe(base):
+            order.append('probe')
+            return None
+
+        result = self._run(order, probe=_probe)
+
+        # Baseline right after the unload, re-check when the command returns, and both
+        # BEFORE the restore (the restore loads our own model — it must not be mistaken
+        # for a concurrent reload).
+        assert order == ['save', 'approval', 'unload', 'probe', 'run', 'probe', 'restore'], order
+        # Unverifiable → claim nothing either way, and keep the legacy wording.
+        assert 'verified free' not in result
+        assert 'WARNING' not in result
+        assert 'KV state restored after' in result
+
+    def test_verified_clean_states_the_cards_were_free(self):
+        result = self._run([], probe=[[], []])
+
+        assert 'verified free for its full duration' in result
+        assert 'WARNING' not in result
+
+    def test_still_resident_after_unload_reports_never_free(self):
+        resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
+        result = self._run([], probe=[resident, resident])
+
+        assert '[safe] WARNING:' in result
+        assert 'were still resident right after the pre-command unload' in result
+        assert 'qwen3.8-flash-next-coder-iq3_xxs' in result
+        assert 'VOID' in result
+
+    def test_reload_mid_command_reports_a_violation(self):
+        result = self._run([], probe=[[], [{'id': 'some-other-model', 'uptime_s': 999.0}]])
+
+        assert '[safe] WARNING:' in result
+        assert 'resident again when the command finished' in result
+        assert 'some-other-model' in result
+        assert 'VOID' in result
+
+    def test_degraded_endpoint_never_probes(self):
+        order = []
+        inst = _make_instance(endpoint={'state_save_enabled': False,
+                                        'api_base': 'http://127.0.0.1:1234/v1',
+                                        'model': 'test-model'})
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+
+        def _probe(base):
+            order.append('probe')
+            return []
+
+        with _seam_patches(order, probe=_probe):
+            result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                        justification='run it', cwd='.', timeout=None)
+
+        assert 'probe' not in order  # nothing was unloaded → nothing to verify
+        assert not result.startswith('[safe]')
+
+
+class TestSafeModeViolationClassifier:
+    """The pure classifier behind the note — no I/O, no timing (BUG_0150)."""
+
+    def test_unknown_probe_makes_no_claim(self):
+        assert _safe_mode_violation(None, [], 10) == ('unknown', '')
+        assert _safe_mode_violation([], None, 10) == ('unknown', '')
+
+    def test_clean_run(self):
+        assert _safe_mode_violation([], [], 110) == (None, '')
+
+    def test_still_resident_wins_over_the_reload_case(self):
+        kind, text = _safe_mode_violation(
+            [{'id': 'm', 'uptime_s': 5}], [{'id': 'm', 'uptime_s': 200}], 110)
+        assert kind == 'resident_at_start'
+        assert 'were still resident right after' in text
+        assert 'T+' not in text
+
+    def test_reload_time_comes_from_the_model_uptime(self):
+        # Loaded 20 s ago while the command has been running 110 s → it came back at T+90s.
+        kind, text = _safe_mode_violation([], [{'id': 'm', 'uptime_s': 20}], 110)
+        assert kind == 'reloaded'
+        assert 'T+90s' in text
+
+    def test_missing_uptime_falls_back_to_a_time_free_warning(self):
+        kind, text = _safe_mode_violation([], [{'id': 'm', 'uptime_s': None}], 110)
+        assert kind == 'reloaded'
+        assert 'T+' not in text
+        assert 'resident again when the command finished' in text
+
+
+class TestProbeResidentModels:
+    """state_ops.probe_resident_models — the residency probe behind the BUG_0150 check.
+
+    Reads the same /v1/status body as probe_memory_status; `uptime_models[].uptime_s` is what
+    lets the caller tell "never unloaded" from "reloaded mid-command".
+    """
+
+    def test_returns_loaded_models_with_their_uptime(self):
+        status = {'models_loaded': 1,
+                  'uptime_models': [{'id': 'qwen3.8-flash', 'uptime_s': 12.5, 'last_used_s_ago': 1.0}]}
+        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') == [
+                {'id': 'qwen3.8-flash', 'uptime_s': 12.5}]
+
+    def test_empty_list_when_nothing_is_loaded(self):
+        with patch('agent_cascade.state_ops.probe_memory_status',
+                   return_value={'models_loaded': 0, 'uptime_models': []}):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') == []
+
+    def test_none_when_the_endpoint_cannot_report_residency(self):
+        # Foreign/older server: a status body with no `models_loaded` must never be read as "free".
+        with patch('agent_cascade.state_ops.probe_memory_status',
+                   return_value={'ram': {}, 'gpus': []}):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') is None
+        with patch('agent_cascade.state_ops.probe_memory_status', return_value=None):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') is None
+
+    def test_count_without_per_model_detail_is_still_a_violation(self):
+        with patch('agent_cascade.state_ops.probe_memory_status', return_value={'models_loaded': 2}):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') == [
+                {'id': 'unknown model', 'uptime_s': None}]
+
+    def test_non_dict_body_degrades_to_none(self):
+        with patch('agent_cascade.state_ops.probe_memory_status', return_value=['not', 'a', 'status']):
+            assert probe_resident_models('http://127.0.0.1:1234/v1') is None

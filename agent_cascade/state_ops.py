@@ -292,15 +292,18 @@ def is_autoloader_endpoint(api_base: str) -> bool:
     return ':1234/' in api_base or ':9123/' in api_base
 
 
-def probe_memory_status(api_base: str, timeout: float = 1.5) -> Optional[dict]:
+def probe_memory_status(api_base: str, timeout: float = 1.5, *, quiet: bool = False) -> Optional[dict]:
     """GET {base}/v1/status on the autoloader; return parsed JSON or None (best-effort).
 
     Runs on the hot AUTO path of every shell_cmd whose held endpoint is an autoloader, so
     the timeout is kept short (~1.5s): a hung/unreachable autoloader must not stall real
     commands. The autoloader caches this body on a background poll, so a client GET is cheap.
+    ``quiet`` logs a failed probe at DEBUG instead of WARNING (used by the safe-mode guarantee
+    check, where a missing probe is an unverifiable guarantee, not a problem of its own).
     Body shape (see llama-autoloader server.py::_build_status):
       - 'ram':  {total_mb, used_mb, free_mb, pct}
       - 'gpus': [{index, name, total_mb, used_mb, free_mb, utilization_pct}, ...] (may be [])
+      - 'models_loaded': int, 'uptime_models': [{id, uptime_s, last_used_s_ago, ...}] (BUG_0150)
     Any non-200 or transport/parse error returns None so callers degrade to the normal
     path — a status hiccup must never block or crash a command.
     """
@@ -311,7 +314,41 @@ def probe_memory_status(api_base: str, timeout: float = 1.5) -> Optional[dict]:
             return None
         return resp.json()
     except Exception as e:
-        logger.warning('[state_ops] /v1/status probe failed for %s: %s', api_base, e)
+        (logger.debug if quiet else logger.warning)('[state_ops] /v1/status probe failed for %s: %s',
+                                                    api_base, e)
+        return None
+
+
+def probe_resident_models(api_base: str, timeout: float = 1.5) -> Optional[list]:
+    """Return the models the autoloader reports as LOADED, or None when unverifiable.
+
+    Used by safe-mode's guarantee check (BUG_0150): "was the local model really unloaded,
+    and did it stay unloaded while the command ran?" Reads the same ``/v1/status`` body as
+    :func:`probe_memory_status` — ``models_loaded`` plus ``uptime_models[].uptime_s`` (how long
+    the model process has been up, i.e. when it was loaded) — so one cheap GET answers both.
+
+    Returns:
+        ``[{'id': str, 'uptime_s': float | None}, ...]`` — possibly ``[]`` when nothing is
+        resident.
+        ``None`` when the endpoint cannot answer or is a foreign/older server with no
+        ``models_loaded`` field. Callers MUST NOT claim a guarantee they could not verify.
+
+    Failures are logged at DEBUG, not WARNING: this runs on both sides of a safe-mode command
+    and a missing probe is not itself a problem worth alerting on.
+    """
+    status = probe_memory_status(api_base, timeout, quiet=True)
+    try:
+        if not isinstance(status, dict) or 'models_loaded' not in status:
+            return None
+        models = [m for m in (status.get('uptime_models') or []) if isinstance(m, dict)]
+        if models:
+            return [{'id': m.get('id') or 'unknown model', 'uptime_s': m.get('uptime_s')} for m in models]
+        if status.get('models_loaded'):
+            # Resident per the count but no per-model detail: still a violation, just anonymous.
+            return [{'id': 'unknown model', 'uptime_s': None}]
+        return []
+    except Exception as e:  # noqa: BLE001 - a malformed body must never break the caller's finally
+        logger.debug('[state_ops] unparseable residency in /v1/status for %s: %s', api_base, e)
         return None
 
 
