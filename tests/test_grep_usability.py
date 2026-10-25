@@ -434,6 +434,65 @@ def test_grep_fast_path_context_no_blank_lines():
     print('[PASS] test_grep_fast_path_context_no_blank_lines')
 
 
+def test_grep_context_lines_are_verbatim():
+    """BUG_0144: context lines must carry the file's raw bytes — no indent, no padding.
+
+    ``edit_file`` (``match_mode="exact"``) matches raw file bytes. Context lines used to be
+    rendered with a 5-space indent, so a block transcribed out of grep output silently
+    injected leading whitespace that does not exist in the file (a blank line became five
+    spaces) and exact matching failed with "Pattern not found". Only the matched line may
+    gain the visible ``>>>`` marker, which is trivially stripped when copying.
+
+    Covers the subprocess fast path (when available), the single-file renderer, and the
+    Python fallback (forced).
+    """
+    import unittest.mock as mock
+
+    import agent_cascade.operation_manager.grep as grep_module
+    from agent_cascade.operation_manager import OperationManager
+
+    lines = [
+        'The naive `cols = min(micro, len - off)` is wrong:',
+        '',
+        'Exact rule — **widen, never shrink**:',
+        '',
+        '    indented code line',
+    ]
+
+    def _check(label, target):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, 'doc.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+            om = OperationManager(base_dir=tmpdir)
+            result = om.grep(pattern='Exact rule', path=target, context=2)
+            assert 'Found 1 matches' in result, f"Expected exactly 1 match ({label}): {result}"
+            body = result.split('\n\n', 1)[1]
+            entries = [ln for ln in body.splitlines() if ln and ln != '---']
+            assert entries, f"No result entries reported ({label}): {result}"
+            for entry in entries:
+                _path, rest = entry.split(':', 1)
+                line_no_str, content = rest.split(':', 1)
+                # The renderer always emits exactly one separator space before the content
+                # column (part of the "path:line: " prefix, not of the file text).
+                assert content.startswith(' '), f"Missing separator space ({label}): {entry!r}"
+                content = content[1:]
+                if content.startswith('>>>'):
+                    content = content[3:]
+                expected = lines[int(line_no_str) - 1]
+                assert content == expected, (
+                    f"{label}: line {line_no_str} content is not verbatim — grep rendered the "
+                    f"content column differently from the file.\n"
+                    f"  file    ={expected!r}\n  rendered={content!r}")
+
+    if _require_subprocess_grep('test_grep_context_lines_are_verbatim (fast path)'):
+        _check('subprocess fast path (directory)', '.')
+    # The single-file path has its own renderer (_grep_single_file) — pin it too.
+    _check('single-file path', 'doc.md')
+    # Force the Python fallback so both directory renderers share the same contract.
+    with mock.patch.object(grep_module, '_check_tool_availability', return_value=(False, False)):
+        _check('python fallback (directory)', '.')
+    print('[PASS] test_grep_context_lines_are_verbatim')
+
+
 def test_grep_comma_glob_supported():
     """BUG_0056: comma-separated glob patterns are split and applied per-pattern in all grep paths."""
     # Verify the splitting logic used by ripgrep/GNU-grep/Python-fallback paths.
@@ -706,6 +765,7 @@ if __name__ == '__main__':
         test_grep_fast_path_truncation_surfaces_spillover,
         test_grep_fast_path_no_blank_lines_between_matches,
         test_grep_fast_path_context_no_blank_lines,
+        test_grep_context_lines_are_verbatim,
         test_grep_comma_glob_supported,
         test_list_exclude_prunes_git_subtree,
         test_list_exclude_git_glob_form,

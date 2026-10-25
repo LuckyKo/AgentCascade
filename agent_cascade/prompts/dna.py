@@ -384,7 +384,12 @@ TOOL_METADATA = {
     'grep': {
         'description': ('Search for a text pattern in files. Supports Python regex syntax. '
                         'Smart case by default (case-insensitive unless the pattern contains uppercase letters); '
-                        'respects .gitignore/.rgignore by default (ignore_vcs).'),
+                        'respects .gitignore/.rgignore by default (ignore_vcs). '
+                        'Each result line is "path:LINE: content", where content is the raw file text — never '
+                        'indented or padded. With context>0 the matching line additionally carries a ">>>" marker '
+                        'directly before the content. When copying lines into edit_file (exact match), strip the '
+                        '"path:LINE: " prefix and any ">>>" marker; never add whitespace that is absent from the '
+                        'content, and prefer read_file when transcribing a large block.'),
         'parameters': {
             'pattern':
                 'Text or regex pattern to search for (Python regex syntax)',

@@ -31,6 +31,30 @@ def _compile_grep_pattern(pattern: str, *, flags: int = 0):
     return re.compile(pattern, flags)
 
 
+# Marker injected in front of the matching line in context mode. Content lines never get
+# any other decoration — see _format_grep_entry (BUG_0144).
+_GREP_MATCH_MARKER = '>>>'
+
+
+def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str = '') -> str:
+    """Render one grep result line as ``<path>:<line>: [<marker>]<content>``.
+
+    BUG_0144: the content column is the RAW file text. It is never indented, padded, or
+    otherwise re-wrapped. Context lines used to be rendered with a 5-space indent
+    (4 prefix spaces + the separator space) to set them apart from matched lines. That
+    indent is invisible whitespace, so anyone transcribing a multi-line block out of grep
+    output into ``edit_file`` (``match_mode="exact"``) silently injected leading spaces
+    that do not exist in the file and got "Pattern not found". Context lines now carry no
+    decoration at all; only matched lines get ``_GREP_MATCH_MARKER``, which is visible and
+    trivially stripped, and the always-present ``<path>:<line>: `` prefix tells the reader
+    exactly where the content begins.
+
+    Every render path (rg --json, GNU grep, Python fallback, single-file) MUST go through
+    here so their byte-level output cannot drift apart.
+    """
+    return f"{rel_path}:{line_num}: {marker}{content}"
+
+
 @lru_cache(maxsize=1)
 def _check_tool_availability():
     """Check if ripgrep or system grep are available at runtime.
@@ -437,10 +461,8 @@ class GrepMixin:
 
                             normalized_path = file_path.replace('\\', '/')
 
-                            if context > 0:
-                                formatted.append(f"{normalized_path}:{line_num}: >>>{match_text}")
-                            else:
-                                formatted.append(f"{normalized_path}:{line_num}: {match_text}")
+                            marker = _GREP_MATCH_MARKER if context > 0 else ''
+                            formatted.append(_format_grep_entry(normalized_path, line_num, match_text, marker))
 
                             match_count += 1
 
@@ -457,7 +479,8 @@ class GrepMixin:
                             # would otherwise create blank lines between entries.
                             match_text = data.get('lines', {}).get('text', '').rstrip('\r\n')
                             normalized_path = file_path.replace('\\', '/')
-                            formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
+                            # BUG_0144: no indent on context lines — raw file bytes only.
+                            formatted.append(_format_grep_entry(normalized_path, line_num, match_text))
 
                     except json.JSONDecodeError as e:
                         logger.debug('ripgrep JSON parse error: %s', e)
@@ -505,19 +528,21 @@ class GrepMixin:
                         if m:
                             raw_path, linenum, content = m.groups()
                             normalized_path = raw_path.replace('\\', '/')
+                            # BUG_0144: content stays verbatim; only the match marker is added.
                             if context > 0 and normalized_path.startswith(' '):
                                 normalized_path = normalized_path[1:]
-                                formatted.append(f"{normalized_path}:{linenum}:     {content}")
+                                formatted.append(_format_grep_entry(normalized_path, linenum, content))
                             elif context > 0:
-                                formatted.append(f"{normalized_path}:{linenum}: >>>{content}")
+                                formatted.append(_format_grep_entry(normalized_path, linenum, content,
+                                                                    _GREP_MATCH_MARKER))
                             else:
-                                formatted.append(f"{normalized_path}:{linenum}: {content}")
+                                formatted.append(_format_grep_entry(normalized_path, linenum, content))
                         elif context > 0:
                             c = _ctx_re.match(line)
                             if c:
                                 ctx_path, ctx_linenum, ctx_content = c.groups()
                                 normalized_ctx_path = ctx_path.replace('\\', '/')
-                                formatted.append(f"{normalized_ctx_path}:{ctx_linenum}:     {ctx_content}")
+                                formatted.append(_format_grep_entry(normalized_ctx_path, ctx_linenum, ctx_content))
                             else:
                                 formatted.append(line)
                         else:
@@ -658,8 +683,8 @@ class GrepMixin:
                     start = max(1, line_num - context)
                     end = min(len(lines), line_num + context)
                     for ctx_line in range(start - 1, end):
-                        prefix = '>>>' if ctx_line + 1 == line_num else '    '
-                        results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
+                        marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
+                        results.append(_format_grep_entry(normalized_rel_path, ctx_line + 1, lines[ctx_line], marker))
                     results.append('---')
                 if len(results) % 200 == 0 and time.time() - start_time > timeout:
                     was_timed_out = True
@@ -995,8 +1020,9 @@ class GrepMixin:
                                 start = max(1, line_num - context)
                                 end = min(len(lines), line_num + context)
                                 for ctx_line in range(start - 1, end):
-                                    prefix = '>>>' if ctx_line + 1 == line_num else '    '
-                                    results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
+                                    marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
+                                    results.append(_format_grep_entry(normalized_rel_path, ctx_line + 1,
+                                                                      lines[ctx_line], marker))
                                 results.append('---')
                             if len(results) % 200 == 0 and time.time() - start_time > timeout:
                                 was_timed_out = True
