@@ -7,7 +7,8 @@ SKILL.md files stored in agents/global/skills/ directories.
 See docs/skills_system_architecture.md for full design rationale.
 """
 
-from .advisor import SkillAdvisorResult, build_skill_advisor_prompt, parse_advisor_output, run_skill_advisor
+from .advisor import (SUGGESTION_ACTIONS, SkillAdvisorResult, build_skill_advisor_prompt, format_denial_message,
+                      parse_advisor_output, run_skill_advisor)
 from .manager import SkillManager
 from .matcher import SkillMatcher
 from .parser import parse_frontmatter, parse_skill_file
@@ -20,7 +21,9 @@ __all__ = [
     'SkillManager',
     'validate_skill',
     'SkillAdvisorResult',
+    'SUGGESTION_ACTIONS',
     'build_skill_advisor_prompt',
+    'format_denial_message',
     'parse_advisor_output',
     'run_skill_advisor',
 ]

@@ -136,7 +136,8 @@ class SystemAgentMixin:
                 logger.debug('[SKILL-ADVISOR] Early recall check failed (treating as new): %s', e)
 
             if not _is_early_recall:
-                from agent_cascade.skills.advisor import SkillAdvisorResult, run_skill_advisor
+                from agent_cascade.skills.advisor import (SkillAdvisorResult, format_denial_message,
+                                                          run_skill_advisor)
                 _task_text = args.get('task', '')
                 _context_text = args.get('context', '')
                 try:
@@ -168,19 +169,17 @@ class SystemAgentMixin:
 
                 if _advisor_result.verdict == 'deny':
                     logger.warning(
-                        '[SKILL-ADVISOR] DENIED delegation to %s: %s',
+                        '[SKILL-ADVISOR] DENIED delegation to %s (action=%s): %s',
                         instance_name,
+                        _advisor_result.suggestion_action or 'unspecified',
                         _advisor_result.reason,
                     )
                     # No child instance is created - return an error the caller can surface.
                     # Use ASSISTANT role so extract_instance_output() picks up the text
                     # (FUNCTION role triggers the "terminated with tool result" guard).
-                    return None, '', (None, [
-                        Message(
-                            role=ASSISTANT,
-                            content=(f"[SKILL-ADVISOR DENIED] {_advisor_result.reason} "
-                                     f"Consider handling this task yourself or rephrasing with more specific context."))
-                    ])
+                    # format_denial_message (BUG_0058) adds the structured action/hint/
+                    # retry-task block so the caller can act without re-parsing prose.
+                    return None, '', (None, [Message(role=ASSISTANT, content=format_denial_message(_advisor_result))])
 
                 if _advisor_result.verdict == 'approve':
                     _advisor_recommended_skills = list(_advisor_result.recommended_skills)

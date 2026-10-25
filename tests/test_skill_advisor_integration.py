@@ -374,6 +374,34 @@ class TestAdvisorDeny:
         assert msgs[0].role == ASSISTANT
         assert '[SKILL-ADVISOR DENIED]' in msgs[0].content
         assert 'trivial task' in msgs[0].content
+        # BUG_0058: even with no advisor suggestion, the denial carries an explicit,
+        # machine-readable action token plus the legacy next-step prose.
+        assert '[SKILL-ADVISOR SUGGESTION] action=unspecified' in msgs[0].content
+
+    def test_deny_propagates_structured_suggestion_and_retry_task(self):
+        """BUG_0058: the action token, hint, and paste-ready retry task must survive
+        the gate and reach the caller's Message verbatim."""
+        advisor_result = SkillAdvisorResult(
+            verdict='deny',
+            reason='context too thin',
+            recommended_skills=[],
+            task_notes='',
+            suggestion_action='add_context',
+            suggestion_hint='name the failing test module',
+            retry_task='Run tests/test_skill_advisor.py and list every failing assertion.',
+        )
+        _, pool, lifecycle, mock_advisor, result = _run_gate(advisor_result)
+
+        lifecycle.find_or_create_instance.assert_not_called()
+        inst, msgs = result
+        assert inst is None
+        content = msgs[0].content
+        assert content.split('\n')[0].startswith('[SKILL-ADVISOR DENIED] ')
+        assert '[SKILL-ADVISOR SUGGESTION] action=add_context' in content
+        assert 'hint: name the failing test module' in content
+        assert 'retry_task: Run tests/test_skill_advisor.py and list every failing assertion.' in content
+        # child_runner treats a leading '[SYSTEM ERROR' as a failed child — never that.
+        assert not content.lstrip().startswith('[SYSTEM ERROR')
 
 
 # ===========================================================================

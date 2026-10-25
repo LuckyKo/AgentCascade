@@ -132,7 +132,9 @@ COMPRESSION_PROMPT = (
     '1. Output ONLY the summary — no intro/outro remarks, no meta-commentary, no thinking process.\n'
     '2. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n'
     '3. Retain a compacted initial request and any follow ups from user in the summary.\n'
-    '4. Existing summary is just for reference, focus on summarizing the events after that.\n\n'
+    '4. Existing summary is just for reference, focus on summarizing the events after that.\n'
+    '5. Keep one short line for each "[SKILL-ADVISOR DENIED]" delegation (its reason plus the '
+    'suggested alternative or retry task), so the same ineffective call is not retried later.\n\n'
     '--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n'
     'Present the summary below.{end_instruction}')
 
@@ -191,9 +193,16 @@ SKILL_ADVISOR_PROMPT = (
     '## RESPOND IN EXACTLY THIS FORMAT (text only, max one paragraph each entry):\n'
     '[SKILLS] skill1, skill2, ...   (or [SKILLS] none)\n'
     '[NOTES] <additional task notes or "none">\n'
+    '[SUGGESTION] <action> — <one-line hint>   (DENY only; action must be one of: '
+    'handle_directly, rephrase, add_context, split_task, none)\n'
+    '[RETRY_TASK] <a self-contained task that WOULD be accepted, or "none">   (DENY only)\n'
     '[VERDICT] APPROVE — <reason>\n'
     'OR\n'
     '[VERDICT] DENY — <reason>\n'
+    'When you DENY, pick the action that unblocks the caller: handle_directly (the parent should just do it), '
+    'rephrase (a sharper task would pass), add_context (the task is fine but needs specifics), or split_task '
+    '(part is trivial, part is delegable). Put a concrete, ready-to-paste replacement task in [RETRY_TASK] '
+    'whenever a revised delegation could pass; otherwise write "none". Omit both lines on APPROVE.\n'
     'After your [VERDICT] line, append [END] on the same line to signal your response is complete. Do NOT make any further tool calls after [END].')
 
 # --- Auto-Skill Reflection (extended-turns phase) ---

@@ -35,6 +35,12 @@ class SkillAdvisorResult:
     recommended_skills: List[str] = field(default_factory=list)  # Validated skill names
     task_notes: str = ''  # Improved task notes (empty if none)
     latency_ms: float = 0.0  # Wall-clock time for the advisor LLM call
+    # BUG_0058: machine-actionable next step on DENY. `suggestion_action` is a canonical
+    # token (see SUGGESTION_ACTIONS) or 'unspecified' when the advisor's token was absent/
+    # unrecognized; `retry_task` is a self-contained task that WOULD be accepted, if any.
+    suggestion_action: str = ''
+    suggestion_hint: str = ''
+    retry_task: str = ''
 
     @property
     def is_usable(self) -> bool:
@@ -42,11 +48,30 @@ class SkillAdvisorResult:
         return self.verdict in ('approve', 'deny')
 
 
+# BUG_0058: the fixed vocabulary a DENY may carry. Free-form prose remains available in
+# `suggestion_hint`; the action token is the part callers can branch on deterministically.
+SUGGESTION_ACTIONS = ('handle_directly', 'rephrase', 'add_context', 'split_task', 'none')
+
+# What the caller should DO for each action, appended to the denial payload.
+_ACTION_NEXT_STEP = {
+    'handle_directly': 'Handle this task yourself — no delegation needed.',
+    'rephrase': 'Retry call_agent with a more specific, non-trivial task.',
+    'add_context': 'Retry call_agent with the missing context included.',
+    'split_task': 'Split the work: handle the trivial part yourself, delegate only the substantial part.',
+    'none': 'Do not retry this delegation.',
+}
+
+# Fallback used when the advisor gave no usable suggestion (old wording preserved).
+_DEFAULT_NEXT_STEP = 'Consider handling this task yourself or rephrasing with more specific context.'
+
 # ── Marker regexes (case-insensitive, whitespace-tolerant) ───────────────────
 # Each marker is matched at the start of a line; the payload runs to end-of-line.
 _RE_SKILLS = re.compile(r'^\s*\[SKILLS\]\s*(.*)$', re.IGNORECASE | re.MULTILINE)
 _RE_NOTES = re.compile(r'^\s*\[NOTES\]\s*(.*)$', re.IGNORECASE | re.MULTILINE)
 _RE_VERDICT = re.compile(r'^\s*\[VERDICT\]\s*(.*)$', re.IGNORECASE | re.MULTILINE)
+_RE_SUGGESTION = re.compile(r'^\s*\[SUGGESTION\]\s*(.*)$', re.IGNORECASE | re.MULTILINE)
+_RE_RETRY_TASK = re.compile(r'^\s*\[RETRY_TASK\]\s*(.*?)(?=\n\s*\[[A-Z_]+\]|\Z)',
+                            re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
 # The meta-skill that is always injected by the engine — never recommended here.
 _SELF_AUGMENTATION = 'self-augmentation'
@@ -226,12 +251,100 @@ def parse_advisor_output(
         if candidate and candidate.lower() != 'none':
             notes = candidate
 
+    # ── [SUGGESTION] / [RETRY_TASK] — next step (DENY only, BUG_0058) ───────
+    # Only meaningful on a denial: an APPROVE that emits them is ignored rather than
+    # surfacing a suggestion the caller has no reason to act on.
+    suggestion_action = ''
+    suggestion_hint = ''
+    retry_task = ''
+    if verdict == 'deny':
+        suggestion_action, suggestion_hint = _parse_suggestion(output_text)
+        retry_task = _parse_retry_task(output_text)
+
     return SkillAdvisorResult(
         verdict=verdict,
         reason=reason,
         recommended_skills=recommended,
         task_notes=notes,
+        suggestion_action=suggestion_action,
+        suggestion_hint=suggestion_hint,
+        retry_task=retry_task,
     )
+
+
+def _normalize_suggestion_action(raw: str) -> str:
+    """Map the advisor's action token onto SUGGESTION_ACTIONS (else 'unspecified').
+
+    Tolerant of backticks/quotes, casing, and hyphen-vs-underscore spelling. Anything we
+    cannot map deterministically becomes 'unspecified' — the hint still reaches the caller,
+    so an unknown token degrades to prose rather than being silently dropped.
+    """
+    token = raw.strip().strip('`"\'*').lower().replace('-', '_')
+    return token if token in SUGGESTION_ACTIONS else 'unspecified'
+
+
+def _parse_suggestion(output_text: str) -> tuple[str, str]:
+    """Return ``(action, hint)`` from the optional ``[SUGGESTION]`` line.
+
+    Accepts ``action — hint`` (any of em dash / hyphen / colon / pipe), ``action: hint``,
+    or a bare action. ``[SUGGESTION] none`` is an explicit "no suggestion"; a missing line
+    yields ('', ''), which the formatter renders as 'unspecified'.
+    """
+    match = _RE_SUGGESTION.search(output_text)
+    if match is None:
+        return '', ''
+    payload = match.group(1).strip()
+    if not payload:
+        return 'none', ''
+
+    # First word-ish token is the action. Accept common separators (em dash / en dash /
+    # colon / pipe) or plain whitespace, and allow `handle-directly` spelling.
+    match = re.match(r'^\s*[`"\'*]*([A-Za-z_][A-Za-z_\-]*)[`"\'*]*\s*(?:[—–:|]\s*)?(.*)$', payload)
+    if match is None:
+        return 'unspecified', payload.lstrip('—–-:|').strip()
+    action = _normalize_suggestion_action(match.group(1))
+    hint = (match.group(2) or '').strip().lstrip('—–-:|').strip()
+    return action, hint
+
+
+def _parse_retry_task(output_text: str) -> str:
+    """Return the optional ``[RETRY_TASK]`` payload, or '' when absent/none.
+
+    Whitespace (including newlines from a wrapped advisor response) is collapsed so the
+    value stays a single paste-ready task line.
+    """
+    match = _RE_RETRY_TASK.search(output_text)
+    if match is None:
+        return ''
+    value = ' '.join(match.group(1).split())
+    if not value or value.lower() in ('none', 'n/a', '-'):
+        return ''
+    return value
+
+
+def format_denial_message(result: SkillAdvisorResult) -> str:
+    """Render a DENY result as the caller-facing tool response (BUG_0058).
+
+    Shape (stable, machine-readable tokens first):
+
+        [SKILL-ADVISOR DENIED] <reason>
+        [SKILL-ADVISOR SUGGESTION] action=<token>
+        hint: <prose>            (omitted when absent)
+        retry_task: <task>       (omitted when absent)
+        <next step for that action>
+
+    ``[SKILL-ADVISOR DENIED]`` stays the leading token (callers/tests match on it) and the
+    text never begins with '[SYSTEM ERROR' (child_runner treats that as a failed child).
+    """
+    action = result.suggestion_action or 'unspecified'
+    lines = [f'[SKILL-ADVISOR DENIED] {result.reason}'.rstrip(),
+             f'[SKILL-ADVISOR SUGGESTION] action={action}']
+    if result.suggestion_hint:
+        lines.append(f'hint: {result.suggestion_hint}')
+    if result.retry_task:
+        lines.append(f'retry_task: {result.retry_task}')
+    lines.append(_ACTION_NEXT_STEP.get(action, _DEFAULT_NEXT_STEP))
+    return '\n'.join(lines)
 
 
 def _resolve_known_skill(name: str, known_names: set) -> Optional[str]:
