@@ -607,10 +607,12 @@ class TestRecallSkipsAdvisor:
 
 class TestLoadSkillNormalization:
     """The gate must normalize the many shapes an LLM can emit for load_skill
-    into a plain "AUTO"/"NONE" before comparing modes. The bug: a JSON-encoded
-    list string like '["AUTO"]' failed the old ``== "AUTO"`` comparison, so the
-    advisor silently never ran. Each scenario asserts only whether the advisor
-    was invoked (the single observable that distinguishes AUTO vs NONE mode)."""
+    into ONE gate-mode token (AUTO / NONE / EXPLICIT) before comparing modes. The
+    original bug: a JSON-encoded list string like '["AUTO"]' failed the old
+    ``== "AUTO"`` comparison, so the advisor silently never ran. The fix must not
+    over-correct: a list of explicit skill names is EXPLICIT and must NOT trigger
+    the advisor. Each scenario asserts only whether the advisor was invoked (the
+    single observable that distinguishes AUTO from NONE/EXPLICIT)."""
 
     def _approve(self):
         return SkillAdvisorResult(verdict='approve', reason='ok', recommended_skills=[], task_notes='')
@@ -630,14 +632,34 @@ class TestLoadSkillNormalization:
         _, pool, lifecycle, mock_advisor, _ = _run_gate(self._approve(), load_skill_value=['AUTO'])
         assert mock_advisor.call_count == 1
 
-    def test_multi_element_explicit_skills_still_runs_advisor(self):
-        # Multi-element list is NOT a mode — normalization skips it (len != 1),
-        # final fallback treats non-str as "AUTO" → advisor still runs so it can
-        # validate/recommend against the explicit skill names.
+    def test_explicit_skill_list_skips_advisor(self):
+        # A multi-element list of skill names is EXPLICIT, not a mode. The advisor
+        # must NOT run — the caller already named the skills it wants.
         _, pool, lifecycle, mock_advisor, _ = _run_gate(
             self._approve(),
             load_skill_value=['docker-best-practices', 'httpx-connection-pooling'],
         )
+        assert mock_advisor.call_count == 0
+
+    def test_single_element_explicit_list_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value=['docker-best-practices'])
+        assert mock_advisor.call_count == 0
+
+    def test_json_string_explicit_list_skips_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value='["docker-best-practices"]')
+        assert mock_advisor.call_count == 0
+
+    def test_auto_plus_extras_list_runs_advisor(self):
+        # A list CONTAINING the AUTO token means "auto + extras" → advisor runs.
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value=['AUTO', 'docker-best-practices'])
+        assert mock_advisor.call_count == 1
+
+    def test_json_string_auto_plus_extras_runs_advisor(self):
+        _, pool, lifecycle, mock_advisor, _ = _run_gate(
+            self._approve(), load_skill_value='["AUTO", "docker-best-practices"]')
         assert mock_advisor.call_count == 1
 
     # ── NONE variants → advisor does NOT run ────────────────────────────────

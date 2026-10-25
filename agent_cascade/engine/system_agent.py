@@ -67,24 +67,34 @@ class SystemAgentMixin:
         load_skill_value = args.get('load_skill')
         if load_skill_value is None:
             load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
-        # Normalize: LLM may pass a JSON-encoded list string like '["AUTO"]' or an actual list.
-        # For the gate we only care whether it's AUTO vs NONE vs explicit-skill-names.
+        # Normalize every shape an LLM may emit into ONE gate-mode token. INVARIANT:
+        # the advisor only runs in AUTO mode. A list of explicit skill names (native
+        # or JSON-encoded) is EXPLICIT and skips the advisor; a list that CONTAINS
+        # the AUTO token means "auto + extras" and still runs it.
         if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
+            # Decode a JSON-encoded list string into a real list so it hits the list
+            # branch below. An unparseable '['-prefixed string falls through to the
+            # literal-string branch (safe default).
+            import json as _json_gate
             try:
-                import json as _json_gate
                 _decoded = _json_gate.loads(load_skill_value)
-                if isinstance(_decoded, list) and len(_decoded) == 1 and str(
-                        _decoded[0]).upper() in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
-                    load_skill_value = str(_decoded[0])
             except (ValueError, TypeError):
-                pass  # not valid JSON - treat as literal string below
-        elif isinstance(load_skill_value, list) and len(load_skill_value) == 1:
-            _single = str(load_skill_value[0]).strip().upper()
-            if _single in (LOAD_SKILL_AUTO, LOAD_SKILL_NONE):
-                load_skill_value = _single
-        # Multi-element lists (e.g. ["AUTO", "docker"]) default to AUTO - the
-        # presence of explicit skill names alongside AUTO means "auto + extras".
-        load_skill_mode_upper = (load_skill_value.strip().upper() if isinstance(load_skill_value, str) else 'AUTO')
+                _decoded = None
+            if isinstance(_decoded, list):
+                load_skill_value = _decoded
+        if isinstance(load_skill_value, list):
+            _tokens = [str(x).strip().upper() for x in load_skill_value]
+            if LOAD_SKILL_AUTO in _tokens:
+                load_skill_mode_upper = LOAD_SKILL_AUTO
+            elif LOAD_SKILL_NONE in _tokens:
+                load_skill_mode_upper = LOAD_SKILL_NONE
+            else:
+                load_skill_mode_upper = 'EXPLICIT'
+        elif isinstance(load_skill_value, str):
+            load_skill_mode_upper = load_skill_value.strip().upper()
+        else:
+            # Unknown/non-str, non-list shape: preserve the prior safe default of AUTO.
+            load_skill_mode_upper = LOAD_SKILL_AUTO
         auto_skill_mode = getattr(self.pool.settings, 'auto_skill_mode', 'basic')
         _skill_mgr_gate = getattr(self.pool, 'skill_manager', None)
 
