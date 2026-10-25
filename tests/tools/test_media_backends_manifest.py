@@ -36,9 +36,13 @@ class TestBackendManifest:
             assert isinstance(entry['agent_args'], list) and entry['agent_args']
             assert isinstance(entry['overrides_keys'], list)
             assert isinstance(entry['defaults'], dict)
+            # advanced_fields must exist (every backend exposes at least a timeout);
+            # connection_fields MAY be empty — a zero-config backend (svg2png: no
+            # binary/server/dir to configure) legitimately renders nothing there.
+            assert entry['advanced_fields']
             for group in ('connection_fields', 'advanced_fields'):
                 specs = entry[group]
-                assert isinstance(specs, list) and specs
+                assert isinstance(specs, list)
                 keys = set()
                 for spec in specs:
                     assert {'key', 'label', 'kind'} <= set(spec)
@@ -56,7 +60,7 @@ class TestBackendManifest:
     def test_timeout_limits_match_per_backend_expectations(self):
         expected = {'comfyui': (30, 1800, 5), 'sdcpp': (30, 1800, 30),
                     'kobold_tts': (60, 3600, 30), 'chatterbox': (60, 3600, 30),
-                    'voice_to_text': (30, 3600, 30)}
+                    'voice_to_text': (30, 3600, 30), 'svg2png': (5, 120, 5)}
         for bid, entry in BACKEND_MANIFEST.items():
             tf = [s for s in entry['advanced_fields'] if s['key'] == 'timeout']
             assert len(tf) == 1

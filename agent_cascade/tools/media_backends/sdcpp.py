@@ -30,7 +30,7 @@ class SdcppBackend(MediaBackend):
 
     manifest = BackendManifest(
         label='stable-diffusion.cpp',
-        note='stable-diffusion.cpp local CLI — image only.',
+        note='stable-diffusion.cpp local CLI — image only, slow.',
         connection_fields=(
             FieldSpec(key='binary', label='Binary', kind='path', required=True,
                       placeholder='C:\\...\\sd-cli.exe'),
