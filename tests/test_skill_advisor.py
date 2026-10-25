@@ -23,8 +23,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent_cascade.settings import SKILL_ADVISOR_MAX_CANDIDATES  # POLISH rev122 #5: named cap constant
-from agent_cascade.skills.advisor import (SkillAdvisorResult, build_skill_advisor_prompt, parse_advisor_output,
-                                          run_skill_advisor)
+from agent_cascade.skills.advisor import (SkillAdvisorResult, build_skill_advisor_prompt, format_denial_message,
+                                          parse_advisor_output, run_skill_advisor)
 
 
 @pytest.fixture(autouse=True)
@@ -776,9 +776,14 @@ class TestFallbackBehavior:
 
 class TestDenyPath:
 
-    def test_deny_returns_error_message_and_no_instance(self):
-        """Simulate the engine hook's DENY branch contract: (None, [FUNCTION msg])."""
-        from agent_cascade.llm.schema import FUNCTION, Message
+    def test_deny_payload_is_an_assistant_message_with_no_instance(self):
+        """The DENY contract: (None, [Message(ASSISTANT, format_denial_message(result))]).
+
+        ASSISTANT, not FUNCTION — ``extract_instance_output()`` skips a FUNCTION message, which
+        would make child_runner surface an empty rejection. Built through the real formatter so
+        this pin cannot drift from the engine again (BUG_0058).
+        """
+        from agent_cascade.llm.schema import ASSISTANT, Message
 
         advisor_result = SkillAdvisorResult(
             verdict='deny',
@@ -786,30 +791,20 @@ class TestDenyPath:
             recommended_skills=[],
             task_notes='',
         )
-        'worker1'
 
-        # Replicate the exact return shape used by engine/core.py on DENY.
-        if advisor_result.verdict == 'deny':
-            result_tuple = (None, [
-                Message(role=FUNCTION,
-                        content=(f"Error: Skill Advisor denied this delegation — {advisor_result.reason}. "
-                                 f"Consider handling this task yourself or rephrasing with more specific context."))
-            ])
+        result_tuple = (None, [Message(role=ASSISTANT, content=format_denial_message(advisor_result))])
 
         inst, conv = result_tuple
         assert inst is None  # no child instance allocated
         assert len(conv) == 1
-        assert conv[0].role == FUNCTION
-        assert 'Skill Advisor denied' in conv[0].content
+        assert conv[0].role == ASSISTANT
+        assert conv[0].content.startswith('[SKILL-ADVISOR DENIED] ')
         assert advisor_result.reason in conv[0].content
 
     def test_deny_error_is_not_a_system_error(self):
         """The deny message must NOT start with '[SYSTEM ERROR' (child_runner raises on that)."""
-        from agent_cascade.llm.schema import FUNCTION, Message
-        msg = Message(role=FUNCTION,
-                      content=('Error: Skill Advisor denied this delegation — trivial. '
-                               'Consider handling this task yourself or rephrasing with more specific context.'))
-        assert not msg.content.strip().startswith('[SYSTEM ERROR')
+        content = format_denial_message(SkillAdvisorResult(verdict='deny', reason='trivial'))
+        assert not content.strip().startswith('[SYSTEM ERROR')
 
     @pytest.mark.parametrize('verdict,expected', [
         ('approve', True),
