@@ -242,25 +242,41 @@ def _install_asyncio_log_bridge():
 
 
 # HTTP client loggers. They install no handlers of their own, so a bridge cannot double-log.
-# `httpx` emits one INFO line PER REQUEST, so the default stays WARNING (today's effective level
-# under a handler-less root); debug runs get the request lines (BUG_0148).
+# Their output is high-volume: `httpcore._trace` writes ~10 DEBUG lines PER REQUEST (connect / send /
+# receive phases) and `httpx._client` one INFO line per request. Both therefore stay at WARNING —
+# i.e. only failures — unless `AGENT_CASCADE_DEBUG_HTTP=1` explicitly turns the tracing on (BUG_0149).
 _HTTP_CLIENT_LOGGERS = ('httpx', 'httpcore')
+_HTTP_TRACE_LEVELS = {'httpx': logging.INFO, 'httpcore': logging.DEBUG}
 
 
-def _install_http_client_log_bridges(app_level):
-    """Bridge ``httpx``/``httpcore`` into the app log, quiet by default (BUG_0148).
+def _env_flag(name):
+    """True when `name` is set to a truthy value ('1' / 'true', case-insensitive)."""
+    return os.getenv(name, '0').strip().lower() in ('1', 'true')
 
-    Returns the level applied to them (``DEBUG`` when the app itself runs at DEBUG, else
-    ``WARNING``) so a caller/test can assert the policy.
+
+def _install_http_client_log_bridges(http_debug=None):
+    """Bridge ``httpx``/``httpcore`` into the app log, quiet unless explicitly asked (BUG_0148/0149).
+
+    Default level is ``WARNING`` for both, so a request is only visible when something goes wrong.
+    ``AGENT_CASCADE_DEBUG_HTTP=1`` opts into the noisy view: ``httpx`` at INFO (one line per request)
+    and ``httpcore`` at DEBUG (per-request wire trace).
+
+    Deliberately keyed off its own variable rather than ``AGENT_CASCADE_DEBUG``: dev runs keep the app
+    at DEBUG permanently, so deriving from the app level made the trace flood the normal case —
+    ~70% of `console.log` (BUG_0149).
+
+    ``http_debug`` may be passed explicitly (tests); ``None`` reads the environment. Returns
+    ``{logger_name: level}`` so the applied policy is assertable.
     """
-    http_level = logging.DEBUG if app_level <= logging.DEBUG else logging.WARNING
+    if http_debug is None:
+        http_debug = _env_flag('AGENT_CASCADE_DEBUG_HTTP')
     for name in _HTTP_CLIENT_LOGGERS:
         http_logger = logging.getLogger(name)
         if not any(isinstance(h, _AppLogBridgeHandler) for h in http_logger.handlers):
             http_logger.addHandler(_AppLogBridgeHandler())
         http_logger.propagate = False
-        http_logger.setLevel(http_level)
-    return http_level
+        http_logger.setLevel(_HTTP_TRACE_LEVELS[name] if http_debug else logging.WARNING)
+    return {name: logging.getLogger(name).level for name in _HTTP_CLIENT_LOGGERS}
 
 
 _UVICORN_LOGGERS = ('uvicorn', 'uvicorn.error', 'uvicorn.access')
@@ -298,10 +314,7 @@ def install_uvicorn_log_bridge():
 
 def setup_logger(level=None):
     if level is None:
-        if os.getenv('AGENT_CASCADE_DEBUG', '0').strip().lower() in ('1', 'true'):
-            level = logging.DEBUG
-        else:
-            level = logging.INFO
+        level = logging.DEBUG if _env_flag('AGENT_CASCADE_DEBUG') else logging.INFO
 
     # Capture original stdout/stderr BEFORE creating the StreamHandler,
     # so the handler writes to the real terminal and NOT our capturing stream
@@ -350,8 +363,9 @@ def setup_logger(level=None):
         _logger.addHandler(file_handler)
 
     # BUG_0147/0148: give handler-less third-party loggers a path into the app log.
+    # (HTTP clients stay at WARNING unless AGENT_CASCADE_DEBUG_HTTP=1 — BUG_0149.)
     _install_asyncio_log_bridge()
-    _install_http_client_log_bridges(level)
+    _install_http_client_log_bridges()
 
     return _logger, _original_stdout, _original_stderr
 

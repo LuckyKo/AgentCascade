@@ -11,6 +11,10 @@ BUG_0146 — `asyncio` on Windows 3.12 reports `ConnectionResetError: [WinError 
 reload dropping its WebSocket + keep-alive connections). That is benign teardown noise;
 `_ProactorTeardownFilter` drops the traceback and leaves one DEBUG line.
 
+BUG_0148/0149 — uvicorn installs its own `StreamHandler`s, so its bridge removes them first and attaches
+exactly one handler at the `uvicorn` root; `httpx`/`httpcore` are bridged too but stay at WARNING (only
+failures) unless `AGENT_CASCADE_DEBUG_HTTP=1` asks for the per-request trace, which is ~10 lines each.
+
 No event loop and no sockets: the asyncio record shapes are built by hand exactly as CPython
 3.12 emits them (`events.Handle._run` message + `base_events.default_exception_handler`
 `exc_info`).
@@ -333,58 +337,80 @@ def test_uvicorn_bridge_preserves_levels_and_is_idempotent(app_log):
         assert logging.getLogger('uvicorn.error').propagate is True
 
 
-@pytest.mark.parametrize('app_level,expected', [(logging.INFO, logging.WARNING), (logging.DEBUG, logging.DEBUG)])
-def test_http_client_loggers_bridge_with_a_quiet_default(app_log, app_level, expected):
-    saved = {}
-    try:
+class _http_client_loggers_reset:
+    """Clear the httpx/httpcore handler state for one test, restore it afterwards."""
+
+    def __enter__(self):
+        self._saved = {}
         for name in ('httpx', 'httpcore'):
             lg = logging.getLogger(name)
-            saved[name] = (list(lg.handlers), lg.level, lg.propagate)
+            self._saved[name] = (list(lg.handlers), lg.level, lg.propagate)
             lg.handlers = []
             lg.setLevel(logging.NOTSET)
+        return self
 
-        assert _install_http_client_log_bridges(app_level) == expected
-        for name in ('httpx', 'httpcore'):
-            lg = logging.getLogger(name)
-            assert lg.level == expected
-            assert lg.propagate is False
-            assert len(_bridges(name)) == 1
-        # Idempotent: a second install must not stack a second bridge.
-        _install_http_client_log_bridges(app_level)
-        assert len(_bridges('httpx')) == 1
-    finally:
-        for name, (handlers, level, propagate) in saved.items():
+    def __exit__(self, *exc_info):
+        for name, (handlers, level, propagate) in self._saved.items():
             lg = logging.getLogger(name)
             lg.handlers = handlers
             lg.setLevel(level)
             lg.propagate = propagate
+        return False
 
 
-def test_http_client_request_lines_are_quiet_by_default_but_visible_in_debug(app_log):
-    _, recorder = app_log
-    saved = {}
-    try:
+def test_http_client_loggers_are_quiet_by_default(app_log):
+    """WARNING only: the app level must not raise them (BUG_0149 regression)."""
+    with _http_client_loggers_reset():
+        applied = _install_http_client_log_bridges()
+
+        assert applied == {'httpx': logging.WARNING, 'httpcore': logging.WARNING}
         for name in ('httpx', 'httpcore'):
-            lg = logging.getLogger(name)
-            saved[name] = (list(lg.handlers), lg.level, lg.propagate)
-            lg.handlers = []
-            lg.setLevel(logging.NOTSET)
+            assert logging.getLogger(name).propagate is False
+            assert len(_bridges(name)) == 1
+        # Idempotent: a second install must not stack a second bridge.
+        _install_http_client_log_bridges()
+        assert len(_bridges('httpx')) == 1
 
-        _install_http_client_log_bridges(logging.INFO)
-        httpx_logger = logging.getLogger('httpx')
-        httpx_logger.info('HTTP Request: GET http://127.0.0.1:1234/v1/models "HTTP/1.1 200 OK"')
-        assert recorder.records == []  # one line per request would flood console.log
 
+def test_agent_cascade_debug_alone_does_not_unmute_http_tracing(app_log, monkeypatch):
+    """The separate switch exists because AGENT_CASCADE_DEBUG=1 is the normal dev setup."""
+    monkeypatch.setenv('AGENT_CASCADE_DEBUG', '1')
+    monkeypatch.delenv('AGENT_CASCADE_DEBUG_HTTP', raising=False)
+
+    with _http_client_loggers_reset():
+        assert _install_http_client_log_bridges()['httpcore'] == logging.WARNING
+
+
+@pytest.mark.parametrize('http_debug', [False, True], ids=['default', 'opt-in'])
+def test_http_client_trace_levels_are_opt_in_only(app_log, http_debug):
+    expected = ({'httpx': logging.INFO, 'httpcore': logging.DEBUG} if http_debug else
+                {'httpx': logging.WARNING, 'httpcore': logging.WARNING})
+
+    with _http_client_loggers_reset():
+        assert _install_http_client_log_bridges(http_debug) == expected
+        for name, level in expected.items():
+            assert logging.getLogger(name).level == level
+
+
+def test_http_request_lines_need_the_explicit_opt_in(app_log, monkeypatch):
+    _, recorder = app_log
+    httpx_logger = logging.getLogger('httpx')
+    httpcore_logger = logging.getLogger('httpcore')
+
+    with _http_client_loggers_reset():
+        _install_http_client_log_bridges()
+        # These two shapes were ~70% of a dev console.log before BUG_0149.
+        httpx_logger.info('HTTP Request: POST https://api.telegram.org/bot/getUpdates "HTTP/1.1 200 OK"')
+        httpcore_logger.debug('receive_response_body.started')
+        assert recorder.records == []
+
+        # Real problems still surface at the quiet default.
         httpx_logger.warning('connection pool exhausted')
         assert [r.levelno for r in recorder.records] == [logging.WARNING]
 
         recorder.records.clear()
-        _install_http_client_log_bridges(logging.DEBUG)
-        httpx_logger.info('HTTP Request: GET http://127.0.0.1:1234/v1/models "HTTP/1.1 200 OK"')
-        assert [r.levelno for r in recorder.records] == [logging.INFO]
-    finally:
-        for name, (handlers, level, propagate) in saved.items():
-            lg = logging.getLogger(name)
-            lg.handlers = handlers
-            lg.setLevel(level)
-            lg.propagate = propagate
+        monkeypatch.setenv('AGENT_CASCADE_DEBUG_HTTP', '1')
+        _install_http_client_log_bridges()
+        httpx_logger.info('HTTP Request: POST https://api.telegram.org/bot/getUpdates "HTTP/1.1 200 OK"')
+        httpcore_logger.debug('receive_response_body.started')
+        assert [r.levelno for r in recorder.records] == [logging.INFO, logging.DEBUG]
