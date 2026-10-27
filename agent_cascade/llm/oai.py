@@ -168,6 +168,81 @@ def _should_send_include_usage(api_base: Optional[str]) -> bool:
         return False
 
 
+def _stream_error_payload(sse) -> Optional[dict]:
+    """Return the provider error carried by an SSE frame, or ``None`` for normal chunks.
+
+    BUG_0157: both llama.cpp/llama-server and our autoloader can answer HTTP 200
+    (headers already flushed) and then abort a generation with an in-stream error
+    event, e.g.::
+
+        event: error
+        data: {"error": {"message": "internal error generation | checkpoint ...",
+                         "type": "server_error", "code": 500}}
+
+    The OpenAI SDK parses that payload into a chunk *without* ``choices``, so the
+    streaming loops yielded nothing and the caller saw a clean empty response —
+    hiding the failure from every retry/cooldown layer. Detect the payload here so
+    ``_raise_on_stream_error`` can surface it as a real exception.
+
+    Accepts ``{"error": {...}}``, ``{"error": "text"}`` and any frame with
+    ``event: error`` (falling back to the raw data as the message). Returns a
+    normalized ``{'code': str|None, 'message': str}`` dict.
+    """
+    event = (getattr(sse, 'event', None) or '').strip().lower()
+    data = getattr(sse, 'data', '') or ''
+    if not data or data == '[DONE]':
+        return None
+
+    payload = None
+    try:
+        payload = sse.json()
+    except Exception:
+        payload = None
+
+    error = payload.get('error') if isinstance(payload, dict) else None
+    if error is None and event == 'error':
+        # Error event without an ``error`` envelope (some servers put the text
+        # directly in ``data`` or use ``{"message": ...}``).
+        error = payload if isinstance(payload, dict) and payload.get('message') else {'message': data}
+    if error is None:
+        return None
+
+    if isinstance(error, str):
+        return {'code': None, 'message': error}
+    if not isinstance(error, dict):
+        return {'code': None, 'message': str(error)}
+
+    code = error.get('code')
+    if not (isinstance(code, int) or (isinstance(code, str) and code.strip().isdigit())):
+        # Non-numeric app-level code (e.g. "server_error", "insufficient_quota"):
+        # keep the numeric HTTP status if the payload carries one separately.
+        code = error.get('status') or error.get('status_code')
+
+    message = str(error.get('message') or error.get('detail') or error.get('type') or 'provider error')
+    err_type = error.get('type')
+    if err_type and str(err_type) not in message:
+        message = f'{err_type}: {message}'
+
+    code_str = str(code) if code is not None and str(code).strip() else None
+    return {'code': code_str, 'message': message}
+
+
+def _raise_on_stream_error(sse) -> None:
+    """Raise :class:`ModelServiceError` when an SSE frame carries a provider error.
+
+    BUG_0157: without this, a mid-generation HTTP 500/429 delivered as an SSE
+    event is indistinguishable from a legitimately empty completion, so the
+    engine retries it with no bound and no backoff (265 requests in 15 s).
+    """
+    err = _stream_error_payload(sse)
+    if err is None:
+        return
+    status = err['code'] or '?'
+    message = err['message']
+    logger.error(f'Provider error mid-stream: HTTP {status} - {message}')
+    raise ModelServiceError(code=err['code'], message=err['message'])
+
+
 def _extract_reasoning_blocks(reasoning) -> Optional[List[dict]]:
     """Normalize a provider encrypted-reasoning payload into the structured list
     ``Message.reasoning_blocks`` expects: ``[{'id': str|None, 'encrypted_content': str}]``.
@@ -615,6 +690,9 @@ class TextChatAtOAI(BaseFnCallModel):
                 ):
                     if sse.data == '[DONE]':
                         continue
+                    # BUG_0157: surface mid-generation provider errors (SSE error frames)
+                    # instead of letting them look like a clean empty completion.
+                    _raise_on_stream_error(sse)
                     chunk = response._client._process_response_data(data=sse.json(),
                                                                     cast_to=response._cast_to,
                                                                     response=response.response)
@@ -654,6 +732,9 @@ class TextChatAtOAI(BaseFnCallModel):
                 ):
                     if sse.data == '[DONE]':
                         continue
+                    # BUG_0157: surface mid-generation provider errors (SSE error frames)
+                    # instead of letting them look like a clean empty completion.
+                    _raise_on_stream_error(sse)
                     chunk = response._client._process_response_data(data=sse.json(),
                                                                     cast_to=response._cast_to,
                                                                     response=response.response)

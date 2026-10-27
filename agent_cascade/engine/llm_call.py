@@ -25,7 +25,7 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.error_reporting import TB_DEDUP, build_terminal_message, summarize_exhaustion
 from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
 from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected, ContextWindowExceeded,
-                                      FallbackCompressionRequired, MaxTokenExceeded)
+                                      FallbackCompressionRequired, MaxTokenExceeded, ServerBusyError)
 from agent_cascade.inner_loop_detect import InnerLoopDetector, save_loop_sample
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 from agent_cascade.log import logger
@@ -496,10 +496,55 @@ class LLMCallMixin:
                     break
 
                 try:
+                    _retry_before_attempt = state.retry_count
                     _got_output = yield from self._stream_llm_attempt(
                         instance, inst_name, template, llm_messages, active_functions, _input_tokens_est, state, _max_attempts)
                     if _got_output:
                         break
+                    if state.retry_count > _retry_before_attempt:
+                        # Attempt self-aborted (stream watchdog / inner-loop guard) and
+                        # already consumed its retry budget — keep the existing silent retry.
+                        continue
+                    # BUG_0157: a clean-but-empty response must consume the retry budget.
+                    # Previously this path neither incremented retry_count nor backed off, so
+                    # an endpoint that answered with an empty stream (e.g. a mid-stream error
+                    # payload the backend dropped) was re-hit back-to-back until the 2400 s
+                    # wall-clock deadline — the 265-requests-in-15 s storm.
+                    try:
+                        _terminal = self._is_terminal_stop(inst_name)
+                    except AttributeError:
+                        _terminal = False
+                    if _terminal:
+                        state.error_already_yielded = True
+                        break
+
+                    state.retry_count += 1
+                    if state.retry_count >= _max_attempts:
+                        logger.error(f"[ENDPOINT_RETRY] LLM returned an empty response for {inst_name} "
+                                     f"after {state.retry_count} attempt(s); giving up.")
+                        yield Message(
+                            role=ASSISTANT,
+                            content=f"[SYSTEM ERROR: Empty LLM response after {state.retry_count} attempt(s)]")
+                        state.error_already_yielded = True
+                        break
+
+                    _empty_backoff = calculate_backoff(state.retry_count, _retry_policy)
+                    _remaining = _deadline - time.monotonic()
+                    if _remaining <= 0:
+                        yield Message(
+                            role=ASSISTANT,
+                            content=(f"[SYSTEM ERROR: LLM call exceeded {LLM_CALL_DEADLINE_SECONDS}s "
+                                     f"wall-clock deadline]"))
+                        state.error_already_yielded = True
+                        break
+                    _empty_sleep = min(_empty_backoff, _remaining)
+                    logger.warning(f"[ENDPOINT_RETRY] LLM returned an empty response for {inst_name}, "
+                                   f"retry {state.retry_count}/{_max_attempts}. "
+                                   f"Retrying in {_empty_sleep:.1f}s...")
+                    yield Message(role=ASSISTANT,
+                                  content=('[RETRYING] Empty response from model, retrying '
+                                           f"({state.retry_count}/{_max_attempts}) in {_empty_sleep:.1f}s..."))
+                    time.sleep(_empty_sleep)
                 except FallbackCompressionRequired as fcr:
                     # Context window exceeded during fallback to smaller endpoint.
                     # Use SMART SLICE-FIRST iterative compression: before each compression,
@@ -969,6 +1014,27 @@ class LLMCallMixin:
                 logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
                              f"({inst_name}):\n{traceback.format_exc()}")
             yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
+            state.error_already_yielded = True
+            return True
+
+        # 429 / ServerBusy overload guard (additive — does NOT touch other error types).
+        # A 429 (backend rate limit / context-cache exhaustion) or ServerBusyError (every endpoint on
+        # a breaker-open physical server; the router already burned its bounded fail-fast wait) is
+        # transient-but-pointless to hammer: re-queueing just burns the retry budget and, without this
+        # guard, the loop exits via the while-guard and _finalize_llm_result emits a useless
+        # "[SYSTEM ERROR: Empty LLM response]". classify_error keeps these retryable (correct for the
+        # transient case), so we cap them HERE instead: when THIS attempt is the last one the budget allows,
+        # stop and surface an informative overload message. Fires one attempt before the terminal branch
+        # above (retry_count+1 >= max_attempts), so it always wins for 429/ServerBusy and never for
+        # other classes. N = this attempt's ordinal (retry_count is pre-increment here).
+        _is_overload = isinstance(e, ServerBusyError) or '429' in str(e).lower() or 'rate limit' in str(e).lower()
+        if _is_overload and state.retry_count + 1 >= max_attempts:
+            _attempts = state.retry_count + 1
+            logger.error(f"[ENDPOINT_RETRY] LLM endpoint overloaded for {inst_name} after {_attempts} "
+                         f"attempts (429/ServerBusy): {summarize_exhaustion(e)}")
+            yield Message(role=ASSISTANT,
+                         content=f"[SYSTEM ERROR: LLM endpoint overloaded (HTTP 429) after {_attempts} "
+                                 f"attempts — context cache exhausted]")
             state.error_already_yielded = True
             return True
 
