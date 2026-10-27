@@ -146,6 +146,17 @@ def _wire_approval_consume(om, order, inst):
     om.request_user_approval = _approve_and_consume
 
 
+def _wire_approval_capture(om, captured):
+    """Like _wire_approval, but RECORDS the approval kwargs (BUG_0159).
+
+    Used to assert what the Security gate actually receives in ``tool_args`` —
+    the mode string each execution path declares for itself."""
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return (True, 'ok')
+    om.request_user_approval = _capture
+
+
 def _router_held(api_base, model):
     """A pool.api_router stand-in resolving a held endpoint (for restore tests)."""
     router = SimpleNamespace()
@@ -298,6 +309,36 @@ class TestSafeOrdering:
 
         assert order == ['save', 'approval', 'unload', 'run', 'restore'], \
             f'save must precede the guard; unload after approval, before Popen; restore after: {order}'
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2b. Approval payload (BUG_0159): the gate must see 'safe', not 'sync'.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestSafeApprovalPayload:
+    def test_safe_call_reports_execution_mode_safe_to_the_gate(self):
+        """The sync and safe paths both route through ShellMixin.execute_shell_command,
+        which used to HARDCODE ``'execution_mode': 'sync'`` in the approval tool_args.
+        The guard then saw the justification claim safe-mode VRAM relief while the args
+        said 'sync', flagged the mismatch, and rejected. Each path now declares its own
+        mode; a real safe call must arrive at the gate as 'safe' with the caller's
+        timeout preserved (mirrors the async path, which already serialized 'async')."""
+        captured = {}
+        inst = _make_instance()  # assistant class + state-save-capable endpoint
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval_capture(om, captured)
+
+        with _seam_patches([]):
+            # A non-safe command forces the approval gate to run (is_safe=False).
+            out = tool.call({'command': 'python heavy.py', 'justification': 'run it',
+                             'execution_mode': 'safe', 'timeout': 150})
+
+        assert 'tool_args' in captured, f'the approval gate was never reached: {out!r}'
+        assert captured['tool_args']['execution_mode'] == 'safe', \
+            f"the gate must see the caller's mode, got: {captured['tool_args']}"
+        assert captured['tool_args']['timeout'] == 150
 
 
 # ────────────────────────────────────────────────────────────────────────────

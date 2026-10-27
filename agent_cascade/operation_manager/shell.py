@@ -819,6 +819,7 @@ class ShellMixin:
         cwd: str = '.',
         char_limit: int = 2000,
         timeout: Optional[int] = None,
+        execution_mode: str = 'sync',
         before_execute: Optional[Callable[[], None]] = None,
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
@@ -883,7 +884,7 @@ class ShellMixin:
                     'command': command,
                     'justification': justification,
                     'cwd': cwd,
-                    'execution_mode': 'sync',
+                    'execution_mode': execution_mode,
                     'timeout': effective_timeout,
                 },
                 description=description,

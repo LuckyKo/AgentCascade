@@ -1086,6 +1086,7 @@ class ShellCmd(BaseTool):
             cwd=cwd,
             char_limit=int(char_limit),
             timeout=timeout,
+            execution_mode='sync',
         )
         note = ShellCmd._strip_note(was_stripped)
         return f"{note}{result}"
@@ -1221,6 +1222,7 @@ class ShellCmd(BaseTool):
                 agent_name=agent_name,
                 cwd=cwd,
                 timeout=timeout,
+                execution_mode='safe',
                 before_execute=(_release_model if capable else None),
             )
         finally:
