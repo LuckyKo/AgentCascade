@@ -278,17 +278,23 @@ class AsyncShellTracker:
         Used by AgentPool.has_pending() to determine if an agent should SLEEP
         while waiting for background shell commands to complete.
 
+        A task whose process has finished but whose completion message has not yet
+        been enqueued (BUG_0156) is ALSO reported active: ``task.completed`` flips
+        before the drain-thread joins and message build, and reporting "no pending
+        tools" in that window sent a SLEEPING agent to COMPLETING→IDLE, leaving the
+        late result unprocessed in its queue.
+
         Thread safety: self._lock protects _tasks dict structure only.
-        Individual task state (task.completed) is protected by task._lock.
-        We snapshot the task dict reference under self._lock, then iterate
-        and read each task's state under its own lock.
+        Individual task state (task.completed/completion_delivered) is protected
+        by task._lock. We snapshot the task dict reference under self._lock, then
+        iterate and read each task's state under its own lock.
         """
         with self._lock:
             agent_tasks = dict(self._tasks.get(agent_name, {}))
-        # Read task.completed under task._lock for thread safety
+        # Read task state under task._lock for thread safety
         for task in agent_tasks.values():
             with task._lock:
-                if not task.completed:
+                if not task.completed or not task.completion_delivered:
                     return True
         return False
 
@@ -868,9 +874,20 @@ class AsyncShellTracker:
                 task.completed = True
                 task.return_code = rc
 
-            # Wait for reader threads to drain remaining buffers
-            t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
-            t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
+            # Wait for reader threads to drain remaining buffers. Both joins share ONE
+            # deadline: after a timeout-kill, surviving child processes can keep the pipes
+            # open (the taskkill rc=128 / orphan case), and two sequential full-timeout
+            # joins would hold the completion message back for up to 2× the join timeout
+            # — the window that let a SLEEPING agent exit before the result landed
+            # (BUG_0156). Orphan cleanup must never gate result delivery.
+            drain_deadline = time.time() + DRAIN_THREAD_JOIN_TIMEOUT
+            for drain_thread in (t_out, t_err):
+                if drain_thread is None:
+                    continue
+                remaining = drain_deadline - time.time()
+                if remaining <= 0:
+                    break
+                drain_thread.join(timeout=remaining)
 
             # ── Wait for launch() to finish its early check ───────────
             # Ensure launch_check_done is set before reading completed_at_launch.
@@ -887,6 +904,9 @@ class AsyncShellTracker:
             if done_at_launch:
                 logger.debug(f"[AsyncShell] Task completed at launch for {agent_name} "
                              f"tool_id={tool_id}, skipping all messages")
+                # The result went back inline through launch(), so there is no queue
+                # message to wait for — release has_active_tasks() immediately.
+                self._mark_completion_delivered(task)
             else:
                 # Build a SINGLE merged completion message containing status + elapsed
                 # time + any remaining output. Previously this was two separate messages
@@ -896,11 +916,14 @@ class AsyncShellTracker:
                 msg = self._build_completion_message(agent_name, tool_id, task, timed_out=timed_out)
 
                 # Enqueue the merged message BEFORE the finally block removes the task
-                # from _tasks. Order matters: _enqueue() puts the message on the queue;
-                # if we cleaned up first, has_pending() would return False and a sleeping
-                # agent might miss it. A single enqueue before cleanup preserves the
-                # wake-up guarantee (has_pending stays True while the message is in flight).
-                self._enqueue(agent_name, msg)
+                # from _tasks. Order matters: while the message is in flight the task is
+                # still reported as active (see completion_delivered), so a sleeping
+                # agent cannot observe "no pending tools" before the result lands.
+                # _deliver_completion() also relaunches the agent if it already went
+                # IDLE (BUG_0156: e.g. the process was killed while the drain threads
+                # were still blocked on surviving children, delaying this enqueue).
+                self._deliver_completion(agent_name, msg)
+                self._mark_completion_delivered(task)
 
         except Exception as e:
             logger.warning(f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}")
@@ -920,6 +943,7 @@ class AsyncShellTracker:
                 timed_out=False,
                 error=str(e),
             )
+            self._mark_completion_delivered(task)
             with task._lock:
                 task.completed = True
                 task.return_code = -1
@@ -1391,8 +1415,38 @@ class AsyncShellTracker:
         task = self._get_task(agent_name, tool_id)
         header = self._build_completion_header(tool_id, task, timed_out=timed_out, error=error)
 
-        # Send completion via message queue (wakes sleeping agents)
-        self._enqueue(agent_name, header)
+        # Send completion via message queue (wakes sleeping/IDLE agents)
+        self._deliver_completion(agent_name, header)
+
+    # ────────────────────────────────────────────────────────────────
+    def _deliver_completion(self, agent_name: str, text: str) -> None:
+        """Enqueue a completion/error result and wake an IDLE agent if it missed it.
+
+        BUG_0156: the SLEEPING → COMPLETING gap is closed by ``completion_delivered``
+        (has_active_tasks keeps the task "pending" until this enqueue lands), but an
+        agent that already exited run() as IDLE has no thread left to drain its queue —
+        the result would sit there until the next user message. Mirror the async-tool
+        registry's idle-wakeup path (async_tools._execute) so the result is always
+        acted on. ``relaunch_idle_agent`` is a no-op unless the instance is IDLE and
+        neither stopped nor terminated.
+        """
+        self._enqueue(agent_name, text)
+        if not self._pool:
+            return
+        try:
+            from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
+            relaunch_idle_agent(self._pool, agent_name)
+        except Exception as e:
+            logger.debug(f"[AsyncShell] Idle relaunch failed for {agent_name} (non-critical): {e}")
+
+    # ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _mark_completion_delivered(task: Optional['AsyncShellTask']) -> None:
+        """Clear the "result still in flight" bit read by has_active_tasks()."""
+        if task is None:
+            return
+        with task._lock:
+            task.completion_delivered = True
 
     # ────────────────────────────────────────────────────────────────
     def _enqueue(self, agent_name: str, text: str):

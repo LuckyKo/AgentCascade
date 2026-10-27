@@ -52,6 +52,7 @@ class AsyncShellTask:
         console_window: Pop a console window on Windows for user inspection
         completed_at_launch: Whether the command finished during launch so tracking thread skips all messages
         launch_check_done: Event signaled when launch() has finished its early completion check
+        completion_delivered: Whether the completion/error result has been enqueued for the agent
     """
     tool_id: int
     agent_name: str
@@ -84,3 +85,11 @@ class AsyncShellTask:
 
     # Secondary "viewer" process for visible console window on Windows (fire-and-forget)
     viewer_process: Optional[subprocess.Popen] = None
+
+    # BUG_0156: ``completed`` flips as soon as the process is dead, but the result
+    # message is enqueued only after the drain-thread joins / message build. A
+    # SLEEPING agent polling has_active_tasks() in that window saw "no pending
+    # tools" and went COMPLETING→IDLE, so the late result sat unprocessed in its
+    # queue. Set True only once the completion (or error) message has been handed
+    # to the pool; has_active_tasks() treats an undelivered task as still active.
+    completion_delivered: bool = False
