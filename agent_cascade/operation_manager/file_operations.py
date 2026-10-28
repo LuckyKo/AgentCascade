@@ -674,22 +674,29 @@ class FileOpsMixin:
         return output, total_dirs, total_files, total_size, raw_entries
 
     def _list_recursive(self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int,
-                        max_entries: int) -> Tuple[str, int, int, int, int]:
+                        max_entries: int) -> Tuple[str, int, int, int, int, List[str]]:
         """Recursive directory listing via os.walk.
 
-        Returns (output_str, dirs, files, size, raw_entries) where *raw_entries* is the
-        number of files+subdirs seen while walking, BEFORE name/size/date filtering
-        (used to tell an empty tree from an all-filtered one).
+        Returns (output_str, dirs, files, size, raw_entries, notes) where *raw_entries*
+        is the number of files+subdirs seen while walking, BEFORE name/size/date
+        filtering (used to tell an empty tree from an all-filtered one), and *notes*
+        are warning lines about data that is missing from the listing (unreadable
+        directories, junctions that were not traversed).
         """
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
         blocked_dirs: dict = {}  # abs path -> reason (junctions not traversed)
+        walk_errors: List[OSError] = []
         entry_count = 0
         raw_entries = 0
         root_depth = len(resolved.parts)
         allowed_roots = self._list_allowed_roots(resolved)
 
-        for dirpath, subdirs, filenames in os.walk(str(resolved), topdown=True):
+        def _collect_walk_error(err: OSError) -> None:
+            walk_errors.append(err)
+
+        for dirpath, subdirs, filenames in os.walk(
+                str(resolved), topdown=True, onerror=_collect_walk_error):
             current_dir = Path(dirpath)
             abs_path = current_dir.resolve()
 
@@ -915,7 +922,30 @@ class FileOpsMixin:
         if entry_count >= max_entries and entries_by_dir:
             output += f"\n  ... (listing stopped at {max_entries} files; use include/exclude or size/date filters to narrow)\n"
 
-        return output, total_dirs, total_files, total_size, raw_entries
+        # BUG_0165: os.walk with onerror=None silently skips directories it cannot
+        # read, so a permission-denied subtree simply vanished from the listing and
+        # could seed a false-absence claim. Report every skipped directory instead.
+        notes: List[str] = []
+        if walk_errors:
+            def _err_label(err: OSError) -> str:
+                filename = getattr(err, 'filename', None) or ''
+                rel = _safe_relpath(str(filename), str(resolved)) if filename else ''
+                reason = getattr(err, 'strerror', None) or str(err)
+                return f"{rel or '.'} ({reason})"
+
+            shown = walk_errors[:5]
+            details = '; '.join(_err_label(err) for err in shown)
+            extra = f"; +{len(walk_errors) - len(shown)} more" if len(walk_errors) > len(shown) else ''
+            noun = 'directory' if len(walk_errors) == 1 else 'directories'
+            possessive = 'its' if len(walk_errors) == 1 else 'their'
+            notes.append(f"[warning] {len(walk_errors)} {noun} could not be read; "
+                         f"{possessive} contents are missing from this listing: {details}{extra}")
+
+        if ctx.files_only and blocked_dirs:
+            names = ', '.join(sorted(_safe_relpath(p, str(resolved)) for p in blocked_dirs))
+            notes.append(f"[warning] not traversed (target is outside the workspace): {names}")
+
+        return output, total_dirs, total_files, total_size, raw_entries, notes
 
     # ─── Public directory listing API ─────────────────────────────────────
 
@@ -1001,8 +1031,9 @@ class FileOpsMixin:
 
             header = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
 
+            notes: List[str] = []
             if recursive:
-                output, total_dirs, total_files, total_size, raw_entries = self._list_recursive(
+                output, total_dirs, total_files, total_size, raw_entries, notes = self._list_recursive(
                     path, resolved, ctx, sort_by, max_depth, max_entries)
                 is_empty = not (total_dirs or total_files)
             else:
@@ -1016,7 +1047,11 @@ class FileOpsMixin:
             # negative finding could not be based on a filtered listing alone.
             if is_empty:
                 if raw_entries == 0:
-                    output += '  (directory contains no entries)\n'
+                    if notes:
+                        # BUG_0165: an unreadable root is not an empty directory.
+                        output += '  (nothing could be listed; see warning below)\n'
+                    else:
+                        output += '  (directory contains no entries)\n'
                 else:
                     active = _describe_list_filters(
                         include, exclude, min_size, max_size, modified_after, modified_before,
@@ -1026,6 +1061,10 @@ class FileOpsMixin:
                     output += f'  (no entries matched the active filters{detail})\n'
                     output += (f'  {raw_entries} {noun} before filtering; '
                                'adjust or remove the filters to list them.\n')
+
+            # Notes about data missing from the listing (unreadable dirs, junctions
+            # not traversed) are surfaced with the other warnings at the end.
+            warnings.extend(notes)
 
             if show_summary:
                 output += f"\nSummary:\n"

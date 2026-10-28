@@ -81,6 +81,9 @@ def test_recursive_files_only_does_not_follow_outside_junction(tmp_path, junctio
     out = om.list_directory('.', recursive=True, files_only=True, char_limit=-1)
 
     assert 'SECRET_OUTSIDE_FILE' not in out, out
+    # files_only hides [DIR] headers, so the omission must be reported explicitly.
+    assert 'not traversed' in out, out
+    assert 'junction_out' in out, out
 
 
 def test_nested_outside_junction_is_blocked(tmp_path, junction):
