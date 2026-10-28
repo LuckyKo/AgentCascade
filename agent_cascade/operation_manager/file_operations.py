@@ -27,6 +27,11 @@ _SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
 # critical path (A5). Only delete_file and copy_file use this helper.
 _SCOPE_INFO_FILE_CAP = 1000
 
+# Default cap on entries rendered by list_dir. Also used when a caller supplies an
+# invalid (<= 0) max_entries: -1 is a common "unlimited" idiom for max_depth, so
+# silently honouring it would either truncate to nothing or unbounded-output.
+_DEFAULT_LIST_DIR_MAX_ENTRIES = 500
+
 
 def _parse_size(s: Optional[str]) -> Optional[int]:
     """Parse human-readable size string to bytes. Returns None if invalid/empty.
@@ -923,7 +928,7 @@ class FileOpsMixin:
         exclude: Optional[str] = None,
         sort_by: str = 'name',
         show_summary: bool = False,
-        max_entries: int = 500,
+        max_entries: int = _DEFAULT_LIST_DIR_MAX_ENTRIES,
         char_limit: int = 3000,
         agent_name: str = 'unknown',
         min_size: Optional[str] = None,
@@ -945,15 +950,25 @@ class FileOpsMixin:
             if not resolved.is_dir():
                 return f"Not a directory: {path}"
 
-            if recursive and max_depth == 0:
-                recursive = False
-
             valid_sort_keys = {'name', 'size', 'date', 'type'}
             if sort_by not in valid_sort_keys:
                 sort_by = 'name'
 
             # Build the filter context (single object threaded through the call chain).
             warnings = []
+            # BUG_0164: normalize values that would otherwise corrupt the listing.
+            # max_entries <= 0 used to truncate every entry while still printing
+            # "output limited to N" (and, recursively, blame skip_vcs for the empty
+            # result); max_depth < -1 pruned every subdir at the root with no warning.
+            if max_entries < 1:
+                warnings.append(f"[warning] max_entries={max_entries} is invalid (must be >= 1); "
+                                f"using {_DEFAULT_LIST_DIR_MAX_ENTRIES}.")
+                max_entries = _DEFAULT_LIST_DIR_MAX_ENTRIES
+            if max_depth < -1:
+                warnings.append(f"[warning] max_depth={max_depth} is invalid (use -1 for unlimited); treating as -1.")
+                max_depth = -1
+            if recursive and max_depth == 0:
+                recursive = False
             ctx_min_size = _parse_size(min_size)
             if min_size and ctx_min_size is None:
                 warnings.append(f"[warning] min_size='{min_size}' not recognized; no size filter applied.")

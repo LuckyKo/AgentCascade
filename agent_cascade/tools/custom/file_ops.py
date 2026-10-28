@@ -1197,6 +1197,7 @@ class ListDir(BaseTool):
             'max_depth': {
                 'type': 'integer',
                 'default': -1,
+                'minimum': -1,
                 'description': TOOL_METADATA['list_dir']['parameters']['max_depth']
             },
             'include': {
@@ -1221,6 +1222,7 @@ class ListDir(BaseTool):
             'max_entries': {
                 'type': 'integer',
                 'default': 500,
+                'minimum': 1,
                 'maximum': MAX_LIST_DIR_ENTRIES,
                 'description': TOOL_METADATA['list_dir']['parameters']['max_entries']
             },
