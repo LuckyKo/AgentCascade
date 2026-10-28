@@ -6,7 +6,7 @@ so backslashes and other regex metacharacters are matched literally.
 
 Run with:  python tests/test_grep_literal.py
 """
-import tempfile
+import unittest.mock as mock
 from pathlib import Path
 
 import pytest
@@ -93,6 +93,88 @@ class TestGrepLiteral:
         # 'hello world' (lowercase) should NOT match 'Hello World'
         result2 = om.grep(pattern='hello world', path='.', literal=True, smart_case=False)
         assert 'No matches' in result2, f"Should not find case-mismatched match; got: {result2[:300]}"
+
+    # ── Python fallback path (BUG_0171) ────────────────────────────────────────
+
+    def test_python_fallback_literal_re_escape(self, tmp_path):
+        """Force the Python fallback and verify re.escape() handles literal mode correctly.
+
+        With (False, False) the subprocess fast path is skipped entirely, so the
+        fallback at grep.py:936 (_compile_pattern = re.escape(pattern) if literal)
+        is the only code path that can match.  This proves the re.escape() branch
+        actually works end-to-end.
+        """
+        from agent_cascade.operation_manager import grep as grep_mod
+
+        # File contains the literal string: tests\ninfer_tests\.exe  (backslash-n, backslash-dot)
+        file = tmp_path / 'searchable.txt'
+        file.write_text('prefix tests\\ninfer_tests\\.exe suffix\n')
+
+        om = _make_om(tmp_path)
+
+        # literal=True → re.escape() escapes backslashes → matches the literal string
+        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, False)):
+            result = om.grep(pattern='tests\\ninfer_tests\\.exe', path='.', literal=True)
+        assert 'searchable.txt' in result, (
+            f"Python fallback with literal=True should find the file; got: {result[:300]}"
+        )
+
+        # literal=False → regex interpretation: '\n' means newline, won't match backslash-n
+        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, False)):
+            result2 = om.grep(pattern='tests\\ninfer_tests\\.exe', path='.', literal=False)
+        assert 'No matches' in result2, (
+            f"Python fallback with literal=False should find no matches (regex \\n ≠ backslash-n); "
+            f"got: {result2[:300]}"
+        )
+
+    # ── argv flag assertions (BUG_0171) ────────────────────────────────────────
+
+    def test_rg_argv_literal_flag(self, tmp_path):
+        """_build_rg_argv should include -F when literal=True, not when literal=False."""
+        om = _make_om(tmp_path)
+        argv_true = om._build_rg_argv('test', '*', '', 0, True, literal=True)
+        assert '-F' in argv_true, f"Expected -F in rg argv when literal=True; got: {argv_true}"
+
+        argv_false = om._build_rg_argv('test', '*', '', 0, True, literal=False)
+        assert '-F' not in argv_false, f"Expected no -F in rg argv when literal=False; got: {argv_false}"
+
+    def test_system_grep_argv_literal_flag(self, tmp_path):
+        """The system-grep branch should emit -F when literal=True and -E when literal=False.
+
+        Mocks _check_tool_availability → (False, True) to select the grep (non-rg)
+        branch, and captures the argv passed to subprocess.run.
+        """
+        from agent_cascade.operation_manager import grep as grep_mod
+        from types import SimpleNamespace
+
+        file = tmp_path / 'target.txt'
+        file.write_text('hello world\n')
+
+        om = _make_om(tmp_path)
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            r = SimpleNamespace(returncode=1, stdout='', stderr='')
+            return r
+
+        # literal=True → expect -F, not -E
+        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, True)), \
+             mock.patch('subprocess.run', side_effect=_fake_run):
+            om.grep(pattern='hello', path='.', literal=True)
+        # Filter to the system-grep call (argv[0] == 'grep') to avoid coupling to call order
+        grep_cmd = next(c for c in calls if c[0] == 'grep')
+        assert '-F' in grep_cmd, f"Expected -F in system grep cmd; got: {grep_cmd}"
+        assert '-E' not in grep_cmd, f"Expected no -E in system grep cmd; got: {grep_cmd}"
+
+        # literal=False → expect -E, not -F
+        calls.clear()
+        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, True)), \
+             mock.patch('subprocess.run', side_effect=_fake_run):
+            om.grep(pattern='hello', path='.', literal=False)
+        grep_cmd = next(c for c in calls if c[0] == 'grep')
+        assert '-E' in grep_cmd, f"Expected -E in system grep cmd; got: {grep_cmd}"
+        assert '-F' not in grep_cmd, f"Expected no -F in system grep cmd; got: {grep_cmd}"
 
 
 if __name__ == '__main__':
