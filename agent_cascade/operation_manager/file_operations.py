@@ -141,6 +141,30 @@ def _build_pattern_fn(patterns_str: Optional[str]) -> Optional[Callable]:
     return _build_pattern_fn_from_patterns(_parse_patterns(patterns_str))
 
 
+def _safe_relpath(path: str, root: str) -> str:
+    """Return *path* relative to *root* (forward slashes, '' when equal).
+
+    ``os.path.relpath`` is unsafe for directory entries whose final component is a
+    Windows reserved device name (``nul``, ``con``, ``aux``, ``prn``, ``com1``…):
+    ``ntpath.abspath`` rewrites such a path to the device form (``\\\\.\\nul``), so
+    the drive comparison fails and relpath raises
+    ``ValueError: path is on mount '\\\\.\\nul', start on mount 'N:'``. A real file
+    with that name can exist on a network share or be created via a ``\\\\?\\`` path,
+    and listing the containing directory must not abort because of it (BUG_0162,
+    BUG_0052). ``PurePath.relative_to`` is pure string arithmetic — no Win32
+    abspath call — so it stays correct for these names. Any path that is not a
+    descendant of *root* falls back to its basename.
+    """
+    p = Path(path)
+    r = Path(root)
+    if p == r:
+        return ''
+    try:
+        return p.relative_to(r).as_posix()
+    except ValueError:  # different drive, or not a descendant
+        return p.name
+
+
 @dataclass
 class FilterContext:
     """Bundle of all list_dir filters threaded through the listing call chain."""
@@ -417,7 +441,7 @@ class FileOpsMixin:
             return False
         if ctx.exclude_fn(d_name):  # bare name: ".git", "__pycache__"
             return True
-        rel = os.path.relpath(str(current_dir / d_name), str(root)).replace('\\', '/')
+        rel = _safe_relpath(str(current_dir / d_name), str(root))
         for pat in ctx.exclude_patterns:
             # fnmatch(rel, pat): the dir's own relative path matches the pattern
             #   (e.g. 'sub/deep' prunes the 'deep' dir at the right depth).
@@ -605,7 +629,7 @@ class FileOpsMixin:
                 # Full filter (name + size + date) via context, after stat is available.
                 # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
                 # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
-                rel = os.path.relpath(str(current_dir / f_name), str(resolved)).replace('\\', '/')
+                rel = _safe_relpath(str(current_dir / f_name), str(resolved))
                 if not self._matches_filters(
                         f_name,
                         False,
@@ -672,12 +696,7 @@ class FileOpsMixin:
         # Root-level entries render as just their own name (empty relative dir).
         def rel_of(dirpath: str) -> str:
             """Relative path of *dirpath* with respect to the listed root ('' for root)."""
-            if dirpath == root_str:
-                return ''
-            try:
-                return os.path.relpath(dirpath, root_str)
-            except ValueError:  # cross-drive on Windows (shouldn't happen under walk)
-                return Path(dirpath).name
+            return _safe_relpath(dirpath, root_str)
 
         # Descent set for files_only. Under files_only no [DIR] entries are created
         # (L584 skips them), so render_dir's "if e['is_dir']" branch never fires and
