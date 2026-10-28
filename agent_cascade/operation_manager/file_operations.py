@@ -165,6 +165,45 @@ def _safe_relpath(path: str, root: str) -> str:
         return p.name
 
 
+def _describe_list_filters(
+    include: Optional[str],
+    exclude: Optional[str],
+    min_size: Optional[str],
+    max_size: Optional[str],
+    modified_after: Optional[str],
+    modified_before: Optional[str],
+    files_only: bool,
+    dirs_only: bool,
+    skip_vcs: bool = False,
+) -> str:
+    """Describe the filters that can hide existing entries (used by empty-result reporting).
+
+    Only filters the caller actually supplied are named, so the empty-result message can
+    point at the knob responsible instead of listing every default. *skip_vcs* is included
+    only when the caller is in recursive mode (flat listings never apply it).
+    """
+    parts = []
+    if include:
+        parts.append(f"include={include!r}")
+    if exclude:
+        parts.append(f"exclude={exclude!r}")
+    if min_size:
+        parts.append(f"min_size={min_size!r}")
+    if max_size:
+        parts.append(f"max_size={max_size!r}")
+    if modified_after:
+        parts.append(f"modified_after={modified_after!r}")
+    if modified_before:
+        parts.append(f"modified_before={modified_before!r}")
+    if files_only:
+        parts.append('files_only')
+    if dirs_only:
+        parts.append('dirs_only')
+    if skip_vcs:
+        parts.append('skip_vcs')
+    return ', '.join(parts)
+
+
 @dataclass
 class FilterContext:
     """Bundle of all list_dir filters threaded through the listing call chain."""
@@ -492,13 +531,19 @@ class FileOpsMixin:
     # ─── Directory listing helpers ────────────────────────────────────────
 
     def _list_flat(self, resolved: Path, ctx: 'FilterContext', sort_by: str,
-                   max_entries: int) -> Tuple[str, int, int, int]:
-        """Flat directory listing via os.scandir. Returns (output_str, dirs, files, size)."""
+                   max_entries: int) -> Tuple[str, int, int, int, int]:
+        """Flat directory listing via os.scandir.
+
+        Returns (output_str, dirs, files, size, raw_entries) where *raw_entries* is the
+        pre-filter entry count (used to tell an empty directory from an all-filtered one).
+        """
         dirs = []
         files = []
+        raw_entries = 0
 
         with os.scandir(str(resolved)) as it:
             for entry in it:
+                raw_entries += 1
                 is_dir = entry.is_dir()
                 # Early exit for files_only/dirs_only (no stat needed)
                 if ctx.files_only and is_dir:
@@ -558,14 +603,20 @@ class FileOpsMixin:
         if overflow_count > 0:
             output += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude or size/date filters to narrow\n"
 
-        return output, total_dirs, total_files, total_size
+        return output, total_dirs, total_files, total_size, raw_entries
 
     def _list_recursive(self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int,
-                        max_entries: int) -> Tuple[str, int, int, int]:
-        """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
+                        max_entries: int) -> Tuple[str, int, int, int, int]:
+        """Recursive directory listing via os.walk.
+
+        Returns (output_str, dirs, files, size, raw_entries) where *raw_entries* is the
+        number of files+subdirs seen while walking, BEFORE name/size/date filtering
+        (used to tell an empty tree from an all-filtered one).
+        """
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
         entry_count = 0
+        raw_entries = 0
         root_depth = len(resolved.parts)
 
         for dirpath, subdirs, filenames in os.walk(str(resolved), topdown=True):
@@ -578,6 +629,9 @@ class FileOpsMixin:
             visited_dirs.add(abs_path)
 
             current_depth = len(abs_path.parts) - root_depth
+            # Count before exclude/skip_vcs pruning so an all-pruned tree is not
+            # misreported as a genuinely empty directory (BUG_0160).
+            raw_entries += len(subdirs) + len(filenames)
 
             # Directory traversal is decoupled from file filtering: we always descend
             # into every subdirectory (os.walk is never pruned by the include/exclude
@@ -684,8 +738,10 @@ class FileOpsMixin:
         # displayable set; files/size are accumulated in render_dir below so they
         # stay consistent even under max_entries truncation (which drops some
         # entries). This mirrors flat mode and keeps the top-level "empty directory"
-        # message accurate.
-        total_dirs = len(displayed_dirs)
+        # message accurate. Under files_only no [DIR] header is ever rendered, so the
+        # displayable set must not count as output (otherwise a tree containing only
+        # directories renders an empty listing with no empty-result message).
+        total_dirs = 0 if ctx.files_only else len(displayed_dirs)
         rendered_files = 0
         rendered_size = 0
 
@@ -759,7 +815,7 @@ class FileOpsMixin:
         if entry_count >= max_entries and entries_by_dir:
             output += f"\n  ... (listing stopped at {max_entries} files; use include/exclude or size/date filters to narrow)\n"
 
-        return output, total_dirs, total_files, total_size
+        return output, total_dirs, total_files, total_size, raw_entries
 
     # ─── Public directory listing API ─────────────────────────────────────
 
@@ -836,15 +892,30 @@ class FileOpsMixin:
             header = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
 
             if recursive:
-                output, total_dirs, total_files, total_size = self._list_recursive(path, resolved, ctx, sort_by,
-                                                                                   max_depth, max_entries)
+                output, total_dirs, total_files, total_size, raw_entries = self._list_recursive(
+                    path, resolved, ctx, sort_by, max_depth, max_entries)
                 is_empty = not (total_dirs or total_files)
             else:
-                output, total_dirs, total_files, total_size = self._list_flat(resolved, ctx, sort_by, max_entries)
+                output, total_dirs, total_files, total_size, raw_entries = self._list_flat(
+                    resolved, ctx, sort_by, max_entries)
                 is_empty = not (total_dirs or total_files)
 
+            # BUG_0160: distinguish a genuinely empty directory from a listing whose
+            # entries all failed the filters. The old single message ("empty directory
+            # or all entries filtered out") was true for both opposite situations, so a
+            # negative finding could not be based on a filtered listing alone.
             if is_empty:
-                output += '  (empty directory or all entries filtered out)'
+                if raw_entries == 0:
+                    output += '  (directory contains no entries)\n'
+                else:
+                    active = _describe_list_filters(
+                        include, exclude, min_size, max_size, modified_after, modified_before,
+                        files_only, dirs_only, skip_vcs=recursive and skip_vcs)
+                    detail = f': {active}' if active else ''
+                    noun = 'entry exists' if raw_entries == 1 else 'entries exist'
+                    output += f'  (no entries matched the active filters{detail})\n'
+                    output += (f'  {raw_entries} {noun} before filtering; '
+                               'adjust or remove the filters to list them.\n')
 
             if show_summary:
                 output += f"\nSummary:\n"
