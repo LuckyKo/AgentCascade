@@ -342,6 +342,7 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
 # ── AFK idle auto-reply (server-side; replaces the browser's checkAfkAutoReply) ──
 
 AFK_NUDGE_COOLDOWN = 5 * 60  # seconds — matches the browser's 5*60*1000 (app.js:2752)
+AFK_NUDGE_TICK_SECS = 5.0    # background re-check cadence for the idle AFK nudge loop (BUG_0172)
 AFK_DEFAULT_MESSAGE = ('User is AFK, continue working on given task or polish/verify '
                        'your work if there are things to improve...')  # verbatim from app.js:2774
 
@@ -939,6 +940,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except Exception as e:
                 logger.debug(f"Idle status frame failed (non-critical): {e}")
 
+    async def _afk_nudge_loop():
+        """Re-create the browser's AFK idle auto-reply catch-up (BUG_0172).
+
+        The on-run-end trigger (_afk_maybe_nudge in run_agent_thread's finally) only fires when a
+        conversation ends. If the agent finishes a nudge's run and sits idle with the 5-minute
+        cooldown not yet expired, nothing re-checks, so AFK silently stops (only one nudge). This
+        loop re-runs the SAME _afk_maybe_nudge on a short tick so an idle AFK agent is re-nudged
+        once the cooldown boundary is crossed — indefinitely, until AFK is off or the user resumes.
+        Mirrors _idle_status_loop / _approval_loop.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await asyncio.sleep(AFK_NUDGE_TICK_SECS)
+                _afk_maybe_nudge(session['session_name'], loop)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001 - the loop must never die
+                logger.debug(f"AFK idle nudge tick failed (non-critical): {e}")
+
     # ── Agent execution thread ────────────────────────────────────────────
 
     def run_agent_thread(history_for_agent, agent_runner, gen_id, loop, target_instance_name=None):
@@ -1066,6 +1087,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # BUG_0142: quiet-period status heartbeat so a lost `done` frame cannot leave
         # the UI stuck on "Generating..." until a page refresh.
         asyncio.create_task(_idle_status_loop())
+        # BUG_0172: idle AFK re-nudge catch-up — re-checks the cooldown every tick so an
+        # idle agent is re-nudged on the 5-min cadence, not just once (restores pre-v0.2.81
+        # browser behavior). Reuses the same locked _afk_maybe_nudge, so no double-fire.
+        asyncio.create_task(_afk_nudge_loop())
 
         # Start-on-boot: if the Telegram bridge toggle was persisted ON, start the
         # in-process daemon thread now (uvicorn is serving, so the client can reach AC).

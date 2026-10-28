@@ -2160,6 +2160,141 @@ class TestAfkRunEndWiring:
         # And it must NOT exist at module level.
         assert not hasattr(api_server, '_afk_maybe_nudge')
 
+    def test_afk_idle_renudge_loop_wired(self):
+        """BUG_0172 static guard: the periodic idle re-nudge loop must exist, be
+        nested in create_app, be wired into startup, and reuse the SAME locked sender.
+
+        Revert-proof against DELETING the loop, hoisting it to module level, dropping its
+        startup wiring, duplicating its own send logic, or hard-coding the tick as a magic
+        number. (The behavioral "does it actually re-nudge" proof is TestAfkIdleRenudgeLoop.)
+        """
+        import inspect
+        from agent_cascade import api_server
+
+        create_app_src = inspect.getsource(api_server.create_app)
+        # (a) the loop is defined AND nested (never a module attribute).
+        assert 'def _afk_nudge_loop' in create_app_src
+        assert not hasattr(api_server, '_afk_nudge_loop')
+        # (b) it is started in startup, next to the other background loops.
+        assert 'asyncio.create_task(_afk_nudge_loop())' in create_app_src
+        # (c) it reuses the SAME locked sender targeting the root session — no duplicated send.
+        #     The run-end hook uses 'target_instance_name or session[...]', so this exact
+        #     substring uniquely pins the loop's call.
+        assert "_afk_maybe_nudge(session['session_name'], loop)" in create_app_src
+        # (d) a real module constant backs the tick interval (no magic number in the loop body).
+        assert hasattr(api_server, 'AFK_NUDGE_TICK_SECS')
+        # (e) the loop reuses the single locked sender and adds NO send logic of its own
+        #     (slice just the loop body; _afk_maybe_nudge is the only thing that enqueues).
+        start = create_app_src.index('async def _afk_nudge_loop')
+        end = create_app_src.index('# \u2500\u2500 Agent execution thread', start)
+        assert 'enqueue_message' not in create_app_src[start:end], (
+            'the loop must call _afk_maybe_nudge, not duplicate the enqueue/send path')
+
+
+class _AfkLoopInstance:
+    """Idle instance double. Non-None satisfies afk_should_nudge's instance-present guard;
+    conversation/_compression_lock keep run_agent_thread's pre-try system-message extraction
+    from erroring before it reaches the (deliberately short-circuited) engine call."""
+
+    def __init__(self):
+        self.conversation = []
+        self._compression_lock = threading.Lock()
+
+
+class _AfkLoopOm:
+    def __init__(self, afk_enabled):
+        self.afk_enabled = afk_enabled
+        self.afk_message = ''
+        # Valid path so get_session_log_dir() resolves without raising (the session-history
+        # load at startup is non-fatal either way, but this keeps the run log clean).
+        self.base_dir = tempfile.gettempdir()
+
+
+class _AfkLoopPool:
+    """Pool double that lets the REAL nested _afk_maybe_nudge run end-to-end and records
+    every enqueue_message call.
+
+    Unlike _AfkNudgePool (which only drives the pure afk_should_nudge()), this supplies
+    operation_manager + enqueue_message. It deliberately does NOT pre-seed _afk_last_nudge_ts
+    / _afk_nudge_lock — create_app initializes those (see api_server ~line 468). The run thread
+    each nudge spawns dies fast (the pool lacks _run_generation, caught by run_agent_thread_unified's
+    broad except) — harmless; we assert ONLY on enqueue captures, never on run completion.
+    """
+
+    def __init__(self, afk_enabled=True):
+        self.stopped = False
+        self._instance = _AfkLoopInstance()
+        self.operation_manager = _AfkLoopOm(afk_enabled)
+        self._enqueue_calls = []
+        self._auto_security = None
+
+    def set_auto_security(self, value):
+        # create_app invokes this at construction (app.current_auto_security setter); record it.
+        self._auto_security = bool(value)
+
+    def get_instance(self, name):
+        return self._instance
+
+    def has_pending(self, name):
+        return False
+
+    def has_messages(self, name):
+        return False
+
+    def enqueue_message(self, name, content):
+        self._enqueue_calls.append((name, content))
+
+
+class TestAfkIdleRenudgeLoop:
+    """BUG_0172 end-to-end proof: with AFK on and an idle agent, the periodic loop re-nudges
+    across the cooldown boundary (>=2 enqueues) — which the pre-fix on-run-end hook alone
+    cannot do. Deterministic via tiny monkeypatched tick/cooldown + a bounded poll window."""
+
+    @staticmethod
+    def _build_app(monkeypatch, afk_enabled):
+        from agent_cascade import api_server
+        from agent_cascade.api_server import create_app
+
+        # Tiny cadence so the loop crosses the cooldown boundary many times well inside
+        # the poll window. Both constants are read as module globals at call time, so
+        # monkeypatching them drives the real loop without waiting 5 minutes.
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_TICK_SECS', 0.02)
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 0.05)
+
+        pool = _AfkLoopPool(afk_enabled=afk_enabled)
+        app = create_app(agents=[], agent_pool=pool, config={'session_name': 'w1'})
+        return app, pool
+
+    def test_afk_idle_renudge_fires_repeatedly(self, monkeypatch):
+        from fastapi.testclient import TestClient
+        app, pool = self._build_app(monkeypatch, afk_enabled=True)
+
+        # Entering the lifespan starts startup() -> asyncio.create_task(_afk_nudge_loop()).
+        # Poll a generous bounded window; break as soon as the 2nd nudge lands.
+        with TestClient(app):
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and len(pool._enqueue_calls) < 2:
+                time.sleep(0.05)
+
+        # Only the periodic loop can produce the 2nd nudge: the first is claimed+enqueued,
+        # its run thread dies fast, and that thread's on-run-end hook no-ops within the
+        # cooldown. A >=2 count therefore proves periodic re-nudge, not a single fire.
+        assert len(pool._enqueue_calls) >= 2
+
+    def test_afk_off_does_not_renudge(self, monkeypatch):
+        """Negative control: with AFK off, no enqueue happens at construction or across the
+        window — guards against a nudge firing regardless of the AFK flag. (Proof that the
+        loop actually *runs* comes from the positive test; this only pins the flag-off path.)"""
+        from fastapi.testclient import TestClient
+        app, pool = self._build_app(monkeypatch, afk_enabled=False)
+
+        with TestClient(app):
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+
+        assert pool._enqueue_calls == []
+
 
 class TestAfkRespectsSecurity:
     """The AFK at-registration auto-reject must defer to Auto-Ask Security review.
