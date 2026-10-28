@@ -227,8 +227,9 @@ def _describe_list_filters(
     """Describe the filters that can hide existing entries (used by empty-result reporting).
 
     Only filters the caller actually supplied are named, so the empty-result message can
-    point at the knob responsible instead of listing every default. *skip_vcs* is included
-    only when the caller is in recursive mode (flat listings never apply it).
+    point at the knob responsible instead of listing every default. *skip_vcs* is named
+    only when it actually pruned a directory (the caller passes ``ctx.vcs_pruned > 0``),
+    so a recursive listing that hid nothing does not blame it (BUG_0166).
     """
     parts = []
     if include:
@@ -272,6 +273,10 @@ class FilterContext:
     modified_before: Optional[float] = None  # epoch, or None
     files_only: bool = False
     dirs_only: bool = False
+    # Reporting state (not a filter): directories pruned by skip_vcs during this
+    # traversal. Lets the empty-result message name skip_vcs only when it actually
+    # hid something instead of on every recursive empty listing (BUG_0166).
+    vcs_pruned: int = 0
 
 
 # ─── Mixin: File operations for OperationManager ─────────────────────────
@@ -523,6 +528,7 @@ class FileOpsMixin:
         grep's DEFAULT_IGNORED_DIRS.
         """
         if ctx.skip_vcs and any(fnmatch.fnmatch(d_name, pat) for pat in DEFAULT_IGNORED_DIRS):
+            ctx.vcs_pruned += 1
             return True
         if ctx.exclude_fn is None:
             return False
@@ -1055,12 +1061,19 @@ class FileOpsMixin:
                 else:
                     active = _describe_list_filters(
                         include, exclude, min_size, max_size, modified_after, modified_before,
-                        files_only, dirs_only, skip_vcs=recursive and skip_vcs)
+                        files_only, dirs_only,
+                        skip_vcs=recursive and skip_vcs and ctx.vcs_pruned > 0)
                     detail = f': {active}' if active else ''
                     noun = 'entry exists' if raw_entries == 1 else 'entries exist'
                     output += f'  (no entries matched the active filters{detail})\n'
                     output += (f'  {raw_entries} {noun} before filtering; '
                                'adjust or remove the filters to list them.\n')
+                    # BUG_0166: flat mode matches include/exclude against the basename
+                    # only, so a slash-bearing pattern silently matches nothing. Point
+                    # at recursive mode instead of leaving the caller with a mystery.
+                    if not recursive and include and ('/' in include or '\\' in include):
+                        output += ("  [hint] include contains '/', which is matched against relative "
+                                   'paths only in recursive mode; set recursive=true to match it.\n')
 
             # Notes about data missing from the listing (unreadable dirs, junctions
             # not traversed) are surfaced with the other warnings at the end.
