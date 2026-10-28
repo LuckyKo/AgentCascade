@@ -406,10 +406,6 @@ class ShellCmd(BaseTool):
                         run_async = False
                         logger.info('Auto safe-mode: free RAM %s MB < floor %s MB',
                                     press['ram_free_mb'], ram_floor)
-                        _queue_tool_warning(
-                            pool, agent_name,
-                            f"[shell_cmd] Running in SAFE mode: free system RAM {press['ram_free_mb']} MB "
-                            f"< floor {ram_floor} MB — local model unloaded to avoid OOM; command may be slower.")
                     elif press['low_vram_gpus']:
                         _queue_tool_warning(
                             pool, agent_name,
