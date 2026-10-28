@@ -1381,6 +1381,10 @@ class Grep(BaseTool):
                 'type': 'boolean',
                 'description': TOOL_METADATA['grep']['parameters']['smart_case']
             },
+            'literal': {
+                'type': 'boolean',
+                'description': TOOL_METADATA['grep']['parameters']['literal']
+            },
             'timeout': {
                 'type':
                     'number',
@@ -1427,6 +1431,7 @@ class Grep(BaseTool):
             ignore_vcs = bool(ignore_vcs)
         context = params.get('context', 0)
         smart_case = params.get('smart_case', True)
+        literal = params.get('literal', False)
         # Default timeout comes from settings (DEFAULT_GREP_TIMEOUT); an explicit
         # caller value still overrides it.
         try:
@@ -1456,6 +1461,7 @@ class Grep(BaseTool):
             ignore_vcs=ignore_vcs,  # Already resolved to True/False, no need for bool()
             context=int(context),
             smart_case=bool(smart_case),
+            literal=bool(literal),
             spill_file_path=spill_file_path)
 
 

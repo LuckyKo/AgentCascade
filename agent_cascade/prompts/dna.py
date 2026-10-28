@@ -413,7 +413,9 @@ TOOL_METADATA = {
             'context':
                 'Number of lines to show before/after each match (like -C N). Default: 0',
             'smart_case':
-                'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.'
+                'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.',
+            'literal':
+                'When True, treat the pattern as a literal string (no regex interpretation). Useful for searching paths containing backslashes (e.g., Windows paths) or other regex metacharacters. Default: False.'
         }
     },
     'delete_file': {
@@ -463,8 +465,8 @@ TOOL_METADATA = {
             'Execution mode auto/sync/async/safe — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done; manage it with special commands via that tool_id. '
             'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N. '
-            '⚠ WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters. '
-            '⚠ WARNING: Always use `safe` mode when running programs or tests that might require a lot of RAM/VRAM. '
+            'WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters. '
+            'WARNING: Always use `safe` mode when running programs or tests that require a lot of RAM/VRAM (like loading LLMs). '
             'On Windows hosts the shell is cmd.exe — POSIX tools (grep, awk, sed) and PowerShell cmdlets (Select-String, etc.) are NOT available; use findstr, or a Python snippet / the grep/read_file tools, or invoke powershell -Command "..." to get PowerShell syntax.'
         ),
         'parameters': {

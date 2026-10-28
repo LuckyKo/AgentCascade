@@ -183,7 +183,8 @@ class GrepMixin:
                        smart_case: bool,
                        *,
                        force_no_ignore: bool = False,
-                       exclude_git: bool = False) -> list:
+                       exclude_git: bool = False,
+                       literal: bool = False) -> list:
         """Single source of truth for the ripgrep argv used by BOTH the fast path and the
         BUG_0061 ignored-path probe, so the two can never drift apart (a drifting probe
         would silently misreport how many matches are hidden).
@@ -195,8 +196,10 @@ class GrepMixin:
           exclude_git     — append `--glob '!.git/'`. The fast path wants this only when
                             ignore_vcs=True (to keep the documented .git exclusion);
                             the probe always wants it (to avoid descending into .git/).
+          literal         — emit `-F` (fixed-string mode) so ripgrep treats the pattern as
+                            a literal string rather than a regex.
 
-        Defaults are False/False so neither behaviour is imposed on a caller implicitly —
+        Defaults are False/False/False so neither behaviour is imposed on a caller implicitly —
         each call site must state which behaviour it needs.
 
         Ordering is load-bearing: ripgrep uses "last match wins" for --glob, so the user
@@ -223,6 +226,9 @@ class GrepMixin:
 
         if force_no_ignore:
             cmd.append('--no-ignore')
+
+        if literal:
+            cmd.append('-F')
 
         if context > 0:
             cmd.extend(['-C', str(context)])
@@ -268,7 +274,8 @@ class GrepMixin:
                                exclude: str,
                                context: int,
                                smart_case: bool,
-                               timeout: float) -> Optional[int]:
+                               timeout: float,
+                               literal: bool = False) -> Optional[int]:
         """Best-effort count of matches hiding behind VCS ignore rules (BUG_0061).
 
         With ignore_vcs=True the fast path passes NO explicit ignore flag, so ripgrep applies
@@ -309,7 +316,8 @@ class GrepMixin:
                                   context,
                                   smart_case,
                                   force_no_ignore=True,
-                                  exclude_git=True)
+                                  exclude_git=True,
+                                  literal=literal)
 
         # Bounded: never let the diagnostic probe exceed the caller's time budget.
         # Cap at 5s for sanity, but also clamp to the caller's own timeout so a
@@ -361,6 +369,7 @@ class GrepMixin:
                              ignore_vcs: bool = True,
                              context: int = 0,
                              smart_case: bool = True,
+                             literal: bool = False,
                              spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
 
@@ -396,13 +405,14 @@ class GrepMixin:
                                           context,
                                           smart_case,
                                           force_no_ignore=is_vcs_search,
-                                          exclude_git=not is_vcs_search)
+                                          exclude_git=not is_vcs_search,
+                                          literal=literal)
             else:
                 cmd = [
                     'grep',
                     '-r',
                     '-n',
-                    '-E',  # Extended regex to support alternation (|), groups, etc. — matches Python re semantics
+                    '-F' if literal else '-E',  # -F: fixed-string (literal); -E: extended regex
                 ]
                 # BUG_0056: support comma-separated globs — one --include per pattern.
                 if include and include != '*':
@@ -661,7 +671,8 @@ class GrepMixin:
                           agent_name: str = 'unknown',
                           spill_file_path: Optional[str] = None,
                           timeout: float = 5.0,
-                          searched_note: str = '') -> str:
+                          searched_note: str = '',
+                          literal: bool = False) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
 
         try:
@@ -682,8 +693,9 @@ class GrepMixin:
         else:
             flags = 0
 
+        _compile_pattern = re.escape(pattern) if literal else pattern
         try:
-            pattern_re = _compile_grep_pattern(pattern, flags=flags)
+            pattern_re = _compile_grep_pattern(_compile_pattern, flags=flags)
         except re.error as e:
             return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
@@ -769,6 +781,7 @@ class GrepMixin:
              ignore_vcs: bool = True,
              context: int = 0,
              smart_case: bool = True,
+             literal: bool = False,
              spill_file_path: Optional[str] = None) -> str:
         """Search for text pattern in files.
 
@@ -811,22 +824,24 @@ class GrepMixin:
                                               agent_name=agent_name,
                                               spill_file_path=spill_file_path,
                                               timeout=timeout,
-                                              searched_note=searched_note)
+                                              searched_note=searched_note,
+                                              literal=literal)
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,
              _sub_shown_lines) = self._try_subprocess_grep(
-                 pattern=pattern,
-                 path=resolved,
-                 include=include,
-                 char_limit=char_limit,
-                 timeout=timeout,  # Use configurable timeout
-                 agent_name=agent_name,
-                 exclude=exclude,
-                 ignore_vcs=ignore_vcs,
-                 context=context,
-                 smart_case=smart_case,
-                 spill_file_path=spill_file_path)
+                  pattern=pattern,
+                  path=resolved,
+                  include=include,
+                  char_limit=char_limit,
+                  timeout=timeout,  # Use configurable timeout
+                  agent_name=agent_name,
+                  exclude=exclude,
+                  ignore_vcs=ignore_vcs,
+                  context=context,
+                  smart_case=smart_case,
+                  literal=literal,
+                  spill_file_path=spill_file_path)
             if was_timed_out:
                 return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
             if results is not None:
@@ -846,7 +861,8 @@ class GrepMixin:
                                                               exclude=exclude,
                                                               context=context,
                                                               smart_case=smart_case,
-                                                              timeout=timeout)
+                                                              timeout=timeout,
+                                                              literal=literal)
                         if _hidden:
                             summary += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
                                         f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
@@ -917,8 +933,9 @@ class GrepMixin:
                 flags = re.IGNORECASE
             else:
                 flags = 0
+            _compile_pattern = re.escape(pattern) if literal else pattern
             try:
-                pattern_re = _compile_grep_pattern(pattern, flags=flags)
+                pattern_re = _compile_grep_pattern(_compile_pattern, flags=flags)
             except re.error as e:
                 return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
