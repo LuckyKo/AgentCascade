@@ -60,6 +60,7 @@ Include code examples, commands, or config snippets.
 ## Quality checklist
 
 - [ ] Name and coverage is unique (check existing skills via `scan_skills`)
+- [ ] Name contains the exact info necessary to pick up on its role and use case at a quick glance
 - [ ] Description is specific (not generic like "coding" or "debugging")
 - [ ] Triggers cover how the skill will be matched in practice
 - [ ] Body has concrete, actionable steps (not vague advice)

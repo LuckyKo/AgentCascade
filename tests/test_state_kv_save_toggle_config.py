@@ -113,12 +113,12 @@ def _make_fake_reacquire():
 
 
 class TestPoolSettingsField:
-    """The PoolSettings field exists with the correct default (default ON = today's behavior)."""
+    """The PoolSettings field exists with the correct default (default OFF — pressure planner owns retention)."""
 
-    def test_default_is_true(self):
+    def test_default_is_false(self):
         from agent_cascade.agent_instance import PoolSettings
 
-        assert PoolSettings().state_kv_save_enabled is True
+        assert PoolSettings().state_kv_save_enabled is False
 
 
 # ============================================================================
@@ -235,10 +235,10 @@ class TestSaveGate:
         with inst._state_lock:
             assert inst._state_label == 'B', 'label must be untouched when save is skipped'
 
-    def test_on_saves_by_default(self):
-        """Default ON (no settings object at all) preserves today's behavior: a real save fires."""
+    def test_on_saves_when_enabled(self):
+        """ON (explicit) fires a real save. Default is OFF, so this must opt in explicitly."""
         inst = make_instance()
-        engine = make_engine(inst, state_kv_save_enabled=None)  # no .settings → True default
+        engine = make_engine(inst, state_kv_save_enabled=True)
 
         with patch.object(state_ops.httpx, 'post') as post_mock:
             post_mock.return_value.status_code = 200
@@ -341,9 +341,9 @@ class TestReacquireGate:
                 'stale label must be cleared on the OFF skip path (save occurred while ON)'
 
     def test_on_restores_to_held_endpoint(self):
-        """Default ON: existing restore-to-held-endpoint behavior still holds."""
+        """ON (explicit): existing restore-to-held-endpoint behavior still holds."""
         inst = make_instance()  # label pending, autoloader endpoint config cached
-        engine = make_engine(inst, state_kv_save_enabled=None)  # no .settings → True default
+        engine = make_engine(inst, state_kv_save_enabled=True)
 
         def fake_reacquire(instance_arg, holder_name, context='reacquire'):
             instance_arg._slot_release = lambda: None

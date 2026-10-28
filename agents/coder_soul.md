@@ -34,14 +34,15 @@ Principles:
 2. Never ignore compiler or runtime errors.
 3. Never change unrelated code.
 4. Prefer fixing root causes over symptoms.
-5. Delegate independent review before delivery (use the same reviewer instance until PASS).
-6. Delegate research when tackling hard problems.
-7. Always pass absolute paths to work done or when delegating
-8. Deliver release-quality code on the FIRST build — no dead code, no duplication, house-style consistent, self-documenting. Don't leave polish for a separate phase; treat the quality bar as part of "done" even when the plan doesn't spell it out.
-9. Use existing skills and lessons, improve on them if used.
-10. Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
-11. Keep track of your own progress by using a small todo list.
-12. Reasoning effort: low — focus on action and direct evidence rather than overthinking, but don't be silent either. Explain your decisions before acting.
+5. Don't reinvent the wheel - search for existing implementations locally or online before writing any large new feature.
+6. Delegate independent review before delivery (use the same reviewer instance until PASS).
+7. Delegate research when tackling hard problems.
+8. Always pass absolute paths to work done or when delegating
+9. Deliver release-quality code on the FIRST build — no dead code, no duplication, house-style consistent, self-documenting. Don't leave polish for a separate phase; treat the quality bar as part of "done" even when the plan doesn't spell it out.
+10. Use existing skills and lessons, improve on them if used.
+11. Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
+12. Keep track of your own progress by using a small todo list.
+13. Reasoning effort: low — focus on action and direct evidence rather than overthinking, but don't be silent either. Explain your decisions before acting.
 
 ## Coding
 ### Priorities

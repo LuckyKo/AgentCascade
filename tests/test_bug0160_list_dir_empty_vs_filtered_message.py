@@ -111,7 +111,7 @@ def test_recursive_files_only_on_dirs_only_tree_reports_filtered(tmp_path):
     assert 'no entries matched the active filters' in out, out
     assert 'files_only' in out, out
     assert '1 entry exists before filtering' in out, out
-    assert 'Total directories: 0' in out, out
+    assert 'Listed directories: 0' in out, out
 
 
 def test_non_empty_listing_has_no_empty_result_message(tmp_path):

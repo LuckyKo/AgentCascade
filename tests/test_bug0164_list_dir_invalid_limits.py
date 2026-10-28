@@ -53,7 +53,7 @@ def test_negative_max_entries_recursive_does_not_blame_filters(tmp_path):
     out = om.list_directory('.', recursive=True, max_entries=-5, char_limit=-1)
 
     assert 'max_entries=-5 is invalid' in out, out
-    assert 'listing stopped at -5' not in out, out
+    assert 'output limited to -5' not in out, out
     assert 'f0.txt' in out, out
 
 

@@ -463,7 +463,8 @@ TOOL_METADATA = {
             'Execution mode auto/sync/async/safe — see execution_mode param. '
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done; manage it with special commands via that tool_id. '
             'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N. '
-            'WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters. '
+            '⚠ WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters. '
+            '⚠ WARNING: Always use `safe` mode when running programs or tests that might require a lot of RAM/VRAM. '
             'On Windows hosts the shell is cmd.exe — POSIX tools (grep, awk, sed) and PowerShell cmdlets (Select-String, etc.) are NOT available; use findstr, or a Python snippet / the grep/read_file tools, or invoke powershell -Command "..." to get PowerShell syntax.'
         ),
         'parameters': {

@@ -675,7 +675,7 @@ class FileOpsMixin:
             for e in sorted_files:
                 output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
         if overflow_count > 0:
-            output += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude or size/date filters to narrow\n"
+            output += f"  ... and {overflow_count} more entries (output limited to {max_entries} entries); use include/exclude or size/date filters to narrow\n"
 
         return output, total_dirs, total_files, total_size, raw_entries
 
@@ -693,7 +693,13 @@ class FileOpsMixin:
         visited_dirs: set = set()
         blocked_dirs: dict = {}  # abs path -> reason (junctions not traversed)
         walk_errors: List[OSError] = []
-        entry_count = 0
+        # Entry budget shared by directory headers and file lines. Both modes now
+        # count "entries" the same way (BUG_0167): a directory header and a file line
+        # each consume one slot. The budget is consumed in collection order (dirs
+        # before files within each walked directory); rendering may reorder entries
+        # by sort_by, but the number of rendered lines stays capped.
+        remaining = max_entries
+        truncated = False
         raw_entries = 0
         root_depth = len(resolved.parts)
         allowed_roots = self._list_allowed_roots(resolved)
@@ -755,6 +761,14 @@ class FileOpsMixin:
                 # Early exit for files_only (no stat needed) — dirs are never files.
                 if ctx.files_only:
                     continue
+                # Only a dir that passes its own name filter gets a [DIR] header, so
+                # only those consume the entry budget. A non-displayable dir still
+                # needs an entry so render_dir descends into it (BUG_0008), but it
+                # must not count against max_entries.
+                displayable = self._matches_filters(d_name, True, None, None, ctx=ctx)
+                if displayable and remaining <= 0:
+                    truncated = True
+                    break
                 try:
                     stat_info = (current_dir / d_name).stat()
                 except OSError:
@@ -762,35 +776,42 @@ class FileOpsMixin:
                 d_entry = self._make_entry(d_name, True, stat_info)
                 d_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
                 dir_entries.append(d_entry)
+                if displayable:
+                    remaining -= 1
 
             file_entries = []
-            for f_name in sorted(filenames):
-                if entry_count >= max_entries:
-                    break
-                # Early exit for dirs_only (no stat needed) — files are never dirs here.
-                if ctx.dirs_only:
-                    continue
-                try:
-                    stat_info = (current_dir / f_name).stat()
-                except OSError:
-                    stat_info = None
-                # Full filter (name + size + date) via context, after stat is available.
-                # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
-                # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
-                rel = _safe_relpath(str(current_dir / f_name), str(resolved))
-                if not self._matches_filters(
-                        f_name,
-                        False,
-                        size=stat_info.st_size if stat_info else None,
-                        mtime=stat_info.st_mtime if stat_info else None,
-                        ctx=ctx,
-                        rel=rel,
-                ):
-                    continue
-                f_entry = self._make_entry(f_name, False, stat_info)
-                f_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
-                file_entries.append(f_entry)
-                entry_count += 1
+            if ctx.dirs_only:
+                pass  # dirs_only: files are never rendered and must not consume budget
+            elif remaining <= 0:
+                # Budget used up by directory headers. Files are not scanned; say so
+                # rather than silently pretending the listing is complete.
+                truncated = truncated or bool(filenames)
+            else:
+                for f_name in sorted(filenames):
+                    try:
+                        stat_info = (current_dir / f_name).stat()
+                    except OSError:
+                        stat_info = None
+                    # Full filter (name + size + date) via context, after stat is available.
+                    # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
+                    # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
+                    rel = _safe_relpath(str(current_dir / f_name), str(resolved))
+                    if not self._matches_filters(
+                            f_name,
+                            False,
+                            size=stat_info.st_size if stat_info else None,
+                            mtime=stat_info.st_mtime if stat_info else None,
+                            ctx=ctx,
+                            rel=rel,
+                    ):
+                        continue
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    f_entry = self._make_entry(f_name, False, stat_info)
+                    f_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
+                    file_entries.append(f_entry)
+                    remaining -= 1
 
             # Record every walked directory (even with no displayable files) so the
             # tree structure and empty-dir markers are preserved.
@@ -801,7 +822,11 @@ class FileOpsMixin:
             if blocked_dirs:
                 subdirs[:] = [d for d in subdirs if str(current_dir / d) not in blocked_dirs]
 
-            if entry_count >= max_entries:
+            if remaining <= 0:
+                # Budget exhausted: no further entry can be rendered. Any remaining
+                # subdirectories were not scanned, so record that output was limited.
+                if subdirs:
+                    truncated = True
                 subdirs.clear()
                 continue
             if max_depth != -1 and current_depth >= max_depth - 1:
@@ -827,11 +852,20 @@ class FileOpsMixin:
         # the old recursion rescanned all of entries_by_dir per directory -> O(n^2).
         root_str = str(resolved)
         displayed_dirs = set()
-        for dirpath in entries_by_dir:
+        for dirpath, entries in entries_by_dir.items():
             if dirpath == root_str:
-                continue  # root is never recorded (matches _dir_displayed's no-add branch)
+                # Root is never recorded as a displayed dir, but its dir-children
+                # must still be added (they may not be keys in entries_by_dir if
+                # the entry budget was exhausted before the walk descended).
+                for e in entries:
+                    if e['is_dir'] and self._matches_filters(e['name'], True, None, None, ctx=ctx):
+                        displayed_dirs.add(os.path.join(dirpath, e['name']))
+                continue
             if self._matches_filters(Path(dirpath).name, True, None, None, ctx=ctx):
                 displayed_dirs.add(dirpath)
+            for e in entries:
+                if e['is_dir'] and self._matches_filters(e['name'], True, None, None, ctx=ctx):
+                    displayed_dirs.add(os.path.join(dirpath, e['name']))
 
         # Blocked junctions are never walked, so they are absent from entries_by_dir;
         # add them to the display set explicitly (subject to the same name filter) so
@@ -880,14 +914,37 @@ class FileOpsMixin:
                 if parent_key in entries_by_dir and parent_key != k:
                     children_by_parent.setdefault(parent_key, set()).add(k)
 
-        def render_dir(dirpath: str, depth: int):
+        def render_dir(root_dirpath: str) -> None:
+            """Render the collected tree iteratively (BUG_0168).
+
+            An explicit stack of (dirpath, depth, entry-iterator) replaces the former
+            recursion: a tree deeper than Python's recursion limit (~1000 levels) used
+            to raise RecursionError and turn the whole listing into an error string.
+            A stack of iterators preserves the original depth-first order.
+            """
             nonlocal output, rendered_files, rendered_size
-            group = entries_by_dir.get(dirpath, [])
-            prefix = '  ' * depth
-            base_rel = rel_of(dirpath)
-            for e in group:
-                if e['is_dir']:
-                    child = os.path.join(dirpath, e['name'])
+            stack = [(root_dirpath, 0, iter(entries_by_dir.get(root_dirpath, [])))]
+            _cur_dirpath = None  # tracks which stack frame is active (for prefix/base_rel caching)
+            while stack:
+                dirpath, depth, entries = stack[-1]
+                entry = next(entries, None)
+                if entry is None:
+                    stack.pop()
+                    if ctx.files_only:
+                        # No [DIR] entries exist under files_only, so descend into the
+                        # walked child dirs after rendering this group. reverse=True
+                        # keeps ascending order on the LIFO stack.
+                        for child in sorted(children_by_parent.get(dirpath, set()), reverse=True):
+                            stack.append((child, depth + 1, iter(entries_by_dir.get(child, []))))
+                    continue
+
+                # Compute per-group constants once (on first entry of each stack frame)
+                if dirpath != _cur_dirpath:
+                    _cur_dirpath = dirpath
+                    prefix = '  ' * depth
+                    base_rel = rel_of(dirpath)
+                if entry['is_dir']:
+                    child = os.path.join(dirpath, entry['name'])
                     blocked_reason = blocked_dirs.get(child)
                     # Print the dir line only when it passed its own name filter (it is
                     # in displayed_dirs); a non-displayable dir is skipped but we still
@@ -897,27 +954,21 @@ class FileOpsMixin:
                             marker = f" (not traversed: {blocked_reason})"
                         else:
                             is_empty = not entries_by_dir.get(child)
-                            marker = ' (empty)' if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
-                        rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
+                            marker = ' (empty)' if is_empty else f" (modified: {self._format_mtime(entry['mtime'])})"
+                        rel_name = entry['name'] if not base_rel else f"{base_rel}/{entry['name']}"
                         output += f"{prefix}[DIR] {rel_name}/{marker}\n"
                     # Never descend into a junction whose target is outside the
                     # allowed roots (BUG_0163).
                     if not blocked_reason:
-                        render_dir(child, depth + 1)
+                        stack.append((child, depth + 1, iter(entries_by_dir.get(child, []))))
                 else:
-                    rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
-                    output += f"{prefix}{rel_name} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+                    rel_name = entry['name'] if not base_rel else f"{base_rel}/{entry['name']}"
+                    output += f"{prefix}{rel_name} ({self._format_size(entry['size'])}, modified: {self._format_mtime(entry['mtime'])})\n"
                     rendered_files += 1
-                    rendered_size += e['size'] or 0
-
-            # Under files_only there are no [DIR] entries to drive descent, so recurse
-            # into every walked child dir (derived from entries_by_dir keys above).
-            if ctx.files_only:
-                for child in sorted(children_by_parent.get(dirpath, set())):
-                    render_dir(child, depth + 1)
+                    rendered_size += entry['size'] or 0
 
         output = ''
-        render_dir(dirpath=str(resolved), depth=0)
+        render_dir(root_dirpath=str(resolved))
 
         # total_files/total_size are accumulated in render_dir (rendered_files /
         # rendered_size) so they reflect exactly the file lines actually printed,
@@ -925,8 +976,9 @@ class FileOpsMixin:
         total_files = rendered_files
         total_size = rendered_size
 
-        if entry_count >= max_entries and entries_by_dir:
-            output += f"\n  ... (listing stopped at {max_entries} files; use include/exclude or size/date filters to narrow)\n"
+        if truncated:
+            output += (f"\n  ... (output limited to {max_entries} entries; "
+                       'use include/exclude or size/date filters to narrow)\n')
 
         # BUG_0165: os.walk with onerror=None silently skips directories it cannot
         # read, so a permission-denied subtree simply vanished from the listing and
@@ -1080,10 +1132,13 @@ class FileOpsMixin:
             warnings.extend(notes)
 
             if show_summary:
+                # BUG_0169: these are the counts of lines actually listed, not totals
+                # for the whole tree -- max_entries/max_depth truncation can hide
+                # entries, so calling them "Total" was misleading.
                 output += f"\nSummary:\n"
-                output += f"  Total directories: {total_dirs}\n"
-                output += f"  Total files:       {total_files}\n"
-                output += f"  Total size:        {self._format_size(total_size)}\n"
+                output += f"  Listed directories: {total_dirs}\n"
+                output += f"  Listed files:       {total_files}\n"
+                output += f"  Listed size:        {self._format_size(total_size)}\n"
 
             # Surface unrecognized size/date filter values so the agent knows a
             # filter was silently ignored (prevents silent no-op confusion).

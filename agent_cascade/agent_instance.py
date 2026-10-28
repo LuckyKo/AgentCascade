@@ -1002,7 +1002,10 @@ class PoolSettings:
     # buttons do NOT read this: they gate on per-endpoint capability
     # (is_state_save_capable, state_ops.py) and work with this toggle off.
     # When False, automatic checkpoint save/restore is skipped (autoloader only).
-    state_kv_save_enabled: bool = True
+    # Default-off: the engine's pressure planner handles state retention (demote-to-host);
+    # users opt in explicitly via the Web UI / Telegram setting, and shell_cmd 'safe'
+    # forces it on for its window via the _safe_mode_kv override.
+    state_kv_save_enabled: bool = False
 
     # shell_cmd AUTO low-RAM guard floors (see state_ops.ram_vram_pressure + shell_cmd hook):
     # below the RAM floor AUTO forces safe mode; VRAM is advisory-only. Explicit 'sync'/'safe' win.

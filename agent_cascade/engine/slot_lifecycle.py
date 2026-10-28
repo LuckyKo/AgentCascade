@@ -137,7 +137,9 @@ class SlotLifecycleMixin:
         """
         from agent_cascade.state_ops import kv_save_effectively_enabled
         # KV gate: global checkpoint toggle ORed with the safe-mode override (see state_ops.kv_save_effectively_enabled).
-        if not kv_save_effectively_enabled(instance, self._get_pool_setting('state_kv_save_enabled', True)):
+        # Default-off: the engine's pressure planner handles state retention (demote-to-host). Users may still
+        # opt in explicitly via the pool's state_kv_save_enabled setting; safe-mode forces it on for its window.
+        if not kv_save_effectively_enabled(instance, self._get_pool_setting('state_kv_save_enabled', False)):
             logger.debug('[STATE_SAVE_SKIP] %s (%s) — KV save before slot yield disabled by toggle',
                          inst_name, reason or 'slot-yield')
             return False
@@ -257,7 +259,7 @@ class SlotLifecycleMixin:
         # override (see state_ops.kv_save_effectively_enabled).
         from agent_cascade.state_ops import kv_save_effectively_enabled
         if respect_toggle and not kv_save_effectively_enabled(
-                instance, self._get_pool_setting('state_kv_save_enabled', True)):
+                instance, self._get_pool_setting('state_kv_save_enabled', False)):
             logger.debug('[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
                          inst_name, context or 'slot-yield')
             # Clear any stale label (save may have occurred before toggle was turned OFF).

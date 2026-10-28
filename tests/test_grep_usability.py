@@ -761,7 +761,7 @@ def test_list_files_only_recursive_three_level_depth():
 
 def test_list_files_only_recursive_max_entries_truncation():
     """BUG_0075 coverage: max_entries truncation must still take effect under
-    files_only+recursive (the new descent path must respect the entry_count break).
+    files_only+recursive (the descent path must respect the shared entry budget).
     Fixture 10 .txt files across root + sub; max_entries=3 -> truncation notice present
     and NOT all 10 files rendered."""
     from agent_cascade.operation_manager import OperationManager
@@ -774,7 +774,7 @@ def test_list_files_only_recursive_max_entries_truncation():
             (sub / f'g{i}.txt').write_text('x')
         om = OperationManager(base_dir=tmpdir)
         result = om.list_directory('.', recursive=True, files_only=True, max_entries=3)
-        assert 'listing stopped at' in result, f"truncation notice must appear: {result}"
+        assert 'output limited to' in result, f"truncation notice must appear: {result}"
         assert result.count('.txt') <= 3, f"max_entries=3 must cap rendered files at 3, got {result.count('.txt')}: {result}"
     print('[PASS] test_list_files_only_recursive_max_entries_truncation')
 
