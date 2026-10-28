@@ -165,6 +165,49 @@ def _safe_relpath(path: str, root: str) -> str:
         return p.name
 
 
+# Windows FILE_ATTRIBUTE_REPARSE_POINT: set on junctions, mount points and symlinks.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_junction_dir(path) -> bool:
+    """True if *path* is a Windows junction / reparse-point directory.
+
+    ``os.walk(followlinks=False)`` refuses to follow symlinks, but a junction is NOT
+    reported as a symlink (``os.path.islink()`` is False), so the walk descends into it.
+    That is what lets a junction inside the workspace expose a directory outside every
+    allowed root (BUG_0163). ``os.path.isjunction`` exists on Python 3.12+; the
+    ``st_file_attributes`` fallback covers older interpreters on Windows and returns
+    False on POSIX (where symlinked dirs are already handled by ``followlinks=False``).
+    """
+    isjunction = getattr(os.path, 'isjunction', None)
+    if isjunction is not None:
+        try:
+            return bool(isjunction(path))
+        except OSError:
+            return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, 'st_file_attributes', 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _is_within_roots(path, roots: List[Path]) -> bool:
+    """True if *path* (after resolving links) is one of *roots* or lives under one.
+
+    Resolution failure (broken junction, symlink loop) returns False: an entry whose
+    target cannot be verified must not be traversed.
+    """
+    try:
+        target = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    for root in roots:
+        if target == root or root in target.parents:
+            return True
+    return False
+
+
 def _describe_list_filters(
     include: Optional[str],
     exclude: Optional[str],
@@ -530,6 +573,26 @@ class FileOpsMixin:
 
     # ─── Directory listing helpers ────────────────────────────────────────
 
+    def _list_allowed_roots(self, fallback: Path) -> List[Path]:
+        """Resolved roots a recursive listing is allowed to traverse.
+
+        base_dir plus any extra work folders (RW or RO). Falls back to *fallback*
+        (the directory being listed) for mixin users without the PathSecurityMixin
+        attributes, e.g. the MockOpMgr test double in tests/scripts/check_oob_fixes.py.
+        """
+        candidates = [getattr(self, 'base_dir', None)]
+        candidates.extend(getattr(self, 'extra_work_folders_rw', None) or [])
+        candidates.extend(getattr(self, 'extra_work_folders_ro', None) or [])
+        roots = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                roots.append(Path(candidate).resolve())
+            except (OSError, RuntimeError):
+                continue
+        return roots or [fallback]
+
     def _list_flat(self, resolved: Path, ctx: 'FilterContext', sort_by: str,
                    max_entries: int) -> Tuple[str, int, int, int, int]:
         """Flat directory listing via os.scandir.
@@ -615,9 +678,11 @@ class FileOpsMixin:
         """
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
+        blocked_dirs: dict = {}  # abs path -> reason (junctions not traversed)
         entry_count = 0
         raw_entries = 0
         root_depth = len(resolved.parts)
+        allowed_roots = self._list_allowed_roots(resolved)
 
         for dirpath, subdirs, filenames in os.walk(str(resolved), topdown=True):
             current_dir = Path(dirpath)
@@ -655,6 +720,17 @@ class FileOpsMixin:
             # what makes exclude='.git' (bare) and exclude='.git/*' suppress the whole
             # .git subtree instead of only its header.
             subdirs[:] = [d for d in subdirs if not self._dir_is_excluded(current_dir, d, resolved, ctx)]
+
+            # Junction guard (BUG_0163): os.walk(followlinks=False) does not follow
+            # symlinks, but a Windows junction is not reported as a symlink, so the
+            # walk DOES descend into it. A junction inside the workspace can therefore
+            # expose a directory outside every allowed root (base_dir / extra work
+            # folders). Record such entries so they stay visible but are not traversed;
+            # render_dir marks them "(not traversed: ...)".
+            for d_name in subdirs:
+                full = current_dir / d_name
+                if _is_junction_dir(full) and not _is_within_roots(full, allowed_roots):
+                    blocked_dirs[str(full)] = 'target is outside the workspace'
 
             dir_entries = []
             for d_name in sorted(subdirs):
@@ -702,6 +778,11 @@ class FileOpsMixin:
             # tree structure and empty-dir markers are preserved.
             entries_by_dir[dirpath] = self._sort_entries(dir_entries + file_entries, sort_by)
 
+            # Do not let os.walk descend into a blocked junction: it is displayed as a
+            # [DIR] entry above, but its target is outside every allowed root.
+            if blocked_dirs:
+                subdirs[:] = [d for d in subdirs if str(current_dir / d) not in blocked_dirs]
+
             if entry_count >= max_entries:
                 subdirs.clear()
                 continue
@@ -731,6 +812,13 @@ class FileOpsMixin:
         for dirpath in entries_by_dir:
             if dirpath == root_str:
                 continue  # root is never recorded (matches _dir_displayed's no-add branch)
+            if self._matches_filters(Path(dirpath).name, True, None, None, ctx=ctx):
+                displayed_dirs.add(dirpath)
+
+        # Blocked junctions are never walked, so they are absent from entries_by_dir;
+        # add them to the display set explicitly (subject to the same name filter) so
+        # the caller can see that the entry exists but was not traversed.
+        for dirpath in blocked_dirs:
             if self._matches_filters(Path(dirpath).name, True, None, None, ctx=ctx):
                 displayed_dirs.add(dirpath)
 
@@ -782,15 +870,22 @@ class FileOpsMixin:
             for e in group:
                 if e['is_dir']:
                     child = os.path.join(dirpath, e['name'])
+                    blocked_reason = blocked_dirs.get(child)
                     # Print the dir line only when it passed its own name filter (it is
                     # in displayed_dirs); a non-displayable dir is skipped but we still
                     # descend below so matching files are not lost.
                     if child in displayed_dirs:
-                        is_empty = not entries_by_dir.get(child)
-                        marker = ' (empty)' if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
+                        if blocked_reason:
+                            marker = f" (not traversed: {blocked_reason})"
+                        else:
+                            is_empty = not entries_by_dir.get(child)
+                            marker = ' (empty)' if is_empty else f" (modified: {self._format_mtime(e['mtime'])})"
                         rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
                         output += f"{prefix}[DIR] {rel_name}/{marker}\n"
-                    render_dir(child, depth + 1)
+                    # Never descend into a junction whose target is outside the
+                    # allowed roots (BUG_0163).
+                    if not blocked_reason:
+                        render_dir(child, depth + 1)
                 else:
                     rel_name = e['name'] if not base_rel else f"{base_rel}/{e['name']}"
                     output += f"{prefix}{rel_name} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
