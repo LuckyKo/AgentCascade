@@ -1322,6 +1322,7 @@ class FileOpsMixin:
         start_idx = None  # d&i mode range indices
         end_idx = None  # d&i mode range indices
         delta_width = 0  # Indent delta for heuristic feedback
+        absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
 
         import difflib
 
@@ -1517,11 +1518,48 @@ class FileOpsMixin:
             orig_start_idx = file_line_info[unique_match['start_list_idx']][0]
             orig_end_idx = file_line_info[unique_match['end_list_idx'] - 1][0]
 
+            # BUG_0168: If new_content's last non-blank line is a prefix of the next
+            # non-blank file line (ending at a word boundary), extend the span to absorb
+            # it. This prevents duplicate/residue lines when the replacement tail overlaps
+            # the following line (e.g. new_content ends with "from 129 columns." and the
+            # next file line is "from 129 columns. So micro 512 ...").
+            #
+            # Word-boundary guard: the prefix must end where the next line has a
+            # non-identifier character (space, punctuation), so that distinct names that
+            # merely share a prefix (e.g. "data_source_primary" vs
+            # "data_source_primary_extended_field") are NOT absorbed.
+            _pre_absorb_end = orig_end_idx  # Save for indent anchor (Phase 2 regression guard)
+            _new_lines = new_content.splitlines(keepends=True)
+            _last_new_line = next((l for l in reversed(_new_lines) if l.strip()), '')
+            if _last_new_line:
+                _last_stripped = _last_new_line.lstrip().rstrip('\r\n')
+                _next_list_idx = unique_match['end_list_idx']
+                if _next_list_idx < len(file_line_info) and len(_last_stripped) >= 5:
+                    _next_orig_idx = file_line_info[_next_list_idx][0]
+                    _next_stripped = file_lines[_next_orig_idx].lstrip()
+                    if _next_stripped.startswith(_last_stripped):
+                        _plen = len(_last_stripped)
+                        _next_body = _next_stripped.rstrip('\r\n')
+                        if _plen == len(_next_body):
+                            # Exact match (modulo line ending) → absorb
+                            orig_end_idx = _next_orig_idx
+                            absorbed_tail = True
+                        elif _plen < len(_next_body):
+                            # Proper prefix: require word boundary at the junction
+                            _junction_char = _next_stripped[_plen]
+                            if not (_junction_char.isalnum() or _junction_char == '_'):
+                                orig_end_idx = _next_orig_idx
+                                absorbed_tail = True
+
             # Store line range for response construction (1-based)
             exact_start_line = orig_start_idx + 1
             exact_end_line = orig_end_idx + 1
 
             actual_old_content = ''.join(file_lines[orig_start_idx:orig_end_idx + 1])
+            # BUG_0168: use pre-absorption content for the indent anchor so the absorbed
+            # line (which may have different indentation) doesn't skew Phase 2 re-anchoring.
+            _indent_anchor = (''.join(file_lines[orig_start_idx:_pre_absorb_end + 1])
+                              if absorbed_tail else actual_old_content)
             match_ratio = unique_match['ratio']
 
             last_matched_line = file_lines[orig_end_idx]
@@ -1542,14 +1580,14 @@ class FileOpsMixin:
                 """Detect whether file uses tabs or spaces for indentation."""
                 return '\t' if '\t' in indent_str else ' '
 
-            file_indent = get_leading_whitespace(actual_old_content)
+            file_indent = get_leading_whitespace(_indent_anchor)
             old_indent = get_leading_whitespace(old_content)
             indent_delta = get_indent_width(file_indent) - get_indent_width(old_indent)
             # Store at method scope for response construction
             delta_width = indent_delta
 
             # Collect indent widths of non-blank lines in the matched block (used for base indent)
-            file_block_lines = actual_old_content.splitlines(keepends=True)
+            file_block_lines = _indent_anchor.splitlines(keepends=True)
             file_indent_by_line = {}
             for idx, fl in enumerate(file_block_lines):
                 norm = ''.join(fl.split())
@@ -1592,7 +1630,20 @@ class FileOpsMixin:
                 # insert a separator to avoid gluing the sibling onto that line.
                 _ncl = new_content.splitlines(keepends=True)
                 _sep = '' if actual_old_content.endswith(('\n', '\r')) else '\n'
-                new_content = actual_old_content + _sep + ''.join(_ncl[len(file_block_lines):])
+                # BUG_0168: when absorbed_tail is True, the absorbed line is already in
+                # actual_old_content (retained at its original file position). Siblings
+                # are the lines between the matched block and the absorbed line; they
+                # are appended after the block. Exclude the absorbed line to avoid
+                # duplication. Find it by identity (last non-blank line) so a trailing
+                # blank line in new_content cannot re-introduce the duplicate.
+                _block_lines = len(file_block_lines)
+                if absorbed_tail:
+                    _absorbed_pos = len(_ncl) - 1
+                    while _absorbed_pos >= 0 and not _ncl[_absorbed_pos].strip():
+                        _absorbed_pos -= 1
+                    new_content = actual_old_content + _sep + ''.join(_ncl[_block_lines:_absorbed_pos])
+                else:
+                    new_content = actual_old_content + _sep + ''.join(_ncl[_block_lines:])
             else:
                 adjusted_lines = []
                 for line in new_content_lines:
@@ -1826,6 +1877,8 @@ class FileOpsMixin:
                 resolved_path_str = resolved.as_posix()
 
                 res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                if absorbed_tail:
+                    res_msg += ' [absorbed overlapping tail line to prevent duplicate]'
 
                 # Indent adjustment info (only if non-zero delta detected in heuristic mode)
                 if match_mode == 'heuristic':
