@@ -45,11 +45,22 @@ rest_api:
     - {method: POST,   path: /api/message,              summary: "Inject an AES-GCM-encrypted message into an agent's queue and start generation."}
     - {method: GET,    path: /api/status,               summary: "Current generating state, active agent, agent list, active stack. Requires session token."}
     - {method: GET,    path: /api/agents,               summary: "List agents with name, index, description, and active tools."}
+    - {method: GET,    path: /api/skills,               summary: "List all skills with their active/inactive status (schema 1.3)."}
+    - {method: GET,    path: /api/skills/threshold,     summary: "Read-only preview of the current skill rebalance threshold + scoring params (no mutation)."}
+    - {method: POST,   path: /api/skills/toggle,        summary: "Toggle one skill's status (body: {name, status: active|inactive})."}
+    - {method: POST,   path: /api/skills/migrate,       summary: "Manually (re)run the one-time metrics migration to schema 1.3 (idempotent)."}
     - {method: GET,    path: /api/state,                summary: "Full UI state snapshot (agents, messages, tokens, api_router, etc.)."}
     - {method: POST,   path: /api/reset,                summary: "Reset the active session's conversation and start a fresh logger session."}
     - {method: POST,   path: "/api/approve/{request_id}", summary: "Approve a pending tool-call approval request by id."}
     - {method: POST,   path: "/api/reject/{request_id}",  summary: "Reject a pending approval request (optional reason query param)."}
     - {method: POST,   path: /api/resume_all,           summary: "Clear the global pause flag; all paused instances resume."}
+    - {method: POST,   path: /api/stop,                 summary: "Stop all streaming and set active agents to IDLE (mirrors WS 'stop')."}
+    - {method: POST,   path: /api/state/save,           summary: "Manually save KV state for an instance (mirrors WS 'kv_state' save)."}
+    - {method: POST,   path: /api/state/load,           summary: "Manually load KV state for an instance (mirrors WS 'kv_state' load)."}
+    - {method: POST,   path: /api/restart,              summary: "Restart the AC server process (destructive; gated by session token)."}
+    - {method: POST,   path: /api/auto_security,        summary: "Toggle Auto-Ask Security mode (mirrors WS 'set_auto_security')."}
+    - {method: POST,   path: /api/afk,                  summary: "Toggle the server-backed AFK flag (auto-reject approvals + idle nudge; persists)."}
+    - {method: POST,   path: /api/session/restore,      summary: "Restore a named session from its log (mirrors WS 'load_session')."}
     - {method: GET,    path: /api/sessions,             summary: "List past session logs (*.jsonl) with name, agent, timestamp, caption."}
     - {method: GET,    path: /api/file,                 summary: "Serve a file by absolute path (restricted to allowed roots)."}
     - {method: GET,    path: /api/telemetry,            summary: "Session telemetry summary + per-config comparison + recent events."}
@@ -60,9 +71,20 @@ rest_api:
     - {method: DELETE, path: "/api/endpoints/{id}",     summary: "Delete an endpoint by id."}
     - {method: POST,   path: /api/endpoints/priorities, summary: "Set per-agent-type endpoint priority ordering."}
     - {method: POST,   path: /api/endpoints/bulk,       summary: "Bulk replace all endpoints + priorities (UI save)."}
+    - {method: GET,    path: /api/mcp-config,           summary: "Return the raw MCP server config (config/mcp_servers.json); {} if absent."}
+    - {method: PUT,    path: /api/mcp-config,           summary: "Validate and write the MCP server config to config/mcp_servers.json."}
+    - {method: GET,    path: /api/mcp-status,           summary: "Return per-server connection status: [{name, enabled, connected, tool_count}]."}
+    - {method: POST,   path: /api/mcp-toggle,           summary: "Toggle one MCP server on/off: connect/disconnect live and persist the enabled flag."}
     - {method: GET,    path: /api/image_gen,            summary: "Return the current image-generation (ComfyUI) config."}
     - {method: POST,   path: /api/image_gen,            summary: "Save image-gen config (url, workflow_dir, timeout 30-600s)."}
     - {method: GET,    path: /api/image_gen/workflows,  summary: "List available ComfyUI workflow files."}
+    - {method: GET,    path: /api/image_gen/sdcpp_configs, summary: "List available sdcpp model config files from the configured config_dir."}
+    - {method: GET,    path: /api/media_gen,            summary: "Return the current media_gen settings (full object, plus read-only project_root)."}
+    - {method: POST,   path: /api/media_gen,            summary: "Save media_gen settings (merge-preserve; busts the config cache)."}
+    - {method: GET,    path: /api/media_gen/manifest,   summary: "Data-driven backend manifest for the UI: ids, labels, field specs, defaults."}
+    - {method: GET,    path: /api/media_gen/workflows,  summary: "List ComfyUI workflow stems grouped by media type ({image,video,audio})."}
+    - {method: GET,    path: /api/media_gen/sdcpp_configs, summary: "List sdcpp per-model config stems (mirrors /api/image_gen/sdcpp_configs)."}
+    - {method: GET,    path: /api/media_gen/tts_configs, summary: "List TTS voice-config stems (kokoro_default, outetts_default, ...)."}
     - {method: POST,   path: /api/find_file,            summary: "Recursively find a filename within the workspace; returns matching paths."}
     - {method: POST,   path: /api/parse,                summary: "Upload a document and return extracted text (multipart file)."}
 

@@ -9,6 +9,11 @@ constructor `agent_pool` parameter, which is stored as self.agent_pool.
 No real server is started.
 """
 
+import re
+from pathlib import Path
+
+import yaml
+
 from agent_cascade.tools.custom import system_info as system_info_module
 from agent_cascade.tools.custom.system_info import SystemInfo
 
@@ -360,3 +365,65 @@ class TestSystemInfoVersion:
         import agent_cascade
         from agent_cascade.tools.custom.system_info import AC_VERSION
         assert AC_VERSION == agent_cascade.__version__
+
+
+class TestRestApiHelpDrift:
+    """Drift guard for the rest_api help section (root-cause fix for BUG_0154).
+
+    config/ac_system_help.yaml's rest_api.endpoints list was hand-maintained and
+    silently drifted from the real routes in agent_cascade/api_server.py. This test
+    statically cross-checks the two sources so any future /api/* route added without
+    a matching help entry fails CI. It compares only the (method, path) pairs —
+    summaries are documentation and are not asserted.
+    """
+
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+    @staticmethod
+    def _norm(path: str) -> str:
+        """Collapse every {…} path parameter ({id}, {endpoint_id}, {path:path}) to one
+        wildcard token, so FastAPI param-name differences never cause false drift."""
+        return re.sub(r'\{[^}]*\}', '{_}', path)
+
+    def _yaml_pairs(self):
+        """(METHOD, normalized_path) for every rest_api.endpoints entry in the help YAML."""
+        help_path = self._REPO_ROOT / 'config' / 'ac_system_help.yaml'
+        data = yaml.safe_load(help_path.read_text(encoding='utf-8'))
+        return {
+            (str(e['method']).upper(), self._norm(e['path']))
+            for e in data['rest_api']['endpoints']
+        }
+
+    def _code_pairs(self):
+        """(METHOD, normalized_path) for every @app.<verb>("<path>") route in api_server.py."""
+        src = (self._REPO_ROOT / 'agent_cascade' / 'api_server.py').read_text(encoding='utf-8')
+        pairs = set()
+        # KNOWN LIMITATION: this regex only matches @app.<verb>("<path>") with a
+        # directly-quoted first positional path argument. A future @app.api_route(..., methods=[...]),
+        # @app.route(...), or keyword form (@app.post(path=...)) would be silently unguarded —
+        # if such a form is ever introduced, extend this parser to cover it.
+        for verb, path in re.findall(
+                r"@app\.(get|post|put|delete|patch)\(\s*['\"]([^'\"]+)['\"]", src):
+            # Scope to discoverable API endpoints only. The non-/api catch-alls
+            # ('/' and '/{path:path}') are the UI/static handlers, not API endpoints,
+            # so they are intentionally exempt. /ws/chat is a websocket route and
+            # is not matched by this decorator regex at all.
+            if not path.startswith('/api/'):
+                continue
+            pairs.add((verb.upper(), self._norm(path)))
+        return pairs
+
+    def test_every_api_route_has_a_help_entry(self):
+        """Every scoped code route must appear in the help YAML (code ⊆ YAML)."""
+        missing = self._code_pairs() - self._yaml_pairs()
+        assert not missing, (
+            'rest_api help (config/ac_system_help.yaml) is missing entries for '
+            'these live routes — add them:\n'
+            + '\n'.join(f"  {method} {path}" for method, path in sorted(missing))
+        )
+
+    def test_path_param_names_are_normalized(self):
+        """Normalization proves {id} (YAML) and {endpoint_id} (code) compare equal."""
+        assert self._norm('/api/endpoints/{id}') == self._norm('/api/endpoints/{endpoint_id}')
+        assert self._norm('/api/approve/{request_id}') == '/api/approve/{_}'
+        assert self._norm('/{path:path}') == self._norm('/{proxy_path:path}') == '/{_}'
