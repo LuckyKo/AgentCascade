@@ -243,7 +243,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                     break
 
                 stripped = raw_line.rstrip('\n\r')
-                formatted = f"{line_num}: {stripped}\n"
+                formatted = f"{line_num}:\t{stripped}\n"
 
                 # Per-line memory guard: truncate pathological lines (>100KB)
                 if len(formatted) > MAX_SINGLE_LINE_CHARS:

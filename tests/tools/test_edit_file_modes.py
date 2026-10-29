@@ -1392,3 +1392,132 @@ def test_delete_and_insert_missing_new_content():
         assert 'OK:' in res, f"delete-only is a legitimate mode: {res}"
         assert 'DELETE-ONLY' in res, f"deletion must be distinguishable from replacement: {res}"
         assert file_path.read_text(encoding='utf-8') == 'a\ne\nf\n'
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# BUG_0158 / BUG_0170: read_file tab separator enables correct transcription
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_read_file_tab_separator_enables_exact_edit():
+    """BUG_0158/BUG_0170: verify that read_file's tab-separated line prefix
+    allows agents to correctly transcribe indented lines (including markdown
+    inline code) into edit_file old_content for exact matching.
+
+    The old space separator ('NNN: ') was visually indistinguishable from
+    content indentation, causing off-by-one leading-space mismatches.
+    """
+    from agent_cascade.tools.custom.file_ops import ReadFile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a markdown file with indented lines containing inline code
+        md_path = Path(tmpdir) / 'test_lesson.md'
+        file_content = (
+            '# Title\n'
+            '\n'
+            'Some intro text.\n'
+            '\n'
+            '    nullopt → `[eval_pressure] ... NULLOPT (candidate discarded)`. Function-level confirmed by log;\n'
+            '    exact sub-line INFERRED (needs deterministic repro).\n'
+            '\n'
+            'End of file.\n'
+        )
+        md_path.write_text(file_content, encoding='utf-8')
+
+        # Simulate what an agent does: call read_file, then transcribe lines
+        tool = ReadFile()
+        out = tool._read_text_file(str(md_path), md_path, start_line=1, limit=10)
+
+        assert out.startswith('OK:'), f"read_file should succeed: {out}"
+
+        # Extract the raw content between the code fences
+        # Format: "OK: Read ...\n```\n{lines}\n```"
+        assert '```\n' in out, f"Expected code fences in output: {out}"
+        # Find the content between the first ```\n and the last \n```
+        first_fence = out.index('```\n') + 4  # after "```\n"
+        last_fence = out.rindex('\n```')
+        raw_block = out[first_fence:last_fence]
+
+        # Parse lines: each is "NNN:\t{content}"
+        lines = raw_block.split('\n')
+        parsed = {}
+        for line in lines:
+            if not line.strip():
+                continue
+            tab_idx = line.index('\t')
+            line_num = int(line[:tab_idx].rstrip(':'))
+            content = line[tab_idx + 1:]  # everything after the tab is the raw content
+            parsed[line_num] = content
+
+        # Verify we got the expected lines
+        assert parsed[5] == '    nullopt → `[eval_pressure] ... NULLOPT (candidate discarded)`. Function-level confirmed by log;'
+        assert parsed[6] == '    exact sub-line INFERRED (needs deterministic repro).'
+
+        # Now simulate edit_file: use the transcribed content as old_content
+        from agent_cascade.operation_manager import OperationManager
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+        op_mgr._own(md_path.resolve(), 'test_agent')
+
+        # Edit line 6 using content transcribed from read_file output
+        old_content = parsed[6]
+        new_content = '    exact sub-line CONFIRMED (deterministic repro achieved).'
+
+        res = op_mgr.edit_file(
+            path=str(md_path),
+            agent_name='test_agent',
+            old_content=old_content,
+            new_content=new_content,
+            match_mode='exact'
+        )
+        assert 'OK:' in res, f"exact match should succeed with correctly transcribed content: {res}"
+
+        # Verify the file was edited correctly
+        updated = md_path.read_text(encoding='utf-8')
+        assert 'CONFIRMED (deterministic repro achieved)' in updated
+        assert 'INFERRED (needs deterministic repro)' not in updated
+
+
+def test_read_file_tab_separator_preserves_zero_indent():
+    """Lines with NO leading whitespace should transcribe correctly too
+    (tab separator must not add or remove spaces from unindented content)."""
+    from agent_cascade.tools.custom.file_ops import ReadFile
+    from agent_cascade.operation_manager import OperationManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        txt_path = Path(tmpdir) / 'plain.txt'
+        txt_path.write_text('hello world\nsecond line\n  indented line\n', encoding='utf-8')
+
+        tool = ReadFile()
+        out = tool._read_text_file(str(txt_path), txt_path, start_line=1, limit=10)
+
+        assert out.startswith('OK:'), out
+        first_fence = out.index('```\n') + 4
+        last_fence = out.rindex('\n```')
+        raw_block = out[first_fence:last_fence]
+
+        parsed = {}
+        for line in raw_block.split('\n'):
+            if not line.strip():
+                continue
+            tab_idx = line.index('\t')
+            parsed[int(line[:tab_idx].rstrip(':'))] = line[tab_idx + 1:]
+
+        # Line 1: no leading whitespace
+        assert parsed[1] == 'hello world'
+        # Line 3: two leading spaces
+        assert parsed[3] == '  indented line'
+
+        # Verify edit_file works with the transcribed content
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+        op_mgr._own(txt_path.resolve(), 'test_agent')
+
+        res = op_mgr.edit_file(
+            path=str(txt_path),
+            agent_name='test_agent',
+            old_content=parsed[1],
+            new_content='goodbye world',
+            match_mode='exact'
+        )
+        assert 'OK:' in res, res
+        assert 'goodbye world' in txt_path.read_text(encoding='utf-8')

@@ -1213,7 +1213,7 @@ class FileOpsMixin:
             if hit_end:
                 header += ' [TRUNCATED]'
 
-            content = ''.join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
+            content = ''.join([f"{start_line + i}:\t{lines[i]}" for i in range(len(lines))])
             result = f"{header}\n```\n{content}\n```"
 
             # Compact pagination footer when truncated

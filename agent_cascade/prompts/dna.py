@@ -274,7 +274,11 @@ TOOL_METADATA = {
     'read_file': {
         'description': ('Reads and returns the content of a specified file. If the file is large, '
                         'the content will be truncated. For binary files, displays a '
-                        'hex dump of the first N bytes with ASCII representation.'),
+                        'hex dump of the first N bytes with ASCII representation. '
+                        'Each line is prefixed with its line number followed by a TAB '
+                        '(e.g. "42:\\tcontent"). To transcribe lines into edit_file, '
+                        'strip everything up to and including the first TAB — the '
+                        'remaining text preserves original indentation exactly.'),
         'parameters': {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
@@ -320,7 +324,7 @@ TOOL_METADATA = {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content':
-                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.',
+                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode. When copying from read_file output, strip the "NNN:\\t" line-number prefix (everything up to and including the first TAB) to get the raw content.',
             'new_content':
                 'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
             'match_mode':
