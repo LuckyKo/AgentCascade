@@ -26,7 +26,8 @@ import requests
 
 from agent_cascade.api_router_pkg.endpoints import (CANONICAL_AGENT_TYPES, MAX_CAPTION_LENGTH,
                                                     RATE_LIMIT_WINDOW_SECONDS, APIEndpoint)
-from agent_cascade.api_router_pkg.helpers import _check_termination, _interruptible_sleep
+from agent_cascade.api_router_pkg.helpers import (_interruptible_sleep,
+                                                 _should_abort_lockfree)
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
 from agent_cascade.error_reporting import TB_DEDUP, format_endpoint_error
@@ -1953,6 +1954,13 @@ class APIRouter:
         # apply per-instance cursor rotation and skip already-failed endpoints.
         _inst_name = kwargs.pop('agent_instance_name', None)
 
+        # G1: honour a pool-level Stop (or per-instance termination) at call entry, before
+        # any chain resolution, D1 fail-fast wait, or lazy sanity probe fires. Lock-free predicate
+        # (no _pool_lock, no inst.is_terminated) — see helpers._should_abort_lockfree.
+        if _should_abort_lockfree(self._pool, _inst_name):
+            logger.debug(f"[TERMINATION] Aborting call_with_fallback for '{_inst_name}' before chain resolution (stop requested or instance terminated)")
+            raise AgentTerminatedError(_inst_name or 'unknown')
+
         # ── Change D (D1): bounded fail-fast wait when every remaining endpoint sits on a
         # breaker-open physical server. Zero HTTP to busy bases; wait is capped by
         # SERVER_BUSY_WAIT_CAP_SECONDS so this can never hot-loop. After the cap the call
@@ -2026,6 +2034,13 @@ class APIRouter:
         _probe_failed_bases: set = set()
 
         for cfg_idx, llm_cfg in enumerate(chain):
+            # G2: stop the cascade from advancing to the next endpoint after a Stop (and
+            # prevent a post-stop FIFO re-acquire). Runs before the lazy-probe gate, the
+            # breaker consult and sync_sticky_slot. Lock-free predicate — see helpers.
+            if _should_abort_lockfree(self._pool, _inst_name):
+                logger.debug(f"[TERMINATION] Aborting endpoint cascade for '{_inst_name}' at '{llm_cfg.get('model', 'unknown')}'")
+                raise AgentTerminatedError(_inst_name or 'unknown')
+
             # ── Lazy sanity probe (Fix D): validate THIS endpoint only, just before trying it.
             # Same gate as pre_validate_endpoint_chain but for the current endpoint alone — a
             # live committed primary costs ZERO probe HTTP to its fallbacks (WinError 10055).
@@ -2291,12 +2306,12 @@ class APIRouter:
             _holds_probe = self._caller_holds_probe(endpoint_base)
             try:
                 for attempt in range(max_retries + 1):
-                    # Check if instance was terminated during a previous failed attempt or between retries.
-                    # Prevents starting new API calls after termination (does not interrupt mid-stream calls).
-                    if self._pool and _inst_name:
-                        if _inst_name in self._pool.terminated_instances:
-                            logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated, aborting LLM call")
-                            raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+                    # Cancellation between attempts: user Stop (pool-level) OR this instance in
+                    # terminated_instances — the same membership test as before, plus the stop read,
+                    # via the lock-free predicate (no _pool_lock, no inst.is_terminated).
+                    if _should_abort_lockfree(self._pool, _inst_name):
+                        logger.debug(f"[TERMINATION] Aborting LLM call for '{_inst_name}' (stop requested or instance terminated)")
+                        raise AgentTerminatedError(_inst_name or 'unknown')
 
                     try:
                         # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
@@ -2335,13 +2350,13 @@ class APIRouter:
                                         history.append(now)
                                         break  # Successfully recorded, exit loop
 
-                        # Check termination again just before making the actual API call,
-                        # in case instance was terminated during rate limit wait or backoff.
-                        if self._pool and _inst_name:
-                            if _inst_name in self._pool.terminated_instances:
-                                logger.debug(
-                                    f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
-                                raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+                        # Check termination/stop again just before making the actual API call,
+                        # in case a Stop arrived or the instance was terminated during the rate-limit
+                        # wait or backoff. Same lock-free predicate as G3 (no _pool_lock, no inst.is_terminated).
+                        if _should_abort_lockfree(self._pool, _inst_name):
+                            logger.debug(
+                                f"[TERMINATION] Aborting before API call for '{_inst_name}' (stop requested or instance terminated)")
+                            raise AgentTerminatedError(_inst_name or 'unknown')
 
                         result = execute_api_call()
 
