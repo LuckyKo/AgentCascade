@@ -65,6 +65,44 @@ def _exclude_matches(basename: str, rel_path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(rel_path, pattern)
 
 
+# BUG_0167: LLMs sometimes HTML-escape code-like arguments, so a regex with a lookbehind
+# (`(?<!x)`) arrives as `(?&lt;!x)`. This gate keeps the recovery cost off the hot path: only
+# patterns that actually contain an entity are examined.
+_HTML_ENTITY_RE = re.compile(r'&(?:lt|gt|amp|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);', re.IGNORECASE)
+
+
+def _recover_html_escaped_pattern(pattern: str):
+    """Recover an HTML-escaped regex, or return it unchanged (BUG_0167).
+
+    Returns ``(pattern_to_search, note)``. A pattern that already compiles is NEVER rewritten
+    (so searching for the literal text ``&lt;`` keeps working); only a pattern that fails
+    ``re.compile`` but whose HTML-unescaped form compiles is recovered, and the note tells the
+    caller what happened. Handles double-escaping (``&amp;lt;``) by unescaping up to 3 times.
+    """
+    import html as _html
+
+    try:
+        re.compile(pattern)
+        return pattern, ''
+    except re.error:
+        pass
+
+    current = pattern
+    for _ in range(3):
+        candidate = _html.unescape(current)
+        if candidate == current:
+            break
+        try:
+            re.compile(candidate)
+        except re.error:
+            current = candidate
+            continue
+        return candidate, (
+            " [note: the pattern contained HTML entities (e.g. '&lt;' for '<'); searched for the "
+            "unescaped form — send '<' literally in lookbehinds/named groups]")
+    return pattern, ''
+
+
 def _rg_lines_text(lines_data: dict) -> str:
     """Extract one line's text from a ripgrep ``--json`` ``lines`` object.
 
@@ -966,6 +1004,14 @@ class GrepMixin:
             # reformatted, so prefix-matching consumers (see scripts/grep_compare.py) stay
             # byte-stable; as_posix() keeps grep's forward-slash output convention.
             searched_note = f" (searched: {resolved.as_posix()})"
+
+            # BUG_0167: recover a pattern that arrived HTML-escaped (e.g. `&lt;` for `<`).
+            # Done BEFORE the fast path so ripgrep gets the corrected pattern too, and before
+            # searched_note is used so every result path carries the explanatory note.
+            html_note = ''
+            if not literal and _HTML_ENTITY_RE.search(pattern):
+                pattern, html_note = _recover_html_escaped_pattern(pattern)
+                searched_note += html_note
 
             # Sanitize glob patterns to prevent path traversal via include/exclude
             try:
