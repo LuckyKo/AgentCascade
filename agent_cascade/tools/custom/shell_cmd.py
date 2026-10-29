@@ -110,23 +110,45 @@ def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> 
             return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} (elapsed {task_elapsed:.0f}s)\n{truncated}"
 
 
-def _safe_mode_violation(resident_before, resident_after, elapsed_s):
-    """Classify a broken safe-mode "cards are free" guarantee (BUG_0150).
+_UNKNOWN_MODEL_IDS = frozenset({'', 'unknown model', None})
+
+
+def _resident_ids(models):
+    """Model ids from a probe result, dropping placeholders the endpoint could not name."""
+    return {m.get('id') for m in (models or [])
+            if isinstance(m, dict) and m.get('id') not in _UNKNOWN_MODEL_IDS}
+
+
+def _safe_mode_violation(resident_before, resident_after, elapsed_s, *,
+                         unloaded_models=None, owner_model=None):
+    """Classify a broken safe-mode "cards are free" guarantee (BUG_0150/BUG_0161).
 
     ``resident_before`` / ``resident_after`` are :func:`state_ops.probe_resident_models`
     results — a list of ``{'id', 'uptime_s'}``, or ``None`` when the endpoint cannot report
     residency. ``elapsed_s`` is how long the command ran.
 
+    ``unloaded_models`` is the residency probe taken just BEFORE the pre-command unload — the
+    set safe mode freed — or ``None`` when it could not be read. ``owner_model`` is the model
+    id the caller's own session holds. Together they are the ATTRIBUTION scope: only a model
+    that was freed (or is the caller's own) reappearing proves a concurrent session took the
+    cards back (BUG_0153). A model that was never resident before the unload is the command's
+    OWN load (BUG_0161) and must not void the run.
+
     Returns ``(kind, text)``:
-      ``(None, '')``                  — verified: nothing was resident after the unload and
-                                        nothing came back while the command ran.
-      ``('unknown', '')``             — the endpoint cannot report residency; make no claim.
-      ``('resident_at_start', text)`` — models were STILL loaded right after the pre-command
-                                        unload (pinned, or governed by another control plane),
-                                        so the cards were never free.
-      ``('reloaded', text)``          — something loaded a model mid-command. ``uptime_s`` is
-                                        the model process's own uptime, so ``elapsed - uptime``
-                                        is *when* it came back ("T+Ns").
+      ``(None, '')``                    — verified: nothing was resident after the unload and
+                                          nothing came back while the command ran.
+      ``('unknown', '')``               — the endpoint cannot report residency; make no claim.
+      ``('resident_at_start', text)``   — models were STILL loaded right after the pre-command
+                                          unload (pinned, or governed by another control plane),
+                                          so the cards were never free.
+      ``('reloaded', text)``            — a model safe mode freed came back mid-command.
+                                          ``uptime_s`` is the model process's own uptime, so
+                                          ``elapsed - uptime`` is *when* it came back ("T+Ns").
+      ``('self_loaded', text)``         — a model safe mode never freed appeared; that is the
+                                          command's own load (informational, NOT void).
+      ``('unattributed_load', text)``   — a model appeared and the freed set is unknown, so
+                                          self-load cannot be distinguished from contention;
+                                          informational, NOT void.
 
     Pure function: the caller does the probing and the note formatting.
     """
@@ -138,21 +160,49 @@ def _safe_mode_violation(resident_before, resident_after, elapsed_s):
             f'local model(s) {names} were still resident right after the pre-command unload, so '
             'the cards were never free (pinned model, or a control plane this endpoint does not '
             'govern). Any result that needed free VRAM/RAM is VOID.')
-    if resident_after:
-        names = ', '.join(sorted({m.get('id') or 'unknown model' for m in resident_after}))
-        uptimes = [m.get('uptime_s') for m in resident_after
+    if not resident_after:
+        return None, ''
+
+    after = [m for m in resident_after if isinstance(m, dict)]
+    names = ', '.join(sorted({m.get('id') or 'unknown model' for m in after}))
+
+    # BUG_0161: a model appearing mid-command is NOT automatically contention. Only the
+    # return of a model safe mode actually freed (the pre-unload residency set, plus the
+    # caller's own model) proves a concurrent session took the cards back (BUG_0153).
+    snapshot_ids = _resident_ids(unloaded_models)
+    protected = set(snapshot_ids)
+    if owner_model:
+        protected.add(owner_model)
+    returned = [m for m in after if m.get('id') in protected]
+    if returned:
+        returned_names = ', '.join(sorted({m.get('id') or 'unknown model' for m in returned}))
+        uptimes = [m.get('uptime_s') for m in returned
                    if isinstance(m.get('uptime_s'), (int, float))]
         if isinstance(elapsed_s, (int, float)) and uptimes and min(uptimes) < elapsed_s:
             when = f'T+{max(0.0, elapsed_s - min(uptimes)):.0f}s'
             return 'reloaded', (
-                f'local model(s) {names} were loaded again {when} into the command by a '
+                f'local model(s) {returned_names} were loaded again {when} into the command by a '
                 'concurrent session, so safe mode did NOT have the cards to itself. Any result '
                 'that needed free VRAM/RAM is VOID; re-run with the cards free.')
         return 'reloaded', (
-            f'local model(s) {names} were resident again when the command finished, so a '
+            f'local model(s) {returned_names} were resident again when the command finished, so a '
             'concurrent session reloaded them mid-run. Any result that needed free VRAM/RAM is '
             'VOID; re-run with the cards free.')
-    return None, ''
+
+    # No freed model came back. Only claim "the command's own load" when the freed set was
+    # readable and every appeared model has a name — otherwise the attribution is unknown.
+    names_readable = all(m.get('id') not in _UNKNOWN_MODEL_IDS for m in after)
+    snapshot_known = unloaded_models is not None and (not unloaded_models or bool(snapshot_ids))
+    if snapshot_known and names_readable:
+        return 'self_loaded', (
+            f'local model(s) {names} were loaded during the command, but none of them was '
+            'resident before safe mode freed the cards and none is this session\'s own model, '
+            'so this is the command\'s own load (expected). The models safe mode freed stayed '
+            'free. If the command itself needed the whole GPU, verify free VRAM yourself.')
+    return 'unattributed_load', (
+        f'local model(s) {names} were loaded while the command ran, but the load cannot be '
+        'attributed (the command\'s own load or a concurrent session), so the result is not '
+        'voided. Verify free VRAM/RAM yourself if the result depends on it.')
 
 
 @register_tool('shell_cmd', allow_overwrite=True)
@@ -1140,6 +1190,13 @@ class ShellCmd(BaseTool):
         model tracked when it could not verify the tree drain) is NOT reported as "unloaded".
         When residency is also unverifiable the note says the unload failed and the results are
         void, rather than asserting a release that never happened.
+
+        BUG_0161: the mid-command check is scoped to ATTRIBUTION, not "any model appeared".
+        Residency is snapshotted before the unload too; only a model that safe mode freed (or
+        the caller's own model) coming back means a concurrent session took the cards. A model
+        that was never resident before the unload is the command's own load (e.g. a harness that
+        POSTs to the autoloader to JIT-load the model under test) and produces an informational
+        ``[safe] NOTE``, never a VOID.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -1175,7 +1232,10 @@ class ShellCmd(BaseTool):
         # probe residency right after the unload (cards actually free?) and again when the
         # command returns (did they stay free?). Both probes are best-effort; None means the
         # endpoint cannot report residency and no claim is made.
-        resident_before = resident_after = None
+        # BUG_0161: also snapshot residency BEFORE the unload, so the note can tell a model
+        # safe mode freed coming back (real contention, BUG_0153) from a model the command
+        # itself loaded (expected — that is what a harness driving the autoloader does).
+        resident_pre_unload = resident_before = resident_after = None
         watch_t0 = None
         elapsed = None
         # BUG_0152: the autoloader answers 500 when it could not verify the release (e.g. a
@@ -1195,9 +1255,13 @@ class ShellCmd(BaseTool):
             # First statement inside the try in ShellMixin.execute_shell_command → its
             # exceptions hit that method's except, and this method's own finally still
             # restores.
-            nonlocal freed, resident_before, watch_t0, unload_ok
+            nonlocal freed, resident_pre_unload, resident_before, watch_t0, unload_ok
             freed = True  # set BEFORE the POST (media_gen V2/F1 discipline)
             from agent_cascade.state_ops import probe_resident_models, unload_all_models
+            # BUG_0161 baseline: what is safe mode about to free? Only these models (plus the
+            # caller's own) coming back means a concurrent session took the cards; a model that
+            # was not resident here appeared because of the command itself.
+            resident_pre_unload = probe_resident_models(ep['api_base'])
             # Until the autoloader says otherwise the release did NOT happen: an exception
             # here must not leave `unload_ok` at its "never attempted" None.
             unload_ok = False
@@ -1270,7 +1334,12 @@ class ShellCmd(BaseTool):
         # silently skips rows. Say so instead of implying a guarantee that never existed.
         note = ''
         if freed:
-            violation_kind, violation_text = _safe_mode_violation(resident_before, resident_after, elapsed)
+            # BUG_0161: pass the pre-unload set + the caller's own model so a load the command
+            # itself triggered is not misreported as a concurrent session.
+            owner_model = ep.get('model') if isinstance(ep, dict) else None
+            violation_kind, violation_text = _safe_mode_violation(
+                resident_before, resident_after, elapsed,
+                unloaded_models=resident_pre_unload, owner_model=owner_model)
             unload_failed = unload_ok is False
             if violation_kind is None:
                 head = (f'[safe] Local model(s) unloaded before the command and verified free '
@@ -1290,6 +1359,9 @@ class ShellCmd(BaseTool):
                 head = '[safe] Local model(s) unloaded before the command'
                 if unload_failed and violation_text:
                     violation_text += ' (the pre-command unload request itself failed)'
+            # BUG_0161: "a model appeared" is not by itself a broken guarantee. Only a freed
+            # model coming back voids the run; a self-load is a NOTE, not a WARNING.
+            informational = violation_kind in ('self_loaded', 'unattributed_load')
             if restored:
                 tail = 'KV state restored after.'
             elif saved or advisor_will_run:
@@ -1300,7 +1372,12 @@ class ShellCmd(BaseTool):
                 tail = 'KV state save failed, no restore attempted (the conversation will be reprocessed).'
             note = f'{head}; {tail}\n'
             if violation_text:
-                note += f'[safe] WARNING: {violation_text}\n'
-                logger.warning('[shell_cmd] safe-mode guarantee broken (%s): %s',
-                               violation_kind, violation_text)
+                if informational:
+                    note += f'[safe] NOTE: {violation_text}\n'
+                    logger.info('[shell_cmd] safe-mode residency note (%s): %s',
+                                violation_kind, violation_text)
+                else:
+                    note += f'[safe] WARNING: {violation_text}\n'
+                    logger.warning('[shell_cmd] safe-mode guarantee broken (%s): %s',
+                                   violation_kind, violation_text)
         return note + result

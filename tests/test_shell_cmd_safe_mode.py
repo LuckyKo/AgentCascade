@@ -921,24 +921,25 @@ class TestSafeModeGuaranteeVerification:
 
         result = self._run(order, probe=_probe)
 
-        # Baseline right after the unload, re-check when the command returns, and both
-        # BEFORE the restore (the restore loads our own model — it must not be mistaken
-        # for a concurrent reload).
-        assert order == ['save', 'approval', 'unload', 'probe', 'run', 'probe', 'restore'], order
+        # Snapshot before the unload (what are we freeing?), baseline right after the unload,
+        # re-check when the command returns, and both post-unload probes BEFORE the restore
+        # (the restore loads our own model — it must not be mistaken for a concurrent reload).
+        assert order == ['save', 'approval', 'probe', 'unload', 'probe', 'run', 'probe',
+                         'restore'], order
         # Unverifiable → claim nothing either way, and keep the legacy wording.
         assert 'verified free' not in result
         assert 'WARNING' not in result
         assert 'KV state restored after' in result
 
     def test_verified_clean_states_the_cards_were_free(self):
-        result = self._run([], probe=[[], []])
+        result = self._run([], probe=[[], [], []])
 
         assert 'verified free for its full duration' in result
         assert 'WARNING' not in result
 
     def test_still_resident_after_unload_reports_never_free(self):
         resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
-        result = self._run([], probe=[resident, resident])
+        result = self._run([], probe=[[], resident, resident])
 
         assert '[safe] WARNING:' in result
         assert 'were still resident right after the pre-command unload' in result
@@ -946,12 +947,38 @@ class TestSafeModeGuaranteeVerification:
         assert 'VOID' in result
 
     def test_reload_mid_command_reports_a_violation(self):
-        result = self._run([], probe=[[], [{'id': 'some-other-model', 'uptime_s': 999.0}]])
+        # BUG_0153 shape: the model safe mode freed comes back mid-command → real contention.
+        caller_model = [{'id': 'test-model', 'uptime_s': 1200.0}]
+        result = self._run([], probe=[caller_model, [],
+                                      [{'id': 'test-model', 'uptime_s': 999.0}]])
 
         assert '[safe] WARNING:' in result
         assert 'resident again when the command finished' in result
-        assert 'some-other-model' in result
+        assert 'test-model' in result
         assert 'VOID' in result
+
+    def test_command_own_model_load_is_not_a_violation(self):
+        # BUG_0161: the harness JIT-loads a DIFFERENT model than the caller's session holds.
+        # That is the command's own load, not contention, and must not void the run.
+        caller_model = [{'id': 'qwen3.8-flash-next-coder-iq1_m', 'uptime_s': 1200.0}]
+        result = self._run([], probe=[caller_model, [],
+                                      [{'id': 'Qwen3.8-27B-ninfer', 'uptime_s': 60.0}]])
+
+        assert '[safe] NOTE:' in result
+        assert '[safe] WARNING:' not in result
+        assert 'VOID' not in result
+        assert "command's own load" in result
+        assert 'Qwen3.8-27B-ninfer' in result
+
+    def test_unknown_freed_set_downgrades_to_note_not_void(self):
+        # BUG_0161 fallback: the pre-unload snapshot is unreadable, so self-load cannot be
+        # distinguished from contention. Say so — do not assert a VOID.
+        result = self._run([], probe=[None, [], [{'id': 'some-model', 'uptime_s': 60.0}]])
+
+        assert '[safe] NOTE:' in result
+        assert '[safe] WARNING:' not in result
+        assert 'VOID' not in result
+        assert 'cannot be attributed' in result
 
     def test_degraded_endpoint_never_probes(self):
         order = []
@@ -993,15 +1020,55 @@ class TestSafeModeViolationClassifier:
 
     def test_reload_time_comes_from_the_model_uptime(self):
         # Loaded 20 s ago while the command has been running 110 s → it came back at T+90s.
-        kind, text = _safe_mode_violation([], [{'id': 'm', 'uptime_s': 20}], 110)
+        # BUG_0161: only a model safe mode FREED counts as a reload.
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'm', 'uptime_s': 20}], 110, unloaded_models=[{'id': 'm', 'uptime_s': 500}])
         assert kind == 'reloaded'
         assert 'T+90s' in text
 
     def test_missing_uptime_falls_back_to_a_time_free_warning(self):
-        kind, text = _safe_mode_violation([], [{'id': 'm', 'uptime_s': None}], 110)
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'm', 'uptime_s': None}], 110, unloaded_models=[{'id': 'm', 'uptime_s': None}])
         assert kind == 'reloaded'
         assert 'T+' not in text
         assert 'resident again when the command finished' in text
+
+    def test_model_never_freed_is_the_commands_own_load_not_a_violation(self):
+        # BUG_0161: the caller held 'caller', the command JIT-loaded 'ninfer'.
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'ninfer', 'uptime_s': 10}], 60,
+            unloaded_models=[{'id': 'caller', 'uptime_s': 900}], owner_model='caller')
+        assert kind == 'self_loaded'
+        assert 'VOID' not in text
+        assert "command's own load" in text
+        assert 'ninfer' in text
+
+    def test_caller_model_reload_still_wins_over_a_self_load(self):
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'caller', 'uptime_s': 10}, {'id': 'ninfer', 'uptime_s': 10}], 60,
+            unloaded_models=[{'id': 'caller', 'uptime_s': 900}], owner_model='caller')
+        assert kind == 'reloaded'
+        assert 'VOID' in text
+        assert 'caller' in text
+        assert 'ninfer' not in text  # only the freed model is named as the contended one
+
+    def test_owner_model_alone_still_detects_its_reload(self):
+        kind, _text = _safe_mode_violation(
+            [], [{'id': 'caller', 'uptime_s': 10}], 60, owner_model='caller')
+        assert kind == 'reloaded'
+
+    def test_unknown_freed_set_is_unattributed_not_void(self):
+        kind, text = _safe_mode_violation([], [{'id': 'm', 'uptime_s': 10}], 60)
+        assert kind == 'unattributed_load'
+        assert 'VOID' not in text
+        assert 'cannot be attributed' in text
+
+    def test_unnamed_model_is_never_claimed_as_a_self_load(self):
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'unknown model', 'uptime_s': None}], 60,
+            unloaded_models=[{'id': 'caller', 'uptime_s': 900}], owner_model='caller')
+        assert kind == 'unattributed_load'
+        assert 'VOID' not in text
 
 
 class TestProbeResidentModels:
@@ -1072,7 +1139,7 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
         # observably empty is a clean run, not a warning.
         order = []
         result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
-                           probe=[[], []])
+                           probe=[[], [], []])
 
         assert 'verified free for its full duration' in result
         assert 'WARNING' not in result
@@ -1081,7 +1148,7 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
         resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
         order = []
         result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
-                           probe=[resident, resident])
+                           probe=[[], resident, resident])
 
         assert '[safe] WARNING:' in result
         assert 'were still resident right after the pre-command unload' in result
