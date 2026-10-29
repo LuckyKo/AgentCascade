@@ -147,6 +147,82 @@ def test_edit_file_whole_file_range_errors_and_leaves_file():
         assert f.read_text(encoding='utf-8') == original, 'whole-file guard must not write'
 
 
+# ── BUG_0175: suffix range 'N:' silently deletes the tail (message-only fix) ─
+
+
+def test_edit_file_suffix_range_notes_tail_deletion():
+    """range '3:' on a 3-line file deletes through EOF. The edit still performs, but the
+    success message must surface the deleted tail (name the range, quote the last deleted
+    line, point to range '0' / match_mode='exact'). This is the red/green discriminator:
+    pre-fix the message carries no such note."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'l1\nl2\nl3\n'
+        f = _owned_file(om, d, 'k.txt', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='3:')
+        assert res.startswith('OK'), f"suffix-range edit should still succeed, got: {res!r}"
+        assert 'also deleted' in res, f"message must surface the tail deletion: {res!r}"
+        assert 'to append without deleting' in res, f"message must point to the safe alternatives: {res!r}"
+        assert 'l3' in res, f"message must quote the last deleted line: {res!r}"
+        # Data loss really happened — now surfaced rather than silent.
+        assert f.read_text(encoding='utf-8') == 'l1\nl2\nX\n', 'line 3 must in fact be removed'
+
+
+def test_edit_file_suffix_range_note_absent_on_mid_file():
+    """A mid-file delete that does NOT reach EOF must get NO tail-deletion note (no false
+    positive on a normal d&i edit)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'l1\nl2\nl3\nl4\nl5\n'
+        f = _owned_file(om, d, 'm.txt', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='2:3')
+        assert res.startswith('OK'), f"mid-file edit should succeed, got: {res!r}"
+        assert 'also deleted' not in res, f"mid-file edit must not carry the tail note: {res!r}"
+        assert f.read_text(encoding='utf-8') == 'l1\nX\nl4\nl5\n', 'mid-file delete+insert must be exact'
+
+
+def test_edit_file_suffix_range_whole_file_still_errors():
+    """Regression guard: the whole-file form ':' keeps ERRORing (BUG_0109 unchanged) —
+    the new note lives only on the accepted suffix-range path, not the ERROR path."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'l1\nl2\nl3\n'
+        f = _owned_file(om, d, 'n.txt', original)
+        res = _d_and_i(om, f, new_content='replacement\n', range_param=':')
+        assert res.startswith('ERROR'), f"whole-file range must still ERROR, got: {res!r}"
+        assert 'also deleted' not in res, f"the note must not appear on the ERROR path: {res!r}"
+        assert f.read_text(encoding='utf-8') == original, 'whole-file guard must not write'
+
+
+def test_edit_file_suffix_range_insert_only_at_eof_no_note():
+    """range '4' (past the end) parses to an empty range → the INSERT-ONLY branch, a sibling
+    of the note's `elif new_content:` branch, so the note code is structurally unreachable here.
+    Structural guard only (confirms insert-only is untouched) — NOT a note-guard discriminator."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'l1\nl2\nl3\n'
+        f = _owned_file(om, d, 'o.txt', original)
+        res = _d_and_i(om, f, new_content='l4\n', range_param='4')
+        assert res.startswith('OK'), f"insert-only-at-EOF should succeed, got: {res!r}"
+        assert 'also deleted' not in res, f"insert-only edit must not carry the tail note: {res!r}"
+        assert f.read_text(encoding='utf-8') == 'l1\nl2\nl3\nl4\n', 'insert-only must not delete anything'
+
+
+def test_edit_file_suffix_range_past_eof_colon_deletes_nothing_no_note():
+    """range '4:' on a 3-line file reaches the NORMAL d&i branch (start_idx != end_idx) but
+    deletes ZERO lines (old_lc == 0), so the guard's `old_lc > 0` term must suppress the note.
+    This is the ONLY input that exercises that term: without it the note would falsely print a
+    nonsensical 'trailing lines 4-3'. The insert still happens."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'l1\nl2\nl3\n'
+        f = _owned_file(om, d, 'p.txt', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='4:')
+        assert res.startswith('OK'), f"past-EOF colon edit should succeed, got: {res!r}"
+        assert 'also deleted' not in res, f"zero-line delete must not carry the tail note: {res!r}"
+        assert f.read_text(encoding='utf-8') == 'l1\nl2\nl3\nX\n', 'nothing deleted, X appended'
+
+
 def test_edit_file_append_at_eof_succeeds():
     """range '0' is a legitimate append and must NOT be caught by the whole-file guard."""
     with tempfile.TemporaryDirectory() as d:

@@ -1903,6 +1903,21 @@ class FileOpsMixin:
                 elif new_content:
                     # Normal delete+insert
                     res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                    # BUG_0175: a suffix range 'N:' (N>1) parses to end_idx=total+1, so the
+                    # range deletes through EOF and the success message above reports only line
+                    # arithmetic — the tail deletion is silent. The whole-file guard (BUG_0109)
+                    # only fires for start_idx==0, so this case slips past it. Make the message
+                    # honest about the deleted tail; the edit itself is unchanged.
+                    if end_idx >= total_lines and start_idx > 0 and old_lc > 0:
+                        # Read the last-deleted line from the ORIGINAL file_content (file_lines
+                        # was rebound to the post-edit list at :1772/:1775). d_end is already
+                        # clamped to the real last line, so d_end-1 is the last deleted index.
+                        last_deleted = file_content.splitlines()[d_end - 1].rstrip('\r\n')
+                        snippet = last_deleted[:60] + ('...' if len(last_deleted) > 60 else '')
+                        res_msg += (f"\n  note: this also deleted the file's trailing lines "
+                                   f"{d_start}-{d_end} (last deleted line: \"{snippet}\"); "
+                                   f"to append without deleting use range '0' (or a line number "
+                                   f"past the end), or match_mode='exact' on the last lines.")
                 else:
                     # Delete-only variant. BUG_0096: label it explicitly — a bare "-K +0" reads
                     # like a replacement that lost its text, which is exactly the confusion this
