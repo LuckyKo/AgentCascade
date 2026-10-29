@@ -56,6 +56,15 @@ def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str =
     return f"{rel_path}:{line_num}: {marker}{content}"
 
 
+def _exclude_matches(basename: str, rel_path: str, pattern: str) -> bool:
+    """grep exclude semantics: no separator → basename; separator → relative path."""
+    if not pattern:
+        return False
+    if '/' not in pattern and '\\' not in pattern:
+        return fnmatch.fnmatch(basename, pattern)
+    return fnmatch.fnmatch(rel_path, pattern)
+
+
 def _rg_lines_text(lines_data: dict) -> str:
     """Extract one line's text from a ripgrep ``--json`` ``lines`` object.
 
@@ -91,6 +100,27 @@ def _check_tool_availability():
     grep_available = (grep_path is not None) and (os.name != 'nt')
 
     return rg_available, grep_available
+
+
+def _grep_large_file_limits() -> tuple:
+    """Return ``(max_file_size_mb, head_bytes, scan_limit, budget_s)`` for BUG_0169.
+
+    Read lazily from :mod:`agent_cascade.settings` so tests can patch the module constants
+    and callers that never grep pay nothing. Falls back to the documented defaults when the
+    settings module cannot be imported (e.g. an isolated unit-test harness).
+    """
+    try:
+        from agent_cascade.settings import (GREP_LARGE_FILE_HEAD_KB, GREP_LARGE_FILE_SCAN_BUDGET_S,
+                                            GREP_LARGE_FILE_SCAN_LIMIT, GREP_MAX_FILE_SIZE_MB)
+        return (int(GREP_MAX_FILE_SIZE_MB), int(GREP_LARGE_FILE_HEAD_KB) * 1024,
+                int(GREP_LARGE_FILE_SCAN_LIMIT), float(GREP_LARGE_FILE_SCAN_BUDGET_S))
+    except Exception:  # noqa: BLE001 - a settings import hiccup must not break grep
+        return 100, 64 * 1024, 50, 0.75
+
+
+def _grep_max_file_size_mb() -> int:
+    """The streaming cap in MB (0 disables it)."""
+    return _grep_large_file_limits()[0]
 
 
 # ─── Mixin: Grep methods for OperationManager ─────────────────────────────
@@ -224,6 +254,13 @@ class GrepMixin:
             '--text',
         ]
 
+        # BUG_0169: `--text` on a multi-GB model artifact streams the whole file. Skip files
+        # above the cap during the streaming search; grep() then scans only their headers and
+        # reports the partial coverage instead of timing out with misleading advice.
+        _max_file_mb = _grep_max_file_size_mb()
+        if _max_file_mb > 0:
+            cmd.append(f'--max-filesize={_max_file_mb}M')
+
         if force_no_ignore:
             cmd.append('--no-ignore')
 
@@ -266,6 +303,129 @@ class GrepMixin:
 
         cmd.extend(['-e', pattern])
         return cmd
+
+    # ─── BUG_0169: over-size file handling ────────────────────────────────
+
+    @staticmethod
+    def _head_scan_matches(file_path: Path, rel_path: str, pattern_re, head_bytes: int) -> list:
+        """Search only the first ``head_bytes`` of a file and format matches.
+
+        Used for files grep's streaming search refused (over ``GREP_MAX_FILE_SIZE_MB``).
+        Model artifacts and archives carry their metadata header at the start (a JSON header
+        in the reported case), so this recovers exactly the useful information without
+        reading 19 GB. Line numbers are relative to the scanned prefix.
+        """
+        try:
+            with file_path.open('rb') as fh:
+                chunk = fh.read(head_bytes)
+        except OSError:
+            return []
+        text = chunk.decode('utf-8', errors='replace')
+        return [_format_grep_entry(rel_path, line_num, line.rstrip('\r'))
+                for line_num, line in enumerate(text.split('\n'), 1)
+                if pattern_re.search(line)]
+
+    def _iter_grep_scope_files(self, root: Path, include: str, exclude: str,
+                               ignore_vcs: bool, deadline: float):
+        """Yield ``(path, rel_path)`` for files matching grep's include/exclude/ignore rules.
+
+        Mirrors the Python fallback's filtering (default excludes, basename-vs-path exclude
+        semantics, .gitignore handling) so the over-size scan reports the same candidate set
+        the streaming search saw. Bounded by ``deadline`` (a ``time.monotonic()`` value) so a
+        pathological tree can never add more than the configured budget to a grep.
+        """
+        import os
+
+        resolver = IgnoreResolver(root) if ignore_vcs else None
+        includes = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
+        excludes = [p.strip() for p in exclude.split(',') if p.strip()] if exclude else []
+        default_excludes = ('*.pyc', '*.so', '*.dll', '*.exe', '*.zip')
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            if time.monotonic() > deadline:
+                return
+            if resolver is not None:
+                dirnames[:] = [d for d in dirnames
+                               if not resolver.is_ignored(Path(dirpath) / d, is_dir=True)]
+            for name in filenames:
+                if time.monotonic() > deadline:
+                    return
+                if any(fnmatch.fnmatch(name, pat) for pat in default_excludes):
+                    continue
+                fp = Path(dirpath) / name
+                try:
+                    rel_str = str(fp.relative_to(root)).replace('\\', '/')
+                except ValueError:
+                    continue
+                if includes and not any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel_str, pat)
+                                        for pat in includes):
+                    continue
+                if resolver is not None and resolver.is_ignored(fp, is_dir=False):
+                    continue
+                if any(_exclude_matches(name, rel_str, exc) for exc in excludes):
+                    continue
+                yield fp, rel_str
+
+    def _scan_large_files(self, root: Path, include: str, exclude: str, pattern: str, *,
+                          ignore_vcs: bool = True, smart_case: bool = True,
+                          literal: bool = False, head_scan: bool = True) -> dict:
+        """Find over-size files in the scope and (optionally) match their headers.
+
+        Returns ``{'formatted', 'count', 'large_files', 'scanned', 'total_bytes', 'partial'}``:
+        ``large_files`` is how many over-size files were found, ``scanned`` how many had their
+        header searched, ``count``/``formatted`` the header matches, ``total_bytes`` their
+        combined size, and ``partial`` True when the scan stopped at ``GREP_LARGE_FILE_SCAN_LIMIT``
+        or the walk budget expired before the whole scope was seen.
+
+        Best-effort by design: any I/O or regex failure yields whatever was gathered, never an
+        exception into the grep result.
+        """
+        out = {'formatted': [], 'count': 0, 'large_files': 0, 'scanned': 0,
+               'total_bytes': 0, 'partial': False}
+        max_mb, head_bytes, scan_limit, budget_s = _grep_large_file_limits()
+        if max_mb <= 0:
+            return out
+
+        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+            flags = 0
+        elif smart_case:
+            flags = re.IGNORECASE
+        else:
+            flags = 0
+        try:
+            pattern_re = _compile_grep_pattern(re.escape(pattern) if literal else pattern, flags=flags)
+        except re.error:
+            return out
+
+        max_bytes = max_mb * 1024 * 1024
+        deadline = time.monotonic() + budget_s
+        try:
+            for fp, rel_str in self._iter_grep_scope_files(root, include, exclude,
+                                                           ignore_vcs, deadline):
+                try:
+                    size = fp.stat().st_size
+                except OSError:
+                    continue
+                if size <= max_bytes:
+                    continue
+                out['large_files'] += 1
+                out['total_bytes'] += size
+                if not head_scan:
+                    continue
+                if out['scanned'] >= scan_limit:
+                    out['partial'] = True
+                    continue
+                out['scanned'] += 1
+                matches = self._head_scan_matches(fp, rel_str, pattern_re, head_bytes)
+                if matches:
+                    out['formatted'].extend(matches)
+                    out['count'] += len(matches)
+        except OSError:
+            pass
+        if time.monotonic() > deadline:
+            out['partial'] = True
+        return out
 
     def _probe_ignored_matches(self,
                                pattern: str,
@@ -538,6 +698,12 @@ class GrepMixin:
                     # Python so the real error surfaces (Python raises re.error for bad patterns).
                     if result.returncode == 2 and count == 0:
                         stderr_msg = (result.stderr or '').strip()[:500]
+                        # BUG_0169: when --max-filesize filtered out EVERY candidate, rg exits 2
+                        # with "No files were searched" — that is a normal empty result, not a
+                        # usage error. Reporting it as one made grep() fall back to the Python
+                        # scan instead of taking the over-size header path.
+                        if 'No files were searched' in stderr_msg and _grep_max_file_size_mb() > 0:
+                            return [], 0, False, False, 0, None, 0, 0
                         logger.warning(
                             f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
                         return None, 0, False, False, 0, None, 0, 0
@@ -843,6 +1009,22 @@ class GrepMixin:
                   literal=literal,
                   spill_file_path=spill_file_path)
             if was_timed_out:
+                # BUG_0169: name the real cause when the scope is dominated by over-size
+                # artifacts. The old message claimed the pattern/scope was "too broad", which
+                # was already false: a single directory + an extension filter is as narrow as
+                # the caller can get.
+                _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
+                _diag = self._scan_large_files(resolved, include, exclude, pattern,
+                                               ignore_vcs=ignore_vcs, smart_case=smart_case,
+                                               literal=literal, head_scan=False) \
+                    if _max_mb > 0 else {'large_files': 0, 'total_bytes': 0}
+                if _diag['large_files']:
+                    _total_gb = _diag['total_bytes'] / (1024 ** 3)
+                    return (f"ERROR: Search timed out after {int(timeout)}s — the scope contains "
+                            f"{_diag['large_files']} file(s) larger than {_max_mb} MB "
+                            f"(>= {_total_gb:.1f} GB total). grep does not stream files that large; "
+                            f"use read_file to inspect a file's header/metadata, or narrow "
+                            f"include/exclude to smaller files.")
                 return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
             if results is not None:
                 if count == 0 and not _sub_truncated:
@@ -867,6 +1049,27 @@ class GrepMixin:
                             summary += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
                                         f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
                                         f"to include them]")
+                    # BUG_0169: the streaming search skipped over-size files. Recover header
+                    # matches from them; otherwise say the scope was only partially covered
+                    # instead of claiming a clean "No matches".
+                    _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
+                    if _max_mb > 0:
+                        _large = self._scan_large_files(resolved, include, exclude, pattern,
+                                                        ignore_vcs=ignore_vcs, smart_case=smart_case,
+                                                        literal=literal, head_scan=True)
+                        if _large['count'] > 0:
+                            _head_kb = _head_bytes // 1024
+                            _summary = f"Found {_large['count']} matches for '{pattern}'{searched_note}"
+                            _partial = ' (scan limit reached)' if _large['partial'] else ''
+                            _summary += (f" [note: matched in the first {_head_kb} KiB of "
+                                         f"{_large['scanned']} file(s) larger than {_max_mb} MB{_partial}; "
+                                         f"full file content was not streamed — use read_file for more]")
+                            return f"{_summary}:\n\n" + '\n'.join(_large['formatted'])
+                        if _large['large_files']:
+                            summary += (f" [note: {_large['large_files']} file(s) larger than "
+                                        f"{_max_mb} MB were not searched in full (only the first "
+                                        f"{_head_bytes // 1024} KiB was scanned); use read_file to "
+                                        f"inspect their headers/content]")
                     return f"{summary}:\n\n"
                 else:
                     output_text = '\n'.join(results)
@@ -957,6 +1160,13 @@ class GrepMixin:
             # Match against basename only (fnmatch).
             _PY_DEFAULT_EXCLUDES = {'*.pyc', '*.so', '*.dll', '*.exe', '*.zip'}
 
+            # BUG_0169: the fallback must not read a multi-GB artifact into memory either.
+            # Over-size files get the same bounded header scan the ripgrep path uses.
+            _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
+            _large_max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else 0
+            _large_skipped = 0
+            _large_scanned = 0
+
             # When include is "*" (all files), use os.walk with directory skipping to match
             # subprocess behavior. rglob("*") doesn't respect ignores and only matches root level.
             # BUG_0056: support comma-separated globs — union of rglob for each pattern.
@@ -1044,6 +1254,27 @@ class GrepMixin:
                         continue
 
                 # File reading and pattern matching — OUTSIDE the exclude block so it runs regardless
+                if _large_max_bytes:
+                    try:
+                        _size = file_path.stat().st_size
+                    except OSError:
+                        _size = 0
+                    if _size > _large_max_bytes:
+                        # BUG_0169: skip the full read; scan only the header.
+                        _large_skipped += 1
+                        if _large_scanned < _scan_limit:
+                            _large_scanned += 1
+                            try:
+                                _rel_large = str(file_path.relative_to(resolved)).replace('\\', '/')
+                            except ValueError:
+                                _rel_large = file_path.name
+                            _head_hits = self._head_scan_matches(file_path, _rel_large,
+                                                                 pattern_re, _head_bytes)
+                            if _head_hits:
+                                results.extend(_head_hits)
+                                match_count += len(_head_hits)
+                        continue
+
                 try:
                     # BUG_0145: 'replace' (not 'ignore') keeps non-UTF-8 lines renderable,
                     # matching read_file and the rg fast path (see _rg_lines_text).
@@ -1111,11 +1342,21 @@ class GrepMixin:
                 if was_timed_out:
                     return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
                 exclude_info = f", excluding {exclude}" if exclude else ''
-                return f"No matches found for pattern '{pattern}' in {path}/**/{include}{exclude_info}{searched_note}"
+                _large_note = ''
+                if _large_skipped:
+                    _large_note = (f" [note: {_large_skipped} file(s) larger than {_max_mb} MB were "
+                                   f"not read in full (only the first {_head_bytes // 1024} KiB was "
+                                   f"scanned); use read_file to inspect their headers/content]")
+                return (f"No matches found for pattern '{pattern}' in {path}/**/{include}"
+                        f"{exclude_info}{searched_note}{_large_note}")
 
             summary = f"Found {match_count} matches for '{pattern}'{searched_note}"
             if context > 0:
                 summary += f" (with {context} line(s) of context)"
+            if _large_skipped:
+                summary += (f" [note: {_large_skipped} file(s) larger than {_max_mb} MB were not "
+                            f"read in full; only their first {_head_bytes // 1024} KiB was scanned "
+                            f"— use read_file for more]")
             output_text = '\n'.join(results)
 
             if was_timed_out:

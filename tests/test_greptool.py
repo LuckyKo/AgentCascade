@@ -1072,7 +1072,7 @@ def test_fastpath_and_probe_argv_relationship_is_exact():
     # absolute base argv against an independent literal so one test fails if the shared base
     # list is edited at all.
     base = ['rg', '--no-heading', '-n', '--json', '--color', 'never', '--no-mmap',
-            '--hidden', '--text']
+            '--hidden', '--text', '--max-filesize=100M']
     assert _probe_argv('', '', 0, 'needle') == base + ['--no-ignore', '-i', '--glob', '!.git/',
                                                         '-e', 'needle'], \
         f'shared base argv drifted from the pinned literal; got: {_probe_argv('', '', 0, 'needle')}'

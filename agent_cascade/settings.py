@@ -133,6 +133,20 @@ DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LI
 # "narrow your search" error. Kept low so a pathological wide search can't hang the
 # agent for tens of seconds; ripgrep searches normally finish well under this.
 DEFAULT_GREP_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_GREP_TIMEOUT', 5.0))
+# BUG_0169: ripgrep is told not to STREAM files larger than this as text. With `--text`
+# (required so NUL-byte files are not silently skipped) a multi-GB model artifact is read
+# byte-by-byte, blows the grep timeout and reports a misleading "scope too broad" error.
+# Such files are instead skipped by the streaming search and only their FIRST
+# GREP_LARGE_FILE_HEAD_KB KiB are scanned (enough for JSON/model headers), with the skip
+# reported in the result. Set to 0 to disable the cap (old, unbounded behaviour).
+GREP_MAX_FILE_SIZE_MB: int = int(os.getenv('AGENT_CASCADE_GREP_MAX_FILE_SIZE_MB', 100))
+GREP_LARGE_FILE_HEAD_KB: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_HEAD_KB', 64))
+# Safety caps for the header scan of over-size files: never scan more than this many files
+# or spend more than this many seconds walking/stat-ing the scope to find them.
+GREP_LARGE_FILE_SCAN_LIMIT: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_LIMIT', 50))
+GREP_LARGE_FILE_SCAN_BUDGET_S: float = float(
+    os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_BUDGET_S', 0.75))
+
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_HEURISTIC_MATCH_THRESHOLD', 0.90))
 # Wall-clock ceiling (seconds) for the CPU-bound document-parse step in web_extractor /
 # SimpleDocParser. The network download is already bounded by _HTTP_FETCH_TIMEOUT
