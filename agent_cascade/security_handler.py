@@ -623,6 +623,45 @@ class SecurityAdvisorHandler:
                 # Release concurrency lock for Security checks
                 exec_lock.release()
 
+            # ── BUG_0155: re-acquire the caller's slot + restore its KV BEFORE the verdict ──
+            # The caller is unblocked ONLY by approval.event.set() inside user_approve/user_reject,
+            # which _handle_result (below) delivers. Doing the existing reacquire+restore HERE —
+            # after the advisor's permit was released (inner finally) and BEFORE the verdict is
+            # handed to the operation manager — makes the main agent's next LLM dispatch hit a warm
+            # cache instead of re-prefilling the whole conversation (the measured 0 % cache miss).
+            # The outer finally stays ONLY as the exception-path fallback (the execution loop re-raised
+            # → this early call is skipped there).
+            #
+            # Safety on the AUTO path: the caller issues NO LLM request between save_before_slot_yield
+            # and its resume — it is blocked in request_user_approval — so the saved snapshot IS its
+            # current KV and re-applying it is not a rollback ([[bug-0101-media-gen-restore-prefix-cache-verified-fixed]]).
+            # The MANUAL path (Auto-Ask off: ws_handlers user_approve / api_server approve route + the
+            # inner-finally release) has a PRE-EXISTING user-click / timeout race window; this change
+            # strictly NARROWS it (the restore now lands before the verdict card is sent) but does NOT
+            # eliminate it.
+            if _yielded_slot and caller_inst_sec:
+                try:
+                    if self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent):
+                        # Success (slot re-acquired; a stop/dismiss is also returned True so the finally
+                        # does NOT retry after a user stop): clear the flag so the finally does not repeat
+                        # it. A repeat is itself safe via the sticky-keep fast path in reacquire_for
+                        # (already-holds-permit → returns True without acquiring); the flag keeps it to one
+                        # attempt.
+                        _yielded_slot = False
+                    # A False return (could not re-acquire, e.g. no router at slot_lifecycle.py:442-443)
+                    # leaves _yielded_slot set so the finally retries the SLOT. It does NOT retry the KV
+                    # restore: the failed attempt already cleared the pending label via
+                    # _clear_orphaned_state_label, so a KV retry would find "no saved state to restore".
+                except Exception as e:
+                    # Any hard failure (TimeoutError from the acquire phase, or ANY exception
+                    # reacquire_after_slot_yield re-raises at slot_lifecycle.py:231) must NOT skip the
+                    # verdict — _handle_result still runs. Leave _yielded_slot set so the finally re-attempts
+                    # the SLOT ONLY (NOT the KV restore — the failed attempt already cleared the pending
+                    # label via _clear_orphaned_state_label). A transient early failure may be recovered by
+                    # the finally (self-healing).
+                    logger.warning(f"[SECURITY_SLOT_REACQUIRE] early restore deferred for '{caller_agent}': {e} — "
+                                   f"the finally will re-attempt the slot only (not the KV restore)")
+
             # ── Extract output and parse verdict ───────────────────────────
             from agent_cascade.compression.helpers import extract_instance_output
             parsing_response = extract_instance_output(sec_instance.conversation, sec_state_key)
@@ -669,36 +708,15 @@ class SecurityAdvisorHandler:
                 except Exception:
                     pass  # Timer may have already fired
 
-            # ── Slot reacquire: restore caller's slot if we yielded it ──
+            # ── Slot reacquire (FALLBACK: exception route OR a failed early attempt) ─────────────
+            # BUG_0155: on the normal path the early call site re-acquires + restores the caller's slot
+            # BEFORE the verdict and clears _yielded_slot, so this finally is reached ONLY when the early
+            # call did NOT succeed: either the execution loop re-raised (early call skipped) OR the early
+            # call returned False (could not re-acquire, e.g. no router) and left the flag set. It is
+            # therefore NOT dead code. Delegates to the same helper, so the raise position and the
+            # _cleanup / release_claim ordering below are unchanged.
             if _yielded_slot and caller_inst_sec:
-                logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
-                try:
-                    # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores
-                    # the KV saved by save_before_slot_yield (only when a label is pending and
-                    # we actually hold the slot). tolerate_failure=False preserves the existing
-                    # raise-on-hard-failure sanction below.
-                    #
-                    # Inside a shell_cmd ``safe`` window the tool unloads the model right
-                    # before the command and restores by the stable label afterwards, so restoring
-                    # here would land inside the command window and race that unload (the autoloader
-                    # cold-reloads the model mid-command). _safe_mode_kv is set before execute_shell_command
-                    # and cleared only in the tool's finally AFTER this approval returns, so it is still
-                    # True here. Every other caller (plain security check) keeps the default False.
-                    engine.reacquire_after_slot_yield(
-                        caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False,
-                        skip_kv_restore=bool(getattr(caller_inst_sec, '_safe_mode_kv', False)))
-                except SlotCancelled:
-                    # A stop/dismiss cancelled the reacquire. This is EXPECTED, not a
-                    # failure: the verdict was already delivered by _handle_result
-                    # (user_approve/user_reject) before this finally was entered. Do not
-                    # let it propagate — doing so made a successful APPROVED check report
-                    # "Security check failed" at ERROR. (D-6)
-                    logger.info(f"[SECURITY_SLOT_REACQUIRE] Cancelled by stop for '{caller_agent}' — "
-                                f"verdict already delivered, no reacquire needed")
-                except TimeoutError:
-                    # Unchanged sanction: hard reacquire failures propagate (see
-                    # .agent_lessons/api-scheduling-architecture.md vulnerability #4).
-                    raise
+                self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent)
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key, rid=rid)
@@ -707,6 +725,71 @@ class SecurityAdvisorHandler:
             # take it. release_claim no-ops on a None/empty name AND on a mismatched rid, so this is
             # safe on every path — including fresh-spawn fallback where reuse_name is None.
             security_reuse.release_claim(reuse_name, rid)
+
+    def _reacquire_caller_slot(self, engine, caller_inst_sec, caller_agent) -> bool:
+        """Re-acquire the caller's slot after a Security yield and restore its saved KV.
+
+        BUG_0155: shared by the early call site in ``_execute_check`` (run BEFORE the approval
+        verdict is delivered, so the main agent's next LLM dispatch hits a warm cache instead of
+        re-prefilling) and by the outer ``finally`` (the exception-path fallback only). Delegates
+        VERBATIM to ``engine.reacquire_after_slot_yield`` — same context tag; the state label is
+        consumed from ``_state_label`` inside ``reacquire_after_slot_yield`` ('after_security_check' is a
+        log/context tag, NOT the state label) — so the existing safety-gate chain (toggle / pending-label
+        / slot-ownership / safe-mode skip) is reused unchanged and the restore never clobbers a warm
+        cache ([[bug-0101-media-gen-restore-prefix-cache-verified-fixed]]). No new restore path, no
+        residency probe, no ``defer_kv_restore``.
+
+        Returns:
+            The bool from ``reacquire_after_slot_yield`` (True = slot re-acquired; False = could not
+            re-acquire, e.g. no router at ``slot_lifecycle.py:442-443``). The early call site clears
+            ``_yielded_slot`` ONLY on True; a False return leaves it set so the finally retries the SLOT.
+
+        Raises / error handling:
+            ``reacquire_after_slot_yield`` is called with ``tolerate_failure=False``, so a hard failure
+            (e.g. a SlotQueueTimeout from the acquire phase, or any error at ``slot_lifecycle.py:231``)
+            re-raises out of THIS helper. At the EARLY call site that raise is caught by a broad
+            ``except Exception``: the verdict is still delivered and the finally MAY recover the slot on
+            the next attempt — a TRANSIENT early failure is therefore SELF-HEALING (an improvement over
+            the pre-BUG_0155 behavior). A hard failure is swallowed at the EARLY call site, but the
+            finally re-attempt is unguarded — so the raise-out-of-``_execute_check`` is preserved via the
+            finally on the early-failure route AND via the execution-loop route (which skips the early
+            call). ``SlotCancelled`` (a stop/dismiss
+            during the reacquire) is swallowed and returns True (do NOT retry the slot after a user stop):
+            it must never propagate (D-6: it made a successful APPROVED check report "Security check failed").
+        """
+        from agent_cascade.log import logger
+        # Local import (mirrors _execute_check's :312): SlotCancelled lives in slot_queue and is
+        # not imported at module scope here, so the except clause would otherwise NameError.
+        from agent_cascade.slot_queue import SlotCancelled
+
+        logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
+        try:
+            # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores the KV
+            # saved by save_before_slot_yield (only when a label is pending and we actually hold
+            # the slot). tolerate_failure=False makes a hard failure re-raise out of this helper; the
+            # CALLER decides whether to swallow it (see Raises above). The bool return tells the early
+            # call site whether the slot was actually re-acquired.
+            #
+            # Inside a shell_cmd ``safe`` window the tool unloads the model right before the
+            # command and restores by the stable label afterwards, so restoring here would land
+            # inside the command window and race that unload (the autoloader cold-reloads the model
+            # mid-command). _safe_mode_kv is set before execute_shell_command and cleared only in
+            # the tool's finally AFTER this approval returns, so it is still True here. Every other
+            # caller (plain security check) keeps the default False.
+            return engine.reacquire_after_slot_yield(
+                caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False,
+                skip_kv_restore=bool(getattr(caller_inst_sec, '_safe_mode_kv', False)))
+        except SlotCancelled:
+            # A stop/dismiss cancelled the reacquire. EXPECTED, not a failure. Do not let it
+            # propagate — doing so made a successful APPROVED check report "Security check failed".
+            # Return True so the finally does NOT retry the slot after a user-initiated stop.
+            logger.info(f"[SECURITY_SLOT_REACQUIRE] Cancelled by stop for '{caller_agent}' — "
+                        f"reacquire skipped, verdict handling continues")
+            return True
+        except TimeoutError:
+            # Hard reacquire failure re-raises: the early call site swallows it (self-healing via the
+            # finally); the execution-loop route lets it propagate out of _execute_check.
+            raise
 
     # ── Slot diagnostics helper ────────────────────────────────────────────
     def _describe_pool_holders(self, caller_agent: str) -> str:

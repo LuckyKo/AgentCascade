@@ -77,34 +77,49 @@ def _build_pool(router):
     return AgentPool(llm_cfg, agents_dir=str(router._config_dir), api_router=router)
 
 
-def _make_sec_instance(sec_name):
+def _make_sec_instance(sec_name, conversation_text='I will analyze this request.'):
     """Lightweight stand-in for engine._create_system_agent's Security instance.
 
     Real attribute storage (so the yield/reacquire code can read/write it) but a
     dummy conversation so extract_instance_output() yields nothing → ambiguous verdict.
+    ``conversation_text`` lets a test drive a clear [YES]/[NO] verdict instead.
     """
     inst = MagicMock(name=sec_name)
     inst.instance_name = sec_name
     inst.agent_class = 'Security'
     inst._state_lock = threading.RLock()
-    inst.conversation = [{'role': 'assistant', 'content': 'I will analyze this request.'}]
+    inst.conversation = [{'role': 'assistant', 'content': conversation_text}]
     return inst
 
 
-def _run_execute_check(handler, ap, rid, caller_agent):
-    """Run the REAL _execute_check with only engine.run / _create_system_agent patched."""
+def _run_execute_check(handler, ap, rid, caller_agent, *, auto_apply=False, verdict=None,
+                      reacquire_side_effect=None, engine_holder=None):
+    """Run the REAL _execute_check with only engine.run / _create_system_agent patched.
 
+    ``auto_apply`` and ``verdict`` default to the original behavior (no auto-apply,
+    ambiguous response). Pass ``auto_apply=True, verdict='[YES] ...'`` to drive the
+    auto-approve path so operation_manager.user_approve fires (the verdict event).
+    ``reacquire_side_effect`` forces the shared reacquire helper to raise (failure semantics);
+    ``engine_holder`` receives the engine instance BEFORE the call so a test can still inspect
+    it when _execute_check itself raises.
+    """
     engine_instance = MagicMock()
-    # Security "completes" immediately with an ambiguous (non-[YES]/[NO]) response.
-    engine_instance.run.return_value = iter([('I will analyze this request.', False)])
+    run_text = verdict if verdict is not None else 'I will analyze this request.'
+    # Security "completes" immediately with the requested response.
+    engine_instance.run.return_value = iter([(run_text, False)])
     engine_instance._create_system_agent.side_effect = lambda **kw: _make_sec_instance(
-        kw.get('instance_name', 'Security'))
+        kw.get('instance_name', 'Security'), conversation_text=run_text)
     engine_instance._telemetry.return_value = None
     # t151b: the security path now re-acquires via the shared helper reacquire_after_slot_yield
     # (which internally wraps reacquire_for + restores any KV saved by save_before_slot_yield).
-    engine_instance.reacquire_after_slot_yield.return_value = True
+    if reacquire_side_effect is not None:
+        engine_instance.reacquire_after_slot_yield.side_effect = reacquire_side_effect
+    else:
+        engine_instance.reacquire_after_slot_yield.return_value = True
 
     mock_engine_cls = MagicMock(return_value=engine_instance)
+    if engine_holder is not None:
+        engine_holder.append(engine_instance)
 
     with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 5):
         with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
@@ -112,7 +127,7 @@ def _run_execute_check(handler, ap, rid, caller_agent):
                 ap=ap,
                 sec_inst=None,
                 rid=rid,
-                auto_apply=False,
+                auto_apply=auto_apply,
                 instance_name='Maine',
                 caller_agent=caller_agent,
                 prompt_template='Analyze {tool_name}: {description} args={arguments}',
@@ -354,11 +369,11 @@ def test_normal_yield_path_completes(slot_harness):
                                  f"not free it in time.\n{report}")
     # The normal yield path fired (verified above) and the Security agent did NOT time out
     # waiting for the slot — i.e. the caller's permit was freed in time for it to proceed.
-    # After the check, the finally-block RE-ACQUIRES the caller's slot, so the caller is
-    # expected to hold the permit again (yield → run Security → reacquire is in-order).
-    # t151b: reacquire now goes through the shared helper (wraps reacquire_for + KV restore).
+    # After the check, the caller is expected to hold the permit again (yield → run Security
+    # → reacquire is in-order). BUG_0155: the reacquire now happens BEFORE the verdict is
+    # delivered, not in the finally. t151b: via the shared helper (wraps reacquire_for + KV restore).
     assert engine_instance.reacquire_after_slot_yield.called, (
-        '_yielded_slot should be True so the finally-block reacquire runs.\n' + report)
+        '_yielded_slot should be True so the reacquire runs before the verdict is delivered.\n' + report)
     # Reacquire must have targeted the caller.
     assert any(c.args and c.args[0] is caller for c in engine_instance.reacquire_after_slot_yield.call_args_list), (
         'reacquire_after_slot_yield should be called with the caller instance to restore its slot.\n' + report)
@@ -416,9 +431,9 @@ def test_force_release_fallback_path(slot_harness):
     # After a successful force-release, the caller's permit must be gone from the pool.
     assert 'caller' not in shared._running, (
         f"Force-release fallback should remove the leaked holder from _running: {list(shared._running)}\n{report}")
-    # Reacquire must run (the finally block restores the caller's slot). t151b: via the shared helper.
+    # Reacquire must run (the caller's slot is restored before the verdict is delivered). t151b: via the shared helper.
     assert engine_instance.reacquire_after_slot_yield.called, (
-        '_yielded_slot should be True after force-release so the reacquire runs.\n' + report)
+        '_yielded_slot should be True after force-release so the reacquire runs before the verdict is delivered.\n' + report)
 
 
 # ── Test 3: skip path (no slot to yield at all) — diagnostic only ────────────
@@ -506,7 +521,7 @@ def test_safe_mode_window_passes_skip_kv_restore_true(slot_harness):
     print('\n' + report)
 
     calls = engine_instance.reacquire_after_slot_yield.call_args_list
-    assert calls, f'reacquire_after_slot_yield must still run in the finally.\n{report}'
+    assert calls, f'reacquire_after_slot_yield must still run before the verdict is delivered.\n{report}'
     targeted = [c for c in calls if c.args and c.args[0] is caller]
     assert targeted, f'reacquire must target the caller instance.\n{report}'
     assert all((c.kwargs or {}).get('skip_kv_restore') is True for c in targeted), (
@@ -539,9 +554,246 @@ def test_plain_security_check_keeps_advisor_restore(slot_harness):
     print('\n' + report)
 
     calls = engine_instance.reacquire_after_slot_yield.call_args_list
-    assert calls, f'reacquire_after_slot_yield must still run in the finally.\n{report}'
+    assert calls, f'reacquire_after_slot_yield must still run before the verdict is delivered.\n{report}'
     targeted = [c for c in calls if c.args and c.args[0] is caller]
     assert targeted, f'reacquire must target the caller instance.\n{report}'
     assert all((c.kwargs or {}).get('skip_kv_restore') is False for c in targeted), (
         'outside a safe-mode window the advisor restore must stay enabled: '
         f'{[dict(c.kwargs or {}) for c in targeted]}\n{report}')
+
+
+# ── BUG_0155: the /state/load must be issued BEFORE the verdict is delivered ─
+#
+# These tests drive the REAL _execute_check. The ordering + negative tests bind the REAL
+# save/reacquire/restore chain (only the HTTP layer is faked) so a "skip" that still
+# issued a state/load cannot pass — the same recording idiom as
+# tests/test_state_restore_slot_gate.py::TestSafeModeRestoreDeferral. The failure-semantics
+# tests use the MagicMock engine and force the shared helper to raise.
+
+
+def _make_ap(rid):
+    return {
+        'request_id': rid,
+        'tool_name': 'shell_cmd',
+        'description': 'echo hi',
+        'tool_args': {
+            'command': 'echo hi'
+        },
+        'agent_name': 'caller',
+    }
+
+
+def _bind_real_restore_chain(engine_instance, pool, *, toggle=True):
+    """Bind the REAL save + reacquire/restore chain onto the stub engine so the test
+    exercises the production code path (only the HTTP layer is faked). The engine's
+    slot resolution reads pool.api_router only, so a MagicMock pool carrying the real
+    router is enough — no AgentPool internals needed."""
+    from agent_cascade.engine.core import ExecutionEngine
+
+    engine_instance.pool = MagicMock()
+    engine_instance.pool.api_router = pool.api_router
+    engine_instance._get_pool_setting.return_value = toggle  # state_kv_save_enabled toggle
+    # Real save side (issues /state/save + sets the consume-once label). yield_caller_slot
+    # invokes save_fn(caller_inst, release_reason) with two positional args.
+    engine_instance.save_before_slot_yield = (
+        lambda instance, inst_name, reason='': ExecutionEngine.save_before_slot_yield(
+            engine_instance, instance, inst_name, reason))
+    # Real reacquire/restore (issues /state/load from the pending label onto the held endpoint).
+    engine_instance.reacquire_after_slot_yield = (
+        lambda instance, inst_name, context='', *, tolerate_failure=False, respect_toggle=True,
+        skip_kv_restore=False, defer_kv_restore=False: ExecutionEngine.reacquire_after_slot_yield(
+            engine_instance, instance, inst_name, context, tolerate_failure=tolerate_failure,
+            respect_toggle=respect_toggle, skip_kv_restore=skip_kv_restore, defer_kv_restore=defer_kv_restore))
+    engine_instance._restore_held_slot_state = (
+        lambda instance, inst_name, label=None: ExecutionEngine._restore_held_slot_state(
+            engine_instance, instance, inst_name, label))
+    engine_instance._clear_orphaned_state_label = ExecutionEngine._clear_orphaned_state_label
+
+    # Fake the bounded-FIFO acquire: grant the caller its slot without touching the scheduler.
+    def _fake_reacquire(instance, holder_name, context='reacquire'):
+        instance._slot_release = lambda: None
+        instance._slot_key = '_shared_sequential_slot_'
+        return True
+
+    engine_instance.reacquire_for = _fake_reacquire
+
+
+def _record_state_http(post_mock, seq):
+    """Record every state/save + state/load POST as (tag, label) into ``seq``."""
+    def _post(url, *args, json=None, **kwargs):
+        if isinstance(url, str) and '/state/' in url:
+            tag = 'save' if '/state/save' in url else 'load'
+            seq.append((tag, (json or {}).get('label')))
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    post_mock.side_effect = _post
+
+
+def _drive_real_restore(h, ap, rid, *, auto_apply=True, verdict='[YES] safe to proceed',
+                       toggle=True, safe_mode=False, arm_endpoint=True):
+    """Drive the REAL _execute_check with the REAL save/reacquire chain bound. Returns the
+    ordered event log: ('save'|'load', label) from HTTP and ('approve', None) from the verdict."""
+    import agent_cascade.state_ops as state_ops
+
+    pool, caller = h['pool'], h['caller']
+    if safe_mode:
+        caller._safe_mode_kv = True
+    if arm_endpoint:
+        # The caller's held endpoint declares state-save capability (mirrors a real autoloader).
+        caller._last_endpoint_config = {'api_base': 'http://127.0.0.1:9/v1',
+                                        'model': 'mock',
+                                        'state_save_enabled': True}
+
+    events = []
+    if auto_apply:
+        pool.operation_manager.user_approve.side_effect = (
+            lambda *a, **k: (events.append(('approve', None)), 'Approved: rid')[1])
+
+    engine_instance = MagicMock()
+    _bind_real_restore_chain(engine_instance, pool, toggle=toggle)
+    engine_instance.run.return_value = iter([(verdict, False)])
+    engine_instance._create_system_agent.side_effect = lambda **kw: _make_sec_instance(
+        kw.get('instance_name', 'Security'), conversation_text=verdict)
+    engine_instance._telemetry.return_value = None
+
+    mock_engine_cls = MagicMock(return_value=engine_instance)
+    with patch('agent_cascade.security_handler.SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS', 5):
+        with patch('agent_cascade.execution_engine.ExecutionEngine', mock_engine_cls):
+            with patch.object(state_ops.httpx, 'post') as post_mock:
+                _record_state_http(post_mock, events)
+                h['handler']._execute_check(
+                    ap=ap, sec_inst=None, rid=rid, auto_apply=auto_apply,
+                    instance_name='Maine', caller_agent='caller',
+                    prompt_template='Analyze {tool_name}: {description} args={arguments}',
+                    timeout_seconds=3600, warning_seconds=2400,
+                )
+    return events
+
+
+def test_restore_is_issued_before_the_verdict_is_delivered(slot_harness):
+    """BUG_0155 PRIMARY (red/green): exactly one /state/load with the save's label must be
+    issued BEFORE operation_manager.user_approve unblocks the caller.
+
+    Against the PRE-FIX (late) code the load is issued in the finally — i.e. AFTER user_approve
+    — so events.index('load') > events.index('approve') and this FAILS. After the fix the
+    early call issues the load before the verdict is delivered, so it PASSES.
+    """
+    h = slot_harness
+    events = _drive_real_restore(h, _make_ap('rid_order'), 'rid_order')
+
+    saves = [lbl for tag, lbl in events if tag == 'save']
+    loads = [lbl for tag, lbl in events if tag == 'load']
+    assert len(saves) == 1 and saves[0] == 'caller', (
+        f"exactly one /state/save with the caller label expected: {events}")
+    assert len(loads) == 1 and loads[0] == 'caller', (
+        f"exactly one /state/load with the save's label expected: {events}")
+    assert loads[0] == saves[0], f'the load label must equal the save label: {events}'
+
+    load_i = next(i for i, (tag, _) in enumerate(events) if tag == 'load')
+    approve_i = next(i for i, (tag, _) in enumerate(events) if tag == 'approve')
+    assert load_i < approve_i, (
+        f'[BUG_0155] the /state/load must be issued BEFORE the verdict is delivered; got order: {events}')
+
+
+def test_negative_toggle_off_issues_zero_loads(slot_harness):
+    """state_kv_save_enabled OFF (and no safe-mode override) → ZERO state/load requests, and
+    the verdict is still delivered (user_approve exactly once). Mirrors the
+    TestSafeModeRestoreDeferral skip-path assertion."""
+    h = slot_harness
+    events = _drive_real_restore(h, _make_ap('rid_toggle_off'), 'rid_toggle_off', toggle=False)
+
+    assert [lbl for tag, lbl in events if tag == 'load'] == [], (
+        f'toggle off must issue no state/load: {events}')
+    assert [t for t, _ in events if t == 'approve'].count('approve') == 1, (
+        f'the verdict must still be delivered once: {events}')
+
+
+def test_negative_safe_mode_window_issues_zero_loads(slot_harness):
+    """Caller armed _safe_mode_kv (a shell_cmd safe window) → the early call passes
+    skip_kv_restore=True, so the slot is re-acquired but ZERO state/load fires here (the
+    tool owns the restore by stable label after the command)."""
+    h = slot_harness
+    events = _drive_real_restore(h, _make_ap('rid_safe'), 'rid_safe', toggle=True, safe_mode=True)
+
+    assert [lbl for tag, lbl in events if tag == 'load'] == [], (
+        f'a safe-mode window must defer the advisor KV restore: {events}')
+    assert [t for t, _ in events if t == 'approve'].count('approve') == 1, (
+        f'the verdict must still be delivered once: {events}')
+
+
+def test_negative_no_slot_held_issues_zero_loads(slot_harness):
+    """Nothing yielded (no live callback, no leaked permit) → neither the early call nor the
+    finally runs the reacquire, so ZERO state/load fires and the verdict is still delivered."""
+    h = slot_harness
+    caller = h['caller']
+    # Free the permit so the pool is empty (the skip path).
+    caller._slot_release = None
+    caller._slot_key = None
+    h['release_cb']()
+
+    events = _drive_real_restore(h, _make_ap('rid_noslot'), 'rid_noslot', toggle=True, arm_endpoint=False)
+
+    assert [lbl for tag, lbl in events if tag == 'load'] == [], (
+        f'nothing yielded must issue no state/load: {events}')
+    assert [t for t, _ in events if t == 'approve'].count('approve') == 1, (
+        f'the verdict must still be delivered once: {events}')
+
+
+def test_verdict_still_delivered_when_early_reacquire_raises_timeout(slot_harness):
+    """A hard TimeoutError from the early reacquire must NOT skip the verdict: user_approve
+    still runs once, the unchanged finally re-attempts (call_count == 2), and the exception
+    still propagates out of _execute_check."""
+    h = slot_harness
+    approve_calls = []
+    h['pool'].operation_manager.user_approve.side_effect = (
+        lambda *a, **k: (approve_calls.append(1), 'Approved: rid')[1])
+
+    engine_holder = []
+    with pytest.raises(TimeoutError):
+        _run_execute_check(h['handler'], _make_ap('rid_fail_to'), 'rid_fail_to', 'caller',
+                           auto_apply=True, verdict='[YES] safe to proceed',
+                           reacquire_side_effect=TimeoutError('slot acquire timeout'),
+                           engine_holder=engine_holder)
+
+    engine_instance = engine_holder[0]
+    assert len(approve_calls) == 1, 'the verdict must still be delivered despite the early-reacquire failure'
+    assert engine_instance.reacquire_after_slot_yield.call_count == 2, (
+        'early attempt + the unchanged finally must both run on a hard failure')
+
+
+def test_verdict_still_delivered_when_early_reacquire_raises_other(slot_harness):
+    """A non-TimeoutError (e.g. a slot-queue RuntimeError re-raised at slot_lifecycle.py:231)
+    must also NOT skip the verdict — the reviewer-corrected exception-safety requirement.
+    Same shape: user_approve once, finally re-attempts (call_count == 2), exception propagates."""
+    h = slot_harness
+    approve_calls = []
+    h['pool'].operation_manager.user_approve.side_effect = (
+        lambda *a, **k: (approve_calls.append(1), 'Approved: rid')[1])
+
+    engine_holder = []
+    with pytest.raises(RuntimeError):
+        _run_execute_check(h['handler'], _make_ap('rid_fail_rt'), 'rid_fail_rt', 'caller',
+                           auto_apply=True, verdict='[YES] safe to proceed',
+                           reacquire_side_effect=RuntimeError('slot queue'),
+                           engine_holder=engine_holder)
+
+    engine_instance = engine_holder[0]
+    assert len(approve_calls) == 1, 'the verdict must still be delivered despite a non-TimeoutError failure'
+    assert engine_instance.reacquire_after_slot_yield.call_count == 2, (
+        'early attempt + the unchanged finally must both run on a hard failure')
+
+
+def test_success_path_reacquires_exactly_once(slot_harness):
+    """On the normal (no-error) path the caller is re-acquired EXACTLY once — the early call
+    clears _yielded_slot so the finally does not repeat it (no double-acquire)."""
+    h = slot_harness
+    engine_holder = []
+    _run_execute_check(h['handler'], _make_ap('rid_once'), 'rid_once', 'caller',
+                       auto_apply=True, verdict='[YES] safe to proceed',
+                       engine_holder=engine_holder)
+
+    engine_instance = engine_holder[0]
+    assert engine_instance.reacquire_after_slot_yield.call_count == 1, (
+        'the success path must re-acquire exactly once (early call clears _yielded_slot)')

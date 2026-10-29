@@ -1083,14 +1083,14 @@ class TestSlotYieldBeforeSecurityCheck:
         assert engine_instance._release_slot.called, (
             "_release_slot should be called to free the caller's slot before Security runs"
         )
-        # Reacquire must run in the finally block to restore the caller's slot.
-        # Without reacquire, the caller remains slotless for the entire remaining run()
-        # (slots are acquired once at run() entry, not per-turn).
-        # t151b: the security path now uses the shared yield/reacquire helper
+        # Reacquire must run to restore the caller's slot BEFORE the verdict is delivered
+        # (BUG_0155 ordering fix). Without reacquire, the caller remains slotless for the entire
+        # remaining run() (slots are acquired once at run() entry, not per-turn).
+        # t151b: the security path uses the shared yield/reacquire helper
         # reacquire_after_slot_yield (which wraps reacquire_for AND restores any KV saved
         # by save_before_slot_yield), not a bare reacquire_for call.
         assert engine_instance.reacquire_after_slot_yield.called, (
-            "reacquire_after_slot_yield should be called in the finally block to restore the caller's slot"
+            "reacquire_after_slot_yield should be called before the verdict is delivered to restore the caller's slot"
         )
         # Verify it was called with the correct instance and tolerate_failure=False.
         assert any(
