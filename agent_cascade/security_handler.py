@@ -208,6 +208,92 @@ def _builtin_tool_hint(command: str):
     return tool
 
 
+def _shell_cmd_targets_out_of_ro(command: str, extra_roots: Optional[Any] = None) -> bool:
+    """Return True if a read-only shell command targets a path the built-in file
+    tools cannot reach (outside the allowed RO roots), so the "prefer built-in
+    tool" hint would not be actionable (BUG_0182).
+
+    Extracts absolute path tokens from ``command`` and checks each against the
+    allowed roots (``_get_allowed_file_roots(extra_roots)``). Returns True if ANY
+    extracted absolute path is outside ALL allowed roots; False if no absolute
+    path is found (conservative - CWD is likely in-workspace) or every path is
+    within some root. Any error -> False (do not suppress the hint).
+
+    Path extraction is platform-aware: on Windows only drive-lettered absolute
+    paths (``C:\\...`` / ``C:/...``) count, so a cmd flag like ``/b`` is not
+    mistaken for a root-level path; on POSIX, ``/...`` multi-segment tokens count.
+    """
+    try:
+        from pathlib import Path
+
+        from agent_cascade.path_security import _get_allowed_file_roots, _is_within
+
+        if os.name == 'nt':
+            # Drive-lettered absolute paths: N:\work\... or N:/work/...
+            paths = re.findall(r'[A-Za-z]:[\\/][^\s"\'|;&()]*', command or '')
+        else:
+            # POSIX absolute paths: /usr/... A bare flag like /b is not matched
+            # (no second segment) - conservative, avoids false suppression.
+            paths = re.findall(r'/(?:[\w.-]+/)+[\w.-]*', command or '')
+        if not paths:
+            return False  # no absolute path -> conservative (CWD likely in-workspace)
+
+        root_paths = []
+        for root in _get_allowed_file_roots(extra_roots):
+            try:
+                root_paths.append(root.resolve())
+            except (OSError, ValueError):
+                continue
+        if not root_paths:
+            return False  # cannot determine reachability -> conservative
+
+        for token in paths:
+            try:
+                resolved = Path(token).resolve()
+            except (OSError, ValueError):
+                continue
+            if not any(_is_within(resolved, rp) for rp in root_paths):
+                return True  # this path is outside every allowed root
+        return False
+    except Exception:
+        return False  # any error -> do not suppress the hint
+
+
+def _get_session_extra_roots(agent_pool: Any) -> Optional[Any]:
+    """Best-effort: return the session's extra work folders for path-RO checks.
+
+    Mirrors ``api_server._current_extra_roots``: collects
+    ``operation_manager.extra_work_folders_ro/rw`` plus the live ``base_dir``
+    (when it differs from ``DEFAULT_WORKSPACE``). Returns ``None`` on any error
+    (or when there are no extra roots) so the caller falls back to the built-in
+    media + workspace roots only.
+    """
+    try:
+        om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
+        if om is None:
+            return None
+        roots = (list(getattr(om, 'extra_work_folders_ro', []) or [])
+                 + list(getattr(om, 'extra_work_folders_rw', []) or []))
+        base_dir = getattr(om, 'base_dir', None)
+        if base_dir is not None and str(base_dir).strip():
+            from pathlib import Path
+
+            from agent_cascade.settings import DEFAULT_WORKSPACE
+
+            def _norm(p):
+                try:
+                    return os.path.normcase(os.path.normpath(str(Path(p).resolve())))
+                except (OSError, ValueError):
+                    return None
+            base_norm = _norm(base_dir)
+            default_norm = _norm(DEFAULT_WORKSPACE)
+            if base_norm is None or default_norm is None or base_norm != default_norm:
+                roots.insert(0, base_dir)
+        return roots or None
+    except Exception:
+        return None
+
+
 class SecurityAdvisorHandler:
     """Handles ask_security WebSocket messages.
 
@@ -422,7 +508,17 @@ class SecurityAdvisorHandler:
         # is structurally read-only; any doubt falls through to the LLM guard.
         hint_tool = None
         if ap.get('tool_name') == 'shell_cmd':
-            hint_tool = _builtin_tool_hint(ap.get('tool_args', {}).get('command', ''))
+            command = ap.get('tool_args', {}).get('command', '')
+            hint_tool = _builtin_tool_hint(command)
+            # BUG_0182: suppress the "prefer built-in tool" hint when the command
+            # targets a path the built-in file tools cannot reach (outside the
+            # allowed RO roots) - otherwise the hint is not actionable and the agent
+            # is stuck (out-of-workspace catch-22). Conservative: only suppresses
+            # when a concrete absolute path is outside every allowed root; no
+            # absolute path (or all in-workspace) -> the hint still fires.
+            if hint_tool is not None and _shell_cmd_targets_out_of_ro(
+                    command, _get_session_extra_roots(self.agent_pool)):
+                hint_tool = None
         if hint_tool is not None:
             hint_reason = (f"[SECURITY_HINT] prefer {hint_tool} for this read-only "
                            f"shell command; auto-approved deterministically (no LLM review)")
