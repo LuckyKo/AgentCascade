@@ -144,6 +144,33 @@ def _resolve_fix_paths(params: Union[str, dict, None]) -> bool:
     return bool(value)
 
 
+# BUG_0054: detect host-path-in-container artifacts in cell output.
+# When a Windows drive-letter path (e.g. N:/work/...) survives into the Linux
+# container and gets joined onto a mount prefix (e.g. /extra_rw_0/N:/work/...),
+# the result is a doubled-prefix path that looks like a plausible error but is
+# a silent container artifact.  Detection only — does not change behaviour.
+_FIX_PATHS_ARTIFACT_RE = re.compile(
+    r'(/[a-z_0-9]+/[A-Za-z]:[\\/]\S*)',
+)
+
+
+def _check_fix_paths_artifact(result: str) -> str:
+    """Return a one-line note if *result* contains a host-path-in-container artifact.
+
+    A doubled-prefix path (e.g. ``/extra_rw_0/N:/work/...``) signals that a
+    Windows drive-letter path was read from a file/DB/argv at runtime and joined
+    onto a container mount prefix.  This is detection only; the note does not
+    alter the path or the code's behaviour.
+    """
+    m = _FIX_PATHS_ARTIFACT_RE.search(result)
+    if m:
+        return (
+            f"\n[fix_paths note] possible host-path-in-container artifact: "
+            f"'{m.group(1)}' — see system_info mounts"
+        )
+    return ''
+
+
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
 
@@ -715,7 +742,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
             },
             'fix_paths': {
                 'description':
-                    'Auto-translate Windows host paths (e.g. N:\\work\\...) to Docker container paths (/workspace/...). Set to false to disable.',
+                    ('Auto-translate Windows host path LITERALS in the submitted code '
+                     '(e.g. N:\\work\\...) to Docker container paths (/workspace/...). '
+                     'Paths obtained at runtime from files, databases, or argv are NOT rewritten. '
+                     'Set to false to disable.'),
                 'type':
                     'boolean',
                 'default':
@@ -1331,6 +1361,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Append path resolution notice to result (before truncation check so it's included in spill file)
         if path_notice:
             result = f'{result}\n\n{path_notice}'
+
+        # BUG_0054: detect host-path-in-container artifacts (doubled-prefix paths)
+        artifact_note = _check_fix_paths_artifact(result)
+        if artifact_note:
+            result = f'{result}{artifact_note}'
 
         if char_limit != -1 and len(result) > char_limit:
             instance_name = kwargs.get('agent_instance_name', 'unknown')
