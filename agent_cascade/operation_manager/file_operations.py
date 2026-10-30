@@ -1916,6 +1916,26 @@ class FileOpsMixin:
                 elif new_content:
                     # Normal delete+insert
                     res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                    # BUG_0060: echo the deleted first/last ~80 chars so range drift is visible
+                    # without reading the diff. If a prior edit in the same parallel block
+                    # shifted the lines, the deleted content will not match what the caller
+                    # described — the echo makes that obvious. Read from the ORIGINAL
+                    # file_content (pre-edit); file_lines was rebound to the post-edit list
+                    # earlier, so do NOT use it here.
+                    _orig = file_content.splitlines()
+                    _d_first = _orig[start_idx].rstrip('\r\n') if start_idx < len(_orig) else ''
+                    _d_last_i = d_end - 1  # d_end is already clamped to total_lines
+                    _d_last = _orig[_d_last_i].rstrip('\r\n') if 0 <= _d_last_i < len(_orig) else ''
+
+                    def _snip(s):
+                        s = s.strip()
+                        return (s[:80] + '…') if len(s) > 80 else (s if s else '(blank)')
+
+                    if start_idx == _d_last_i:
+                        res_msg += f'\n  deleted: "{_snip(_d_first)}"'
+                    else:
+                        res_msg += (f'\n  deleted first line: "{_snip(_d_first)}"\n'
+                                    f'  deleted last line:  "{_snip(_d_last)}"')
                     # BUG_0175: a suffix range 'N:' (N>1) parses to end_idx=total+1, so the
                     # range deletes through EOF and the success message above reports only line
                     # arithmetic — the tail deletion is silent. The whole-file guard (BUG_0109)
