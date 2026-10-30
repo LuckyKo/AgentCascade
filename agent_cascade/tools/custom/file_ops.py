@@ -226,6 +226,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         total_lines = 0
         lines_read: list[str] = []
         hit_line_limit = False  # Truncated because we hit the line count limit
+        at_eof = False  # read reached end of file
 
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -239,7 +240,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
                         # Count remaining lines for accurate total (+1 for the peeked line)
                         total_lines = line_num + 1 + sum(1 for _ in f)
                     else:
-                        total_lines = len(lines_read)  # exactly limit lines, EOF
+                        total_lines = line_num  # EOF: line_num is the file's last line
+                        at_eof = True
                     break
 
                 stripped = raw_line.rstrip('\n\r')
@@ -251,6 +253,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
                 lines_read.append(formatted)
                 total_lines = line_num
+            else:
+                # File ended before the line limit was reached
+                if lines_read:
+                    at_eof = True
 
         # Count actual file lines to distinguish empty file from out-of-range start_line
         if not lines_read and total_lines == 0:
@@ -301,7 +307,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
         except OSError:
             file_size_str = '?'
 
-        header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
+        eof_marker = ' (EOF)' if at_eof else ''
+        header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines}{eof_marker} (text, {file_size_str}){encoding_note}"
 
         truncated_msg = ''
         if wild_truncated:
