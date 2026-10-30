@@ -1294,11 +1294,11 @@ def test_edit_file_occurrence_tool_wiring():
                              agent_pool=type('obj', (object,), {'operation_manager': op_mgr})(),
                              agent_name='test_agent')
 
-        # Schema exposes occurrence as an integer with minimum 1
+        # Schema exposes occurrence as an integer with minimum -1 (BUG_0059: -1 = replace all)
         props = edit_tool.parameters['properties']
         assert 'occurrence' in props
         assert props['occurrence']['type'] == 'integer'
-        assert props['occurrence'].get('minimum') == 1
+        assert props['occurrence'].get('minimum') == -1
 
         file_path = Path(tmpdir) / 'dup.txt'
         file_path.write_text('alpha\nbeta\nalpha\n', encoding='utf-8')
