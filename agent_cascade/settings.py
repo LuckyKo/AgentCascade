@@ -67,7 +67,7 @@ normalize_afk_mode = _normalize_afk_mode
 
 AFK_MODE_DEFAULT: str = _normalize_afk_mode(os.getenv('AGENT_CASCADE_AFK_MODE', 'basic'))
 AFK_ADMIN_MAX_TURNS: int = int(
-    os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_TURNS', 12))  # Turn budget for the AFK Admin agent
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_TURNS', 30))  # Turn budget for the AFK Admin agent
 AFK_ADMIN_FIRST_YIELD_TIMEOUT: float = float(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_FIRST_YIELD_TIMEOUT', 45.0))  # First-yield guard (s)
 AFK_ADMIN_NUDGE_MAX_CHARS: int = int(
