@@ -19,9 +19,52 @@ from typing import Dict, List, Optional, Union
 
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.settings import DEFAULT_WORKSPACE
-from agent_cascade.utils.utils import has_chinese_chars, json_loads, logger, print_traceback, save_url_to_local_work_dir
+from agent_cascade.utils.utils import (has_chinese_chars, is_http_url, json_loads, logger, print_traceback,
+                                       sanitize_chrome_file_path, save_url_to_local_work_dir)
 
 TOOL_REGISTRY = {}
+
+
+def _comparable_path(path: str) -> str:
+    """Absolute, case-folded, symlink-resolved form of ``path`` for containment tests."""
+    try:
+        return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    except OSError:
+        return os.path.normcase(os.path.abspath(path))
+
+
+def _is_inside_work_dir(path: str, work_dir: str) -> bool:
+    """True when a local file already lives under ``work_dir`` (BUG_0179).
+
+    ``BaseToolWithFileAccess.call`` stages every file/image referenced anywhere in the
+    conversation into ``work_dir`` so the tool can read it. When the file is *already*
+    under ``work_dir`` the staging is a no-op at best; at worst it is destructive:
+    ``save_url_to_local_work_dir`` deletes an existing destination before copying, so a
+    same-named file in the workspace root was silently replaced by the staged copy (and
+    every staged file got a fresh mtime).
+
+    The visible case: ``CodeInterpreter``'s work_dir is the workspace root, so each
+    ``code_interpreter`` call copied *every* image from earlier ``media_gen`` results
+    (``<workspace>/logs/media/images/img_*.jpg``) into ``<workspace>/`` — files that
+    never move back out, because nothing cleans the workspace root.
+
+    Remote references (http/https/data:) have no local path to compare and are always
+    staged, exactly as before.
+    """
+    path = path if isinstance(path, str) else str(path)
+    if is_http_url(path) or path.lower().startswith('data:'):
+        return False
+    try:
+        local = sanitize_chrome_file_path(path)
+        if not os.path.isfile(local):
+            return False
+        root = _comparable_path(work_dir)
+        target = _comparable_path(local)
+        return os.path.commonpath([root, target]) == root
+    except (OSError, ValueError):
+        # ValueError: different drives on Windows (no common path); OSError: unreadable
+        # path. Neither is provably inside, so fall back to the old staging behaviour.
+        return False
 
 
 class ToolServiceError(Exception):
@@ -285,6 +328,10 @@ class BaseToolWithFileAccess(BaseTool, ABC):
             os.makedirs(self.work_dir, exist_ok=True)
             for file in files:
                 try:
+                    # Already readable at its own path — copying it to work_dir only
+                    # duplicates bytes (and can clobber a same-named file there). BUG_0179.
+                    if _is_inside_work_dir(file, self.work_dir):
+                        continue
                     save_url_to_local_work_dir(file, self.work_dir)
                 except Exception:
                     print_traceback()
