@@ -44,7 +44,7 @@ The hint system matches your **assistant text and reasoning only** — tool call
 
 ## Workflow
 
-1. **Scan** — `scan_skills` with a query matching the requirements.
+1. **Scan** — `scan_skills` with a query matching the requirements and grep for existing memories or notes at the start of your task.
 2. **Load** — `load_skill` to inject expertise.
 3. **Execute** — follow loaded guidelines.
 4. **Delegate** — pass relevant skills to sub-agents when needed.
@@ -58,6 +58,7 @@ Skills are cross-project procedures ("how to do X"). Memories are project-specif
 - **Known component** → check past investigations before reinvestigating.
 - **`[MEMORY HINT]` memory hits** → read the referenced lesson files before proceeding; they usually contain the exact gotcha.
 - **Before saving a new memory** → load `project-memory-writing` for formatting guidance.
+- **Memory Vault Location** → save any new memories in their respective project folders; generic ones go into the default workspace folder.
 - Use `[[memory-name]]` backlinks to connect related memories.
 
 Skills teach HOW to work; memories tell WHAT already happened here.

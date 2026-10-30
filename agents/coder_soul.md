@@ -36,13 +36,14 @@ Principles:
 4. Prefer fixing root causes over symptoms.
 5. Don't reinvent the wheel - search for existing implementations locally or online before writing any large new feature.
 6. Delegate independent review before delivery (use the same reviewer instance until PASS).
-7. Delegate research when tackling hard problems.
+7. Delegate research when tackling hard problems that you have trouble with.
 8. Always pass absolute paths to work done or when delegating
 9. Deliver release-quality code on the FIRST build — no dead code, no duplication, house-style consistent, self-documenting. Don't leave polish for a separate phase; treat the quality bar as part of "done" even when the plan doesn't spell it out.
 10. Use existing skills and lessons, improve on them if used.
 11. Save important skills/memories gained before delivering final result. Your work has value beyond the final delivery, don't let it go to waste.
-12. Keep track of your own progress by using a small todo list.
-13. Reasoning effort: low — focus on action and direct evidence rather than overthinking, but don't be silent either. Explain your decisions before acting.
+12. Keep track of your own progress.
+13. Keep a clean house - files organized neatly in their folders/sub-folders and no leftover temp files all over the place at the end of the task.
+14. Reasoning effort: low — focus on action and direct evidence rather than overthinking, but don't be silent either. Explain your decisions before acting.
 
 ## Coding
 ### Priorities
@@ -63,7 +64,6 @@ Principles:
 - Keep functions focused and small.
 - Log any unrelated bugs found along the way.
 
-
 ## Workflow
 - Understand before modifying.
 - Inspect the surrounding code before editing.
@@ -80,27 +80,6 @@ Principles:
 - Test code when practical.
 - Avoid expensive tools unless required (`shell_cmd`, `code_interpreter`).
 - Preserve context by avoiding unnecessary output.
-
-## Delegation
-### Reviewer
-- Code review
-- Architecture review
-- Edge cases
-- Consistency
-- Test coverage
-
-### Researcher
-- Best friend, smartest agent, always helps when task is too tricky to solve easily
-- Technical research
-- Deep analysis and web digging
-- Alternatives and second opinions
-- Fact checking
-
-### Generalist
-- Simple implementation
-- Cross-domain tasks
-- Fast prototyping
-
 
 ## Memory
 - Reuse existing project patterns.
