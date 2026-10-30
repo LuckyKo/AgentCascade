@@ -30,6 +30,37 @@ def _normalize_api_base(api_base: str) -> str:
     return base
 
 
+# Cap on the refusal text kept in one log line. Engine refusals are a sentence
+# ("session snapshot does not fit the free KV capacity; evict other sessions first");
+# a proxy/gateway error page can be tens of KB, and none of that belongs in a log line.
+_REFUSAL_BODY_CHARS = 400
+
+
+def _refusal_detail(resp) -> str:
+    """One-line, bounded rendering of a state save/load refusal body (BUG_0178).
+
+    The engine explains a refusal in the body and the autoloader passes it through, e.g.
+    ``400 slot_restore_failed: session snapshot does not fit the free KV capacity; evict
+    other sessions first``. Logging only the status (the old behaviour) threw that away,
+    so a refused restore was indistinguishable from "file missing" on the AC side and the
+    real reason existed only in the autoloader's console log.
+
+    Best-effort by construction: a response whose body cannot be read degrades to a
+    placeholder, never to an exception — a failed save/restore must not fail harder
+    because its diagnostics did.
+    """
+    try:
+        text = resp.text or ''
+    except Exception:
+        return '<unreadable body>'
+    collapsed = ' '.join(text.split())  # one log line, whatever the server sent
+    if not collapsed:
+        return '<empty body>'
+    if len(collapsed) > _REFUSAL_BODY_CHARS:
+        collapsed = f'{collapsed[:_REFUSAL_BODY_CHARS]}… (+{len(collapsed) - _REFUSAL_BODY_CHARS} chars)'
+    return collapsed
+
+
 def is_state_save_capable(endpoint_cfg) -> bool:
     """True if an endpoint config declares state-save capability.
 
@@ -237,7 +268,10 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
             # Cleanup old states for this instance after successful save
             _cleanup_old_states(base, model, instance_name)
             return label
-        logger.debug('State save returned status %d for %s', resp.status_code, instance_name)
+        # Body kept (DEBUG: saves are best-effort and a non-capable endpoint answers 501 on
+        # every attempt, so a WARNING here would be periodic noise). See _refusal_detail.
+        logger.debug('State save refused for %s: HTTP %d %s',
+                     instance_name, resp.status_code, _refusal_detail(resp))
         return None
     except Exception as e:
         logger.debug('State save failed for %s: %s', instance_name, e)
@@ -255,10 +289,18 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
         # model alone can take 30+ s, and the request is then abandoned with no state/load 200.
         resp = httpx.post(url, json={'label': label}, timeout=180)
         if resp.status_code != 200:
-            logger.debug('State restore returned status %d for label %s', resp.status_code, label)
+            # WARNING, not DEBUG: the caller reports "State restore failed … cleared label"
+            # right after, and that line cannot carry the reason (restore_state returns
+            # bool). Keeping the engine's sentence here is what makes the pair actionable —
+            # e.g. "does not fit the free KV capacity; evict other sessions first" versus
+            # "was saved for a different model". See _refusal_detail / BUG_0178.
+            logger.warning('State restore refused for label=%s: HTTP %d %s',
+                           label, resp.status_code, _refusal_detail(resp))
         return resp.status_code == 200
     except Exception as e:
-        logger.debug('State restore failed for label %s: %s', label, e)
+        # Transport/timeout: the restore did not happen. The reason is the exception, and
+        # the caller will warn that the label was cleared — so this must name the failure.
+        logger.warning('State restore failed for label=%s: %s: %s', label, type(e).__name__, e)
         return False
 
 
