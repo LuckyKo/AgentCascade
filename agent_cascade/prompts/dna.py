@@ -205,6 +205,7 @@ SECURITY_ADVISOR_PROMPT = (
     '- Recursive deletion without explicit scope.\n'
     '- Credential extraction.\n'
     '- SSH key access.\n'
+    '- Poorly scoped killtask that might terminate unrelated processes or it\'s own inference engine.\n'
     '- Browser password access.\n'
     '- Environment secret dumping.\n'
     '- Disabling security protections.\n'
