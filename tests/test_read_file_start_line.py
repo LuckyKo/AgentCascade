@@ -138,3 +138,46 @@ def test_invalid_json_string_errors_cleanly():
     assert out.startswith('ERROR'), out
     # Pin the expected message so a regression to a different error path is caught.
     assert 'missing required parameter' in out or 'valid JSON' in out, out
+
+
+def test_read_file_preserves_leading_whitespace_bytes():
+    """BUG_0176: read_file is byte-correct — the content after the NNN:\\t separator is exactly
+    the file's bytes, with NO extra indentation added for fenced/indented blocks.
+
+    The BUG_0176 hazard is a *transcription* artifact: the \\t separator renders as a leading tab
+    of indentation, so a line whose content has no leading whitespace (e.g. 'for attempt:') looks
+    like it has one. This test pins the render side: for every content line, the bytes after the
+    first TAB must equal the file's bytes — for both no-leading-whitespace and 4-space-indented
+    lines inside a markdown fence.
+    """
+    body = (
+        '# Title\n'
+        '\n'
+        '```python\n'
+        'for attempt in range(max_retries + 1):\n'
+        '    # Check cancellation\n'
+        '    if _should_abort(self._pool):\n'
+        "        logger.debug('Aborting')\n"
+        '```\n'
+        '\n'
+        'Text after.\n'
+    )
+    p = _ws_file('bug176_fence.md', body)
+    out = ReadFile().call({'path': str(p), 'start_line': 1, 'limit': 50})
+    assert not out.startswith('ERROR'), out
+
+    file_lines = body.split('\n')
+    checked = 0
+    for line in out.split('\n'):
+        if '\t' not in line:
+            continue  # header / closing fence
+        num_str, content = line.split('\t', 1)
+        # The prefix is "NNN:" (line number + colon); strip the colon before parsing.
+        if not num_str.endswith(':') or not num_str[:-1].isdigit():
+            continue
+        n = int(num_str[:-1])
+        assert content == file_lines[n - 1], f"line {n}: {content!r} != {file_lines[n - 1]!r}"
+        checked += 1
+
+    expected = sum(1 for _ in open(p, 'r', encoding='utf-8'))
+    assert checked == expected, f"rendered {checked} content lines, file has {expected}"
