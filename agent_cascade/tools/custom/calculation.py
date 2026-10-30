@@ -76,7 +76,16 @@ class Calculate(BaseTool):
             # Restricted eval: only allowlisted math funcs + safe built-ins; __builtins__={} blocks
             # dangerous names like __import__. Attribute access (e.g. (1).__class__) can introspect
             # type objects but is NOT exploitable — no side-effect object is in scope (see tests).
-            result = eval(processed_expr, {'__builtins__': {}}, self.allowed_names)
+            #
+            # BUG_0177: the allowlist must live in the GLOBALS mapping. With it in ``locals``, a
+            # name used inside a function body (lambda / comprehension) compiles to LOAD_GLOBAL,
+            # which never consults locals — so ``sum([1,2,3])`` worked while
+            # ``(lambda: sum([1,2]))()`` raised "name 'sum' is not defined". The same names are
+            # exported, so the sandbox surface is unchanged: __builtins__ stays empty and no name
+            # outside the allowlist becomes reachable, nested scopes included.
+            scope = {'__builtins__': {}}
+            scope.update(self.allowed_names)
+            result = eval(processed_expr, scope)
 
             # Format the result to be clean
             if isinstance(result, (int, float)):
