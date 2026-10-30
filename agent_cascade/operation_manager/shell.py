@@ -193,6 +193,27 @@ class ShellMixin:
         'grep',
         'egrep',
         'fgrep',
+        # Windows read-only inspection (BUG_0180) — process/network listing, no writes.
+        'tasklist',
+        'netstat',
+        # Read-only PowerShell cmdlets (BUG_0180). The primary word is lowercased
+        # before lookup (see _is_structurally_safe_shell_command), so these are
+        # stored in lowercase even though PowerShell cmdlets are case-insensitive.
+        # `powershell`/`pwsh` wrappers are rejected above, so these only match when
+        # the cmdlet is the primary word of the command.
+        # Caveat (same as `cat` above): they read arbitrary paths the agent could
+        # already read_file; no side effects, no filesystem writes.
+        'get-childitem',
+        'get-content',
+        'get-process',
+        'get-service',
+        'get-item',
+        'test-path',
+        'select-string',
+        # Deliberately NOT blanket-allowed (side-effect capable; a documented
+        # follow-up requiring arg-scoping, left to the Security guard):
+        #   - `curl`  (can POST/write with -d/-X/-o/-O)
+        #   - `python -c` (arbitrary code execution)
     }
 
     # Policy: any command safe as a primary is also safe as a pipe stage.
