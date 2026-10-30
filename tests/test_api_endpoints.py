@@ -2516,12 +2516,14 @@ class TestAfkAdminNudge:
         assert calls == []  # the advisor stub raises loudly if basic mode ever calls it
 
     def test_admin_mode_enqueues_admin_output(self, monkeypatch):
-        """T4: admin mode enqueues the Admin's text and passes the right advisor kwargs."""
+        """T4: admin mode enqueues the Admin's text (with the Admin marker) and passes the
+        right advisor kwargs."""
         from agent_cascade.advisor_runner import AdvisorResult
         from agent_cascade.settings import AFK_ADMIN_FIRST_YIELD_TIMEOUT, AFK_ADMIN_MAX_TURNS
         from fastapi.testclient import TestClient
 
         out = 'STATUS: partial\nTHEN: verify the build'
+        admin_marker = 'Context: This is a message from Admin.\n\n'
         app, pool, calls = self._build_app(monkeypatch, 'admin', AdvisorResult(output_text=out))
         from agent_cascade import api_server
         # Widen the cooldown so exactly ONE admin run lands in the window.
@@ -2533,7 +2535,8 @@ class TestAfkAdminNudge:
             time.sleep(0.1)
 
         assert len(pool._enqueue_calls) == 1
-        assert pool._enqueue_calls[0][1] == out
+        # The Admin's text is enqueued with a marker so the re-task survives compression.
+        assert pool._enqueue_calls[0][1] == admin_marker + out
         assert len(calls) == 1
         kw = calls[0]
         assert kw['agent_class'] == 'Admin'
@@ -2597,11 +2600,13 @@ class TestAfkAdminNudge:
         assert len(calls) == 1
 
     def test_admin_mode_output_truncated(self, monkeypatch):
-        """T8: the enqueued nudge is capped at AFK_ADMIN_NUDGE_MAX_CHARS."""
+        """T8: the enqueued nudge body is capped at AFK_ADMIN_NUDGE_MAX_CHARS (the Admin
+        marker is prepended on top of the cap)."""
         import agent_cascade.settings as _settings
         from agent_cascade.advisor_runner import AdvisorResult
         from fastapi.testclient import TestClient
 
+        admin_marker = 'Context: This is a message from Admin.\n\n'
         monkeypatch.setattr(_settings, 'AFK_ADMIN_NUDGE_MAX_CHARS', 500)
         app, pool, calls = self._build_app(monkeypatch, 'admin',
                                           AdvisorResult(output_text='x' * 20000))
@@ -2611,7 +2616,9 @@ class TestAfkAdminNudge:
                 time.sleep(0.02)
 
         assert len(pool._enqueue_calls) == 1
-        assert len(pool._enqueue_calls[0][1]) == 500
+        msg = pool._enqueue_calls[0][1]
+        assert msg.startswith(admin_marker)
+        assert len(msg) - len(admin_marker) == 500  # body capped; marker on top
 
     def test_admin_mode_drops_message_if_generation_started(self, monkeypatch):
         """T9: a real run that started while the analysis was in flight wins — no nudge is

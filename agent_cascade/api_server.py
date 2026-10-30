@@ -1137,7 +1137,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return None
         if len(text) > AFK_ADMIN_NUDGE_MAX_CHARS:
             text = text[:AFK_ADMIN_NUDGE_MAX_CHARS]
-        return text
+        # Marker so this re-task survives context compression: the root recognizes the
+        # enqueued message as coming from the Admin (not a plain user turn) even after
+        # its own history has been summarized.
+        return 'Context: This is a message from Admin.\n\n' + text
 
     def _afk_admin_nudge(instance_name: str, loop) -> None:
         """Daemon-thread worker for AFK admin mode: run the Admin analysis and enqueue its
