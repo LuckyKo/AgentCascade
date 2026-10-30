@@ -470,7 +470,7 @@ TOOL_METADATA = {
             'In async mode a tool_id is returned immediately and the final result is delivered automatically when done; manage it with special commands via that tool_id. '
             'Special commands (no justification required): __help (list auto-approved commands), __wait, __status, __kill, __ctrl_c, __heartbeat=N. '
             'WARNING: DO NOT use async shell_cmd with file redirects, pipes or filters. '
-            'WARNING: Always use `safe` mode when running programs or tests that require a lot of RAM/VRAM (like loading LLMs). '
+            'WARNING: Use `safe` mode only when running programs or tests that require a lot of free RAM/VRAM (like loading LLMs when there\'s already one running). '
             'On Windows hosts the shell is cmd.exe — POSIX tools (grep, awk, sed) and PowerShell cmdlets (Select-String, etc.) are NOT available; use findstr, or a Python snippet / the grep/read_file tools, or invoke powershell -Command "..." to get PowerShell syntax.'
         ),
         'parameters': {
@@ -483,7 +483,7 @@ TOOL_METADATA = {
             'timeout':
                 'Timeout in seconds. With default auto mode, values over 60s run in the background. Default: 30s.',
             'execution_mode':
-                '"auto" (default) = background if timeout>60s else blocking, BUT may auto-switch to "safe" if free system RAM is low (to avoid OOM — you\'ll get a warning explaining why); "sync" = always blocking; "async" = always background; "safe" = blocking but frees local model RAM/VRAM around the command — use it for GPU/memory-heavy commands; null ≡ auto.',
+                '"auto" (default) = background if timeout>60s else blocking; "sync" = always blocking; "async" = always background with heartbeat updates; "safe" = same as sync but automatically frees local model RAM/VRAM around the command — use it for GPU/memory-heavy commands; null ≡ auto.',
             'heartbeat_interval':
                 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective in async execution. Default: -1.',
             'tool_id':
