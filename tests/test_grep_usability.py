@@ -426,7 +426,7 @@ def test_grep_fast_path_context_no_blank_lines():
         assert not body.endswith('\n'), \
             f"Body has a dangling trailing newline after the last entry: {body!r}"
         # Each match is still prefixed with '>>>' (exactly two, one per match).
-        match_lines = [ln for ln in body.splitlines() if '>>>' in ln]
+        match_lines = [ln for ln in body.splitlines() if '>>>' in ln and not ln.startswith('# note')]
         assert len(match_lines) == 2, f"Expected exactly 2 '>>>' match lines: {body!r}"
         # Context neighbours are surfaced.
         for token in ('alpha', 'bravo', 'charlie', 'delta'):
@@ -466,7 +466,7 @@ def test_grep_context_lines_are_verbatim():
             result = om.grep(pattern='Exact rule', path=target, context=2)
             assert 'Found 1 matches' in result, f"Expected exactly 1 match ({label}): {result}"
             body = result.split('\n\n', 1)[1]
-            entries = [ln for ln in body.splitlines() if ln and ln != '---']
+            entries = [ln for ln in body.splitlines() if ln and ln != '---' and not ln.startswith('# note')]
             assert entries, f"No result entries reported ({label}): {result}"
             for entry in entries:
                 _path, rest = entry.split(':', 1)
@@ -519,7 +519,7 @@ def test_grep_non_utf8_line_content_surfaced():
                 result = om.grep(pattern='Exact rule', path='.', context=ctx)
                 assert 'Found 1 matches' in result, f"Expected 1 match ({label}, ctx={ctx}): {result}"
                 body = result.split('\n\n', 1)[1]
-                entries = [ln for ln in body.splitlines() if ln and ln != '---']
+                entries = [ln for ln in body.splitlines() if ln and ln != '---' and not ln.startswith('# note')]
                 match_lines = [
                     ln for ln in entries
                     if (ln.split(':', 2)[2][1:].startswith('>>>'))

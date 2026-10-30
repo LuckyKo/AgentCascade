@@ -36,6 +36,12 @@ def _compile_grep_pattern(pattern: str, *, flags: int = 0):
 # any other decoration — see _format_grep_entry (BUG_0144).
 _GREP_MATCH_MARKER = '>>>'
 
+# BUG_0056: the marker above was undocumented and unlabelled in the output, so a reader seeing
+# '>>>    async def ...' hypothesised the '>>>' was in the file content. This one-line legend is
+# prepended to the result body whenever at least one match line carries the marker (context mode
+# with a match), making it self-explanatory. It never appears on clean greps (no marker ⇒ none).
+_GREP_MARKER_LEGEND = "# note: '>>>' marks matched lines in context mode (unmarked lines are surrounding context)"
+
 
 def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str = '') -> str:
     """Render one grep result line as ``<path>:<line>: [<marker>]<content>``.
@@ -54,6 +60,20 @@ def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str =
     here so their byte-level output cannot drift apart.
     """
     return f"{rel_path}:{line_num}: {marker}{content}"
+
+
+def _grep_body_with_legend(body_lines: list, context: int, match_count: int) -> str:
+    """Join the grep body lines, prepending the '>>>' legend when the marker is present.
+
+    BUG_0056: the ``>>>`` marker (injected on matched lines in context mode) was undocumented,
+    so readers mistook it for file content. The legend is emitted only when at least one match
+    line carries the marker — i.e. context mode with a match. Clean greps are byte-identical
+    (no marker ⇒ no legend), and which lines match / how they are numbered is unchanged.
+    """
+    body = '\n'.join(body_lines)
+    if context > 0 and match_count > 0:
+        return _GREP_MARKER_LEGEND + '\n' + body
+    return body
 
 
 def _exclude_matches(basename: str, rel_path: str, pattern: str) -> bool:
@@ -952,7 +972,7 @@ class GrepMixin:
         summary = f"Found {match_count} matches for '{pattern}'{searched_note}"
         if context > 0:
             summary += f" (with {context} line(s) of context)"
-        output_text = '\n'.join(results)
+        output_text = _grep_body_with_legend(results, context, match_count)
 
         if was_timed_out:
             summary += f" [TIMED OUT after {int(timeout)}s]"
@@ -1118,7 +1138,7 @@ class GrepMixin:
                                         f"inspect their headers/content]")
                     return f"{summary}:\n\n"
                 else:
-                    output_text = '\n'.join(results)
+                    output_text = _grep_body_with_legend(results, context, count)
                     summary = f"Found {count} matches for '{pattern}'{searched_note}"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
@@ -1403,7 +1423,7 @@ class GrepMixin:
                 summary += (f" [note: {_large_skipped} file(s) larger than {_max_mb} MB were not "
                             f"read in full; only their first {_head_bytes // 1024} KiB was scanned "
                             f"— use read_file for more]")
-            output_text = '\n'.join(results)
+            output_text = _grep_body_with_legend(results, context, match_count)
 
             if was_timed_out:
                 summary += f" [TIMED OUT after {int(timeout)}s]"
