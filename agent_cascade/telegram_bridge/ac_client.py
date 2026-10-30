@@ -263,12 +263,18 @@ class ACClient:
         """POST /api/auto_security (session_token)."""
         return await self._token_post('/api/auto_security', {'enabled': bool(enabled)})
 
-    async def set_afk(self, enabled: bool) -> Dict[str, Any]:
+    async def set_afk(self, enabled: bool, mode: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/afk (session_token) — toggle the server-backed AFK flag.
 
-        The time-based approval timeout is a separate feature; it is no longer sent here.
+        ``mode`` ('basic' | 'admin') selects the idle-nudge behavior; it is sent only when
+        given, so a toggle-only on/off call leaves the stored mode untouched (the server
+        preserves it). The time-based approval timeout is a separate feature; it is no
+        longer sent here.
         """
-        return await self._token_post('/api/afk', {'enabled': bool(enabled)})
+        body = {'enabled': bool(enabled)}
+        if mode is not None:
+            body['mode'] = mode
+        return await self._token_post('/api/afk', body)
 
     async def restore_session(self, name: str) -> Dict[str, Any]:
         """POST /api/session/restore (session_token)."""

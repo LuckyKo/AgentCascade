@@ -1381,7 +1381,9 @@ def test_help_alias_question_mark():
 
 
 def test_afk_and_security_usage_errors_reply_without_ac_call():
-    for text in ('/afk', '/afk maybe', '/security', '/restore'):
+    # Bare /afk is NOT a usage case (it toggles — see test_cmd_afk_bare_toggles_state);
+    # only a non-empty bogus token is.
+    for text in ('/afk maybe', '/security', '/restore'):
         update, context, ac, sent = _cmd_context(text)
         _run(on_message(update, context))
         assert len(sent) == 1
@@ -1390,6 +1392,30 @@ def test_afk_and_security_usage_errors_reply_without_ac_call():
         ac.set_auto_security.assert_not_called()
         ac.restore_session.assert_not_called()
         ac.inject_message.assert_not_called()
+
+
+def test_cmd_afk_bare_toggles_state():
+    """A bare /afk (no arg) toggles the on/off state: it reads the live afk_enabled
+    flag via get_state(), flips it, and preserves the stored mode (no mode sent)."""
+    # Currently OFF -> toggles ON.
+    ac = _cmd_ac(get_state=AsyncMock(return_value={'pool_settings': {'afk_enabled': False}}),
+                 set_afk=AsyncMock(return_value={'enabled': True}))
+    update, context, ac, sent = _cmd_context('/afk', ac=ac)
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(True)   # flipped on, single positional, no mode
+    assert len(sent) == 1
+    assert 'AFK on' in sent[0]
+    ac.inject_message.assert_not_called()
+
+    # Currently ON -> toggles OFF.
+    ac2 = _cmd_ac(get_state=AsyncMock(return_value={'pool_settings': {'afk_enabled': True}}),
+                  set_afk=AsyncMock(return_value={'enabled': False}))
+    update2, context2, ac2, sent2 = _cmd_context('/afk', ac=ac2)
+    _run(on_message(update2, context2))
+    ac2.set_afk.assert_awaited_once_with(False)  # flipped off, single positional, no mode
+    assert len(sent2) == 1
+    assert 'AFK off' in sent2[0]
+    ac2.inject_message.assert_not_called()
 
 
 def test_cmd_afk_on_calls_set_afk_true():
@@ -1442,6 +1468,62 @@ def test_cmd_afk_ignores_legacy_seconds_token():
     _run(on_message(update, context))
     ac.set_afk.assert_awaited_once_with(True)
     assert len(sent) == 1
+
+
+def test_cmd_afk_basic_sets_mode_basic():
+    """/afk basic enables AFK and sets the idle-nudge mode to 'basic' in one call."""
+    ac = _cmd_ac(set_afk=AsyncMock(return_value={'status': 'ok', 'enabled': True, 'mode': 'basic'}))
+    update, context, ac, sent = _cmd_context('/afk basic', ac=ac)
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(True, mode='basic')
+    assert len(sent) == 1
+    ac.inject_message.assert_not_called()
+
+
+def test_cmd_afk_admin_sets_mode_admin():
+    """/afk admin enables AFK and sets the idle-nudge mode to 'admin' in one call."""
+    ac = _cmd_ac(set_afk=AsyncMock(return_value={'status': 'ok', 'enabled': True, 'mode': 'admin'}))
+    update, context, ac, sent = _cmd_context('/afk admin', ac=ac)
+    _run(on_message(update, context))
+    ac.set_afk.assert_awaited_once_with(True, mode='admin')
+    assert len(sent) == 1
+    ac.inject_message.assert_not_called()
+
+
+def test_cmd_afk_mode_replies_name_the_mode():
+    """The basic/admin replies must name the mode read back from the response
+    (falling back to the requested arg if the server omits it)."""
+    ac = _cmd_ac(set_afk=AsyncMock(return_value={'status': 'ok', 'enabled': True, 'mode': 'basic'}))
+    update, context, ac, sent = _cmd_context('/afk basic', ac=ac)
+    _run(on_message(update, context))
+    assert 'basic mode' in sent[0].lower()
+
+    ac2 = _cmd_ac(set_afk=AsyncMock(return_value={'status': 'ok', 'enabled': True, 'mode': 'admin'}))
+    update2, context2, ac2, sent2 = _cmd_context('/afk admin', ac=ac2)
+    _run(on_message(update2, context2))
+    assert 'admin mode' in sent2[0].lower()
+
+
+def test_cmd_afk_on_off_do_not_send_mode():
+    """A toggle-only on/off call must NOT pass a mode kwarg, so it cannot clobber
+    the stored mode (the server preserves it when mode is absent)."""
+    for text, expected in (('/afk on', True), ('/afk off', False)):
+        ac = _cmd_ac()
+        update, context, ac, sent = _cmd_context(text, ac=ac)
+        _run(on_message(update, context))
+        ac.set_afk.assert_awaited_once_with(expected)  # single positional arg, no mode kwarg
+        assert len(sent) == 1
+        ac.inject_message.assert_not_called()
+
+
+def test_cmd_afk_bogus_arg_replies_usage():
+    """An unrecognized token (not on/off/basic/admin) -> usage, set_afk never called."""
+    update, context, ac, sent = _cmd_context('/afk bogus')
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    assert 'Usage' in sent[0]
+    ac.set_afk.assert_not_called()
+    ac.inject_message.assert_not_called()
 
 
 def test_kv_commands_surface_server_message_verbatim():

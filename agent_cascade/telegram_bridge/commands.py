@@ -203,21 +203,42 @@ def _parse_on_off(arg: str) -> Optional[bool]:
     return None
 
 
-async def _cmd_afk(ctx: CommandContext) -> str:
-    parts = ctx.args.split()
-    if not parts:
-        return 'Usage: /afk on|off'
-    enabled = _parse_on_off(parts[0])
-    if enabled is None:
-        return 'Usage: /afk on|off'
-    # Any extra token (e.g. a legacy '/afk on 300') is ignored — the time-based approval
-    # timeout is a separate feature configured in the UI, not via this command.
-    result = await ctx.ac.set_afk(enabled)
-    on = bool((result or {}).get('enabled', enabled))
+def _afk_on_off_reply(on: bool) -> str:
+    """The on/off reply, shared by the bare-toggle and explicit on/off paths."""
     if on:
         return ('🌙 AFK on — pending approvals auto-rejected, '
                 'and an auto-reply nudge is sent when the agent goes idle.')
     return '🌙 AFK off — approvals wait for you, no idle nudges.'
+
+
+async def _cmd_afk(ctx: CommandContext) -> str:
+    parts = ctx.args.split()
+    if not parts:
+        # Bare /afk toggles the on/off state; no mode is sent, so the stored mode
+        # is preserved (read the live flag, flip it).
+        state = await ctx.ac.get_state()
+        current = bool((state.get('pool_settings') or {}).get('afk_enabled', False))
+        result = await ctx.ac.set_afk(not current)
+        on = bool((result or {}).get('enabled', not current))
+        return _afk_on_off_reply(on)
+    arg = parts[0].strip().lower()
+    # Any extra token (e.g. a legacy '/afk on 300') is ignored — the time-based approval
+    # timeout is a separate feature configured in the UI, not via this command.
+    if arg in ('basic', 'admin'):
+        # basic/admin enable AFK AND set the idle-nudge mode in one call.
+        result = await ctx.ac.set_afk(True, mode=arg)
+        mode = (result or {}).get('mode', arg)
+        if mode == 'admin':
+            return ('🌙 AFK on (admin mode) — the Admin agent reviews idle sessions; '
+                    'pending approvals auto-rejected.')
+        return ('🌙 AFK on (basic mode) — a plain auto-reply nudge is sent '
+                'when the agent goes idle.')
+    enabled = _parse_on_off(arg)
+    if enabled is None:
+        return 'Usage: /afk on|off|basic|admin'
+    result = await ctx.ac.set_afk(enabled)
+    on = bool((result or {}).get('enabled', enabled))
+    return _afk_on_off_reply(on)
 
 
 async def _cmd_security(ctx: CommandContext) -> str:
@@ -271,7 +292,7 @@ COMMANDS: Dict[str, CommandHandler] = {
         CommandHandler('no', 'Reject the first (or named) pending approval', _cmd_no),
         CommandHandler('stop', 'Stop the current agent', _cmd_stop),
         CommandHandler('restart', 'Restart the AC server', _cmd_restart),
-        CommandHandler('afk', 'Toggle AFK (auto-reject approvals + idle auto-reply): /afk on|off', _cmd_afk),
+        CommandHandler('afk', 'Toggle AFK (auto-reject approvals + idle auto-reply): /afk on|off|basic|admin', _cmd_afk),
         CommandHandler('security', 'Toggle auto-ask security: /security on|off', _cmd_security),
         CommandHandler('restore', 'Restore a saved session: /restore <name>', _cmd_restore),
         CommandHandler('savekv', 'Save KV state of an agent: /savekv [instance-name]', _cmd_savekv),
