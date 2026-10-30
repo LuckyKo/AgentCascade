@@ -1532,6 +1532,20 @@ class DeleteFile(BaseTool):
         raw = params.get('path')
         if raw is None:
             return params, None
+        # BUG_0042: the LLM may send `path` as a JSON-array STRING ('["a","b"]')
+        # instead of a real JSON array. Detect + parse it so the list->paths
+        # normalization below fires. Conservative: only when the text looks like
+        # a JSON array AND parses to a list of strings (a file literally named
+        # '[weird]' parses to a non-list and is left untouched).
+        if isinstance(raw, str):
+            _s = raw.strip()
+            if _s.startswith('[') and _s.endswith(']'):
+                try:
+                    _parsed = json.loads(_s)
+                except (json.JSONDecodeError, ValueError):
+                    _parsed = None
+                if isinstance(_parsed, list) and all(isinstance(p, str) for p in _parsed):
+                    raw = _parsed
         if isinstance(raw, list):
             valid = [p for p in raw if isinstance(p, str) and p.strip()]
             params = dict(params)

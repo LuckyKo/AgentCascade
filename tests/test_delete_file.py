@@ -805,3 +805,62 @@ class TestDeleteFileCall:
         call = om.calls[-1]
         assert call['kwargs']['paths'] == ['a.md', 'b.md'], \
             f"non-string entries must be filtered, got {call['kwargs'].get('paths')!r}"
+
+    def test_path_json_array_string_forwards_as_paths(self):
+        """BUG_0042: a JSON-array STRING ('["a","b"]') must be coerced to a list,
+        not treated as one literal path (which yielded 'No files matched (0 of 1)')."""
+        tool, om = _make_tool()
+        res = tool.call({'path': '["a.txt", "b.txt"]', 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] is None, \
+            f"JSON-array string must normalize to a list (path None), got {call['path']!r}"
+        assert call['kwargs']['paths'] == ['a.txt', 'b.txt'], \
+            f"JSON-array string must forward as paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_path_real_list_still_forwards_as_paths(self):
+        """Regression guard: a real list input is unchanged by the BUG_0042 fix."""
+        tool, om = _make_tool()
+        res = tool.call({'path': ['a.txt', 'b.txt'], 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] is None, f"path must be None for a list input, got {call['path']!r}"
+        assert call['kwargs']['paths'] == ['a.txt', 'b.txt'], \
+            f"list input must forward as paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_path_single_string_still_forwards_as_path(self):
+        """Regression guard: a plain single-string path is unchanged."""
+        tool, om = _make_tool()
+        res = tool.call({'path': 'a.txt', 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] == 'a.txt', f"path must stay 'a.txt', got {call['path']!r}"
+        assert call['kwargs']['paths'] is None, \
+            f"single-string input must not set paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_path_literal_bracket_file_not_coerced(self):
+        """A file literally named '[weird]' is NOT valid JSON, so it stays a
+        single-string path (parse fails -> not coerced)."""
+        tool, om = _make_tool()
+        res = tool.call({'path': '[weird]', 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] == '[weird]', \
+            f"'[weird]' must stay a single string path, got {call['path']!r}"
+        assert call['kwargs']['paths'] is None, \
+            f"'[weird]' must not set paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_path_windows_abs_array_string_forwards_as_paths(self):
+        """BUG_0042 live repro: a Windows-absolute-path array sent as a JSON string
+        must delete BOTH (coerced to a list), not '0 of 1'."""
+        import json as _json
+        tool, om = _make_tool()
+        win_paths = [r'C:\temp\a.txt', r'C:\temp\b.txt']
+        arr_str = _json.dumps(win_paths)  # valid JSON: backslashes properly escaped
+        res = tool.call({'path': arr_str, 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"Unexpected error: {res}"
+        call = om.calls[-1]
+        assert call['path'] is None, \
+            f"Windows abs array string must normalize to a list, got {call['path']!r}"
+        assert call['kwargs']['paths'] == win_paths, \
+            f"Windows abs array string must forward as paths, got {call['kwargs'].get('paths')!r}"
