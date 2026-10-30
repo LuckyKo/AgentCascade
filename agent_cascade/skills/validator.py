@@ -136,8 +136,9 @@ def validate_skill(
         # so a wordy task sank an on-topic skill; and a correctly-generalized skill legitimately
         # shares few tokens with the one-off task, so NO lexical threshold separates "generalized"
         # from "unrelated". We therefore (1) score containment of the SMALLER set and (2) split the
-        # gate: zero shared vocabulary => hard reject (disconnected/hallucinated); some overlap but
-        # below threshold => ADVISORY warning (non-blocking), with actionable repair info.
+        # gate: zero shared vocabulary => ADVISORY warning (BUG_0183: a correctly-generalized skill
+        # may share no tokens with a one-off task, so zero overlap is suspicious but not disqualifying);
+        # some overlap but below threshold => ADVISORY warning (non-blocking), with actionable repair info.
         _token_re = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
         skill_text = f"{name} {description} {' '.join(triggers)}"
         skill_keywords = set(_token_re.findall(skill_text.lower()))
@@ -148,10 +149,10 @@ def validate_skill(
         else:
             overlap, score = 0, 0.0
         if overlap == 0:
-            errors.append(
+            warnings.append(
                 f"Self-match score {score:.3f} below threshold {AUTO_SKILL_PROMOTION_THRESHOLD} "
-                f"— skill shares NO vocabulary with its generating task; it may be unrelated or "
-                f"mis-scoped. Echo key task terms in name/description/triggers, or set "
+                f"(advisory, non-blocking) — skill shares NO vocabulary with its generating task; it may be "
+                f"unrelated or mis-scoped. Echo key task terms in name/description/triggers, or set "
                 f"generated_from_task to reflect the skill's actual scope.")
         elif score < AUTO_SKILL_PROMOTION_THRESHOLD:
             missing = sorted(query_tokens - skill_keywords)

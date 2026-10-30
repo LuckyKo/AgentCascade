@@ -428,18 +428,21 @@ class TestSelfMatch:
         assert passed, f"Self-match should pass: {errors}"
 
     def test_non_matching_skill_scores_below_threshold(self):
+        """BUG_0183: a zero-overlap skill now registers with an advisory warning,
+        not a hard-reject. The gate still fires (warning present), it just no longer blocks."""
         content = _make_skill_content(
             name='docker-containers',
             description='Managing Docker containers and orchestration',
             triggers=['docker', 'container', 'kubernetes', 'pod'],
             generated_from_task='Write pytest unit tests for the parser',
         )
-        passed, errors = validate_skill(content,
+        passed, messages = validate_skill(content,
                                         'docker-containers',
                                         set(),
                                         task_text='Write pytest unit tests for the parser module')
-        assert not passed
-        assert len(errors) > 0
+        assert passed, f"zero-overlap skill must now register (advisory), got: {messages}"
+        assert any('shares NO vocabulary' in m for m in messages), \
+            f"expected zero-overlap advisory warning, got: {messages}"
 
     def test_self_match_threshold_is_0_3(self):
         assert AUTO_SKILL_PROMOTION_THRESHOLD == 0.3
@@ -469,20 +472,22 @@ class TestSelfMatch:
         assert any('Self-match score' in m and 'advisory, non-blocking' in m for m in messages), \
             f"expected advisory self-match warning, got: {messages}"
 
-    def test_zero_overlap_still_hard_rejected(self):
-        """Lesson constraint: a genuinely unrelated skill (ZERO shared tokens with the task)
-        must still be hard-rejected — this is what the drift-guard encodes."""
+    def test_zero_overlap_now_advisory(self):
+        """BUG_0183: a genuinely unrelated skill (ZERO shared tokens with the task)
+        now registers with an advisory warning, not a hard-reject."""
         content = _make_skill_content(
             name='docker-containers',
             description='Managing Docker containers and orchestration',
             triggers=['docker', 'container', 'kubernetes', 'pod'],
             generated_from_task='Write pytest unit tests for the parser module',
         )
-        passed, errors = validate_skill(content, 'docker-containers', set(),
-                                        task_text='Write pytest unit tests for the parser module')
-        assert not passed
-        assert any('shares NO vocabulary' in e for e in errors), \
-            f"expected zero-overlap hard-reject message, got: {errors}"
+        passed, messages = validate_skill(content, 'docker-containers', set(),
+                                          task_text='Write pytest unit tests for the parser module')
+        assert passed, f"zero-overlap skill must now register (advisory), got: {messages}"
+        assert any('shares NO vocabulary' in m for m in messages), \
+            f"expected zero-overlap advisory message, got: {messages}"
+        assert any('advisory, non-blocking' in m for m in messages), \
+            f"warning must be marked advisory/non-blocking, got: {messages}"
 
     def test_advisory_message_lists_missing_task_terms(self):
         """The advisory warning must name at least one actually-missing task token (actionable)."""
@@ -3187,13 +3192,13 @@ class TestProposeSkillPreApprovalHealthCheck:
         assert not result.startswith('REJECTED:'), f'update must pass pre-check (upgrade exclusion), got: {result!r}'
         assert 'updated' in result.lower()
 
-    def test_generated_from_task_tier2_replicated(self, fresh_manager):
+    def test_generated_from_task_tier2_replicated(self, fresh_manager, caplog):
         """DRIFT GUARD: the pre-check derives its Tier-2 task from generated_from_task, not ''.
 
-        A skill whose generated_from_task does NOT self-match (score < 0.3) but is otherwise
-        valid must be REJECTED before approval. If the pre-check hardcoded task_text='' instead of
-        mirroring register's `task_text or frontmatter.get('generated_from_task','')`, Tier 2 would
-        be skipped and this proposal would reach approval (wasting it) only to fail in register.
+        A skill whose generated_from_task has ZERO overlap with the skill's own domain
+        now registers with an advisory warning (BUG_0183). If the pre-check hardcoded
+        task_text='' instead of mirroring register's `task_text or frontmatter.get('generated_from_task','')`,
+        Tier 2 would be skipped entirely and no self-match warning would appear in the log.
         """
         m = self.manager
         import json as _json
@@ -3205,12 +3210,15 @@ class TestProposeSkillPreApprovalHealthCheck:
             generated_from_task='docker kubernetes deployment',
         )
         tool, pool = self._make_tool(m)
-        result = tool.call(_json.dumps({'name': name, 'skill_content': content,
-                                        'justification': 'j'}))
-        assert result.startswith('REJECTED:'), f'tier-2-failing skill must be pre-rejected, got: {result!r}'
-        assert 'health check' in result
-        pool.operation_manager.request_user_approval.assert_not_called()
-        assert m.get_skill_metadata(name) is None
+        with caplog.at_level('INFO', logger='agent_cascade_logger'):
+            result = tool.call(_json.dumps({'name': name, 'skill_content': content,
+                                            'justification': 'j'}))
+        # BUG_0183: zero-overlap is advisory, so the skill registers (not rejected).
+        assert not result.startswith('REJECTED:'), f'tier-2 advisory skill must register, got: {result!r}'
+        assert m.get_skill_metadata(name) is not None, 'skill must be registered after advisory pass'
+        # Drift guard: the self-match warning must appear in the log (proves Tier-2 ran).
+        assert any('shares NO vocabulary' in rec.message for rec in caplog.records), \
+            f'expected zero-overlap self-match warning in log, got: {[r.message for r in caplog.records]}'
 
 
 class TestProposeSkillRealTaskText:
@@ -3251,8 +3259,12 @@ class TestProposeSkillRealTaskText:
         assert _source_task_text(pool, 'missing') == ''
         assert _source_task_text(pool, None) == ''
 
-    def test_omitted_generated_from_task_still_screened(self, fresh_manager):
-        """Omitting the frontmatter field must NOT skip Tier-2 (the original bypass)."""
+    def test_omitted_generated_from_task_still_screened(self, fresh_manager, caplog):
+        """Omitting the frontmatter field must NOT skip Tier-2 (the original bypass).
+
+        BUG_0183: zero-overlap is now advisory, so the skill registers with a warning
+        instead of being rejected. The caplog assertion verifies Tier-2 actually ran
+        (the self-match warning appears in the log)."""
         import json as _json
 
         m = self.manager
@@ -3271,15 +3283,24 @@ class TestProposeSkillRealTaskText:
             task_text='bake sourdough bread at altitude with a dutch oven',
             conversation_task='bake sourdough bread at altitude with a dutch oven',
         )}
-        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
-                           agent_instance_name='coder')
+        with caplog.at_level('INFO', logger='agent_cascade_logger'):
+            result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
+                               agent_instance_name='coder')
 
-        assert result.startswith('REJECTED:'), f'expected a Tier-2 reject, got: {result!r}'
-        assert 'Self-match' in result
-        assert m.get_skill_metadata(name) is None
+        # BUG_0183: zero-overlap is advisory, so the skill registers (not rejected).
+        assert not result.startswith('REJECTED:'), f'tier-2 advisory skill must register, got: {result!r}'
+        assert m.get_skill_metadata(name) is not None, 'skill must be registered after advisory pass'
+        # Drift guard: the self-match warning must appear in the log (proves Tier-2 ran).
+        assert any('shares NO vocabulary' in rec.message for rec in caplog.records), \
+            f'expected zero-overlap self-match warning in log, got: {[r.message for r in caplog.records]}'
 
-    def test_self_reported_field_cannot_override_run_task(self, fresh_manager):
-        """A matching generated_from_task does not override an unrelated real task."""
+    def test_self_reported_field_cannot_override_run_task(self, fresh_manager, caplog):
+        """A matching generated_from_task does not override an unrelated real task.
+
+        BUG_0183: the real task (sourdough) has zero overlap with the skill's domain
+        (postgres/pool), so the skill now registers with an advisory warning instead
+        of being rejected. The caplog assertion proves the real task (not the
+        self-reported field) was used for Tier-2."""
         import json as _json
 
         m = self.manager
@@ -3294,12 +3315,16 @@ class TestProposeSkillRealTaskText:
         tool, pool = self._make_tool(m)
         pool.instances = {'coder': self._instance(
             task_text='bake sourdough bread at altitude with a dutch oven')}
-        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
-                           agent_instance_name='coder')
+        with caplog.at_level('INFO', logger='agent_cascade_logger'):
+            result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}),
+                               agent_instance_name='coder')
 
-        assert result.startswith('REJECTED:'), f'the real task must win, got: {result!r}'
-        assert 'Self-match' in result
-        assert m.get_skill_metadata(name) is None
+        # BUG_0183: zero-overlap is advisory, so the skill registers (not rejected).
+        assert not result.startswith('REJECTED:'), f'the real task must win (advisory), got: {result!r}'
+        assert m.get_skill_metadata(name) is not None, 'skill must be registered after advisory pass'
+        # Drift guard: the self-match warning must appear in the log (proves Tier-2 ran against the real task).
+        assert any('shares NO vocabulary' in rec.message for rec in caplog.records), \
+            f'expected zero-overlap self-match warning in log, got: {[r.message for r in caplog.records]}'
 
     def test_matching_run_task_registers(self, fresh_manager):
         """When the real task matches, the proposal passes even without the field."""
