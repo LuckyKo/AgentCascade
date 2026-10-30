@@ -709,6 +709,22 @@ class SessionIOMixin:
             logger.warning(f"[SKILLS] Skill injection on load failed for {instance_name}: {e}")
 
         log_source = 'file' if Path(log_input).exists() else 'JSON input'
+
+        # ── Session-loaded notification (in-tool result / _tool_warnings channel) ──
+        # Tell the freshly-restored instance its context came from disk, so the next turn
+        # knows to re-read key files/logs. Fires for user load (WS/API) and restart alike,
+        # because every load path funnels through this method. Best-effort, never raises.
+        try:
+            from agent_cascade.operation_manager.path_security import _queue_tool_warning
+            _queue_tool_warning(
+                self, instance_name,
+                f"[SESSION LOADED]: Session '{instance_name}' ({agent_class}) was restored from "
+                f"{log_source} — {len(msg_objects)} conversation messages reloaded from disk. "
+                f"Context was reloaded; re-read key files/logs if you need up-to-date detail.",
+            )
+        except Exception as e:
+            logger.warning(f"[SESSION LOADED] notification failed for {instance_name} (non-critical): {e}")
+
         return f"Loaded {len(msg_objects)} messages for '{instance_name}' ({agent_class}) from {log_source}."
 
     @staticmethod
