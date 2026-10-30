@@ -214,6 +214,21 @@ class BaseTool(ABC):
         parsed JSON values per investigation.
         """
         if isinstance(params, str):
+            # BUG_0050: detect truncated JSON before parsing. A JSON object that
+            # starts with '{' but has more '{' than '}' is almost certainly
+            # truncated (e.g. a large 'content' string pushed 'path' past the
+            # LLM's output limit). json5 is lenient enough to parse such a
+            # fragment into a partial dict, which then fails schema validation
+            # with a misleading "missing required parameter" error. Catching
+            # the truncation here gives the model a self-diagnosing message.
+            stripped = params.strip()
+            if stripped.startswith('{') and stripped.count('{') > stripped.count('}'):
+                required = self.parameters.get('required', []) if isinstance(self.parameters, dict) else []
+                raise ValueError(
+                    f"Parameters JSON appears truncated (unbalanced braces) for tool '{self.name}'. "
+                    f"The argument string is missing its closing '}}'. "
+                    f"Required keys: {required}. Re-issue the call with the complete JSON object."
+                )
             try:
                 if strict_json:
                     params_json = json.loads(params)
