@@ -210,10 +210,10 @@ class ShellMixin:
         'get-item',
         'test-path',
         'select-string',
-        # Deliberately NOT blanket-allowed (side-effect capable; a documented
-        # follow-up requiring arg-scoping, left to the Security guard):
-        #   - `curl`  (can POST/write with -d/-X/-o/-O)
-        #   - `python -c` (arbitrary code execution)
+        # Deliberately NOT blanket-allowed (side-effect capable) — arg-scoped
+        # conservatively by _check_conditional_command (curl GET-only /
+        # `python -c` read-only snippet); any other invocation falls through to
+        # the Security guard. See _CONDITIONALLY_SAFE_COMMANDS below.
     }
 
     # Policy: any command safe as a primary is also safe as a pipe stage.
@@ -223,6 +223,42 @@ class ShellMixin:
     # defined AFTER both base sets above. Keeps _SAFE_PIPE_COMMANDS itself
     # untouched — tests and __help text reference it directly.
     _PIPE_STAGE_COMMANDS: set = _SAFE_PIPE_COMMANDS | _SAFE_PRIMARY_COMMANDS
+
+    # Conditionally-safe commands (BUG_0180 follow-up): side-effect capable, so
+    # NOT in _SAFE_PRIMARY_COMMANDS (no blanket allow) and NOT in
+    # _PIPE_STAGE_COMMANDS (a piped curl/python is a producer → guard). Auto-
+    # approved only when _check_conditional_command proves the invocation is
+    # read-only (curl GET-only / `python -c` with a read-only snippet).
+    _CONDITIONALLY_SAFE_COMMANDS: set = {'curl', 'python', 'python3'}
+
+    # curl flags that imply a write/side-effect (any one → guard). --data*/--form*
+    # are prefix-matched to cover --data-urlencode, --form-string, etc.
+    _CURL_WRITE_FLAGS: frozenset = frozenset(
+        {'-d', '-F', '--upload-file', '-o', '-O', '--output', '--remote-name',
+         '--dump-header', '--cookie-jar'})
+    _CURL_WRITE_PREFIXES: tuple = ('--data', '--form', '--trace')
+    # -X/--request consume a method value; only GET/HEAD are read-only.
+    _CURL_REQUEST_FLAGS: frozenset = frozenset({'-X', '--request'})
+    _CURL_SAFE_METHODS: frozenset = frozenset({'GET', 'HEAD'})
+    # Write letters inside a bundled short flag. Covers -d/-F/-o/-O (data/form/
+    # output/download), -D (dump-header to file), -c (cookie-jar file), -T
+    # (upload-file) — any bundled combination of these is a side effect.
+    _CURL_WRITE_SHORT_CHARS: frozenset = frozenset('dFoODcT')
+
+    # `python -c` snippet markers that imply a side effect (substring match).
+    # A bare `import os`/`import shutil`/`import subprocess` (and `from … import`)
+    # is checked separately (see _python_c_is_readonly) because the module name
+    # alone exposes write/network APIs even when no specific call is made.
+    _PY_WRITE_MARKERS: tuple = (
+        'subprocess', 'shutil', 'socket', 'requests', 'urllib', 'tempfile',
+        'os.remove', 'os.unlink', 'os.rename', 'os.rmdir', 'os.makedirs',
+        'os.system', 'os.popen', 'os.mkdir', 'os.exe',
+        # dynamic code / attribute access that can reach any API: __import__
+        # (e.g. __import__('os')), exec/eval/compile of an arbitrary string,
+        # getattr (e.g. getattr(os, 'remove')), and the globals()/vars() dicts.
+        '__import__', 'exec(', 'eval(', 'compile(', 'getattr(',
+        'globals(', 'vars(',
+    )
 
     # Redirect operator: optional fd prefix (2>, 1>), the bash &> "both" form,
     # then a single or double >. Does NOT match && or || (no > present).
@@ -347,6 +383,25 @@ class ShellMixin:
 
         # ── Strip "cd <path> &&" prefix ──
         stripped_cmd = ShellMixin._strip_cd_prefix(cmd)
+
+        # Conditionally-safe commands (curl/python/python3) are side-effect
+        # capable, so they are NOT blanket-allowed. Arg-scope them
+        # conservatively and decide BEFORE the chain split: a `python -c` snippet
+        # may contain `;`/`&&`/`||` inside its quotes, which the chain split below
+        # would otherwise mis-parse as separators. Two conservative guards:
+        #   - a pipeline (`|`) makes the primary a producer (curl/python are NOT in
+        #     _PIPE_STAGE_COMMANDS) → any piped form falls through to the guard;
+        #   - an UNQUOTED `;`/`&&`/`||` after the primary is a real command chain,
+        #     so the trailing segments (e.g. `curl x && rm -rf /`) are NOT validated
+        #     by the arg-scoping and must fall through to the guard.
+        _first_words = stripped_cmd.split('|')[0].split()
+        if _first_words and _first_words[0].lower() in ShellMixin._CONDITIONALLY_SAFE_COMMANDS:
+            if ('|' not in stripped_cmd
+                    and not ShellMixin._has_unquoted_chain_separator(stripped_cmd)
+                    and ShellMixin._check_conditional_command(
+                        _first_words[0].lower(), _first_words)):
+                return True
+            return False
 
         # Handle remaining chaining after stripping cd prefix: split on &&, ;, ||
         # and recursively validate each segment. Since the global checks (subshells,
@@ -556,6 +611,263 @@ class ShellMixin:
             if stage_words[0].lower() not in safe_commands:
                 return False
         return True
+
+    # ------------------------------------------------------------------
+    # Conditionally-safe commands (curl / python / python3) — arg-scoped
+    # read-only checks (BUG_0180 follow-up). Conservative: any doubt falls
+    # through to the Security guard.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _has_unquoted_chain_separator(cmd: str) -> bool:
+        """True if ``cmd`` contains an UNQUOTED ``;``, ``&&``, or ``||``.
+
+        A separator inside single or double quotes (e.g. a ``python -c`` snippet
+        such as ``python -c "import json; print('x')"``) is data, not a command
+        chain, so it does not count. Any unquoted separator means the command
+        chains multiple statements, which a conditionally-safe primary (curl /
+        python) must not silently absorb — the trailing segments are not
+        arg-scoped, so the whole command falls through to the Security guard.
+        """
+        quote = None
+        i = 0
+        n = len(cmd)
+        while i < n:
+            c = cmd[i]
+            if quote:
+                if c == quote:
+                    quote = None
+                i += 1
+                continue
+            if c in ('"', "'"):
+                quote = c
+                i += 1
+                continue
+            if c == ';':
+                return True
+            if c == '&' and i + 1 < n and cmd[i + 1] == '&':
+                return True
+            if c == '|' and i + 1 < n and cmd[i + 1] == '|':
+                return True
+            i += 1
+        return False
+
+    @staticmethod
+    def _check_conditional_command(primary_cmd: str, words: list) -> bool:
+        """Arg-scope a conditionally-safe command to decide if it is read-only.
+
+        ``words`` is the whitespace-split first pipeline stage (``words[0]`` is the
+        command). Safe only for a read-only invocation:
+          - ``curl``: GET-only (see :meth:`_curl_is_get_only`).
+          - ``python``/``python3``: ``-c <snippet>`` with a read-only snippet
+            (see :meth:`_python_c_is_readonly`).
+        Any other shape → False (fall through to the Security guard).
+        """
+        if primary_cmd == 'curl':
+            return ShellMixin._curl_is_get_only(words)
+        if primary_cmd in ('python', 'python3'):
+            return ShellMixin._python_c_is_readonly(words)
+        return False
+
+    @staticmethod
+    def _curl_is_get_only(words: list) -> bool:
+        """True iff the curl invocation is GET-only (reads a URL, no writes).
+
+        ``words[0]`` is ``curl``; the rest are flags/URLs. Reject (→ guard) on ANY
+        write flag:
+          - bundled short flags containing a write letter (``-d``, ``-F``, ``-o``,
+            ``-O``, and bundles like ``-LO``/``-sO``);
+          - long-form write flags (``--output``, ``--remote-name``, ``--upload-file``,
+            ``--dump-header``, ``--cookie-jar``, ``--data*``, ``--form*``, ``--trace*``);
+          - a ``-X``/``--request`` whose method is not GET/HEAD (``-X POST``,
+            ``-XPOST``, ``--request=DELETE``).
+        Read flags (``-s``, ``-S``, ``-I``, ``-L``, ``-H <hdr>``, ``-G``, ``-w``)
+        and bare URLs are allowed. ``--flag=value`` splits on the first ``=``; a
+        ``-X``/``--request`` with no method value rejects conservatively.
+
+        Known-uncovered tail (heuristic, not exhaustive): ``--stderr <file>``
+        writes stderr to a file and is not in the write set, so it passes — an
+        obscure edge, deliberately left to the guard's LLM review rather than
+        chasing every curl flag.
+        """
+        tokens = words[1:]
+        i = 0
+        n = len(tokens)
+        while i < n:
+            tok = tokens[i]
+            if tok.startswith('--'):
+                flag, eq, value = tok.partition('=')
+                if flag in ShellMixin._CURL_WRITE_FLAGS or \
+                        any(flag.startswith(p) for p in ShellMixin._CURL_WRITE_PREFIXES):
+                    return False
+                if flag in ShellMixin._CURL_REQUEST_FLAGS:
+                    if eq:
+                        method = value
+                    else:
+                        method = tokens[i + 1] if i + 1 < n else None
+                        if method is not None:
+                            i += 1  # consume the separate method value
+                    if method is None or method.upper() not in ShellMixin._CURL_SAFE_METHODS:
+                        return False
+                i += 1
+                continue
+            if tok.startswith('-') and len(tok) > 1:
+                body = tok[1:]
+                if body == 'X':
+                    # -X GET / -X HEAD (separate method value).
+                    method = tokens[i + 1] if i + 1 < n else None
+                    if method is None:
+                        return False  # -X with no method → conservative reject
+                    i += 1  # consume the separate method value
+                    if method.upper() not in ShellMixin._CURL_SAFE_METHODS:
+                        return False
+                elif body.startswith('X'):
+                    # Glued form: -XGET / -XHEAD / -XPOST …
+                    if body[1:].upper() not in ShellMixin._CURL_SAFE_METHODS:
+                        return False
+                elif 'X' in body:
+                    return False  # mixed bundle carries a request flag → conservative
+                elif any(ch in ShellMixin._CURL_WRITE_SHORT_CHARS for ch in body):
+                    return False  # bundled write flag
+                i += 1
+                continue
+            # bare URL / other argument
+            i += 1
+        return True
+
+    @staticmethod
+    def _python_c_is_readonly(words: list) -> bool:
+        """True iff ``python -c <snippet>`` is heuristically read-only.
+
+        ``words[0]`` is ``python``/``python3``. Safe ONLY when the first arg is
+        ``-c`` and the joined snippet avoids write/network/file side-effect APIs:
+        ``open()`` in a write/append mode, ``subprocess``/``shutil``/``socket``/
+        ``requests``/``urllib``/``tempfile``, ``os.*`` write APIs, ``pathlib``,
+        dynamic code (``__import__``/``exec``/``eval``/``compile``/``getattr``/
+        ``globals``/``vars``), and a bare ``import``/``from … import`` of
+        ``os``/``shutil``/``subprocess``/``pathlib``. ``python script.py`` (no
+        ``-c``) and bare ``python`` reject. Any doubt → False (fall through to
+        the guard).
+
+        Known-uncovered tail (heuristic, not exhaustive): less-common network
+        modules (``ftplib``, ``http.client``, ``httpx``) are not in the marker
+        set, so a snippet that only touches those passes — an obscure edge left
+        to the guard's LLM review.
+        """
+        args = words[1:]
+        if not args or args[0] != '-c':
+            # `python script.py` / `python3 -m foo` / bare `python` → arbitrary code.
+            return False
+        snippet = ' '.join(args[1:])
+        if not snippet:
+            return False
+
+        if ShellMixin._snippet_has_write_open(snippet):
+            return False
+        for marker in ShellMixin._PY_WRITE_MARKERS:
+            if marker in snippet:
+                return False
+        if 'pathlib' in snippet and '.write' in snippet:
+            return False
+        # A bare import of a side-effect-capable module is rejected even if the
+        # snippet never calls a write API (conservative). Catches both
+        # `import os` and `from os import system` (the latter exposes os.system);
+        # `pathlib` is included because Path().touch/mkdir/rename/unlink/chmod/…
+        # are filesystem mutations.
+        for mod in ('os', 'shutil', 'subprocess', 'pathlib'):
+            if re.search(r'\bimport\s+' + mod + r'\b', snippet) or \
+                    re.search(r'\bfrom\s+' + mod + r'\s+import\b', snippet):
+                return False
+        return True
+
+    @staticmethod
+    def _snippet_has_write_open(snippet: str) -> bool:
+        """True if the snippet opens a file for writing/appending.
+
+        Scans each ``open(...)`` call. A single-argument ``open()`` is read mode
+        (safe). A second-argument mode is safe only when it is a string literal
+        with no write/append/update char (``w``/``a``/``x``/``+``); any other form
+        (a variable, an expression) is rejected conservatively.
+        """
+        i = 0
+        n = len(snippet)
+        while i < n:
+            start = snippet.find('open(', i)
+            if start == -1:
+                return False
+            # Locate the matching close paren (depth-tracked, quote- and
+            # backslash-escape-aware so a `)`/`"` inside a string literal is
+            # not mis-counted, e.g. open("a)b", "w")).
+            depth = 0
+            end = -1
+            quote = None
+            j = start + 4
+            while j < n:
+                ch = snippet[j]
+                if quote:
+                    if ch == '\\' and j + 1 < n:
+                        j += 2  # skip the escaped char
+                        continue
+                    if ch == quote:
+                        quote = None
+                    j += 1
+                    continue
+                if ch in ('"', "'"):
+                    quote = ch
+                    j += 1
+                    continue
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end = j
+                        break
+                j += 1
+            if end == -1:
+                return True  # unbalanced → conservative reject
+            inner = snippet[start + 5:end]
+            # An unescaped quote/escape inside the args means the mode is not a
+            # clean literal we can classify → reject conservatively.
+            if '\\' in inner:
+                return True
+            # Split top-level args (commas outside quotes/parens).
+            args: list = []
+            buf = ''
+            quote = None
+            pdepth = 0
+            for c in inner:
+                if quote:
+                    if c == quote:
+                        quote = None
+                    buf += c
+                elif c in ('"', "'"):
+                    quote = c
+                    buf += c
+                elif c == '(':
+                    pdepth += 1
+                    buf += c
+                elif c == ')':
+                    pdepth -= 1
+                    buf += c
+                elif c == ',' and pdepth == 0:
+                    args.append(buf.strip())
+                    buf = ''
+                else:
+                    buf += c
+            if buf.strip():
+                args.append(buf.strip())
+            # args[0] is the path; args[1] (if present) is the mode.
+            if len(args) >= 2:
+                mode = args[1]
+                if mode.startswith('mode='):
+                    mode = mode[5:].strip()
+                if len(mode) >= 2 and mode[0] in ('"', "'") and mode[-1] == mode[0]:
+                    if any(ch in mode[1:-1] for ch in 'wax+'):
+                        return True
+                else:
+                    return True  # non-literal mode → conservative reject
+            i = end + 1
+        return False
 
     @staticmethod
     def _check_git_command(words: list, pipeline: list) -> bool:

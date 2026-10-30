@@ -156,6 +156,58 @@ def _get_auto_security_enabled(app) -> bool:
     return getattr(app, 'current_auto_security', True)
 
 
+# ── Deterministic "prefer built-in tool" hint (BUG_0180 follow-up) ─────────
+# Maps a lowercased shell primary to the built-in tool that does the same job
+# more directly. SINGLE SOURCE OF TRUTH for the hint: when a read-only shell
+# command's primary matches this map, the guard auto-approves it with a hint
+# (a [SECURITY_HINT] log line) and SKIPS the LLM review — collapsing the
+# "denied in favor of built-in tool" round-trips into a deterministic decision.
+# Conservative: it only fires when the command is structurally read-only; any
+# doubt falls through to the LLM guard.
+_BUILTIN_TOOL_HINTS: dict = {
+    'get-content': 'read_file',
+    'type': 'read_file',
+    'dir': 'list_dir',
+    'get-childitem': 'list_dir',
+    'ls': 'list_dir',
+    'find': 'list_dir',
+    'select-string': 'grep',
+    'findstr': 'grep',
+    'grep': 'grep',
+    'egrep': 'grep',
+    'fgrep': 'grep',
+}
+
+
+def _builtin_tool_hint(command: str):
+    """Return the built-in tool to prefer for a read-only shell command, or None.
+
+    Deterministic (no LLM, no cache): the command's primary (lowercased) must be
+    in :data:`_BUILTIN_TOOL_HINTS` AND the command must be strictly read-only.
+    The strict predicate — not the structural one — is used so a redirect to a
+    real file (a write, e.g. ``dir > existing.txt``) does NOT get auto-approved:
+    it falls through to the LLM guard. Any doubt → None.
+
+    Defensive fast-path: a strictly-read-only ``shell_cmd`` is normally
+    auto-approved upstream (``evaluate_shell_command_safety``), so this hint is a
+    safety net that fires only if a read-only mapped primary ever reaches the
+    guard (restricted-mode agent, manual approval, future code path). It never
+    auto-approves a write.
+    """
+    cmd = (command or '').strip()
+    if not cmd:
+        return None
+    primary = cmd.split()[0].lower()
+    tool = _BUILTIN_TOOL_HINTS.get(primary)
+    if tool is None:
+        return None
+    # Lazy import avoids a security_handler → operation_manager import cycle.
+    from agent_cascade.operation_manager.shell import ShellMixin
+    if not ShellMixin._is_safe_readonly_shell_command(cmd):
+        return None
+    return tool
+
+
 class SecurityAdvisorHandler:
     """Handles ask_security WebSocket messages.
 
@@ -359,6 +411,33 @@ class SecurityAdvisorHandler:
                                             SECURITY_REUSE_APPROVAL_NAME,
                                             SECURITY_APPROVAL_CACHE_ENABLED,
                                             SECURITY_APPROVAL_CACHE_TTL_SECONDS)
+
+        # ── Deterministic "prefer built-in tool" hint (BUG_0180 follow-up) ────
+        # A read-only shell command whose primary maps to a built-in tool
+        # (Get-Content→read_file, dir→list_dir, Select-String→grep, ...) is
+        # auto-approved WITHOUT an LLM review. This runs BEFORE the cache (it is
+        # fully deterministic and cache-independent) and acquires no prompt/
+        # execution lock, engine, agent, or slot — it returns before any of that,
+        # so there is nothing to unwind. Conservative: only fires when the command
+        # is structurally read-only; any doubt falls through to the LLM guard.
+        hint_tool = None
+        if ap.get('tool_name') == 'shell_cmd':
+            hint_tool = _builtin_tool_hint(ap.get('tool_args', {}).get('command', ''))
+        if hint_tool is not None:
+            hint_reason = (f"[SECURITY_HINT] prefer {hint_tool} for this read-only "
+                           f"shell command; auto-approved deterministically (no LLM review)")
+            logger.info(f"[SECURITY_HINT] prefer {hint_tool} for {rid} "
+                        f"(command: {ap.get('tool_args', {}).get('command', '')[:80]!r})")
+            loop = _get_ws_loop(self.agent_pool)
+            try:
+                self._handle_verdict(rid, auto_apply, True, False,
+                                     hint_reason, hint_reason, loop)
+            finally:
+                # run_check() added this rid to active_checks; no full check ran,
+                # so release it here even if _handle_verdict raised.
+                with checks_lock:
+                    active_checks.discard(rid)
+            return
 
         # ── Approval cache fast path (BUG_0180 follow-up) ─────────────────────
         # Repeated identical tool calls collapse into one guard review: a
