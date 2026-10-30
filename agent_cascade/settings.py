@@ -88,6 +88,22 @@ SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPR
 # Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
 # from the approval name: that path holds no lock, so it must not share one warm object.
 SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_skilladvisor')
+# ── Security approval cache (BUG_0180 follow-up) ─────────────────────────
+# Caches Security-guard verdicts keyed by tool-call signature (tool_name + sha1 of
+# canonical tool_args) so repeated identical guard reviews collapse into one LLM turn
+# (the 12 repeated curl probes / 6x pytest re-reviews from the 2026-10-30 audit).
+# Default ON; flip AGENT_CASCADE_SECURITY_APPROVAL_CACHE=0 to reproduce today's
+# review-every-time behavior exactly (the mandatory env kill-switch).
+SECURITY_APPROVAL_CACHE_ENABLED: bool = os.getenv('AGENT_CASCADE_SECURITY_APPROVAL_CACHE',
+                                                 '1').strip().lower() not in ('0', 'false', 'off', 'no')
+# TTL (seconds) a cached verdict stays authoritative before the guard re-reviews it.
+# This is a staleness bound, NOT a disable toggle — the kill-switch is
+# AGENT_CASCADE_SECURITY_APPROVAL_CACHE above. A single LLM verdict governs all
+# repeats of a signature for this window, so a fluke verdict (unlucky [NO] on a
+# safe command, [YES] on a borderline one) is amplified across repeats; the TTL
+# is the bound on that exposure.
+SECURITY_APPROVAL_CACHE_TTL_SECONDS: float = float(os.getenv(
+    'AGENT_CASCADE_SECURITY_APPROVAL_CACHE_TTL', 300))
 # Compressor: its tool restrictions come from UI config (seeded by the one-time class-defaults
 # migration, which disables nearly all of its tools) — it only performs compression internally.
 # A single turn forces no tool calls, guaranteeing a pure one-shot summary. Bump only if the

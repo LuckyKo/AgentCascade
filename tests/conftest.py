@@ -85,6 +85,14 @@ def _restore_runtime_state():
             snapshot[key] = dict(value)  # shallow dict copy (values are scalars)
         else:
             snapshot[key] = value  # bools, ints, floats, strings: immutable
+    # BUG_0180 follow-up: the Security-approval verdict cache is a mutable
+    # process-singleton (reference-only in the snapshot above) — clear it before
+    # AND after each test so a verdict populated by one test never
+    # short-circuits a neighbour's guard (fatal under pytest -n, where many
+    # files share one worker process).
+    _approval_cache = getattr(_runtime_state, 'security_approval_cache', None)
+    if _approval_cache is not None:
+        _approval_cache.clear()
     yield
     for key, value in list(vars(_runtime_state).items()):
         if key in snapshot:
@@ -94,6 +102,8 @@ def _restore_runtime_state():
                 delattr(_runtime_state, key)
             except AttributeError:
                 pass
+    if _approval_cache is not None:
+        _approval_cache.clear()
 
 
 # ---------------------------------------------------------------------------

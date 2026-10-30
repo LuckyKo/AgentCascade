@@ -129,6 +129,57 @@ def clamp_compression_fraction(value) -> float:
     return min(COMPRESSION_MAX_FRACTION, max(COMPRESSION_MIN_FRACTION, float(value)))
 
 
+class SecurityApprovalCache:
+    """Thread-safe TTL+LRU cache of Security-guard verdicts (BUG_0180 follow-up).
+
+    Maps a tool-call signature (``tool_name`` + sha1 of canonical ``tool_args``,
+    see ``security_handler._security_approval_signature``) to an
+    ``(approved, reason, decided_at_mono)`` tuple so repeated identical guard
+    reviews collapse into one LLM turn.
+
+    LRU-ordered on a plain dict (insertion order == recency order; ``get``
+    re-inserts as a touch). Expired entries are evicted on access, and the
+    size cap keeps a chatty session from growing the cache without bound.
+    """
+
+    def __init__(self, max_entries: int = 512):
+        self._lock = threading.Lock()
+        self._entries: dict = {}  # signature -> (approved, reason, decided_at_mono)
+        self._max_entries = max_entries
+
+    def get(self, signature: str, ttl_seconds: float):
+        """Return ``(approved, reason)`` for a within-TTL entry, else None.
+
+        A missing or expired entry is evicted, so a later ``put`` re-seeds it.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(signature)
+            if entry is None:
+                return None
+            approved, reason, decided_at = entry
+            if now - decided_at > ttl_seconds:
+                del self._entries[signature]
+                return None
+            # LRU touch: re-insert so the most-recently-used entry sorts last.
+            del self._entries[signature]
+            self._entries[signature] = entry
+            return approved, reason
+
+    def put(self, signature: str, approved: bool, reason: str) -> None:
+        """Store a fresh verdict; evict the least-recently-used entry past the cap."""
+        now = time.monotonic()
+        with self._lock:
+            self._entries[signature] = (bool(approved), reason, now)
+            while len(self._entries) > self._max_entries:
+                # First insertion-order key == least-recently-used.
+                self._entries.pop(next(iter(self._entries)))
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
 class RuntimeState:
     """Process-level singleton holding every UI-settable runtime value.
 
@@ -164,6 +215,10 @@ class RuntimeState:
         self.security_execution_lock = ResettableRLock()
         self._active_checks: set = set()
         self._active_checks_lock = threading.Lock()
+        # BUG_0180 follow-up: verdict cache for repeated identical guard reviews
+        # (security_handler fast path). Process-global, tiny (LRU-capped), never
+        # persisted — same ownership style as the locks above.
+        self.security_approval_cache = SecurityApprovalCache()
 
     # ── Writers (the ONLY mutation paths) ───────────────────────────────────
 

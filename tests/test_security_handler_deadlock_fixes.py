@@ -1333,6 +1333,10 @@ class TestLeakedLockRecoveryEndToEnd:
 
         def leak_once(rid):
             """Leak the current lock, then run a check that must recover and proceed."""
+            # The approval cache is orthogonal to this test: a cached verdict would
+            # short-circuit the check before it touches the (leaked) execution lock,
+            # skipping the recovery under test. All 3 iterations share one signature.
+            state.security_approval_cache.clear()
             # Leak: acquire in a thread that dies without releasing.
             acquired_flag = threading.Event()
 

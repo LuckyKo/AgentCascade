@@ -6,6 +6,7 @@ parsing, timeout handling, auto-apply/reject logic, and cleanup sequence.
 """
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -121,6 +122,33 @@ def _get_active_checks_state(app):
     """
     from agent_cascade.runtime_state import state as _runtime_state
     return _runtime_state._active_checks, _runtime_state._active_checks_lock
+
+
+def _get_security_approval_cache(app):
+    """Get the process-level Security-approval verdict cache (BUG_0180 follow-up).
+
+    Returns ``state.security_approval_cache`` — a thread-safe TTL+LRU cache
+    constructed once in ``RuntimeState.__init__`` (same storage pattern as
+    ``_get_security_check_lock`` / ``_get_active_checks_state``). The ``app``
+    parameter is retained for call-site compatibility but is unused.
+    """
+    from agent_cascade.runtime_state import state as _runtime_state
+    return _runtime_state.security_approval_cache
+
+
+def _security_approval_signature(ap: dict) -> str:
+    """Approval-cache signature: ``tool_name`` + sha1 of the canonical tool_args.
+
+    Identical tool calls produce identical signatures (the cache win); ANY
+    argument difference changes the digest, so near-identical calls each get
+    one review. ``default=str`` keeps the digest from crashing on any
+    non-JSON-serializable argument — the cache must never take the guard down.
+    """
+    tool_name = str(ap.get('tool_name', 'unknown'))
+    tool_args = ap.get('tool_args', {}) or {}
+    canonical = json.dumps(tool_args, sort_keys=True, default=str)
+    digest = hashlib.sha1(canonical.encode('utf-8')).hexdigest()
+    return f'{tool_name}:{digest}'
 
 
 def _get_auto_security_enabled(app) -> bool:
@@ -328,7 +356,43 @@ class SecurityAdvisorHandler:
         # Fix 6 — Import outside lock block to avoid holding lock during import resolution
         from agent_cascade.constants import NON_LLM_KEYS
         from agent_cascade.settings import (SECURITY_AGENT_MAX_TURNS, SECURITY_REUSE_ENABLED,
-                                            SECURITY_REUSE_APPROVAL_NAME)
+                                            SECURITY_REUSE_APPROVAL_NAME,
+                                            SECURITY_APPROVAL_CACHE_ENABLED,
+                                            SECURITY_APPROVAL_CACHE_TTL_SECONDS)
+
+        # ── Approval cache fast path (BUG_0180 follow-up) ─────────────────────
+        # Repeated identical tool calls collapse into one guard review: a
+        # within-TTL cached verdict is returned WITHOUT running the LLM guard.
+        # This path acquires no prompt/execution lock, engine, agent, or slot —
+        # it returns before any of that, so there is nothing to unwind. Only
+        # clear [YES]/[NO] verdicts are ever cached (ambiguous/timeout are not),
+        # so the guard stays authoritative for anything the cache does not know.
+        if SECURITY_APPROVAL_CACHE_ENABLED:
+            sig = _security_approval_signature(ap)
+            cached = _get_security_approval_cache(self.app_state).get(
+                sig, SECURITY_APPROVAL_CACHE_TTL_SECONDS)
+            if cached is not None:
+                cached_yes, cached_reason = cached
+                logger.info(f"[SECURITY_CACHE] hit sig={sig[:16]}… tool={ap.get('tool_name', 'unknown')} "
+                            f"→ {'APPROVED' if cached_yes else 'DENIED'} (request {rid})")
+                # Same verdict/reason shape a fresh check returns: _handle_verdict
+                # auto-applies (approve/reject + approvals broadcast) in auto-apply
+                # mode and sends the verdict to the UI for manual confirmation
+                # otherwise. In manual mode the UI card's response body is the
+                # cached justification (the raw LLM text is not reproduced).
+                loop = _get_ws_loop(self.agent_pool)
+                try:
+                    self._handle_verdict(
+                        rid, auto_apply,
+                        cached_yes, not cached_yes,
+                        cached_reason, cached_reason, loop)
+                finally:
+                    # run_check() added this rid to active_checks; no full check
+                    # ran, so release it here even if _handle_verdict raised
+                    # (mirrors the full path's finally → _cleanup guarantee).
+                    with checks_lock:
+                        active_checks.discard(rid)
+                return
 
         try:
             # ── Build prompt inside lock to prevent race conditions ────────
@@ -667,6 +731,15 @@ class SecurityAdvisorHandler:
             parsing_response = extract_instance_output(sec_instance.conversation, sec_state_key)
 
             is_yes, is_no, justification = self._parse_verdict(parsing_response)
+
+            # ── Populate the approval cache (BUG_0180 follow-up) ───────────
+            # Cache ONLY clear verdicts from a check that COMPLETED normally
+            # (a repeated denied command should not be re-reviewed either);
+            # ambiguous results and dead-man's-switch timeouts are deliberately
+            # NOT stored, so the guard re-reviews those.
+            if (is_yes or is_no) and not sec_timeout_reached and SECURITY_APPROVAL_CACHE_ENABLED:
+                _get_security_approval_cache(self.app_state).put(
+                    _security_approval_signature(ap), is_yes, justification)
 
             # ── Handle result: timeout / verdict / ambiguous ───────────────
             loop = _get_ws_loop(self.agent_pool)
