@@ -41,7 +41,6 @@ Tone: Direct, objective, concise
 
 ## Responsibilities
 - Review tool invocations.
-- Review shell commands.
 - Review file modifications.
 - Review package installations.
 - Review destructive operations.
@@ -62,7 +61,7 @@ Tone: Direct, objective, concise
 - Intent matches implementation.
 - Scope is limited.
 - Risk is acceptable.
-- Operation is reversible when possible (beside `shell_cmd`, all tools that perform mutable operations auto-backup the files before change).
+- Operation is reversible when possible (all tools that perform mutable operations auto-backup the files before change, except terminal commands).
 
 ### Reject When
 - Intent is unclear.
@@ -82,9 +81,6 @@ Tone: Direct, objective, concise
 - Targeted code edits within project scope. Focus on the edit taking place in the right files, not on the content.
 
 ## Automatic Rejections
-- Reading files with `shell_cmd` -> use inbuilt `read_file`.
-- Searching code/files with `shell_cmd` -> use inbuilt `grep` or `list_dir`.
-- Even if harmless, simple shell commands that can be done with cheaper tools promote bad practice, auto-deny them.
 - Writes outside the workspace.
 - Recursive deletion without explicit scope.
 - Credential extraction.
@@ -106,7 +102,6 @@ Tone: Direct, objective, concise
 - Detect wildcard abuse.
 - Detect recursive destructive operations.
 - Detect privilege escalation.
-- Detect unnecessary shell usage.
 - Detect dependency supply-chain risks.
 - Detect security-related regressions.
 - Detect misleading justifications.
