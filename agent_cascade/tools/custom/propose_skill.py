@@ -14,6 +14,8 @@ from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
 from agent_cascade.skills.parser import (
+    _needs_quoting,
+    _quote_scalar,
     normalize_version,
     parse_frontmatter,
     strict_frontmatter_check,
@@ -110,6 +112,61 @@ def _source_task_text(agent_pool, instance_name) -> str:
     # legacy generated_from_task fallback. Deliberately do NOT guess from the live conversation:
     # during reflection its last user message is the reflection prompt itself.
     return ''
+
+
+def _parse_lightweight_fm(skill_content):
+    """Return ``(fm_dict, fm_span, proposed_version)`` for a SKILL.md frontmatter block.
+
+    Lightweight line-based scalar parse (name/version/description) — sufficient for the
+    fields ``propose_skill`` patches, NOT a full YAML interpretation (block-style /
+    multi-line values are not read; use the parser's ``parse_frontmatter`` for that).
+    """
+    fm = {}
+    fm_span = frontmatter_span(skill_content)
+    if fm_span:
+        fm_text = skill_content[fm_span[0]:fm_span[1]]
+        for line in fm_text.splitlines():
+            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
+            if m:
+                fm[m.group(1)] = m.group(2).strip().strip('"\'')
+    return fm, fm_span, fm.get('version', '1.0.0')
+
+
+def _merge_registered_frontmatter(existing_meta, skill_content):
+    """Rebuild a SKILL.md frontmatter from an existing skill's registered metadata and
+    prepend it to a body-only body (BUG_0053).
+
+    ``load_skill`` strips the YAML frontmatter to save context tokens, so an agent that
+    only ever saw a skill via ``load_skill`` supplies a body-only SKILL.md when updating
+    it. This merges the already-registered frontmatter (description, triggers, source,
+    and any other scalar fields such as ``generated_by`` / ``generated_from_task``) back
+    onto the body so the agent does not have to reconstruct a header it never saw. The
+    version is left at the incumbent's value here; the downstream update-version patch
+    bumps it.
+
+    Called ONLY for an EXISTING skill whose supplied content has NO frontmatter block,
+    so a supplied block (or a NEW skill) is never touched. Returns ``skill_content``
+    unchanged when the metadata carries no usable registered frontmatter (defensive:
+    fall through to the existing rejection path).
+    """
+    parsed = (existing_meta or {}).get('_parsed_data') or {}
+    registered = parsed.get('frontmatter') or {}
+    if not registered:
+        return skill_content
+    lines = ['---']
+    for key, value in registered.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            lines.append(f'{key}:')
+            for item in value:
+                item = str(item)
+                lines.append(f'  - {_quote_scalar(item) if _needs_quoting(item) else item}')
+        else:
+            value = str(value)
+            lines.append(f'{key}: {_quote_scalar(value) if _needs_quoting(value) else value}')
+    lines.append('---')
+    return '\n'.join(lines) + '\n\n' + skill_content
 
 
 @register_tool('propose_skill', allow_overwrite=True)
@@ -235,16 +292,7 @@ class ProposeSkill(BaseTool):
         # BEFORE reconstruction, then patch name (+version on updates) in a single pass.
         # NOTE: lightweight line-based parse — sufficient for scalar keys (name/version/description);
         # block-style or multi-line YAML values are not interpreted (only first physical line captured).
-        fm = {}
-        fm_span = frontmatter_span(skill_content)
-        if fm_span:
-            fm_text = skill_content[fm_span[0]:fm_span[1]]
-            for line in fm_text.splitlines():
-                m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
-                if m:
-                    fm[m.group(1)] = m.group(2).strip().strip('"\'')
-
-        proposed_version = fm.get('version', '1.0.0')
+        fm, fm_span, proposed_version = _parse_lightweight_fm(skill_content)
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         # BUG_0123: the run's actual task is the authoritative input for the Tier-2
@@ -254,6 +302,19 @@ class ProposeSkill(BaseTool):
         run_task_text = _source_task_text(self.agent_pool, kwargs.get('agent_instance_name'))
         existing_meta = skill_manager.get_skill_metadata(proposed_name)
         is_update = existing_meta is not None
+
+        # ── BUG_0053: merge registered frontmatter onto a body-only UPDATE ─────────
+        # load_skill strips the YAML frontmatter (token-saving), so an agent that only ever
+        # saw a skill via load_skill supplies a body-only SKILL.md when updating it. Rebuild
+        # the header from the already-registered frontmatter so the agent does not have to
+        # guess description/triggers/source. Fires ONLY for an EXISTING name whose content has
+        # NO frontmatter block: a supplied block is used as-is (no regression) and a NEW skill
+        # must still declare its own frontmatter (the validator rejects it below).
+        if is_update and frontmatter_span(skill_content) is None:
+            skill_content = _merge_registered_frontmatter(existing_meta, skill_content)
+            fm, fm_span, proposed_version = _parse_lightweight_fm(skill_content)
+            logger.info('[PROPOSE-SKILL] %s: merged registered frontmatter onto body-only update',
+                        proposed_name)
 
         # Captured BEFORE any gate/approval side effect: a disabled skill is dropped from the
         # registry, so `is_update` is False and it takes the new-skill path — but its production

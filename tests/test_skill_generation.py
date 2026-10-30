@@ -5191,3 +5191,113 @@ class TestRegisterSingleDoesNotFilter:
         m._register_single(root / 'turned-off' / 'SKILL.md')
         assert 'turned-off' in m._skills_registry, \
             '_register_single must NOT consult _disabled_names (discover() owns the filter)'
+
+
+class TestProposeSkillFrontmatterMerge:
+    """BUG_0053: a body-only update of an existing skill merges the registered frontmatter.
+
+    ``load_skill`` strips the YAML frontmatter (token-saving), so an agent that only ever
+    saw a skill via ``load_skill`` supplies a body-only SKILL.md when updating it. The
+    ``propose_skill`` update path must rebuild the header from the already-registered
+    frontmatter instead of rejecting with "No valid YAML frontmatter found".
+
+    Rules under test:
+      - existing name + body-only content -> succeeds, registered description/triggers
+        preserved, version auto-bumped (NEW behavior).
+      - existing name + full frontmatter+body -> succeeds with the SUPPLIED frontmatter
+        (no regression).
+      - NEW name + body-only content -> still rejected (a new skill must declare its own
+        frontmatter).
+    """
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Content mode reaches approval; auto-approve by default.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    @staticmethod
+    def _body_only(full_content):
+        """Strip the frontmatter block from a full SKILL.md, leaving body-only content.
+
+        ``_make_skill_content`` emits ``---\n<yaml>---\\n\\n<body>``; splitting on the
+        block-close delimiter isolates the body exactly as ``load_skill`` would inject it.
+        """
+        return full_content.split('---\n\n', 1)[1]
+
+    def test_body_only_update_preserves_registered_frontmatter(self, fresh_manager):
+        """Existing name + body-only content -> merges registered frontmatter, version bumps."""
+        m = self.manager
+        name = f"test-fm-merge-{_uid()}"
+        desc = 'Body-only merge target skill description text'
+        trig = ['merge', 'frontmatter']
+        full = _make_skill_content(name=name, description=desc, triggers=trig,
+                                  generated_from_task='frontmatter merge test')
+        assert m.register_skill_from_content(full, task_text='frontmatter merge test')[0]
+        assert m.get_skill_metadata(name)['version'] == '1.0.0'
+
+        body_only = self._body_only(full)
+        assert '---' not in body_only  # sanity: this really is body-only (no frontmatter)
+        body_only = body_only.replace('Follow these steps carefully',
+                                      'Follow these revised steps carefully')
+
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': body_only,
+                                        'justification': 'update body only'}))
+        assert 'updated' in result.lower(), result
+        # The registered frontmatter must be preserved on the merged update.
+        meta = m.get_skill_metadata(name)
+        assert meta['description'] == desc
+        assert meta['triggers'] == trig
+        # Version must have auto-bumped past the incumbent.
+        assert meta['version'] == '1.0.1'
+
+    def test_full_frontmatter_update_uses_supplied_frontmatter(self, fresh_manager):
+        """Existing name + full frontmatter+body -> the SUPPLIED frontmatter wins (no regression)."""
+        m = self.manager
+        name = f"test-fm-full-{_uid()}"
+        full = _make_skill_content(name=name,
+                                   description='Full frontmatter update target skill text',
+                                   triggers=['full', 'fm'],
+                                   generated_from_task='full frontmatter update test')
+        assert m.register_skill_from_content(full, task_text='full frontmatter update test')[0]
+
+        # A DIFFERENT description proves the supplied frontmatter wins over the registered one.
+        updated = full.replace('Follow these steps carefully',
+                               'Follow these revised steps carefully')
+        updated = updated.replace('Full frontmatter update target skill text',
+                                  'Brand new description that must win over the registered one')
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': updated,
+                                        'justification': 'refine with new description'}))
+        assert 'updated' in result.lower(), result
+        meta = m.get_skill_metadata(name)
+        assert meta['description'].startswith('Brand new description')
+        assert meta['version'] == '1.0.1'
+
+    def test_body_only_new_skill_still_rejected(self, fresh_manager):
+        """NEW name + body-only content -> still rejected (a new skill must declare frontmatter)."""
+        m = self.manager
+        name = f"test-fm-new-{_uid()}"
+        full = _make_skill_content(name=name,
+                                   description='New body-only skill description text here',
+                                   triggers=['new', 'body'],
+                                   generated_from_task='new body-only skill test')
+        body_only = self._body_only(full)
+        tool, _ = self._make_tool(m)
+        import json as _json
+        result = tool.call(_json.dumps({'name': name, 'skill_content': body_only,
+                                        'justification': 'create new skill'}))
+        # Must be rejected (not registered): a new skill must declare its own frontmatter.
+        assert 'REJECTED' in result or 'frontmatter' in result.lower(), result
+        assert m.get_skill_metadata(name) is None
