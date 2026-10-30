@@ -552,6 +552,13 @@
                             style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--bg-elevated); background: var(--bg-tertiary); color: var(--text-primary); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
                         </label>
                         <label class="setting-field">
+                          <span title="Idle-nudge behavior while AFK. Basic = the canned message above is enqueued. Admin = a read-only Admin agent reviews the idle session (log tail + telemetry) and hands back the continuation message; falls back to the basic nudge on timeout/error.">AFK Nudge Mode</span>
+                          <select autocomplete="off" id="setting-afk-mode">
+                            <option value="basic" selected>Basic (canned message)</option>
+                            <option value="admin">Admin (agent review)</option>
+                          </select>
+                        </label>
+                        <label class="setting-field">
                           <span>Max Turns per Run</span>
                           <input autocomplete="off" type="number" id="setting-max-turns" min="1" max="500" value="50" />
                         </label>

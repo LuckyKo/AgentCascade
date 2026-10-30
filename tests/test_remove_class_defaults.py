@@ -276,3 +276,35 @@ class TestSystemAgentRestrictedShellFlag:
             agent_class='Security', instance_name='Security_test', task='t', caller='Main')
 
         assert created.restricted_shell is True
+
+
+class TestAfkAdminToolPolicy:
+    """AFK admin mode: the Admin reviewer is spawned with generate_cfg=None, so the
+    read-only new-agent baseline (Layer 4) must apply — Admin must not mutate anything."""
+
+    def test_admin_agent_gets_read_only_baseline(self):
+        """No explicit config + non-core class → the full read-only baseline applies."""
+        result = resolve_disabled_tools_for_agent(
+            instance_override=None, template_cfg=None, agent_name='Admin', agent_type='Admin')
+        assert result == DEFAULT_NEW_AGENT_DISABLED_TOOLS
+        for tool in ('shell_cmd', 'code_interpreter', 'write_file', 'edit_file'):
+            assert tool in result
+        for tool in ('read_file', 'grep', 'list_dir'):
+            assert tool not in result
+
+    def test_admin_agent_case_insensitive_type(self):
+        """The AFK path passes agent_type='Admin' but the exclusion check is
+        case-insensitive — lowercase 'admin' must resolve identically."""
+        result = resolve_disabled_tools_for_agent(
+            instance_override=None, template_cfg=None, agent_name='Admin', agent_type='admin')
+        assert result == DEFAULT_NEW_AGENT_DISABLED_TOOLS
+
+    def test_foreign_class_ui_config_does_not_disable_admin_tools(self):
+        """A UI disabled_tools dict keyed only to OTHER classes leaves Admin with an empty
+        disabled set (the explicit config suppresses the baseline) — no foreign class's
+        tools leak into the Admin's policy."""
+        result = resolve_disabled_tools_for_agent(
+            instance_override=None,
+            template_cfg={'disabled_tools': {'coder': ['read_file'], 'writer': ['shell_cmd']}},
+            agent_name='Admin', agent_type='Admin')
+        assert result == set()

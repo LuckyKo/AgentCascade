@@ -35,9 +35,11 @@ class TestBrowserAfkDuplicatesGone:
         assert 'automated: true' not in app_js_source
 
     def test_no_localstorage_afk_keys_written(self, app_js_source):
-        # saveSettings() must no longer persist afk-enabled/afk-message to localStorage.
+        # saveSettings() must no longer persist afk-enabled/afk-message/afk-mode to
+        # localStorage — the server is the single source of truth for all three.
         assert "s['afk-enabled']" not in app_js_source
         assert "s['afk-message']" not in app_js_source
+        assert "s['afk-mode']" not in app_js_source
 
     def test_no_last_afk_timer_state(self, app_js_source):
         # The cooldown bookkeeping that lived in the browser is gone with it.
@@ -55,3 +57,10 @@ class TestServerBackedWiringPresent:
         # syncPoolSettings() must read the authoritative values from state.
         assert 'ps.afk_enabled' in app_js_source
         assert 'ps.afk_message' in app_js_source
+        # The nudge mode select is hydrated from the server state, not localStorage.
+        assert 'ps.afk_mode' in app_js_source
+
+    def test_mode_select_sends_set_afk_with_mode(self, app_js_source):
+        # The AFK Nudge Mode <select> must push its value to the server on change.
+        assert 'afkModeSelect' in app_js_source
+        assert 'mode: afkModeSelect.value' in app_js_source

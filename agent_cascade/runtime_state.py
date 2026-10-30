@@ -16,8 +16,9 @@ import so no cycle can form.
 import threading
 import time
 
-from agent_cascade.settings import (COMPRESSION_DEFAULT_FRACTION_SEED, COMPRESSION_MAX_FRACTION,
-                                    COMPRESSION_MIN_FRACTION)
+from agent_cascade.settings import (AFK_MODE_DEFAULT, COMPRESSION_DEFAULT_FRACTION_SEED,
+                                    COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
+                                    normalize_afk_mode)
 
 
 class ResettableRLock:
@@ -136,7 +137,7 @@ class RuntimeState:
     - ``auto_security`` (bool) — single writer: :meth:`set_auto_security` (the toggle).
       The assignment channel is :meth:`_assign_auto_security` (boot/load paths only).
     - ``compression_fraction`` (float) — single writer: :meth:`set_compression_fraction`.
-    - ``afk_enabled`` / ``afk_message`` — single writer: :meth:`set_afk`.
+    - ``afk_enabled`` / ``afk_message`` / ``afk_mode`` — single writer: :meth:`set_afk`.
     - ``enable_timeout`` / ``approval_timeout_seconds`` — single writers:
       :meth:`set_enable_timeout` / :meth:`set_approval_timeout`.
     - Security synchronization primitives (constructed once here; Step 4 moves the
@@ -151,6 +152,8 @@ class RuntimeState:
         self.compression_fraction: float = COMPRESSION_DEFAULT_FRACTION_SEED
         self.afk_enabled: bool = False
         self.afk_message: str = ''
+        # 'basic' | 'admin' (settings.py AFK_MODE_DEFAULT seeds the env-var default).
+        self.afk_mode: str = AFK_MODE_DEFAULT
         self.enable_timeout: bool = True
         self.approval_timeout_seconds: int = 300
 
@@ -191,16 +194,20 @@ class RuntimeState:
         """
         self.compression_fraction = clamp_compression_fraction(float(pct) / 100.0)
 
-    def set_afk(self, enabled: bool, message=None) -> None:
+    def set_afk(self, enabled: bool, message=None, mode=None) -> None:
         """Set the server-backed AFK flag (shared by WebUI and Telegram bridge).
 
         ``message`` is optional; when absent the stored afk_message is left untouched
         so a toggle-only caller (e.g. Telegram /afk) cannot clobber a UI-set message.
+        ``mode`` (``'basic' | 'admin'``) follows the same rule: ``None`` leaves the
+        stored afk_mode untouched, a string is normalized (unknown -> 'basic').
         Unrelated to the time-based approval timeout (enable_timeout).
         """
         self.afk_enabled = bool(enabled)
         if message is not None:
             self.afk_message = str(message)
+        if mode is not None:
+            self.afk_mode = normalize_afk_mode(mode)
 
     def set_enable_timeout(self, enabled) -> None:
         """Enable or disable approval timeout."""

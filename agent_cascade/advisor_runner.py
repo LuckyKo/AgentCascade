@@ -126,7 +126,11 @@ def run_lightweight_advisor(
         # ── 2. Acquire the advisor instance: warm-reuse first, fresh-spawn fallback ──────
         # Shared two-branch logic (see security_reuse.acquire_security_agent). The fallback name is
         # the legacy per-call instance_name, byte-for-byte as before.
-        reuse_name = None if not SECURITY_REUSE_ENABLED else SECURITY_REUSE_SKILL_ADVISOR_NAME
+        # The fixed warm-reuse name belongs to the Security class ONLY: other advisor classes
+        # (e.g. the AFK 'Admin' mode) are per-call fresh spawns (like call_agent children) and
+        # must never seed or collide with the Security warm instance.
+        reuse_name = (SECURITY_REUSE_SKILL_ADVISOR_NAME
+                      if (SECURITY_REUSE_ENABLED and agent_class == 'Security') else None)
         # BUG_0029 Phase 3: acquire_security_agent now returns a 3-TUPLE
         # (instance, is_reuse, actual_name). `actual_name` is the REAL instance name — the
         # fixed reuse name on a reuse/seed hit, the per-call fallback name on a miss. The

@@ -51,6 +51,30 @@ SKILL_ADVISOR_MAX_CANDIDATES: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_CANDIDATES',
               20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
 
+# ── AFK nudge mode (basic | admin) ─────────────────────────────────────────────
+# 'basic' keeps the current AFK behavior (auto-reject + canned idle nudge). 'admin'
+# spawns a read-only Admin agent that reviews the idle session and hands back the
+# continuation message. Admin is a per-call fresh spawn (like call_agent children) —
+# it never seeds or shares the fixed Security warm-reuse name.
+def _normalize_afk_mode(value) -> str:
+    """Normalize an AFK mode value to 'basic' | 'admin'; non-string/unknown -> 'basic'."""
+    v = value.strip().lower() if isinstance(value, str) else ''
+    return 'admin' if v == 'admin' else 'basic'
+
+
+# Public alias: the canonical normalizer (runtime_state re-exports it for its consumers).
+normalize_afk_mode = _normalize_afk_mode
+
+AFK_MODE_DEFAULT: str = _normalize_afk_mode(os.getenv('AGENT_CASCADE_AFK_MODE', 'basic'))
+AFK_ADMIN_MAX_TURNS: int = int(
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_TURNS', 12))  # Turn budget for the AFK Admin agent
+AFK_ADMIN_FIRST_YIELD_TIMEOUT: float = float(
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_FIRST_YIELD_TIMEOUT', 45.0))  # First-yield guard (s)
+AFK_ADMIN_NUDGE_MAX_CHARS: int = int(
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_NUDGE_MAX_CHARS', 4000))  # Enqueued-nudge cap
+AFK_ADMIN_MAX_FINDINGS: int = int(
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_FINDINGS', 5))  # Max findings in the Admin prompt
+
 # ── Security agent instance reuse (BUG_0029 Phase 3) ───────────────────────────
 # Reuse a single warm Security instance across security checks so the LLM prompt prefix
 # stays byte-identical and hits the server-side KV cache, instead of spawning a fresh

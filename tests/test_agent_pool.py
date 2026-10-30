@@ -967,6 +967,17 @@ class _AfkOmDouble:
         _rs.afk_message = str(value)
 
     @property
+    def afk_mode(self) -> str:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_mode
+
+    @afk_mode.setter
+    def afk_mode(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        from agent_cascade.settings import normalize_afk_mode
+        _rs.afk_mode = normalize_afk_mode(value)
+
+    @property
     def enable_timeout(self) -> bool:
         from agent_cascade.runtime_state import state as _rs
         return _rs.enable_timeout
@@ -995,9 +1006,9 @@ class _AfkOmDouble:
         """Mirror OperationManager.set_base_dir (used by _apply_pending_config)."""
         self.base_dir = Path(path)
 
-    def set_afk(self, enabled, message=None):
+    def set_afk(self, enabled, message=None, mode=None):
         from agent_cascade.runtime_state import state as _rs
-        _rs.set_afk(enabled, message)
+        _rs.set_afk(enabled, message, mode)
 
     def set_enable_timeout(self, enabled):
         from agent_cascade.runtime_state import state as _rs
@@ -1132,6 +1143,67 @@ class TestAfkPersistence:
         finally:
             _runtime_state.afk_enabled = saved_enabled
             _runtime_state.afk_message = saved_message
+
+    def test_afk_mode_saved_and_restored(self, tmp_path):
+        """afk_mode persists to pool_settings.json and is restored on the next startup."""
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+
+        pool1, om1 = _build_pool_with_afk_om(config_dir)
+        try:
+            om1.afk_mode = 'admin'
+            pool1._save_pool_settings()
+        finally:
+            _stop_pool(pool1)
+
+        # Second "server start" over the same config dir with a fresh OM.
+        pool2, om2 = _build_pool_with_afk_om(config_dir)
+        try:
+            assert om2.afk_mode == 'admin'
+        finally:
+            _stop_pool(pool2)
+
+    def test_afk_mode_absent_key_resets_to_basic(self, tmp_path):
+        """A settings file with no afk_mode key must reset the mode to 'basic' even when a
+        previous pool in the same process ran 'admin' (the always-assign _pending_afk_mode
+        guard against the known cross-pool _pending_* leak)."""
+        import json
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+
+        pool1, om1 = _build_pool_with_afk_om(config_dir)
+        try:
+            om1.afk_mode = 'admin'
+            pool1._save_pool_settings()
+        finally:
+            _stop_pool(pool1)
+
+        # Rewrite the file WITHOUT the afk_mode key (a pre-feature file).
+        path = pool1._pool_settings_path
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        data.pop('afk_mode', None)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+
+        pool2, om2 = _build_pool_with_afk_om(config_dir)
+        try:
+            assert om2.afk_mode == 'basic', 'absent key must reset to basic, not leak from pool1'
+        finally:
+            _stop_pool(pool2)
+
+    def test_set_afk_none_mode_preserves_existing(self, tmp_path):
+        """Mode-preservation twin of test_set_afk_none_message_preserves_existing: a
+        toggle-only set_afk (message=None, mode=None) must not clobber the stored mode."""
+        config_dir = str(tmp_path / 'config')
+        (tmp_path / 'config').mkdir(parents=True, exist_ok=True)
+        pool, om = _build_pool_with_afk_om(config_dir)
+        try:
+            om.afk_mode = 'admin'
+            om.set_afk(False)  # toggle-only caller (e.g. Telegram /afk)
+            assert om.afk_mode == 'admin', 'mode must be preserved when mode=None'
+        finally:
+            _stop_pool(pool)
 
     def test_approval_timeout_persists_through_pool_save(self, tmp_path):
         """BUG_0029 Phase 2 Step 5: approval timeout written via state persists through pool save."""

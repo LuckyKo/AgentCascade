@@ -354,6 +354,8 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
         # AFK flag (server-backed, shared by WebUI + Telegram bridge)
         pool_settings['afk_enabled'] = bool(getattr(om, 'afk_enabled', False))
         pool_settings['afk_message'] = getattr(om, 'afk_message', '') or ''
+        from agent_cascade.settings import normalize_afk_mode
+        pool_settings['afk_mode'] = normalize_afk_mode(getattr(om, 'afk_mode', 'basic'))
 
     # Async shell console window toggle from pool if available
     pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', False)

@@ -47,7 +47,8 @@ from agent_cascade.constants import LLM_CONFIG_KEYS
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
 from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
-                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting)
+                                    SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS,
+                                    clamp_skill_setting, normalize_afk_mode)
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.operation_manager import OperationManager
@@ -352,6 +353,17 @@ def afk_idle_nudge_text(om: OperationManager) -> str:
     return (getattr(om, 'afk_message', '') or '').strip() or AFK_DEFAULT_MESSAGE
 
 
+# AFK nudge modes: 'basic' (current behavior) and 'admin' (a read-only Admin agent reviews
+# the idle session and its output becomes the nudge). Normalization lives in settings.py.
+AFK_MODE_BASIC: str = 'basic'
+AFK_MODE_ADMIN: str = 'admin'
+
+
+def afk_nudge_mode(om) -> str:
+    """The AFK nudge mode ('basic' | 'admin'), defaulting to basic. Pure, no side effects."""
+    return normalize_afk_mode(getattr(om, 'afk_mode', AFK_MODE_BASIC))
+
+
 def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance=None,
                      generating: bool, now: float) -> bool:
     """Pure eligibility+cooldown decision for the idle AFK auto-reply. No side effects.
@@ -369,6 +381,8 @@ def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance
         return False
     if instance is None:
         return False  # instance dismissed mid-run — never resurrect it
+    if getattr(pool, '_afk_admin_in_flight', False):
+        return False  # an Admin review is already running — do not stack nudges on it
     if hasattr(pool, 'has_pending') and pool.has_pending(instance_name):
         return False
     if hasattr(pool, 'has_messages') and pool.has_messages(instance_name):
@@ -468,6 +482,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # concurrent run-end threads must share ONE lock and ONE timestamp. See afk_should_nudge().
         agent_pool._afk_last_nudge_ts = 0.0     # monotonic seconds; 0 = never nudged
         agent_pool._afk_nudge_lock = threading.Lock()
+        # AFK admin-mode in-flight flag (owned by the _afk_admin_nudge daemon thread).
+        agent_pool._afk_admin_in_flight = False
 
     # Initialize concurrency control for Security advisor checks.
     # Security runs on a separate daemon thread, so we use RLock-based locking
@@ -1053,6 +1069,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         try:
             if _is_generating(session):
                 raise RuntimeError('generation already started')  # a real run beat us to it
+            if afk_nudge_mode(om) == AFK_MODE_ADMIN:
+                # Admin review is a synchronous LLM call — it must never run on the event
+                # loop (would freeze WS traffic) or the run-end thread. A daemon thread owns it.
+                threading.Thread(
+                    target=_afk_admin_nudge,
+                    args=(instance_name, loop),
+                    daemon=True,
+                ).start()
+                return
             agent_pool.enqueue_message(instance_name, _parse_multimodal_content(afk_idle_nudge_text(om)))
             gen_id = _start_generation(session)
             threading.Thread(
@@ -1064,6 +1089,93 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             logger.warning('[AFK] idle auto-reply failed for %s: %s', instance_name, e)
             with agent_pool._afk_nudge_lock:
                 agent_pool._afk_last_nudge_ts = 0.0   # release the claim so the next run-end retries
+
+    def _afk_admin_analysis(instance_name: str):
+        """Run the read-only Admin agent over the idle session; return its text, or None.
+
+        ``None`` means fall back to the basic nudge: Admin template missing, advisor
+        timeout/error, or empty output. Never raises.
+        """
+        from agent_cascade.advisor_runner import run_lightweight_advisor
+        from agent_cascade.child_runner import _last_step_hint, _resolve_child_log_path
+        from agent_cascade.prompts.dna import AFK_ADMIN_PROMPT
+        from agent_cascade.settings import (AFK_ADMIN_FIRST_YIELD_TIMEOUT, AFK_ADMIN_MAX_FINDINGS,
+                                           AFK_ADMIN_MAX_TURNS, AFK_ADMIN_NUDGE_MAX_CHARS)
+        from uuid import uuid4
+
+        get_template = getattr(agent_pool, 'get_template', None)
+        if get_template is None or get_template('Admin') is None:
+            logger.warning('[AFK-ADMIN] Admin template unavailable — falling back to basic nudge')
+            return None
+        log_path, _is_exact = _resolve_child_log_path(agent_pool, instance_name)
+        inst = agent_pool.get_instance(instance_name)
+        last_step = _last_step_hint(getattr(inst, 'conversation', None), instance_name)
+        task = AFK_ADMIN_PROMPT.format(
+            root_name=instance_name,
+            log_path=log_path,
+            last_step=last_step or '(no completed step recorded)',
+            telemetry_hint=('use system_info with help="telemetry" for a live dump; '
+                            'raw JSONL is available via the /api/telemetry endpoint'),
+            max_findings=AFK_ADMIN_MAX_FINDINGS,
+        )
+        result = run_lightweight_advisor(
+            pool=agent_pool,
+            agent_class='Admin',  # the advisor class name (NOT the mode value 'admin')
+            instance_name='Admin_afk_' + uuid4().hex[:8],
+            task=task,
+            caller=instance_name,
+            max_turns=AFK_ADMIN_MAX_TURNS,
+            first_yield_timeout=AFK_ADMIN_FIRST_YIELD_TIMEOUT,
+            generate_cfg=None,  # keep the read-only tool baseline (a UI cfg disables it)
+        )
+        if not result.ok:
+            logger.warning('[AFK-ADMIN] analysis failed for %s: %s', instance_name,
+                           result.error_msg or ('timeout' if result.was_timeout else 'error'))
+            return None
+        text = (result.output_text or '').strip()
+        if not text:
+            return None
+        if len(text) > AFK_ADMIN_NUDGE_MAX_CHARS:
+            text = text[:AFK_ADMIN_NUDGE_MAX_CHARS]
+        return text
+
+    def _afk_admin_nudge(instance_name: str, loop) -> None:
+        """Daemon-thread worker for AFK admin mode: run the Admin analysis and enqueue its
+        result as the nudge (falling back to the basic nudge on any failure).
+
+        Owns the _afk_admin_in_flight flag: set on entry, cleared in ``finally``. The cooldown
+        claim (taken by _afk_maybe_nudge) is released only if nothing was enqueued, so the next
+        tick / run-end can retry.
+        """
+        agent_pool._afk_admin_in_flight = True
+        enqueued = False
+        try:
+            om = getattr(agent_pool, 'operation_manager', None)
+            text = _afk_admin_analysis(instance_name)
+            if text is None:
+                # Admin unavailable / timed out / failed / empty — the basic nudge keeps AFK alive.
+                text = afk_idle_nudge_text(om)
+            # A real run may have started while the analysis was running; never interrupt it.
+            if _is_generating(session):
+                return
+            if agent_pool.get_instance(instance_name) is None:
+                return  # instance dismissed while the analysis was running
+            agent_pool.enqueue_message(instance_name, _parse_multimodal_content(text))
+            enqueued = True  # if _start_generation raises below the claim is KEPT (no double-enqueue),
+                            # unlike the basic path which releases — deliberate asymmetry
+            gen_id = _start_generation(session)
+            threading.Thread(
+                target=run_agent_thread,
+                args=(None, None, gen_id, loop, instance_name),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            logger.warning('[AFK-ADMIN] nudge failed for %s: %s', instance_name, e)
+        finally:
+            agent_pool._afk_admin_in_flight = False
+            if not enqueued:
+                with agent_pool._afk_nudge_lock:
+                    agent_pool._afk_last_nudge_ts = 0.0  # release the claim so the next tick retries
 
 
     # ── Background tasks ──────────────────────────────────────────────────
@@ -1661,6 +1773,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         ``timeout_seconds`` is no longer accepted: the time-based "Enable Approval Timeout"
         feature is separate and driven solely by its own UI controls. A legacy client sending
         it degrades to a plain on/off toggle instead of erroring.
+
+        The optional ``mode`` ('basic' | 'admin') selects the idle-nudge behavior; when
+        absent the stored mode is left untouched (same preservation rule as ``message``).
         """
         if not token or token not in api_sessions:
             return _invalid_token_response()
@@ -1673,7 +1788,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if payload.get('timeout_seconds') is not None:
             logger.debug('[AFK] /api/afk timeout_seconds ignored — approval timeout is a separate feature')
 
-        WsMessageHandler.apply_afk(agent_pool, bool(payload.get('enabled', False)), payload.get('message'))
+        WsMessageHandler.apply_afk(
+            agent_pool, bool(payload.get('enabled', False)),
+            payload.get('message'), payload.get('mode'))
 
         # BUG_0029 Phase 2 Step 5: read live state for the response (not OM instance)
         from agent_cascade.runtime_state import state as _runtime_state
@@ -1682,6 +1799,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'status': 'ok',
             'enabled': _runtime_state.afk_enabled,
             'message': _runtime_state.afk_message,
+            'mode': _runtime_state.afk_mode,
         }
 
     @app.post('/api/session/restore')

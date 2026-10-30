@@ -316,6 +316,10 @@ function syncPoolSettings(ps) {
     if (settingAfkMessage.value !== ps.afk_message) changed = true;
     settingAfkMessage.value = ps.afk_message;
   }
+  if (ps.afk_mode !== undefined && afkModeSelect && document.activeElement !== afkModeSelect) {
+    if (afkModeSelect.value !== ps.afk_mode) changed = true;
+    afkModeSelect.value = ps.afk_mode;
+  }
 
   // Update two-phase input enabled state after server settings sync
   updateTwoPhaseInputsEnabled();
@@ -866,6 +870,7 @@ const docInput = $('#docInput');
 const afkToggle = $('#afkToggle');
 const autoSecurityToggle = $('#autoSecurityToggle');
 const settingAfkMessage = $('#setting-afk-message');
+const afkModeSelect = $('#setting-afk-mode');
 
 // Approval timeout settings
 const approvalTimeoutEnabled = $('#settingApprovalTimeoutEnabled');
@@ -1893,6 +1898,14 @@ if (settingAfkMessage) {
     debouncedSaveSettings();
     // Push the custom nudge text to the server on the debounce.
     send({ type: 'set_afk', enabled: !!(afkToggle && afkToggle.checked), message: settingAfkMessage.value });
+  });
+}
+
+if (afkModeSelect) {
+  afkModeSelect.addEventListener('change', () => {
+    saveSettings();
+    // Push the nudge mode to the server; the server owns the AFK behavior.
+    send({ type: 'set_afk', enabled: !!(afkToggle && afkToggle.checked), mode: afkModeSelect.value });
   });
 }
 

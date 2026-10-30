@@ -67,18 +67,21 @@ class ApprovalMixin:
         from agent_cascade.runtime_state import state as _runtime_state
         _runtime_state.set_enable_timeout(enabled)
 
-    def set_afk(self, enabled: bool, message: Optional[str] = None) -> None:
+    def set_afk(self, enabled: bool, message: Optional[str] = None,
+                mode: Optional[str] = None) -> None:
         """Set the server-backed AFK flag (shared by WebUI and Telegram bridge).
 
         ``message`` is optional; when absent the stored afk_message is left untouched
         so a toggle-only caller (e.g. Telegram /afk) cannot clobber a UI-set message.
+        ``mode`` (``'basic' | 'admin'``) follows the same rule: ``None`` leaves the
+        stored afk_mode untouched.
         Unrelated to the time-based approval timeout (enable_timeout).
 
-        BUG_0029 Phase 2: delegate to runtime_state.state; message-preservation
+        BUG_0029 Phase 2: delegate to runtime_state.state; message/mode-preservation
         semantics are preserved verbatim.
         """
         from agent_cascade.runtime_state import state as _runtime_state
-        _runtime_state.set_afk(enabled, message)
+        _runtime_state.set_afk(enabled, message, mode)
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 

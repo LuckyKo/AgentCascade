@@ -62,6 +62,7 @@ class ConfigPersistMixin:
                 # Add AFK settings (server-backed flag shared by WebUI + Telegram bridge)
                 data['afk_enabled'] = bool(_runtime_state.afk_enabled)
                 data['afk_message'] = _runtime_state.afk_message
+                data['afk_mode'] = _runtime_state.afk_mode
 
                 # Add async shell console window toggle
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
@@ -140,6 +141,7 @@ class ConfigPersistMixin:
             approval_timeout_seconds_raw = data.pop('approval_timeout_seconds', None)
             afk_enabled_raw = data.pop('afk_enabled', None)
             afk_message_raw = data.pop('afk_message', None)
+            afk_mode_raw = data.pop('afk_mode', None)
             enable_async_shell_console_window_raw = data.pop('enable_async_shell_console_window', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
@@ -182,6 +184,8 @@ class ConfigPersistMixin:
             # prior pool instance sharing this object's state would leak across restarts.
             self._pending_afk_enabled = bool(afk_enabled_raw) if afk_enabled_raw is not None else False
             self._pending_afk_message = str(afk_message_raw) if afk_message_raw is not None else ''
+            from agent_cascade.settings import normalize_afk_mode
+            self._pending_afk_mode = normalize_afk_mode(afk_mode_raw)
 
             # Apply async shell console window toggle from disk if present
             if enable_async_shell_console_window_raw is not None:
@@ -515,7 +519,10 @@ class ConfigPersistMixin:
         if om:
             try:
                 if hasattr(self, '_pending_afk_enabled'):
-                    om.set_afk(self._pending_afk_enabled, getattr(self, '_pending_afk_message', None))
+                    om.set_afk(
+                        self._pending_afk_enabled,
+                        getattr(self, '_pending_afk_message', None),
+                        getattr(self, '_pending_afk_mode', None))
                 elif hasattr(self, '_pending_afk_message'):
                     om.set_afk(getattr(om, 'afk_enabled', False), self._pending_afk_message)
             except Exception as e:

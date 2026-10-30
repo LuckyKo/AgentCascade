@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from agent_cascade.runtime_state import state as _runtime_state
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, normalize_afk_mode
 
 # Import mixins
 # Re-export constants and module-level helpers so existing imports still work
@@ -78,6 +78,14 @@ class OperationManager(ApprovalMixin, PathSecurityMixin, FileOpsMixin, GrepMixin
     @afk_message.setter
     def afk_message(self, value: str) -> None:
         _runtime_state.afk_message = str(value)
+
+    @property
+    def afk_mode(self) -> str:
+        return _runtime_state.afk_mode
+
+    @afk_mode.setter
+    def afk_mode(self, value: str) -> None:
+        _runtime_state.afk_mode = normalize_afk_mode(value)
 
     def __init__(self, base_dir: str = DEFAULT_WORKSPACE, agent_pool=None):
         self.base_dir = Path(base_dir).resolve()

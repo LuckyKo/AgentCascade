@@ -1131,6 +1131,34 @@ class TestAdvisorRunnerIntegration:
         kw = engine_instance._create_system_agent.call_args.kwargs
         assert kw['instance_name'] == FALLBACK_INSTANCE_NAME
 
+    def test_admin_class_never_claims_security_reuse_name(self):
+        """T20: the AFK 'Admin' advisor class is a per-call fresh spawn (like a call_agent
+        child) — it must never seed, acquire, or collide with the Security warm instance."""
+        from agent_cascade.advisor_runner import run_lightweight_advisor
+        from agent_cascade.settings import SECURITY_REUSE_SKILL_ADVISOR_NAME
+        pool = _make_integration_pool()
+        fresh_inst = MagicMock()
+        fresh_inst.conversation = []
+
+        engine_instance = MagicMock()
+        engine_instance._acquire_reusable_system_agent.return_value = None
+        engine_instance._create_system_agent.return_value = fresh_inst
+        engine_instance.run.return_value = iter([(' [VERDICT] APPROVE', False)])
+
+        _clear_all()
+        with patch('agent_cascade.execution_engine.ExecutionEngine', MagicMock(return_value=engine_instance)):
+            result = run_lightweight_advisor(
+                pool=pool, agent_class='Admin', instance_name='Admin_afk_test1234',
+                task='review', caller='w1', max_turns=5)
+
+        assert result.ok is True
+        # The warm-reuse path is Security-only: Admin must go straight to a fresh spawn.
+        engine_instance._acquire_reusable_system_agent.assert_not_called()
+        kw = engine_instance._create_system_agent.call_args.kwargs
+        assert kw['instance_name'] == 'Admin_afk_test1234'
+        # The Security claim was never taken by the Admin run.
+        assert claim_holder(SECURITY_REUSE_SKILL_ADVISOR_NAME) is None
+
     # ── T1: THE regression test (fails before Change A, passes after) ──────────
     def test_broadcast_uses_actual_name_on_reuse_hit(self):
         """On a reuse hit the advisor must broadcast under the REAL instance name (the fixed reuse

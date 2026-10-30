@@ -988,6 +988,17 @@ class _StubOperationManager:
         _rs.afk_message = str(value)
 
     @property
+    def afk_mode(self) -> str:
+        from agent_cascade.runtime_state import state as _rs
+        return _rs.afk_mode
+
+    @afk_mode.setter
+    def afk_mode(self, value):
+        from agent_cascade.runtime_state import state as _rs
+        from agent_cascade.settings import normalize_afk_mode
+        _rs.afk_mode = normalize_afk_mode(value)
+
+    @property
     def enable_timeout(self) -> bool:
         from agent_cascade.runtime_state import state as _rs
         return _rs.enable_timeout
@@ -1023,9 +1034,9 @@ class _StubOperationManager:
         from agent_cascade.runtime_state import state as _rs
         _rs.set_approval_timeout(seconds)
 
-    def set_afk(self, enabled, message=None):
+    def set_afk(self, enabled, message=None, mode=None):
         from agent_cascade.runtime_state import state as _rs
-        _rs.set_afk(enabled, message)
+        _rs.set_afk(enabled, message, mode)
 
     def list_pending_approvals(self):
         return [dict(a) for a in self._pending]
@@ -1481,6 +1492,92 @@ class TestAuthenticatedCommandEndpoints:
         assert om.afk_enabled is True
         # timeout_seconds was ignored — the separate feature is untouched.
         assert om.approval_timeout_seconds == 300
+
+    def test_afk_mode_set_persists_and_echoed(self, client):
+        """POST {mode:'admin'} sets the nudge mode, persists it, and echoes it in the body."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            resp = client.post('/api/afk', params={'token': token},
+                               json={'enabled': True, 'mode': 'admin'})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body['mode'] == 'admin'
+        assert om.afk_mode == 'admin'
+        assert fake.save_pool_settings_calls == 1
+
+    def test_afk_mode_preserved_when_absent(self, client):
+        """A later POST without a mode key must not clobber a previously set mode
+        (mirrors the message-preservation guarantee of test_afk_disable_keeps_message)."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            client.post('/api/afk', params={'token': token},
+                       json={'enabled': True, 'mode': 'admin'})
+            resp = client.post('/api/afk', params={'token': token}, json={'enabled': False})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['mode'] == 'admin'
+        assert om.afk_mode == 'admin'  # untouched (no mode supplied)
+
+    def test_afk_mode_invalid_normalizes_to_basic(self, client):
+        """A non-basic/admin mode value degrades to 'basic' (normalize_afk_mode)."""
+        token = self._token(client)
+        om = _StubOperationManager()
+        fake = _FakePool()
+        real = self._real_pool(client)
+        saved = self._patch_pool(client, fake)
+        real.operation_manager = om
+        try:
+            resp = client.post('/api/afk', params={'token': token},
+                               json={'enabled': True, 'mode': 'yolo'})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['mode'] == 'basic'
+        assert om.afk_mode == 'basic'
+
+    def test_ws_set_afk_with_mode_shares_apply_afk(self, client):
+        """T16: the WS 'set_afk' path and the REST /api/afk path funnel into the SAME
+        WsMessageHandler.apply_afk — mode must reach the same setter, so the two surfaces
+        cannot drift."""
+        import inspect
+        from agent_cascade.runtime_state import state as _rs
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        saved_mode = _rs.afk_mode
+        saved_enabled = _rs.afk_enabled
+        try:
+            # Static guard: handle_set_afk delegates to the shared apply_afk.
+            src = inspect.getsource(WsMessageHandler.handle_set_afk)
+            assert 'apply_afk' in src
+
+            # Behavioral guard: apply_afk (the single funnel) propagates mode and persists.
+            pool = _FakePool()
+            pool.operation_manager = _StubOperationManager()
+            WsMessageHandler.apply_afk(pool, True, 'BRB', 'admin')
+            assert _rs.afk_mode == 'admin'
+            assert pool.save_pool_settings_calls == 1
+            # Toggle-only (mode=None) must not clobber the stored mode.
+            WsMessageHandler.apply_afk(pool, False)
+            assert _rs.afk_mode == 'admin'
+        finally:
+            _rs.afk_mode = saved_mode
+            _rs.afk_enabled = saved_enabled
 
     # ── /api/session/restore ────────────────────────────────────────────────
 
@@ -2043,9 +2140,10 @@ class _AfkNudgePool:
 
 
 class _AfkNudgeOm:
-    def __init__(self, enabled=True, message=''):
+    def __init__(self, enabled=True, message='', afk_mode='basic'):
         self.afk_enabled = enabled
         self.afk_message = message
+        self.afk_mode = afk_mode
 
 
 def _nudge(pool, om, *, generating=False, now=1000.0):
@@ -2113,6 +2211,31 @@ class TestAfkIdleNudgeDecision:
         assert afk_idle_nudge_text(_AfkNudgeOm(message='   ')) == AFK_DEFAULT_MESSAGE
         assert afk_idle_nudge_text(_AfkNudgeOm(message=None)) == AFK_DEFAULT_MESSAGE
 
+    def test_afk_nudge_mode_default_and_normalize(self):
+        """afk_nudge_mode() normalizes to 'basic' | 'admin' and is pure (no side effects)."""
+        from agent_cascade.api_server import afk_nudge_mode
+        # Unset / empty / unknown / non-string values all collapse to basic.
+        assert afk_nudge_mode(_AfkNudgeOm(afk_mode='')) == 'basic'
+        assert afk_nudge_mode(_AfkNudgeOm(afk_mode='nope')) == 'basic'
+        assert afk_nudge_mode(_AfkNudgeOm(afk_mode=42)) == 'basic'
+        # Case- and whitespace-insensitive admin.
+        assert afk_nudge_mode(_AfkNudgeOm(afk_mode='admin')) == 'admin'
+        assert afk_nudge_mode(_AfkNudgeOm(afk_mode='ADMIN ')) == 'admin'
+        # An OM without the attribute at all (pre-feature double) degrades to basic.
+        class _NoModeOm:
+            afk_enabled = True
+            afk_message = ''
+        assert afk_nudge_mode(_NoModeOm()) == 'basic'
+
+    def test_afk_nudge_blocked_while_admin_in_flight(self):
+        """A running Admin review blocks the periodic nudge; the gate is a no-op when the
+        flag is absent (guards the existing decision tests)."""
+        pool = _AfkNudgePool(instance=object())
+        om = _AfkNudgeOm(enabled=True)
+        assert _nudge(pool, om) is True  # flag absent -> unchanged behavior
+        pool._afk_admin_in_flight = True
+        assert _nudge(pool, om) is False
+
 
 class TestAfkStateExposure:
     """build_state_from_pool exposes afk_enabled/afk_message in pool_settings."""
@@ -2138,6 +2261,27 @@ class TestAfkStateExposure:
         ps = state['pool_settings']
         assert ps['afk_enabled'] is True
         assert ps['afk_message'] == 'BRB'
+
+    def test_afk_mode_exposed_in_build_state(self):
+        """build_state_from_pool exposes the AFK nudge mode in pool_settings (T14)."""
+        from agent_cascade.api_integration_pkg.state_builder import build_state_from_pool
+        from agent_cascade.agent_instance import AgentInstance, AgentState
+
+        pool = _FakePool()
+        om = _StubOperationManager()
+        om.afk_enabled = True
+        om.afk_mode = 'admin'
+        pool.operation_manager = om
+        inst = AgentInstance(
+            instance_name='Maine', agent_class='coder', conversation=[],
+            created_at=0.0, last_activity=0.0, latest_marker_index=-1,
+            state=AgentState.IDLE,
+        )
+        pool.instances['Maine'] = inst
+
+        state = build_state_from_pool(pool, 'Maine')
+        assert state is not None
+        assert state['pool_settings']['afk_mode'] == 'admin'
 
 
 class TestAfkRunEndWiring:
@@ -2202,9 +2346,10 @@ class _AfkLoopInstance:
 
 
 class _AfkLoopOm:
-    def __init__(self, afk_enabled):
+    def __init__(self, afk_enabled, afk_mode='basic'):
         self.afk_enabled = afk_enabled
         self.afk_message = ''
+        self.afk_mode = afk_mode
         # Valid path so get_session_log_dir() resolves without raising (the session-history
         # load at startup is non-fatal either way, but this keeps the run log clean).
         self.base_dir = tempfile.gettempdir()
@@ -2216,9 +2361,8 @@ class _AfkLoopPool:
 
     Unlike _AfkNudgePool (which only drives the pure afk_should_nudge()), this supplies
     operation_manager + enqueue_message. It deliberately does NOT pre-seed _afk_last_nudge_ts
-    / _afk_nudge_lock — create_app initializes those (see api_server ~line 468). The run thread
-    each nudge spawns dies fast (the pool lacks _run_generation, caught by run_agent_thread_unified's
-    broad except) — harmless; we assert ONLY on enqueue captures, never on run completion.
+    / _afk_nudge_lock — create_app initializes those (see api_server ~line 468). We assert ONLY
+    on enqueue captures, never on run completion.
     """
 
     def __init__(self, afk_enabled=True):
@@ -2227,6 +2371,9 @@ class _AfkLoopPool:
         self.operation_manager = _AfkLoopOm(afk_enabled)
         self._enqueue_calls = []
         self._auto_security = None
+        # No-op generation counter: run_agent_thread_unified does `pool._run_generation += 1`
+        # (run_agent_unified.py); without it the spawned run thread logs a benign AttributeError.
+        self._run_generation = 0
 
     def set_auto_security(self, value):
         # create_app invokes this at construction (app.current_auto_security setter); record it.
@@ -2294,6 +2441,304 @@ class TestAfkIdleRenudgeLoop:
                 time.sleep(0.05)
 
         assert pool._enqueue_calls == []
+
+
+class TestAfkAdminNudge:
+    """AFK admin mode: a read-only Admin agent reviews the idle session off the event loop,
+    and its output (or the basic nudge as fallback) is enqueued as the continuation message.
+
+    Drives the REAL create_app harness (_AfkLoopPool) with the advisor stubbed, so the
+    daemon-thread worker (_afk_admin_nudge) runs for real and only the LLM call is fake.
+    """
+
+    @staticmethod
+    def _build_app(monkeypatch, afk_mode, advisor_result=None, advisor_sleep=0.0,
+                   with_template=True, advisor_hook=None):
+        """Build the app with a tiny tick/cooldown and a stubbed run_lightweight_advisor.
+
+        Returns (app, pool, calls) where ``calls`` records every advisor invocation with its
+        kwargs. ``advisor_hook`` (if given) runs inside the stub before it returns — used to
+        flip shared state (e.g. start a generation) while the admin run is in flight.
+        """
+        import agent_cascade.advisor_runner as _ar
+        from agent_cascade import api_server
+        from agent_cascade.api_server import create_app
+
+        # Tiny cadence so a nudge lands quickly; both constants are read as module globals
+        # at call time, so monkeypatching drives the real loop (pattern of TestAfkIdleRenudgeLoop).
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_TICK_SECS', 0.02)
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 0.05)
+
+        calls = []
+
+        def _advisor(pool, agent_class, instance_name, task, caller,
+                    max_turns=None, first_yield_timeout=30.0, generate_cfg=None):
+            calls.append({'agent_class': agent_class, 'instance_name': instance_name,
+                          'task': task, 'caller': caller, 'max_turns': max_turns,
+                          'first_yield_timeout': first_yield_timeout,
+                          'generate_cfg': generate_cfg})
+            if advisor_sleep:
+                time.sleep(advisor_sleep)
+            if advisor_hook is not None:
+                advisor_hook()
+            if advisor_result is None:
+                raise AssertionError('advisor must not be called in this scenario')
+            return advisor_result
+
+        # _afk_admin_analysis imports run_lightweight_advisor lazily, so patching the module
+        # attribute is picked up at call time.
+        monkeypatch.setattr(_ar, 'run_lightweight_advisor', _advisor)
+
+        pool = _AfkLoopPool(afk_enabled=True)
+        pool.operation_manager.afk_mode = afk_mode
+        if with_template:
+            pool.get_template = lambda name: (name == 'Admin')
+        app = create_app(agents=[], agent_pool=pool, config={'session_name': 'w1'})
+        return app, pool, calls
+
+    def test_basic_mode_enqueues_plain_text(self, monkeypatch):
+        """T3: basic mode enqueues the plain nudge text and NEVER calls the advisor."""
+        from agent_cascade import api_server
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'basic')
+        # Widen the cooldown so the observation window stays inside ONE nudge cycle.
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 1.0)
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+            time.sleep(0.1)  # still inside the widened cooldown: no 2nd nudge
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
+        assert calls == []  # the advisor stub raises loudly if basic mode ever calls it
+
+    def test_admin_mode_enqueues_admin_output(self, monkeypatch):
+        """T4: admin mode enqueues the Admin's text and passes the right advisor kwargs."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from agent_cascade.settings import AFK_ADMIN_FIRST_YIELD_TIMEOUT, AFK_ADMIN_MAX_TURNS
+        from fastapi.testclient import TestClient
+
+        out = 'STATUS: partial\nTHEN: verify the build'
+        app, pool, calls = self._build_app(monkeypatch, 'admin', AdvisorResult(output_text=out))
+        from agent_cascade import api_server
+        # Widen the cooldown so exactly ONE admin run lands in the window.
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 1.0)
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+            time.sleep(0.1)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == out
+        assert len(calls) == 1
+        kw = calls[0]
+        assert kw['agent_class'] == 'Admin'
+        assert kw['caller'] == 'w1'
+        assert kw['instance_name'].startswith('Admin_afk_')
+        # max_turns must be explicit (None would apply the Security budget to Admin).
+        assert kw['max_turns'] == AFK_ADMIN_MAX_TURNS
+        assert kw['first_yield_timeout'] == AFK_ADMIN_FIRST_YIELD_TIMEOUT
+        # generate_cfg=None keeps the read-only tool baseline (a UI cfg disables it).
+        assert kw['generate_cfg'] is None
+
+    def test_admin_mode_timeout_falls_back_to_basic(self, monkeypatch):
+        """T5: a first-yield timeout degrades to the basic nudge text."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                           AdvisorResult(was_timeout=True))
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
+        assert len(calls) == 1
+
+    def test_admin_mode_error_falls_back_to_basic(self, monkeypatch):
+        """T6: an engine error degrades to the basic nudge text."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                           AdvisorResult(was_error=True, error_msg='boom'))
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
+        assert len(calls) == 1
+
+    def test_admin_mode_empty_output_falls_back_to_basic(self, monkeypatch):
+        """T7: blank advisor output degrades to the basic nudge text."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                           AdvisorResult(output_text='   '))
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
+        assert len(calls) == 1
+
+    def test_admin_mode_output_truncated(self, monkeypatch):
+        """T8: the enqueued nudge is capped at AFK_ADMIN_NUDGE_MAX_CHARS."""
+        import agent_cascade.settings as _settings
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setattr(_settings, 'AFK_ADMIN_NUDGE_MAX_CHARS', 500)
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                          AdvisorResult(output_text='x' * 20000))
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert len(pool._enqueue_calls[0][1]) == 500
+
+    def test_admin_mode_drops_message_if_generation_started(self, monkeypatch):
+        """T9: a real run that started while the analysis was in flight wins — no nudge is
+        enqueued, and the cooldown claim is released (nothing was enqueued) so the next
+        run-end hook can re-claim."""
+        from agent_cascade import api_server
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        gen = {'on': False}
+        app, pool, calls = self._build_app(
+            monkeypatch, 'admin', AdvisorResult(output_text='STATUS: partial'),
+            advisor_hook=lambda: gen.__setitem__('on', True))
+        monkeypatch.setattr(api_server, '_is_generating', lambda s: gen['on'])
+
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and len(calls) < 1:
+                time.sleep(0.02)
+            time.sleep(0.1)
+
+        assert pool._enqueue_calls == []
+        assert len(calls) == 1
+        assert pool._afk_last_nudge_ts == 0.0  # claim released (nothing enqueued)
+
+    def test_admin_mode_drops_message_if_instance_gone(self, monkeypatch):
+        """T10: the instance dismissed while the analysis ran is never resurrected — no
+        enqueue, and the claim is released so the next tick can re-evaluate cleanly."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                          AdvisorResult(output_text='STATUS: partial'))
+        # The claim path's get_instance sees the instance; the worker's post-run check
+        # sees it gone.
+        orig_get_instance = pool.get_instance
+        seen = {'n': 0}
+
+        def _flaky(name):
+            seen['n'] += 1
+            return orig_get_instance(name) if seen['n'] == 1 else None
+
+        pool.get_instance = _flaky
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and len(calls) < 1:
+                time.sleep(0.02)
+            time.sleep(0.1)
+
+        assert pool._enqueue_calls == []
+        assert pool._afk_last_nudge_ts == 0.0  # claim released (nothing enqueued)
+
+    def test_admin_mode_missing_template(self, monkeypatch):
+        """T11: no Admin template on the pool -> no advisor call, basic text enqueued."""
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin', with_template=False)
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
+        assert calls == []
+
+    def test_admin_mode_does_not_block_the_event_loop(self, monkeypatch):
+        """T12: a ~1s admin run must not stall the 0.02s tick loop — the Admin work runs on
+        a daemon thread, so the loop keeps ticking while the advisor sleeps."""
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        # Count tick calls to pool.get_instance (made by _afk_maybe_nudge on every tick,
+        # before the in-flight gate) — a stalled loop would stop incrementing this.
+        ticks = {'n': 0}
+        result = {}
+
+        def _hook():
+            # Runs at the END of the 1s advisor sleep: record the tick delta around it.
+            result['ticks_during'] = ticks['n'] - result['ticks_before']
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                           AdvisorResult(output_text='STATUS: complete'),
+                                           advisor_sleep=1.0, advisor_hook=_hook)
+        result['ticks_before'] = ticks['n']  # baseline captured before any tick lands
+
+        orig_get_instance = pool.get_instance
+
+        def _counting_get_instance(name):
+            ticks['n'] += 1
+            return orig_get_instance(name)
+
+        pool.get_instance = _counting_get_instance
+        with TestClient(app):
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and 'ticks_during' not in result:
+                time.sleep(0.02)
+
+        # The hook captured the delta around the 1s advisor sleep; ~50 ticks are expected.
+        assert result['ticks_during'] >= 3
+        # At least the first run's output was enqueued (later cycles may add more — the
+        # point of this test is tick continuity, not the enqueue count).
+        assert len(pool._enqueue_calls) >= 1
+
+    def test_no_overlapping_admin_runs(self, monkeypatch):
+        """T13: with an advisor run longer than the cooldown, the in-flight gate +
+        cooldown claim yield exactly ONE advisor invocation and ONE enqueue in the
+        window (no overlapping runs)."""
+        from agent_cascade import api_server
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                          AdvisorResult(output_text='ok'),
+                                          advisor_sleep=0.4)
+        # Widen the cooldown past the observation window so the 2nd claim (which can only
+        # land after the 1st run completes) stays outside it.
+        monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 1.0)
+        with TestClient(app):
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+            time.sleep(0.3)
+
+        assert len(calls) == 1
+        assert len(pool._enqueue_calls) == 1
 
 
 class TestAfkRespectsSecurity:

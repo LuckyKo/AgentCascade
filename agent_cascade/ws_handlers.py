@@ -319,12 +319,17 @@ class WsMessageHandler:
             logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
 
     @staticmethod
-    def apply_afk(agent_pool, enabled: bool, message: Optional[str] = None) -> None:
-        """Set the server-backed AFK flag (shared by WS and REST /api/afk)."""
+    def apply_afk(agent_pool, enabled: bool, message: Optional[str] = None,
+                  mode: Optional[str] = None) -> None:
+        """Set the server-backed AFK flag (shared by WS and REST /api/afk).
+
+        ``mode`` (``'basic' | 'admin'``) is optional; ``None`` leaves the stored
+        afk_mode untouched (toggle-only callers cannot clobber a UI-set mode).
+        """
         om = getattr(agent_pool, 'operation_manager', None) if agent_pool else None
         if om is None:
             return
-        om.set_afk(enabled, message)
+        om.set_afk(enabled, message, mode)
         if hasattr(agent_pool, '_save_pool_settings'):
             agent_pool._save_pool_settings()
 
@@ -1281,7 +1286,8 @@ class WsMessageHandler:
         paths cannot drift, then broadcasts updated state.
         """
         WsMessageHandler.apply_afk(
-            self.agent_pool, bool(data.get('enabled', False)), data.get('message'))
+            self.agent_pool, bool(data.get('enabled', False)), data.get('message'),
+            data.get('mode'))
         await self._broadcast()
 
     async def handle_edit_message(self, data: dict) -> None:
