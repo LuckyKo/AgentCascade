@@ -168,6 +168,8 @@ class _FakeTelemetry:
             'total_time_sec': 12.3,
             'tokens_generated': 1500,
             'turns': 3,
+            # BUG_0181: LLM-turn count (distinct from engagements/turns) must be surfaced.
+            'llm_calls': 12,
         }]
 
     def get_skill_usage_summary(self):
@@ -204,6 +206,8 @@ class TestSystemInfoTelemetryDump:
         # Agent class usage (accuracy formatted as %)
         assert 'orchestrator:' in out
         assert '91.7%' in out
+        # BUG_0181: LLM-turn count surfaced alongside engagement turns.
+        assert 'llm_calls=12' in out
         # Skill usage
         assert 'docker-best-practices: loads=4' in out
         assert 'top_mode=auto' in out

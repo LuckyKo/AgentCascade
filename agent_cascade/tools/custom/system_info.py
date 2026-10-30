@@ -131,7 +131,12 @@ class SystemInfo(BaseTool):
                     cls = a.get('agent_class', '?')
                     acc = a.get('tool_usage_accuracy')
                     acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else 'n/a'
+                    # BUG_0181: surface llm_calls (actual LLM turns) alongside
+                    # turns (engagements) — a multi-turn agent (e.g. the warm-reused
+                    # Security guard) runs far more LLM turns than engagements, and
+                    # showing only `turns` made the guard look ~2.7x cheaper than it is.
                     lines.append(f"  {cls}: turns={a.get('turns', '')} "
+                                 f"llm_calls={a.get('llm_calls', '')} "
                                  f"turn_time={a.get('total_time_sec', '')}s "
                                  f"llm_time={a.get('llm_time_sec', '')}s "
                                  f"tool_time={a.get('tool_time_sec', '')}s "
