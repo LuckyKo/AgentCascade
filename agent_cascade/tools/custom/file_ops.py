@@ -1052,7 +1052,7 @@ class EditFile(BaseTool, PathResolutionMixin):
             },
             'occurrence': {
                 'type': 'integer',
-                'minimum': 1,
+                'minimum': -1,
                 'description': TOOL_METADATA['edit_file']['parameters']['occurrence']
             },
             'justification': {

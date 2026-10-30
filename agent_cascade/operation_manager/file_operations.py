@@ -1410,14 +1410,17 @@ class FileOpsMixin:
             if count == 0:
                 return f"ERROR: Pattern not found in {path} (exact) — try heuristic match_mode or include more context lines"
             if occurrence is not None:
-                # Coerce/validate the 1-based occurrence index (LLMs may send a string).
+                # Coerce/validate the occurrence index (LLMs may send a string).
+                # A 1-based index selects the Nth match; -1 is a sentinel meaning
+                # "replace ALL occurrences" (BUG_0059).
                 try:
                     occurrence = int(occurrence)
                 except (ValueError, TypeError):
-                    return f"ERROR: 'occurrence' must be a positive integer, got {occurrence!r}"
-                if occurrence < 1 or occurrence > count:
+                    return (f"ERROR: 'occurrence' must be a positive integer or -1 "
+                            f"(replace all), got {occurrence!r}")
+                if occurrence != -1 and (occurrence < 1 or occurrence > count):
                     return (f"ERROR: occurrence={occurrence} out of range — pattern found "
-                            f"{count} time(s) in {path} (valid range: 1-{count})")
+                            f"{count} time(s) in {path} (valid range: 1-{count}, or -1 to replace all)")
             if count > 1 and occurrence is None:
                 return f"ERROR: Pattern found {count} times in {path} — add more context lines to old_content to disambiguate"
 
@@ -1432,7 +1435,7 @@ class FileOpsMixin:
             # Advance by len(old_content) so the Nth occurrence matches str.count()
             # semantics (non-overlapping), keeping the range check above consistent.
             match_start_pos = file_content.index(old_content)
-            if occurrence is not None:
+            if occurrence is not None and occurrence != -1:
                 for _ in range(occurrence - 1):
                     match_start_pos = file_content.index(old_content, match_start_pos + len(old_content))
             match_end_pos = match_start_pos + len(actual_old_content)
@@ -1823,6 +1826,10 @@ class FileOpsMixin:
             if match_mode == 'delete_and_insert':
                 # new_file_content was already computed above — skip string replace
                 pass
+            elif match_mode == 'exact' and occurrence == -1:
+                # BUG_0059: occurrence=-1 replaces ALL (non-overlapping) occurrences,
+                # matching str.count()/str.replace() semantics.
+                new_file_content = file_content.replace(actual_old_content, new_content)
             elif match_mode == 'exact' and occurrence is not None:
                 # Replace only the Nth match — match_start_pos points at its start (computed
                 # in the exact branch above). The default path below stays byte-identical.
@@ -1869,7 +1876,13 @@ class FileOpsMixin:
 
             if match_mode == 'exact':
                 # Exact mode: line range + delta
-                res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                if occurrence == -1:
+                    total_net = net_delta * count
+                    total_sign = '+' if total_net >= 0 else ''
+                    res_msg += (f" (exact, replaced all {count} occurrence(s), first at lines "
+                               f"{exact_start_line}-{exact_end_line}, net {total_sign}{total_net})")
+                else:
+                    res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
 
             elif match_mode in ('heuristic', 'heuristic_agnostic'):
                 # Discriminated labels for heuristic vs heuristic_agnostic
