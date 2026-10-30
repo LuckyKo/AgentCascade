@@ -12,12 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import math
 import random
 from typing import Dict, Optional, Union
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+
+# BUG_0180: the evaluator is a single-expression ``eval``, so a statement block is a compile
+# error, not a runtime one. The old handler forwarded the raw SyntaxError and quoted the whole
+# expression back — expensive to re-read and silent about the accepted grammar. Echoed input is
+# now capped, and statement blocks get a message that names the construct and shows the rewrite.
+_MAX_ECHOED_EXPRESSION = 160
+
+
+def _abbreviate(text: str, limit: int = _MAX_ECHOED_EXPRESSION) -> str:
+    """Shorten an expression for an error message, preserving the head."""
+    return text if len(text) <= limit else text[:limit - 3] + '...'
+
+
+def _is_statement_block(expr: str) -> bool:
+    """True when ``expr`` parses as statements but not as a single expression.
+
+    ``D = 1; gu = D``, a newline-separated block, ``import os`` and ``for ...: ...`` are all
+    valid ``exec``-mode Python, which is exactly what ``eval`` cannot take. Genuinely malformed
+    input such as ``1 +`` fails in both modes and keeps the plain syntax error.
+    """
+    try:
+        ast.parse(expr, mode='exec')
+    except (SyntaxError, ValueError):
+        return False
+    try:
+        ast.parse(expr, mode='eval')
+        return False  # parses as a single expression -> not a statement block
+    except (SyntaxError, ValueError):
+        return True  # exec-only -> statement block
 
 
 @register_tool('calculate')
@@ -95,4 +125,14 @@ class Calculate(BaseTool):
             return str(result)
 
         except Exception as e:
-            return f"Error evaluating expression '{expression}': {str(e)}"
+            # BUG_0180: a statement block (e.g. "D=1; gu=D") is a compile-time SyntaxError, not a
+            # runtime one. Detect that case and tell the agent what the tool accepts, showing the
+            # lambda rewrite; cap the echoed input so long expressions aren't re-read in full.
+            if isinstance(e, SyntaxError) and _is_statement_block(processed_expr):
+                return (
+                    f"Error: '{_abbreviate(expression)}' is a statement block, but `calculate` "
+                    'evaluates a single expression only (no `;`-separated or newline-separated '
+                    'statements). Rewrite it as one expression: inline the sub-expressions, or '
+                    'wrap them in a lambda, e.g. (lambda D: [D, D * 2])(521.0).'
+                )
+            return f"Error evaluating expression '{_abbreviate(expression)}': {str(e)}"

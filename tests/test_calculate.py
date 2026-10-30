@@ -163,3 +163,45 @@ def test_getattr_builtin_unavailable(calc):
     # getattr is a dangerous builtin; it must not resolve in the eval scope.
     result = run(calc, "getattr(1, 'real')")
     assert result.startswith('Error evaluating expression')
+
+
+# ── BUG_0180: statement-block & echo-capping ──────────────────────────────
+
+
+def test_statement_block_gets_targeted_message(calc):
+    """A `;`-separated block gets the statement-block message, not the generic error."""
+    result = run(calc, 'D=521.0; gu=D; dn=D*2; [gu, dn]')
+    assert 'statement block' in result
+    assert 'single expression' in result
+    assert not result.startswith('Error evaluating expression')
+
+
+def test_single_expression_lambda_still_works(calc):
+    """A single-expression lambda (the recommended rewrite) evaluates correctly."""
+    result = run(calc, '(lambda D: [D, D * 2])(521.0)')
+    assert result == '[521.0, 1042.0]'
+
+
+def test_malformed_single_expression_keeps_plain_error(calc):
+    """Genuinely malformed input like '1 +' is not a statement block — plain syntax error."""
+    result = run(calc, '1 +')
+    assert result.startswith('Error evaluating expression')
+
+
+def test_long_expression_echo_is_capped(calc):
+    """A long expression that fails at runtime gets its echo capped at 160 chars."""
+    # Build a >160-char single expression that fails at runtime (undefined name at end).
+    long_expr = 'sum([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]) + undefined_name_xyz'
+    assert len(long_expr) > 160
+    result = run(calc, long_expr)
+    # The echoed portion must be capped: result should contain '...'
+    assert '...' in result
+    # And the echoed substring should not be the full expression
+    assert long_expr not in result
+
+
+def test_newline_block_is_statement_block(calc):
+    """A newline-separated block also gets the targeted statement-block message."""
+    result = run(calc, 'D = 1\ngu = D')
+    assert 'statement block' in result
+    assert not result.startswith('Error evaluating expression')

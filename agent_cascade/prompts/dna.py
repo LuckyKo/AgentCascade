@@ -711,7 +711,10 @@ TOOL_METADATA = {
                         'logarithms (log, ln), constants like pi and e, random number generation '
                         '(random(), randint(a, b), uniform(a, b)), numeric builtins '
                         '(abs, round, min, max, pow, int, float, bool, len, sum, divmod, trunc, floor, ceil), '
-                        'and list/sequence expressions.'),
+                        'and list/sequence expressions.'
+                        ' Accepts a single expression only — not a `;`-separated or newline-separated statement block; '
+                        'for multi-step derivations inline the sub-expressions or wrap them in a lambda, '
+                        'e.g. (lambda D: [D, D * 2])(521.0).'),
         'parameters': {
             'expression': 'The mathematical expression to evaluate (e.g., "sin(pi/2) + randint(1, 10)").'
         }
