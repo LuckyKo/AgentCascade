@@ -163,7 +163,26 @@ def _get_session_name(instance_snapshot: Dict[str, Any], fallback: str) -> str:
 
 
 def _get_current_model(pool: AgentPool, instance: AgentInstance) -> str:
-    """Get the current model name from the instance's template LLM."""
+    """Return the top (chain-head) endpoint's live model for this instance, fresh at call time.
+
+    Mirrors _resolve_max_tokens(): live router state beats the template's creation-time
+    snapshot. A runtime reorder/swap of the top endpoint is reflected on the next call.
+    Never blocks: one in-memory router lookup (self-locking). No HTTP, no disk.
+    """
+    agent_class = getattr(instance, 'agent_class', '') or ''
+    inst_name = getattr(instance, 'instance_name', '') or ''
+
+    router = getattr(pool, 'api_router', None)
+    if router is not None:
+        try:
+            # get_endpoint_chain acquires router._lock internally; do NOT re-wrap it.
+            chain = router.get_endpoint_chain(agent_class, instance_name=inst_name or None)
+            if chain and chain[0].get('model'):
+                return chain[0]['model']
+        except Exception as e:
+            logger.debug(f"current_model: live lookup failed for {inst_name} (falling back to template): {e}")
+
+    # Template static value — fallback (also the no-router / test-double path).
     template = pool.get_template(instance.agent_class)
     if template and hasattr(template, 'llm') and template.llm:
         return getattr(template.llm, 'model', 'Unknown')
