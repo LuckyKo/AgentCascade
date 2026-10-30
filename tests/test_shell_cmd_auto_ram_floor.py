@@ -13,6 +13,10 @@ Design invariants under test:
   - Explicit 'sync'/'async'/'safe' win over the floor (the floor only applies to 'auto').
   - Forced-safe takes precedence over auto-async (a command about to OOM must not run
     unmonitored in the background).
+  - Forced-safe queues NO pre-command tool warning (BUG_0174/commit 42956f47): such a warning
+    claimed "local model unloaded" before the approval gate ran, so it was false when the
+    command was denied. The reason is still logged at INFO; the user-facing notification is
+    the `[safe]` note `_execute_safe` appends after the unload actually happened.
   - Best-effort: a status-fetch failure degrades to the normal path, never crashes.
 
 Mock style mirrors tests/test_shell_cmd_safe_mode.py. The instance is a real AgentInstance-
@@ -22,6 +26,7 @@ _queue_tool_warning would no-op and the warning assertion would be vacuous (the 
 called out in state_ops.kv_save_effectively_enabled's docstring).
 """
 
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -146,31 +151,42 @@ def _gpu(index, free_mb):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 1. Low RAM + autoloader + capable → force safe (routes to _execute_safe) + warning.
+# 1. Low RAM + autoloader + capable → force safe (routes to _execute_safe), no
+#    premature tool warning; the reason is logged instead.
 # ────────────────────────────────────────────────────────────────────────────
 
 
 class TestAutoForcesSafe:
-    def test_low_ram_forces_execute_safe_and_queues_warning(self):
+    def test_low_ram_forces_execute_safe_without_premature_warning(self, caplog):
         inst, pool, tool = _wire()
 
         # Drive the REAL ram_vram_pressure by stubbing only the status fetch.
         status = _status(ram_free=1000)  # 1000 < AUTO_RAM_FLOOR → force_safe
 
-        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status), \
-              patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
-              patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync, \
-              patch.object(tool, '_launch_async', side_effect=lambda **k: 'ASYNC') as m_async:
+        with (
+            patch('agent_cascade.state_ops.probe_memory_status', return_value=status) as m_probe,
+            caplog.at_level(logging.INFO, logger='agent_cascade.tools.custom.shell_cmd'),
+            patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe,
+            patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync,
+            patch.object(tool, '_launch_async', side_effect=lambda **k: 'ASYNC') as m_async,
+        ):
             out = tool.call({'command': 'python heavy.py', 'justification': 'run it'})
             assert out == 'SAFE'
             m_safe.assert_called_once()
             m_sync.assert_not_called()
             m_async.assert_not_called()
+            # Execution witness: the probe DID see low RAM and force safe, so the empty
+            # warning list below proves "forced and queued nothing", not "hook skipped".
+            m_probe.assert_called_once()
 
-        # The informational "why safe" warning was queued on the instance.
-        assert any('Running in SAFE mode: free system RAM' in w for w in inst._tool_warnings), \
-            f'expected a safe-mode explanation warning: {inst._tool_warnings}'
-        assert any(f'< floor {AUTO_RAM_FLOOR} MB' in w for w in inst._tool_warnings)
+        # BUG_0174 / 42956f47: the queued warning claimed "local model unloaded" BEFORE the
+        # approval gate, so a denied command made it false. No pre-command warning may return;
+        # the accurate notification is _execute_safe's [safe] note (gated on `freed`).
+        assert inst._tool_warnings == [], \
+            f'forced-safe must not queue a pre-command warning: {inst._tool_warnings}'
+        # The "why safe" diagnostic is still emitted, at INFO (kept by the same commit).
+        assert any('Auto safe-mode: free RAM 1000 MB < floor' in rec.getMessage()
+                   for rec in caplog.records), caplog.text
 
     def test_low_ram_beats_auto_async(self):
         """Forced-safe takes precedence over auto-async: a long-timeout auto command that
@@ -179,7 +195,7 @@ class TestAutoForcesSafe:
 
         status = _status(ram_free=500)  # below floor
 
-        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status), \
+        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status) as m_probe, \
               patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
               patch.object(tool, '_launch_async', side_effect=lambda **k: 'ASYNC') as m_async:
             # timeout=300 > AUTO_ASYNC_TIMEOUT_THRESHOLD → auto-async would normally fire.
@@ -187,7 +203,9 @@ class TestAutoForcesSafe:
             assert out == 'SAFE'
             m_safe.assert_called_once()
             m_async.assert_not_called()  # async launch skipped
-        assert any('Running in SAFE mode' in w for w in inst._tool_warnings)
+            m_probe.assert_called_once()  # witness: the floor was actually evaluated
+        assert inst._tool_warnings == [], \
+            f'forced-safe must not queue a pre-command warning: {inst._tool_warnings}'
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -306,7 +324,7 @@ class TestAutoExplicitWins:
             assert out == 'SYNC'
             m_sync.assert_called_once()
             m_safe.assert_not_called()  # explicit sync wins over the RAM floor
-        assert not any('Running in SAFE mode' in w for w in inst._tool_warnings)
+        assert inst._tool_warnings == [], inst._tool_warnings  # BUG_0174: no queued safe warning
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -330,23 +348,28 @@ class TestAutoFloorsFromSettings:
             assert out == 'SYNC'
             m_sync.assert_called_once()
             m_safe.assert_not_called()
-        assert not any('Running in SAFE mode' in w for w in inst._tool_warnings)
+        assert inst._tool_warnings == [], inst._tool_warnings  # BUG_0174: no queued safe warning
 
-    def test_high_floor_forces_safe(self):
+    def test_high_floor_forces_safe(self, caplog):
         """Same status (free RAM 2000 MB) DOES force safe when the configured floor is above
         it (8192). Pairs with the test above to bracket the floor read."""
         inst, pool, tool = _wire(ram_floor=8192)
 
         status = _status(ram_free=2000)  # 2000 < 8192 floor → forced
 
-        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status), \
-              patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
-              patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync:
+        with (
+            patch('agent_cascade.state_ops.probe_memory_status', return_value=status),
+            caplog.at_level(logging.INFO, logger='agent_cascade.tools.custom.shell_cmd'),
+            patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe,
+            patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync,
+        ):
             out = tool.call({'command': 'python heavy.py', 'justification': 'run it'})
             assert out == 'SAFE'
             m_safe.assert_called_once()
             m_sync.assert_not_called()
-        assert any('< floor 8192 MB' in w for w in inst._tool_warnings)
+        # BUG_0174: no pre-command tool warning; the configured floor is named in the log.
+        assert inst._tool_warnings == [], inst._tool_warnings
+        assert any('< floor 8192 MB' in rec.getMessage() for rec in caplog.records), caplog.text
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -410,21 +433,27 @@ class TestAutoDefensiveEdges:
             m_safe.assert_not_called()
             m_probe.assert_not_called()  # no instance → no probe
 
-    def test_settings_missing_uses_default_floor(self):
+    def test_settings_missing_uses_default_floor(self, caplog):
         """pool.settings is None → getattr fallback uses the default AUTO_RAM_FLOOR, so low RAM
         still forces safe. Proves the fallback path, not a hardcoded skip."""
         inst, pool, tool = _wire(no_settings=True)
 
         status = _status(ram_free=1000)  # 1000 < default AUTO_RAM_FLOOR → forced
 
-        with patch('agent_cascade.state_ops.probe_memory_status', return_value=status), \
-              patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe, \
-              patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync:
+        with (
+            patch('agent_cascade.state_ops.probe_memory_status', return_value=status),
+            caplog.at_level(logging.INFO, logger='agent_cascade.tools.custom.shell_cmd'),
+            patch.object(tool, '_execute_safe', side_effect=lambda **k: 'SAFE') as m_safe,
+            patch.object(tool, '_execute_sync', side_effect=lambda **k: 'SYNC') as m_sync,
+        ):
             out = tool.call({'command': 'python heavy.py', 'justification': 'run it'})
             assert out == 'SAFE'
             m_safe.assert_called_once()
             m_sync.assert_not_called()
-        assert any(f'< floor {AUTO_RAM_FLOOR} MB' in w for w in inst._tool_warnings)
+        # BUG_0174: no pre-command tool warning; the DEFAULT floor is named in the log.
+        assert inst._tool_warnings == [], inst._tool_warnings
+        assert any(f'< floor {AUTO_RAM_FLOOR} MB' in rec.getMessage()
+                   for rec in caplog.records), caplog.text
 
     def test_status_missing_ram_keys_not_forced(self):
         """A non-empty status dict that lacks a usable ram.free_mb must NOT force safe and must
@@ -479,4 +508,4 @@ class TestAutoDefensiveEdges:
             m_async.assert_called_once()
             m_safe.assert_not_called()
             m_probe.assert_not_called()  # explicit async → AUTO hook skipped entirely
-        assert not any('Running in SAFE mode' in w for w in inst._tool_warnings)
+        assert inst._tool_warnings == [], inst._tool_warnings  # BUG_0174: no queued safe warning
