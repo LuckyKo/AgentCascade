@@ -875,7 +875,7 @@ class GrepMixin:
 
         except subprocess.TimeoutExpired:
             logger.warning(
-                f"grep subprocess timed out after {timeout}s (pattern/scope too broad); returning error instead of falling back to Python"
+                f"grep subprocess timed out after {int(timeout)}s; falling back to Python"
             )
             return None, 0, True, False, 0, None, 0, 0
 
@@ -1084,14 +1084,15 @@ class GrepMixin:
                                                ignore_vcs=ignore_vcs, smart_case=smart_case,
                                                literal=literal, head_scan=False) \
                     if _max_mb > 0 else {'large_files': 0, 'total_bytes': 0}
-                if _diag['large_files']:
-                    _total_gb = _diag['total_bytes'] / (1024 ** 3)
-                    return (f"ERROR: Search timed out after {int(timeout)}s — the scope contains "
-                            f"{_diag['large_files']} file(s) larger than {_max_mb} MB "
-                            f"(>= {_total_gb:.1f} GB total). grep does not stream files that large; "
-                            f"use read_file to inspect a file's header/metadata, or narrow "
-                            f"include/exclude to smaller files.")
-                return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
+                if not _diag['large_files']:
+                    return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
+                # BUG_0185: large files in scope — fall through to the Python fallback,
+                # which skips over-size files and continues searching the rest of the
+                # corpus. The fallback reports the skipped files as a "search INCOMPLETE"
+                # note so a caller knows absence is not conclusive.
+                # Note: this means the scope is walked twice (diag scan + fallback walk).
+                # Intentional: the diagnostic only counts large files; the fallback does
+                # the actual content search and header recovery the diagnostic can't.
             if results is not None:
                 if count == 0 and not _sub_truncated:
                     logger.debug(f"grep: subprocess found no matches for '{pattern}'")
@@ -1127,12 +1128,12 @@ class GrepMixin:
                             _head_kb = _head_bytes // 1024
                             _summary = f"Found {_large['count']} matches for '{pattern}'{searched_note}"
                             _partial = ' (scan limit reached)' if _large['partial'] else ''
-                            _summary += (f" [note: matched in the first {_head_kb} KiB of "
-                                         f"{_large['scanned']} file(s) larger than {_max_mb} MB{_partial}; "
+                            _summary += (f" [search INCOMPLETE — matched in the first {_head_kb} KiB of "
+                                         f"{_large['scanned']} file(s) > {_max_mb} MB{_partial}; "
                                          f"full file content was not streamed — use read_file for more]")
                             return f"{_summary}:\n\n" + '\n'.join(_large['formatted'])
                         if _large['large_files']:
-                            summary += (f" [note: {_large['large_files']} file(s) larger than "
+                            summary += (f" [search INCOMPLETE — {_large['large_files']} file(s) > "
                                         f"{_max_mb} MB were not searched in full (only the first "
                                         f"{_head_bytes // 1024} KiB was scanned); use read_file to "
                                         f"inspect their headers/content]")
@@ -1232,6 +1233,7 @@ class GrepMixin:
             _large_max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else 0
             _large_skipped = 0
             _large_scanned = 0
+            _large_skipped_paths: list = []
 
             # When include is "*" (all files), use os.walk with directory skipping to match
             # subprocess behavior. rglob("*") doesn't respect ignores and only matches root level.
@@ -1328,12 +1330,14 @@ class GrepMixin:
                     if _size > _large_max_bytes:
                         # BUG_0169: skip the full read; scan only the header.
                         _large_skipped += 1
+                        try:
+                            _rel_large = str(file_path.relative_to(resolved)).replace('\\', '/')
+                        except ValueError:
+                            _rel_large = file_path.name
+                        if len(_large_skipped_paths) < 11:
+                            _large_skipped_paths.append(_rel_large)
                         if _large_scanned < _scan_limit:
                             _large_scanned += 1
-                            try:
-                                _rel_large = str(file_path.relative_to(resolved)).replace('\\', '/')
-                            except ValueError:
-                                _rel_large = file_path.name
                             _head_hits = self._head_scan_matches(file_path, _rel_large,
                                                                  pattern_re, _head_bytes)
                             if _head_hits:
@@ -1406,13 +1410,20 @@ class GrepMixin:
 
             if not results:
                 if was_timed_out:
-                    return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
+                    _timeout_msg = f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
+                    if _large_skipped:
+                        _skipped_list = ', '.join(_large_skipped_paths[:10])
+                        _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
+                        _timeout_msg += (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
+                                         f"{_skipped_list}{_more}]")
+                    return _timeout_msg
                 exclude_info = f", excluding {exclude}" if exclude else ''
                 _large_note = ''
                 if _large_skipped:
-                    _large_note = (f" [note: {_large_skipped} file(s) larger than {_max_mb} MB were "
-                                   f"not read in full (only the first {_head_bytes // 1024} KiB was "
-                                   f"scanned); use read_file to inspect their headers/content]")
+                    _skipped_list = ', '.join(_large_skipped_paths[:10])
+                    _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
+                    _large_note = (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
+                                   f"{_skipped_list}{_more}; use read_file to inspect their headers/content]")
                 return (f"No matches found for pattern '{pattern}' in {path}/**/{include}"
                         f"{exclude_info}{searched_note}{_large_note}")
 
@@ -1420,9 +1431,10 @@ class GrepMixin:
             if context > 0:
                 summary += f" (with {context} line(s) of context)"
             if _large_skipped:
-                summary += (f" [note: {_large_skipped} file(s) larger than {_max_mb} MB were not "
-                            f"read in full; only their first {_head_bytes // 1024} KiB was scanned "
-                            f"— use read_file for more]")
+                _skipped_list = ', '.join(_large_skipped_paths[:10])
+                _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
+                summary += (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
+                            f"{_skipped_list}{_more}; use read_file for more]")
             output_text = _grep_body_with_legend(results, context, match_count)
 
             if was_timed_out:

@@ -60,7 +60,8 @@ class TestLargeFileHeaderScan:
 
         assert out.startswith('Found 1 matches'), out
         assert 'model.ninfer' in out
-        assert 'larger than 1 MB' in out, 'the result must say the file was not streamed in full'
+        assert 'search INCOMPLETE' in out, 'the result must mark the search as incomplete'
+        assert '> 1 MB' in out
         assert 'read_file' in out
         assert 'timed out' not in out.lower()
 
@@ -73,7 +74,8 @@ class TestLargeFileHeaderScan:
             out = _make_om(tmp_path).grep('needle', '.', include='*.ninfer')
 
         assert out.startswith('No matches found'), out
-        assert 'larger than 1 MB' in out
+        assert 'search INCOMPLETE' in out
+        assert '> 1 MB' in out
         assert 'use read_file' in out
 
     def test_include_filter_is_honoured_by_the_header_scan(self, tmp_path):
@@ -100,7 +102,7 @@ class TestLargeFileHeaderScan:
 
 
 class TestTimeoutMessage:
-    def test_timeout_names_the_over_size_files_instead_of_the_pattern(self, tmp_path):
+    def test_timeout_falls_through_to_fallback_with_incomplete_note(self, tmp_path):
         (tmp_path / 'a.ninfer').write_bytes(b'header\n' + PAYLOAD)
         (tmp_path / 'b.ninfer').write_bytes(b'header\n' + PAYLOAD)
         om = _make_om(tmp_path)
@@ -111,10 +113,38 @@ class TestTimeoutMessage:
         with _patch_cap():
             out = om.grep('needle', '.', include='*.ninfer', timeout=5.0)
 
-        assert out.startswith('ERROR: Search timed out'), out
-        assert '2 file(s) larger than 1 MB' in out, out
+        # BUG_0185: the search no longer aborts — it falls through to the Python
+        # fallback, which skips the over-size files and reports the gap.
+        assert out.startswith('No matches found'), out
+        assert 'search INCOMPLETE' in out, out
+        assert '2 file(s) > 1 MB' in out, out
         assert 'read_file' in out
-        assert 'too broad' not in out
+
+    def test_timeout_with_no_large_files_still_says_too_broad(self, tmp_path):
+        """Regression: the 'too broad' ERROR is preserved when no large files are in scope."""
+        (tmp_path / 'small.txt').write_text('nothing here\n', encoding='utf-8')
+        om = _make_om(tmp_path)
+        om._try_subprocess_grep = lambda *a, **k: (None, 0, True, False, 0, None, 0, 0)
+
+        with _patch_cap():
+            out = om.grep('needle', '.', include='*.txt', timeout=5.0)
+
+        assert out.startswith('ERROR: Search timed out'), out
+        assert 'too broad' in out, out
+
+    def test_skipped_files_truncated_at_10_paths(self, tmp_path):
+        """The INCOMPLETE note shows at most 10 paths, then '(+N more)'."""
+        for i in range(12):
+            (tmp_path / f'f{i}.ninfer').write_bytes(b'x\n' + PAYLOAD)
+        om = _make_om(tmp_path)
+        om._try_subprocess_grep = lambda *a, **k: (None, 0, True, False, 0, None, 0, 0)
+
+        with _patch_cap():
+            out = om.grep('needle', '.', include='*.ninfer', timeout=5.0)
+
+        assert 'search INCOMPLETE' in out, out
+        assert '12 file(s) > 1 MB' in out, out
+        assert '(+2 more)' in out, out
 
 
 class TestPythonFallbackGuard:
@@ -129,7 +159,7 @@ class TestPythonFallbackGuard:
 
         assert out.startswith('Found 1 matches'), out
         assert 'model.ninfer' in out
-        assert 'larger than 1 MB' in out
+        assert '> 1 MB' in out
 
 
 class TestLargeFileScanHelper:
