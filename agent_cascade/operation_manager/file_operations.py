@@ -1407,8 +1407,89 @@ class FileOpsMixin:
 
         if match_mode == 'exact':
             count = file_content.count(old_content)
+            _normalized_fallback = False
             if count == 0:
-                return f"ERROR: Pattern not found in {path} (exact) — try heuristic match_mode or include more context lines"
+                # BUG_0186: tab/space normalization fallback — the caller may have
+                # transcribed read_file output with spaces where the file uses tabs
+                # (or vice versa). Normalize both sides (tab → 4 spaces) and retry.
+                _TAB_W = 4
+                norm_old = old_content.replace('\t', ' ' * _TAB_W)
+                norm_file = file_content.replace('\t', ' ' * _TAB_W)
+                norm_count = norm_file.count(norm_old)
+
+                if norm_count == 0:
+                    # No match even after normalization — emit a helpful diff hint
+                    _old_ls = old_content.splitlines()
+                    _file_ls = file_content.splitlines()
+                    _hint = ''
+                    for _i in range(min(len(_old_ls), len(_file_ls))):
+                        _a = _old_ls[_i].replace('\t', ' ' * _TAB_W)
+                        _b = _file_ls[_i].replace('\t', ' ' * _TAB_W)
+                        if _a != _b:
+                            _hint = (f"first diff at line {_i + 1}: "
+                                    f"old_content={_a[:50]!r} vs file={_b[:50]!r}")
+                            break
+                    if not _hint:
+                        if len(_old_ls) != len(_file_ls):
+                            _hint = (f"old_content has {len(_old_ls)} line(s) "
+                                    f"but file has {len(_file_ls)}")
+                        else:
+                            _hint = 'whitespace-only mismatch (tab vs space)'
+                    return (f"ERROR: Pattern not found in {path} (exact) — {_hint}. "
+                            f"Try heuristic match_mode or include more context lines")
+
+                # Normalized match found — extract the raw (tab-indented) file content
+                # so the replacement operates on the file's actual bytes.
+                _normalized_fallback = True
+                count = norm_count
+                norm_start = norm_file.index(norm_old)
+                # Mid-line guard: if the match starts mid-line in the normalized file,
+                # the line-snapping approach would over-capture (include the line's
+                # prefix). Reject it and suggest a safer match mode.
+                if norm_start > 0 and norm_file[norm_start - 1] != '\n':
+                    return (f"ERROR: Pattern not found in {path} (exact) — the "
+                            f"tab/space-normalized match starts mid-line, which is "
+                            f"ambiguous. Try heuristic match_mode, or include the "
+                            f"full line in old_content.")
+                _sl = norm_file[:norm_start].count('\n')
+                norm_end = norm_start + len(norm_old)
+                # End-of-match guard: if the match ends mid-line in the normalized
+                # file, the line-snapping reconstruction would over-capture the
+                # line's suffix. Reject it. Skipped when norm_old ends with a
+                # newline — the match ends at a line boundary by definition.
+                if (not norm_old.endswith(('\n', '\r'))
+                        and norm_end < len(norm_file)
+                        and norm_file[norm_end] not in ('\n', '\r')):
+                    return (f"ERROR: Pattern not found in {path} (exact) — the "
+                            f"tab/space-normalized match ends mid-line, which is "
+                            f"ambiguous. Try heuristic match_mode, or include the "
+                            f"full line in old_content.")
+                _el = (norm_file[:norm_end - 1].count('\n')
+                       if norm_old.endswith(('\n', '\r'))
+                       else norm_file[:norm_end].count('\n'))
+                _raw_lines = file_content.splitlines(keepends=True)
+                actual_old_content = ''.join(_raw_lines[_sl:_el + 1])
+                # If old_content has no trailing newline, the line-snapping
+                # reconstruction may include the file's trailing newline, which
+                # would cause the replacement to glue to the next line.
+                if not old_content.endswith(('\n', '\r')) and actual_old_content.endswith(('\n', '\r')):
+                    actual_old_content = actual_old_content.rstrip('\r\n')
+                match_start_pos = file_content.index(actual_old_content)
+                match_end_pos = match_start_pos + len(actual_old_content)
+                exact_start_line = _sl + 1
+                exact_end_line = _el + 1
+            else:
+                # Raw match — existing position computation
+                match_start_pos = file_content.index(old_content)
+                match_end_pos = match_start_pos + len(actual_old_content)
+                exact_start_line = file_content[:match_start_pos].count('\n') + 1
+                # BUG FIX: Trailing newline is a terminator, not the start of a new line.
+                # Count newlines up to just before the trailing newline if present.
+                if actual_old_content and (actual_old_content[-1] == '\r' or actual_old_content[-1] == '\n'):
+                    exact_end_line = file_content[:match_end_pos - 1].count('\n') + 1
+                else:
+                    exact_end_line = file_content[:match_end_pos].count('\n') + 1
+
             if occurrence is not None:
                 # Coerce/validate the occurrence index (LLMs may send a string).
                 # A 1-based index selects the Nth match; -1 is a sentinel meaning
@@ -1427,25 +1508,21 @@ class FileOpsMixin:
             # BUG_0095: an identity replacement changes nothing. Returning here (before the
             # approval/backup/write section) keeps the agent from believing a fix landed when
             # nothing changed, and leaves no backup artifact behind.
-            if new_content == old_content:
+            # (Skipped for the normalized fallback: the file has tabs, old_content has
+            # spaces, so the replacement always changes bytes.)
+            if not _normalized_fallback and new_content == old_content:
                 return 'NO-OP: old_content and new_content are identical — nothing changed. No backup written.'
 
-            # Record match position for feedback message (line range).
-            # occurrence is 1-based; None (or a unique pattern) selects the 1st match.
-            # Advance by len(old_content) so the Nth occurrence matches str.count()
-            # semantics (non-overlapping), keeping the range check above consistent.
-            match_start_pos = file_content.index(old_content)
-            if occurrence is not None and occurrence != -1:
+            # Advance to Nth occurrence (raw match only — the normalized fallback
+            # already computed match_start_pos for the 1st match).
+            if (not _normalized_fallback
+                    and occurrence is not None and occurrence != -1):
                 for _ in range(occurrence - 1):
                     match_start_pos = file_content.index(old_content, match_start_pos + len(old_content))
-            match_end_pos = match_start_pos + len(actual_old_content)
-            exact_start_line = file_content[:match_start_pos].count('\n') + 1
-            # BUG FIX: Trailing newline is a terminator, not the start of a new line.
-            # Count newlines up to just before the trailing newline if present.
-            if actual_old_content and (actual_old_content[-1] == '\r' or actual_old_content[-1] == '\n'):
-                exact_end_line = file_content[:match_end_pos - 1].count('\n') + 1
-            else:
-                exact_end_line = file_content[:match_end_pos].count('\n') + 1
+            elif _normalized_fallback and occurrence is not None and occurrence not in (1, -1):
+                return (f"ERROR: occurrence={occurrence} is not supported with the "
+                        f"tab/space-normalized fallback (only the 1st match is found). "
+                        f"Use occurrence=1 or match_mode='heuristic'.")
         elif match_mode in ('heuristic', 'heuristic_agnostic'):
             file_lines = file_content.splitlines(keepends=True)
 
@@ -1662,6 +1739,49 @@ class FileOpsMixin:
                     adjusted_lines.append(_render_indent(base_width) + body)
 
                 new_content = ''.join(adjusted_lines)
+                # BUG_0186: preserve trailing lines when new_content is shorter than the
+                # matched region. If the replacement covers fewer non-blank lines than
+                # the matched block, shorten the deletion span so the uncovered trailing
+                # lines (e.g. a function's parameter list) survive the edit.
+                _n_new_nb = sum(1 for l in new_content.splitlines() if l.strip())
+                _n_old_nb = sum(1 for l in file_lines[orig_start_idx:orig_end_idx + 1] if l.strip())
+                if _n_new_nb < _n_old_nb:
+                    _trailing_start = orig_end_idx + 1  # default: no trailing lines
+                    _nb = 0
+                    for _i in range(orig_start_idx, orig_end_idx + 1):
+                        if file_lines[_i].strip():
+                            _nb += 1
+                            if _nb == _n_new_nb:
+                                _trailing_start = _i + 1
+                                break
+                    if _trailing_start <= orig_end_idx:
+                        # Deletion-aware guard: if every non-blank line in new_content
+                        # is already present in the full matched region, the edit is an
+                        # intentional deletion — don't resurrect the trailing lines.
+                        # Compare whitespace-normalized content (file_lines use keepends,
+                        # new_content.splitlines() does not).
+                        _norm = lambda s: ''.join(s.split())
+                        _matched_norm = {_norm(l) for l in file_lines[orig_start_idx:orig_end_idx + 1] if l.strip()}
+                        _new_nb = [l for l in new_content.splitlines() if l.strip()]
+                        if all(_norm(l) in _matched_norm for l in _new_nb):
+                            # Intentional deletion — leave the trailing lines to be
+                            # removed by the full-span replacement.
+                            pass
+                        else:
+                            # Ensure new_content ends with a newline so it doesn't glue
+                            # to the first preserved tail line.
+                            if new_content and not new_content.endswith(('\n', '\r')):
+                                _last_covered = file_lines[_trailing_start - 1]
+                                if _last_covered.endswith('\r\n'):
+                                    new_content += '\r\n'
+                                elif _last_covered.endswith('\n'):
+                                    new_content += '\n'
+                                elif _last_covered.endswith('\r'):
+                                    new_content += '\r'
+                            # Shorten the deletion span — the trailing lines survive
+                            # because they are excluded from actual_old_content.
+                            actual_old_content = ''.join(file_lines[orig_start_idx:_trailing_start])
+                            exact_end_line = _trailing_start
 
             # Phase 3 — Validation: increment-based indentation anomaly detection
             from collections import Counter
