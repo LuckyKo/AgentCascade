@@ -55,6 +55,7 @@ const THROTTLE = Object.freeze({
   RENDER_BASE_MS: 250,         // base streaming render throttle (sub-agent + root; raised to reduce image re-decode pressure during streaming)
   RENDER_ROOT_MAX_MS: 500,     // root agent max render throttle cap (adaptive)
   RENDER_STREAM_SMOOTH_MS: 100, // dedicated smooth cadence for VISIBLE growing stream content (perceived "periodic refresh"); overrides the coarse adaptive throttle only while the on-screen bubble is actively growing
+  RENDER_STREAM_MAX_MS: 500,    // ceiling for the adaptive smooth cadence (matches RENDER_ROOT_MAX_MS); prevents a slow render from stalling the visible refresh for seconds
   ACTIVITY_BAR_RENDER_MS: 200, // ActivityBar full render throttle
   GEN_STATS_MS: 500,           // gen stats update throttle (~2Hz)
   CONTROLS_MS: 1000,           // controls update throttle (~1Hz)
@@ -540,10 +541,10 @@ function scrollPanelToBottom(panel, name, force = false) {
     if (lock) {
       lock.locked = true;
       lock.programmaticScrollCount++;
-      scroll.scrollTop = scroll.scrollHeight;
+      scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'instant' });
     } else {
       // Fallback for panels without lock
-      scroll.scrollTop = scroll.scrollHeight;
+      scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'instant' });
     }
   }
 }
@@ -2642,7 +2643,10 @@ function handleServerMessage(data) {
       // for VISIBLE growing content, which uses a dedicated smooth cadence (RENDER_STREAM_SMOOTH_MS)
       // so on-screen streaming paints at a predictable ~100ms rhythm (the "periodic refresh" the
       // user perceives). Hidden agents and non-growing frames keep the coarse adaptive throttle.
-      const renderThrottle = visibleContentGrowing ? THROTTLE.RENDER_STREAM_SMOOTH_MS : subThrottleContent;
+      // Adaptive: use measured render duration to avoid re-triggering a slow render at the fixed 100ms cadence,
+      // capped at RENDER_STREAM_MAX_MS so the visible refresh never stalls past the repo's render-throttle ceiling.
+      const smoothCadence = Math.min(THROTTLE.RENDER_STREAM_MAX_MS, Math.max(THROTTLE.RENDER_STREAM_SMOOTH_MS, state.genStats.lastSubAgentRenderDuration || 0));
+      const renderThrottle = visibleContentGrowing ? smoothCadence : subThrottleContent;
       const shouldRender = completionDetected ||
                            stackChanged ||
                            subAgentNewVisibleMessage ||
@@ -4983,7 +4987,8 @@ function renderSubAgentPanel(panel, agentData, name) {
   // Include streaming state in contentKey so bubble UI (waiting animation, token count) updates even when content dims match
   const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0') + ':' + tokPart + ':' + toolSig;
 
-  if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
+  const contentUnchanged = panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length;
+  if (contentUnchanged) {
     // Nothing changed — skip scrollHeight read and all DOM updates.
     // BUT during active streaming, force at least one render per throttle cycle to catch
     // incremental append drift (raw text appended via updateBubbleContent may diverge from
@@ -5117,14 +5122,19 @@ function renderSubAgentPanel(panel, agentData, name) {
   // after DOM update ensures we use the current scrollHeight.
   if (subAgentScrollLocks[name] && isVisible) {
     const lock = subAgentScrollLocks[name];
-    const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < AUTO_SCROLL_THRESHOLD;
-
     if (lock.locked) {
       // Force scroll to bottom
       scrollPanelToBottom(panel, name, true);
-    } else if (atBottom) {
-      // User scrolled back to bottom — re-enable auto-scroll
-      lock.locked = true;
+    } else if (!contentUnchanged) {
+      // Only read scrollHeight (forces reflow) when content actually changed this tick.
+      // This branch runs only when the lock is already off (user scrolled up); the
+      // scroll-handler debounce (app.js:385-388) independently re-enables the lock on
+      // any user scroll event, so skipping the read here cannot leave the scroll stuck.
+      const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < AUTO_SCROLL_THRESHOLD;
+      if (atBottom) {
+        // User scrolled back to bottom — re-enable auto-scroll
+        lock.locked = true;
+      }
     }
   }
 }

@@ -2487,16 +2487,6 @@ body {
   color: #000;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.waiting-spin {
-  display: inline-block;
-  animation: spin 2s linear infinite;
-  margin-right: 4px;
-}
 
 /* ─── Context Bar ─────────────────────────────────────────────────────────── */
 
@@ -2959,7 +2949,6 @@ body {
 
 /* ─── GPU Savings: Pause infinite animations when NOT generating ──────────── */
 body:not(.is-generating) .sub-tab-pulse,
-body:not(.is-generating) .activity-queued,
-body:not(.is-generating) .waiting-spin {
+body:not(.is-generating) .activity-queued {
   animation-play-state: paused !important;
 }
