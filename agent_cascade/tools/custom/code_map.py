@@ -154,6 +154,7 @@ class CodeMap(BaseTool):
             'cpp': [
                 (r'^\s*(?:class|struct|enum|namespace)\s+(\w+)', 'class'),
                 (r'^\s*(?:[\w:*&<>]+)\s+(\w+)\s*\([^)]*\)\s*(?:const|override|final)?\s*(?:[:{]|$)', 'func'),
+                (r'^(?:[\w:*&<>]+\s+)?(\w+(?:::\w+)+)\s*\(', 'member'),
             ],
             'csharp': [
                 (r'^\s*(?:public|protected|private|internal|partial)?\s*(?:static|abstract|sealed|partial)?\s*(?:class|interface|struct|enum|record)\s+(\w+)',
@@ -229,6 +230,8 @@ class CodeMap(BaseTool):
                         result.append(f"L{i}: interface {name}")
                     elif p_type in ('func', 'method', 'arrow'):
                         result.append(f"L{i}: function {name}")
+                    elif p_type == 'member':
+                        result.append(f"L{i}: member {name}")
                     elif p_type == 'type':
                         result.append(f"L{i}: type {name}")
                     elif p_type == 'impl':
@@ -254,4 +257,13 @@ class CodeMap(BaseTool):
             if lang == 'markdown':
                 return 'No headings found in Markdown file.'
             return f"No recognizable structures found for {lang}."
+
+        # Stub-map warning: flag suspiciously sparse results
+        entry_count = len(result) - 1  # exclude header
+        line_count = len(lines)
+        if (entry_count < 3 and line_count > 100) or (line_count > 100 and entry_count < line_count * 0.02):
+            result.append(
+                f"\n[heuristic parser produced {entry_count} entries for a {line_count}-line file — map may be incomplete]"
+            )
+
         return '\n'.join(result)
