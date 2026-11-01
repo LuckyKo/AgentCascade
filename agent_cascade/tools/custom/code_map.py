@@ -3,12 +3,7 @@ import re
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
-
-# Attempt to import Pygments for better cross-language tokenization
-try:
-    HAS_PYGMENTS = True
-except ImportError:
-    HAS_PYGMENTS = False
+from agent_cascade.tools.custom import cpp_lex
 
 
 @register_tool('code_map')
@@ -132,6 +127,11 @@ class CodeMap(BaseTool):
             result = ['# Markdown Code Map\n(ATX headings only; fenced code blocks ignored)\n']
         else:
             result = [f"# {lang.capitalize()} Code Map (Heuristic)\n"]
+        # C/C++: run the patterns against a length-preserving code-only view so
+        # comments, string/char literals and raw-string bodies cannot invent
+        # phantom entries (newlines are preserved, so line numbers stay valid).
+        if lang in ('cpp', 'c'):
+            content = cpp_lex.neutralize(content)
         lines = content.splitlines()
 
         # Regex patterns for common languages
@@ -154,7 +154,22 @@ class CodeMap(BaseTool):
             'cpp': [
                 (r'^\s*(?:class|struct|enum|namespace)\s+(\w+)', 'class'),
                 (r'^\s*(?:[\w:*&<>]+)\s+(\w+)\s*\([^)]*\)\s*(?:const|override|final)?\s*(?:[:{]|$)', 'func'),
-                (r'^(?:[\w:*&<>]+\s+)?(\w+(?:::\w+)+)\s*\(', 'member'),
+                # 1) definition with the body opener on the same line (accepts
+                #    indentation). The lazy return-type prefix is word-boundary-
+                #    guarded by (?<![\w:]) so the qualified name is not truncated
+                #    (e.g. SessionHasher::SessionHasher must not capture as
+                #    essionHasher::SessionHasher).
+                (r'^\s*(?:[\w:*&<>,\s]*?)(?<![\w:])(\w+(?:::\w+)+)\s*\([^)]*\)\s*'
+                 r'(?:const|noexcept|override|final|volatile)*\s*(?:\{|:|$)', 'member'),
+                # 2) column-0 qualified definition (optional return type) whose
+                #    signature continues on the next line. Deduped against
+                #    pattern 1 per line below. The (?<![\w:]) guard keeps the
+                #    optional return-type prefix from truncating the name.
+                #    NOTE (OQ-2): multi-line *indented* member definitions are
+                #    out of scope — a continuation-line heuristic measured 5
+                #    false positives on the fixtures, so only the tight
+                #    same-line / column-0 patterns are shipped.
+                (r'^(?:[\w:*&<>]+\s+)?(?<![\w:])(\w+(?:::\w+)+)\s*\(', 'member_open'),
             ],
             'csharp': [
                 (r'^\s*(?:public|protected|private|internal|partial)?\s*(?:static|abstract|sealed|partial)?\s*(?:class|interface|struct|enum|record)\s+(\w+)',
@@ -190,9 +205,10 @@ class CodeMap(BaseTool):
         fence_char = None  # '`' or '~'
         fence_len = 0  # length of opening fence
 
-        # Simple line-by-line regex matching
-        # Note: This is naive and will match inside strings/comments unless we use Pygments
+        # Simple line-by-line regex matching (C/C++ runs against the neutralized
+        # view, so string/comment bodies no longer produce phantom entries).
         for i, line in enumerate(lines, 1):
+            member_emitted = False  # dedup: first matching member pattern per line wins
             # Handle fenced code blocks for markdown
             if lang == 'markdown':
                 stripped = line.strip()
@@ -230,7 +246,10 @@ class CodeMap(BaseTool):
                         result.append(f"L{i}: interface {name}")
                     elif p_type in ('func', 'method', 'arrow'):
                         result.append(f"L{i}: function {name}")
-                    elif p_type == 'member':
+                    elif p_type in ('member', 'member_open'):
+                        if member_emitted:
+                            continue  # same-line definition already emitted by an earlier pattern
+                        member_emitted = True
                         result.append(f"L{i}: member {name}")
                     elif p_type == 'type':
                         result.append(f"L{i}: type {name}")

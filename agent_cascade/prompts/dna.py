@@ -857,7 +857,8 @@ TOOL_METADATA = {
                         'Auto-detects the language from the file extension and applies the '
                         'appropriate syntax checker. Works with Python, JavaScript, TypeScript, '
                         'JSON, YAML, TOML, XML, HTML, CSS, C, C++, C#, Java, Go, Rust, and more. '
-                        'Returns "Valid (<language>)" or a detailed error message.'),
+                        'Returns "Valid (<language>)" or a detailed error message. '
+                        'C/C++ results are heuristic/advisory when no C++ compiler is available on the host.'),
         'parameters': {
             'path': 'Path to the file to check, absolute or relative to the workspace root.'
         }

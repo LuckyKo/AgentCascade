@@ -100,3 +100,73 @@ class TestStubWarning:
         assert 'map may be incomplete' not in result, (
             f"Unexpected stub warning on dense map:\n{result}"
         )
+
+
+class TestNoPhantomEntries:
+    """Comments and raw-string bodies must not produce phantom map entries.
+
+    Uses the synthetic file from plan §2.1: a raw string and a block comment each
+    contain a whole fake class. Only the real ``RealClass`` may appear.
+    """
+
+    SYNTH = '''#include <string>
+const char* r = R"code(
+class InRawString {
+    void member_in_raw();
+}
+)code";
+int real;
+/*
+class InBlockComment {
+    void in_comment();
+}
+*/
+class RealClass {
+    void real_method();
+};
+'''
+
+    def test_raw_string_body_has_no_phantoms(self, code_map):
+        result = map_cpp(code_map, self.SYNTH)
+        for phantom in ('InRawString', 'member_in_raw', 'InBlockComment', 'in_comment'):
+            assert phantom not in result, (
+                f"Phantom entry '{phantom}' leaked from a comment/raw-string:\n{result}"
+            )
+
+    def test_real_class_still_present(self, code_map):
+        result = map_cpp(code_map, self.SYNTH)
+        # Only the real class (caught by the `class` pattern) survives; the
+        # fake classes inside the raw string / block comment are blanked.
+        assert 'class RealClass' in result, (
+            f"Real class 'RealClass' missing from map:\n{result}"
+        )
+
+
+class TestIndentedMemberDefinitions:
+    """A same-line qualified definition that is indented (not column-0) is
+    still caught by the ``member`` pattern (``^\\s*`` allows leading whitespace)."""
+
+    def test_indented_qualified_definition(self, code_map):
+        content = (
+            'namespace ns {\n'
+            'struct Inner {\n'
+            'public:\n'
+            '    void Inner::indented_helper() {\n'
+            '        int x = 1;\n'
+            '    }\n'
+            '};\n'
+            '}\n'
+        )
+        result = map_cpp(code_map, content)
+        assert 'Inner::indented_helper' in result, (
+            f"Indented qualified definition not caught:\n{result}"
+        )
+
+    def test_indented_definition_no_duplicate(self, code_map):
+        # A same-line definition must be emitted exactly once (member_open is
+        # deduped against member on the same line).
+        content = 'void Foo::bar() {\n    int x = 1;\n}\n'
+        result = map_cpp(code_map, content)
+        assert result.count('Foo::bar') == 1, (
+            f"Duplicate entry for same-line definition:\n{result}"
+        )

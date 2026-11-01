@@ -1,10 +1,13 @@
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, Union
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.custom import cpp_lex
 
 # ── Extension → language mapping ───────────────────────────────────────────────
 _EXT_LANG_MAP: Dict[str, str] = {
@@ -221,88 +224,124 @@ def _check_css(content: str, _path: str) -> str:
     return 'Valid'
 
 
-def _check_c_family(content: str, _path: str) -> str:
-    """Check C-family languages for balanced braces, parens, and brackets.
+def _balance_scan(view: str) -> list[str]:
+    """Scan a code-only view (strings/comments already neutralized) for
+    unbalanced brackets/braces/parens. Returns a list of human-readable
+    findings (an empty list means the file is balanced).
 
-    Handles strings (double/single/backtick), comments (// and /* */),
-    regex literals (/pattern/flags with character classes), and multiline
-    strings/template literals by persisting state across lines.
-
-    Note: Braces inside template ${...} expressions are not tracked;
-    division vs. regex ambiguity is resolved via a preceding-char heuristic.
+    This is the single shared bracket-stacking routine used by both
+    ``_check_c_family`` and ``_check_cpp`` (DRY). Line numbers are recovered by
+    counting newlines, which the neutralized views preserve.
     """
     errors = []
     stack = []
     match_map = {')': '(', ']': '[', '}': '{'}
     open_chars = set('({[')
+    line_no = 1
+    for ch in view:
+        if ch == '\n':
+            line_no += 1
+            continue
+        if ch in match_map:
+            expected = match_map[ch]
+            if not stack:
+                errors.append(f"Line {line_no}: Unexpected '{ch}' "
+                              f"with no matching '{expected}'")
+            elif stack[-1][0] != expected:
+                opener, open_line = stack[-1]
+                errors.append(f"Line {line_no}: '{ch}' does not match "
+                              f"'{opener}' opened at line {open_line}")
+                stack.pop()
+            else:
+                stack.pop()
+        elif ch in open_chars:
+            stack.append((ch, line_no))
+    for opener, open_line in stack:
+        close_char = {'{': '}', '(': ')', '[': ']'}[opener]
+        errors.append(f"Line {open_line}: Unclosed '{opener}' (expected '{close_char}')")
+    return errors
 
-    # State persists across lines (multiline strings/template literals)
+
+def _c_family_neutralize(content: str) -> str:
+    """Build a length-preserving code-only view of C-family source.
+
+    String literals (double/single/backtick), ``//`` and ``/* */`` comments, and
+    regex-literal bodies are blanked to spaces (newlines preserved) so a plain
+    bracket scan (_balance_scan) sees only real code. This is the C-family
+    analogue of ``cpp_lex.neutralize``; it keeps the regex/template branches
+    that are real in JavaScript/TypeScript/PHP/Perl/R. A quote only closes a
+    literal opened by the SAME quote type (D-4: a ``'`` never terminates a
+    ``"..."`` string).
+
+    DRY seam (D-6): the comment/string-blanking core overlaps with
+    ``cpp_lex.neutralize``. If you fix a comment/string edge case there, apply
+    the same fix here (and vice-versa).
+    """
+    out_lines = []
     in_string = False
     string_char = ''
     in_block_comment = False
-
-    lines = content.splitlines()
-    for line_no, line in enumerate(lines, 1):
-        prev_ch = ''
+    for line in content.splitlines():
+        chars = []
+        n = len(line)
         i = 0
-        while i < len(line):
+        prev_ch = ''
+        while i < n:
             ch = line[i]
-
-            # Handle block comment state (/* ... */)
+            # block comment body
             if in_block_comment:
                 if prev_ch == '*' and ch == '/':
                     in_block_comment = False
+                chars.append(' ')
                 prev_ch = ch
                 i += 1
                 continue
-
-            # Check for comment start (only outside strings)
-            if ch == '/' and not in_string and i + 1 < len(line):
-                next_ch = line[i + 1]
-                if next_ch == '/':
-                    break  # rest of line is a line comment
-                elif next_ch == '*':
+            # comment start
+            if ch == '/' and not in_string and i + 1 < n:
+                nxt = line[i + 1]
+                if nxt == '/':
+                    chars.extend(' ' * (n - i))  # rest of line is a line comment
+                    break
+                if nxt == '*':
                     in_block_comment = True
+                    chars.append(' ')
                     prev_ch = ch
                     i += 1
                     continue
-
-            # Check for string start/close (handles ", ', `)
+            # string start / content / close
             if ch in ('"', "'", '`'):
-                # Inside a backtick template literal, ' and " are plain characters
-                # (they cannot terminate the template — only an unescaped ` can).
-                # Ignoring them prevents the state machine from getting stuck when a
-                # multi-line template contains HTML/text with apostrophes or quotes.
-                # Best-effort: this is not a full template-literal parser, so nested
-                # templates inside ${...} interpolations are not modeled (escaped `
-                # IS handled by the backslash count below); exotic cases may still misparse.
+                # Inside a backtick template literal, ' and " are plain
+                # characters (only an unescaped ` can terminate the template).
                 if in_string and string_char == '`' and ch != '`':
+                    chars.append(' ')
                     prev_ch = ch
                     i += 1
                     continue
                 if not in_string:
                     in_string = True
                     string_char = ch
+                    chars.append(' ')
                     prev_ch = ch
                     i += 1
                     continue
-                else:
-                    # Count preceding backslashes to check for escape
-                    backslash_count = 0
-                    for j in range(i - 1, -1, -1):
-                        if line[j] == '\\':
-                            backslash_count += 1
-                        else:
-                            break
-                    if backslash_count % 2 == 0:
-                        in_string = False
+                # D-4: a quote only closes a literal opened by the SAME quote type.
+                if ch != string_char:
+                    chars.append(' ')  # foreign quote is string content
                     prev_ch = ch
                     i += 1
                     continue
-
-            # Detect regex literal /pattern/flags
-            # Regex starts with / when preceded by an operator, delimiter, or at line start.
-            # Includes ) and ] since after closing parens/brackets a common next token is a regex.
+                backslash_count = 0
+                j = i - 1
+                while j >= 0 and line[j] == '\\':
+                    backslash_count += 1
+                    j -= 1
+                if backslash_count % 2 == 0:
+                    in_string = False
+                chars.append(' ')
+                prev_ch = ch
+                i += 1
+                continue
+            # regex literal /pattern/flags
             if ch == '/' and not in_string:
                 before = ''
                 j = i - 1
@@ -310,70 +349,144 @@ def _check_c_family(content: str, _path: str) -> str:
                     j -= 1
                 if j >= 0:
                     before = line[j]
-
-                # Preceding chars that indicate a regex (not division).
-                # j < 0 means start-of-line after whitespace, also valid for regex.
-                if (before in ('(', ')', '[', ']', '=', '!', '&', '|', '^', ',', ';', ':', '?', '~') or i == 0 or
-                        j < 0):
-                    # Scan forward to find the closing /
+                if (before in ('(', ')', '[', ']', '=', '!', '&', '|', '^', ',', ';', ':', '?', '~')
+                        or i == 0 or j < 0):
                     j = i + 1
-                    while j < len(line):
+                    while j < n:
                         if line[j] == '\\':
-                            j += 2  # skip escaped character inside regex
+                            j += 2
                             continue
-                        elif line[j] == '[':
-                            # Skip character class (handles [a-z], [\w\d], etc.)
+                        if line[j] == '[':
                             k = j + 1
-                            while k < len(line):
+                            while k < n:
                                 if line[k] == '\\':
                                     k += 2
                                     continue
-                                elif line[k] == ']':
+                                if line[k] == ']':
                                     break
                                 k += 1
                             j = k + 1
                             continue
-                        elif line[j] == '/':
-                            # Found closing slash, skip any flags (giu, etc.)
+                        if line[j] == '/':
                             j += 1
-                            while (j < len(line) and (line[j].isalpha() or line[j] in '_')):
+                            while j < n and (line[j].isalpha() or line[j] == '_'):
                                 j += 1
-                            i = j - 1  # will be incremented at end of loop
                             break
-                        # (spaces are naturally skipped by the loop increment below)
                         j += 1
-                    prev_ch = ch
-                    i += 1
+                    chars.append(' ' * (j - i))  # blank the whole regex body
+                    i = j
                     continue
-
-            # Track bracket/brace/paren balance (skip characters inside strings)
-            if not in_string:
-                if ch in match_map:
-                    expected = match_map[ch]
-                    if not stack:
-                        errors.append(f"Line {line_no}: Unexpected '{ch}' "
-                                      f"with no matching '{expected}'")
-                    elif stack[-1][0] != expected:
-                        opener, open_line = stack[-1]
-                        errors.append(f"Line {line_no}: '{ch}' does not match "
-                                      f"'{opener}' opened at line {open_line}")
-                        stack.pop()
-                    else:
-                        stack.pop()
-                elif ch in open_chars:
-                    stack.append((ch, line_no))
-
+            # code character
+            chars.append(ch)
             prev_ch = ch
             i += 1
+        out_lines.append(''.join(chars))
+    return '\n'.join(out_lines)
 
-    # Report any unclosed brackets/braces/parens
-    for opener, line_no in stack:
-        close_char = {'{': '}', '(': ')', '[': ']'}[opener]
-        errors.append(f"Line {line_no}: Unclosed '{opener}' (expected '{close_char}')")
 
+def _check_c_family(content: str, _path: str) -> str:
+    """Check C-family languages for balanced braces, parens, and brackets.
+
+    Strings/comments/regex-literals are neutralized first (_c_family_neutralize),
+    then the shared _balance_scan reports any unbalanced delimiters. Serves the
+    13 non-C/C++ C-family languages (JS/TS/C#/Java/Go/Rust/Kotlin/Swift/Scala/
+    PHP/Lua/Perl/R) — regex and template-literal branches are kept because they
+    are real in those languages (D-6).
+    """
+    view = _c_family_neutralize(content)
+    errors = _balance_scan(view)
     if errors:
         return 'Syntax Issues:\n' + '\n'.join(errors[:20])
     return 'Valid'
+
+
+# ── C/C++ checker (BUG_0193) ─────────────────────────────────────────────────
+
+# Genuine grammar-error markers (report as findings) vs. include/environment
+# failures (do NOT report as a syntax finding — fall back to the heuristic).
+_FATAL_PATTERNS = (
+    r"expected ';'", r'expected unqualified-id', r'unbalanced',
+    r'expected expression', r"expected '}'", r'mismatched close delimiter',
+    r'C2059', r'C2143', r'C1003', r'C1009', r'C1075',
+    r'C1513', r'C1514', r'C2447', r'C2449',
+)
+_NONFATAL_PATTERNS = (
+    r'C1083', r'cannot open include file', r'fatal error: .*not found',
+    r'LNK1181', r'no such file or directory',
+)
+
+
+def _classify_compiler_output(output: str) -> str:
+    """Classify compiler diagnostics as 'fatal' (genuine grammar errors, report
+    them) or 'nonfatal' (include/environment failures — fall back to the
+    heuristic). A fatal grammar marker trumps an include failure."""
+    if any(re.search(p, output) for p in _FATAL_PATTERNS):
+        return 'fatal'
+    return 'nonfatal'
+
+
+def _first_include_error(output: str) -> str:
+    """Return the first include/environment failure line (for the advisory
+    label); falls back to the first non-empty line."""
+    for line in output.splitlines():
+        if re.search(r'C1083|cannot open include file|fatal error: .*not found', line, re.IGNORECASE):
+            return line.strip()
+    for line in output.splitlines():
+        if line.strip():
+            return line.strip()
+    return 'include'
+
+
+def _run_compiler(compiler, path: str):
+    """Run the syntax-only compiler gate. Returns ``(exit_code, output)`` or
+    ``None`` on timeout / OS error (the caller treats ``None`` as "no usable
+    compiler" and falls back to the heuristic)."""
+    exe, extra = compiler
+    base = os.path.basename(exe).lower()
+    is_c = path.lower().endswith('.c')
+    if base == 'cl.exe':
+        cmd = [exe, '/Zs', '/nologo', '/c'] + list(extra) + [path]
+    else:
+        cmd = [exe, '-fsyntax-only', '-x', 'c' if is_c else 'c++'] + list(extra) + [path]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=20)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    output = (proc.stderr or '') + (proc.stdout or '')
+    return (proc.returncode, output)
+
+
+def _check_cpp(content: str, path: str) -> str:
+    """Check C/C++ syntax.
+
+    Runs the shared bracket scan over a ``cpp_lex.neutralize``d view. If a C++
+    compiler is discoverable, a 20 s syntax-only gate is attempted: a clean
+    exit is authoritative "Valid", fatal grammar diagnostics are reported, and
+    include/environment failures fall back to the labelled heuristic so a
+    missing include is never reported as a syntax finding. When no compiler is
+    available (the default on most hosts) the labelled heuristic is returned.
+
+    Returns a string, or a ``(result, advisory_label)`` tuple for the heuristic
+    paths (the wrapper appends the label after the OK/ERROR prefix).
+    """
+    view = cpp_lex.neutralize(content)
+    findings = _balance_scan(view)
+    base = 'Syntax Issues:\n' + '\n'.join(findings[:20]) if findings else 'Valid'
+    compiler = cpp_lex.find_compiler()
+    if compiler:
+        result = _run_compiler(compiler, path)
+        if result is not None:
+            exit_code, output = result
+            if exit_code == 0:
+                return 'Valid'  # authoritative, no advisory label
+            if _classify_compiler_output(output) == 'fatal':
+                lines = [l for l in output.splitlines() if l.strip()][:20]
+                return 'Compiler Issues:\n' + '\n'.join(lines)
+            first = _first_include_error(output)
+            label = f'heuristic, advisory — compiler present but includes unresolved: {first}'
+            return (base, label)
+    label = 'heuristic, advisory — no C++ compiler found'
+    return (base, label)
 
 
 def _check_bash(content: str, _path: str) -> str:
@@ -433,8 +546,8 @@ _CHECKER_MAP = {
     'css': _check_css,
     'bash': _check_bash,
     # C-family languages all use bracket/brace matching
-    'c': _check_c_family,
-    'cpp': _check_c_family,
+    'c': _check_cpp,
+    'cpp': _check_cpp,
     'csharp': _check_c_family,
     'java': _check_c_family,
     'javascript': _check_c_family,
@@ -528,8 +641,16 @@ class SyntaxCheck(BaseTool):
         try:
             result = checker(content, str(abs_path))
             line_count = len(content.splitlines())
-            if result == 'Valid':
-                return f"OK: {rel_path} syntax valid ({lang}, {line_count} lines)"
-            return f"ERROR: {rel_path} syntax error ({lang}) — {result}"
+            if isinstance(result, tuple):
+                base, advisory = result
+            else:
+                base, advisory = result, None
+            if base == 'Valid':
+                out = f"OK: {rel_path} syntax valid ({lang}, {line_count} lines)"
+            else:
+                out = f"ERROR: {rel_path} syntax error ({lang}) — {base}"
+            if advisory:
+                out += f" ({advisory})"
+            return out
         except Exception as e:
             return f"Error during syntax check: {str(e)}"
