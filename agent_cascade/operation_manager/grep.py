@@ -1084,7 +1084,13 @@ class GrepMixin:
                                                ignore_vcs=ignore_vcs, smart_case=smart_case,
                                                literal=literal, head_scan=False) \
                     if _max_mb > 0 else {'large_files': 0, 'total_bytes': 0}
-                if not _diag['large_files']:
+                # BUG_0185: the diagnostic walk runs under a budget (GREP_LARGE_FILE_SCAN_BUDGET_S),
+                # so on a huge tree it can expire BEFORE reaching the oversized files and report
+                # large_files==0 even though they exist. partial=True is the helper's "I did not see
+                # the whole scope" flag — when it is set the "no large files" reading is
+                # inconclusive, so fall through to the Python fallback (skip-and-continue) instead of
+                # claiming the scope was "too broad".
+                if not _diag['large_files'] and not _diag.get('partial'):
                     return f"ERROR: Search timed out after {int(timeout)}s — the pattern/scope was too broad to be useful. Narrow your search to a specific directory or use a more specific pattern."
                 # BUG_0185: large files in scope — fall through to the Python fallback,
                 # which skips over-size files and continues searching the rest of the

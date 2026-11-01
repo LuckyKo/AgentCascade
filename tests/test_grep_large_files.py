@@ -132,6 +132,30 @@ class TestTimeoutMessage:
         assert out.startswith('ERROR: Search timed out'), out
         assert 'too broad' in out, out
 
+    def test_timeout_inconclusive_diagnostic_falls_through(self, tmp_path):
+        """BUG_0185 hardening: an inconclusive diagnostic must not claim 'too broad'.
+
+        The oversized-file diagnostic runs under GREP_LARGE_FILE_SCAN_BUDGET_S; on a huge tree
+        it can expire before reaching the over-size files and report partial=True with
+        large_files==0. That is an *inconclusive* reading, so grep must fall through to the
+        Python fallback (skip-and-continue → 'search INCOMPLETE') instead of the 'too broad'
+        ERROR. Patching the budget to -1.0 makes the diagnostic walk expire immediately,
+        mirroring test_budget_expiry_marks_the_report_partial.
+        """
+        (tmp_path / 'a.ninfer').write_bytes(b'header\n' + PAYLOAD)
+        (tmp_path / 'b.ninfer').write_bytes(b'header\n' + PAYLOAD)
+        om = _make_om(tmp_path)
+        om._try_subprocess_grep = lambda *a, **k: (None, 0, True, False, 0, None, 0, 0)
+
+        with _patch_cap(), patch('agent_cascade.settings.GREP_LARGE_FILE_SCAN_BUDGET_S', -1.0):
+            out = om.grep('needle', '.', include='*.ninfer', timeout=5.0)
+
+        # Inconclusive diagnostic → fallback, not the 'too broad' ERROR.
+        assert out.startswith('No matches found'), out
+        assert 'search INCOMPLETE' in out, out
+        assert '2 file(s) > 1 MB' in out, out
+        assert 'too broad' not in out, out
+
     def test_skipped_files_truncated_at_10_paths(self, tmp_path):
         """The INCOMPLETE note shows at most 10 paths, then '(+N more)'."""
         for i in range(12):
