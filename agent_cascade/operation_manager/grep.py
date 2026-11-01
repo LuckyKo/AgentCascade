@@ -1050,7 +1050,6 @@ class GrepMixin:
         per_file: dict = {}
         per_pattern: dict = {}
         total = 0
-        files_searched = 0
         skipped_count = 0
         skipped_paths: list = []
         timed_out = False
@@ -1129,7 +1128,6 @@ class GrepMixin:
                             per_file[rel_str] = per_file.get(rel_str, 0) + len(_hits)
                             total += len(_hits)
                     continue
-                files_searched += 1
                 try:
                     # BUG_0145: 'replace' keeps non-UTF-8 lines countable, matching the rg path.
                     content = fp.read_text(encoding='utf-8', errors='replace')
@@ -1140,7 +1138,7 @@ class GrepMixin:
                         _tally(rel_str, line)
 
         return self._format_count_result(
-            pattern, searched_note, per_file, per_pattern, total, files_searched,
+            pattern, searched_note, per_file, per_pattern, total,
             alts, partial_error, timed_out, skipped_count, skipped_paths, _max_mb,
             ignore_vcs, resolved, include, exclude, smart_case, literal, timeout)
 
@@ -1150,7 +1148,6 @@ class GrepMixin:
                              per_file: dict,
                              per_pattern: dict,
                              total: int,
-                             files_searched: int,
                              alts,
                              partial_error: bool,
                              timed_out: bool,
@@ -1171,10 +1168,11 @@ class GrepMixin:
         full) + the per-pattern breakdown + the integrity notes.
         """
         if total == 0:
-            base = f"0 matching lines for '{pattern}'"
-            if files_searched:
-                base += f" ({files_searched} files searched)"
-            base += searched_note
+            # BUG_0190: no (N files searched) parenthetical — the rg path does not
+            # track a file count (rg handles traversal internally), so the number
+            # would be 0 on the fast path and non-zero on the fallback. The
+            # searched_note already names the search root.
+            base = f"0 matching lines for '{pattern}'{searched_note}"
             if ignore_vcs:
                 _hidden = self._probe_ignored_matches(
                     pattern=pattern, path=resolved, include=include, exclude=exclude,
