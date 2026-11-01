@@ -845,3 +845,8 @@ CANDIDATE_MAX_PENDING_DAYS: float = float(os.getenv(
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
 MIN_SKILL_BODY_LENGTH: int = 100  # Minimum body char count for skill validation
 MIN_DESCRIPTION_LENGTH: int = 20  # Minimum description length for skill validation
+# BUG_0199: propose_skill's non-fatal unresolved-skill-reference scan (advisory only — it
+# never blocks registration or candidate promotion).
+SKILL_REF_SCAN_MODE: str = os.getenv('AGENT_CASCADE_SKILL_REF_SCAN_MODE', 'hybrid')  # hybrid | cue | typo | off
+SKILL_REF_SUGGEST_CUTOFF: float = 0.6  # difflib similarity floor for "did you mean" suggestions
+SKILL_REF_MAX_REPORT: int = 5  # Cap on unresolved references listed per response (+N more)

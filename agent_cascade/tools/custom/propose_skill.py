@@ -9,9 +9,16 @@ mode (name + rating, no content) records a rating without modifying content.
 
 import logging
 import re
+from difflib import get_close_matches
 
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.settings import SKILL_DUP_SIM_THRESHOLD, SKILL_MATCH_THRESHOLD
+from agent_cascade.settings import (
+    SKILL_DUP_SIM_THRESHOLD,
+    SKILL_MATCH_THRESHOLD,
+    SKILL_REF_MAX_REPORT,
+    SKILL_REF_SCAN_MODE,
+    SKILL_REF_SUGGEST_CUTOFF,
+)
 from agent_cascade.skills.matcher import find_similar_skills, skill_frontmatter_text
 from agent_cascade.skills.parser import (
     _needs_quoting,
@@ -167,6 +174,164 @@ def _merge_registered_frontmatter(existing_meta, skill_content):
             lines.append(f'{key}: {_quote_scalar(value) if _needs_quoting(value) else value}')
     lines.append('---')
     return '\n'.join(lines) + '\n\n' + skill_content
+
+
+# ── BUG_0199: unresolved inline skill-reference scan (advisory, non-fatal) ────
+# A skill body conventionally points at sibling skills by name (`Pair with
+# `skill-name`` / `[[wiki-target]]`). Those pointers are not validated today, so a
+# typo (e.g. a misspelled sibling skill) serves silently. The scan below reports
+# names that resolve to NO registered skill as a non-fatal warning — it never
+# blocks registration or candidate promotion (rating-driven, manager side).
+#
+# Two tiers keep the false-positive rate low (measured over the live library):
+#   cue tier  — shaped tokens (>=3 hyphen segments) in a reference-cue position
+#              ("Pair with", "Related", "see `x`", ...); line-level, so a chain
+#              like "Pair with `a` (…) and `b`" counts for every token on the line.
+#   typo tier — shaped tokens (>=2 hyphen segments) within Levenshtein distance 2
+#              of a registered name, ANY position; catches typos of short names.
+# `[[wiki]]` targets additionally resolve against the in-memory .agent_lessons
+# memory index (memory names are not skills; flagging them is a false positive).
+_SKILL_REF_HEADER = '⚠️ SKILL-REFERENCE WARNING'
+# Backtick-quoted and [[wiki]] targets, >=3 hyphen-separated segments (cue tier).
+_SKILL_REF_TOKEN_RE = re.compile(r'`([a-z][a-z0-9_]+(?:-[a-z0-9_]+){2,})`')
+_SKILL_REF_WIKI_RE = re.compile(r'\[\[([a-z][a-z0-9_]+(?:-[a-z0-9_]+){2,})\]\]')
+# Typo tier: >=2 segments, so 2-segment skill names are typo-checkable too.
+_SKILL_REF_TOKEN_LOOSE_RE = re.compile(r'`([a-z][a-z0-9_]+(?:-[a-z0-9_]+){1,})`')
+_SKILL_REF_WIKI_LOOSE_RE = re.compile(r'\[\[([a-z][a-z0-9_]+(?:-[a-z0-9_]+){1,})\]\]')
+# Line-level cue test (NOT token-adjacency: chained references on one line must all count).
+_SKILL_REF_CUE_RE = re.compile(
+    r'(?i)\b(pair with|paired with|pair|related|see also|see|use|load_skill|'
+    r'combine with|follow[- ]?up|supersedes?)\b')
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Levenshtein edit distance between two strings (stdlib-only DP)."""
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _collect_skill_reference_names(skill_manager, agent_pool) -> tuple:
+    """Return ``(registered_names, memory_names)`` as lowercase sets.
+
+    ``registered_names`` comes from the full listing scan (active + candidate +
+    disabled-but-servable — the same set ``scan_skills`` lists), so a reference
+    to any of them is resolvable. ``memory_names`` is the in-memory
+    ``.agent_lessons`` index (vault-relative ``.md`` stems); it whitelists
+    ``[[wiki]]`` targets that point at project memories, not skills. No disk
+    walk: a missing index simply yields an empty whitelist (defensive — the
+    scan must never block registration).
+    """
+    registered = set()
+    try:
+        for meta in skill_manager.get_all_metadata(include_active_only=False):
+            name = str(meta.get('name', '') or '').lower()
+            if name:
+                registered.add(name)
+    except Exception as e:  # pragma: no cover - defensive; scan must not break propose
+        logger.debug('[PROPOSE-SKILL] reference scan: registry listing failed (%s)', e)
+    memory_names = set()
+    hint_manager = getattr(agent_pool, 'memory_hint_manager', None)
+    indexes = getattr(hint_manager, '_vault_indexes', None)
+    if isinstance(indexes, dict):
+        try:
+            for idx in indexes.values():
+                for rel_path in idx.documents:
+                    stem = str(rel_path).rsplit('/', 1)[-1]
+                    if stem.endswith('.md'):
+                        stem = stem[:-3]
+                    if stem:
+                        memory_names.add(stem.lower())
+        except Exception as e:  # pragma: no cover - defensive; scan must not break propose
+            logger.debug('[PROPOSE-SKILL] reference scan: memory index read failed (%s)', e)
+    return registered, memory_names
+
+
+def _unresolved_skill_references(
+    body: str,
+    own_name: str,
+    registered: set,
+    memory_names: set,
+) -> list:
+    """Scan a skill BODY for cross-references that resolve to no registered skill.
+
+    Returns a deduplicated list (case-insensitive) of
+    ``(token, tier, edit_distance, suggestion)`` tuples, where tier is 1 (cue
+    position) or 2 (typo of a registered name) and ``suggestion``/distance are
+    None/0 when no close match exists. The skill's own name is never flagged;
+    with an empty registry the scan short-circuits (nothing is resolvable, so
+    nothing is reportable). Caveat: the cue-anchored tier can over-trigger on
+    a >=3-segment backtick token that is a config key / non-skill name on a
+    cue line (e.g. "Pair with `foo-bar-baz`"); non-fatal advisory.
+    """
+    if not registered or SKILL_REF_SCAN_MODE == 'off':
+        return []
+    # Own-name exclusion (also suppresses a reference to the OLD name on a rename
+    # update — the body is renamed with it, so that is acceptable).
+    own = {own_name.lower()} if own_name else set()
+    sorted_registered = sorted(registered)
+    items = {}
+    for line in body.splitlines():
+        # Cue tier: shaped (>=3 segments) tokens on a cue line, any position in the line.
+        if _SKILL_REF_CUE_RE.search(line):
+            tokens = _SKILL_REF_TOKEN_RE.findall(line) + _SKILL_REF_WIKI_RE.findall(line)
+        else:
+            # Typo tier: looser shape (>=2 segments) anywhere; only near-matches count.
+            tokens = _SKILL_REF_TOKEN_LOOSE_RE.findall(line) + _SKILL_REF_WIKI_LOOSE_RE.findall(line)
+        for tok in tokens:
+            low = tok.lower()
+            if low in own or low in registered or low in memory_names:
+                continue
+            close = get_close_matches(low, sorted_registered, n=1, cutoff=SKILL_REF_SUGGEST_CUTOFF)
+            best = close[0] if close else None
+            dist = _levenshtein(low, best) if best else 0
+            n_seg = low.count('-') + 1
+            in_cue = bool(_SKILL_REF_CUE_RE.search(line))
+            if in_cue and n_seg >= 3:
+                tier = 1
+            # Typo tier needs a REAL near-registered name (best is not None): without one,
+            # `dist` is 0 and every shaped non-cue token would falsely look like a typo.
+            elif (not in_cue) and n_seg >= 2 and best is not None and dist <= 2:
+                tier = 2
+            else:
+                continue
+            # The SKILL_REF_SCAN_MODE knob selects a single tier when set to 'cue'/'typo'.
+            if (SKILL_REF_SCAN_MODE == 'cue' and tier != 1) or (SKILL_REF_SCAN_MODE == 'typo' and tier != 2):
+                continue
+            if low not in items:
+                items[low] = (tok, tier, dist, best)
+    return list(items.values())
+
+
+def _format_skill_reference_warning(items) -> str:
+    """Render the non-fatal warning block for unresolved skill references (BUG_0199).
+
+    Returns '' when there is nothing to report. At most SKILL_REF_MAX_REPORT
+    items are listed; the overflow is summarized. ``items`` are the tuples
+    produced by :func:`_unresolved_skill_references`.
+    """
+    if not items:
+        return ''
+    shown = items[:SKILL_REF_MAX_REPORT]
+    # Neutral wording: the same block is shown in the approval prompt (BEFORE registration)
+    # and in the success return (AFTER), so it must not claim registration already happened.
+    lines = [f"\n\n{_SKILL_REF_HEADER} (non-blocking advisory — registration and promotion are unaffected):"]
+    for tok, tier, dist, best in shown:
+        if best:
+            lines.append(f'  - unresolved skill reference "{tok}" — did you mean "{best}"? (edit distance {dist}).')
+        else:
+            lines.append(f'  - unresolved skill reference "{tok}" — no registered skill is close to it.')
+        if tier == 2:
+            lines.append('    (referenced outside a "Pair with"/"see" position — this looks like a typo of a registered skill name)')
+    if len(items) > SKILL_REF_MAX_REPORT:
+        lines.append(f'  - (+{len(items) - SKILL_REF_MAX_REPORT} more unresolved references not listed)')
+    return '\n'.join(lines)
 
 
 @register_tool('propose_skill', allow_overwrite=True)
@@ -386,6 +551,27 @@ class ProposeSkill(BaseTool):
             if n.lower() != proposed_name.lower() and s >= SKILL_MATCH_THRESHOLD
         ][:3]
 
+        # ── BUG_0199: unresolved inline skill-reference check (advisory) ──────
+        # The body is final at this point (strict-YAML auto-fix and the body-only
+        # frontmatter merge both ran above; the frontmatter patch below mutates
+        # only the frontmatter span), so the scanned bytes are the registered bytes.
+        # Non-fatal by construction: it appends text to the approval prompt and the
+        # success returns only — no early return, no content mutation, no effect on
+        # the rating-driven candidate promotion.
+        ref_items = []
+        ref_warn = ''
+        try:
+            _, ref_body = parse_frontmatter(skill_content)  # body only — frontmatter is not prose
+            reg_names, mem_names = _collect_skill_reference_names(skill_manager, self.agent_pool)
+            ref_items = _unresolved_skill_references(ref_body, proposed_name, reg_names, mem_names)
+            if ref_items:
+                ref_warn = _format_skill_reference_warning(ref_items)
+                logger.warning('[PROPOSE-SKILL] %s: %d unresolved skill reference(s)',
+                               proposed_name, len(ref_items))
+        except Exception as e:  # pragma: no cover - defensive; a broken warning must never fail propose
+            ref_items, ref_warn = [], ''
+            logger.debug('[PROPOSE-SKILL] reference scan skipped (%s): %r', type(e).__name__, e)
+
         if is_update:
             existing_version = existing_meta.get('version', '1.0.0')
             effective_version = _choose_update_version(proposed_version, existing_version, proposed_name)
@@ -472,6 +658,12 @@ class ProposeSkill(BaseTool):
                             'matches). Consider upgrading one of these instead of creating a duplicate:\n'
                             + '\n'.join(overlap_lines))
 
+        # BUG_0199: unresolved-skill-reference notice (advisory). Surfaced BEFORE the approval
+        # request so the agent can fix a broken pointer instead of wasting a registration.
+        if ref_items:
+            description += ('\n\n⚠️  Skill-reference notice: this body points at skill names that '
+                            'are not registered:\n' + ref_warn.strip())
+
         # Request user approval (same pattern as shell_cmd)
         approved, reason = self.agent_pool.operation_manager.request_user_approval(
             agent_name=agent_name,
@@ -551,8 +743,9 @@ class ProposeSkill(BaseTool):
                 # and the update may be discarded by the gate (BUG_0122).
                 return (f"Skill '{proposed_name}' updated successfully: candidate v{effective_version} "
                         f"is now serving and will be promoted or discarded after enough ratings."
-                        f"{reenabled_note}{yaml_warn}")
-            return f"Skill '{proposed_name}' registered successfully (v{effective_version}).{reenabled_note}{yaml_warn}"
+                        f"{reenabled_note}{yaml_warn}{ref_warn}")
+            return (f"Skill '{proposed_name}' registered successfully (v{effective_version})."
+                    f"{reenabled_note}{yaml_warn}{ref_warn}")
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             action = 'update' if is_update else 'register'

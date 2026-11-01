@@ -3564,6 +3564,495 @@ class TestProposeSkillOverlapGate:
             assert inc_name not in desc, f'trivial overlap {inc_name!r} should be filtered by floor: {desc!r}'
 
 
+class TestProposeSkillCrossReferenceWarning:
+    """BUG_0199 — propose_skill reports a NON-FATAL warning for body references that
+    resolve to no registered skill (backtick names and [[wiki]] targets).
+
+    Revert-proof: every positive test asserts the warning header is present, so
+    stashing the feature makes it fail; negative tests assert the header's absence
+    on paths where a false positive would be a regression.
+    """
+
+    _HEADER = 'SKILL-REFERENCE WARNING'
+
+    def _make_tool(self, fresh_manager):
+        from agent_cascade.tools.custom.propose_skill import ProposeSkill
+        pool = MagicMock()
+        pool.skill_manager = fresh_manager
+        # Auto-approve by default so proposals reach registration.
+        pool.operation_manager.request_user_approval.return_value = (True, '')
+        return ProposeSkill(agent_pool=pool), pool
+
+    @pytest.fixture(autouse=True)
+    def _isolated_metrics(self, fresh_manager, tmp_path):
+        self.manager = fresh_manager
+        _isolate_metrics(fresh_manager, tmp_path, reset=True)
+        yield
+
+    def _approval_description(self, pool):
+        """Return the description string passed to request_user_approval (the approval prompt)."""
+        call_kwargs = pool.operation_manager.request_user_approval.call_args.kwargs
+        return call_kwargs.get('description', '')
+
+    def _register_target(self, m, name):
+        """Register a resolvable target skill so references to it resolve."""
+        task = f'{name} target skill for reference resolution'
+        content = _make_skill_content(
+            name=name,
+            description=task,
+            triggers=['refres', 'target'],
+            generated_from_task=task,
+        )
+        assert m.register_skill_from_content(content, task_text=task)[0], 'target registration failed'
+
+    def test_resolvable_backtick_reference_no_warning(self, fresh_manager):
+        """A backtick reference to a REGISTERED skill produces no warning."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        target = f"target-skill-{base}"
+        self._register_target(m, target)
+        new_name = f"backtick-ref-{base}"
+        body = (f"## Instructions\n\nPair with `{target}` for the companion workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Backtick cross-reference resolution scenario for reference scan',
+            triggers=['backtick', 'reference'],
+            body=body,
+            generated_from_task='backtick cross-reference resolution scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result, f'registration failed: {result!r}'
+        assert self._HEADER not in result, f'resolvable reference must not warn: {result!r}'
+
+    def test_resolvable_wiki_reference_no_warning(self, fresh_manager):
+        """A [[wiki]] reference to a REGISTERED skill produces no warning."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        target = f"target-skill-{base}"
+        self._register_target(m, target)
+        new_name = f"wikiref-{base}"
+        body = (f"## Instructions\n\nPair with [[{target}]] for the companion workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Wiki cross-reference resolution scenario for reference scan',
+            triggers=['wikiref', 'reference'],
+            body=body,
+            generated_from_task='wiki cross-reference resolution scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result, f'registration failed: {result!r}'
+        assert self._HEADER not in result, f'resolvable wiki reference must not warn: {result!r}'
+
+    def test_unresolvable_reference_warns_with_suggestion(self, fresh_manager):
+        """A typo'd reference (Levenshtein 1 from a registered name) warns WITH a suggestion,
+        and registration still succeeds (non-fatal)."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        registered = f"cache-miss-trace-{base}"
+        typo = f"cache-mass-trace-{base}"
+        self._register_target(m, registered)
+        new_name = f"typoref-{base}"
+        body = (f"## Instructions\n\nPair with `{typo}` for the companion trace workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Typo cross-reference suggestion scenario for reference scan',
+            triggers=['typoref', 'suggestion'],
+            body=body,
+            generated_from_task='typo cross-reference suggestion scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result, f'warning must be non-fatal: {result!r}'
+        assert self._HEADER in result, f'missing warning: {result!r}'
+        assert f'did you mean "{registered}"' in result, f'missing suggestion: {result!r}'
+        assert 'edit distance 1' in result, f'missing distance: {result!r}'
+
+    def test_typo_outside_cue_position_still_flagged(self, fresh_manager):
+        """The typo tier fires on a plain (non-cue) line: a near-registered name in a bullet."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        registered = f"cache-miss-trace-{base}"
+        typo = f"cache-mass-trace-{base}"
+        self._register_target(m, registered)
+        new_name = f"typotier-{base}"
+        # No cue word on the line ("is the companion approach" carries none).
+        body = (f"## Instructions\n\n- `{typo}` is the companion approach for trace analysis. "
+                'Apply it before finishing the task in this workflow area.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Typo tier non-cue position scenario for reference scan',
+            triggers=['typotier', 'noncue'],
+            body=body,
+            generated_from_task='typo tier non-cue position scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert self._HEADER in result, f'typo tier must flag non-cue typos: {result!r}'
+        assert f'did you mean "{registered}"' in result
+
+    def test_own_name_not_self_flagged(self, fresh_manager):
+        """A skill referencing its OWN name (both forms) is never flagged."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        # Register a target so the registry is non-empty (an empty registry short-circuits
+        # the scan, which would make this test pass for the wrong reason).
+        self._register_target(m, f"target-skill-{base}")
+        new_name = f"selfref-check-{base}"  # >=3 segments so it would be cue-tier shaped
+        body = (f"## Instructions\n\nPair with `{new_name}` for the follow-up step. "
+                f"Also see [[{new_name}]] for the full procedure and related guidance.\n")
+        content = _make_skill_content(
+            name=new_name,
+            description='Self reference exclusion scenario for reference scan',
+            triggers=['selfref', 'exclusion'],
+            body=body,
+            generated_from_task='self reference exclusion scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert self._HEADER not in result, f'self-name must not be flagged: {result!r}'
+
+    def test_code_identifier_not_flagged(self, fresh_manager):
+        """Ordinary code identifiers in non-cue lines are NOT skill references (false-positive guard)."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        target = f"target-skill-{base}"
+        self._register_target(m, target)
+        new_name = f"coderef-{base}"
+        body = ('## Instructions\n\n'
+                'The helper `difflib.get_close_matches` resolves candidate names. '
+                'A `mixed-line-ending` setting is a separate concern here. '
+                'The value `some_local_var` stays local to the function scope.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Code identifier false positive guard scenario for reference scan',
+            triggers=['coderef', 'identifier'],
+            body=body,
+            generated_from_task='code identifier false positive guard scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert self._HEADER not in result, f'code identifiers must not be flagged: {result!r}'
+
+    def test_no_double_report(self, fresh_manager):
+        """The same broken token in backtick AND wiki form is reported exactly once."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        self._register_target(m, f"target-skill-{base}")  # non-empty registry so the scan runs
+        broken = f"broken-ref-{base}"
+        new_name = f"dedupref-{base}"
+        body = (f"## Instructions\n\nPair with `{broken}` and also [[{broken}]] for the "
+                'companion workflow. Follow the paired procedure before finishing.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Deduplication scenario for reference scan reporting',
+            triggers=['dedupref', 'report'],
+            body=body,
+            generated_from_task='deduplication scenario for reference scan reporting')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert self._HEADER in result
+        assert result.count('unresolved skill reference') == 1, f'double report: {result!r}'
+
+    def test_warning_appended_on_update_candidate_path(self, fresh_manager):
+        """An UPDATE (candidate flow) with a broken reference warns AND reports success."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        name = f"updateref-{base}"
+        target = f"cache-miss-trace-{base}"
+        typo = f"cache-mass-trace-{base}"
+        self._register_target(m, name)
+        self._register_target(m, target)
+        task = f'{name} update with broken cross reference'
+        body = (f"## Instructions\n\nPair with `{typo}` for the companion trace workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=name,
+            description=task,
+            triggers=['updateref', 'candidate'],
+            body=body,
+            generated_from_task=task)
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'updated successfully' in result, f'update failed: {result!r}'
+        assert self._HEADER in result, f'missing warning on update path: {result!r}'
+
+    def test_warning_never_blocks_candidate_promotion(self, fresh_manager):
+        """Promotion is rating-driven and unaffected: a candidate with a broken reference is
+        still promoted once it earns enough better ratings than the incumbent."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        name = f"promoteref-{base}"
+        target = f"cache-miss-trace-{base}"
+        typo = f"cache-mass-trace-{base}"
+        _write_incumbent(m, name, '1.0.0')
+        self._register_target(m, target)
+        task = f'{name} promotion gate scenario with broken reference'
+        body = (f"## Instructions\n\nPair with `{typo}` for the companion trace workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=name,
+            description=task,
+            triggers=['promoteref', 'gate'],
+            body=body,
+            generated_from_task=task)
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'skill_content': content, 'justification': 'j'}))
+        assert 'updated successfully' in result, f'candidate update failed: {result!r}'
+        assert self._HEADER in result, f'missing warning: {result!r}'
+        cand_version = m.get_skill_metadata(name)['version']
+        # Incumbent avg 5.0 (2 ratings) vs candidate avg 9.0 (CANDIDATE_MIN_RATINGS) -> promote.
+        for r in (9.0,) * CANDIDATE_MIN_RATINGS:
+            m.record_rating(name, r)
+        with m._metrics_lock:
+            m._metrics[name]['ratings_by_version']['1.0.0'] = {'count': 2, 'sum': 10.0, 'latest': 6.0}
+        m.evaluate_candidates()
+        from agent_cascade.skills.manager import _PRIORITY_SYSTEM
+        reg = m._skills_registry[name]
+        assert reg['_priority'] == _PRIORITY_SYSTEM, 'candidate with a warning must still be promotable'
+        assert reg['version'] == cand_version
+
+    def test_rating_only_path_unaffected(self, fresh_manager):
+        """Rating-only mode returns before any content handling — never warns."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        name = f"ratingref-{base}"
+        self._register_target(m, name)
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': name, 'rating': 8.5}))
+        assert 'Recorded rating' in result, f'rating-only failed: {result!r}'
+        assert self._HEADER not in result
+
+    def test_rejection_paths_have_no_warning(self, fresh_manager):
+        """Hard-gate and health-check rejections must not carry the advisory warning."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        # (a) Similarity-gate rejection: near-identical frontmatter to an existing skill.
+        inc = f"similar-ref-{base}"
+        inc_task = 'zebra crossing traffic signal audit protocol'
+        inc_content = _make_skill_content(
+            name=inc,
+            description=inc_task,
+            triggers=['zebra', 'crossing'],
+            generated_from_task=inc_task)
+        assert m.register_skill_from_content(inc_content, task_text=inc_task)[0]
+        dup_name = f"similar-ref2-{base}"
+        dup_content = _make_skill_content(
+            name=dup_name,
+            description=inc_task,
+            triggers=['zebra', 'crossing'],
+            generated_from_task=inc_task)
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': dup_name, 'skill_content': dup_content, 'justification': 'j'}))
+        assert result.startswith('REJECTED:'), f'similarity gate should reject: {result!r}'
+        assert self._HEADER not in result, f'rejection must not carry the warning: {result!r}'
+        # (b) Health-check rejection: body below MIN_SKILL_BODY_LENGTH.
+        short_name = f"shortref-{base}"
+        short_content = _make_skill_content(
+            name=short_name,
+            description='Short body health check rejection scenario for reference scan',
+            triggers=['shortref', 'health'],
+            body='short',
+            generated_from_task='short body health check rejection scenario for reference scan')
+        result = tool.call(_json.dumps({'name': short_name, 'skill_content': short_content,
+                                        'justification': 'j'}))
+        assert result.startswith('REJECTED:'), f'health check should reject: {result!r}'
+        assert self._HEADER not in result, f'rejection must not carry the warning: {result!r}'
+
+    def test_notice_also_appears_in_approval_description(self, fresh_manager):
+        """Hook B: the advisory is surfaced in the approval prompt so the pointer can be
+        fixed before wasting a registration."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        self._register_target(m, f"target-skill-{base}")  # non-empty registry so the scan runs
+        broken = f"broken-ref-{base}"
+        new_name = f"apprref-{base}"
+        body = (f"## Instructions\n\nPair with `{broken}` for the companion workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Approval prompt notice scenario for reference scan',
+            triggers=['apprref', 'notice'],
+            body=body,
+            generated_from_task='approval prompt notice scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        desc = self._approval_description(pool)
+        assert 'Skill-reference notice' in desc, f'missing notice in approval prompt: {desc!r}'
+        assert self._HEADER in desc
+        assert f'"{broken}"' in desc
+
+    def test_report_cap(self, fresh_manager):
+        """At most SKILL_REF_MAX_REPORT items are listed; the overflow is summarized."""
+        m = self.manager
+        import json as _json
+        from agent_cascade.tools.custom.propose_skill import SKILL_REF_MAX_REPORT
+        base = _uid()
+        self._register_target(m, f"target-skill-{base}")  # non-empty registry so the scan runs
+        new_name = f"capref-{base}"
+        refs = [f"broken-ref-{c}-{base}" for c in 'abcdefgh']  # 8 distinct broken refs
+        body = '## Instructions\n\n' + ' '.join(f'Pair with `{r}`' for r in refs) + '.\n'
+        content = _make_skill_content(
+            name=new_name,
+            description='Report cap scenario for reference scan',
+            triggers=['capref', 'cap'],
+            body=body,
+            generated_from_task='report cap scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert result.count('unresolved skill reference') == SKILL_REF_MAX_REPORT, f'cap violated: {result!r}'
+        assert f'+{len(refs) - SKILL_REF_MAX_REPORT} more' in result
+
+    def test_disabled_skill_reference_is_not_flagged(self, fresh_manager):
+        """A DISABLED skill that is still servable (on-disk + servable index) resolves: its
+        reference must not be flagged. Mirrors the test_overlap_includes_inactive_skill setup."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        disabled = f"disabled-ref-{base}"
+        _write_incumbent(m, disabled, '1.0.0')
+        assert m.disable_skill(disabled)[0], 'disable failed'
+        # Rebuild the servable index from the on-disk file so get_all_metadata(include_active_only=False)
+        # re-surfaces the disabled name (manager.py: disabled names resolve only via _servable_index).
+        m.discover(m._skill_paths)
+        new_name = f"disref-{base}"
+        body = (f"## Instructions\n\nPair with `{disabled}` for the companion workflow. "
+                'Follow the paired procedure before finishing the task.\n')
+        content = _make_skill_content(
+            name=new_name,
+            description='Disabled skill reference resolution scenario for reference scan',
+            triggers=['disref', 'inactive'],
+            body=body,
+            generated_from_task='disabled skill reference resolution scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        result = tool.call(_json.dumps({'name': new_name, 'skill_content': content, 'justification': 'j'}))
+        assert 'registered successfully' in result
+        assert self._HEADER not in result, f'disabled-but-servable skill must resolve: {result!r}'
+
+    def test_scan_failure_does_not_break_registration(self, fresh_manager):
+        """A raised detector must never fail the registration (whole scan is try/except-wrapped)."""
+        m = self.manager
+        import json as _json
+        base = _uid()
+        new_name = f"scanfail-{base}"
+        content = _make_skill_content(
+            name=new_name,
+            description='Scan failure resilience scenario for reference scan',
+            triggers=['scanfail', 'resilience'],
+            generated_from_task='scan failure resilience scenario for reference scan')
+        tool, pool = self._make_tool(m)
+        with patch('agent_cascade.tools.custom.propose_skill._unresolved_skill_references',
+                   side_effect=RuntimeError('boom')):
+            result = tool.call(_json.dumps({'name': new_name, 'skill_content': content,
+                                            'justification': 'j'}))
+        assert 'registered successfully' in result, f'registration must survive a scan failure: {result!r}'
+        assert self._HEADER not in result
+
+
+class TestSkillReferenceScanHelper:
+    """Pure helper-level tests for the BUG_0199 detector (no manager fixtures needed)."""
+
+    def _scan(self, body, own_name='', registered=None, memory_names=None):
+        from agent_cascade.tools.custom.propose_skill import _unresolved_skill_references
+        return _unresolved_skill_references(
+            body, own_name, registered or set(), memory_names or set())
+
+    def test_tier_classification(self):
+        reg = {'cache-miss-trace-abc'}
+        # Cue tier: >=3-segment shaped tokens on a cue line, even with no close match.
+        items = self._scan('Pair with `cache-mass-trace-abc` and `other-broken-name-xyz`.\n',
+                           'self-skill', reg)
+        assert len(items) == 2
+        by_tok = {it[0].lower(): it for it in items}
+        assert by_tok['cache-mass-trace-abc'][1] == 1, 'cue-position token must be tier 1'
+        assert by_tok['cache-mass-trace-abc'][2] == 1, 'mass->miss is edit distance 1'
+        assert by_tok['cache-mass-trace-abc'][3] == 'cache-miss-trace-abc'
+        assert by_tok['other-broken-name-xyz'][1] == 1
+        assert by_tok['other-broken-name-xyz'][3] is None, 'no close match -> no suggestion'
+        # Typo tier: >=2-segment token on a NON-cue line, within distance 2 of a registered name.
+        items = self._scan('- `cache-mass-trace-abc` is the companion approach.\n',
+                           'self-skill', reg)
+        assert len(items) == 1
+        assert items[0][1] == 2, 'non-cue near-registered token must be tier 2'
+
+    def test_own_name_excluded(self):
+        reg = {'other-skill-name-xyz'}
+        # 'brand-new-skill-abc' is NOT registered, but it is the skill's own name -> excluded.
+        items = self._scan('Pair with `brand-new-skill-abc`.\n', 'brand-new-skill-abc', reg)
+        assert items == []
+
+    def test_dedup_case_insensitive(self):
+        reg = {'alpha-beta-gamma'}
+        body = 'Pair with `Broken-Ref-One-xyz` and `broken-ref-one-xyz` plus [[broken-ref-one-xyz]].\n'
+        items = self._scan(body, 'self', reg)
+        assert len(items) == 1, 'same token in mixed-case backtick + wiki form must report once'
+
+    def test_memory_whitelist_suppresses_wiki_target(self):
+        reg = {'some-registered-skill-name'}
+        # [[some-memory-lesson]] matches the in-memory .agent_lessons index -> not flagged.
+        items = self._scan('Related: [[some-memory-lesson]] and `some-registered-skill-name`.\n',
+                           'self', reg, {'some-memory-lesson'})
+        assert items == []
+        # Without the whitelist the same wiki target IS flagged (proves the whitelist did the work).
+        items = self._scan('Related: [[some-memory-lesson]]\n', 'self', reg, set())
+        assert len(items) == 1
+
+    def test_empty_registry_short_circuits(self):
+        items = self._scan('Pair with `broken-ref-one-xyz`.\n', 'self', set(), set())
+        assert items == []
+
+    def test_scan_mode_knob(self):
+        """SKILL_REF_SCAN_MODE selects a single tier ('cue'/'typo') or disables the scan ('off')."""
+        import agent_cascade.tools.custom.propose_skill as ps
+        reg = {'cache-miss-trace-abc'}
+        cue_body = 'Pair with `other-broken-name-xyz`.\n'
+        typo_body = '- `cache-mass-trace-abc` is the companion approach.\n'
+        with patch.object(ps, 'SKILL_REF_SCAN_MODE', 'off'):
+            assert ps._unresolved_skill_references(cue_body, 'self', reg, set()) == []
+            assert ps._unresolved_skill_references(typo_body, 'self', reg, set()) == []
+        with patch.object(ps, 'SKILL_REF_SCAN_MODE', 'cue'):
+            items = ps._unresolved_skill_references(cue_body, 'self', reg, set())
+            assert len(items) == 1 and items[0][1] == 1, 'cue mode must keep tier 1'
+            assert ps._unresolved_skill_references(typo_body, 'self', reg, set()) == []
+        with patch.object(ps, 'SKILL_REF_SCAN_MODE', 'typo'):
+            assert ps._unresolved_skill_references(cue_body, 'self', reg, set()) == []
+            items = ps._unresolved_skill_references(typo_body, 'self', reg, set())
+            assert len(items) == 1 and items[0][1] == 2, 'typo mode must keep tier 2'
+
+    def test_formatter_cap_and_suggestion(self):
+        from agent_cascade.tools.custom.propose_skill import _format_skill_reference_warning
+        from agent_cascade.tools.custom.propose_skill import SKILL_REF_MAX_REPORT
+        # Suggestion line wording.
+        text = _format_skill_reference_warning([('cache-mass-trace-abc', 1, 1, 'cache-miss-trace-abc')])
+        assert 'did you mean "cache-miss-trace-abc"' in text
+        assert 'edit distance 1' in text
+        # No-suggestion wording.
+        text = _format_skill_reference_warning([('other-broken-name-xyz', 1, 0, None)])
+        assert 'no registered skill is close to it' in text
+        # Cap: 8 items -> SKILL_REF_MAX_REPORT listed + overflow summary.
+        items = [(f'broken-ref-{c}-xyz', 1, 0, None) for c in 'abcdefgh']
+        text = _format_skill_reference_warning(items)
+        assert text.count('unresolved skill reference') == SKILL_REF_MAX_REPORT
+        assert f'+{8 - SKILL_REF_MAX_REPORT} more' in text
+        # Empty.
+        assert _format_skill_reference_warning([]) == ''
+
+
 class TestProposeSkillAutoActivateInactive:
     """Req 3 — auto-activate upgraded-inactive skills via enable_skill on successful registration."""
 
