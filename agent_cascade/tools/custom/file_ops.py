@@ -1392,6 +1392,11 @@ class Grep(BaseTool):
                 'type': 'boolean',
                 'description': TOOL_METADATA['grep']['parameters']['literal']
             },
+            'count_only': {
+                'type': 'boolean',
+                'description': TOOL_METADATA['grep']['parameters']['count_only'],
+                'default': False
+            },
             'timeout': {
                 'type':
                     'number',
@@ -1438,6 +1443,15 @@ class Grep(BaseTool):
             ignore_vcs = bool(ignore_vcs)
         context = params.get('context', 0)
         smart_case = params.get('smart_case', True)
+        # BUG_0190: count-only mode (per-file matching-line counts). None-safe like the
+        # ignore_vcs coercion above — a JSON null must not crash the bool() coercion.
+        count_only = params.get('count_only')
+        if count_only is None:
+            count_only = False
+        elif isinstance(count_only, str):
+            count_only = count_only.lower() in ('true', '1', 'yes', 'on')
+        else:
+            count_only = bool(count_only)
         literal = params.get('literal', False)
         # Default timeout comes from settings (DEFAULT_GREP_TIMEOUT); an explicit
         # caller value still overrides it.
@@ -1469,6 +1483,7 @@ class Grep(BaseTool):
             context=int(context),
             smart_case=bool(smart_case),
             literal=bool(literal),
+            count_only=count_only,
             spill_file_path=spill_file_path)
 
 

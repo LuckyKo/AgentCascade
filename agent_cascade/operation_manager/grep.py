@@ -142,6 +142,131 @@ def _rg_lines_text(lines_data: dict) -> str:
     return text.rstrip('\r\n')
 
 
+def _rg_match_fields(obj: dict):
+    """Extract ``(normalized_path, line_num, match_text)`` from a ripgrep ``--json`` ``match`` event.
+
+    BUG_0190: the single source of truth for match-event field extraction, shared by
+    :func:`_iter_rg_json_matches` (the count path and the BUG_0061 ignored-path probe) and the
+    line-mode ``_parse_rg_json``, so the three cannot drift apart. Returns ``None`` when ``obj``
+    is not a ``match`` event. The line text goes through :func:`_rg_lines_text` (BUG_0145: decodes
+    ``lines.bytes`` for non-UTF-8 lines and strips the trailing newline).
+    """
+    if obj.get('type') != 'match':
+        return None
+    data = obj.get('data', {})
+    file_path = data.get('path', {}).get('text', '')
+    line_num_data = data.get('line_number', 0)
+    if isinstance(line_num_data, dict):
+        line_num = line_num_data.get('start', 0)
+    else:
+        line_num = line_num_data
+    match_text = _rg_lines_text(data.get('lines', {}))
+    return file_path.replace('\\', '/'), line_num, match_text
+
+
+def _iter_rg_json_matches(stdout_text: str):
+    """Yield ``(normalized_path, line_num, match_text)`` for each ripgrep ``--json`` ``match`` event.
+
+    BUG_0190: the shared rg-JSON match parser for the count-only path and the ignored-path probe.
+    One ``match`` event == one reported match line (submatches are deliberately NOT counted).
+    Malformed lines are skipped, never raised.
+    """
+    for line in (stdout_text.split('\n') if stdout_text.strip() else []):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fields = _rg_match_fields(obj)
+        if fields is not None:
+            yield fields
+
+
+def _split_top_level_alternatives(pattern: str):
+    """Split a regex at top-level ``|`` (depth 0, outside ``[…]`` classes and ``(…)`` groups).
+
+    BUG_0190: builds the per-alternative count breakdown. Returns the list of alternatives, or
+    ``None`` when the pattern is not confidently parseable (unbalanced brackets/groups, or no
+    top-level ``|``) so the caller omits the per-pattern section rather than emit a wrong
+    breakdown. Honours backslash escapes; a ``]`` closes a class only if it is not the first
+    character after ``[``/``[^``.
+    """
+    parts = []
+    depth = 0
+    in_class = False
+    class_start = -1
+    start = 0
+    i = 0
+    n = len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == '\\':
+            i += 2
+            continue
+        if in_class:
+            if c == ']' and (i - class_start) > 1:
+                in_class = False
+            i += 1
+            continue
+        if c == '[':
+            in_class = True
+            class_start = i
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth < 0:
+                return None
+        elif c == '|' and depth == 0:
+            parts.append(pattern[start:i])
+            start = i + 1
+        i += 1
+    if depth != 0 or in_class:
+        return None
+    parts.append(pattern[start:])
+    if len(parts) < 2:
+        return None
+    return parts
+
+
+def _compile_alternatives(pattern: str, literal: bool, flags: int):
+    """Compile each top-level alternative of ``pattern`` (BUG_0190).
+
+    Returns ``(alternatives, compiled_regexes)`` aligned by index, or ``(None, None)`` when the
+    pattern has no confidently-parseable top-level alternatives (per-pattern section omitted).
+    Each alternative is compiled with the same flags as the whole pattern; for ``literal=True``
+    each alternative is ``re.escape``-d first. Any compile failure returns ``(None, None)``.
+    """
+    alts = _split_top_level_alternatives(pattern)
+    if not alts:
+        return None, None
+    compiled = []
+    for alt in alts:
+        candidate = re.escape(alt) if literal else alt
+        try:
+            compiled.append(_compile_grep_pattern(candidate, flags=flags))
+        except re.error:
+            return None, None
+    return alts, compiled
+
+
+def _incomplete_note(skipped_count: int, skipped_paths: list, max_mb: int, tail: str = '') -> str:
+    """BUG_0185/BUG_0190: the shared ``[search INCOMPLETE — …]`` note.
+
+    A count/line claim over a scope where over-size files were skipped must never read as
+    conclusive. The count-only path reuses this so the integrity guarantee carries over from
+    BUG_0185. Returns ``''`` when nothing was skipped. ``tail`` is an optional trailing clause
+    (e.g. ``use read_file to inspect their headers/content``).
+    """
+    if not skipped_count:
+        return ''
+    more = f" (+{skipped_count - 10} more)" if skipped_count > 10 else ''
+    tail_part = f"; {tail}" if tail else ''
+    return (f" [search INCOMPLETE — skipped {skipped_count} file(s) > {max_mb} MB: "
+            f"{', '.join(skipped_paths[:10])}{more}{tail_part}]")
+
+
 @lru_cache(maxsize=1)
 def _check_tool_availability():
     """Check if ripgrep or system grep are available at runtime.
@@ -561,20 +686,9 @@ class GrepMixin:
         if result.returncode not in (0, 1, 2):
             return None
 
-        # `json` and `re` are already module-level imports in this file (grep.py L4-5).
-        count = 0
-        for line in result.stdout.split('\n'):
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if obj.get('type') == 'match':
-                # One `match` message == one reported match line, matching the existing
-                # _parse_rg_json counting. Deliberately NOT counting submatches.
-                count += 1
-        return count
+        # BUG_0190: reuse the shared rg-JSON match parser (one `match` event == one match line;
+        # submatches deliberately NOT counted) so the probe and the count path cannot drift apart.
+        return sum(1 for _ in _iter_rg_json_matches(result.stdout))
 
     def _try_subprocess_grep(self,
                              pattern: str,
@@ -680,6 +794,10 @@ class GrepMixin:
             # Parse ripgrep's --json stdout into (formatted, match_count). Shared by the rc==0
             # and rc==2 paths so a partial-error search never discards matches that were found.
             def _parse_rg_json(stdout_text):
+                # BUG_0190: match-event field extraction goes through the shared
+                # _rg_match_fields so the line-mode parser and the count path share one
+                # rg-JSON truth. Context events are handled inline (line mode only) to
+                # preserve the match/context interleaving rg emits per file.
                 formatted = []
                 match_count = 0
                 lines = stdout_text.split('\n') if stdout_text.strip() else []
@@ -690,51 +808,30 @@ class GrepMixin:
 
                     try:
                         json_obj = json.loads(line)
-                        entry_type = json_obj.get('type', '')
-
-                        if entry_type == 'match':
-                            data = json_obj.get('data', {})
-                            file_path = data.get('path', {}).get('text', '')
-
-                            line_num_data = data.get('line_number', 0)
-                            if isinstance(line_num_data, dict):
-                                line_num = line_num_data.get('start', 0)
-                            else:
-                                line_num = line_num_data
-
-                            # rg's line payload always carries a trailing newline
-                            # ('\n' on POSIX, '\r\n' on Windows) — _rg_lines_text strips it
-                            # so the entries don't gain blank lines when joined below.
-                            # BUG_0145: the shared extractor also decodes lines.bytes, which
-                            # rg emits for non-UTF-8 lines, instead of rendering them blank.
-                            match_text = _rg_lines_text(data.get('lines', {}))
-
-                            normalized_path = file_path.replace('\\', '/')
-
-                            marker = _GREP_MATCH_MARKER if context > 0 else ''
-                            formatted.append(_format_grep_entry(normalized_path, line_num, match_text, marker))
-
-                            match_count += 1
-
-                        elif entry_type == 'context' and context > 0:
-                            data = json_obj.get('data', {})
-                            file_path = data.get('path', {}).get('text', '')
-                            line_num_data = data.get('line_number', 0)
-                            if isinstance(line_num_data, dict):
-                                line_num = line_num_data.get('start', 0)
-                            else:
-                                line_num = line_num_data
-
-                            # Strip the trailing newline (same as 'match' branch above) —
-                            # would otherwise create blank lines between entries.
-                            # BUG_0145: lines.bytes fallback lives in _rg_lines_text.
-                            match_text = _rg_lines_text(data.get('lines', {}))
-                            normalized_path = file_path.replace('\\', '/')
-                            # BUG_0144: no indent on context lines — raw file bytes only.
-                            formatted.append(_format_grep_entry(normalized_path, line_num, match_text))
-
                     except json.JSONDecodeError as e:
                         logger.debug('ripgrep JSON parse error: %s', e)
+                        continue
+
+                    entry_type = json_obj.get('type', '')
+                    if entry_type == 'match':
+                        normalized_path, line_num, match_text = _rg_match_fields(json_obj)
+                        # BUG_0144: marker only in context mode; BUG_0145 text via _rg_match_fields.
+                        marker = _GREP_MATCH_MARKER if context > 0 else ''
+                        formatted.append(_format_grep_entry(normalized_path, line_num, match_text, marker))
+                        match_count += 1
+                    elif entry_type == 'context' and context > 0:
+                        data = json_obj.get('data', {})
+                        file_path = data.get('path', {}).get('text', '')
+                        line_num_data = data.get('line_number', 0)
+                        if isinstance(line_num_data, dict):
+                            line_num = line_num_data.get('start', 0)
+                        else:
+                            line_num = line_num_data
+                        # BUG_0144: no indent on context lines — raw file bytes only.
+                        # BUG_0145: lines.bytes fallback lives in _rg_lines_text.
+                        match_text = _rg_lines_text(data.get('lines', {}))
+                        normalized_path = file_path.replace('\\', '/')
+                        formatted.append(_format_grep_entry(normalized_path, line_num, match_text))
 
                 return formatted, match_count
 
@@ -884,6 +981,229 @@ class GrepMixin:
 
         return None, 0, False, False, 0, None, 0, 0
 
+    def _over_cap_rel_paths(self, root: Path, include: str, exclude: str,
+                            ignore_vcs: bool, max_bytes: int, deadline: float):
+        """BUG_0190: ``(count, rel_paths)`` for in-scope files over the size cap.
+
+        Reuses :func:`_iter_grep_scope_files` (the same include/exclude/ignore filtering the rg
+        ``--max-filesize`` fast path applies) so the over-cap set the INCOMPLETE note names is
+        exactly the set rg skipped. Paths are capped at 11 (the note shows 10 + a "+N more").
+        """
+        paths: list = []
+        count = 0
+        for fp, rel_str in self._iter_grep_scope_files(root, include, exclude, ignore_vcs, deadline):
+            try:
+                size = fp.stat().st_size
+            except OSError:
+                continue
+            if size > max_bytes:
+                count += 1
+                if len(paths) < 11:
+                    paths.append(rel_str)
+        return count, paths
+
+    def _grep_count_only(self,
+                         resolved: Path,
+                         pattern: str,
+                         include: str,
+                         exclude: str,
+                         ignore_vcs: bool,
+                         smart_case: bool,
+                         literal: bool,
+                         timeout: float,
+                         agent_name: str,
+                         searched_note: str) -> str:
+        """BUG_0190: count matching lines per file (plus a per-alternative breakdown) without
+        materializing the matched lines.
+
+        The rg fast path reuses the exact ``_build_rg_argv`` (context forced to 0 — counts are
+        line-level) and parses ``--json`` via the shared ``_iter_rg_json_matches``; the Python
+        fallback walks via ``_iter_grep_scope_files`` and counts per file. Counts are matching
+        LINES (submatches are not counted) and totals are computed before any display cap.
+        Over-cap files are skipped and named with the shared ``[search INCOMPLETE ...]`` note
+        (the BUG_0185 integrity link), so a count over a partially-searched scope is never read
+        as a full-scope total.
+        """
+        import subprocess
+
+        from agent_cascade.log import logger
+
+        # Compile once for the Python fallback and the per-alternative breakdown.
+        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+            flags = 0
+        elif smart_case:
+            flags = re.IGNORECASE
+        else:
+            flags = 0
+        _compile_pattern = re.escape(pattern) if literal else pattern
+        try:
+            pattern_re = _compile_grep_pattern(_compile_pattern, flags=flags)
+        except re.error as e:
+            return (f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. "
+                    f"Please provide a valid Python regular expression.")
+        alts, alt_res = _compile_alternatives(pattern, literal, flags)
+
+        _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
+        max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else 0
+
+        per_file: dict = {}
+        per_pattern: dict = {}
+        total = 0
+        files_searched = 0
+        skipped_count = 0
+        skipped_paths: list = []
+        timed_out = False
+        partial_error = False
+        used_rg = False
+
+        def _tally(rel: str, text: str):
+            nonlocal total
+            per_file[rel] = per_file.get(rel, 0) + 1
+            total += 1
+            if alt_res:
+                for alt, r in zip(alts, alt_res):
+                    if r.search(text):
+                        per_pattern[alt] = per_pattern.get(alt, 0) + 1
+
+        _rg_available, _ = _check_tool_availability()
+        if _rg_available:
+            is_vcs_search = not ignore_vcs
+            # context=0: counts are line-level, so no context flag is ever needed.
+            cmd = self._build_rg_argv(pattern,
+                                      include,
+                                      exclude,
+                                      0,
+                                      smart_case,
+                                      force_no_ignore=is_vcs_search,
+                                      exclude_git=not is_vcs_search,
+                                      literal=literal)
+            result = None
+            try:
+                result = subprocess.run(cmd,
+                                        cwd=str(resolved),
+                                        capture_output=True,
+                                        text=True,
+                                        encoding='utf-8',
+                                        errors='replace',
+                                        # BUG_0063: DEVNULL so rg never consumes the parent's stdin.
+                                        stdin=subprocess.DEVNULL,
+                                        timeout=timeout)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"grep count subprocess timed out after {int(timeout)}s; falling back to Python")
+            except (FileNotFoundError, PermissionError, OSError) as e:
+                logger.debug(f"grep count subprocess unavailable (falling back to Python): {e}")
+            if result is not None and result.returncode in (0, 1, 2):
+                used_rg = True
+                for p, _ln, text in _iter_rg_json_matches(result.stdout):
+                    _tally(p, text)
+                # rc==2 that DID yield matches = some files were skipped (e.g. permission denied).
+                partial_error = (result.returncode == 2)
+                # Over-cap files were skipped by --max-filesize: name them so the count is never
+                # read as a full-scope total (the BUG_0185 integrity link). "No files were
+                # searched" (every candidate over-cap) is a normal empty result — the note below.
+                if max_bytes:
+                    skipped_count, skipped_paths = self._over_cap_rel_paths(
+                        resolved, include, exclude, ignore_vcs, max_bytes,
+                        time.monotonic() + _budget_s)
+        if not used_rg:
+            # Python count fallback: walk the same scope, count per file, header-scan over-cap.
+            deadline = time.monotonic() + timeout
+            scanned = 0
+            for fp, rel_str in self._iter_grep_scope_files(resolved, include, exclude, ignore_vcs, deadline):
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                try:
+                    size = fp.stat().st_size
+                except OSError:
+                    continue
+                if max_bytes and size > max_bytes:
+                    skipped_count += 1
+                    if len(skipped_paths) < 11:
+                        skipped_paths.append(rel_str)
+                    if scanned < _scan_limit:
+                        scanned += 1
+                        _hits = self._head_scan_matches(fp, rel_str, pattern_re, _head_bytes)
+                        if _hits:
+                            per_file[rel_str] = per_file.get(rel_str, 0) + len(_hits)
+                            total += len(_hits)
+                    continue
+                files_searched += 1
+                try:
+                    # BUG_0145: 'replace' keeps non-UTF-8 lines countable, matching the rg path.
+                    content = fp.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    continue
+                for line in content.split('\n'):
+                    if pattern_re.search(line):
+                        _tally(rel_str, line)
+
+        return self._format_count_result(
+            pattern, searched_note, per_file, per_pattern, total, files_searched,
+            alts, partial_error, timed_out, skipped_count, skipped_paths, _max_mb,
+            ignore_vcs, resolved, include, exclude, smart_case, literal, timeout)
+
+    def _format_count_result(self,
+                             pattern: str,
+                             searched_note: str,
+                             per_file: dict,
+                             per_pattern: dict,
+                             total: int,
+                             files_searched: int,
+                             alts,
+                             partial_error: bool,
+                             timed_out: bool,
+                             skipped_count: int,
+                             skipped_paths: list,
+                             max_mb: int,
+                             ignore_vcs: bool,
+                             resolved: Path,
+                             include: str,
+                             exclude: str,
+                             smart_case: bool,
+                             literal: bool,
+                             timeout: float) -> str:
+        """BUG_0190: render a count-only result.
+
+        Zero matches get a bare line (plus the BUG_0061 hidden-matches probe note and the
+        over-cap INCOMPLETE note). Non-zero gets the per-file list (capped at 50, totals always
+        full) + the per-pattern breakdown + the integrity notes.
+        """
+        if total == 0:
+            base = f"0 matching lines for '{pattern}'"
+            if files_searched:
+                base += f" ({files_searched} files searched)"
+            base += searched_note
+            if ignore_vcs:
+                _hidden = self._probe_ignored_matches(
+                    pattern=pattern, path=resolved, include=include, exclude=exclude,
+                    context=0, smart_case=smart_case, timeout=timeout, literal=literal)
+                if _hidden:
+                    base += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
+                             f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
+                             f"to include them]")
+            base += _incomplete_note(skipped_count, skipped_paths, max_mb)
+            return base
+
+        out = f"Count-only results for '{pattern}'{searched_note}:"
+        items = sorted(per_file.items(), key=lambda kv: kv[1], reverse=True)
+        shown = items[:50]
+        for rel, c in shown:
+            out += f"\n{rel}: {c}"
+        if len(items) > 50:
+            out += f"\n(+{len(items) - 50} more files — totals are complete)"
+        out += f"\n[total: {total} matching lines in {len(per_file)} file(s)]"
+        if alts:
+            pp = ', '.join(f"'{alt}': {per_pattern.get(alt, 0)}" for alt in alts)
+            out += f"\n[per-pattern: {pp} across {total} matching lines]"
+        out += _incomplete_note(skipped_count, skipped_paths, max_mb)
+        if partial_error:
+            out += ' [note: some files were skipped due to errors — counts are partial]'
+        if timed_out:
+            out += f" [TIMED OUT after {int(timeout)}s — counts are partial, not totals]"
+        return out
+
     def _grep_single_file(self,
                           file_path: Path,
                           pattern: str,
@@ -896,8 +1216,10 @@ class GrepMixin:
                           spill_file_path: Optional[str] = None,
                           timeout: float = 5.0,
                           searched_note: str = '',
-                          literal: bool = False) -> str:
-        """Search a single file for a regex pattern. Used when path is a file instead of directory."""
+                          literal: bool = False,
+                          *,
+                          count_only: bool = False) -> str:
+        """Search a single file for a regex pattern (used when path is a file). BUG_0190: count_only counts matching lines without materializing them."""
 
         try:
             normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
@@ -932,6 +1254,28 @@ class GrepMixin:
             return f"Error reading file {file_path.name}: {str(e)}"
 
         lines = content.split('\n')
+        if count_only:
+            # BUG_0190: count matching lines without building result lines.
+            alts, alt_res = _compile_alternatives(pattern, literal, flags)
+            cnt = 0
+            per_pattern = {}
+            for line in lines:
+                if pattern_re.search(line):
+                    cnt += 1
+                    if alt_res:
+                        for alt, r in zip(alts, alt_res):
+                            if r.search(line):
+                                per_pattern[alt] = per_pattern.get(alt, 0) + 1
+            if cnt == 0:
+                return f"0 matching lines for '{pattern}' in {file_path.name}{searched_note}"
+            out = (f"Count-only results for '{pattern}'{searched_note}:\n"
+                  f"{normalized_rel_path}: {cnt}\n"
+                  f"[total: {cnt} matching lines in 1 file(s)]")
+            if alts:
+                pp = ', '.join(f"'{alt}': {per_pattern.get(alt, 0)}" for alt in alts)
+                out += f"\n[per-pattern: {pp} across {cnt} matching lines]"
+            return out
+
         results = []
         match_count = 0
         hit_result_limit = False
@@ -1006,7 +1350,9 @@ class GrepMixin:
              context: int = 0,
              smart_case: bool = True,
              literal: bool = False,
-             spill_file_path: Optional[str] = None) -> str:
+             spill_file_path: Optional[str] = None,
+             *,
+             count_only: bool = False) -> str:
         """Search for text pattern in files.
 
         Uses subprocess-based grep (ripgrep or system grep) as a fast path,
@@ -1057,7 +1403,23 @@ class GrepMixin:
                                               spill_file_path=spill_file_path,
                                               timeout=timeout,
                                               searched_note=searched_note,
-                                              literal=literal)
+                                              literal=literal,
+                                              count_only=count_only)
+
+            # BUG_0190: count-only mode returns per-file matching-line counts (plus a
+            # per-alternative breakdown) instead of the matched lines. Dispatched before the
+            # line-mode fast/slow paths so the line-mode output stays byte-identical.
+            if count_only:
+                return self._grep_count_only(resolved,
+                                             pattern,
+                                             include,
+                                             exclude,
+                                             ignore_vcs,
+                                             smart_case,
+                                             literal,
+                                             timeout,
+                                             agent_name,
+                                             searched_note)
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,

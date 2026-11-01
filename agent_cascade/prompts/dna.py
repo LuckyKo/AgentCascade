@@ -172,8 +172,12 @@ SECURITY_ADVISOR_PROMPT = (
     'Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n'
     'Shell-command guidance (when the tool is shell_cmd):\n'
     '- Prefer the inbuilt tools over the shell: use read_file to read files and grep / list_dir to '
-    'search. Even when harmless, a simple shell command that a cheaper tool covers promotes bad '
-    'practice — auto-deny it.\n'
+    'search. For counting matches, use the grep tool with count_only=True (per-file matching-line '
+    'counts) instead of shell counting (wc -l, find /c, grep -c). Even when harmless, a simple '
+    'shell command that a cheaper tool covers promotes bad practice — auto-deny it.\n'
+    '- When a shell command asks for something grep genuinely cannot do (numeric statistics over '
+    'matches, per-occurrence submatch counts), approve-or-flag it naming the gap ("grep returns '
+    'lines/counts, not statistics") instead of asserting full coverage.\n'
     '- Flag unnecessary shell usage.\n\n'
     '## Decision rulebook\n'
     '### Process\n'
@@ -529,7 +533,9 @@ TOOL_METADATA = {
             'smart_case':
                 'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.',
             'literal':
-                'When True, treat the pattern as a literal string (no regex interpretation). Useful for searching paths containing backslashes (e.g., Windows paths) or other regex metacharacters. Default: False.'
+                'When True, treat the pattern as a literal string (no regex interpretation). Useful for searching paths containing backslashes (e.g., Windows paths) or other regex metacharacters. Default: False.',
+            'count_only':
+                'When True, return per-file matching-line counts (plus a per-alternative breakdown for top-level "|" patterns) instead of the matched lines. Counts are matching lines (not submatch occurrences); totals are reported before any display cap. context is ignored in count mode. Use for count claims instead of shell counting (wc -l, find /c, grep -c). Default: False.'
         }
     },
     'delete_file': {
@@ -622,11 +628,13 @@ TOOL_METADATA = {
             'max_chars_per_message':
                 'Maximum characters to keep for each string value in messages. Default: 1000.',
             'range':
-                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries.',
+                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries. Entry index is NOT the physical file line — the output shows both (entry index and `L <file line>`) when they differ. Pass by_line=true to interpret this range as physical file lines instead.',
             'mode':
                 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
             'format':
-                'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing.'
+                'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing. In raw mode each line is prefixed with its physical file line (`L<n>:`) or, when no line mapping exists, its entry index (`E<n>:`).',
+            'by_line':
+                'When true, interpret `range` as physical file line numbers (1-based inclusive) instead of entry indices, e.g. range="181:259" reads every log entry whose source line falls in 181-259. Requires an explicit range; not supported for whole-file JSON arrays (which have no per-entry line mapping).'
         }
     },
     'image_gen': {
