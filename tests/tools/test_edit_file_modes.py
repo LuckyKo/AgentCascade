@@ -930,6 +930,87 @@ def test_delete_and_insert_indent_preservation():
             'def g():\n\t\ty()\n\t\tz()\n')
 
 
+def test_delete_and_insert_append_newline():
+    """BUG_0220: append-at-EOF (range '0') must not glue new_content onto the
+    file's last line when that line has no trailing newline.
+
+    - Trailing-newline file: append stays clean, no extra blank line.
+    - Unterminated file: a separating newline is emitted (the core bug).
+    - Empty file: append works.
+    - Single unterminated line: separating newline emitted.
+    - CRLF file without trailing newline: separating newline in the file's
+      style, appended line stays verbatim.
+    - Mid-range delete_and_insert and suffix 'N:' ranges are unaffected.
+    - Replacing the last line with new_content that has no trailing newline
+      preserves the no-trailing-newline property (no forced NL added).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        file_path = Path(tmpdir) / 'append_test.txt'
+
+        def run(content, new_content, range_param, expected):
+            """Write the fixture (text), apply a delete_and_insert edit, assert result."""
+            file_path.write_text(content, encoding='utf-8')
+            op_mgr._own(file_path.resolve(), 'test_agent')
+            res = op_mgr.edit_file(path='append_test.txt',
+                                   agent_name='test_agent',
+                                   old_content='',
+                                   new_content=new_content,
+                                   match_mode='delete_and_insert',
+                                   range_param=range_param)
+            assert 'OK:' in res, f"edit failed: {res}"
+            got = file_path.read_text(encoding='utf-8')
+            assert got == expected, f"got [{got!r}] expected [{expected!r}]"
+
+        def run_bytes(content, new_content, range_param, expected):
+            """Write the fixture (bytes), apply a delete_and_insert edit, assert result."""
+            file_path.write_bytes(content)
+            op_mgr._own(file_path.resolve(), 'test_agent')
+            res = op_mgr.edit_file(path='append_test.txt',
+                                   agent_name='test_agent',
+                                   old_content='',
+                                   new_content=new_content,
+                                   match_mode='delete_and_insert',
+                                   range_param=range_param)
+            assert 'OK:' in res, f"edit failed: {res}"
+            got = file_path.read_bytes()
+            assert got == expected, f"got [{got!r}] expected [{expected!r}]"
+
+        # 1. Trailing-newline file — append stays clean, no extra blank line.
+        run('a\nb\nc\n', 'footer\n', '0', 'a\nb\nc\nfooter\n')
+
+        # 2. Unterminated file — the core BUG_0220: a separating newline is
+        #    emitted so the append starts on its own line (was 'a\nb\ncfooter\n').
+        run('a\nb\nc', 'footer\n', '0', 'a\nb\nc\nfooter\n')
+
+        # 3. Empty file — append works.
+        run('', 'appended\n', '0', 'appended\n')
+
+        # 4. Single unterminated line — separating newline emitted (was 'helloworld\n').
+        run('hello', 'world\n', '0', 'hello\nworld\n')
+
+        # 5. CRLF file without trailing newline — a separating newline is emitted; the
+        #    appended line stays verbatim. read_text normalizes to '\n' internally and
+        #    write_text re-translates to the OS native ending, so the expected bytes are
+        #    platform-dependent (same convention as the existing CRLF tests).
+        _nl = b'\r\n' if os.name == 'nt' else b'\n'
+        run_bytes(b'l1' + _nl + b'l2' + _nl + b'l3', 'footer\n', '0',
+                  b'l1' + _nl + b'l2' + _nl + b'l3' + _nl + b'footer' + _nl)
+
+        # 6. Mid-range delete_and_insert is unaffected by the append fix.
+        run('l1\nl2\nl3\nl4\nl5\nl6\n', 'X\nY\n', '3:5', 'l1\nl2\nX\nY\nl6\n')
+
+        # 7. Suffix range '3:' (delete to EOF, insert) is unaffected.
+        run('a\nb\nc\nd\ne\n', 'X\n', '3:', 'a\nb\nX\n')
+
+        # 8. Characterization guard: replacing the last line with new_content that has
+        #    NO trailing newline preserves that property (no forced trailing NL added).
+        #    Passes pre-fix too — it guards against an over-eager "always add a newline".
+        run('a\nb\n', 'tail', '2:2', 'a\ntail')
+
+
 def test_re_indent_shift_mode():
     """Test all scenarios for the new shift mode of re_indent.
 

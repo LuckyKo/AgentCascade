@@ -1935,6 +1935,18 @@ class FileOpsMixin:
                         for i in range(len(inserted)):
                             # Normalize each line's ending to match file style
                             inserted[i] = inserted[i].rstrip('\r\n') + ref_ending
+                elif before:
+                    # BUG_0220: append-at-EOF (after is empty) — the `if after:` branch above
+                    # never runs, so a pure append used to glue new_content onto the file's
+                    # last line when that line has no trailing newline. file_content is read
+                    # with universal newlines (read_text), so internally every line is
+                    # '\n'-terminated; emit a separating '\n' only when the tail is
+                    # unterminated (a terminated tail must not gain a blank line).
+                    # write_text re-translates '\n' to the OS native ending on write. The
+                    # inserted lines stay verbatim (no forced trailing NL), matching the
+                    # pre-existing append behavior.
+                    if _detect_line_ending(before[-1]) == '':
+                        before[-1] = before[-1] + '\n'
                 file_lines = before + inserted + after
             else:
                 # Delete-only: no insertion
