@@ -13,6 +13,8 @@ Covers:
   Phase B: multi-path delete; include filter; size/date filters; single aggregate
            approval for mixed sets + reject leaves all intact; empty-match early return
            with NO approval prompt (B6); continue-on-error (B4); containment/RO escape.
+  BUG_0219: paren/dot child paths — bottom-up bulk backup order, sanitised backup
+           names + manifest, un-backupable entries deleted with a warning.
 """
 
 import os
@@ -137,7 +139,7 @@ def test_non_owned_approved_deletes_with_backup():
         assert res.startswith('OK: Deleted'), f"Expected OK, got: {res}"
         assert not f.exists(), 'Approved delete should remove the file'
         bdir = _backup_dir(om)
-        backups = list(bdir.glob('foreign2.txt*')) if bdir.exists() else []
+        backups = [p for p in bdir.glob('foreign2.txt*') if p.name.endswith('.bak')] if bdir.exists() else []
         assert len(backups) == 1, f"Expected exactly one backup, got {backups}"
         # Backup content matches original.
         assert backups[0].read_text() == 'bye', 'Backup should preserve file content'
@@ -145,11 +147,13 @@ def test_non_owned_approved_deletes_with_backup():
 
 
 def test_backup_failure_simulation_a2(monkeypatch):
-    """Simulate a copy failure → original intact, no partial backup, clear error (A2).
+    """Simulate a genuine copy failure → original preserved, no partial backup (A2).
 
     On the same volume shutil.move is a rename (succeeds), so we patch shutil.move to
-    raise and force the copy fallback; then make shutil.copy2 fail. The original must
-    remain, no partial backup may be left, and the error must name the failed step.
+    raise and force the copy fallback; then make shutil.copy2 fail with a plain IO
+    error (disk full). BUG_0219 narrowed the delete-anyway path to the
+    ancestor-already-moved signature (source vanished), so a genuine backup failure
+    still preserves the original and raises.
     """
     import shutil as _shutil
 
@@ -163,19 +167,19 @@ def test_backup_failure_simulation_a2(monkeypatch):
             raise OSError('simulated disk full during copy')
 
         # Force the copy fallback (shutil.move is a same-volume rename that would
-        # succeed), then make the copy itself fail. Call _delete_one directly so the
-        # per-target error surfaces as an ERROR string rather than a bulk failure line.
+        # succeed), then make the copy itself fail.
         monkeypatch.setattr(_shutil, 'move', lambda *a, **k: (_ for _ in ()).throw(OSError('force fallback')))
         monkeypatch.setattr(_shutil, 'copy2', boom)
 
         try:
             om._delete_one(resolved, 'coder', justification='x')
-            raise AssertionError('_delete_one should have raised on a backup failure')
+            raise AssertionError('_delete_one should have raised on a genuine backup failure')
+        except AssertionError:
+            raise
         except Exception as e:
-            assert 'backup failed before delete' in str(e), f"Error must name the step: {e}"
+            assert 'backup failed before delete' in str(e), f"Error must name the failed step: {e}"
 
-        assert f.exists(), 'Original must remain intact after a backup failure'
-        assert f.read_text() == 'precious', 'Original content must be unchanged'
+        assert f.exists() and f.read_text() == 'precious', 'Original must survive a genuine backup failure (A2)'
         bdir = _backup_dir(om)
         partials = list(bdir.glob('victim.txt*')) if bdir.exists() else []
         assert not partials, f"No partial backup may remain: {partials}"
@@ -864,3 +868,187 @@ class TestDeleteFileCall:
             f"Windows abs array string must normalize to a list, got {call['path']!r}"
         assert call['kwargs']['paths'] == win_paths, \
             f"Windows abs array string must forward as paths, got {call['kwargs'].get('paths')!r}"
+
+
+# ── BUG_0219: paren/dot child paths — bottom-up backup, sanitised names, manifest ──
+
+
+def test_paren_dir_tree_delete_backs_up_with_manifest():
+    """Ticket verification: scratch/a(b)/c.d/1.txt + 2.txt, delete_file on a(b).
+
+    All files must be gone, a restorable backup must exist, and the manifest must
+    map the sanitised backup name back to the original entry name. (Note: a lone
+    directory target is moved wholesale, so the *ordering* defect is covered by
+    test_bulk_delete_parent_and_child_bottom_up.)
+    """
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        leaf = Path(d, 'scratch', 'a(b)', 'c.d')
+        leaf.mkdir(parents=True)
+        (leaf / '1.txt').write_text('one')
+        (leaf / '2.txt').write_text('two')
+        target = Path(d, 'scratch', 'a(b)')
+        om._own(target.resolve(), 'coder')
+
+        res = om.delete_file(str(target), 'coder', justification='BUG_0219 repro')
+
+        assert res.startswith('OK: Deleted 1 of 1'), f"Expected clean delete, got:\n{res}"
+        assert 'Failures:' not in res, f"No per-entry failures allowed:\n{res}"
+        assert not target.exists(), 'Paren directory tree must be fully gone'
+
+        bdir = _backup_dir(om)
+        baks = [p for p in bdir.iterdir() if p.name.endswith('.bak')] if bdir.exists() else []
+        assert len(baks) == 1, f"Expected exactly one backup, got {baks}"
+        bak = baks[0]
+        # Sanitised name: no parentheses, plain stem + .bak.
+        assert '(' not in bak.name and ')' not in bak.name, f"Backup name must be sanitised: {bak.name}"
+        assert bak.name.startswith('a_b_'), f"Backup should start with sanitised 'a_b_', got {bak.name}"
+
+        # Manifest maps sanitised → original.
+        manifest = _json.loads((bdir / (bak.name + '.manifest.json')).read_text())
+        assert manifest['original_name'] == 'a(b)', f"Manifest must keep the original name: {manifest}"
+
+        # Restorable: content survives the round-trip.
+        assert (bak / 'c.d' / '1.txt').read_text() == 'one'
+        assert (bak / 'c.d' / '2.txt').read_text() == 'two'
+    print('[PASS] test_paren_dir_tree_delete_backs_up_with_manifest')
+
+
+def test_bulk_delete_parent_and_child_bottom_up():
+    """Parent + child both targeted → child backed up first; no partial tree (BUG_0219)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        parent = Path(d, 'parent()')
+        child = parent / 'child.d'
+        (child / 'deep.txt').mkdir(parents=True)
+        (child / 'deep.txt' / 'x.txt').write_text('x')
+        (parent / 'top.txt').write_text('t')
+        for p in (parent, child):
+            om._own(p.resolve(), 'coder')
+
+        res = om.delete_file(None, 'coder', paths=[str(parent), str(child)], justification='x')
+
+        assert res.startswith('OK: Deleted 2 of 2'), f"Expected 2/2, got:\n{res}"
+        assert 'Failures:' not in res, f"No failures allowed:\n{res}"
+        assert not parent.exists(), 'Whole tree must be gone (no partial tree)'
+
+        # Both entries got their own backups (child first, then parent).
+        # Note: dots are preserved by the sanitizer, so the child backup is 'child.d...'.
+        bdir = _backup_dir(om)
+        baks = sorted(p.name for p in bdir.iterdir() if p.name.endswith('.bak'))
+        assert len(baks) == 2, f"Expected two backups, got {baks}"
+        parent_bak = bdir / [n for n in baks if n.startswith('parent_')][0]
+        child_bak = bdir / [n for n in baks if n.startswith('child.d')][0]
+        assert (child_bak / 'deep.txt' / 'x.txt').read_text() == 'x', 'Child backup must preserve content'
+        # The child was already moved out, so the parent backup must NOT contain it.
+        assert not (parent_bak / 'child.d').exists(), 'Parent backup must not contain the already-moved child'
+    print('[PASS] test_bulk_delete_parent_and_child_bottom_up')
+
+
+def test_unbackupable_entry_deleted_with_warning(monkeypatch):
+    """BUG_0219 signature: the entry's path is already gone (ancestor moved) →
+    the entry is deleted with a warning, never leaving a partial tree.
+
+    Simulated by making shutil.move take the source away (as a deeper target's
+    move would) and raise FileNotFoundError, so the copy fallback hits the same
+    signature; a plain IO failure (disk full) would instead preserve the original.
+    """
+    import shutil as _shutil
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'victim.txt')
+        f.write_text('precious')
+        om._own(f.resolve(), 'coder')
+
+        def ancestor_moved(src, dst, *a, **k):
+            Path(src).unlink(missing_ok=True)  # a deeper target's move took it
+            raise FileNotFoundError('ancestor already moved')
+        monkeypatch.setattr(_shutil, 'move', ancestor_moved)
+
+        res = om.delete_file(str(f), 'coder', justification='x')
+
+        assert res.startswith('OK: Deleted 1 of 1'), f"Entry must count as deleted, got:\n{res}"
+        assert 'Warnings (deleted without backup):' in res, f"Warning section missing:\n{res}"
+        assert 'victim.txt' in res and 'deleted without backup' in res
+        assert 'backup none (see warnings)' in res, 'Un-backed entry must not advertise a backup path'
+        assert not f.exists(), 'Un-backupable entry must still be deleted'
+    print('[PASS] test_unbackupable_entry_deleted_with_warning')
+
+
+def test_manifest_failure_keeps_valid_backup(monkeypatch):
+    """A manifest write failure must never destroy a valid backup (BUG_0219)."""
+    import shutil as _shutil
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'weird (name).txt')  # gets sanitised → a manifest is written
+        f.write_text('x')
+        om._own(f.resolve(), 'coder')
+
+        monkeypatch.setattr(_shutil, 'move', lambda *a, **k: (_ for _ in ()).throw(OSError('force fallback')))
+
+        def boom(*a, **k):
+            raise RuntimeError('manifest exploded')
+        monkeypatch.setattr(om, '_write_backup_manifest', boom)
+
+        backup_str, warning = om._delete_one(f.resolve(), 'coder', justification='x')
+
+        assert warning is None, 'A manifest failure must not turn into a delete warning'
+        assert backup_str, 'The backup path must still be reported'
+        assert not f.exists()
+        bdir = _backup_dir(om)
+        baks = [p for p in bdir.iterdir() if p.name.endswith('.bak')]
+        assert len(baks) == 1 and baks[0].read_text() == 'x', 'Valid backup must survive a manifest failure'
+    print('[PASS] test_manifest_failure_keeps_valid_backup')
+
+
+def test_vanished_target_reported_as_warning(monkeypatch):
+    """A target removed by a race before its turn → counted as deleted, with a warning."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        parent = Path(d, 'p')
+        child = parent / 'c.txt'
+        parent.mkdir()
+        child.write_text('c')
+        for p in (parent, child):
+            om._own(p.resolve(), 'coder')
+
+        real_delete_one = om._delete_one
+
+        def sweep_parent_after_child(resolved, agent_name, justification=''):
+            out = real_delete_one(resolved, agent_name, justification)
+            if resolved.name == 'c.txt':
+                parent.rmdir()  # child already moved → parent now empty; simulate a race
+            return out
+        monkeypatch.setattr(om, '_delete_one', sweep_parent_after_child)
+
+        res = om.delete_file(None, 'coder', paths=[str(child), str(parent)], justification='x')
+
+        assert res.startswith('OK: Deleted 2 of 2'), f"Both entries are gone, got:\n{res}"
+        assert 'Warnings (deleted without backup):' in res, f"Warning section missing:\n{res}"
+        assert 'vanished before delete' in res
+        assert not parent.exists()
+    print('[PASS] test_vanished_target_reported_as_warning')
+
+
+def test_cleanup_backups_archives_orphan_manifest():
+    """cleanup_backups archives/deletes *.manifest.json even with no .bak files (BUG_0219)."""
+    import zipfile as _zipfile
+
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        bdir = _backup_dir(om)
+        bdir.mkdir(parents=True)
+        (bdir / 'orphan.bak.manifest.json').write_text('{"original_name": "x(y)"}')
+
+        om.cleanup_backups('coder')
+
+        assert not (bdir / 'orphan.bak.manifest.json').exists(), 'Orphan manifest must be cleaned'
+        archive = bdir / 'backup_archive.zip'
+        assert archive.exists(), 'Manifest-only cleanup must still produce an archive'
+        with _zipfile.ZipFile(archive) as zf:
+            assert 'orphan.bak.manifest.json' in zf.namelist()
+    print('[PASS] test_cleanup_backups_archives_orphan_manifest')

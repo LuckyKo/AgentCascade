@@ -1,6 +1,7 @@
 """File operations — directory listing, read, write, edit, re-indent, delete, copy, move, backup cleanup."""
 
 import fnmatch
+import json
 import logging
 import os
 import re
@@ -341,7 +342,8 @@ class FileOpsMixin:
     # ─── Backup cleanup (registered via atexit in __init__) ──────────────
 
     def cleanup_backups(self, agent_name: Optional[str] = None):
-        """Archive .bak backup files into zip archives and remove the originals.
+        """Archive .bak backup files (and their .manifest.json companions) into zip archives
+        and remove the originals.
 
         If agent_name is provided, only processes that agent's backup directory.
         Otherwise, performs global cleanup across all agents.
@@ -378,8 +380,9 @@ class FileOpsMixin:
 
             archive_path = agent_backup_dir / 'backup_archive.zip'
             bak_files = list(agent_backup_dir.glob('*.bak'))
+            manifest_files = list(agent_backup_dir.glob('*.manifest.json'))
 
-            if not bak_files:
+            if not bak_files and not manifest_files:
                 _safe_log(logging.DEBUG, 'No .bak files to archive for agent %s', agent_name)
             else:
                 if archive_path.exists():
@@ -391,6 +394,9 @@ class FileOpsMixin:
                 with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for bak_file in bak_files:
                         zf.write(bak_file, arcname=bak_file.name)
+                    # Keep manifests (BUG_0219) with their backups.
+                    for manifest in manifest_files:
+                        zf.write(manifest, arcname=manifest.name)
                     for old_zip in old_zips:
                         zf.write(old_zip, arcname=old_zip.name)
 
@@ -402,18 +408,23 @@ class FileOpsMixin:
                 except Exception as e:
                     _safe_log(logging.WARNING, 'Failed to delete old archive %s: %s', old_zip, e)
 
-            if bak_files:
-                for bak_file in bak_files:
-                    try:
-                        bak_file.unlink()
-                    except Exception as e:
-                        _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
+            for bak_file in bak_files:
+                try:
+                    bak_file.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
+            for manifest in manifest_files:
+                try:
+                    manifest.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, 'Failed to delete backup manifest %s: %s', manifest, e)
 
         else:
             archive_path = backup_base / 'backup_archive.zip'
             bak_files = list(backup_base.rglob('*.bak'))
+            manifest_files = list(backup_base.rglob('*.manifest.json'))
 
-            if not bak_files:
+            if not bak_files and not manifest_files:
                 _safe_log(logging.DEBUG, 'No .bak files to archive globally')
             else:
                 if archive_path.exists():
@@ -426,6 +437,10 @@ class FileOpsMixin:
                     for bak_file in bak_files:
                         arcname = str(bak_file.relative_to(backup_base))
                         zf.write(bak_file, arcname=arcname)
+                    # Keep manifests (BUG_0219) with their backups.
+                    for manifest in manifest_files:
+                        arcname = str(manifest.relative_to(backup_base))
+                        zf.write(manifest, arcname=arcname)
                     for old_zip in old_zips:
                         zf.write(old_zip, arcname=old_zip.name)
 
@@ -437,12 +452,16 @@ class FileOpsMixin:
                 except Exception as e:
                     _safe_log(logging.WARNING, 'Failed to delete old archive %s: %s', old_zip, e)
 
-            if bak_files:
-                for bak_file in bak_files:
-                    try:
-                        bak_file.unlink()
-                    except Exception as e:
-                        _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
+            for bak_file in bak_files:
+                try:
+                    bak_file.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, 'Failed to delete backup file %s: %s', bak_file, e)
+            for manifest in manifest_files:
+                try:
+                    manifest.unlink()
+                except Exception as e:
+                    _safe_log(logging.WARNING, 'Failed to delete backup manifest %s: %s', manifest, e)
 
     # ─── Static helpers for formatting and filtering ─────────────────────
 
@@ -476,6 +495,43 @@ class FileOpsMixin:
     def _backup_path_str(backup_path) -> str:
         """Return the absolute path string for backup reporting."""
         return str(backup_path)
+
+    @staticmethod
+    def _sanitize_backup_name(name: str) -> str:
+        """Replace characters that complicate downstream tooling with '_'.
+
+        BUG_0219: names containing parens (e.g. ``APIRouter()``) made backup
+        destinations awkward to handle. Alphanumerics (incl. Unicode), dots,
+        hyphens and underscores are kept, so ordinary names (``foreign2.txt``,
+        ``café.txt``) are unchanged and the ``<name>.<epoch>.bak`` convention is
+        preserved. The original name is never lost — when sanitisation changes
+        the name, it is recorded in the backup manifest.
+        """
+        return re.sub(r'[^\w.\-]', '_', name)
+
+    @staticmethod
+    def _manifest_path(backup_path) -> Path:
+        """Path of the manifest file that sits next to *backup_path*."""
+        return backup_path.parent / (backup_path.name + '.manifest.json')
+
+    @staticmethod
+    def _write_backup_manifest(backup_path, source: Path, timestamp: int) -> None:
+        """Write a manifest mapping the sanitized backup name to the original entry name.
+
+        Stored next to the backup as ``<backup>.manifest.json`` so a restorer
+        (or downstream tooling) can recover the original name. Best-effort by
+        contract: a manifest failure must NEVER affect the delete outcome, so
+        every exception is swallowed here.
+        """
+        manifest_path = FileOpsMixin._manifest_path(backup_path)
+        try:
+            manifest_path.write_text(json.dumps({
+                'original_name': source.name,
+                'source_path': str(source),
+                'created': timestamp,
+            }, indent=2))
+        except Exception:
+            pass
 
     @staticmethod
     def _detect_binary(path) -> bool:
@@ -2669,21 +2725,40 @@ class FileOpsMixin:
                 justification = f"{justification}\n{reason}".strip()
 
         # ── B4: per-target execution with continue-on-error + aggregated report. ─
+        # BUG_0219: process targets bottom-up (deepest first) so a child is backed
+        # up BEFORE its parent is moved; the parent's single move then covers all
+        # remaining content. A target that no longer exists was covered by a
+        # previously deleted ancestor — report it as deleted, not a failure.
+        targets.sort(key=lambda p: len(p.parts), reverse=True)
         deleted: List[Tuple[Path, str]] = []  # (resolved, backup_path_str)
         failures: List[str] = []
+        warnings: List[str] = []
         for t in targets:
+            if not t.exists():
+                # BUG_0219 safety net: a target that vanished before its turn
+                # was either covered by an already-deleted ancestor (the normal
+                # case under deepest-first ordering) or removed by a race.
+                cover = next((ab for a, ab in deleted if a != t and t.is_relative_to(a)), None)
+                if cover is not None:
+                    deleted.append((t, f'covered by ancestor backup ({cover})'))
+                else:
+                    deleted.append((t, 'none (vanished before delete)'))
+                    warnings.append(f"{t}: vanished before delete (not backed up)")
+                continue
             try:
-                backup_str = self._delete_one(t, agent_name, justification)
+                backup_str, warning = self._delete_one(t, agent_name, justification)
             except Exception as e:
                 failures.append(f"{t}: {e}")
                 continue
             deleted.append((t, backup_str))
+            if warning:
+                warnings.append(f"{t}: {warning}")
 
         total = len(targets)
         ok_count = len(deleted)
         lines = [f"OK: Deleted {ok_count} of {total} entries"]
         for t, backup_str in deleted:
-            lines.append(f"  ✓ {t}  →  backup {backup_str}")
+            lines.append(f"  ✓ {t}  →  backup {backup_str if backup_str else 'none (see warnings)'}")
         # A4 (audit trail): on a clean full delete, echo the justification exactly like
         # the single-delete path did. On partial failures it is omitted to keep the
         # per-target failure list the focus of the report.
@@ -2692,6 +2767,9 @@ class FileOpsMixin:
         if failures:
             lines.append('Failures:')
             lines.extend(f"  ✗ {f}" for f in failures)
+        if warnings:
+            lines.append('Warnings (deleted without backup):')
+            lines.extend(f"  ⚠ {w}" for w in warnings)
         # B6a errors (unresolvable / not-found explicit entries) are surfaced here.
         if errors:
             lines.append('Skipped (unresolved):')
@@ -2829,11 +2907,18 @@ class FileOpsMixin:
             desc += f"\n\n{len(non_owned)} of these are not owned by you and require approval."
         return desc
 
-    def _delete_one(self, resolved: Path, agent_name: str, justification: str = '') -> str:
+    def _delete_one(self, resolved: Path, agent_name: str, justification: str = '') -> Tuple[str, Optional[str]]:
         """Hardened single-target delete (A2 backup+verify, A3 ownership cleanup).
 
-        Returns the backup path string on success. Raises on failure so the bulk
-        loop can collect per-target status (continue-on-error, B4).
+        Returns ``(backup_path_str, warning)``. On a clean backup, ``warning`` is
+        None and ``backup_path_str`` is the backup path. BUG_0219: when the
+        entry's path has already vanished (a deeper target's move took an
+        ancestor with it — the ancestor-already-moved signature), the entry is
+        deleted best-effort, ``backup_path_str`` is '' and the warning names the
+        missing backup — a partial tree is worse than a deleted-but-unbacked
+        entry. Genuine backup failures (disk full, permissions) and integrity
+        failures still raise with the original preserved (A2), so the bulk loop
+        can collect per-target status (continue-on-error, B4).
         """
         is_directory = resolved.is_dir()
 
@@ -2842,12 +2927,15 @@ class FileOpsMixin:
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(time.time())
+        # BUG_0219: sanitise the backup filename so the destination is always a
+        # plain name; the original is recorded in the manifest.
+        safe_name = self._sanitize_backup_name(resolved.name)
         counter = 0
         while True:
             if counter == 0:
-                backup_filename = f"{resolved.name}.{timestamp}.bak"
+                backup_filename = f"{safe_name}.{timestamp}.bak"
             else:
-                backup_filename = f"{resolved.name}.{timestamp}_{counter}.bak"
+                backup_filename = f"{safe_name}.{timestamp}_{counter}.bak"
             backup_path = backup_dir / backup_filename
             if not backup_path.exists():
                 break
@@ -2855,6 +2943,7 @@ class FileOpsMixin:
 
         # A2: back up, verify integrity, then delete — never delete the original
         # unless we are sure the backup is complete. Partial backups are removed.
+        warning = None
         try:
             shutil.move(resolved, backup_path)
         except Exception:
@@ -2865,46 +2954,68 @@ class FileOpsMixin:
                 else:
                     shutil.copy2(resolved, backup_path)
             except Exception as copy_err:
-                # Copy failed before any deletion — clean up partial backup,
-                # leave the original untouched. (A6: name the failed step.)
-                self._remove_partial_backup(backup_path)
-                raise RuntimeError(f"backup failed before delete: {copy_err}")
-
-            try:
-                if is_directory:
-                    if not self._verify_dir_backup(resolved, backup_path):
-                        raise RuntimeError('backup integrity check failed (file count/size mismatch)')
-                    shutil.rmtree(resolved)
+                if isinstance(copy_err, (FileNotFoundError, NotADirectoryError)) and not resolved.exists():
+                    # BUG_0219: ancestor-already-moved signature — a deeper
+                    # target's move already took this entry with it, so its
+                    # path is gone; clean up the partial backup and report the
+                    # missing one. (A6: name the failed step.)
+                    self._remove_partial_backup(backup_path)
+                    warning = f"backup failed before delete ({copy_err}); deleted without backup"
                 else:
-                    if not self._verify_file_backup(resolved, backup_path):
-                        raise RuntimeError('backup integrity check failed (missing or size mismatch)')
-                    resolved.unlink()
-            except Exception as del_err:
-                # Delete/integrity step failed — clean up partial backup.
-                # Original is only gone if rmtree/unlink itself succeeded first.
-                self._remove_partial_backup(backup_path)
-                raise RuntimeError(f"delete failed after backup: {del_err}")
+                    # Copy failed before any deletion — clean up the partial
+                    # backup, leave the original untouched. (A6: name the step.)
+                    self._remove_partial_backup(backup_path)
+                    raise RuntimeError(f"backup failed before delete: {copy_err}")
 
-        backup_path_str = self._backup_path_str(backup_path)
+            if warning is None:
+                try:
+                    if is_directory:
+                        if not self._verify_dir_backup(resolved, backup_path):
+                            raise RuntimeError('backup integrity check failed (file count/size mismatch)')
+                        shutil.rmtree(resolved)
+                    else:
+                        if not self._verify_file_backup(resolved, backup_path):
+                            raise RuntimeError('backup integrity check failed (missing or size mismatch)')
+                        resolved.unlink()
+                except Exception as del_err:
+                    # Delete/integrity step failed — clean up partial backup.
+                    # Original is only gone if rmtree/unlink itself succeeded first.
+                    self._remove_partial_backup(backup_path)
+                    raise RuntimeError(f"delete failed after backup: {del_err}")
+
+        # Best-effort manifest (BUG_0219): only when sanitisation changed the
+        # name, and outside the backup-critical path so a manifest problem can
+        # never destroy a valid backup or block the delete.
+        if warning is None and safe_name != resolved.name:
+            try:
+                self._write_backup_manifest(backup_path, resolved, timestamp)
+            except Exception:
+                pass
+
+        backup_path_str = '' if warning is not None else self._backup_path_str(backup_path)
 
         # A3: normalized ownership cleanup (atomic + normcase under lock).
+        # Operates on the ownership dict, so it is safe after the entry is gone.
         if is_directory:
             self._unown_recursive(resolved)
         else:
             self._unown(resolved)
 
-        return backup_path_str
+        return backup_path_str, warning
 
     # ─── delete_file helpers (A2/A3) ───────────────────────────────────────
 
     @staticmethod
     def _remove_partial_backup(backup_path) -> None:
-        """Best-effort removal of a partially-created backup (file or dir)."""
+        """Best-effort removal of a partially-created backup (file or dir) and its manifest."""
         try:
             if backup_path.is_dir():
                 shutil.rmtree(backup_path, ignore_errors=True)
             elif backup_path.exists():
                 backup_path.unlink()
+            manifest = FileOpsMixin._manifest_path(backup_path)
+            if manifest.exists():
+                manifest.unlink()
         except Exception:
             pass
 
