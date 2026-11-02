@@ -41,6 +41,11 @@ class ReadLogs(BaseTool):
                 'enum': ['raw', 'simple'],
                 'default': 'simple',
                 'description': TOOL_METADATA['read_logs']['parameters']['format']
+            },
+            'by_line': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['read_logs']['parameters']['by_line']
             }
         },
         'required': ['log_file'],
@@ -116,6 +121,19 @@ class ReadLogs(BaseTool):
                 idx = total_entries + 1 + idx
             idx = max(1, min(idx, total_entries))
             return idx - 1, idx
+
+    @staticmethod
+    def _parse_file_line_range(range_str: str, total_lines: int) -> tuple:
+        """Parse a range as 1-based inclusive *physical file lines*.
+
+        Used by ``by_line=true``. Returns (start_line, end_line) inclusive,
+        clamped to [1, total_lines]. Semantics match ``_parse_range``
+        (open ends, negative indices count from the end).
+        """
+        start_idx, end_idx = ReadLogs._parse_range(range_str, total_lines)
+        # _parse_range returns a 0-based half-open slice; convert back to the
+        # 1-based inclusive bounds used for physical-line filtering.
+        return start_idx + 1, end_idx
 
     @staticmethod
     def _humanize_size(file_path: Path) -> str:
@@ -205,24 +223,32 @@ class ReadLogs(BaseTool):
         return item
 
     @staticmethod
-    def _format_simple_entry(entry, entry_num, mode='trim_tools', max_chars=1000):
+    def _format_simple_entry(entry, entry_num, mode='trim_tools', max_chars=1000, src_line=None):
         """Format one truncated log entry as a readable summary line.
+
+        ``entry_num`` is read_logs' own 1-based entry index (the coordinate used
+        by the ``range`` parameter); ``src_line`` is the physical file line when
+        it is known (BUG_0195). Both are shown so citations cannot silently
+        drift between the two coordinate systems.
 
         Returns (header_line, content_line_or_none).
         """
+        label = (f"⟨E {entry_num} | L {src_line}⟩" if src_line is not None
+                 else f"⟨E {entry_num}⟩")
+
         if isinstance(entry, str):
             # Non-JSON line or raw string — respect truncation settings
             c = entry
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
-            return f"⟨L {entry_num}⟩ [RAW] {c}", None
+            return f"{label} [RAW] {c}", None
 
         if not isinstance(entry, dict):
             # Non-dict type — respect truncation settings
             c = str(entry)
             if mode != 'none' and len(c) > max_chars:
                 c = ReadLogs._truncate_middle(c, max_chars)
-            return f"⟨L {entry_num}⟩ [{type(entry).__name__}] {c}", None
+            return f"{label} [{type(entry).__name__}] {c}", None
 
         # If it doesn't have a recognizable role, treat as raw JSON
         role = entry.get('role', '').lower()
@@ -230,7 +256,7 @@ class ReadLogs(BaseTool):
             json_str = json.dumps(entry, ensure_ascii=False)
             if mode != 'none' and len(json_str) > max_chars:
                 json_str = ReadLogs._truncate_middle(json_str, max_chars)
-            return f"⟨L {entry_num}⟩ [RAW] {json_str}", None
+            return f"{label} [RAW] {json_str}", None
 
         timestamp = entry.get('timestamp', '')
         time_str = ''
@@ -284,7 +310,7 @@ class ReadLogs(BaseTool):
                 tool_info = ' → ' + ', '.join(calls)
 
         # Build header
-        header_parts = [f"⟨L {entry_num}⟩"]
+        header_parts = [label]
         if time_str:
             header_parts.append(time_str)
         header_parts.append(role_label + tool_info)
@@ -409,52 +435,84 @@ class ReadLogs(BaseTool):
             return f"Error reading file: {e}"
 
         # --- Parse the file content ---
-        # Support three formats: JSON array, single JSON object, and JSONL (one JSON per line)
-        parsed_lines = []
+        # Support three formats: JSON array, single JSON object, and JSONL (one JSON per line).
+        # Each entry is stored as (physical file line or None, parsed item).
+        parsed_entries = []
         stripped = content.strip()
 
         if stripped.startswith('['):
-            # Case 1: JSON array — try to parse as a whole
+            # Case 1: JSON array — try to parse as a whole. Individual array
+            # elements are not tied to physical lines here, so src_line is None.
             try:
                 arr = json.loads(stripped)
                 if isinstance(arr, list):
-                    parsed_lines = [item for item in arr if item is not None]
+                    parsed_entries = [(None, item) for item in arr if item is not None]
                 else:
-                    parsed_lines = [{'raw': str(arr)}]
+                    parsed_entries = [(None, {'raw': str(arr)})]
             except json.JSONDecodeError:
                 pass  # Fall through to JSONL parsing below
 
-        if not parsed_lines and stripped.startswith('{'):
+        if not parsed_entries and stripped.startswith('{'):
             # Case 2: Single JSON object (could also be the start of a malformed array)
             try:
                 obj = json.loads(stripped)
-                parsed_lines = [obj]
+                parsed_entries = [(1, obj)]
             except json.JSONDecodeError:
                 pass
 
-        if not parsed_lines:
-            # Case 3: JSONL — one JSON object per line (original behavior)
-            for line in content.splitlines():
+        if not parsed_entries:
+            # Case 3: JSONL — one JSON object per line (original behavior).
+            # BUG_0195: record the physical 1-based file line for each entry so
+            # the output can report both coordinates (entry index != file line
+            # whenever blank or multi-line records exist).
+            for line_no, line in enumerate(content.splitlines(), start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    parsed_lines.append(json.loads(line))
+                    parsed_entries.append((line_no, json.loads(line)))
                 except json.JSONDecodeError:
                     # Non-JSON lines kept as plain strings; truncation handled in the pass below
-                    parsed_lines.append(line)
+                    parsed_entries.append((line_no, line))
 
         # --- Pagination / slicing ---
-        # Keep all lines including metadata, tracking original positions
+        # Keep all lines including metadata, tracking original positions.
+        # Each tuple is (1-based entry index, physical file line or None, item).
         all_lines = []
-        for idx, l in enumerate(parsed_lines):
-            all_lines.append((idx + 1, l))
+        for idx, (src_line, l) in enumerate(parsed_entries):
+            all_lines.append((idx + 1, src_line, l))
 
         total = len(all_lines)
         file_size_str = self._humanize_size(file_path)
 
+        # --- Empty log (0 entries): mirror read_file's empty-file style ---
+        if total == 0:
+            return f"OK: Read {file_path} entries 0/0 ({fmt}, {file_size_str})"
+
+        _by_line_raw = params.get('by_line', False)
+        by_line = (_by_line_raw if isinstance(_by_line_raw, bool)
+                   else str(_by_line_raw).strip().lower() in ('1', 'true', 'yes', 'on'))
+
         try:
-            if range_str is not None:
+            if by_line:
+                # BUG_0195: interpret `range` as physical file lines. Requires a
+                # line-resolved source (JSONL / mixed / single object), not a
+                # whole-file JSON array.
+                if range_str is None:
+                    return ("Error: by_line=true requires an explicit 'range' "
+                            "(e.g. '181:259') expressed in physical file lines.")
+                if not any(src_line is not None for _, src_line, _ in all_lines):
+                    return ('Error: by_line=true is not supported for this file — '
+                            'its entries are not resolvable to physical file lines '
+                            "(JSON array). Use the entry-based 'range' instead.")
+                total_file_lines = len(content.splitlines())
+                line_start, line_end = self._parse_file_line_range(range_str, total_file_lines)
+                selected = [t for t in all_lines
+                            if t[1] is not None and line_start <= t[1] <= line_end]
+                if not selected:
+                    return (f"Error: No log entries on file lines "
+                            f"{line_start}-{line_end} in {file_path}.")
+            elif range_str is not None:
                 # Unified range parameter (1-indexed inclusive like re_indent / edit_file)
                 start_idx, end_idx = self._parse_range(range_str, total)
                 selected = all_lines[start_idx:end_idx]
@@ -465,38 +523,43 @@ class ReadLogs(BaseTool):
             return f"Error parsing range '{range_str}': {e}"
 
         truncated_lines = []
-        for pos, item in selected:
-            truncated_lines.append((pos, ReadLogs.truncate_item(item, mode, max_chars)))
-
-        # --- Empty log (0 entries): mirror read_file's empty-file style ---
-        if total == 0:
-            return f"OK: Read {file_path} lines 0/0 ({fmt}, {file_size_str})"
+        for entry_num, src_line, item in selected:
+            truncated_lines.append(
+                (entry_num, src_line, ReadLogs.truncate_item(item, mode, max_chars)))
 
         # --- Build the operation-status header (first line of output) ---
-        # Wording mirrors read_file's "OK: Read {path} lines {start}-{end}/{total} (...)" so the
-        # two tools look consistent. The ({fmt}, ...) tag carries the log-specific detail.
+        # BUG_0195: the window is in ENTRY coordinates (the coordinate `range`
+        # accepts). Physical file lines are appended when every selected entry
+        # has one, so a reader can translate citations without guessing.
         first = truncated_lines[0][0]
         last = truncated_lines[-1][0]
+        src_lines = [src for _, src, _ in truncated_lines if src is not None]
 
-        header = f"OK: Read {file_path} lines {first}-{last}/{total} ({fmt}, {file_size_str})"
+        header = f"OK: Read {file_path} entries {first}-{last}/{total} ({fmt}, {file_size_str}"
+        if len(src_lines) == len(truncated_lines):
+            header += f"; file lines {src_lines[0]}-{src_lines[-1]}"
+        header += ')'
 
         # --- Output formatting based on 'format' parameter ---
         if fmt == 'raw':
-            # Original behavior: numbered JSON lines (using original entry positions)
+            # Numbered JSON lines. BUG_0195: prefix with the physical file line
+            # (L...) when known, otherwise the entry index (E...) — never a bare
+            # number that could be mistaken for the other coordinate system.
             result = []
-            for pos, item in truncated_lines:
+            for entry_num, src_line, item in truncated_lines:
                 if isinstance(item, str):
                     line_text = item
                 else:
                     line_text = json.dumps(item, ensure_ascii=False)
-                num_label = 'meta' if pos == 0 else pos
+                num_label = f"L{src_line}" if src_line is not None else f"E{entry_num}"
                 result.append(f"{num_label}: {line_text}")
             return f"{header}\n```\n" + '\n'.join(result) + '\n```'
 
-        # simple mode: human-readable summary (using original entry positions)
+        # simple mode: human-readable summary (entry index + physical file line)
         result = []
-        for pos, item in truncated_lines:
-            header_line, content_line = ReadLogs._format_simple_entry(item, pos, mode, max_chars)
+        for entry_num, src_line, item in truncated_lines:
+            header_line, content_line = ReadLogs._format_simple_entry(
+                item, entry_num, mode, max_chars, src_line=src_line)
             result.append(header_line)
             if content_line is not None:
                 result.append(content_line)

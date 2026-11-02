@@ -8,6 +8,7 @@ Tests validate:
 """
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -553,15 +554,18 @@ class TestReadLogsFormatParameter:
             assert lines[0].startswith('OK: Read '), f"Missing header: {lines[0]}"
             assert lines[1] == '```' and lines[-1] == '```', f"Fence envelope missing: {lines}"
 
-            # Each entry line inside the fences starts with a number prefix followed by ": " and valid JSON.
+            # Each entry line inside the fences starts with a coordinate prefix followed by ": " and valid JSON.
+            # BUG_0195: JSONL entries are prefixed with their physical file line (L<n>).
             body = result.split('```')[1].strip().split('\n')
             assert len(body) == 2, f"Expected 2 numbered entries in fenced body: {body}"
             for line in body:
                 assert ': ' in line, f"Line missing ': ' separator: {line}"
                 num_prefix, json_part = line.split(': ', 1)
-                assert num_prefix.isdigit(), f"Prefix not numeric: {num_prefix}"
+                assert re.fullmatch(r'[LE]\d+', num_prefix), f"Prefix not a coordinate: {num_prefix}"
                 parsed = json.loads(json_part)
                 assert isinstance(parsed, dict), f"Not a JSON object: {parsed}"
+            assert body[0].startswith('L1: '), f"First entry should cite file line 1: {body[0]}"
+            assert body[1].startswith('L2: '), f"Second entry should cite file line 2: {body[1]}"
 
             # Verify content is preserved in raw output
             assert 'hello' in result

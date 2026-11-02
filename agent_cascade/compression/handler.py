@@ -362,7 +362,8 @@ class CompressionHandler:
             return text
         first_line = text[:first_newline]
         # Match: "OK: Read ... lines 123-456/789 (text, 1.2 KB)"
-        m = re.match(r'^(.*?lines )(\d+)-(\d+)(/\d+)(.*)$', first_line)
+        # or read_logs: "OK: Read ... entries 123-456/789 (simple, ...; file lines ...)"
+        m = re.match(r'^(.*?(?:lines|entries) )(\d+)-(\d+)(/\d+)(.*)$', first_line)
         if m:
             prefix = m.group(1)
             start = m.group(2)
