@@ -233,6 +233,116 @@ def test_edit_file_append_at_eof_succeeds():
         assert f.read_text(encoding='utf-8') == 'l1\nl2\nl3\nl4\n', 'append should add the line'
 
 
+# ── BUG_0213: range ends mid-block, leaving orphaned residue on the surviving side ──
+
+
+def test_edit_file_mid_block_range_notes_continuation_residue():
+    """The BUG_0213 repro: the section body spans lines 3-8 but the range stops at 5.
+    The edit still performs, but the success message must surface the first surviving
+    line (line 6, mid-sentence) so the residue is visible without a follow-up grep.
+    Red/green discriminator: pre-fix the message carried only line arithmetic."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('# Doc\n'
+                    '\n'
+                    '## Section\n'
+                    'First line of the\n'
+                    'section body that\n'
+                    'runs on to line eight\n'
+                    'and ends here.\n'
+                    '\n'
+                    '## Next\n'
+                    'body\n')
+        f = _owned_file(om, d, 'residue.md', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='3:5')
+        assert res.startswith('OK'), f"mid-block edit should still succeed, got: {res!r}"
+        assert 'note: line 6 after the range continues the deleted block' in res, \
+            f"message must flag the surviving continuation at line 6: {res!r}"
+        assert 'runs on to line eight' in res, \
+            f"message must quote the first surviving line: {res!r}"
+        assert 'extend the range' in res, f"message must point at the repair: {res!r}"
+        # The residue is real — now surfaced rather than silent.
+        assert 'X\nruns on to line eight\n' in f.read_text(encoding='utf-8'), \
+            'the orphaned continuation must in fact survive the edit'
+
+
+def test_edit_file_block_boundary_range_has_no_residue_note():
+    """A range that ends exactly where the block ends (next line is blank) must NOT
+    carry the BUG_0213 note — no false positive on a clean section replacement."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('# Doc\n'
+                    '\n'
+                    '## Section\n'
+                    'First line of the\n'
+                    'section body that\n'
+                    'runs on to line eight\n'
+                    'and ends here.\n'
+                    '\n'
+                    '## Next\n'
+                    'body\n')
+        f = _owned_file(om, d, 'boundary.md', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='3:7')
+        assert res.startswith('OK'), f"clean section replace should succeed, got: {res!r}"
+        assert 'after the range' not in res, \
+            f"block-boundary edit must not carry a residue note: {res!r}"
+        assert f.read_text(encoding='utf-8') == '# Doc\n\nX\n\n## Next\nbody\n', \
+            'section replacement must be exact'
+
+
+def test_edit_file_terminal_punctuation_range_has_no_residue_note():
+    """A deleted block whose last line closes cleanly ('.') is presumed complete, so a
+    non-blank surviving line must not be flagged as residue."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'para one ends.\ncontinues here\nlast\n'
+        f = _owned_file(om, d, 'closed.txt', original)
+        res = _d_and_i(om, f, new_content='replacement\n', range_param='1:1')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'after the range' not in res, \
+            f"closed block must not carry a residue note: {res!r}"
+        assert f.read_text(encoding='utf-8') == 'replacement\ncontinues here\nlast\n', \
+            'edit must be exact'
+
+
+def test_edit_file_range_ending_on_heading_notes_orphan():
+    """Deleting a heading while leaving its body behind orphans the body even though it
+    is plain prose — the second BUG_0213 shape. Must be flagged."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'intro\n## Section title\nbody line one\n'
+        f = _owned_file(om, d, 'heading.md', original)
+        res = _d_and_i(om, f, new_content='replacement\n', range_param='2:2')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'note: line 3 after the range may be orphaned' in res, \
+            f"message must flag the orphaned body under a deleted heading: {res!r}"
+        assert 'body line one' in res, f"message must quote the surviving line: {res!r}"
+
+
+def test_edit_file_next_line_structural_start_has_no_residue_note():
+    """A surviving list item / heading / fence starts its own block and must never be
+    mistaken for residue."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = 'intro text that\n- item one\n- item two\n'
+        f = _owned_file(om, d, 'list.md', original)
+        res = _d_and_i(om, f, new_content='X\n', range_param='1:1')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'after the range' not in res, \
+            f"a structural next line must not be flagged as residue: {res!r}"
+
+
+def test_edit_file_insert_only_has_no_residue_note():
+    """Insert-only d&i (old_lc == 0) deletes nothing, so there is nothing to orphan."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = _owned_file(om, d, 'insert.md', 'line one\nline two\n')
+        res = _d_and_i(om, f, new_content='inserted\n', range_param='2')
+        assert res.startswith('OK'), f"insert-only should succeed, got: {res!r}"
+        assert 'after the range' not in res, \
+            f"insert-only edit must not carry a residue note: {res!r}"
+
+
 # ── BUG_0105: verbatim indentation of inserted lines (regression, no code change)
 
 

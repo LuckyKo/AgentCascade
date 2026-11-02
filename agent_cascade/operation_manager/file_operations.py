@@ -213,6 +213,49 @@ def _is_within_roots(path, roots: List[Path]) -> bool:
     return False
 
 
+# ─── edit_file delete_and_insert residue heuristic (BUG_0213) ─────────────────
+
+_MD_HEADING_RE = re.compile(r'^#{1,6}(?:\s|$)')
+_MD_LIST_ITEM_RE = re.compile(r'^(?:[-*+]|\d+[.)])\s')
+# Punctuation that closes a phrase/sentence/bracket. A deleted block ending in one of
+# these is presumed complete, so the surviving line is treated as a new block.
+_TERMINAL_TAIL_CHARS = ('.', '!', '?', ':', ';', ')', ']', '}', '"', "'", '`',
+                        '\u2019', '\u201d', '\u00bb')
+
+
+def _orphan_residue_reason(last_deleted: str, next_line: str) -> Optional[str]:
+    """Return a short reason when *next_line* looks orphaned by a deleted range.
+
+    BUG_0213: ``delete_and_insert`` operates on raw line numbers, so a range that ends
+    mid-paragraph leaves the tail of the block on the surviving side. The success
+    message used to report only line arithmetic — this heuristic supplies the missing
+    "does the range cut a block in half?" signal. Purely advisory: it never changes
+    what is written.
+
+    A surviving line that starts its own markdown block (heading, list item,
+    blockquote, table row, fence, horizontal rule) is never flagged.
+    """
+    last = last_deleted.strip()
+    nxt = next_line.strip()
+    if not last or not nxt:
+        return None
+    if (_MD_HEADING_RE.match(nxt)
+            or _MD_LIST_ITEM_RE.match(nxt)
+            or nxt[0] in '|>'
+            or nxt.startswith('```')
+            or nxt.startswith('~~~')
+            or re.fullmatch(r'(?:[-*_]\s*){3,}', nxt)):
+        return None
+    # A deleted heading took its section title with it; whatever survives below is
+    # orphaned even if it reads like a normal paragraph (the second BUG_0213 shape).
+    if _MD_HEADING_RE.match(last):
+        return 'may be orphaned — it follows a deleted heading'
+    # Plain prose/code: only flag when the deleted block did not close cleanly.
+    if last.endswith(_TERMINAL_TAIL_CHARS):
+        return None
+    return 'continues the deleted block'
+
+
 def _describe_list_filters(
     include: Optional[str],
     exclude: Optional[str],
@@ -2076,6 +2119,27 @@ class FileOpsMixin:
                     # like a replacement that lost its text, which is exactly the confusion this
                     # path used to cause (a replacement passed under the wrong kwarg name).
                     res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY, -{old_lc} +0 = {sign}{net_delta}net)"
+
+                # BUG_0213: the range may end mid-block, leaving the block's tail on the
+                # surviving side. The preview above echoes only the deleted lines, so also
+                # surface the first surviving line and say when it reads like residue.
+                # Only meaningful while something survives (d_end == total_lines is the
+                # suffix-to-EOF case already covered by the BUG_0175 note above) and when
+                # the edit actually deleted lines (insert-only has nothing to orphan).
+                _orig_msg_lines = file_content.splitlines()
+                if old_lc > 0 and d_end < len(_orig_msg_lines):
+                    _next_line = _orig_msg_lines[d_end]
+                    _residue_reason = _orphan_residue_reason(
+                        _orig_msg_lines[d_end - 1], _next_line)
+                    if _residue_reason:
+                        _next_snip = _next_line.strip()
+                        if len(_next_snip) > 60:
+                            _next_snip = _next_snip[:60] + '…'
+                        res_msg += (
+                            f'\n  note: line {d_end + 1} after the range '
+                            f'{_residue_reason}: "{_next_snip}" — if that line belongs to '
+                            f'the replaced block, re-read and extend the range to cover it '
+                            f'(or use match_mode=\'exact\').')
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
