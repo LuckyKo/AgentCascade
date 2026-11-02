@@ -1278,6 +1278,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Poll for pending approvals and push to clients."""
         known_ids: Set[str] = set()
         seen_ids: Set[str] = set()  # Cumulative set of all IDs we've ever seen
+        auto_checked: Set[str] = set()  # BUG_0211: approvals already handed to the advisor
         while True:
             try:
                 await asyncio.sleep(0.3)
@@ -1289,6 +1290,19 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     seen_ids.update(current_ids)
                     known_ids = current_ids.copy()
                     await broadcast({'type': 'approvals', 'approvals': pending})
+
+                # BUG_0211: Auto-Ask Security must not depend on a browser tab. The Web UI's
+                # renderApprovals() loop was the only sender of `ask_security`; headless /
+                # Telegram-only runs had no tab, so approvals sat until the timeout. Drive the
+                # same handler server-side. Duplicate checks (when a tab IS open) are rejected
+                # by SecurityAdvisorHandler's active-check guard.
+                if pending:
+                    try:
+                        from agent_cascade.security_handler import auto_start_pending_security_checks
+                        await auto_start_pending_security_checks(
+                            agent_pool, session, app, _get_send_queue(), pending, auto_checked)
+                    except Exception as e:
+                        logger.debug(f"Headless security auto-ask failed (continuing): {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:

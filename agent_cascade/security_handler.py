@@ -124,6 +124,64 @@ def _get_active_checks_state(app):
     return _runtime_state._active_checks, _runtime_state._active_checks_lock
 
 
+async def auto_start_pending_security_checks(
+        agent_pool,
+        session: Dict[str, Any],
+        app_state,
+        send_queue,
+        pending: list,
+        attempted: set,
+) -> int:
+    """BUG_0211: start Auto-Ask Security checks without a browser attached.
+
+    ``ask_security`` used to be sent exclusively by the Web UI's ``renderApprovals``
+    loop. In headless / Telegram-only mode no tab exists, so no check ever started and
+    every approval sat until the timeout. The server now drives the same handler from
+    its approval poll instead.
+
+    Each request id is attempted once (``attempted`` is caller-owned and persists for
+    the process lifetime). An open browser may still send ``ask_security`` for the same
+    approval; ``SecurityAdvisorHandler``'s active-check guard rejects the duplicate, so
+    the two drivers cannot run overlapping checks for one id.
+
+    Returns the number of checks this call started. A per-check failure is logged and
+    does not stop the remaining approvals from being checked.
+    """
+    if not pending:
+        return 0
+
+    from agent_cascade.runtime_state import state as _runtime_state
+    if not _runtime_state.auto_security:
+        return 0
+
+    # Mirror the Web UI's one-at-a-time trigger: _execute_check serializes on a global
+    # execution lock, so queueing several workers per poll would only add contention.
+    active_checks, active_lock = _get_active_checks_state(app_state)
+    with active_lock:
+        if active_checks:
+            return 0
+
+    started = 0
+    handler = None
+    for ap in pending:
+        rid = ap.get('request_id')
+        if not rid or rid in attempted:
+            continue
+        attempted.add(rid)
+        try:
+            if handler is None:
+                # broadcast_fn is unused by the handler (it pushes via send_queue).
+                handler = SecurityAdvisorHandler(
+                    agent_pool, session, app_state, send_queue, None)
+            await handler.run_check({'request_id': rid, 'auto_apply': True})
+            started += 1
+        except Exception as e:  # noqa: BLE001 - one bad approval must not stall the rest
+            from agent_cascade.log import logger
+            logger.warning('[SECURITY] headless auto-ask failed for %s: %s', rid, e)
+        break  # one check per poll; the next tick picks up the next approval
+    return started
+
+
 def _get_security_approval_cache(app):
     """Get the process-level Security-approval verdict cache (BUG_0180 follow-up).
 
