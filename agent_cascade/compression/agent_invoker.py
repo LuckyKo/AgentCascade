@@ -475,16 +475,33 @@ def _execute_compressor_and_extract_summary(
             engine.reacquire_after_slot_yield(
                 caller_inst, caller_name, context='after_compression', tolerate_failure=True)
 
-    # Extract the summary from the last assistant message
+    # Extract the summary from the last assistant message.
+    # BUG_0203 (F1): skip engine error strings that the Compressor commits as its own
+    # assistant message (a failed LLM turn surfaces "[SYSTEM ERROR: …]" as the last
+    # committed message). Feeding those to _parse_compression_output
+    # mis-classifies the failure as retryable (a "missing end marker" / "empty summary"
+    # format error) and re-sends the same oversized payload every round.
+    # ([RETRYING] messages are transient — yielded to the UI but not committed to
+    # history — so they never appear in the conversation and need no skip clause.)
     summary = ''
+    llm_error_surfaced = False
     if final_msgs:
         for msg_obj in reversed(final_msgs):
             role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
                     else getattr(msg_obj, 'role', ''))
-            if role == 'assistant':
-                content = extract_text_from_message(msg_obj, add_upload_info=False)
-                summary = strip_thinking_blocks(content)
-                break
+            if role != 'assistant':
+                continue
+            content = strip_thinking_blocks(
+                extract_text_from_message(msg_obj, add_upload_info=False)).strip()
+            if not content:
+                continue  # empty assistant message — keep scanning for a real summary
+            if content.startswith('[SYSTEM ERROR'):
+                # Engine error surfaced as an assistant message — not a usable summary.
+                # Keep scanning; if no usable message remains, this is the terminal case.
+                llm_error_surfaced = True
+                continue
+            summary = content
+            break
 
         # Strip conversational filler prefixes
         lower_summary = summary.lower()
@@ -496,6 +513,17 @@ def _execute_compressor_and_extract_summary(
 
     # Validate we got a usable summary
     if not summary.strip():
+        if llm_error_surfaced:
+            # BUG_0203 (F1): the LLM produced no output — the engine surfaced an error
+            # string as the last assistant message. This is NON-retryable on the same
+            # endpoint (the payload is unchanged), so classify it distinctly to avoid
+            # re-sending the same oversized payload every round.
+            logger.warning(
+                f"[COMPRESSION_LLM_FAILURE] {timeout_label} LLM produced no output "
+                f"(engine error surfaced as assistant message); not retryable on the same endpoint")
+            raise RuntimeError(
+                f"{timeout_label} LLM produced no output (engine error surfaced as assistant "
+                f"message); not retryable on the same endpoint")
         raise RuntimeError(f"{timeout_label} Agent returned an empty summary")
 
     # Parse + strip the end marker (and optional same-line caption) in one pass.
@@ -695,6 +723,13 @@ def invoke_compression_agent(
                 # rebuild_conversation() also invalidates message caches so _setup_turn
                 # will rebuild the working set from scratch on the next engine.run().
                 comp_instance.rebuild_conversation(initial_conversation)
+
+                # BUG_0203 (F2b): advance the endpoint cursor between compression retry rounds
+                # so each round tries a DIFFERENT endpoint — a down class-pinned `compressor`
+                # endpoint does not block all rounds. No-op if the router is absent/mocked.
+                _router = getattr(agent_pool, 'api_router', None)
+                if _router is not None:
+                    _router.advance_instance_endpoint(comp_state_key)
 
     finally:
         # Always clean up compression agent state when done (runs exactly once).

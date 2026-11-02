@@ -40,6 +40,68 @@ def _compression_failure(error: str, mode: str) -> CompressResult:
     )
 
 
+def truncate_context_for_fallback(
+    agent_pool,
+    target_agent_name: str,
+    fraction: float | None = None,
+) -> CompressResult:
+    """BUG_0203 (F3): deterministic truncation fallback for fallback-compression round
+    exhaustion.
+
+    When the iterative fallback compression rounds all fail (e.g. the Compressor LLM
+    itself is down), this drops the oldest active messages to fit the target fraction
+    WITHOUT an LLM call, so the caller's context stays bounded and the turn can continue
+    with a safe (if lossy) payload. The caller rebuilds its working set from the
+    mutated pool state. Returns a CompressResult (success=True on a real truncation).
+    """
+    if fraction is None:
+        fraction = _runtime_state.compression_fraction
+
+    history = agent_pool.get_conversation(target_agent_name)
+    if not history:
+        return _compression_failure('No conversation to truncate', mode='auto')
+
+    active_start_idx, active_set, _ = (
+        agent_pool.get_compression_target_set_from_conversation(target_agent_name, history))
+    if not active_set:
+        return _compression_failure('No active messages to truncate', mode='auto')
+
+    discard_count = compute_discard_count(active_set, fraction, force=True)
+    if discard_count <= 0:
+        return _compression_failure('No messages to discard (truncation floor reached)', mode='auto')
+
+    # Mechanical marker: states that N messages were dropped with no LLM summary.
+    marker_message = Message(
+        role=USER,
+        content=(f"{COMPRESSION_MARKER} (truncated — no summary available) ---\n"
+                 f"{discard_count} messages dropped to fit the available endpoint; "
+                 f"context trimmed deterministically without an LLM summary."),
+    )
+    if marker_message.ts is None:
+        marker_message.ts = time.time()
+
+    insert_pos = active_start_idx + discard_count
+    new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
+    try:
+        agent_pool.instance_conversations[target_agent_name] = new_history
+    except Exception as e:
+        return _compression_failure(f"Pool mutation during truncation failed: {e}", mode='auto')
+
+    logger.warning(
+        f"[COMPRESSION_TRUNCATION_FALLBACK] {target_agent_name}: dropped {discard_count} "
+        f"messages (fraction={fraction:.2f}) to fit the endpoint without an LLM summary.")
+
+    return CompressResult(
+        success=True,
+        summary_text=None,
+        marker_message=marker_message,
+        messages_discarded=discard_count,
+        tail_count=len(active_set) - discard_count,
+        error=None,
+        mode='auto',
+    )
+
+
 def _estimate_usage_pct(agent_pool, target_agent_name: str, history) -> float | None:
     """Estimate context usage percentage for the min-usage guard.
 

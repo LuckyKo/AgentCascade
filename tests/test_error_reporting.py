@@ -561,6 +561,103 @@ class TestLlmCallTerminalPath:
         assert 'LLM unavailable after' in content
         assert 'All API endpoints exhausted for agent type' in content
 
+    # ── BUG_0203 (F5): plain connection/API errors reach the informative terminal branch ──
+
+    def test_plain_connection_error_reaches_informative_terminal_branch(self):
+        """BUG_0203 (F5): a plain connection/API error that exhausts the retry budget
+        must reach the informative terminal branch (build_terminal_message), NOT fall
+        through to the generic '[SYSTEM ERROR: Empty LLM response]' produced by
+        _finalize_llm_result.
+
+        Red-at-HEAD: before the F5 fix, the terminal check `retry_count >= max_attempts`
+        was evaluated BEFORE the per-attempt increment, so a plain-raising exception
+        reached `== max_attempts` (not `>=`) at check time, the loop guard exited, and
+        _finalize_llm_result emitted the generic empty-response string.
+        """
+        from agent_cascade.llm.base import ModelServiceError
+
+        # A plain connection error (no .endpoint_failures) — the D1 scenario.
+        exc = ModelServiceError(message='connection refused: llama-server unreachable')
+
+        engine, instance, template, active_functions = _build_engine_with_failing_llm(exc)
+        messages = _drive_engine(engine, instance, template, active_functions)
+
+        error_msgs = [m for m in messages if getattr(m, 'content', '') and '[SYSTEM ERROR:' in str(m.content)]
+        assert error_msgs, f"no [SYSTEM ERROR] message yielded: {[getattr(m,'content',None) for m in messages]}"
+
+        # The terminal message must be the INFORMATIVE one (from build_terminal_message,
+        # which starts with 'LLM unavailable after N retries.'), NOT the generic
+        # 'Empty LLM response' string.
+        assert any('LLM unavailable after' in str(m.content) for m in error_msgs), (
+            f"plain connection error must reach the informative terminal branch, "
+            f"got: {[str(m.content) for m in error_msgs]}")
+        assert not any('Empty LLM response' in str(m.content) for m in error_msgs), (
+            f"plain connection error must NOT fall through to the generic empty-response "
+            f"string, got: {[str(m.content) for m in error_msgs]}")
+
+    def test_stream_guard_char_run_reaches_terminal_branch_exactly_once(self):
+        """BUG_0196 (stream-guard path) ordering lock: the terminal-exhaustion check
+        must run BEFORE _handle_inner_loop_detection, so that an inner_loop_exhausted
+        raise from that helper cannot suppress the terminal branch.
+
+        Uses a genuine CharacterRunDetected with loop_retry_count pre-set to
+        the budget so _handle_inner_loop_detection would raise if reached.
+        The terminal check (retry_count >= max_attempts) fires first.
+
+        Locks the terminal-check ordering: if the check were moved back after
+        the inner-loop call, the raise would escape and this test would fail.
+        """
+        from unittest.mock import patch
+        from agent_cascade.exceptions import CharacterRunDetected
+        from agent_cascade.engine import llm_call as _llm_call_mod
+
+        exc = CharacterRunDetected('character run detected (stream guard)')
+        engine, instance, template, active_functions = _build_engine_with_failing_llm(exc)
+
+        _orig_state_cls = _llm_call_mod._LLMCallState
+
+        class _PreSetState(_orig_state_cls):
+            def __init__(self):
+                super().__init__()
+                self.retry_count = 2   # == max_attempts → terminal check fires
+                self.loop_retry_count = 2  # == max_attempts → inner-loop would raise
+
+        with patch.object(_llm_call_mod, '_LLMCallState', _PreSetState):
+            messages = _drive_engine(engine, instance, template, active_functions)
+
+        error_msgs = [m for m in messages if getattr(m, 'content', '') and '[SYSTEM ERROR:' in str(m.content)]
+        assert len(error_msgs) == 1, (
+            f"expected exactly one terminal message, got {len(error_msgs)}: "
+            f"{[str(m.content) for m in error_msgs]}")
+
+    def test_stream_guard_max_token_reaches_terminal_branch_exactly_once(self):
+        """Same ordering lock as the CharacterRunDetected test above but with
+        MaxTokenExceeded. Verifies the terminal check fires before
+        _handle_inner_loop_detection for the max-token stream-guard path.
+        """
+        from unittest.mock import patch
+        from agent_cascade.exceptions import MaxTokenExceeded
+        from agent_cascade.engine import llm_call as _llm_call_mod
+
+        exc = MaxTokenExceeded('max token exceeded (stream guard)')
+        engine, instance, template, active_functions = _build_engine_with_failing_llm(exc)
+
+        _orig_state_cls = _llm_call_mod._LLMCallState
+
+        class _PreSetState(_orig_state_cls):
+            def __init__(self):
+                super().__init__()
+                self.retry_count = 2
+                self.loop_retry_count = 2
+
+        with patch.object(_llm_call_mod, '_LLMCallState', _PreSetState):
+            messages = _drive_engine(engine, instance, template, active_functions)
+
+        error_msgs = [m for m in messages if getattr(m, 'content', '') and '[SYSTEM ERROR:' in str(m.content)]
+        assert len(error_msgs) == 1, (
+            f"expected exactly one terminal message, got {len(error_msgs)}: "
+            f"{[str(m.content) for m in error_msgs]}")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5b. BUG_0099 — a mid-stream error must NOT commit the truncated partial

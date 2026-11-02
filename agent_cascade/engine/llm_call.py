@@ -980,6 +980,53 @@ class LLMCallMixin:
         # is a local of this method, not a closure variable here.
         state.last_output = None
 
+        # 429 / ServerBusy overload guard (additive — does NOT touch other error types).
+        # A 429 (backend rate limit / context-cache exhaustion) or ServerBusyError (every endpoint on
+        # a breaker-open physical server; the router already burned its bounded fail-fast wait) is
+        # transient-but-pointless to hammer: re-queueing just burns the retry budget and, without this
+        # guard, the loop exits via the while-guard and _finalize_llm_result emits a useless
+        # "[SYSTEM ERROR: Empty LLM response]". classify_error keeps these retryable (correct for the
+        # transient case), so we cap them HERE instead: when THIS attempt is the last one the budget allows,
+        # stop and surface an informative overload message. Fires one attempt before the terminal branch
+        # below (retry_count+1 >= max_attempts), so it always wins for 429/ServerBusy and never for
+        # other classes. N = this attempt's ordinal (retry_count is pre-increment here).
+        _is_overload = isinstance(e, ServerBusyError) or '429' in str(e).lower() or 'rate limit' in str(e).lower()
+        if _is_overload and state.retry_count + 1 >= max_attempts:
+            _attempts = state.retry_count + 1
+            logger.error(f"[ENDPOINT_RETRY] LLM endpoint overloaded for {inst_name} after {_attempts} "
+                         f"attempts (429/ServerBusy): {summarize_exhaustion(e)}")
+            yield Message(role=ASSISTANT,
+                         content=f"[SYSTEM ERROR: LLM endpoint overloaded (HTTP 429) after {_attempts} "
+                                 f"attempts — context cache exhausted]")
+            state.error_already_yielded = True
+            return True
+
+        # _abort_llm_stream already increments retry_count before raising.
+        # For regular exceptions, increment if we haven't yet
+        # (retry_count==0).
+        _is_first_attempt = state.retry_count == 0
+        if _is_first_attempt:
+            state.retry_count += 1
+        else:
+            # Already incremented by _abort_llm_stream OR previous round —
+            # check if we need another increment (only if _abort_llm_stream
+            # didn't do it).
+            # We know _abort_llm_stream incremented if the error message
+            # contains our markers.
+            if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+                state.retry_count += 1
+
+        # BUG_0203 (F5): exhaustion/terminal check — runs AFTER the per-attempt increment,
+        # BEFORE the inner-loop side effects (_handle_inner_loop_detection). Plain connection/API
+        # errors now reach this informative terminal branch on the last attempt (retry_count
+        # reaches max_attempts after the increment) instead of falling through to the generic
+        # "[SYSTEM ERROR: Empty LLM response]". The 429 overload guard above still fires one
+        # attempt earlier for 429/ServerBusy. The stream-guard (inner-loop) path pre-increments
+        # via _abort_llm_stream and is NOT re-incremented here, so it still reaches this branch
+        # exactly once (BUG_0196 preserved). Placing this check BEFORE
+        # _handle_inner_loop_detection is critical: that helper can RAISE
+        # (inner_loop_exhausted) when the loop budget is hit, which would otherwise escape
+        # this handler and suppress the terminal branch.
         if state.retry_count >= max_attempts:
             # B-fix-1 (plan §3 B): was `>`. The per-attempt increment bumps
             # retry_count for EVERY non-loop exception, so after max_attempts
@@ -1007,8 +1054,8 @@ class LLMCallMixin:
                 # the router's structured .endpoint_failures (plan §3.4). The log line uses
                 # a compact digest so the full concatenated stack dumps are never re-printed.
                 display_msg = build_terminal_message(e, max_attempts)
-            logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {max_attempts} "
-                         f"retry attempts: {summarize_exhaustion(e)}")
+            logger.error(f"[ENDPOINT_RETRY] [LLM_TERMINAL_EXHAUSTED] LLM call failed for {inst_name} "
+                         f"after {max_attempts} retry attempts: {summarize_exhaustion(e)}")
             # Deduped full traceback at DEBUG — this is the user-visible failure point.
             if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
                 logger.debug(f"[ENDPOINT_RETRY] Full traceback for terminal LLM failure "
@@ -1017,44 +1064,12 @@ class LLMCallMixin:
             state.error_already_yielded = True
             return True
 
-        # 429 / ServerBusy overload guard (additive — does NOT touch other error types).
-        # A 429 (backend rate limit / context-cache exhaustion) or ServerBusyError (every endpoint on
-        # a breaker-open physical server; the router already burned its bounded fail-fast wait) is
-        # transient-but-pointless to hammer: re-queueing just burns the retry budget and, without this
-        # guard, the loop exits via the while-guard and _finalize_llm_result emits a useless
-        # "[SYSTEM ERROR: Empty LLM response]". classify_error keeps these retryable (correct for the
-        # transient case), so we cap them HERE instead: when THIS attempt is the last one the budget allows,
-        # stop and surface an informative overload message. Fires one attempt before the terminal branch
-        # above (retry_count+1 >= max_attempts), so it always wins for 429/ServerBusy and never for
-        # other classes. N = this attempt's ordinal (retry_count is pre-increment here).
-        _is_overload = isinstance(e, ServerBusyError) or '429' in str(e).lower() or 'rate limit' in str(e).lower()
-        if _is_overload and state.retry_count + 1 >= max_attempts:
-            _attempts = state.retry_count + 1
-            logger.error(f"[ENDPOINT_RETRY] LLM endpoint overloaded for {inst_name} after {_attempts} "
-                         f"attempts (429/ServerBusy): {summarize_exhaustion(e)}")
-            yield Message(role=ASSISTANT,
-                         content=f"[SYSTEM ERROR: LLM endpoint overloaded (HTTP 429) after {_attempts} "
-                                 f"attempts — context cache exhausted]")
-            state.error_already_yielded = True
-            return True
-
-        # _abort_llm_stream already increments retry_count before raising.
-        # For regular exceptions, increment if we haven't yet
-        # (retry_count==0).
-        if state.retry_count == 0:
-            state.retry_count += 1
-        else:
-            # Already incremented by _abort_llm_stream OR previous round —
-            # check if we need another increment (only if _abort_llm_stream
-            # didn't do it).
-            # We know _abort_llm_stream incremented if the error message
-            # contains our markers.
-            if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                state.retry_count += 1
-
-            # Handle inner-loop detection: budget check and endpoint advancement
-            if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
-                self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, max_attempts)
+        # Handle inner-loop detection: budget check and endpoint advancement.
+        # Placed AFTER the terminal check above so that an inner_loop_exhausted raise
+        # from _handle_inner_loop_detection cannot suppress the terminal branch (BUG_0203 F5).
+        # Only reached for non-exhausted loop exceptions on non-first attempts.
+        if not _is_first_attempt and isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
+            self._handle_inner_loop_detection(instance, e, state.retry_count, state.loop_retry_count, max_attempts)
 
         # Classify error type using centralized policy (Phase 4a)
         error_type = classify_error(e)
@@ -1158,6 +1173,12 @@ class LLMCallMixin:
 
         agent_type = fcr.agent_type
 
+        # BUG_0203 (F3): track the resolved endpoint limit across rounds so the
+        # round-exhaustion else-branch can decide between a safe truncation
+        # fallback (limit known) and the documented ContextWindowExceeded raise
+        # (no limit anywhere — the infinite-loop escape hatch).
+        next_limit = 0
+
         for round_num in range(1, FALLBACK_COMPRESSION_MAX_ROUNDS + 1):
             logger.debug(f"[FALLBACK_COMPRESSION] === Round {round_num}/{FALLBACK_COMPRESSION_MAX_ROUNDS} "
                          f"for {inst_name} ===")
@@ -1186,6 +1207,17 @@ class LLMCallMixin:
             if not llm_messages:
                 logger.error(f"[FALLBACK_COMPRESSION] Empty working set for {inst_name}")
                 break
+
+            # BUG_0203 (F3): resolve the endpoint limit at the top of each round
+            # so the round-exhaustion else-branch can decide between a safe
+            # truncation fallback (limit known) and the ContextWindowExceeded
+            # raise (no limit anywhere — the infinite-loop escape hatch).
+            try:
+                _chain = self.pool.api_router.get_endpoint_chain(agent_type, instance_name=inst_name)
+                if _chain:
+                    next_limit = _chain[0].get('max_input_tokens') or 0
+            except Exception:
+                pass
 
             if self.compression_handler.check_overfeeding(instance, llm_messages):
                 logger.warning(f"[FALLBACK_COMPRESSION] Overfeeding detected for {inst_name} "
@@ -1434,14 +1466,44 @@ class LLMCallMixin:
             # naturally hit _pre_llm_checks on the next iteration if needed.
 
         else:
-            # Exhausted all compression rounds without success
-            logger.error(
-                f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds "
-                f"for {inst_name}. Raising ContextWindowExceeded.")
-            raise ContextWindowExceeded(
-                f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) for {inst_name}. "
-                f"Context still exceeds available endpoint limits after aggressive compression. "
-                f"Original error: context exceeded on '{fcr.failed_endpoint}'.") from fcr
+            # BUG_0203 (F3): Exhausted all compression rounds without success.
+            if next_limit > 0:
+                # A target limit exists — do a safe deterministic TRUNCATION fallback
+                # (drop the oldest active messages to fit the target fraction, no LLM call)
+                # so the caller's context stays bounded and the turn can continue.
+                # Note: next_limit is used only as a boolean gate (limit exists vs. not);
+                # the truncation itself is fraction-based, NOT guaranteed to fit the
+                # resolved endpoint limit exactly.
+                logger.warning(
+                    f"[FALLBACK_COMPRESSION] [COMPRESSION_TRUNCATION_FALLBACK] Exhausted "
+                    f"{FALLBACK_COMPRESSION_MAX_ROUNDS} compression rounds for {inst_name} "
+                    f"(limit={next_limit}); applying deterministic truncation fallback.")
+                from agent_cascade.compression.core import truncate_context_for_fallback as _truncate_local
+                trunc_result = _truncate_local(agent_pool=self.pool, target_agent_name=inst_name)
+                if trunc_result.success:
+                    self._rebuild_working_set(messages, llm_messages, inst_name)
+                    logger.info(
+                        f"[FALLBACK_COMPRESSION] [COMPRESSION_TRUNCATION_FALLBACK] Truncated "
+                        f"{trunc_result.messages_discarded} messages for {inst_name}; "
+                        f"context is now bounded. Continuing with the existing payload.")
+                else:
+                    logger.warning(
+                        f"[FALLBACK_COMPRESSION] [COMPRESSION_TRUNCATION_FALLBACK] Truncation "
+                        f"fallback failed for {inst_name}: {trunc_result.error}. Continuing "
+                        f"with the current payload.")
+                return
+            else:
+                # No limit configured anywhere — the truncation target is undefined.
+                # Preserve the documented ContextWindowExceeded raise (the infinite-loop
+                # escape hatch). Without a target to truncate to, the safe bounded outcome
+                # is to raise, NOT to silently succeed with an unbounded payload.
+                logger.warning(
+                    f"[FALLBACK_COMPRESSION] Exhausted {FALLBACK_COMPRESSION_MAX_ROUNDS} "
+                    f"compression rounds for {inst_name} with no endpoint limit configured; "
+                    f"raising ContextWindowExceeded (no-limit escape hatch).")
+                raise ContextWindowExceeded(
+                    f"Iterative compression exhausted ({FALLBACK_COMPRESSION_MAX_ROUNDS} rounds) "
+                    f"for {inst_name} and no endpoint limit is configured to truncate to.")
 
         # If we got here, compression succeeded and payload fits — continue retry loop
         # llm_messages has been updated in-place by _rebuild_working_set

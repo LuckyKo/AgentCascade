@@ -1020,11 +1020,24 @@ class TestExecutionEngineIterativeCompression:
         assert 'overfeeding' in str(exc_info.value).lower()
 
     def test_max_rounds_exceeded_raises_context_window_exceeded(self):
-        """Compression loop exhausts all rounds → raises ContextWindowExceeded via real handler."""
+        """No-limit invariant: when no endpoint limit is configured anywhere, the
+        compression loop exhausts all rounds and raises ContextWindowExceeded
+        (the infinite-loop escape hatch) — NOT a silent success.
+
+        BUG_0203 (F3): the safe truncation fallback only applies when a limit
+        exists to truncate to. With no limit, the raise is preserved.
+        """
         from agent_cascade.compression.result import CompressResult
         from agent_cascade.engine.compression_exec import FALLBACK_COMPRESSION_MAX_ROUNDS
 
         engine, pool, instance, history = self._make_pool_and_engine()
+
+        # Override the router chain to report no limit (max_input_tokens=0)
+        # so the F3 conditional truncation does NOT fire and the raise is preserved.
+        pool.api_router.get_endpoint_chain.side_effect = lambda agent_type, **kw: (
+            [{'max_input_tokens': 32768}] if agent_type == 'Compressor'
+            else [{'max_input_tokens': 0}]
+        )
 
         # compress_context always fails — forces loop to exhaust rounds
         fail_result = CompressResult(
