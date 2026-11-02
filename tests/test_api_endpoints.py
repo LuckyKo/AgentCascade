@@ -2747,6 +2747,147 @@ class TestAfkAdminNudge:
         assert len(calls) == 1
         assert len(pool._enqueue_calls) == 1
 
+    # ── BUG_0198: KV save/restore around the Admin review ────────────────────
+
+    @staticmethod
+    def _enable_state_save(pool, enabled=True):
+        """Give the pool double what the real pool provides for the KV-save gate."""
+        from types import SimpleNamespace
+        pool.settings = SimpleNamespace(state_kv_save_enabled=enabled)
+        inst = pool._instance
+        inst._state_lock = threading.RLock()
+        inst._state_label = None
+        inst._last_endpoint_config = {
+            'api_base': 'http://127.0.0.1:1234/v1',
+            'model': 'test-model',
+            'state_save_enabled': True,
+        }
+
+    def test_admin_mode_saves_root_state_before_review(self, monkeypatch):
+        """BUG_0198: admin mode persists the idle root's KV BEFORE the Admin run and
+        leaves the consume-once label pending for the root's next-turn restore."""
+        from agent_cascade import state_ops
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        saved = []
+        seen_at_advisor = {}
+        holder = {}
+
+        def _save(inst):
+            saved.append(inst)
+            inst._state_label = 'w1'  # simulate a successful save (stable label)
+            return True
+
+        def _hook():
+            # Runs inside the advisor stub: the save must already have happened.
+            seen_at_advisor['label'] = holder['pool']._instance._state_label
+
+        app, pool, calls = self._build_app(
+            monkeypatch, 'admin', AdvisorResult(output_text='STATUS: ok'),
+            advisor_hook=_hook)
+        holder['pool'] = pool
+        self._enable_state_save(pool)
+        monkeypatch.setattr(state_ops, 'save_instance_state', _save)
+        # One nudge cycle inside the observation window.
+        from agent_cascade import api_server as _api
+        monkeypatch.setattr(_api, 'AFK_NUDGE_COOLDOWN', 1.0)
+
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+            time.sleep(0.1)
+
+        assert len(calls) == 1
+        assert len(pool._enqueue_calls) == 1
+        # Save ran on the ROOT instance, before the Admin review.
+        assert saved == [pool._instance]
+        assert seen_at_advisor['label'] == 'w1'
+        # The label is NOT consumed here: the next root turn's _setup_turn restores it.
+        assert pool._instance._state_label == 'w1'
+
+    def test_admin_mode_save_failure_still_nudges(self, monkeypatch):
+        """BUG_0198: a failed save degrades to the old behavior — it must never block
+        or fail the nudge."""
+        from agent_cascade import state_ops
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        def _save(inst):
+            raise RuntimeError('autoloader down')
+
+        app, pool, calls = self._build_app(monkeypatch, 'admin',
+                                          AdvisorResult(output_text='STATUS: ok'))
+        self._enable_state_save(pool)
+        monkeypatch.setattr(state_ops, 'save_instance_state', _save)
+        from agent_cascade import api_server as _api
+        monkeypatch.setattr(_api, 'AFK_NUDGE_COOLDOWN', 1.0)
+
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert pool._enqueue_calls[0][1].endswith('STATUS: ok')
+        assert pool._instance._state_label is None
+
+    def test_admin_mode_state_save_disabled_by_toggle(self, monkeypatch):
+        """BUG_0198: the save honors the global State KV Save/Restore toggle — OFF
+        means no save attempt even on a state-save-capable endpoint."""
+        from agent_cascade import state_ops
+        from agent_cascade.advisor_runner import AdvisorResult
+        from fastapi.testclient import TestClient
+
+        calls = []
+
+        def _save(inst):
+            calls.append(inst)
+            return True
+
+        app, pool, advisor_calls = self._build_app(
+            monkeypatch, 'admin', AdvisorResult(output_text='STATUS: ok'))
+        self._enable_state_save(pool, enabled=False)
+        monkeypatch.setattr(state_ops, 'save_instance_state', _save)
+        from agent_cascade import api_server as _api
+        monkeypatch.setattr(_api, 'AFK_NUDGE_COOLDOWN', 1.0)
+
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(advisor_calls) == 1
+        assert len(pool._enqueue_calls) == 1
+        assert calls == []
+
+    def test_basic_mode_never_touches_state(self, monkeypatch):
+        """BUG_0198 negative control: basic mode (no Admin run) never saves state."""
+        from agent_cascade import state_ops
+        from fastapi.testclient import TestClient
+
+        calls = []
+
+        def _save(inst):
+            calls.append(inst)
+            return True
+
+        app, pool, advisor_calls = self._build_app(monkeypatch, 'basic')
+        self._enable_state_save(pool)
+        monkeypatch.setattr(state_ops, 'save_instance_state', _save)
+        from agent_cascade import api_server as _api
+        monkeypatch.setattr(_api, 'AFK_NUDGE_COOLDOWN', 1.0)
+
+        with TestClient(app):
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and not pool._enqueue_calls:
+                time.sleep(0.02)
+
+        assert len(pool._enqueue_calls) == 1
+        assert advisor_calls == []
+        assert calls == []
+
 
 class TestAfkRespectsSecurity:
     """The AFK at-registration auto-reject must defer to Auto-Ask Security review.

@@ -46,9 +46,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.constants import LLM_CONFIG_KEYS
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
+from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS,
                                     clamp_skill_setting, normalize_afk_mode)
+from agent_cascade.utils.atomic_json import atomic_write_json
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.operation_manager import OperationManager
@@ -109,6 +111,46 @@ def should_push_idle_status(*, now: float, last_broadcast: float, connection_cou
         return True
     return (now - last_broadcast) >= WS_IDLE_STATUS_QUIET_SECS
 
+
+
+def _minimal_state(instance_name: Optional[str] = None,
+                   max_tokens: int = 8192,
+                   default_workspace: Optional[str] = None,
+                   api_router_state: Optional[Dict[str, Any]] = None,
+                   pool_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Skeleton state payload for clients when no agent instance is available.
+
+    Shared by build_state()'s "instance not yet created" branch and the /api/state error
+    fallback, so the two can never drift on required keys (revisions, pool_settings,
+    session/instance name).
+    """
+    from agent_cascade.runtime_state import state as _runtime_state
+    from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
+
+    name = instance_name or DEFAULT_SESSION_NAME
+    return {
+        'messages': [],
+        'agent_instances': {},
+        'active_stack': [],
+        'generating': False,
+        'session_name': name,
+        'instance_name': name,
+        'total_tokens': 0,
+        'total_words': 0,
+        'max_tokens': max_tokens,
+        'summary': '',
+        'has_queued_messages': False,
+        'queued_messages': [],
+        'stopped': False,
+        'current_model': 'Unknown',
+        'telemetry': None,
+        'default_workspace': default_workspace or str(DEFAULT_WORKSPACE),
+        'is_waiting': False,
+        'api_router': api_router_state or {'endpoints': [], 'agent_priorities': {}},
+        'settings_revision': _runtime_state.settings_revision,
+        'endpoints_revision': _runtime_state.endpoints_revision,
+        'pool_settings': pool_settings if pool_settings is not None else {},
+    }
 
 
 def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
@@ -580,7 +622,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         return False
 
     # ── Shared session state ──────────────────────────────────────────────
-    default_session_name = config.get('session_name', 'Maine')
+    # Active session name is server-wide persisted state (config/session_state.json)
+    # so it survives a restart. Precedence: explicit config arg > persisted file >
+    # default. An explicit config session_name is the most specific signal (and is what
+    # tests rely on); when no config arg is given, the persisted file provides the
+    # server-wide resume value (plan §11.2) and load_session_name() falls back to the
+    # default ('Maine') when the file is absent.
+    from agent_cascade.session_state_store import load_session_name
+    if config.get('session_name'):
+        default_session_name = config['session_name']
+    else:
+        default_session_name = load_session_name()
     session: Dict[str, Any] = {
         'agent_index': 0,
         'session_name': default_session_name,
@@ -733,6 +785,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # The value is stored on app.current_auto_security and toggled via WS handler.
         if result is not None:
             result['auto-security'] = getattr(app, 'current_auto_security', True)
+            # Carry the shared settings + endpoints revisions on every state frame so a
+            # (re)connecting client can detect a settings_conflict / stale revision and
+            # re-hydrate. `pool_settings` is already set by build_state_from_pool — do NOT
+            # rebuild it here (MAJOR-5: avoid building the settings snapshot twice).
+            result['settings_revision'] = _runtime_state.settings_revision
+            result['endpoints_revision'] = _runtime_state.endpoints_revision
 
         # If unified build returned None (instance not yet created), return minimal state
         if result is None:
@@ -766,31 +824,24 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 default_workspace = str(agent_pool.operation_manager.base_dir)
 
-            return {
-                'messages': [],
-                'agent_instances': {},
-                'active_stack': [],
+            # Full settings snapshot for the minimal-state path (instance not yet created) too.
+            from agent_cascade.api_integration_pkg.state_builder import build_pool_settings_snapshot
+
+            state = _minimal_state(instance_name, fallback_max_tokens, default_workspace,
+                                   api_router_state, build_pool_settings_snapshot(agent_pool))
+            state.update({
                 'approvals': approvals,
                 'generating': gen,
-                'session_name': instance_name,
-                'instance_name': instance_name,
                 'auto-security': getattr(app, 'current_auto_security', True),
                 'agent_index': session.get('agent_index', 0),
-                'total_tokens': 0,
-                'total_words': 0,
-                'max_tokens': fallback_max_tokens,
-                'summary': '',
                 'has_queued_messages': has_queued,
                 'queued_messages': agent_pool.get_queue_messages(instance_name) or [],
                 'stopped': stopped,
                 'paused': agent_pool.is_paused() if agent_pool else False,
                 'agents': agents_list,
                 'current_model': current_model,
-                'telemetry': None,
-                'default_workspace': default_workspace,
-                'is_waiting': False,
-                'api_router': api_router_state,
-            }
+            })
+            return state
 
         return result
 
@@ -1090,6 +1141,54 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             with agent_pool._afk_nudge_lock:
                 agent_pool._afk_last_nudge_ts = 0.0   # release the claim so the next run-end retries
 
+    def _afk_admin_save_root_state(instance_name: str) -> bool:
+        """Persist the idle root's KV state before the Admin review runs (BUG_0198).
+
+        Security and Compressor save the caller's KV through
+        ``yield_caller_slot(..., save_fn=engine.save_before_slot_yield)`` because they run
+        inside a caller turn while it still holds its slot. The AFK Admin review instead
+        runs from a background daemon while the root is idle and slotless, so that seam
+        does not exist here. Saving now arms the consume-once ``_state_label``; the root's
+        next ``_setup_turn`` restores it after ``run()`` re-acquires the slot — the
+        eviction-safe path (the restore targets the endpoint actually held, never the
+        stale ``_last_endpoint_config``).
+
+        Best-effort by design: a missed save degrades to the pre-fix behavior (the root
+        reprocesses its context) and must never block or fail the nudge. Gated exactly
+        like the automatic checkpoint path — the ``state_kv_save_enabled`` toggle ORed
+        with the safe-mode override (``state_ops.kv_save_effectively_enabled``) plus the
+        endpoint's own ``state_save_enabled`` capability flag.
+
+        Returns:
+            True if a label was saved (a restore is now pending), False otherwise.
+        """
+        try:
+            inst = agent_pool.get_instance(instance_name) if agent_pool else None
+            if inst is None:
+                return False
+            from agent_cascade.state_ops import (is_state_save_capable,
+                                                 kv_save_effectively_enabled,
+                                                 save_instance_state)
+            settings = getattr(agent_pool, 'settings', None)
+            toggle = bool(getattr(settings, 'state_kv_save_enabled', False))
+            if not kv_save_effectively_enabled(inst, toggle):
+                logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — KV save disabled by toggle',
+                             instance_name)
+                return False
+            if not is_state_save_capable(getattr(inst, '_last_endpoint_config', None)):
+                logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — endpoint not state-save capable',
+                             instance_name)
+                return False
+            # Lock around the save to match save_before_slot_yield / shell_cmd safe mode:
+            # makes the _last_endpoint_config read + _state_label write atomic against a
+            # concurrent turn. Safe because _state_lock is an RLock and save_instance_state
+            # re-acquires it.
+            with inst._state_lock:
+                return bool(save_instance_state(inst))
+        except Exception as e:
+            logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — save failed: %s', instance_name, e)
+            return False
+
     def _afk_admin_analysis(instance_name: str):
         """Run the read-only Admin agent over the idle session; return its text, or None.
 
@@ -1118,6 +1217,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                             'raw JSONL is available via the /api/telemetry endpoint'),
             max_findings=AFK_ADMIN_MAX_FINDINGS,
         )
+        # BUG_0198: the Admin run shares the root's endpoint/model and can evict its
+        # resident KV pages, so persist the root's state first and leave the label
+        # pending for the next turn's restore. Best-effort — never blocks the review.
+        _afk_admin_save_root_state(instance_name)
         result = run_lightweight_advisor(
             pool=agent_pool,
             agent_class='Admin',  # the advisor class name (NOT the mode value 'admin')
@@ -1370,7 +1473,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
             payload = json.loads(decrypted_bytes.decode('utf-8'))
 
-            target = payload.get('target') or session.get('session_name', 'Maine')
+            target = payload.get('target') or session.get('session_name', DEFAULT_SESSION_NAME)
             text = payload.get('text', '').strip()
 
             if not text:
@@ -1647,7 +1750,63 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return build_state()
         except Exception as e:
             logger.warning('State build failed: %s', e, exc_info=True)
-            return {'agents': [], 'messages': [], 'agent_instances': {}, 'active_stack': [], 'generating': False, 'session_name': 'Maine', 'instance_name': 'Maine', 'total_tokens': 0, 'total_words': 0, 'max_tokens': 8192, 'summary': '', 'has_queued_messages': False, 'queued_messages': [], 'stopped': False, 'current_model': 'Unknown', 'telemetry': None, 'default_workspace': str(DEFAULT_WORKSPACE), 'is_waiting': False, 'api_router': {'endpoints': [], 'agent_priorities': {}}}
+            return _minimal_state()
+
+    @app.get('/api/settings')
+    async def api_get_settings():
+        """Return the current settings snapshot with a monotonically increasing revision.
+
+        The ``settings`` payload is the registry-driven pool-settings snapshot (every
+        broadcast key). ``revision`` bumps on each persisted save so pollers can detect
+        changes without diffing the whole payload. Sensitive keys (api_key) are excluded.
+        """
+        from agent_cascade.api_integration_pkg.state_builder import build_pool_settings_snapshot
+        from agent_cascade.settings_registry import strip_sensitive
+        snapshot: dict = {}
+        if agent_pool is not None:
+            try:
+                snapshot = build_pool_settings_snapshot(agent_pool)
+            except Exception as e:
+                logger.warning('Settings snapshot build failed: %s', e)
+        # Sensitive keys are gated by the registry (spec.sensitive), so the endpoint
+        # stays correct even if a sensitive key ever becomes broadcastable.
+        snapshot = strip_sensitive(snapshot)
+        return {
+            'revision': _runtime_state.settings_revision,
+            'settings': snapshot,
+        }
+
+    @app.patch('/api/settings')
+    async def api_patch_settings(data: dict = None):
+        """Apply a per-key settings delta (same pipeline as the 'update_settings' WS message).
+
+        Body: ``{"base_revision": N, "changes": {key: value, ...}}`` (or just ``{key: value}``
+        for a bare delta). Each key is validated against the registry (unknown key / type /
+        enum violation → rejected per-key); accepted keys apply to live state, each touched
+        bucket persists once, and the shared revision bumps. Returns
+        ``{"revision", "applied", "rejected"}``. A stale ``base_revision`` is logged but does
+        not reject the batch (plan §11.3).
+        """
+        from agent_cascade.settings_delta import apply_settings_changes, log_stale_revision
+
+        payload = data or {}
+        if isinstance(payload.get('changes'), dict):
+            base_revision = payload.get('base_revision')
+            changes = payload['changes']
+        else:
+            # Bare-delta convenience: the body itself is the {key: value} map.
+            base_revision = payload.get('base_revision')
+            changes = {k: v for k, v in payload.items() if k not in ('base_revision', 'changes')}
+
+        log_stale_revision(base_revision, _runtime_state.settings_revision, 'PATCH /api/settings')
+
+        applied, rejected, _changes_out, revision = await apply_settings_changes(
+            agent_pool, agents, changes, session=session)
+        if applied:
+            logger.info('[PATCH /api/settings] applied %d key(s): %s (revision=%d)',
+                        len(applied), applied, revision)
+            await _broadcast_state()
+        return {'revision': revision, 'applied': applied, 'rejected': rejected}
 
     @app.post('/api/reset')
     async def api_reset():
@@ -1990,16 +2149,21 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.post('/api/endpoints/bulk')
     async def api_bulk_update_endpoints(data: dict):
-        """Bulk update all endpoints and priorities (from UI save).
+        """Bulk update all endpoints and priorities (import-style; single edits use PUT).
 
-        Body: { "endpoints": [...], "agent_priorities": {...} }
+        Body: { "endpoints": [...], "agent_priorities": {...}, "base_revision"? : N }.
+        An optional ``base_revision`` (endpoints-list revision) is a stale-tab guard: a
+        mismatch is logged but the bulk write still applies (last-write wins).
         """
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={'message': 'No API router'})
 
+        from agent_cascade.settings_delta import log_stale_revision
+        base_revision = data.get('base_revision')
+        log_stale_revision(base_revision, _runtime_state.endpoints_revision, 'endpoints/bulk')
         agent_pool.api_router.from_dict(data)
         await _broadcast_state()
-        return {'status': 'ok'}
+        return {'status': 'ok', 'endpoints_revision': _runtime_state.endpoints_revision}
 
     # ── MCP Config Endpoints ──────────────────────────────────────────────────
     # MCP server config lives at <AgentCascade_root>/config/mcp_servers.json — the single
@@ -2226,8 +2390,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         try:
             _image_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(_image_gen_config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2)
+            atomic_write_json(_image_gen_config_path, config, backup=False)
         except OSError as e:
             return JSONResponse(status_code=500, content={'message': f"Failed to write config: {e}"})
 
@@ -2325,8 +2488,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     elif isinstance(data[block_key], dict) and isinstance(old_block, dict):
                         for key, value in old_block.items():
                             data[block_key].setdefault(key, value)
-            with open(_media_gen_config_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(_media_gen_config_path, data, backup=False)
         except OSError as e:
             return JSONResponse(status_code=500, content={'message': f"Failed to write config: {e}"})
 
