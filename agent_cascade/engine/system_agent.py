@@ -12,6 +12,7 @@ import time
 from typing import Any, List, Optional, Tuple
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.engine.helpers import (_inject_skills_to_system_message, _merge_loaded_skill_names,
                                           _with_run_identity)
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, Message
@@ -610,12 +611,19 @@ class SystemAgentMixin:
             return denied
 
         # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
-        inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(agent_class,
-                                                                                    instance_name,
-                                                                                    caller,
-                                                                                    nest_depth,
-                                                                                    force_fresh,
-                                                                                    log_file=log_file)
+        try:
+            inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(agent_class,
+                                                                                        instance_name,
+                                                                                        caller,
+                                                                                        nest_depth,
+                                                                                        force_fresh,
+                                                                                        log_file=log_file)
+        except LogFileNotFoundError:
+            # BUG_0207: a missing log file is a structured rejection — no instance was
+            # created. Reused by run_child_core's [Agent 'X' Rejected] formatting.
+            return (None, [Message(role=ASSISTANT,
+                                   content=f"Error: Log file not found: {log_file}. No instance was created; "
+                                           f"verify the path and retry.")])
 
         # -- System message + skills handling ---------------------------------
         sys_msg, args = self._prepare_child_system_message(

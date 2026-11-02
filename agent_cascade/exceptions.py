@@ -84,3 +84,16 @@ class ServerBusyError(RuntimeError):
     compression path is never triggered by model-load congestion.
     """
     pass
+
+
+class LogFileNotFoundError(Exception):
+    """Raised when a session restore is requested from a log file that does not exist.
+
+    Propagated from ``LifecycleManager.find_or_create_instance`` when
+    ``load_session_from_log`` reports a missing path, so the caller (the
+    ``call_agent`` engine) can surface a structured rejection instead of silently
+    starting a fresh (empty) instance.
+    """
+    def __init__(self, log_file):
+        super().__init__(f'Log file not found: {log_file}')
+        self.log_file = log_file

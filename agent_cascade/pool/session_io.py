@@ -515,6 +515,18 @@ class SessionIOMixin:
 
         messages, metadata = self._parse_json_input(log_input)
         if not messages:
+            # BUG_0207: a missing path is not "no messages" — surface a distinct, path-inclusive
+            # error. Only reached when parsing yielded nothing, so a JSON/JSONL string that
+            # parses (even with a '/' inside its content, e.g. a URL in a message body) is
+            # consumed by _parse_json_input and never misrouted here. Reuse the same
+            # relative-path resolution as _parse_json_input (workspace_dir / DEFAULT_WORKSPACE).
+            _p = Path(log_input)
+            if not _p.is_absolute():
+                _ws = self._logger.workspace_dir if self._logger.workspace_dir else Path(DEFAULT_WORKSPACE)
+                _p = _ws / _p
+            if (not _p.exists()) and ('/' in log_input or '\\' in log_input
+                    or log_input.lower().endswith(('.jsonl', '.json'))):
+                return f'Error: Log file not found: {_p}'
             return 'Error: No valid messages found in log input.'
 
         # --- 2b. Determine instance name early for exclusion check ----------

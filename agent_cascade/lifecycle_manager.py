@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from agent_cascade.agent_instance import AgentInstance, AgentState, SystemPromptFrozenError
 from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import SYSTEM, USER, Message
+from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_TURNS
 
@@ -268,6 +269,11 @@ class AgentLifecycleManager:
                                                      caller_name=caller)
             if status.startswith('Error'):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
+                if status.startswith('Error: Log file not found'):
+                    # BUG_0207: a missing log file is a hard error, not a warn-and-continue.
+                    # Other load errors (corrupt file, no messages) keep the existing
+                    # warn-and-continue behavior.
+                    raise LogFileNotFoundError(log_file)
             else:
                 # load_session_from_log creates a new instance in the pool,
                 # update our reference
