@@ -111,8 +111,9 @@ test('behaviour: disableSessionHistoryFormRestore tags settings but keeps transi
 
 // ── Test 4: pageshow re-applies the store for history restores only ──────────
 function buildPageshowSandbox({ navType = 'navigate', persisted = false, connected = true, readyState = 1 } = {}) {
-  const calls = { load: 0, send: [] };
+  const calls = { load: 0, send: [], sync: [] };
   const box = { value: 'STALE' }; // models the DOM value loadSettings() restores
+  const pendingSettings = { grep_char_limit: 777 }; // the server's last authoritative snapshot
   const ctx = {
     settingsLoaded: true,
     state: { connected },
@@ -121,9 +122,10 @@ function buildPageshowSandbox({ navType = 'navigate', persisted = false, connect
     performance: { getEntriesByType: () => [{ type: navType }] },
     calls,
     box,
+    pendingSettings,
     loadSettings() { calls.load++; box.value = 'SAVED'; },
     send(msg) { calls.send.push(msg); },
-    getGenerateCfg() { return { model: 'm' }; },
+    syncPoolSettings(ps) { calls.sync.push(ps); },
   };
   vm.createContext(ctx);
   vm.runInContext(extractFunction('_isBackForwardNavigation'), ctx, { filename: 'isBackForwardNavigation.js' });
@@ -131,14 +133,15 @@ function buildPageshowSandbox({ navType = 'navigate', persisted = false, connect
   return { ctx, handler, calls, box, persisted };
 }
 
-test('behaviour: bfcache restore re-applies synchronously and re-pushes config', () => {
+test('behaviour: bfcache restore re-applies synchronously and re-hydrates from the server', () => {
   const { handler, calls, box } = buildPageshowSandbox({ persisted: true, connected: true });
   handler({ persisted: true });
   // Synchronous (no timer): the stale snapshot must be gone as soon as the handler returns.
   assert.equal(box.value, 'SAVED');
   assert.equal(calls.load, 1);
-  assert.equal(JSON.stringify(calls.send),
-    JSON.stringify([{ type: 'update_config', generate_cfg: { model: 'm' } }]));
+  // Batch B: re-hydrate from the server snapshot — no full update_config push.
+  assert.equal(calls.sync.length, 1, 'pageshow must re-hydrate via syncPoolSettings(pendingSettings)');
+  assert.equal(calls.send.length, 0, 'pageshow must not push update_config back to the server');
 });
 
 test('behaviour: back_forward reload re-applies the store', () => {
@@ -146,6 +149,7 @@ test('behaviour: back_forward reload re-applies the store', () => {
   handler({ persisted: false });
   assert.equal(box.value, 'SAVED');
   assert.equal(calls.load, 1);
+  assert.equal(calls.send.length, 0, 'back_forward re-hydrates from the server, no update_config push');
 });
 
 test('behaviour: a normal first load is not re-applied', () => {
@@ -156,12 +160,12 @@ test('behaviour: a normal first load is not re-applied', () => {
   assert.equal(calls.send.length, 0);
 });
 
-test('behaviour: no server push when the socket is not open', () => {
+test('behaviour: pageshow never pushes config (server is authoritative, even when the socket is closed)', () => {
   const { handler, calls, box } = buildPageshowSandbox({ persisted: true, connected: false, readyState: 3 });
   handler({ persisted: true });
   assert.equal(box.value, 'SAVED');
   assert.equal(calls.load, 1);
-  assert.equal(calls.send.length, 0);
+  assert.equal(calls.send.length, 0, 'pageshow re-hydrates locally; it never pushes update_config');
 });
 
 // ── Test 5: pagehide flushes like beforeunload ───────────────────────────────

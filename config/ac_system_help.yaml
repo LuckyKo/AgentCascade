@@ -50,6 +50,8 @@ rest_api:
     - {method: POST,   path: /api/skills/toggle,        summary: "Toggle one skill's status (body: {name, status: active|inactive})."}
     - {method: POST,   path: /api/skills/migrate,       summary: "Manually (re)run the one-time metrics migration to schema 1.3 (idempotent)."}
     - {method: GET,    path: /api/state,                summary: "Full UI state snapshot (agents, messages, tokens, api_router, etc.)."}
+    - {method: GET,    path: /api/settings,             summary: "Current settings snapshot with a monotonically increasing revision (registry-driven; api_key omitted)."}
+    - {method: PATCH,  path: /api/settings,             summary: "Apply a settings delta: {base_revision, changes:{key:value}} — per-key registry validation, one persist per bucket, returns {revision, applied, rejected}."}
     - {method: POST,   path: /api/reset,                summary: "Reset the active session's conversation and start a fresh logger session."}
     - {method: POST,   path: "/api/approve/{request_id}", summary: "Approve a pending tool-call approval request by id."}
     - {method: POST,   path: "/api/reject/{request_id}",  summary: "Reject a pending approval request (optional reason query param)."}

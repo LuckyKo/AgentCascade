@@ -4,9 +4,9 @@
  * (todo.md line 145). See reports/settings_reboot_reset_investigation.md.
  *
  * Covers the frontend fixes:
- *   - FIX 2a/2b: POOL_SETTINGS_MAP entry for #setting-max-rollbacks now has a live localKey
- *     ('max_auto_rollbacks') AND saveSettings() actually writes that key, so the respect-local
- *     guard in syncPoolSettings() engages and the server value no longer stomps the input.
+ *   - FIX 2a/2b: the POOL_SETTINGS_MAP entry for #setting-max-rollbacks maps to the key
+ *     ('max_auto_rollbacks') that saveSettings()/getGenerateCfg() actually write, and
+ *     syncPoolSettings() hydrates it from the server value.
  *   - FIX 3: getGenerateCfg() falls back to 3 for an empty #setting-max-rollbacks (not NaN/null),
  *     and preserves -1 (unlimited).
  *   - FIX 5: getGenerateCfg() OMITS the 7 LLM-gen params when their input is empty/invalid
@@ -14,9 +14,9 @@
  *   - FIX 4: loadSettings() skips null-poisoned numeric restores for the ranges loop and the
  *     max_tokens / setting-max-context direct restores.
  *
- * Also a HARD audit that pins the whole class of dead-guard bugs: EVERY POOL_SETTINGS_MAP entry's
- * localKey must be written by saveSettings() OR getGenerateCfg(). A future entry with a dead
- * localKey will now FAIL this test instead of silently regressing.
+ * NOTE: the former "dead respect-local guard" audit of every POOL_SETTINGS_MAP entry was
+ * retired with the `localKey` field — syncPoolSettings() no longer has a local-preference
+ * guard (Batch B: server value always wins), so there is no guard to audit.
  *
  * Like tests/test_settings_live_edit.js, this extracts the REAL fragments from web_ui/app.js via
  * regex + vm sandbox (so it always tests current source) and does NOT load the whole browser-global
@@ -60,11 +60,13 @@ function extractFunction(name) {
   throw new Error(`Unbalanced braces for ${name}`);
 }
 
-const MAP_SRC = extractConstArray('POOL_SETTINGS_MAP');
-const SYNC_SRC = extractFunction('syncPoolSettings');
-const GETCFG_SRC = extractFunction('getGenerateCfg');
-const SAVE_SRC = extractFunction('saveSettings');
-const LOADSRC = extractFunction('loadSettings');
+	const MAP_SRC = extractConstArray('POOL_SETTINGS_MAP');
+	const SYNC_SRC = extractFunction('syncPoolSettings');
+	const GETCFG_SRC = extractFunction('getGenerateCfg');
+	const SAVE_SRC = extractFunction('saveSettings');
+	const LOADSRC = extractFunction('loadSettings');
+	const LOADUIPREFS_SRC = extractFunction('loadUiPrefs');
+	const SAVEUIPREFS_SRC = extractFunction('saveUiPrefs');
 
 // ── Minimal DOM / browser stubs ───────────────────────────────────────────────
 function makeDom(ids) {
@@ -145,15 +147,26 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     .map((id) => ({ input: dom.elements['#' + id] || null, output: null }))
     .filter((r) => r.input);
 
-  sandbox.saveSettings = saveSettingsSpy || (() => {});
-  const ctx = vm.createContext(sandbox);
-  vm.runInContext(MAP_SRC, ctx, { filename: 'POOL_SETTINGS_MAP.js' });
-  vm.runInContext(SYNC_SRC, ctx, { filename: 'syncPoolSettings.js' });
-  vm.runInContext(GETCFG_SRC, ctx, { filename: 'getGenerateCfg.js' });
-  vm.runInContext(SAVE_SRC, ctx, { filename: 'saveSettings.js' });
-  vm.runInContext(LOADSRC, ctx, { filename: 'loadSettings.js' });
-  return { sandbox, ctx, localStorageData };
-}
+	  sandbox.saveSettings = saveSettingsSpy || (() => {});
+	  const ctx = vm.createContext(sandbox);
+	  // UI_PREFS_KEY and UI_PREFS_ALLOWLIST are consts referenced by loadUiPrefs/saveUiPrefs.
+	  const UIPREFS_CONSTS = APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/s)
+	    ? APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/)[0] + '\n'
+	    : '';
+	  const ALLOWLIST_MATCH = APP_JS.match(/const UI_PREFS_ALLOWLIST\s*=\s*new Set\(\[([^\]]*)\]\)/s);
+	  const ALLOWLIST_SRC = ALLOWLIST_MATCH
+	    ? `const UI_PREFS_ALLOWLIST = new Set([${ALLOWLIST_MATCH[1]}]);`
+	    : 'const UI_PREFS_ALLOWLIST = new Set();';
+	  vm.runInContext(UIPREFS_CONSTS + '\n' + ALLOWLIST_SRC, ctx, { filename: 'ui_prefs_consts.js' });
+	  vm.runInContext(MAP_SRC, ctx, { filename: 'POOL_SETTINGS_MAP.js' });
+	  vm.runInContext(SYNC_SRC, ctx, { filename: 'syncPoolSettings.js' });
+	  vm.runInContext(GETCFG_SRC, ctx, { filename: 'getGenerateCfg.js' });
+	  vm.runInContext(LOADUIPREFS_SRC, ctx, { filename: 'loadUiPrefs.js' });
+	  vm.runInContext(SAVEUIPREFS_SRC, ctx, { filename: 'saveUiPrefs.js' });
+	  vm.runInContext(SAVE_SRC, ctx, { filename: 'saveSettings.js' });
+	  vm.runInContext(LOADSRC, ctx, { filename: 'loadSettings.js' });
+	  return { sandbox, ctx, localStorageData };
+	}
 
 // The element ids referenced by getGenerateCfg for the 7 LLM-gen params (FIX 5).
 const GEN_PARAM_IDS = [
@@ -161,80 +174,25 @@ const GEN_PARAM_IDS = [
   '#setting-repeat-penalty', '#setting-presence-penalty', '#setting-frequency-penalty',
 ];
 
-// ── Test 1 (HARD audit): every POOL_SETTINGS_MAP.localKey is written by saveSettings OR getGenerateCfg ─
-test('audit: every POOL_SETTINGS_MAP localKey is actually written (no dead respect-local guards)', () => {
-  // Collect the set of localStorage keys that saveSettings() writes explicitly via s['<key>'] = ...
-  const explicitSaveKeys = new Set();
-  {
-    const re = /s\[\s*(['"])([^'"]+)\1\s*\]\s*=/g;
-    let m;
-    while ((m = re.exec(SAVE_SRC)) !== null) explicitSaveKeys.add(m[2]);
-  }
-
-  // Collect the set of cfg keys that getGenerateCfg() writes (cfg.<key> = ...). These are stored
-  // into localStorage under the same key name by saveSettings() (s = getGenerateCfg()).
-  const genCfgKeys = new Set();
-  {
-    const re = /cfg\.([A-Za-z0-9_]+)\s*=/g;
-    let m;
-    while ((m = re.exec(GETCFG_SRC)) !== null) genCfgKeys.add(m[1]);
-  }
-
-  // Run the REAL getGenerateCfg with a DOM whose elements all exist, to confirm which cfg keys are
-  // actually produced at runtime (guards `if ($('#id'))` may skip some). This is the authoritative
-  // "written by getGenerateCfg" set.
-  const dom = makeDom(GEN_PARAM_IDS.concat(['#setting-max-rollbacks']));
-  const { ctx } = buildSandbox({ dom, saveSettingsSpy: () => {} });
-  Object.values(dom.elements).forEach((el) => { el.value = '5'; el.checked = true; });
-  const cfg = vm.runInContext('getGenerateCfg()', ctx);
-  const runtimeCfgKeys = new Set(Object.keys(cfg));
-
-  // A localKey is "alive" if saveSettings writes it explicitly OR getGenerateCfg produces a key of
-  // the same name (which saveSettings then persists). The map's `key` and `localKey` are normally
-  // identical for generate-cfg-backed entries.
-  const domAll = makeDom([]);
-  const { ctx: ctxMap } = buildSandbox({ dom: domAll, saveSettingsSpy: () => {} });
-  const entries = vm.runInContext('POOL_SETTINGS_MAP', ctxMap);
-
-  assert.ok(entries.length > 0, 'POOL_SETTINGS_MAP is empty — extraction failed');
-
-  const dead = [];
-  for (const e of entries) {
-    if (!e.localKey || !e.key) continue; // entries without a localKey are not guard-protected by design
-    const writtenBySave = explicitSaveKeys.has(e.localKey);
-    const writtenByGen = runtimeCfgKeys.has(e.localKey) || genCfgKeys.has(e.localKey);
-    if (!writtenBySave && !writtenByGen) {
-      dead.push(`id=${e.id} key=${e.key} localKey=${e.localKey}`);
-    }
-  }
-
-  assert.deepEqual(
-    dead, [],
-    'Dead respect-local guards found (localKey never written by saveSettings/getGenerateCfg):\n  - ' + dead.join('\n  - ')
-  );
-});
-
-// ── Test 2: the max-rollbacks entry specifically now has a live localKey ─
-test('FIX 2a: #setting-max-rollbacks localKey matches the key getGenerateCfg/saveSettings write', () => {
+	// ── Test 2: the max-rollbacks entry maps to the key getGenerateCfg/saveSettings write ─
+test('FIX 2a: #setting-max-rollbacks maps to the underscore key getGenerateCfg/saveSettings write', () => {
   const domAll = makeDom([]);
   const { ctx } = buildSandbox({ dom: domAll, saveSettingsSpy: () => {} });
   const entries = vm.runInContext('POOL_SETTINGS_MAP', ctx);
   const entry = entries.find((e) => e.id === '#setting-max-rollbacks');
   assert.ok(entry, 'map entry for #setting-max-rollbacks missing');
   assert.equal(entry.key, 'max_auto_rollbacks', 'server key must be max_auto_rollbacks');
-  assert.equal(
-    entry.localKey, 'max_auto_rollbacks',
-    `localKey must equal the underscore storage key 'max_auto_rollbacks' (got '${entry.localKey}')`
-  );
+  assert.equal(entry.prop, 'value',
+    '#setting-max-rollbacks must be hydrated through its .value property');
 });
 
 // ── Test 3: syncPoolSettings does NOT stomp #setting-max-rollbacks when a local pref exists ─
-test('FIX 2b/3: server value does NOT stomp #setting-max-rollbacks when localStorage has max_auto_rollbacks', () => {
+test('Batch B: server value WINS over a stale local max_auto_rollbacks preference', () => {
   const ids = ['#setting-max-rollbacks'];
   const dom = makeDom(ids);
   const { ctx, localStorageData } = buildSandbox({ dom, saveSettingsSpy: () => {} });
 
-  // User previously saved their value under the underscore key (now written by saveSettings FIX 2b).
+  // A stale local key left over from an older build; the server value must still win.
   localStorageData['agent-cascade-settings'] = JSON.stringify({ max_auto_rollbacks: '2' });
 
   // DOM currently shows the user's value.
@@ -246,10 +204,10 @@ test('FIX 2b/3: server value does NOT stomp #setting-max-rollbacks when localSto
     vm.runInContext('syncPoolSettings(ps)', Object.assign(ctx, { ps: serverPs }));
   }
 
-  // The user's value must survive — NOT be stomped to the server's 3.
+  // Batch B: the server value now wins over the stale local preference.
   assert.equal(
-    dom.elements['#setting-max-rollbacks'].value, '2',
-    `#setting-max-rollbacks was stomped by server (got '${dom.elements['#setting-max-rollbacks'].value}')`
+    String(dom.elements['#setting-max-rollbacks'].value), '3',
+    `#setting-max-rollbacks did not adopt the server value (got '${dom.elements['#setting-max-rollbacks'].value}')`
   );
 });
 
@@ -273,22 +231,16 @@ test('FIX 2b/3: server value applies to #setting-max-rollbacks when no local pre
   );
 });
 
-// ── Test 5: saveSettings() actually persists max_auto_rollbacks under the underscore key ─
-test('FIX 2b: saveSettings() writes s.max_auto_rollbacks from #setting-max-rollbacks', () => {
-  const ids = ['#setting-max-rollbacks'];
-  const dom = makeDom(ids);
-  const { ctx, localStorageData } = buildSandbox({ dom, saveSettingsSpy: () => {} });
-
-  dom.elements['#setting-max-rollbacks'].value = '7';
-  vm.runInContext('saveSettings(false)', ctx); // false = do not push to server
-
-  const persisted = JSON.parse(localStorageData['agent-cascade-settings']);
-  assert.ok(
-    Object.prototype.hasOwnProperty.call(persisted, 'max_auto_rollbacks'),
-    'saveSettings() did not persist the max_auto_rollbacks key'
-  );
-  assert.equal(String(persisted.max_auto_rollbacks), '7', 'persisted max_auto_rollbacks value mismatch');
-});
+	// ── Test 5: the max-rollbacks control reaches the server as a cfg delta ─
+	test('FIX 2b: getGenerateCfg builds cfg.max_auto_rollbacks from #setting-max-rollbacks', () => {
+	  // Source invariant: the DOM value is read into the cfg object that saveSettings forwards
+	  // through queueSettingChange. Server-backed keys never reach the ui-prefs store, so there
+	  // is no s['max_auto_rollbacks'] localStorage write anymore.
+	  assert(GETCFG_SRC.includes("cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar"),
+    'getGenerateCfg() must build cfg.max_auto_rollbacks from #setting-max-rollbacks');
+	  assert(GETCFG_SRC.includes('#setting-max-rollbacks'),
+    'getGenerateCfg() must read from #setting-max-rollbacks');
+	});
 
 // ── Test 6: getGenerateCfg empty #setting-max-rollbacks → 3 (not NaN/null) ─
 test('FIX 3: getGenerateCfg empty #setting-max-rollbacks → max_auto_rollbacks === 3', () => {
@@ -401,23 +353,15 @@ test('FIX 4: loadSettings does not assign null into range sliders / max_tokens /
 });
 
 // ── Test 11: loadSettings still restores VALID numeric values (no over-correction) ─
-test('FIX 4: loadSettings still restores finite numeric values for sliders / max_tokens / max-context', () => {
-  const dom = makeDom(
-    Object.keys(RANGE_DEFAULTS).map((id) => '#' + id).concat(['#setting-max-tokens', '#setting-max-context'])
-  );
-  const { ctx, localStorageData } = buildSandbox({ dom, saveSettingsSpy: () => {} });
-
-  localStorageData['agent-cascade-settings'] = JSON.stringify({
-    'setting-temperature': 0.42,   // finite number (range slider)
-    'setting-top-k': '17',         // numeric string (range slider)
-    'max_tokens': 4096,            // finite number (direct restore via settingMaxTokens)
-    'setting-max-context': '16384',// numeric string (direct restore via settingMaxContext)
-  });
-
-  vm.runInContext('loadSettings()', ctx);
-
-  assert.equal(ctx.ranges[0].input.value, 0.42, 'finite number temperature not restored');
-  assert.equal(String(ctx.ranges[2].input.value), '17', 'numeric-string top-k range not restored');
-  assert.equal(ctx.settingMaxTokens.value, 4096, 'finite max_tokens not restored');
-  assert.equal(String(ctx.settingMaxContext.value), '16384', 'numeric-string max-context not restored');
-});
+	test('FIX 4: loadSettings reads class-D keys from agent-cascade-ui-prefs (not the old blob)', () => {
+	  // Source invariant: loadSettings must call loadUiPrefs (the ui-prefs reader),
+	  // and must NOT reference the legacy agent-cascade-settings blob.
+	  assert(LOADSRC.includes('loadUiPrefs'),
+	    'loadSettings must call loadUiPrefs() for class-D keys');
+	  assert(!LOADSRC.includes("agent-cascade-settings"),
+	    'loadSettings must NOT read from the legacy agent-cascade-settings blob');
+	  // loadUiPrefs must exist and be callable (extracted and in the VM).
+	  const { ctx } = buildSandbox({ dom: makeDom([]), saveSettingsSpy: () => {} });
+	  const prefs = vm.runInContext('loadUiPrefs()', ctx);
+	  assert(prefs && typeof prefs === 'object', 'loadUiPrefs() must return an object');
+	});

@@ -12,152 +12,17 @@ from collections import deque as Deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from agent_cascade.constants import LLM_CONFIG_KEYS, MAX_IMAGES_FOR_LLM_DEFAULT
+from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting,
                                     parse_skill_always_protected)
+from agent_cascade.settings_registry import (
+    EXPORT_IMPORT_ALLOWLIST, EXTRA_PERSIST_KEYS, LLM_CFG_KEYS, LLM_CFG_PERSIST_KEYS, POOL_SETTINGS_KEYS,
+)
 
-# LLM_CONFIG_KEYS is imported from agent_cascade.constants (single source of truth, BUG_0012).
-
-# ── PoolSettings keys — used by ws_handlers.py to trigger centralized save ────
-# Includes ALL non-cosmetic settings that should persist to pool_settings.json.
-POOL_SETTINGS_KEYS = frozenset({
-    # Core pool/agent settings
-    'idle_timeout_seconds',
-    'system_agent_idle_timeout_seconds',
-    'max_parallel_agents',
-    'max_workers',
-    'auto_continue',
-    'completion_classifier_enabled',
-    'enable_agent_budgeting',
-    'allow_parallel_agents',
-    'state_kv_save_enabled',
-    'safe_mode_auto_ram_floor_mb',
-    'safe_mode_auto_vram_floor_mb',
-    'max_turns',
-    'soft_turn_limit',
-    'max_auto_rollbacks',
-    'auto_rollback_on_loop',
-    # Two-tier loop detection (2026-08 redesign)
-    'loop_exact_rollback_enabled',
-    'loop_fuzzy_warning_enabled',
-    'tool_loop_fuzzy_rollback_enabled',
-    'tool_loop_detection_enabled',
-    # Inner-loop detection
-    'inner_loop_detect_enabled',
-    'loop_min_chars',
-    'loop_max_chars',
-    'loop_char_run_enabled',
-    'loop_char_run_limit',
-    'loop_max_chars_enabled',
-    'loop_two_phase_enabled',
-    'loop_suspicion_threshold',
-    'loop_confirm_required',
-    'loop_cooldown_feeds',
-    # Skills system
-    'default_load_skill_mode',
-    'auto_skill_enabled',
-    'auto_skill_min_turns',
-    'auto_skill_extra_turns',
-    'auto_skill_mode',
-    'skill_selector_mode',
-    # Retry policy
-    'retry_max_attempts',
-    'endpoint_max_retries',
-    'retry_base_delay',
-    'retry_max_delay',
-    # Slot pool dead-man's switch (activity window; hard cap is derived as 6x)
-    'slot_queue_timeout_seconds',
-    # Code interpreter
-    'ci_execution_timeout',
-    'ci_watchdog_timeout',
-    'ci_stale_container_ttl',
-    # Cache pool
-    'cache_pool_enabled',
-    'cache_pool_size',
-    'cache_threshold_chars',
-    # Tool char limits (stored in pool.llm_cfg but persisted via pool_settings.json)
-    'tool_result_max_chars',
-    'wild_read_truncation_chars',
-    'grep_char_limit',
-    'grep_spillover',
-    'shell_char_limit',
-    'code_char_limit',
-    'list_dir_char_limit',
-    # Memory-hint feature (plan §7) — persisted via pool_settings.json.
-    'memory_hint_enabled',
-    'memory_hint_threshold',
-    'memory_hint_max_entries',
-    'memory_hint_query_chars',
-    'memory_hint_cooldown_seconds',
-    'memory_hint_skill_suggestions',
-    'memory_hint_skill_threshold',
-    # Skill invalidation (adaptive count-cap) — persisted via pool_settings.json.
-    'skill_auto_invalidate_enabled',
-    'skill_active_target_k',
-    'skill_active_min_cap',
-    'skill_active_max_cap',
-    # Skill-scoring constants (research §5/§7/§18 + D-SAFE) — persisted via pool_settings.json.
-    'skill_score_q0',
-    'skill_score_kq',
-    'skill_score_nhalf',
-    'skill_score_ghalf',
-    'skill_score_rflood',
-    'skill_score_tau_turns',
-    'skill_score_dq',
-    'skill_score_nmin',
-    'skill_fair_window_turns',
-    'skill_max_evictions_per_pass',
-    # Always-protected (unremovable) meta-skill set — a STRING setting, persisted via pool_settings.json.
-    'skill_always_protected',
-    # Image base64 management
-    'max_images_for_llm',
-    # Image caption mode (auto/always/off)
-    'image_caption_mode',
-    # Approval timeout settings
-    'approval_timeout_seconds',
-    'enable_approval_timeout',
-    # Async shell console window toggle
-    'enable_async_shell_console_window',
-    # Work folders (persisted alongside PoolSettings fields)
-    'work_access_folders_ro',
-    'work_access_folders_rw',
-    # Default workspace
-    'default_workspace',
-    # Idle management
-    'idle_check_interval',
-    # Compression settings
-    'compression_force_threshold',
-    'compression_warning_threshold',
-    'compression_timeout',
-    'compression_force_cooldown',
-    'compression_max_attempts',
-    'compression_proactive_threshold',
-    'compression_context_reserve_tokens',
-    # Security
-    'security_check_timeout',
-    # Nesting/sleeping limits
-    'max_nesting_depth',
-    'sleeping_wakeup_interval',
-    # Sync checks
-    'tail_sync_check_enabled',
-    # Streaming timeout settings
-    'stream_max_silence_seconds',
-    'stream_max_total_seconds',
-    # Dismiss thread join timeout
-    'dismiss_thread_join_timeout',
-    # Telegram bridge (Phase 3) — UI toggle; starts/stops the in-process daemon thread.
-    'telegram_bridge_enabled',
-    # User-message log (t154) — gate for the Agent-Messages JSONL audit trail.
-    'user_message_log_enabled',
-})
-
-# ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
-EXTRA_PERSIST_KEYS = frozenset({
-    'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
-    'auto_security',  # Auto-Ask security mode toggle state
-    'compression_fraction',  # Compression ratio as percentage (maps to runtime_state.state.compression_fraction)
-})
+# POOL_SETTINGS_KEYS / EXTRA_PERSIST_KEYS / EXPORT_IMPORT_ALLOWLIST / LLM_CFG_KEYS /
+# LLM_CFG_PERSIST_KEYS are registry-derived (single source of truth); re-exported here so
+# existing imports (ws_handlers, tests) keep working.
 
 # ── Registry of config key → handler function ────────────────────────────
 CONFIG_HANDLERS: Dict[str, Callable] = {}
@@ -1097,6 +962,75 @@ def _handle_compression_fraction(ui_cfg: dict, agent_pool: Optional[Any], agents
     _runtime_state.set_compression_fraction(float(ui_cfg['compression_fraction']))
 
 
+@register_config_handler('auto_security')
+def _handle_auto_security(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Auto-Ask Security toggle.
+
+    Single writer is the pool (runtime_state + change-detected persistence); fall back to
+    the runtime singleton when no pool is wired in.
+    """
+    from agent_cascade.runtime_state import state as _runtime_state
+    enabled = bool(ui_cfg['auto_security'])
+    setter = getattr(agent_pool, 'set_auto_security', None)
+    if setter is not None:
+        setter(enabled)
+    else:
+        _runtime_state.set_auto_security(enabled)
+
+
+@register_config_handler('compression_min_usage_pct')
+def _handle_compression_min_usage_pct(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Refuse agent-triggered compression below this context-usage percentage (0-100)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.compression_min_usage_pct = min(100.0, max(0.0,
+                                                                       float(ui_cfg['compression_min_usage_pct'])))
+
+
+@register_config_handler('tool_loop_sim_threshold')
+def _handle_tool_loop_sim_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Tier-2 (fuzzy) similarity floor for near-duplicate tool-call cores (0-1)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.tool_loop_sim_threshold = min(1.0, max(0.0,
+                                                                   float(ui_cfg['tool_loop_sim_threshold'])))
+
+
+@register_config_handler('holder_dms_window_s')
+def _handle_holder_dms_window_s(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Holder-side dead-man's-switch activity window (seconds; 0 disables the watchdog)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.holder_dms_window_s = max(0.0, float(ui_cfg['holder_dms_window_s']))
+
+
+@register_config_handler('holder_dms_max_bound_s')
+def _handle_holder_dms_max_bound_s(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Fallback DMS bound for sync tools that declare no finite dms_bound()."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.holder_dms_max_bound_s = max(0.0, float(ui_cfg['holder_dms_max_bound_s']))
+
+
+@register_config_handler('afk_enabled')
+def _handle_afk_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the server-backed AFK flag (message/mode left untouched)."""
+    from agent_cascade.runtime_state import state as _runtime_state
+    _runtime_state.set_afk(bool(ui_cfg['afk_enabled']))
+
+
+@register_config_handler('afk_message')
+def _handle_afk_message(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the AFK nudge message without changing the enabled flag."""
+    from agent_cascade.runtime_state import state as _runtime_state
+    _runtime_state.set_afk(bool(_runtime_state.afk_enabled), str(ui_cfg['afk_message']))
+
+
+@register_config_handler('afk_mode')
+def _handle_afk_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the AFK nudge mode ('basic' | 'admin') without changing the enabled flag."""
+    from agent_cascade.runtime_state import state as _runtime_state
+    from agent_cascade.settings import normalize_afk_mode
+    _runtime_state.set_afk(bool(_runtime_state.afk_enabled), None,
+                           normalize_afk_mode(ui_cfg['afk_mode']))
+
+
 @register_config_handler('enable_agent_budgeting')
 def _handle_enable_agent_budgeting(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
@@ -1182,7 +1116,7 @@ def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) ->
     """Update default LLM config if changed (defense-in-depth optimization)."""
     from agent_cascade.log import logger as _logger
     if agent_pool is not None and hasattr(agent_pool, 'api_router'):
-        new_llm_cfg = {k: v for k, v in ui_cfg.items() if k in LLM_CONFIG_KEYS}
+        new_llm_cfg = {k: v for k, v in ui_cfg.items() if k in LLM_CFG_KEYS}
         current_llm_cfg = agent_pool.api_router.default_llm_cfg or {}
         if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
             agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
@@ -1192,7 +1126,7 @@ def _handle_llm_config(ui_cfg: dict, agent_pool: Optional[Any], agents: list) ->
 
 # Each key is bound at decoration time (register_config_handler(_llm_key)), so there is
 # no late-binding closure issue — every registered handler routes to _handle_llm_config.
-for _llm_key in LLM_CONFIG_KEYS:
+for _llm_key in LLM_CFG_KEYS:
 
     @register_config_handler(_llm_key)
     def _handler(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:

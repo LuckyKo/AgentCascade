@@ -103,7 +103,7 @@ const state = {
   agents: [],
   agentIndex: 0,
   viewingAgentIndex: 0,
-  sessionName: localStorage.getItem('agent-cascade-session-name') || DEFAULT_SESSION_NAME,
+  sessionName: DEFAULT_SESSION_NAME,
   connected: false,
   editingIndex: null,  // Which message index is being edited
   activeSubTab: null,
@@ -157,176 +157,226 @@ function clearAutoSecurityTimers() {
  * transform(value) is called to convert the server value before assignment. */
 const POOL_SETTINGS_MAP = [
   // Core agent settings
-  { id: '#setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
-  { id: '#setting-soft-turn-limit', prop: 'checked', key: 'soft_turn_limit', localKey: 'soft_turn_limit' },
-  { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max_auto_rollbacks' },
-  { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
-  { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
-  { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents', localKey: 'allow_parallel_agents' },
+  { id: '#setting-max-turns', prop: 'value', key: 'max_turns' },
+  { id: '#setting-soft-turn-limit', prop: 'checked', key: 'soft_turn_limit' },
+  { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks' },
+  { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop' },
+  { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting' },
+  { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents' },
   // state_kv_save_enabled = automatic checkpoint toggle only (Security/compression saves);
   // it does NOT gate the manual Save/Load KV buttons — see index.html tooltip.
-  { id: '#setting-state-kv-save', prop: 'checked', key: 'state_kv_save_enabled', localKey: 'state_kv_save_enabled' },
-  { id: '#setting-completion-classifier', prop: 'checked', key: 'completion_classifier_enabled', localKey: 'completion-classifier' },
+  { id: '#setting-state-kv-save', prop: 'checked', key: 'state_kv_save_enabled' },
+  { id: '#setting-completion-classifier', prop: 'checked', key: 'completion_classifier_enabled' },
   // Inner-loop detection (master toggle)
-  { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
+  { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled' },
   // Inner-loop thresholds
-  { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
-  { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
-  { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled', localKey: 'loop-max-chars-enabled' },
+  { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars' },
+  { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars' },
+  { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled' },
   // Inner-loop detection modes
-  { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
-  { id: '#setting-loop-char-run-limit', prop: 'value', key: 'loop_char_run_limit', localKey: 'loop-char-run-limit' },
-  { id: '#setting-loop-two-phase', prop: 'checked', key: 'loop_two_phase_enabled', localKey: 'loop-two-phase-enabled' },
+  { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled' },
+  { id: '#setting-loop-char-run-limit', prop: 'value', key: 'loop_char_run_limit' },
+  { id: '#setting-loop-two-phase', prop: 'checked', key: 'loop_two_phase_enabled' },
   // Inner-loop semantic parameters
-  { id: '#setting-loop-suspicion-threshold', prop: 'value', key: 'loop_suspicion_threshold', localKey: 'loop-suspicion-threshold' },
-  { id: '#setting-loop-confirm-required', prop: 'value', key: 'loop_confirm_required', localKey: 'loop-confirm-required' },
-  { id: '#setting-loop-cooldown-feeds', prop: 'value', key: 'loop_cooldown_feeds', localKey: 'loop-cooldown-feeds' },
+  { id: '#setting-loop-suspicion-threshold', prop: 'value', key: 'loop_suspicion_threshold' },
+  { id: '#setting-loop-confirm-required', prop: 'value', key: 'loop_confirm_required' },
+  { id: '#setting-loop-cooldown-feeds', prop: 'value', key: 'loop_cooldown_feeds' },
   // Skills system
-  { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
+  { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode',
     transform: (v) => v === 'AUTO' },
-  { id: '#setting-auto-skill-mode', prop: 'value', key: 'auto_skill_mode', localKey: 'auto-skill-mode' },
-  { id: '#setting-skill-selector-mode', prop: 'value', key: 'skill_selector_mode', localKey: 'skill-selector-mode' },
-  { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
-  { id: '#setting-auto-skill-min-turns', prop: 'value', key: 'auto_skill_min_turns', localKey: 'auto-skill-min-turns' },
-  { id: '#setting-auto-skill-extra-turns', prop: 'value', key: 'auto_skill_extra_turns', localKey: 'auto-skill-extra-turns' },
+  { id: '#setting-auto-skill-mode', prop: 'value', key: 'auto_skill_mode' },
+  { id: '#setting-skill-selector-mode', prop: 'value', key: 'skill_selector_mode' },
+  { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled' },
+  { id: '#setting-auto-skill-min-turns', prop: 'value', key: 'auto_skill_min_turns' },
+  { id: '#setting-auto-skill-extra-turns', prop: 'value', key: 'auto_skill_extra_turns' },
   // Telegram bridge (Phase 3) — underscore key via getGenerateCfg().
-  { id: '#setting-telegram-bridge-enabled', prop: 'checked', key: 'telegram_bridge_enabled', localKey: 'telegram_bridge_enabled' },
+  { id: '#setting-telegram-bridge-enabled', prop: 'checked', key: 'telegram_bridge_enabled' },
   // Retry policy settings (Phase 6)
-  { id: '#setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
-  { id: '#setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
-  { id: '#setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
-  { id: '#setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
+  { id: '#setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts' },
+  { id: '#setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries' },
+  { id: '#setting-retry-base-delay', prop: 'value', key: 'retry_base_delay' },
+  { id: '#setting-retry-max-delay', prop: 'value', key: 'retry_max_delay' },
       // Slot pool dead-man's switch — ONE knob. The hard cap is derived as 6x this value
       // server-side (pool/slots.py::_queue_limits); it is deliberately not a second setting.
-      { id: '#setting-slot-queue-timeout', prop: 'value', key: 'slot_queue_timeout_seconds', localKey: 'slot_queue_timeout_seconds' },
+      { id: '#setting-slot-queue-timeout', prop: 'value', key: 'slot_queue_timeout_seconds' },
   // Cache pool
-  { id: '#setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
-  { id: '#setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
-  { id: '#setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
+  { id: '#setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled' },
+  { id: '#setting-cache-pool-size', prop: 'value', key: 'cache_pool_size' },
+  { id: '#setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars' },
   // Tool char limits
-  { id: '#setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
-  // NOTE: localKey must match the localStorage key written by saveSettings()/getGenerateCfg().
-  // This family uses underscore keys via getGenerateCfg(), NOT hyphens — mismatch breaks the
-  // respect-local-preference guard and causes mid-stream stomp-reverts.
-  { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep_char_limit' },
-  { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep_spillover' },
-  { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell_char_limit' },
-  { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code_char_limit' },
-  { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list_dir_char_limit' },
-  { id: '#setting-wild-read-truncation-chars', prop: 'value', key: 'wild_read_truncation_chars', localKey: 'wild_read_truncation_chars' },
+  { id: '#setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars' },
+  { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit' },
+  { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover' },
+  { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit' },
+  { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit' },
+  { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit' },
+  { id: '#setting-wild-read-truncation-chars', prop: 'value', key: 'wild_read_truncation_chars' },
   // Memory-hint feature (plan §7) — underscore keys via getGenerateCfg(), like the tool-char family.
-  { id: '#setting-memory-hint-enabled', prop: 'checked', key: 'memory_hint_enabled', localKey: 'memory_hint_enabled' },
-  { id: '#setting-memory-hint-threshold', prop: 'value', key: 'memory_hint_threshold', localKey: 'memory_hint_threshold' },
-  { id: '#setting-memory-hint-max-entries', prop: 'value', key: 'memory_hint_max_entries', localKey: 'memory_hint_max_entries' },
-  { id: '#setting-memory-hint-query-chars', prop: 'value', key: 'memory_hint_query_chars', localKey: 'memory_hint_query_chars' },
-  { id: '#setting-memory-hint-cooldown', prop: 'value', key: 'memory_hint_cooldown_seconds', localKey: 'memory_hint_cooldown_seconds' },
+  { id: '#setting-memory-hint-enabled', prop: 'checked', key: 'memory_hint_enabled' },
+  { id: '#setting-memory-hint-threshold', prop: 'value', key: 'memory_hint_threshold' },
+  { id: '#setting-memory-hint-max-entries', prop: 'value', key: 'memory_hint_max_entries' },
+  { id: '#setting-memory-hint-query-chars', prop: 'value', key: 'memory_hint_query_chars' },
+  { id: '#setting-memory-hint-cooldown', prop: 'value', key: 'memory_hint_cooldown_seconds' },
   // Skill invalidation (adaptive count-cap) — underscore keys via getGenerateCfg().
-  { id: '#setting-skill-invalidate-enabled', prop: 'checked', key: 'skill_auto_invalidate_enabled', localKey: 'skill_auto_invalidate_enabled' },
-  { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k', localKey: 'skill_active_target_k' },
-  { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap', localKey: 'skill_active_min_cap' },
-  { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap', localKey: 'skill_active_max_cap' },
+  { id: '#setting-skill-invalidate-enabled', prop: 'checked', key: 'skill_auto_invalidate_enabled' },
+  { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k' },
+  { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap' },
+  { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap' },
   // Skill-scoring constants (research §5/§7/§18 + D-SAFE) — underscore keys via getGenerateCfg().
-  { id: '#setting-skill-score-q0', prop: 'value', key: 'skill_score_q0', localKey: 'skill_score_q0' },
-  { id: '#setting-skill-score-kq', prop: 'value', key: 'skill_score_kq', localKey: 'skill_score_kq' },
-  { id: '#setting-skill-score-nhalf', prop: 'value', key: 'skill_score_nhalf', localKey: 'skill_score_nhalf' },
-  { id: '#setting-skill-score-ghalf', prop: 'value', key: 'skill_score_ghalf', localKey: 'skill_score_ghalf' },
-  { id: '#setting-skill-score-rflood', prop: 'value', key: 'skill_score_rflood', localKey: 'skill_score_rflood' },
-  { id: '#setting-skill-score-tau-turns', prop: 'value', key: 'skill_score_tau_turns', localKey: 'skill_score_tau_turns' },
-  { id: '#setting-skill-score-dq', prop: 'value', key: 'skill_score_dq', localKey: 'skill_score_dq' },
-  { id: '#setting-skill-score-nmin', prop: 'value', key: 'skill_score_nmin', localKey: 'skill_score_nmin' },
-  { id: '#setting-skill-fair-window-turns', prop: 'value', key: 'skill_fair_window_turns', localKey: 'skill_fair_window_turns' },
-  { id: '#setting-skill-max-evictions-per-pass', prop: 'value', key: 'skill_max_evictions_per_pass', localKey: 'skill_max_evictions_per_pass' },
+  { id: '#setting-skill-score-q0', prop: 'value', key: 'skill_score_q0' },
+  { id: '#setting-skill-score-kq', prop: 'value', key: 'skill_score_kq' },
+  { id: '#setting-skill-score-nhalf', prop: 'value', key: 'skill_score_nhalf' },
+  { id: '#setting-skill-score-ghalf', prop: 'value', key: 'skill_score_ghalf' },
+  { id: '#setting-skill-score-rflood', prop: 'value', key: 'skill_score_rflood' },
+  { id: '#setting-skill-score-tau-turns', prop: 'value', key: 'skill_score_tau_turns' },
+  { id: '#setting-skill-score-dq', prop: 'value', key: 'skill_score_dq' },
+  { id: '#setting-skill-score-nmin', prop: 'value', key: 'skill_score_nmin' },
+  { id: '#setting-skill-fair-window-turns', prop: 'value', key: 'skill_fair_window_turns' },
+  { id: '#setting-skill-max-evictions-per-pass', prop: 'value', key: 'skill_max_evictions_per_pass' },
   // Approval timeout settings
-  { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
-  { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
+  { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout' },
+  { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds' },
   // Async shell console window toggle
-  { id: '#settingAsyncShellConsoleWindow', prop: 'checked', key: 'enable_async_shell_console_window', localKey: 'async-shell-console-window' },
+  { id: '#settingAsyncShellConsoleWindow', prop: 'checked', key: 'enable_async_shell_console_window' },
   // Compression settings
-  { id: '#setting-compression-warning-threshold', prop: 'value', key: 'compression_warning_threshold', localKey: 'compression-warning-threshold' },
-  { id: '#setting-compression-force-threshold', prop: 'value', key: 'compression_force_threshold', localKey: 'compression-force-threshold' },
-  { id: '#setting-compression-proactive-threshold', prop: 'value', key: 'compression_proactive_threshold', localKey: 'compression-proactive-threshold' },
-  { id: '#setting-compression-context-reserve-tokens', prop: 'value', key: 'compression_context_reserve_tokens', localKey: 'compression-context-reserve-tokens' },
-  { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction', localKey: 'compression-fraction' },
-  // Image caption mode (auto/always/off) — localKey matches the underscore key written by saveSettings()/getGenerateCfg()
-  { id: '#setting-image-caption-mode', prop: 'value', key: 'image_caption_mode', localKey: 'image_caption_mode' },
+  { id: '#setting-compression-warning-threshold', prop: 'value', key: 'compression_warning_threshold' },
+  { id: '#setting-compression-force-threshold', prop: 'value', key: 'compression_force_threshold' },
+  { id: '#setting-compression-proactive-threshold', prop: 'value', key: 'compression_proactive_threshold' },
+  { id: '#setting-compression-context-reserve-tokens', prop: 'value', key: 'compression_context_reserve_tokens' },
+  { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction' },
+  // Image caption mode (auto/always/off) — stored under the underscore key written by saveSettings()/getGenerateCfg()
+  { id: '#setting-image-caption-mode', prop: 'value', key: 'image_caption_mode' },
 ];
 
-/** Sync pool settings from server state to UI elements.
- * Called on every state/stream_update message to ensure UI matches server truth.
- * Respects existing localStorage preferences — only syncs if the user has not set a value locally.
- * Only saves to localStorage if something actually changed.
- * Preserves frontend-only settings (e.g., log-api-post) that are not in backend pool_settings.
- * @param {Object} ps - Pool settings object (inner-loop detection tuning + cache pool) */
-function syncPoolSettings(ps) {
-  if (!ps) return;
-  // Read localStorage once to check existing user preferences
-  let saved;
-  try { saved = JSON.parse(localStorage.getItem('agent-cascade-settings')); } catch { saved = null; }
-  if (!saved) saved = {};
+// ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
+// Presentation-only state that stays in the browser. Never sent to the server.
+// `vision-enabled` is a behaviour gate (decides what the browser sends to the model),
+// NOT class D — it is hydrated from the server snapshot like any other server key.
+const UI_PREFS_KEY = 'agent-cascade-ui-prefs';
+const UI_PREFS_ALLOWLIST = new Set([
+  'setting-lines-enabled', 'setting-msg-meta',
+  'setting-sound-intervention', 'setting-sound-completed', 'setting-sound-notification',
+  'setting-user-color', 'setting-assistant-color', 'setting-raw-edit-color',
+  'setting-font-size', 'truncate-tools', 'auto-tab-focus',
+  'setting-image-detail', 'setting-max-image-size',
+]);
 
-  let changed = false;
-  for (const { id, prop, key, transform, localKey } of POOL_SETTINGS_MAP) {
-    const el = $(id);
-    if (el && ps[key] !== undefined) {
-      // Respect existing local preference — only overwrite if not already set in localStorage
-      if (localKey && saved[localKey] !== undefined) continue;
-      // Skip if the user is actively editing this field (prevents stale-tick stomps mid-edit).
-      if (el === document.activeElement) continue;
-      const newVal = transform ? transform(ps[key]) : ps[key];
-      // No-op filter: skip if value already matches — avoids `changed=true` churn and the
-      // associated saveSettings(false) localStorage write on every stream tick.
-      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
-      else { if (String(el[prop]) === String(newVal)) continue; }
-      el[prop] = newVal;
-      changed = true;
+/** Load class-D UI preferences from the browser-local store. */
+function loadUiPrefs() {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (!raw) return {};
+    const all = JSON.parse(raw);
+    // Allowlist filter: only class-D keys are valid in this store.
+    const out = {};
+    for (const k of Object.keys(all)) {
+      if (UI_PREFS_ALLOWLIST.has(k)) out[k] = all[k];
     }
-  }
+    return out;
+  } catch { return {}; }
+}
 
-  // Sync disabled_tools from server if available and we have agent data to apply it to.
-  // Only sync if localStorage doesn't already have a saved value (respect user's local preferences).
-  // This ensures pool_settings.json disabled_tools are reflected in UI on first load.
-  if (ps.disabled_tools && typeof ps.disabled_tools === 'object' && state.agents?.length > 0) {
-    const disabledToolsKey = 'agent-cascade-disabled-tools';
-    const fallbackKey = 'qwen-disabled-tools';
-    const hasLocalDisabledTools = localStorage.getItem(disabledToolsKey) || localStorage.getItem(fallbackKey);
-
-    if (!hasLocalDisabledTools) {
-      // No local preference exists - use server's disabled_tools as the source of truth
-      Object.assign(agentDisabledTools, ps.disabled_tools);
-      localStorage.setItem(disabledToolsKey, JSON.stringify(agentDisabledTools));
-      // Re-render tool checkboxes if settings panel is visible
-      if (settingToolsList && settingAgentSelect) {
-        renderToolsForSelectedAgent();
-      }
-    }
+/** Save class-D UI preferences to the browser-local store. */
+function saveUiPrefs(prefs) {
+  const filtered = {};
+  for (const k of Object.keys(prefs)) {
+    if (UI_PREFS_ALLOWLIST.has(k)) filtered[k] = prefs[k];
   }
+  localStorage.setItem(UI_PREFS_KEY, JSON.stringify(filtered));
+}
 
-  // Preserve frontend-only settings that aren't in backend pool_settings
-  const logApiPostEl = $('#setting-log-api-post');
-  if (logApiPostEl && saved['log-api-post'] !== undefined) {
-    logApiPostEl.checked = saved['log-api-post'];
-  }
+	/** Sync pool settings from the server's pool_settings snapshot into the UI controls.
+	 * Called on every state/stream_update frame so the UI matches server truth.
+	 * Server value always wins for server-backed controls (Batch B): hydration is
+	 * unconditional except for the element the user is actively focused on, so a live
+	 * keystroke is never stomped mid-edit.
+	 * @param {Object} ps - Pool settings object from the server state frame */
+		function syncPoolSettings(ps) {
+		  if (!ps) return;
 
-  // AFK is server-backed (state_builder _add_pool_runtime_settings) — the server is the
-  // single source of truth; localStorage no longer holds afk-enabled/afk-message.
-  if (ps.afk_enabled !== undefined && afkToggle) {
-    if (afkToggle.checked !== !!ps.afk_enabled) changed = true;
-    afkToggle.checked = !!ps.afk_enabled;
-  }
-  if (ps.afk_message !== undefined && settingAfkMessage && document.activeElement !== settingAfkMessage) {
-    if (settingAfkMessage.value !== ps.afk_message) changed = true;
-    settingAfkMessage.value = ps.afk_message;
-  }
-  if (ps.afk_mode !== undefined && afkModeSelect && document.activeElement !== afkModeSelect) {
-    if (afkModeSelect.value !== ps.afk_mode) changed = true;
-    afkModeSelect.value = ps.afk_mode;
-  }
+		  for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
+	    const el = $(id);
+	    if (el && ps[key] !== undefined) {
+	      // Server value always wins for server-backed controls (Batch B): no local-preference guard.
+	      // Only skip a control the user is actively editing (prevents stale-tick stomps mid-edit).
+	      if (el === document.activeElement) continue;
+	      const newVal = transform ? transform(ps[key]) : ps[key];
+	      // No-op filter: skip if value already matches.
+	      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
+	      else { if (String(el[prop]) === String(newVal)) continue; }
+	      el[prop] = newVal;
+	    }
+	  }
 
-  // Update two-phase input enabled state after server settings sync
-  updateTwoPhaseInputsEnabled();
+		  // Sync disabled_tools from server if available and we have agent data to apply it to.
+		  // Server value always wins (Batch B): the in-memory agentDisabledTools map is the sole
+		  // source for tool checkbox rendering; no localStorage write (server is authoritative).
+		  if (ps.disabled_tools && typeof ps.disabled_tools === 'object' && state.agents?.length > 0) {
+		    Object.assign(agentDisabledTools, ps.disabled_tools);
+		    if (settingToolsList && settingAgentSelect) {
+		      renderToolsForSelectedAgent();
+		    }
+		  }
 
-  // Persist synced settings to localStorage only if something changed (skip server broadcast to avoid feedback loop).
-  if (changed) saveSettings(false);
+		// AFK is server-backed (state_builder _add_pool_runtime_settings): the server is
+		// authoritative, so the controls are hydrated from the snapshot — a control the
+		// user is actively editing is skipped to avoid stomping a live keystroke.
+	  if (ps.afk_enabled !== undefined && afkToggle) {
+	    afkToggle.checked = !!ps.afk_enabled;
+	  }
+	  if (ps.afk_message !== undefined && settingAfkMessage && document.activeElement !== settingAfkMessage) {
+	    settingAfkMessage.value = ps.afk_message;
+	  }
+	  if (ps.afk_mode !== undefined && afkModeSelect && document.activeElement !== afkModeSelect) {
+	    afkModeSelect.value = ps.afk_mode;
+	  }
+
+		  // Update two-phase input enabled state after server settings sync
+		  updateTwoPhaseInputsEnabled();
+		}
+
+// ── Backend-authoritative settings (Batch B, Phase 2) ──────────────────────────
+// The server is the single source of truth for every server-backed setting. The client
+// keeps `pendingSettings` (the optimistic diff baseline, seeded from the last full
+// pool_settings snapshot) and sends per-key
+// deltas via `update_settings` — never the legacy full-push `update_config`.
+let pendingSettings = null;   // optimistic working copy (diffs for queued deltas)
+let serverSettingsSnapshot = null; // AUTHORITATIVE server value — updated ONLY from state frames,
+                                   // stream_update frames, and settings_changed broadcasts; the revertControl source
+let settingsRevision = 0;        // last settings_revision seen from the server
+let endpointsRevision = 0;       // last endpoints_revision seen from the server (stale-tab guard)
+const _pendingSettingChanges = {};
+let _settingFlushTimer = null;
+
+/** Record a user change to a server-backed setting; coalesced into a debounced delta send. */
+function queueSettingChange(key, value) {
+  if (pendingSettings && pendingSettings[key] === value) return; // no effective change
+  _pendingSettingChanges[key] = value;
+  if (_settingFlushTimer) clearTimeout(_settingFlushTimer);
+  _settingFlushTimer = setTimeout(_flushSettingChanges, 250);
+}
+
+function _flushSettingChanges() {
+  _settingFlushTimer = null;
+  if (!state.connected) return;
+  const changes = Object.assign({}, _pendingSettingChanges);
+  for (const k of Object.keys(changes)) delete _pendingSettingChanges[k];
+  if (Object.keys(changes).length === 0) return;
+  if (!pendingSettings) pendingSettings = {};
+  Object.assign(pendingSettings, changes); // optimistic baseline for the next diff
+  send({ type: 'update_settings', base_revision: settingsRevision, changes });
+}
+
+/** Revert a single control to the last server value after a per-key rejection (no new modal). */
+function revertControl(key) {
+  const entry = POOL_SETTINGS_MAP.find(e => e.key === key);
+  if (!entry || !serverSettingsSnapshot) return;
+  const el = $(entry.id);
+  if (!el) return;
+  const v = serverSettingsSnapshot[key];
+  if (entry.prop === 'checked') el.checked = !!v;
+  else el.value = (v === undefined || v === null) ? '' : String(v);
+  if (typeof showInSystemToastBar === 'function') showInSystemToastBar(`↩ ${key} reverted to server value`);
 }
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
@@ -1226,9 +1276,6 @@ function saveSettings(sendToServer) {
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-soft-turn-limit')) s['soft_turn_limit'] = $('#setting-soft-turn-limit').checked;
-  // Store the raw value under the underscore key so the respect-local guard in syncPoolSettings()
-  // (POOL_SETTINGS_MAP localKey='max_auto_rollbacks') has data to protect against server stomps.
-  if ($('#setting-max-rollbacks')) s['max_auto_rollbacks'] = $('#setting-max-rollbacks').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-completion-classifier')) s['completion-classifier'] = $('#setting-completion-classifier').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
@@ -1237,7 +1284,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
   if ($('#setting-auto-skill-min-turns')) s['auto-skill-min-turns'] = $('#setting-auto-skill-min-turns').value;
   if ($('#setting-auto-skill-extra-turns')) s['auto-skill-extra-turns'] = $('#setting-auto-skill-extra-turns').value;
-  // Telegram bridge (Phase 3) — persist under the underscore key (matches POOL_SETTINGS_MAP localKey).
+  // Telegram bridge (Phase 3) — underscore key mirrors the server-side config key; it is
+  // dropped by the ui-prefs allowlist (server-backed keys never reach localStorage).
   if ($('#setting-telegram-bridge-enabled')) s['telegram_bridge_enabled'] = $('#setting-telegram-bridge-enabled').checked;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
@@ -1321,10 +1369,17 @@ function saveSettings(sendToServer) {
 
   // Shell, code, and list_dir char limits also saved via getGenerateCfg() as underscore keys — no duplicate hyphenated keys needed.
 
-  localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
+  // Phase 4: only class-D presentation keys are written to browser storage (ui-prefs store).
+  // Server-backed keys are sent via queueSettingChange below — never to localStorage.
+  saveUiPrefs(s);
 
   if (sendToServer && state.connected) {
-    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
+    // Backend-authoritative (Batch B): the single write path is queueSettingChange — it diffs
+    // each key against the server value, coalesces into a debounced delta, and sends ONLY the
+    // changed keys via update_settings (never the legacy full update_config push). Untouched
+    // keys no-op inside queueSettingChange, so the server's outer-scope fallbacks keep applying.
+    const cfg = getGenerateCfg();
+    for (const k of Object.keys(cfg)) queueSettingChange(k, cfg[k]);
   }
 
   // Update inputs with validated/clamped values so UI reflects actual stored values
@@ -1334,346 +1389,87 @@ function saveSettings(sendToServer) {
   updateAllContextBars();
 }
 
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem('agent-cascade-settings') || localStorage.getItem('qwen-settings');
-    if (!raw) return;
-    const s = JSON.parse(raw);
+	function loadSettings() {
+	  try {
+	    // Phase 4: class-D presentation keys come from the dedicated ui-prefs store.
+	    // Server-backed keys are hydrated by syncPoolSettings() from the server snapshot.
+	    const s = loadUiPrefs();
+	    if (!Object.keys(s).length) {
+	      // No saved prefs — mark loaded and return (HTML defaults apply).
+	      settingsLoaded = true;
+	      return;
+	    }
 
-    // Only restore a numeric slider when the stored value is a finite number (or non-empty numeric
-    // string). Legacy/corrupted localStorage blobs may hold `null` for these element-id keys, and
-    // `null !== undefined` is true — without this guard we'd assign null into the input.
-    const _isFiniteRestore = (v) =>
-      (typeof v === 'number' && Number.isFinite(v)) ||
-      (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
-    // Non-numeric restores (toggles, colors, strings): only restore when the value is present
-    // (neither null nor undefined) so a null-poisoned blob doesn't clobber the HTML default.
-    const _present = (v) => v !== null && v !== undefined;
+	    const _isFiniteRestore = (v) =>
+	      (typeof v === 'number' && Number.isFinite(v)) ||
+	      (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
+	    const _present = (v) => v !== null && v !== undefined;
 
-    ranges.forEach(r => {
-      if (r.input && _isFiniteRestore(s[r.input.id])) {
-        r.input.value = s[r.input.id];
-        r.input.dispatchEvent(new Event('input'));
-      }
-    });
+	    // Class-D: font size
+	    if (settingFontSize && _isFiniteRestore(s['setting-font-size'])) {
+	      settingFontSize.value = s['setting-font-size'];
+	      settingFontSize.dispatchEvent(new Event('input'));
+	    }
 
-    if (settingFontSize && _isFiniteRestore(s['setting-font-size'])) {
-      settingFontSize.value = s['setting-font-size'];
-      settingFontSize.dispatchEvent(new Event('input'));
-    }
+	    // Class-D: line numbers / message metadata toggles
+	    if (settingLinesEnabled && _present(s['setting-lines-enabled'])) {
+	      settingLinesEnabled.checked = s['setting-lines-enabled'];
+	      settingLinesEnabled.dispatchEvent(new Event('change'));
+	    }
+	    if (settingMsgMeta && _present(s['setting-msg-meta'])) {
+	      settingMsgMeta.checked = !!s['setting-msg-meta'];
+	    }
 
-    if (settingMaxTokens && _isFiniteRestore(s['max_tokens'])) {
-      settingMaxTokens.value = s['max_tokens'];
-      settingMaxTokens.dispatchEvent(new Event('input'));
-    }
+	    // Class-D: sound toggles
+	    if (settingSoundIntervention && _present(s['setting-sound-intervention'])) {
+	      settingSoundIntervention.checked = s['setting-sound-intervention'];
+	    }
+	    if (settingSoundCompleted && _present(s['setting-sound-completed'])) {
+	      settingSoundCompleted.checked = s['setting-sound-completed'];
+	    }
+	    if (settingSoundNotification && _present(s['setting-sound-notification'])) {
+	      settingSoundNotification.checked = s['setting-sound-notification'];
+	    }
 
-    if (settingMaxContext && _isFiniteRestore(s['setting-max-context'])) {
-      settingMaxContext.value = s['setting-max-context'];
-      settingMaxContext.dispatchEvent(new Event('input'));
-    }
+	    // Class-D: truncate-tools (default ON when absent)
+	    if (settingTruncateTools) {
+	      settingTruncateTools.checked = _present(s['truncate-tools']) ? !!s['truncate-tools'] : true;
+	      settingTruncateTools.dispatchEvent(new Event('change'));
+	    }
 
-    if (settingLinesEnabled && _present(s['setting-lines-enabled'])) {
-      settingLinesEnabled.checked = s['setting-lines-enabled'];
-      settingLinesEnabled.dispatchEvent(new Event('change'));
-    }
+	    // Class-D: auto-tab-focus
+	    if (settingAutoTabFocus && _present(s['auto-tab-focus'])) {
+	      settingAutoTabFocus.checked = s['auto-tab-focus'];
+	    }
 
-    // Default OFF when absent — no dispatch needed, createMessageEl reads the checkbox live
-    if (settingMsgMeta && _present(s['setting-msg-meta'])) {
-      settingMsgMeta.checked = !!s['setting-msg-meta'];
-    }
+	    // Class-D: colors
+	    if (settingUserColor && _present(s['setting-user-color'])) {
+	      settingUserColor.value = s['setting-user-color'];
+	      settingUserColor.dispatchEvent(new Event('input'));
+	    }
+	    if (settingAssistantColor && _present(s['setting-assistant-color'])) {
+	      settingAssistantColor.value = s['setting-assistant-color'];
+	      settingAssistantColor.dispatchEvent(new Event('input'));
+	    }
+	    if (settingRawEditColor && _present(s['setting-raw-edit-color'])) {
+	      settingRawEditColor.value = s['setting-raw-edit-color'];
+	      settingRawEditColor.dispatchEvent(new Event('input'));
+	    }
 
-    if (settingSoundIntervention && _present(s['setting-sound-intervention'])) {
-      settingSoundIntervention.checked = s['setting-sound-intervention'];
-    }
+	    // Class-D: image detail / max image size
+	    if (settingImageDetail && _present(s['setting-image-detail'])) {
+	      settingImageDetail.value = s['setting-image-detail'];
+	    }
+	    if (settingMaxImageSize && _isFiniteRestore(s['setting-max-image-size'])) {
+	      settingMaxImageSize.value = s['setting-max-image-size'];
+	    }
 
-    if (settingSoundCompleted && _present(s['setting-sound-completed'])) {
-      settingSoundCompleted.checked = s['setting-sound-completed'];
-    }
-
-    if (settingSoundNotification && _present(s['setting-sound-notification'])) {
-      settingSoundNotification.checked = s['setting-sound-notification'];
-    }
-
-    // Frontend-only toggle — always normalize into localStorage so reloads are deterministic.
-    // When absent from the blob, the checkbox keeps its index.html default (checked=true).
-    if (settingTruncateTools) {
-      settingTruncateTools.checked = _present(s['truncate-tools']) ? !!s['truncate-tools'] : true;
-      s['truncate-tools'] = settingTruncateTools.checked;
-      localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
-      settingTruncateTools.dispatchEvent(new Event('change'));
-    }
-
-    // Load Auto Agent Tab Focus toggle state
-    if (settingAutoTabFocus && _present(s['auto-tab-focus'])) {
-      settingAutoTabFocus.checked = s['auto-tab-focus'];
-    }
-
-    if (settingUserColor && _present(s['setting-user-color'])) {
-      settingUserColor.value = s['setting-user-color'];
-      settingUserColor.dispatchEvent(new Event('input'));
-    }
-    if (settingAssistantColor && _present(s['setting-assistant-color'])) {
-      settingAssistantColor.value = s['setting-assistant-color'];
-      settingAssistantColor.dispatchEvent(new Event('input'));
-    }
-    if (settingRawEditColor && _present(s['setting-raw-edit-color'])) {
-      settingRawEditColor.value = s['setting-raw-edit-color'];
-      settingRawEditColor.dispatchEvent(new Event('input'));
-    }
-
-    if (_present(s['api_base'])) $('#setting-endpoint').value = s['api_base'];
-    if (_present(s['api_key'])) $('#setting-api-key').value = s['api_key'];
-    if (_present(s['model'])) $('#setting-model').value = s['model'];
-
-    if (_present(s['vision-enabled'])) $('#setting-vision-enabled').checked = s['vision-enabled'];
-    if (_isFiniteRestore(s['max-turns'])) $('#setting-max-turns').value = s['max-turns'];
-    if (_present(s['soft_turn_limit'])) $('#setting-soft-turn-limit').checked = s['soft_turn_limit'];
-    if (_present(s['auto-continue'])) $('#setting-auto-continue').checked = s['auto-continue'];
-    if (_present(s['completion-classifier'])) $('#setting-completion-classifier').checked = s['completion-classifier'];
-    if (_present(s['enable-skills'])) $('#setting-enable-skills').checked = s['enable-skills'];
-    if (_present(s['auto-skill-mode'])) $('#setting-auto-skill-mode').value = s['auto-skill-mode'];
-    if (_present(s['skill-selector-mode'])) $('#setting-skill-selector-mode').value = s['skill-selector-mode'];
-    if (_present(s['auto-skill-gen'])) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
-    if (_isFiniteRestore(s['auto-skill-min-turns'])) $('#setting-auto-skill-min-turns').value = s['auto-skill-min-turns'];
-    if (_isFiniteRestore(s['auto-skill-extra-turns'])) $('#setting-auto-skill-extra-turns').value = s['auto-skill-extra-turns'];
-    // Telegram bridge (Phase 3): restore prior local preference.
-    if (typeof s['telegram_bridge_enabled'] === 'boolean') {
-      const _tgBridge = $('#setting-telegram-bridge-enabled');
-      if (_tgBridge) _tgBridge.checked = s['telegram_bridge_enabled'];
-    }
-    if (_present(s['inner-loop-detect'])) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
-    // Restore Agent Budgeting toggle state
-    if (_present(s['enable_agent_budgeting'])) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
-    // Restore Allow Parallel Agents toggle state
-    if (_present(s['allow_parallel_agents'])) $('#setting-allow-parallel').checked = s['allow_parallel_agents'];
-    // Restore Slot Queue Timeout (seconds)
-    if (_present(s['slot_queue_timeout_seconds'])) $('#setting-slot-queue-timeout').value = s['slot_queue_timeout_seconds'];
-    // Restore State KV Save/Restore toggle state
-    if (_present(s['state_kv_save_enabled'])) $('#setting-state-kv-save').checked = s['state_kv_save_enabled'];
-    // Restore Log API POST Dump toggle (use consistent key; support old key for migration)
-    const logApiPost = _present(s['log-api-post']) ? s['log-api-post'] : s['log_api_post'];
-    if (_present(logApiPost)) $('#setting-log-api-post').checked = logApiPost;
-    // Restore Max Auto-Rollbacks value
-    if (_isFiniteRestore(s['max_auto_rollbacks'])) $('#setting-max-rollbacks').value = s['max_auto_rollbacks'];
-    // Restore Max Parallel Agents value
-    if (_isFiniteRestore(s['max_parallel_agents'])) $('#setting-max-parallel').value = s['max_parallel_agents'];
-    // Restore Auto-Rollback on Loop toggle
-    if (_present(s['auto_rollback_on_loop'])) $('#setting-auto-rollback').checked = s['auto_rollback_on_loop'];
-    // Loop detection tuning settings restore
-    if (_isFiniteRestore(s['loop-min-chars'])) $('#setting-loop-min-chars').value = s['loop-min-chars'];
-    if (_isFiniteRestore(s['loop-max-chars'])) $('#setting-loop-max-chars').value = s['loop-max-chars'];
-    if (_present(s['loop-char-run-enabled'])) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
-    if (_isFiniteRestore(s['loop-char-run-limit'])) $('#setting-loop-char-run-limit').value = s['loop-char-run-limit'];
-    if (_present(s['loop-max-chars-enabled'])) $('#setting-loop-max-chars-enabled').checked = s['loop-max-chars-enabled'];
-    if (_present(s['loop-two-phase-enabled'])) $('#setting-loop-two-phase').checked = s['loop-two-phase-enabled'];
-    if (_isFiniteRestore(s['loop-suspicion-threshold'])) $('#setting-loop-suspicion-threshold').value = s['loop-suspicion-threshold'];
-    if (_isFiniteRestore(s['loop-confirm-required'])) $('#setting-loop-confirm-required').value = s['loop-confirm-required'];
-    if (_isFiniteRestore(s['loop-cooldown-feeds'])) $('#setting-loop-cooldown-feeds').value = s['loop-cooldown-feeds'];
-
-    // Update two-phase input enabled state based on toggle
-    updateTwoPhaseInputsEnabled();
-
-    if (_isFiniteRestore(s['tool-result-max-chars'])) {
-    $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
-      $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
-    }
-    // Wild read truncation: prefer underscore key from generate_cfg, fall back to legacy hyphenated key
-    if (_isFiniteRestore(s['wild_read_truncation_chars']) || _isFiniteRestore(s['wild-read-truncation-chars'])) {
-      $('#setting-wild-read-truncation-chars').value = s['wild_read_truncation_chars'] ?? s['wild-read-truncation-chars'];
-      $('#setting-wild-read-truncation-chars').dispatchEvent(new Event('input'));
-    }
-    // Memory-hint feature (plan §7): restore toggle + 3 numeric settings.
-    if (typeof s['memory_hint_enabled'] === 'boolean') {
-      const _mhEn = $('#setting-memory-hint-enabled');
-      if (_mhEn) _mhEn.checked = s['memory_hint_enabled'];
-    }
-    if (_isFiniteRestore(s['memory_hint_threshold'])) {
-      $('#setting-memory-hint-threshold').value = s['memory_hint_threshold'];
-    }
-    if (_isFiniteRestore(s['memory_hint_max_entries'])) {
-      $('#setting-memory-hint-max-entries').value = s['memory_hint_max_entries'];
-    }
-    if (_isFiniteRestore(s['memory_hint_query_chars'])) {
-      $('#setting-memory-hint-query-chars').value = s['memory_hint_query_chars'];
-    }
-    if (_isFiniteRestore(s['memory_hint_cooldown_seconds'])) {
-      $('#setting-memory-hint-cooldown').value = s['memory_hint_cooldown_seconds'];
-    }
-    // Skill invalidation (adaptive count-cap): restore toggle + 3 numeric settings.
-    if (typeof s['skill_auto_invalidate_enabled'] === 'boolean') {
-      const _skInval = $('#setting-skill-invalidate-enabled');
-      if (_skInval) _skInval.checked = s['skill_auto_invalidate_enabled'];
-    }
-    if (_isFiniteRestore(s['skill_active_target_k'])) {
-      $('#setting-skill-target-k').value = s['skill_active_target_k'];
-    }
-    if (_isFiniteRestore(s['skill_active_min_cap'])) {
-      $('#setting-skill-min-cap').value = s['skill_active_min_cap'];
-    }
-    if (_isFiniteRestore(s['skill_active_max_cap'])) {
-      $('#setting-skill-max-cap').value = s['skill_active_max_cap'];
-    }
-    // Skill-scoring constants (research §5/§7/§18 + D-SAFE): restore numerics.
-    if (_isFiniteRestore(s['skill_score_q0'])) $('#setting-skill-score-q0').value = s['skill_score_q0'];
-    if (_isFiniteRestore(s['skill_score_kq'])) $('#setting-skill-score-kq').value = s['skill_score_kq'];
-    if (_isFiniteRestore(s['skill_score_nhalf'])) $('#setting-skill-score-nhalf').value = s['skill_score_nhalf'];
-    if (_isFiniteRestore(s['skill_score_ghalf'])) $('#setting-skill-score-ghalf').value = s['skill_score_ghalf'];
-    if (_isFiniteRestore(s['skill_score_rflood'])) $('#setting-skill-score-rflood').value = s['skill_score_rflood'];
-    if (_isFiniteRestore(s['skill_score_tau_turns'])) $('#setting-skill-score-tau-turns').value = s['skill_score_tau_turns'];
-    if (_isFiniteRestore(s['skill_score_dq'])) $('#setting-skill-score-dq').value = s['skill_score_dq'];
-    if (_isFiniteRestore(s['skill_score_nmin'])) $('#setting-skill-score-nmin').value = s['skill_score_nmin'];
-    if (_isFiniteRestore(s['skill_fair_window_turns'])) $('#setting-skill-fair-window-turns').value = s['skill_fair_window_turns'];
-    if (_isFiniteRestore(s['skill_max_evictions_per_pass'])) $('#setting-skill-max-evictions-per-pass').value = s['skill_max_evictions_per_pass'];
-    if (_isFiniteRestore(s['idle-timeout'])) {
-      $('#setting-idle-timeout').value = s['idle-timeout'];
-    }
-    if (_isFiniteRestore(s['system-idle-timeout'])) {
-      $('#setting-system-idle-timeout').value = s['system-idle-timeout'];
-    }
-    // Grep settings: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
-    if (_isFiniteRestore(s['grep_char_limit']) || _isFiniteRestore(s['grep-char-limit'])) {
-      $('#setting-grep-char-limit').value = s['grep_char_limit'] ?? s['grep-char-limit'];
-    }
-    if (_present(s['grep_spillover']) || _present(s['grep-spillover'])) {
-      $('#setting-grep-spillover').checked = s['grep_spillover'] ?? s['grep-spillover'];
-    }
-
-    // Shell, code, and list_dir char limits: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
-    if (_isFiniteRestore(s['shell_char_limit']) || _isFiniteRestore(s['shell-char-limit'])) {
-      $('#setting-shell-char-limit').value = s['shell_char_limit'] ?? s['shell-char-limit'];
-    }
-    if (_isFiniteRestore(s['code_char_limit']) || _isFiniteRestore(s['code-char-limit'])) {
-      $('#setting-code-char-limit').value = s['code_char_limit'] ?? s['code-char-limit'];
-    }
-    if (_isFiniteRestore(s['list_dir_char_limit']) || _isFiniteRestore(s['list-dir-char-limit'])) {
-      $('#setting-list-dir-char-limit').value = s['list_dir_char_limit'] ?? s['list-dir-char-limit'];
-    }
-
-    if (settingImageDetail && _present(s['setting-image-detail'])) {
-      settingImageDetail.value = s['setting-image-detail'];
-    }
-    if (settingMaxImageSize && _isFiniteRestore(s['setting-max-image-size'])) {
-      settingMaxImageSize.value = s['setting-max-image-size'];
-    }
-    if (settingMaxImagesForLlm && _isFiniteRestore(s['max_images_for_llm'])) {
-      settingMaxImagesForLlm.value = s['max_images_for_llm'];
-    }
-    if (settingImageCaptionMode && _present(s['image_caption_mode']) && ['auto', 'always', 'off'].includes(s['image_caption_mode'])) {
-      settingImageCaptionMode.value = s['image_caption_mode'];
-    }
-
-    // Approval timeout settings
-    if (approvalTimeoutEnabled && _present(s['approval-timeout-enabled'])) {
-      approvalTimeoutEnabled.checked = !!s['approval-timeout-enabled'];
-    }
-    if (approvalTimeoutSeconds && _isFiniteRestore(s['approval-timeout-seconds'])) {
-      approvalTimeoutSeconds.value = s['approval-timeout-seconds'];
-    }
-
-    // Cache pool settings
-    if ($('#setting-cache-pool-enabled') && _present(s['cache-pool-enabled'])) {
-      $('#setting-cache-pool-enabled').checked = !!s['cache-pool-enabled'];
-    }
-    if ($('#setting-cache-pool-size') && _isFiniteRestore(s['cache-pool-size'])) {
-      $('#setting-cache-pool-size').value = s['cache-pool-size'];
-    }
-    if ($('#setting-cache-threshold-chars') && _isFiniteRestore(s['cache-threshold-chars'])) {
-      $('#setting-cache-threshold-chars').value = s['cache-threshold-chars'];
-    }
-
-    // Retry policy settings (Phase 6)
-    if ($('#setting-retry-max-attempts') && _isFiniteRestore(s['retry-max-attempts'])) {
-      $('#setting-retry-max-attempts').value = s['retry-max-attempts'];
-    }
-    if ($('#setting-endpoint-max-retries') && _isFiniteRestore(s['endpoint-max-retries'])) {
-      $('#setting-endpoint-max-retries').value = s['endpoint-max-retries'];
-    }
-    if ($('#setting-retry-base-delay') && _isFiniteRestore(s['retry-base-delay'])) {
-      $('#setting-retry-base-delay').value = s['retry-base-delay'];
-    }
-    if ($('#setting-retry-max-delay') && _isFiniteRestore(s['retry-max-delay'])) {
-      $('#setting-retry-max-delay').value = s['retry-max-delay'];
-    }
-
-    // Compression threshold settings
-    if ($('#setting-compression-warning-threshold') && _isFiniteRestore(s['compression-warning-threshold'])) {
-      $('#setting-compression-warning-threshold').value = s['compression-warning-threshold'];
-    }
-    if ($('#setting-compression-force-threshold') && _isFiniteRestore(s['compression-force-threshold'])) {
-      $('#setting-compression-force-threshold').value = s['compression-force-threshold'];
-    }
-    if ($('#setting-compression-proactive-threshold') && _isFiniteRestore(s['compression-proactive-threshold'])) {
-      $('#setting-compression-proactive-threshold').value = s['compression-proactive-threshold'];
-    }
-    if ($('#setting-compression-context-reserve-tokens') && _isFiniteRestore(s['compression-context-reserve-tokens'])) {
-      $('#setting-compression-context-reserve-tokens').value = s['compression-context-reserve-tokens'];
-    }
-    if ($('#setting-compression-fraction') && _isFiniteRestore(s['compression-fraction'])) {
-      $('#setting-compression-fraction').value = s['compression-fraction'];
-    }
-
-    // MCP settings restore (workAccessFoldersRW block follows below)
-    if (workAccessFoldersRW) {
-      if (_present(s['work-access-folders-rw'])) {
-        workAccessFoldersRW.value = s['work-access-folders-rw'];
-      }
-    }
-    if (workAccessFoldersRO && _present(s['work-access-folders-ro'])) {
-      workAccessFoldersRO.value = s['work-access-folders-ro'];
-    }
-
-    if (defaultWorkspace && _present(s['default-workspace'])) {
-      defaultWorkspace.textContent = s['default-workspace'];
-      defaultWorkspace.title = s['default-workspace'];
-    }
-
-    const editDefaultWSBtn = $('#editDefaultWS');
-    if (editDefaultWSBtn && !editDefaultWSBtn.dataset.bound) {
-      editDefaultWSBtn.dataset.bound = "true";
-      editDefaultWSBtn.addEventListener('click', () => {
-        const current = defaultWorkspace.textContent;
-        const newVal = prompt('Enter new Default Workspace path (requires server restart to take full effect):', current);
-        if (newVal !== null && newVal.trim() !== '' && newVal.trim() !== current) {
-          const trimmed = newVal.trim();
-          defaultWorkspace.textContent = trimmed;
-          defaultWorkspace.title = trimmed + ' (Pending restart)';
-          defaultWorkspace.style.color = 'var(--accent)';
-
-          // Save to local settings
-          const settings = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
-          settings['default-workspace'] = trimmed;
-          localStorage.setItem('agent-cascade-settings', JSON.stringify(settings));
-
-          alert('Default workspace path saved to settings. A full server restart is recommended to properly re-initialize the Code Interpreter (Docker) and other core services in the new location.');
-        }
-      });
-    }
-
-    if (autoSecurityToggle && _present(s['auto-security'])) {
-      autoSecurityToggle.checked = s['auto-security'];
-      state.autoSecurity = s['auto-security'];
-    }
-
-    // Async shell console window toggle
-    if (settingAsyncShellConsoleWindow && _present(s['async-shell-console-window'])) {
-      settingAsyncShellConsoleWindow.checked = s['async-shell-console-window'];
-    }
-
-    // Clean up stale hyphenated keys (now stored via generate_cfg as underscore keys)
-    const s2 = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
-    for (const staleKey of ['grep-spillover', 'grep-char-limit', 'shell-char-limit', 'code-char-limit', 'list-dir-char-limit', 'wild-read-truncation-chars']) {
-      if (staleKey in s2) {
-        delete s2[staleKey];
-      }
-    }
-    localStorage.setItem('agent-cascade-settings', JSON.stringify(s2));
-
-    // Mark settings as loaded so beforeunload won't save HTML defaults (only after cleanup succeeds)
-    settingsLoaded = true;
-  } catch (e) {
-    console.error('Failed to load settings', e);
-  }
-}
+	    // Mark settings as loaded so beforeunload won't save HTML defaults
+	    settingsLoaded = true;
+	  } catch (e) {
+	    console.error('Failed to load settings', e);
+	  }
+	}
 
 // Auto-save settings on any change in the panel (debounced for sliders/typing)
 let _saveSettingsTimer;
@@ -1815,11 +1611,7 @@ function saveWorkFolders() {
   const rwValue = workAccessFoldersRW.value.trim();
   const roValue = workAccessFoldersRO.value.trim();
 
-  // Save to localStorage
-  const settings = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
-  settings['work-access-folders-rw'] = rwValue;
-  settings['work-access-folders-ro'] = roValue;
-  localStorage.setItem('agent-cascade-settings', JSON.stringify(settings));
+  // Server is authoritative for work folders (Batch B) — no localStorage write.
 
   // Send explicit set_work_folders message with both types (distinguishes from stale tab sync via update_config)
   if (state.connected) {
@@ -1961,18 +1753,39 @@ function connect() {
   const url = `${proto}//${location.host}/ws/chat`;
   ws = new WebSocket(url);
 
-  ws.onopen = () => {
-    state.connected = true;
-    connectionDot.classList.add('connected');
-    connectionDot.title = 'Connected';
-    statusText.textContent = '';
-    if (statusSave) statusSave.textContent = 'Connected';
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    // Sync session name with server on connect
-    send({ type: 'set_session_name', name: state.sessionName });
-    // Sync local settings (including default_workspace)
-    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
-  };
+	  ws.onopen = () => {
+	    state.connected = true;
+	    connectionDot.classList.add('connected');
+	    connectionDot.title = 'Connected';
+	    statusText.textContent = '';
+	    if (statusSave) statusSave.textContent = 'Connected';
+	    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+	    // Backend-authoritative (Batch B): the server is the source of truth for settings and the
+	    // session name. On connect we no longer push update_config or set_session_name — the initial
+	    // state frame (pool_settings + settings_revision + session_name) re-hydrates the UI, and only
+	    // an explicit user rename sends set_session_name (see the session-name input handler).
+
+	    // Phase 5: one-time migration from the legacy localStorage blob.
+	    // Read the old agent-cascade-settings (or qwen-settings) blob and send any keys the
+	    // server does not already have. The server applies them through the delta pipeline and
+	    // marks _settings_migrated_v1 so this only happens once.
+	    if (!localStorage.getItem('_settings_migrated_v1')) {
+	      const oldRaw = localStorage.getItem('agent-cascade-settings') || localStorage.getItem('qwen-settings');
+	      if (oldRaw) {
+	        try {
+	          const oldBlob = JSON.parse(oldRaw);
+	          if (Object.keys(oldBlob).length) {
+	            send({ type: 'migrate_settings_local', settings: oldBlob });
+	            // Local sentinel so we don't re-send on every reconnect within this release.
+	            localStorage.setItem('_settings_migrated_v1', '1');
+	          }
+	        } catch { /* malformed blob — skip migration */ }
+	      } else {
+	        // No old blob — nothing to migrate.
+	        localStorage.setItem('_settings_migrated_v1', '1');
+	      }
+	    }
+	  };
 
   ws.onclose = () => {
     state.connected = false;
@@ -2250,7 +2063,7 @@ function handleServerMessage(data) {
           state._firstAgentLoad = true;
         }
       }
-      if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; localStorage.setItem('agent-cascade-session-name', state.sessionName); }
+      if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; }
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
       if ('approvals' in data && Array.isArray(data.approvals)) {
@@ -2332,7 +2145,16 @@ function handleServerMessage(data) {
         }
       }
 
-      // Sync pool settings from server state to UI elements
+      // Backend-authoritative (Batch B): the state frame's pool_settings is the source of truth.
+      // Store it as pendingSettings (and track the revision) so the UI can re-hydrate and
+      // diff deltas against it; a reconnect after a settings_conflict re-delivers a fresh snapshot.
+      if (data.pool_settings) {
+        pendingSettings = Object.assign({}, data.pool_settings);
+        serverSettingsSnapshot = data.pool_settings;
+        if (typeof data.settings_revision === 'number') settingsRevision = data.settings_revision;
+        if (typeof data.endpoints_revision === 'number') endpointsRevision = data.endpoints_revision;
+      }
+      // Sync pool settings from server state to UI elements (unconditional — server wins).
       syncPoolSettings(data.pool_settings);
 
       // After syncing pool settings, render agent select if this was the first load
@@ -2346,21 +2168,12 @@ function handleServerMessage(data) {
         statusModel.textContent = data.current_model;
       }
 
-      if (data.default_workspace && defaultWorkspace) {
-        const s = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
-        const localWS = s['default-workspace'];
-        // Only let the server override if we don't have a local preference or it already matches
-        if (!localWS || localWS === data.default_workspace) {
-          defaultWorkspace.textContent = data.default_workspace;
-          defaultWorkspace.title = data.default_workspace;
-          defaultWorkspace.style.color = '';
-        } else {
-          // Keep the local one; the update_config sent on connect will sync the server eventually
-          defaultWorkspace.textContent = localWS;
-          defaultWorkspace.title = localWS + ' (Syncing with server...)';
-          defaultWorkspace.style.color = 'var(--accent)';
-        }
-      }
+	      if (data.default_workspace && defaultWorkspace) {
+	        // Server is authoritative for default workspace (Batch B) — always hydrate from server.
+	        defaultWorkspace.textContent = data.default_workspace;
+	        defaultWorkspace.title = data.default_workspace;
+	        defaultWorkspace.style.color = '';
+	      }
 
       // FIX B (turn-end full-rebuild): only invalidate panel caches on genuine 'state'
       // frames (initial load / explicit full-state reset). A routine turn-end 'done' frame
@@ -2588,7 +2401,15 @@ function handleServerMessage(data) {
       const newStackStr = (state.activeStack || []).join(',');
       const stackChanged = oldStackStr !== newStackStr;
 
-      // Sync pool settings from server state to UI elements
+      // Sync pool settings from server state to UI elements. Keep the authoritative snapshot
+      // + revisions in sync from the stream_update payload too (MINOR-8c: avoid drift between
+      // the state-frame and stream_update paths).
+      if (data.pool_settings) {
+        pendingSettings = Object.assign({}, data.pool_settings);
+        serverSettingsSnapshot = data.pool_settings;
+        if (typeof data.settings_revision === 'number') settingsRevision = data.settings_revision;
+        if (typeof data.endpoints_revision === 'number') endpointsRevision = data.endpoints_revision;
+      }
       syncPoolSettings(data.pool_settings);
 
       // Update scalar stats (always lightweight — no DOM work)
@@ -2718,6 +2539,38 @@ function handleServerMessage(data) {
       applyServerStatus(data);
       break;
 
+    case 'settings_applied': {
+      // settings_applied arrives on every tab (broadcast_fn, not a per-client send): advance
+      // the revision, clear the applied keys from the pending queue, and revert ONLY the
+      // per-key rejected controls (inline status, no modal).
+      if (typeof data.revision === 'number') settingsRevision = data.revision;
+      if (Array.isArray(data.applied)) for (const k of data.applied) delete _pendingSettingChanges[k];
+      if (data.rejected && typeof data.rejected === 'object') {
+        for (const k of Object.keys(data.rejected)) {
+          // Roll the optimistic diff baseline back to the authoritative value; otherwise
+          // pendingSettings keeps the rejected value and every later diff is computed against
+          // a phantom state (queueSettingChange would then treat a real change as a no-op).
+          if (pendingSettings && serverSettingsSnapshot) pendingSettings[k] = serverSettingsSnapshot[k];
+          delete _pendingSettingChanges[k];
+          revertControl(k);
+        }
+      }
+      break;
+    }
+
+    case 'settings_changed': {
+      // Broadcast to all clients after any tab's update_settings: merge the changed keys into the
+      // local snapshot and re-hydrate the affected controls (server value wins across tabs).
+      if (typeof data.revision === 'number') settingsRevision = data.revision;
+      if (data.changes && typeof data.changes === 'object' && Object.keys(data.changes).length) {
+        if (serverSettingsSnapshot) Object.assign(serverSettingsSnapshot, data.changes);
+        if (!pendingSettings) pendingSettings = {};
+        Object.assign(pendingSettings, data.changes);
+        syncPoolSettings(pendingSettings);
+      }
+      break;
+    }
+
     case 'approvals':
     // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
     if ('approvals' in data && Array.isArray(data.approvals)) {
@@ -2812,25 +2665,10 @@ function handleServerMessage(data) {
         showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
 
         // Remove only pool settings from localStorage so syncPoolSettings will apply server values.
-        // This preserves frontend-only settings (colors, font size, log-api-post, etc.) while still
-        // allowing the next state message to sync imported pool settings into UI controls.
-        try {
-          const saved = JSON.parse(localStorage.getItem('agent-cascade-settings')) || {};
-          POOL_SETTINGS_MAP.forEach(({ localKey }) => {
-            if (saved.hasOwnProperty(localKey)) delete saved[localKey];
-          });
-          localStorage.setItem('agent-cascade-settings', JSON.stringify(saved));
-        } catch (e) {
-          console.warn('[Import] Failed to clean pool settings from localStorage:', e);
-        }
+	        // Server is authoritative (Batch B) — no localStorage cleanup needed for pool settings.
+	        // The server-side import handler applies the new values and broadcasts the update.
 
-        // Clear disabled_tools from localStorage so imported values can take effect.
-        if (data.settings && data.settings.disabled_tools) {
-          localStorage.removeItem('agent-cascade-disabled-tools');
-          localStorage.removeItem('qwen-disabled-tools');
-        }
-
-        // Apply imported settings directly to UI controls (no need to wait for state message).
+	        // Apply imported settings directly to UI controls (no need to wait for state message).
         if (data.settings) {
           for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
             const el = $(id);
@@ -2839,10 +2677,9 @@ function handleServerMessage(data) {
             }
           }
 
-          // Apply imported disabled_tools to agentDisabledTools and re-render checkboxes.
-          if (data.settings.disabled_tools && typeof agentDisabledTools !== 'undefined') {
-            Object.assign(agentDisabledTools, data.settings.disabled_tools);
-            localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
+           // Apply imported disabled_tools to agentDisabledTools and re-render checkboxes.
+           if (data.settings.disabled_tools && typeof agentDisabledTools !== 'undefined') {
+             Object.assign(agentDisabledTools, data.settings.disabled_tools);
 
             withRetry(
               () => settingToolsList && settingAgentSelect,
@@ -2854,15 +2691,12 @@ function handleServerMessage(data) {
           if (data.settings && data.settings.auto_security !== undefined) {
             withRetry(
               () => autoSecurityToggle,
-              () => {
-                const newMode = Boolean(data.settings.auto_security);
-                state.autoSecurity = newMode;
-                autoSecurityToggle.checked = newMode;
-                // Also update localStorage so it persists across refresh
-                const saved = JSON.parse(localStorage.getItem('agent-cascade-settings')) || {};
-                saved['auto-security'] = newMode;
-                localStorage.setItem('agent-cascade-settings', JSON.stringify(saved));
-              }
+	              () => {
+	                const newMode = Boolean(data.settings.auto_security);
+	                state.autoSecurity = newMode;
+	                autoSecurityToggle.checked = newMode;
+	                // Server is authoritative for auto-security (Batch B) — no localStorage write.
+	              }
             );
           }
         }
@@ -4204,22 +4038,12 @@ function renderApprovals() {
     return JSON.stringify({ ids, checks, respKeys, respHash });
   }
 
-  // Auto-security check (Auto-Ask) takes priority — always check before skipping render
+  // Auto-security check (Auto-Ask) is driven by the SERVER _approval_loop (BUG_0211), not the
+  // browser: the server's _runtime_state._active_checks is the single gate, so a double-start is
+  // impossible. The browser no longer sends ask_security (auto_apply) itself — it only hides the
+  // bar and keeps the approvals in state until the server broadcasts the auto-applied result
+  // (approvals / security_response frames).
   if (state.autoSecurity) {
-    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
-
-    // FIX 3: Only process ONE approval at a time to prevent multiple simultaneous security checks
-    // After the first check completes and backend broadcasts updated approvals,
-    // renderApprovals() will be called again and pick up the next pending approval automatically.
-    if (pending.length > 0) {
-      const ap = pending[0];  // Process only the first pending approval
-      state.activeSecurityChecks.add(ap.request_id);
-      send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
-      console.debug(`[AUTO-ASK] Triggering security check for ${ap.request_id} (1 of ${pending.length} pending)`);
-    }
-
-    // Don't clear approvals immediately - keep them in case user toggles Auto-Ask off.
-    // They will be cleared by the backend when it broadcasts updated approvals after auto-applying.
     bar.style.display = 'none';
     return;
   }
@@ -5262,14 +5086,11 @@ function renderAgentSelect() {
       if (agent.index === state.viewingAgentIndex) opt2.selected = true;
       settingAgentSelect.appendChild(opt2);
     }
-  }
+	  }
 
-  if (updatedDisabledTools) {
-    localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
-  }
-
-  renderToolsForSelectedAgent();
-}
+	  // Server is authoritative for disabled_tools (Batch B) — no localStorage write.
+	  renderToolsForSelectedAgent();
+	}
 
 function renderToolsForSelectedAgent() {
   if (!settingToolsList || !settingAgentSelect) return;
@@ -5308,13 +5129,13 @@ function handleToolToggleChange(e) {
   const tName = chk.dataset.tool;
   if (!agentDisabledTools[aName]) agentDisabledTools[aName] = [];
   if (!e.target.checked) {
-    if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
-  } else {
-    agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
-  }
-  localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
-  saveSettings();
-}
+	    if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
+	  } else {
+	    agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
+	  }
+	  // Server is authoritative — send the updated map via the delta pipeline.
+	  queueSettingChange('disabled_tools', { ...agentDisabledTools });
+	}
 
 if (settingAgentSelect) {
   settingAgentSelect.addEventListener('change', (e) => {
@@ -6219,7 +6040,6 @@ sessionNameInput.addEventListener('change', () => {
   state.sessionName = sessionNameInput.value.trim() || DEFAULT_SESSION_NAME;
   state.closedTabs.clear();
   localStorage.removeItem('agent-cascade-closed-tabs');
-  localStorage.setItem('agent-cascade-session-name', state.sessionName);
   send({ type: 'set_session_name', name: state.sessionName });
 });
 
@@ -7072,7 +6892,7 @@ function handleApiEndpointToggle(e) {
     const card = toggle.closest('.api-endpoint-card');
     const endpoints = state.api_router?.endpoints || [];
     const ep = endpoints.find(ep => ep.id === card.dataset.id);
-    if (ep) { ep.enabled = e.target.checked; sendApiRouterUpdate(); }
+    if (ep) { ep.enabled = e.target.checked; updateEndpointRest(ep); }
     return;
   }
 
@@ -7089,7 +6909,7 @@ function handleApiEndpointToggle(e) {
       if (section) {
         section.classList.toggle('ep-sampling-hidden', !e.target.checked);
       }
-      sendApiRouterUpdate();
+      updateEndpointRest(ep);
     }
     return;
   }
@@ -7102,7 +6922,7 @@ function handleApiEndpointToggle(e) {
     const ep = endpoints.find(ep => ep.id === card.dataset.id);
     if (ep) {
       ep.vision_enabled = e.target.checked;
-      sendApiRouterUpdate();
+      updateEndpointRest(ep);
     }
   }
 
@@ -7114,7 +6934,7 @@ function handleApiEndpointToggle(e) {
     const ep = endpoints.find(ep => ep.id === card.dataset.id);
     if (ep) {
       ep.state_save_enabled = e.target.checked;
-      sendApiRouterUpdate();
+      updateEndpointRest(ep);
     }
   }
 
@@ -7126,7 +6946,7 @@ function handleApiEndpointToggle(e) {
     const ep = endpoints.find(ep => ep.id === card.dataset.id);
     if (ep) {
       ep.reasoning_effort = e.target.value;
-      sendApiRouterUpdate();
+      updateEndpointRest(ep);
     }
   }
 }
@@ -7206,7 +7026,7 @@ function handleApiEndpointBlur(e) {
   _epSet(ep, card, 'frequency_penalty', '.ep-input-frequency-penalty', parseFloat);
   _epSet(ep, card, 'max_tokens', '.ep-input-max-tokens', parseInt);
 
-  sendApiRouterUpdate();
+  updateEndpointRest(ep);
 }
 
 function handleApiEndpointKeydown(e) {
@@ -7344,7 +7164,7 @@ function renderAgentApiAssignments() {
         if (id) {
           if (!priorities[type]) priorities[type] = [];
           priorities[type].push(id);
-          sendApiRouterUpdate();
+          updatePrioritiesRest();
         }
       });
     }
@@ -7356,7 +7176,7 @@ function renderAgentApiAssignments() {
       item.querySelector('.agent-api-remove').addEventListener('click', () => {
         priorities[type] = priorities[type].filter(eid => eid !== id);
         if (priorities[type].length === 0) delete priorities[type];
-        sendApiRouterUpdate();
+        updatePrioritiesRest();
       });
 
       const upBtn = item.querySelector('.agent-api-move-up');
@@ -7365,7 +7185,7 @@ function renderAgentApiAssignments() {
           const idx = priorities[type].indexOf(id);
           if (idx > 0) {
             [priorities[type][idx-1], priorities[type][idx]] = [priorities[type][idx], priorities[type][idx-1]];
-            sendApiRouterUpdate();
+            updatePrioritiesRest();
           }
         });
       }
@@ -7376,7 +7196,7 @@ function renderAgentApiAssignments() {
           const idx = priorities[type].indexOf(id);
           if (idx < priorities[type].length - 1) {
             [priorities[type][idx+1], priorities[type][idx]] = [priorities[type][idx], priorities[type][idx+1]];
-            sendApiRouterUpdate();
+            updatePrioritiesRest();
           }
         });
       }
@@ -7729,16 +7549,42 @@ document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
 
 initMediaGenSettings();
 
+/** Bulk endpoint/priority update — import-style + structural add/delete/reorder only.
+ * Carries base_revision as a stale-tab guard (the server logs a mismatch; last-write-wins).
+ * Single-endpoint field edits and priority-order changes use the REST helpers below. */
 function sendApiRouterUpdate() {
   if (!state.api_router) return;
-  // Send the bulk update via WebSocket
   send({
     type: 'update_endpoints',
+    base_revision: endpointsRevision,
     endpoints: state.api_router.endpoints || [],
     agent_priorities: state.api_router.agent_priorities || {}
   });
+  endpointsRevision += 1; // optimistic advance; the server broadcast re-syncs it
   // Optimistically re-render locally
   renderApiEndpoints();
+  renderAgentApiAssignments();
+}
+
+/** Single-endpoint field edit → PUT /api/endpoints/{id} (persists + broadcasts server-side). */
+function updateEndpointRest(ep) {
+  if (!ep || !ep.id) return;
+  fetch(`/api/endpoints/${encodeURIComponent(ep.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ep),
+  }).catch(err => console.warn('[endpoints] PUT /api/endpoints/{id} failed:', err));
+  renderApiEndpoints();
+}
+
+/** Priority-order change → POST /api/endpoints/priorities (persists + broadcasts server-side). */
+function updatePrioritiesRest() {
+  if (!state.api_router) return;
+  fetch('/api/endpoints/priorities', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_priorities: state.api_router.agent_priorities || {} }),
+  }).catch(err => console.warn('[endpoints] POST /api/endpoints/priorities failed:', err));
   renderAgentApiAssignments();
 }
 
@@ -7829,9 +7675,9 @@ window.addEventListener('pageshow', (event) => {
   if (!settingsLoaded) return;
   if (!(event && event.persisted) && !_isBackForwardNavigation()) return;
   loadSettings();
-  if (state.connected && ws && ws.readyState === WebSocket.OPEN) {
-    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
-  }
+  // Backend-authoritative (Batch B): re-hydrate from the server's last snapshot instead of
+  // pushing a full update_config. The server value wins over any bfcache-restored form state.
+  if (pendingSettings) syncPoolSettings(pendingSettings);
 });
 
 // ── Page hide/unload: clear debounce timers and flush settings ──

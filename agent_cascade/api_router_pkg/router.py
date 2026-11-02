@@ -39,6 +39,7 @@ from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, BREAKER_MAX_WIN
                                     REACQUIRE_TIMEOUT, SANITY_PROBE_ENABLED, SANITY_PROBE_TIMEOUT_SECONDS,
                                     SERVER_BUSY_WAIT_CAP_SECONDS)
 from agent_cascade.slot_queue import release_slot_permit
+from agent_cascade.utils.atomic_json import atomic_write_json
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids circular import
     from agent_cascade.agent_instance import AgentInstance
@@ -204,6 +205,11 @@ class APIRouter:
         self.policy = policy or POLICY_DEFAULT
         self.endpoints: Dict[str, APIEndpoint] = {}  # id → endpoint
         self.agent_priorities: Dict[str, List[str]] = {}  # agent_type → [endpoint_ids]
+        # Per-bucket dirty flags so _save() bumps ONLY the revision of the bucket(s) that
+        # actually changed: endpoint/priority mutations advance endpoints_revision; a
+        # default_llm_cfg change advances settings_revision. (MINOR-7: decouple the counters.)
+        self._dirty_endpoints = False
+        self._dirty_llm_cfg = False
         self._agent_types_with_priorities: set = set(
         )  # Agent types with active endpoint priorities (gates Tier 3 last-successful fallback)
         self._lock = threading.Lock()
@@ -323,6 +329,7 @@ class APIRouter:
             if not endpoint.id:
                 endpoint.id = str(uuid.uuid4())
             self.endpoints[endpoint.id] = endpoint
+            self._dirty_endpoints = True
             self._save()
             return endpoint.id
 
@@ -348,6 +355,7 @@ class APIRouter:
                 if not self.agent_priorities[agent_type]:
                     del self.agent_priorities[agent_type]
                     self._agent_types_with_priorities.discard(agent_type)
+            self._dirty_endpoints = True
             self._save()
             return True
 
@@ -381,6 +389,7 @@ class APIRouter:
             self._reset_instance_cursors(
                 f"[APIRouter.update_endpoint] Endpoint '{endpoint_id}' updated ({list(updates.keys())})")
 
+            self._dirty_endpoints = True
             self._save()
             return True
 
@@ -458,6 +467,7 @@ class APIRouter:
             # reorder never leaves a dangling rotation behind (mirrors the from_dict FIX-2a reset).
             self._reset_instance_cursors(f"[APIRouter.set_agent_priorities] Priorities changed for '{canonical}'")
 
+            self._dirty_endpoints = True
             self._save()
 
     def get_agent_priorities(self, agent_type: str) -> List[str]:
@@ -3043,6 +3053,21 @@ class APIRouter:
         """Path of the one-generation backup, e.g. api_endpoints.json.bak."""
         return self._config_path.with_suffix(self._config_path.suffix + '.bak')
 
+    def has_default_llm_cfg(self) -> bool:
+        """True if the persisted config file contains a non-empty ``default_llm_cfg``.
+
+        Public API for the settings-migration handler, which needs to know whether the
+        LLM config is already seeded without reaching into ``_config_path`` itself. An
+        unreadable file is treated as "no LLM config" so migration seeds it.
+        """
+        try:
+            if not self._config_path.exists():
+                return False
+            data = json.loads(self._config_path.read_text(encoding='utf-8-sig'))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return isinstance(data, dict) and bool(data.get('default_llm_cfg'))
+
     def _save(self):
         """Persist config to disk (atomic write + one .bak generation).
 
@@ -3051,33 +3076,31 @@ class APIRouter:
         .bak, then os.replace() into position — os.replace is atomic on both POSIX and
         Windows, so a reader never observes a partially written config.
         """
-        tmp_path = None
         try:
             self._config_dir.mkdir(parents=True, exist_ok=True)
             data = {
                 'endpoints': [ep.to_dict() for ep in self.endpoints.values()],
                 'agent_priorities': self.agent_priorities,
                 'agent_types_with_priorities': list(self._agent_types_with_priorities),
+                # General Settings LLM config (model, api_base, api_key, sampling, log_api_post, ...).
+                # Persisted so a restart restores the exact config the UI last saved. api_key is
+                # sensitive and lives only in this gitignored file — never in logs.
+                'default_llm_cfg': self.default_llm_cfg if self.default_llm_cfg else {},
             }
             # Same directory as the primary so os.replace stays on one filesystem.
-            tmp_path = self._tmp_path()
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            # Backup the *previous* generation before swapping in the new one, so a save
-            # that is later found to be wrong can still be rolled back one step.
-            if self._config_path.exists():
-                shutil.copy2(self._config_path, self._backup_path())
-            os.replace(tmp_path, self._config_path)
+            atomic_write_json(self._config_path, data, tmp_path=self._tmp_path())
+            # Bump ONLY the revision counter(s) of the bucket(s) that actually changed:
+            # endpoint/priority mutations advance endpoints_revision; a default_llm_cfg change
+            # advances settings_revision. (Decoupled so the two counters don't drift together.)
+            from agent_cascade.runtime_state import state as _runtime_state
+            if self._dirty_endpoints:
+                _runtime_state.bump_endpoints_revision()
+                self._dirty_endpoints = False
+            if self._dirty_llm_cfg:
+                _runtime_state.bump_settings_revision()
+                self._dirty_llm_cfg = False
         except Exception as e:
             logger.error(f"[APIRouter] Failed to save config: {e}")
-            # Best-effort cleanup so a failed save never leaves a stray .tmp behind.
-            try:
-                if tmp_path is not None:
-                    tmp_path.unlink()
-            except Exception:
-                pass
 
     def _normalize_agent_priorities(self, priorities: dict) -> dict:
         """
@@ -3189,6 +3212,14 @@ class APIRouter:
             # Sync tracking set with actual priorities — remove any stale entries from old configs.
             # Prevents incorrect Tier 3 (last-successful) fallback if config has tracked types without actual priorities.
             self._agent_types_with_priorities &= set(self.agent_priorities.keys())
+
+            # Restore the persisted General Settings LLM config so a restart recovers the
+            # exact model/api_base/api_key/sampling/log_api_post the UI last saved.
+            persisted_llm_cfg = data.get('default_llm_cfg')
+            if isinstance(persisted_llm_cfg, dict):
+                if self.default_llm_cfg is None:
+                    self.default_llm_cfg = {}
+                self.default_llm_cfg.update(persisted_llm_cfg)
 
             logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {source_path}")
         except Exception as e:
@@ -3310,8 +3341,9 @@ class APIRouter:
 
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
                         f"({ep_ids}) with "
-                        f"{len(self.agent_priorities)} priority mappings: "
-                        f"{dict(self.agent_priorities)}")
+                f"{len(self.agent_priorities)} priority mappings: "
+                f"{dict(self.agent_priorities)}")
+            self._dirty_endpoints = True
             self._save()
 
     def update_default_llm_cfg(self, new_cfg: dict):
@@ -3334,6 +3366,9 @@ class APIRouter:
             if changed_keys:
                 logger.info(f"[APIRouter.update_default_llm_cfg] Updating {len(changed_keys)} keys: {changed_keys}")
             self.default_llm_cfg.update(new_cfg)
+            # Persist so a restart restores the exact General Settings LLM config.
+            self._dirty_llm_cfg = True
+            self._save()
 
     def is_waiting(self, agent_name: str) -> bool:
         """Check if an agent instance is currently waiting for a slot in the FIFO queue."""

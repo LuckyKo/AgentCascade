@@ -506,10 +506,15 @@ class TestCLIMode:
         assert orch is not None
         assert 'call_agent' in orch.function_map
 
-    def test_llm_cfg_none_raises_value_error(self):
+    def test_llm_cfg_none_raises_value_error(self, tmp_path, monkeypatch):
         """Passing llm_cfg=None should cause agent loading to fail with a clear error."""
         from agent_cascade.agent_factory import load_agent_template
         from agent_cascade.agent_pool import AgentPool
+
+        # Isolate from the shared session config dir: point the auto-created router at a
+        # FRESH empty config dir so no persisted default_llm_cfg (written by other tests'
+        # update_default_llm_cfg -> _save()) leaks in and suppresses the ValueError.
+        monkeypatch.setenv('AGENT_CASCADE_TEST_CONFIG_DIR', str(tmp_path))
 
         # Pool with None LLM config — APIRouter is auto-created but has no default config
         pool = AgentPool(llm_cfg=None, agents_dir=str(PROJECT_ROOT / 'agents'))

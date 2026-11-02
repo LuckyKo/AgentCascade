@@ -27,7 +27,8 @@ from agent_cascade.settings import (
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
     DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
-    STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD)
+    STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
+    LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, TOOL_LOOP_FUZZY_ROLLBACK_ENABLED)
 
 
 class AgentState(Enum):
@@ -913,6 +914,10 @@ class PoolSettings:
     # evaluated in _pre_llm_checks. Removed in a later cleanup release.
     tool_loop_detection_enabled: bool = TOOL_LOOP_DETECTION_ENABLED  # Legacy kill switch for the fuzzy tier
     tool_loop_sim_threshold: float = TOOL_LOOP_SIM_THRESHOLD  # Tier 2 (fuzzy) similarity floor for near-duplicate cores (default 0.85)
+    # Loop-recovery toggles (persisted; consumed via getattr in engine/llm_call.py).
+    loop_exact_rollback_enabled: bool = LOOP_EXACT_ROLLBACK_ENABLED  # Roll back on an exact (Tier 1) loop
+    loop_fuzzy_warning_enabled: bool = LOOP_FUZZY_WARNING_ENABLED  # Warn on a fuzzy (Tier 2) loop
+    tool_loop_fuzzy_rollback_enabled: bool = TOOL_LOOP_FUZZY_ROLLBACK_ENABLED  # Roll back on a fuzzy tool loop
 
     # Inner-loop detection toggle (enabled by default for loop prevention)
     inner_loop_detect_enabled: bool = True  # Enable in-message loop detection during streaming

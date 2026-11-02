@@ -5,17 +5,18 @@ path to an integer load count. It is *diagnostic only*: any failure (I/O, JSON)
 is swallowed so stats can never affect the agent (plan §3.4 / R4).
 
 Concurrency: a module-level lock guards the load-modify-write cycle, and the
-write is atomic via ``os.replace`` (atomic on both POSIX and Windows), so a torn
+write goes through ``agent_cascade.utils.atomic_json.atomic_write_json``
+(tmp file + ``os.replace``, atomic on both POSIX and Windows), so a torn
 read is impossible.
 """
 
 import json
-import os
 import threading
 from pathlib import Path
 from typing import Dict
 
 from agent_cascade.log import logger
+from agent_cascade.utils.atomic_json import atomic_write_json
 
 STATS_FILENAME = 'memory_stats.json'
 
@@ -62,9 +63,6 @@ def bump_read_count(vault_root, rel_path: str) -> None:
         try:
             data = load_stats(vault_root)
             data[rel_path] = data.get(rel_path, 0) + 1
-            tmp = path.with_name(STATS_FILENAME + '.tmp')
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, path)
+            atomic_write_json(path, data, backup=False)
         except Exception as e:  # noqa: BLE001 — diagnostic only, never raise
             logger.debug('[MEMORY_HINT] bump_read_count failed for %s: %s', rel_path, e)

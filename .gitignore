@@ -85,6 +85,10 @@ config/secrets.json
 # Pool settings (runtime-generated, user-specific)
 config/pool_settings*.json
 
+# Session state (runtime-generated, user-specific)
+config/session_state.json
+config/session_state.json.bak
+
 # Agent lessons
 .agent_lessons/
 

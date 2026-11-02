@@ -140,10 +140,14 @@ class TestSixSeamWiring:
             assert key in POOL_SETTINGS_TO_BROADCAST, f"{key} missing from broadcast tuple"
 
     def test_persist_save_list_and_restore_block(self):
-        """config_persist.py: the save-list and the restore data.pop() block both reference each key."""
-        src = Path('agent_cascade/pool/config_persist.py').read_text(encoding='utf-8')
+        """config_persist.py: the save-list (now the registry's LLM_CFG_PERSIST_KEYS)
+        references each key, and the restore data.pop() block reads them back."""
+        from agent_cascade.settings_registry import LLM_CFG_PERSIST_KEYS
         for key in self._keys():
-            assert f"'{key}'" in src, f"{key} missing from config_persist save/restore"
+            assert key in LLM_CFG_PERSIST_KEYS, f"{key} missing from LLM_CFG_PERSIST_KEYS (save list)"
+        # The restore path still pops the keys out of the loaded data (source of truth).
+        src = Path('agent_cascade/pool/config_persist.py').read_text(encoding='utf-8')
+        assert 'LLM_CFG_PERSIST_KEYS' in src, 'save path must drive off the registry key list'
 
     def test_initial_llm_cfg_seed(self):
         """api_server.py initial_llm_cfg seeds every key with its default."""
@@ -170,17 +174,20 @@ class TestSixSeamWiring:
             assert mapping[key] == default, f"settings constant for {key} != default {default}"
 
     def test_frontend_seams_reference_each_key(self):
-        """app.js (registry/save/restore/getGenerateCfg) + index.html all reference each key.
+        """app.js (registry map entry / saveSettings mirror / getGenerateCfg write) +
+        index.html all reference each key.
 
         JS has no automated harness here; this is the manual grep checklist promoted to a test
-        (OD-4 in the plan). Each key must appear in app.js at least 3× (registry, save, restore,
-        getGenerateCfg = 4 sites) and once as an input id in index.html.
+        (OD-4 in the plan). Each key must appear in app.js in all three seams and once as an
+        input id in index.html. (The old quoted-count proxy was satisfied in part by the dead
+        localKey field, which has since been removed.)
         """
         app_js = Path('web_ui/app.js').read_text(encoding='utf-8')
         index_html = Path('web_ui/index.html').read_text(encoding='utf-8')
         for key in self._keys():
-            count = app_js.count(f"'{key}'")
-            assert count >= 3, f"{key}: app.js references it {count}× (want ≥3)"
+            assert f"key: '{key}'" in app_js, f"{key}: missing POOL_SETTINGS_MAP entry"
+            assert f"s['{key}']" in app_js, f"{key}: missing saveSettings localStorage mirror"
+            assert f"cfg.{key}" in app_js, f"{key}: missing getGenerateCfg write"
             # index.html input id: 'setting-' + key with underscores → hyphens.
             dom_id = 'setting-' + key.replace('_', '-')
             assert f'id="{dom_id}"' in index_html, f"{key}: missing input id {dom_id} in index.html"

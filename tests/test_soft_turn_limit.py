@@ -161,14 +161,28 @@ class TestSoftTurnLimitWiring:
         assert fake_pool.settings.soft_turn_limit is True
 
     def test_in_both_state_builder_blocks(self):
+        """pool_settings is built by ONE shared function (build_pool_settings_snapshot) called
+        by both state_builder paths, so the key cannot be missing from one of them."""
         src = Path('agent_cascade/api_integration_pkg/state_builder.py').read_text(encoding='utf-8')
-        assert src.count(f"'{KEY}'") >= 2, f'{KEY}: both pool_settings serialization blocks must carry it'
+        assert src.count('pool_settings = build_pool_settings_snapshot(pool)') >= 2, \
+            f'{KEY}: both state_builder paths must share build_pool_settings_snapshot'
+
+        from agent_cascade.agent_instance import PoolSettings
+        from agent_cascade.api_integration_pkg.state_builder import build_pool_settings_snapshot
+
+        class _StubPool:
+            settings = PoolSettings()
+            llm_cfg = {}
+
+        assert KEY in build_pool_settings_snapshot(_StubPool()), \
+            f'{KEY} not emitted by the registry-driven snapshot'
 
     def test_frontend_seams(self):
+        from agent_cascade.settings_registry import POOL_SETTINGS_KEYS
         app_js = Path('web_ui/app.js').read_text(encoding='utf-8')
         index_html = Path('web_ui/index.html').read_text(encoding='utf-8')
 
-        assert app_js.count(f"'{KEY}'") >= 4, f'{KEY}: app.js needs map + save + restore + getGenerateCfg'
+        assert KEY in POOL_SETTINGS_KEYS, f'{KEY} must be in the registry (POOL_SETTINGS_KEYS)'
         assert "id: '#setting-soft-turn-limit'" in app_js
         assert 'id="setting-soft-turn-limit"' in index_html
 

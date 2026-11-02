@@ -13,6 +13,7 @@ from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instanc
 from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
 from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, Message
 from agent_cascade.log import logger
+from agent_cascade.settings_registry import SETTINGS_REGISTRY
 
 
 def _msg_fingerprint(msg: Any) -> Optional[tuple]:
@@ -36,20 +37,6 @@ from agent_cascade.settings import STREAM_DELTA_ENABLED, STREAM_DELTA_TAIL_COMMI
 # AGENT_CASCADE_STREAM_DELTA). TAIL_COMMITTED is kept as the internal name used below.
 TAIL_COMMITTED = STREAM_DELTA_TAIL_COMMITTED
 
-
-def _serialize_loop_settings(ps):
-    """Serialize loop detection settings from PoolSettings instance."""
-    return {
-        'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
-        'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
-        'loop_char_run_limit': getattr(ps, 'loop_char_run_limit', 129),
-        'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-        'loop_max_chars_enabled': getattr(ps, 'loop_max_chars_enabled', True),
-        'loop_two_phase_enabled': getattr(ps, 'loop_two_phase_enabled', False),
-        'loop_suspicion_threshold': getattr(ps, 'loop_suspicion_threshold', 7),
-        'loop_confirm_required': getattr(ps, 'loop_confirm_required', 3),
-        'loop_cooldown_feeds': getattr(ps, 'loop_cooldown_feeds', 50),
-    }
 
 
 def _get_instance_messages(pool: AgentPool,
@@ -360,6 +347,75 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     # Async shell console window toggle from pool if available
     pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', False)
 
+    # Auto-Ask Security toggle + compression fraction live on the runtime-state singleton,
+    # NOT on PoolSettings — the registry-driven loop in build_pool_settings_snapshot can
+    # only source them as their spec default. Emit the live values here (runs after that
+    # loop) so the snapshot carries the real state instead of a default.
+    from agent_cascade.runtime_state import state as _runtime_state
+    pool_settings['auto_security'] = bool(_runtime_state.auto_security)
+    # Canonical settings unit is PERCENT (UI control, pool_settings.json and the config
+    # handler all use percent); runtime_state holds the 0-1 fraction the compression code
+    # consumes.
+    pool_settings['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
+
+
+def build_pool_settings_snapshot(pool: Any) -> Dict[str, Any]:
+    """Build the ``pool_settings`` dict for the state snapshot (single source).
+
+    Shared by :func:`build_state_from_pool` and :func:`build_stream_update_from_pool`
+    so the two blocks cannot drift. Emits every broadcast registry key:
+
+      * the PoolSettings core keys — byte-compatible with the historical payload;
+      * the never-broadcast persist keys that gain broadcast in Phase 1
+        (``settings_registry.NEVER_BROADCAST_PERSIST_KEYS``);
+      * the tool char limits / memory-hint / skill keys sourced from ``pool.llm_cfg``;
+      * runtime settings (approval timeout, AFK, async shell console window);
+      * ``disabled_tools`` and work folders when present.
+    """
+    pool_settings: Dict[str, Any] = {}
+
+    llm_cfg = getattr(pool, 'llm_cfg', None)
+    if not isinstance(llm_cfg, dict):
+        llm_cfg = {}
+
+    if hasattr(pool, 'settings'):
+        ps = pool.settings
+        # Registry-driven: every broadcast pool/extra key is emitted from its declared
+        # source, falling back to the registry default. Runtime-sourced keys are
+        # overwritten by _add_pool_runtime_settings (which runs after this loop).
+        for key, sp in SETTINGS_REGISTRY.items():
+            if not sp.broadcast or sp.kind not in ('pool', 'extra'):
+                continue
+            name = sp.broadcast_as or key
+            if sp.value_source == 'settings':
+                pool_settings[name] = getattr(ps, sp.alias_of or key, sp.default)
+            elif sp.value_source == 'llm_cfg':
+                pool_settings[name] = llm_cfg.get(key, sp.default)
+            else:  # runtime: live state is added by _add_pool_runtime_settings below
+                pool_settings[name] = sp.default
+
+    # Runtime state (approval timeout, AFK, async shell console window, auto_security,
+    # compression_fraction) — the registry's runtime-sourced specs only carry defaults.
+    _add_pool_runtime_settings(pool, pool_settings)
+
+    # Add disabled_tools from live cache if available
+    if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
+        try:
+            with pool._ui_disabled_tools_lock:
+                if pool._ui_disabled_tools:
+                    pool_settings['disabled_tools'] = dict(pool._ui_disabled_tools)
+        except Exception:
+            pass  # Don't let lock issues break state broadcast
+
+    # Add work folders and default workspace from operation_manager
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['work_access_folders_ro'] = [str(p) for p in getattr(om, 'extra_work_folders_ro', [])]
+        pool_settings['work_access_folders_rw'] = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
+        pool_settings['default_workspace'] = str(om.base_dir)
+
+    return pool_settings
+
 
 def build_state_from_pool(
         pool: AgentPool,
@@ -433,128 +489,7 @@ def build_state_from_pool(
     pending_approvals = _get_approvals(pool)
 
     # Extract pool settings for frontend sync (ALL non-cosmetic persistent settings)
-    pool_settings = {}
-    if hasattr(pool, 'settings'):
-        ps = pool.settings
-        pool_settings.update({
-            # Core pool/agent settings
-            'idle_timeout_seconds':
-                getattr(ps, 'idle_timeout_seconds', 900.0),
-            'system_agent_idle_timeout_seconds':
-                getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
-            'max_parallel_agents':
-                getattr(ps, 'max_workers', 10),
-            'auto_continue':
-                getattr(ps, 'auto_continue', True),
-            'completion_classifier_enabled':
-                getattr(ps, 'completion_classifier_enabled', True),
-            'enable_agent_budgeting':
-                getattr(ps, 'enable_agent_budgeting', False),
-            'allow_parallel_agents':
-                getattr(ps, 'allow_parallel_agents', True),
-            'state_kv_save_enabled':
-                getattr(ps, 'state_kv_save_enabled', False),
-            'max_turns':
-                getattr(ps, 'max_turns', 50),
-            'soft_turn_limit':
-                getattr(ps, 'soft_turn_limit', False),
-            'max_auto_rollbacks':
-                getattr(ps, 'max_auto_rollbacks', 3),
-            'auto_rollback_on_loop':
-                getattr(ps, 'auto_rollback_on_loop', True),
-            # Two-tier loop detection (2026-08 redesign)
-            'loop_exact_rollback_enabled':
-                getattr(ps, 'loop_exact_rollback_enabled', True),
-            'loop_fuzzy_warning_enabled':
-                getattr(ps, 'loop_fuzzy_warning_enabled', True),
-            'tool_loop_fuzzy_rollback_enabled':
-                getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
-            # DEPRECATED: legacy kill switch for the fuzzy tier (can disable but never enable)
-            'tool_loop_detection_enabled':
-                getattr(ps, 'tool_loop_detection_enabled', True),
-            # Inner-loop detection
-            **{
-                'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)
-            },
-            **_serialize_loop_settings(ps),
-            # Skills system
-            'default_load_skill_mode':
-                getattr(ps, 'default_load_skill_mode', 'AUTO'),
-            'auto_skill_enabled':
-                getattr(ps, 'auto_skill_enabled', True),
-            'auto_skill_min_turns':
-                getattr(ps, 'auto_skill_min_turns', 20),
-            'auto_skill_extra_turns':
-                getattr(ps, 'auto_skill_extra_turns', 25),
-            'auto_skill_mode':
-                getattr(ps, 'auto_skill_mode', 'basic'),
-            'skill_selector_mode':
-                getattr(ps, 'skill_selector_mode', 'keyword'),
-            # Telegram bridge (Phase 3)
-            'telegram_bridge_enabled':
-                getattr(ps, 'telegram_bridge_enabled', False),
-            # Retry policy settings (Phase 6)
-            'retry_max_attempts':
-                getattr(ps, 'retry_max_attempts', 3),
-            'endpoint_max_retries':
-                getattr(ps, 'endpoint_max_retries', 1),
-            'retry_base_delay':
-                getattr(ps, 'retry_base_delay', 1.0),
-            'retry_max_delay':
-                getattr(ps, 'retry_max_delay', 8.0),
-            # Slot pool dead-man's switch activity window (hard cap is derived as 6x).
-            # MUST be emitted in BOTH state blocks — emitting it in only one makes the
-            # value revert on every stream tick, a silent UI failure.
-            'slot_queue_timeout_seconds':
-                getattr(ps, 'slot_queue_timeout_seconds', 300),
-            # Code interpreter
-            'ci_execution_timeout':
-                getattr(ps, 'ci_execution_timeout', 120),
-            'ci_watchdog_timeout':
-                getattr(ps, 'ci_watchdog_timeout', 300),
-            'ci_stale_container_ttl':
-                getattr(ps, 'ci_stale_container_ttl', 1200),
-            # Cache pool
-            'cache_pool_enabled':
-                getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size':
-                getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars':
-                getattr(ps, 'cache_threshold_chars', 1000),
-            # Streaming timeout settings
-            'stream_max_silence_seconds':
-                getattr(ps, 'stream_max_silence_seconds', 120.0),
-            'stream_max_total_seconds':
-                getattr(ps, 'stream_max_total_seconds', 900.0),
-            # Image caption mode (auto/always/off)
-            'image_caption_mode':
-                getattr(ps, 'image_caption_mode', 'auto'),
-        })
-
-    # Add tool char limits from pool.llm_cfg if available
-    if hasattr(pool, 'llm_cfg'):
-        for key in POOL_SETTINGS_TO_BROADCAST:
-            if key in pool.llm_cfg:
-                pool_settings[key] = pool.llm_cfg[key]
-
-    # Add runtime pool settings (approval timeout, async shell console window)
-    _add_pool_runtime_settings(pool, pool_settings)
-
-    # Add disabled_tools from live cache if available
-    if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
-        try:
-            with pool._ui_disabled_tools_lock:
-                if pool._ui_disabled_tools:
-                    pool_settings['disabled_tools'] = dict(pool._ui_disabled_tools)
-        except Exception:
-            pass  # Don't let lock issues break state broadcast
-
-    # Add work folders and default workspace from operation_manager
-    if hasattr(pool, 'operation_manager') and pool.operation_manager:
-        om = pool.operation_manager
-        pool_settings['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
-        pool_settings['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
-        pool_settings['default_workspace'] = str(om.base_dir)
+    pool_settings = build_pool_settings_snapshot(pool)
 
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
@@ -733,127 +668,7 @@ def build_stream_update_from_pool(
     # See the return-dict comment below for why the 'approvals' field is omitted here.
 
     # Extract pool settings for frontend sync (ALL non-cosmetic persistent settings)
-    pool_settings = {}
-    if hasattr(pool, 'settings'):
-        ps = pool.settings
-        pool_settings.update({
-            # Core pool/agent settings
-            'idle_timeout_seconds':
-                getattr(ps, 'idle_timeout_seconds', 900.0),
-            'system_agent_idle_timeout_seconds':
-                getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
-            'max_parallel_agents':
-                getattr(ps, 'max_workers', 10),
-            'auto_continue':
-                getattr(ps, 'auto_continue', True),
-            'completion_classifier_enabled':
-                getattr(ps, 'completion_classifier_enabled', True),
-            'enable_agent_budgeting':
-                getattr(ps, 'enable_agent_budgeting', False),
-            'allow_parallel_agents':
-                getattr(ps, 'allow_parallel_agents', True),
-            'state_kv_save_enabled':
-                getattr(ps, 'state_kv_save_enabled', False),
-            'max_turns':
-                getattr(ps, 'max_turns', 50),
-            'soft_turn_limit':
-                getattr(ps, 'soft_turn_limit', False),
-            'max_auto_rollbacks':
-                getattr(ps, 'max_auto_rollbacks', 3),
-            'auto_rollback_on_loop':
-                getattr(ps, 'auto_rollback_on_loop', True),
-            # Two-tier loop detection (2026-08 redesign)
-            'loop_exact_rollback_enabled':
-                getattr(ps, 'loop_exact_rollback_enabled', True),
-            'loop_fuzzy_warning_enabled':
-                getattr(ps, 'loop_fuzzy_warning_enabled', True),
-            'tool_loop_fuzzy_rollback_enabled':
-                getattr(ps, 'tool_loop_fuzzy_rollback_enabled', False),
-            # DEPRECATED: legacy kill switch for the fuzzy tier (can disable but never enable)
-            'tool_loop_detection_enabled':
-                getattr(ps, 'tool_loop_detection_enabled', True),
-            # Inner-loop detection
-            **{
-                'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)
-            },
-            **_serialize_loop_settings(ps),
-            # Skills system
-            'default_load_skill_mode':
-                getattr(ps, 'default_load_skill_mode', 'AUTO'),
-            'auto_skill_enabled':
-                getattr(ps, 'auto_skill_enabled', True),
-            'auto_skill_min_turns':
-                getattr(ps, 'auto_skill_min_turns', 20),
-            'auto_skill_extra_turns':
-                getattr(ps, 'auto_skill_extra_turns', 25),
-            'auto_skill_mode':
-                getattr(ps, 'auto_skill_mode', 'basic'),
-            'skill_selector_mode':
-                getattr(ps, 'skill_selector_mode', 'keyword'),
-            # Telegram bridge (Phase 3)
-            'telegram_bridge_enabled':
-                getattr(ps, 'telegram_bridge_enabled', False),
-            # Retry policy settings (Phase 6)
-            'retry_max_attempts':
-                getattr(ps, 'retry_max_attempts', 3),
-            'endpoint_max_retries':
-                getattr(ps, 'endpoint_max_retries', 1),
-            'retry_base_delay':
-                getattr(ps, 'retry_base_delay', 1.0),
-            'retry_max_delay':
-                getattr(ps, 'retry_max_delay', 8.0),
-            # Slot pool dead-man's switch activity window (hard cap is derived as 6x).
-            # MUST be emitted in BOTH state blocks — emitting it in only one makes the
-            # value revert on every stream tick, a silent UI failure.
-            'slot_queue_timeout_seconds':
-                getattr(ps, 'slot_queue_timeout_seconds', 300),
-            # Code interpreter
-            'ci_execution_timeout':
-                getattr(ps, 'ci_execution_timeout', 120),
-            'ci_watchdog_timeout':
-                getattr(ps, 'ci_watchdog_timeout', 300),
-            'ci_stale_container_ttl':
-                getattr(ps, 'ci_stale_container_ttl', 1200),
-            # Cache pool
-            'cache_pool_enabled':
-                getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size':
-                getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars':
-                getattr(ps, 'cache_threshold_chars', 1000),
-            # Streaming timeout settings
-            'stream_max_silence_seconds':
-                getattr(ps, 'stream_max_silence_seconds', 120.0),
-            'stream_max_total_seconds':
-                getattr(ps, 'stream_max_total_seconds', 900.0),
-            # Image caption mode (auto/always/off)
-            'image_caption_mode':
-                getattr(ps, 'image_caption_mode', 'auto'),
-        })
-
-    # Add tool char limits from pool.llm_cfg if available
-    if hasattr(pool, 'llm_cfg'):
-        for key in POOL_SETTINGS_TO_BROADCAST:
-            if key in pool.llm_cfg:
-                pool_settings[key] = pool.llm_cfg[key]
-    # Add runtime pool settings (approval timeout, async shell console window)
-    _add_pool_runtime_settings(pool, pool_settings)
-
-    # Add disabled_tools from live cache if available
-    if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
-        try:
-            with pool._ui_disabled_tools_lock:
-                if pool._ui_disabled_tools:
-                    pool_settings['disabled_tools'] = dict(pool._ui_disabled_tools)
-        except Exception:
-            pass  # Don't let lock issues break state broadcast
-
-    # Add work folders and default workspace from operation_manager
-    if hasattr(pool, 'operation_manager') and pool.operation_manager:
-        om = pool.operation_manager
-        pool_settings['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
-        pool_settings['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
-        pool_settings['default_workspace'] = str(om.base_dir)
+    pool_settings = build_pool_settings_snapshot(pool)
 
     return {
         'agent_instances': all_instances,

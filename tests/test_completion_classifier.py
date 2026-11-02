@@ -546,12 +546,14 @@ class TestSettingPlumbing:
         # Registry entry must map this DOM id → this config key (used for load+save).
         assert ("id: '#setting-completion-classifier'" in app_js
                 and "key: 'completion_classifier_enabled'" in app_js)
-        # saveSettings / loadSettings share the POOL_SETTINGS_MAP localKey convention.
+        # saveSettings persists the hyphenated UI key; getGenerateCfg sends the config key.
         assert "s['completion-classifier'] = $('#setting-completion-classifier').checked" in app_js
         # getGenerateCfg must send the server-side key name (not the local one).
         assert "cfg.completion_classifier_enabled = $('#setting-completion-classifier').checked" in app_js
-        # loadSettings must guard on presence, mirroring auto_continue.
-        assert "_present(s['completion-classifier'])" in app_js
+        # Registry-driven: the key must exist in the settings registry (server-backed).
+        from agent_cascade.settings_registry import ALL_KEYS
+        assert 'completion_classifier_enabled' in ALL_KEYS, \
+            'completion_classifier_enabled must be in the settings registry'
 
 
 # ── Helper unit tests ────────────────────────────────────────────────────────

@@ -244,14 +244,56 @@ Trigger a server restart via os.execl.
 }
 ```
 
-#### update_config
-Update LLM or agent configuration. Delegates to ConfigUpdateRouter.
+#### update_config *(deprecated)*
+Update LLM or agent configuration. Delegates to ConfigUpdateRouter. **Deprecated** in
+favour of `update_settings`: the full-push body is now routed through the settings
+registry (unknown keys are dropped, not applied). New clients should send `update_settings`
+deltas instead.
 ```json
 {
     "type": "update_config",
     "generate_cfg": "<required: config object with fields like disabled_tools, etc.>"
 }
 ```
+
+#### update_settings
+Backend-authoritative per-key settings delta. Each key is validated against the settings
+registry (unknown key / type / enum violation → rejected per-key); accepted keys apply to
+live state, each touched bucket persists once, and the shared `settings_revision` bumps.
+A stale `base_revision` is logged but never rejects the batch (no modal).
+
+Broadcast (to ALL clients): `settings_applied {revision, applied, rejected}`.
+Broadcast (to ALL clients): `settings_changed {revision, changes}`.
+```json
+{
+    "type": "update_settings",
+    "base_revision": "<optional int: the settings_revision the client last saw>",
+    "changes": {"<registry key>": "<value>", "...": "..."}
+}
+```
+REST equivalent: `PATCH /api/settings` with the same body; returns `{revision, applied, rejected}`.
+
+#### migrate_settings_local
+One-time migration from browser localStorage to server-side persistence. Sent by the UI on
+first connect after upgrade; carries the legacy `agent-cascade-settings` blob. The server
+applies ONLY keys it does not already have persisted (server always wins on conflict) and
+marks `_settings_migrated_v1` in the session state file.
+
+```json
+{
+    "type": "migrate_settings_local",
+    "settings": {"<key>": "<value>", "...": "..."}
+}
+```
+Reply (to the sender): `migrate_settings_local {status: "ok", applied: [...], rejected: [...]}`.
+
+> **UI-prefs split (Phase 4):** Presentation-only (class D) settings — line numbers, message
+> metadata, sound toggles, user/assistant/raw-edit colors, font size, truncate-tools,
+> auto-tab-focus, image detail, max image size — are stored in the browser's
+> `agent-cascade-ui-prefs` localStorage key and are **never** sent to the server. The legacy
+> `agent-cascade-settings` blob is kept read-only for one release (no `removeItem`).
+> `GET /api/settings` returns the full server-side settings snapshot (all registry keys);
+> it does not include the browser-local ui-prefs keys.
 
 #### set_work_folders
 Change workspace directory settings. Empty arrays are treated as intentional clears.

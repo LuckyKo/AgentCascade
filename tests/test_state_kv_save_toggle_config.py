@@ -149,21 +149,32 @@ class TestWiringSeams:
         assert self.KEY in CONFIG_HANDLERS, f"missing handler for {self.KEY}"
 
     def test_in_both_state_builder_blocks(self):
-        """state_builder.py has TWO pool_settings serialization blocks (full state + stream
-        update). Missing one = silent revert in half the UI sync paths."""
+        """pool_settings is now built by ONE shared function (build_pool_settings_snapshot),
+        called by both build_state_from_pool and build_stream_update_from_pool, so the two
+        payload paths cannot drift. Assert the shared seam and that the key is really emitted."""
         src = Path('agent_cascade/api_integration_pkg/state_builder.py').read_text(encoding='utf-8')
-        count = src.count(f"'{self.KEY}'")
-        assert count >= 2, f"{self.KEY}: state_builder.py references it {count}× (want ≥2 — both blocks)"
+        assert src.count('pool_settings = build_pool_settings_snapshot(pool)') >= 2, \
+            f"{self.KEY}: both state_builder paths must share build_pool_settings_snapshot"
+
+        from agent_cascade.agent_instance import PoolSettings
+        from agent_cascade.api_integration_pkg.state_builder import build_pool_settings_snapshot
+
+        class _StubPool:
+            settings = PoolSettings()
+            llm_cfg = {}
+
+        snapshot = build_pool_settings_snapshot(_StubPool())
+        assert self.KEY in snapshot, f"{self.KEY} not emitted by the registry-driven snapshot"
 
     def test_frontend_seams_reference_key(self):
         """app.js must reference the key in POOL_SETTINGS_MAP, getGenerateCfg(), saveSettings()
         localStorage mirror, and loadSettings() restore (4 sites); index.html must carry the
         checkbox input id."""
+        from agent_cascade.settings_registry import POOL_SETTINGS_KEYS
         app_js = Path('web_ui/app.js').read_text(encoding='utf-8')
         index_html = Path('web_ui/index.html').read_text(encoding='utf-8')
 
-        count = app_js.count(f"'{self.KEY}'")
-        assert count >= 4, f"{self.KEY}: app.js references it {count}× (want ≥4)"
+        assert self.KEY in POOL_SETTINGS_KEYS, f"{self.KEY} must be in the registry (POOL_SETTINGS_KEYS)"
         assert "id: '#setting-state-kv-save'" in app_js, \
             f"{self.KEY}: missing POOL_SETTINGS_MAP entry for #setting-state-kv-save"
 

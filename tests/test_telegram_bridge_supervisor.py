@@ -468,13 +468,24 @@ def test_pool_settings_roundtrip():
 # ---------------------------------------------------------------------------
 
 def test_state_builder_serializes_telegram_bridge_in_both_blocks():
-    """Guard against the 'miss one of two blocks' gotcha: both dict literals in
-    state_builder.py must expose telegram_bridge_enabled."""
+    """Guard against the 'miss one of two blocks' gotcha: pool_settings is produced by ONE
+    shared function (build_pool_settings_snapshot) that both the full-state and stream-update
+    builders call, and that snapshot must carry telegram_bridge_enabled."""
     import inspect
     from agent_cascade.api_integration_pkg import state_builder as sb
+
     src = inspect.getsource(sb)
-    count = src.count("'telegram_bridge_enabled'")
-    assert count >= 2, f"expected telegram_bridge_enabled in both serialization blocks, found {count}"
+    assert src.count('pool_settings = build_pool_settings_snapshot(pool)') >= 2, \
+        'both state_builder paths must share build_pool_settings_snapshot'
+
+    from agent_cascade.agent_instance import PoolSettings
+
+    class _StubPool:
+        settings = PoolSettings()
+        llm_cfg = {}
+
+    assert 'telegram_bridge_enabled' in sb.build_pool_settings_snapshot(_StubPool()), \
+        'expected telegram_bridge_enabled in the registry-driven snapshot'
 
 
 # ---------------------------------------------------------------------------

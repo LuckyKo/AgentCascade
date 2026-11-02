@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_cascade.agents import Assistant
 from agent_cascade.log import logger
+from agent_cascade.settings_registry import LLM_CFG_PERSIST_KEYS
+from agent_cascade.utils.atomic_json import atomic_write_json
 
 from ..agent_instance import PoolSettings
 
@@ -39,16 +42,15 @@ class ConfigPersistMixin:
                     if self._ui_disabled_tools:
                         data['disabled_tools'] = dict(self._ui_disabled_tools)
 
-                # Add work folders from operation_manager if available
+                # Add work folders + default workspace from operation_manager.
+                # An empty list is a VALID persisted value (an intentional clear must
+                # round-trip), so always write both lists when operation_manager exists —
+                # no truthiness gate that would drop a deliberate "no folders" state.
                 if hasattr(self, 'operation_manager') and self.operation_manager:
                     om = self.operation_manager
-                    if om.extra_work_folders_ro or om.extra_work_folders_rw:
-                        data['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
-                        data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
-
-                # Add default workspace if available
-                if hasattr(self, 'operation_manager') and self.operation_manager:
-                    data['default_workspace'] = str(self.operation_manager.base_dir)
+                    data['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+                    data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+                    data['default_workspace'] = str(om.base_dir)
 
                 # Add auto_security (BUG_0029): persist the LIVE pool flag — it is always
                 # a real bool after __init__, so no shadow check needed.
@@ -68,7 +70,6 @@ class ConfigPersistMixin:
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
 
                 # Add compression_fraction as percentage (BUG_0029 Phase 2: read from live state)
-                from agent_cascade.runtime_state import state as _runtime_state
                 data['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
                 # Preserve the one-time class-defaults migration sentinel across saves. This method
@@ -83,33 +84,37 @@ class ConfigPersistMixin:
                     except (OSError, json.JSONDecodeError) as e:
                         logger.debug(f"[PoolSettings] Failed to read existing settings for key preservation: {e}")
 
-                # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
+                # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json.
+                # The key list is the registry's LLM_CFG_PERSIST_KEYS (single source of truth).
                 if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
-                    for key in ('tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit',
-                                'grep_spillover', 'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
-                                'max_images_for_llm',
-                                # Memory-hint feature (plan §7)
-                                'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
-                                'memory_hint_query_chars', 'memory_hint_cooldown_seconds',
-                                'memory_hint_skill_suggestions',
-                                    'memory_hint_skill_threshold',
-                                # Skill invalidation (adaptive count-cap)
-                                'skill_auto_invalidate_enabled', 'skill_active_target_k',
-                                'skill_active_min_cap', 'skill_active_max_cap',
-                                # Skill-scoring constants (research §5/§7/§18 + D-SAFE)
-                                'skill_score_q0', 'skill_score_kq', 'skill_score_nhalf',
-                                'skill_score_ghalf', 'skill_score_rflood', 'skill_score_tau_turns',
-                                'skill_score_dq', 'skill_score_nmin', 'skill_fair_window_turns',
-                                'skill_max_evictions_per_pass',
-                                # Always-protected (unremovable) meta-skill set — STRING setting.
-                                'skill_always_protected'):
+                    for key in LLM_CFG_PERSIST_KEYS:
                         if key in self.llm_cfg:
                             data[key] = self.llm_cfg[key]
 
-                with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                # Atomic write (tmp + fsync + .bak + os.replace) so a reader never observes a
+                # partially written pool_settings.json.
+                atomic_write_json(self._pool_settings_path, data)
+                # Bump the shared settings revision (single counter for all persist paths).
+                _runtime_state.bump_settings_revision()
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to save settings: {e}")
+
+    def persisted_pool_settings(self) -> Dict[str, Any]:
+        """Return the on-disk ``pool_settings.json`` as a dict ({} if missing/unreadable).
+
+        Public accessor so callers (e.g. the settings-migration handler, which needs to
+        know which keys the server already has) do not reach into ``_pool_settings_path``
+        and re-read the file themselves.
+        """
+        path = getattr(self, '_pool_settings_path', None)
+        if not path or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.debug(f"[PoolSettings] Failed to read {path}: {e}")
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _load_pool_settings(self):
         """Load PoolSettings plus extra config from disk. Fault-tolerant.
@@ -152,11 +157,13 @@ class ConfigPersistMixin:
                 self._apply_loaded_disabled_tools(disabled_tools_raw)
 
             # Apply work folders after operation_manager is initialized
-            # (This is called during __init__ before om exists, so defer to post-init)
-            if (work_folders_ro_raw or work_folders_rw_raw) and hasattr(self, '_pending_work_folders'):
+            # (This is called during __init__ before om exists, so defer to post-init).
+            # Presence-based gate (not truthiness) so an intentional clear (empty lists)
+            # round-trips: an explicit [] is a valid value, not "absent".
+            if (work_folders_ro_raw is not None or work_folders_rw_raw is not None) and hasattr(self, '_pending_work_folders'):
                 self._pending_work_folders = {
-                    'ro': work_folders_ro_raw,
-                    'rw': work_folders_rw_raw,
+                    'ro': work_folders_ro_raw or [],
+                    'rw': work_folders_rw_raw or [],
                 }
 
             # Store default_workspace for later application
@@ -464,9 +471,7 @@ class ConfigPersistMixin:
                     except Exception:
                         data = {}
                 data[_CLASS_DEFAULTS_MIGRATED] = True
-                self._pool_settings_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                atomic_write_json(self._pool_settings_path, data)
         except (OSError, TypeError, AttributeError):
             logger.debug('[MIGRATION] Could not persist sentinel to disk (non-Path or I/O error); '
                          'in-memory seeding still applied.')

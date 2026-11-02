@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 # Re-exports for backward compatibility (Phase 4b refactor)
+from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.ws_helpers import _clear_caches_safely, _validate_disabled_tools
 
 
@@ -81,6 +82,7 @@ class WsMessageHandler:
             'refresh_agents': self.handle_refresh_agents,
             'restart_server': self.handle_restart_server,
             'update_config': self.handle_update_config,
+            'update_settings': self.handle_update_settings,
             'set_work_folders': self.handle_set_work_folders,
             'update_endpoints': self.handle_update_endpoints,
             'update_api_priorities': self.handle_update_api_priorities,
@@ -98,6 +100,7 @@ class WsMessageHandler:
             'dismiss_queue': self.handle_dismiss_queue,
             'export_settings': self.handle_export_settings,
             'import_settings': self.handle_import_settings,
+            'migrate_settings_local': self.handle_migrate_settings_local,
             'request_state': self.handle_request_state,
         }
 
@@ -973,18 +976,24 @@ class WsMessageHandler:
         Persists ALL non-cosmetic settings to pool_settings.json (including disabled_tools).
         """
         from agent_cascade.api_integration import _apply_ui_config
-        from agent_cascade.config_handlers import EXTRA_PERSIST_KEYS, POOL_SETTINGS_KEYS, ConfigUpdateRouter
+        from agent_cascade.config_handlers import ConfigUpdateRouter
+        from agent_cascade.settings_registry import ALL_KEYS, EXPORT_IMPORT_ALLOWLIST
 
         if 'generate_cfg' in data:
-            self.session['generate_cfg'] = data['generate_cfg']
-            ui_cfg = data['generate_cfg']
+            # DEPRECATED legacy full-push path: route through the registry so unknown keys
+            # (UI-only cosmetic keys the server has no handler for) are dropped, not applied.
+            # New clients should send the 'update_settings' delta message instead.
+            # The session stores the FILTERED dict: other readers of session['generate_cfg']
+            # (api_server, security_handler) must not see cosmetic UI-only keys.
+            ui_cfg = {k: v for k, v in data['generate_cfg'].items() if k in ALL_KEYS}
+            self.session['generate_cfg'] = ui_cfg
 
             router = ConfigUpdateRouter(self.agent_pool, self.agents)
             await router.apply(ui_cfg)
 
-            # Save PoolSettings once if any persistent settings were modified.
-            # Includes both POOL_SETTINGS_KEYS (PoolSettings fields) and EXTRA_PERSIST_KEYS (disabled_tools).
-            persist_keys_hit = {k for k in ui_cfg.keys() if k in POOL_SETTINGS_KEYS | EXTRA_PERSIST_KEYS}
+            # Save PoolSettings once if any persisted settings were modified
+            # (pool fields, extras, and the disk-only keys the registry tracks).
+            persist_keys_hit = {k for k in ui_cfg if k in EXPORT_IMPORT_ALLOWLIST}
             if persist_keys_hit and self.agent_pool:
                 if hasattr(self.agent_pool, '_save_pool_settings'):
                     self.agent_pool._save_pool_settings()
@@ -999,6 +1008,53 @@ class WsMessageHandler:
 
         await self._broadcast()
 
+    async def handle_update_settings(self, data: dict) -> None:
+        """Handle 'update_settings' — the backend-authoritative per-key settings delta.
+
+        Message shape: ``{"type": "update_settings", "base_revision": N,
+        "changes": {key: value, ...}}``.
+
+        Pipeline (plan §11): each key is validated against the registry (unknown key →
+        rejected per-key; type/enum violation → rejected per-key); accepted keys are applied
+        to live state via the config handlers; each touched bucket persists exactly once; the
+        shared ``settings_revision`` is bumped. A stale ``base_revision`` never rejects the
+        batch — it is logged, the touched keys still apply, and a fresh revision broadcasts
+        (no modal).
+
+        Broadcasts ``settings_applied {revision, applied, rejected}`` to ALL clients (there is
+        no per-client send channel) and, when keys applied, ``settings_changed {revision,
+        changes}`` to all clients.
+        """
+        from agent_cascade.log import logger
+        from agent_cascade.runtime_state import state as _runtime_state
+        from agent_cascade.settings_delta import apply_settings_changes, log_stale_revision
+
+        base_revision = data.get('base_revision')
+        changes = data.get('changes') or {}
+        if not isinstance(changes, dict):
+            await self.broadcast_fn({'type': 'settings_applied',
+                                    'revision': int(_runtime_state.settings_revision),
+                                    'applied': [], 'rejected': {'changes': 'expected an object'}})
+            return
+
+        # Stale-tab guard (plan §11.3): log a revision mismatch but DO NOT reject the batch.
+        log_stale_revision(base_revision, _runtime_state.settings_revision, 'update_settings')
+
+        applied, rejected, changes_out, revision = await apply_settings_changes(
+            self.agent_pool, self.agents, changes, session=self.session)
+
+        if applied:
+            logger.info('[update_settings] applied %d key(s): %s (revision=%d)',
+                        len(applied), applied, revision)
+
+        # Both messages go through broadcast_fn (all clients — no per-client send channel):
+        # announce applied/rejected, then broadcast the changed state when keys applied.
+        await self.broadcast_fn({'type': 'settings_applied', 'revision': revision,
+                                 'applied': applied, 'rejected': rejected})
+        if applied:
+            await self.broadcast_fn({'type': 'settings_changed', 'revision': revision,
+                                     'changes': changes_out})
+
     async def handle_export_settings(self, data: dict) -> None:
         """Handle 'export_settings' — return all persistent settings as JSON.
 
@@ -1007,22 +1063,13 @@ class WsMessageHandler:
         """
         from agent_cascade.log import logger
 
-        if not self.agent_pool or not hasattr(self.agent_pool, '_pool_settings_path'):
+        if not self.agent_pool:
             await self.broadcast_fn({'type': 'error', 'message': 'Agent pool not available for export'})
             return
 
         try:
             # Load from disk (most authoritative source) and merge with live state
-            settings_data = {}
-
-            if self.agent_pool._pool_settings_path.exists():
-                try:
-                    with open(self.agent_pool._pool_settings_path, 'r', encoding='utf-8-sig') as f:
-                        content = f.read().strip()
-                        if content:
-                            settings_data = json.loads(content)
-                except Exception as e:
-                    logger.warning(f"[export_settings] Failed to read pool_settings.json: {e}")
+            settings_data = self.agent_pool.persisted_pool_settings()
 
             # Merge live PoolSettings (in case runtime changes weren't persisted yet)
             if hasattr(self.agent_pool, 'settings'):
@@ -1100,11 +1147,13 @@ class WsMessageHandler:
         try:
             # Apply via update_config — this routes each key to its handler which validates types
             from agent_cascade.api_integration import _apply_ui_config
-            from agent_cascade.config_handlers import EXTRA_PERSIST_KEYS, POOL_SETTINGS_KEYS, ConfigUpdateRouter
+            from agent_cascade.config_handlers import ConfigUpdateRouter
+            from agent_cascade.settings_registry import EXPORT_IMPORT_ALLOWLIST
 
-            # Filter to known keys only (silently skip unknown fields)
-            known_keys = POOL_SETTINGS_KEYS | EXTRA_PERSIST_KEYS
-            filtered_cfg = {k: v for k, v in settings_json.items() if k in known_keys}
+            # Filter to known keys only (silently skip unknown fields).
+            # Uses the registry-derived allowlist (includes the 7 disk-only keys that the
+            # historical POOL_SETTINGS_KEYS|EXTRA_PERSIST_KEYS dropped — BUG_0214 fix).
+            filtered_cfg = {k: v for k, v in settings_json.items() if k in EXPORT_IMPORT_ALLOWLIST}
 
             if not filtered_cfg:
                 await self.broadcast_fn({'type': 'error', 'message': 'No recognized settings found in import data'})
@@ -1144,6 +1193,93 @@ class WsMessageHandler:
         except Exception as e:
             logger.error(f"[import_settings] Failed to import settings: {e}")
             await self.broadcast_fn({'type': 'error', 'message': f'Import failed: {str(e)}'})
+
+    async def handle_migrate_settings_local(self, data: dict) -> None:
+        """Handle 'migrate_settings_local' — one-time migration from browser localStorage.
+
+        Sent by the UI on first connect after upgrade. Carries the old local settings
+        blob; the server applies ONLY keys it does not already have persisted (server
+        always wins on conflict). The LLM config is seeded from the local blob only when
+        ``api_endpoints.json`` has no ``default_llm_cfg`` section.
+
+        Message shape: ``{"type": "migrate_settings_local", "settings": {key: value, ...}}``.
+
+        Idempotency is enforced server-side: after a successful migration the server
+        records ``_settings_migrated_v1`` in ``config/session_state.json`` and every later
+        request — from a second client or a headless run — is short-circuited by that
+        sentinel. The UI-side localStorage flag is only a fast path that avoids sending
+        the blob at all.
+        """
+        from agent_cascade.log import logger
+        from agent_cascade.session_state_store import is_settings_migrated, mark_settings_migrated
+        from agent_cascade.settings_delta import apply_settings_changes
+        from agent_cascade.settings_registry import (
+            EXPORT_IMPORT_ALLOWLIST,
+            LLM_CFG_KEYS,
+            SERVER_WINS_KEYS,
+        )
+
+        settings = data.get('settings')
+        if not isinstance(settings, dict):
+            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'error',
+                                     'message': 'expected a settings object'})
+            return
+
+        # Server-side sentinel: the migration is one-time per server. A second client, or
+        # a headless run replaying the blob, would otherwise re-apply keys the server
+        # deliberately skipped (SERVER_WINS_KEYS) or later changed.
+        if is_settings_migrated():
+            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+                                     'applied': [], 'skipped': 'already_migrated'})
+            return
+
+        # Keys the migration may fill gaps in: every persisted pool/extra key plus the
+        # llm_cfg keys. Both sets are registry-derived.
+        persisted_keys = EXPORT_IMPORT_ALLOWLIST | LLM_CFG_KEYS
+
+        # Which pool/extra keys the server already has on disk (empty ⇒ migrate everything).
+        existing_pool = (self.agent_pool.persisted_pool_settings()
+                         if hasattr(self.agent_pool, 'persisted_pool_settings') else {})
+
+        # Does the router's persisted config already carry a default_llm_cfg section?
+        router = getattr(self.agent_pool, 'api_router', None)
+        has_default_llm_cfg = bool(router and router.has_default_llm_cfg())
+
+        # Filter: only send keys the server does NOT already have.
+        missing_keys: dict = {}
+        for key, value in settings.items():
+            if key in SERVER_WINS_KEYS:
+                continue  # server wins unconditionally
+            if key not in persisted_keys:
+                continue  # not a known registry key — skip
+            if key in LLM_CFG_KEYS:
+                # LLM keys: only migrate if the on-disk file has no default_llm_cfg section.
+                if has_default_llm_cfg:
+                    continue  # server already has LLM config — skip
+                missing_keys[key] = value
+            else:
+                # Pool/extra keys: skip if already in the on-disk pool settings file.
+                if key in existing_pool:
+                    continue
+                missing_keys[key] = value
+
+        # Migration pass complete: record the sentinel so a later client (or a headless
+        # replay of the blob) is short-circuited by is_settings_migrated() above.
+        mark_settings_migrated()
+
+        if not missing_keys:
+            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+                                     'applied': []})
+            return
+
+        # Apply through the standard delta pipeline (one persist per bucket).
+        applied, rejected, changes_out, revision = await apply_settings_changes(
+            self.agent_pool, self.agents, missing_keys, session=self.session)
+
+        logger.info('[migrate_settings_local] applied %d key(s): %s (revision=%d)',
+                    len(applied), applied, revision)
+        await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+                                 'applied': applied, 'rejected': rejected})
 
     async def handle_set_work_folders(self, data: dict) -> None:
         """Handle 'set_work_folders' — explicit user action to set work folders.
@@ -1196,15 +1332,30 @@ class WsMessageHandler:
             # This handles invalid paths gracefully (logs warning, skips bad entries).
             om.set_extra_work_folders(final_ro, final_rw)
             _logger.info('[set_work_folders] Explicit save — RO=%s, RW=%s', ro_paths, rw_paths)
+
+            # Persist the explicit save (including an intentional clear) to disk so a
+            # restart restores the exact folder state the user last saved.
+            if hasattr(self.agent_pool, '_save_pool_settings'):
+                self.agent_pool._save_pool_settings()
         except Exception as e:
             _logger.error('[set_work_folders] Failed to set work folders: %s', e)
 
         await self._broadcast()
 
     async def handle_update_endpoints(self, data: dict) -> None:
-        """Handle 'update_endpoints' — bulk update all endpoints and priorities."""
+        """Handle 'update_endpoints' — bulk update all endpoints and priorities.
+
+        Import-style operation only (single-endpoint edits go through the per-endpoint REST
+        routes). Accepts an optional ``base_revision`` (endpoints-list revision) as a
+        stale-tab guard: a mismatch is logged but the bulk write still applies (last-write
+        wins, mirroring the settings conflict policy).
+        """
+        from agent_cascade.log import logger
+        from agent_cascade.runtime_state import state as _runtime_state
+        from agent_cascade.settings_delta import log_stale_revision
+        base_revision = data.get('base_revision')
+        log_stale_revision(base_revision, _runtime_state.endpoints_revision, 'update_endpoints')
         if self.agent_pool and hasattr(self.agent_pool, 'api_router'):
-            from agent_cascade.log import logger
             ep_count = len(data.get('endpoints', []))
             ap_count = len(data.get('agent_priorities', {}))
             logger.info(f"[update_endpoints] Received: {ep_count} endpoints, {ap_count} agent priority mappings")
@@ -1473,8 +1624,11 @@ class WsMessageHandler:
     async def handle_set_session_name(self, data: dict) -> None:
         """Handle 'set_session_name' — rename session and migrate summaries."""
         old_name = self.session['session_name']
-        new_name = data.get('name', 'Maine').strip()
+        new_name = data.get('name', DEFAULT_SESSION_NAME).strip()
         self.session['session_name'] = new_name
+        # Persist the server-wide active session name so a restart resumes it.
+        from agent_cascade.session_state_store import save_session_name
+        save_session_name(new_name)
         if self.agent_pool:
             if old_name in self.agent_pool.instance_summaries:
                 self.agent_pool.instance_summaries[new_name] = self.agent_pool.instance_summaries.pop(old_name)
@@ -1489,7 +1643,7 @@ class WsMessageHandler:
         # Extract instance_name from log file metadata BEFORE loading.
         # This avoids fragile regex parsing of status strings and lets the
         # loaded session's own metadata determine its identity.
-        instance_name = 'Maine'
+        instance_name = DEFAULT_SESSION_NAME
         try:
             # encoding='utf-8': log files are written as UTF-8 JSONL; the platform
             # default (cp1252 on Windows) crashes on any non-ASCII byte.

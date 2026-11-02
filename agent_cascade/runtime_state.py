@@ -207,6 +207,14 @@ class RuntimeState:
         self.afk_mode: str = AFK_MODE_DEFAULT
         self.enable_timeout: bool = True
         self.approval_timeout_seconds: int = 300
+        # Monotonic settings revision (Phase 1). Bumped by EVERY settings persist path
+        # (pool bucket, default_llm_cfg, session name) so GET /api/settings clients can
+        # detect any settings change with a single counter.
+        self.settings_revision: int = 0
+        # Monotonic endpoints-list revision (Phase 3). Bumped on every endpoint/priority
+        # mutation (router._save) so the bulk 'update_endpoints' path can carry a
+        # base_revision stale-tab guard, mirroring the settings revision.
+        self.endpoints_revision: int = 0
 
         # ── Security handler synchronization primitives (BUG_0029 Phase 2) ──
         # RLock so a nested security check from the same thread re-enters safely.
@@ -248,6 +256,24 @@ class RuntimeState:
         save path reads this value at save time.
         """
         self.compression_fraction = clamp_compression_fraction(float(pct) / 100.0)
+
+    def bump_settings_revision(self) -> int:
+        """Increment the monotonic settings revision and return the new value.
+
+        Called by every settings persist path (pool bucket, default_llm_cfg, session
+        name) so a single counter tracks any settings change for GET /api/settings.
+        """
+        self.settings_revision += 1
+        return self.settings_revision
+
+    def bump_endpoints_revision(self) -> int:
+        """Increment the monotonic endpoints-list revision and return the new value.
+
+        Called by :meth:`APIRouter._save` on every endpoint/priority mutation so the bulk
+        ``update_endpoints`` path can carry a ``base_revision`` stale-tab guard.
+        """
+        self.endpoints_revision += 1
+        return self.endpoints_revision
 
     def set_afk(self, enabled: bool, message=None, mode=None) -> None:
         """Set the server-backed AFK flag (shared by WebUI and Telegram bridge).

@@ -35,7 +35,6 @@ from agent_cascade.api_integration_pkg.streaming import (  # noqa: F401
 
 # ── state_builder.py: pool → UI state serialization ─────────────────────────────
 from agent_cascade.api_integration_pkg.state_builder import (  # noqa: F401
-    _serialize_loop_settings,
     _get_instance_messages,
     _calc_token_stats,
     _serialize_all_instances,
@@ -78,7 +77,7 @@ __all__ = [
     # streaming
     '_put_stream_update', 'broadcast_stream_update', '_calc_stream_token_stats',
     # state_builder
-    '_serialize_loop_settings', '_get_instance_messages', '_calc_token_stats',
+    '_get_instance_messages', '_calc_token_stats',
     '_serialize_all_instances', '_get_session_name', '_get_current_model',
     '_safe_get_telemetry', '_safe_get_api_router_state', '_get_default_workspace',
     '_build_active_stack', '_get_msg_content', '_get_msg_reasoning',
