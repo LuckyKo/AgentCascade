@@ -444,14 +444,21 @@ class LifecycleMixin:
         if inst and inst.parent_instance and inst.parent_instance not in dismissing:
             from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
             from agent_cascade.operation_manager.path_security import _queue_tool_warning
+            from agent_cascade.child_runner import _resolve_child_log_path
             child_class = (getattr(inst, 'agent_class', '') or '').lower()
             if child_class not in STABLE_SYSTEM_PROMPT_CLASSES:
                 parent_name = inst.parent_instance
+                # Name the child's log file so the spawner can reload it. Graceful degradation:
+                # _resolve_child_log_path never raises and returns an is_exact=False searchable
+                # hint when the logger is absent, so no crash path is introduced here.
+                _log_path, _log_exact = _resolve_child_log_path(self, instance_name)
+                _log_clause = (f" Log: {_log_path}."
+                              if _log_exact else f" Search logs/ for '{instance_name}'.")
                 _queue_tool_warning(
                     self, parent_name,
                     f"[Agent '{instance_name}' dismissed]: A sub-agent you spawned was dismissed "
                     f"(idle or user) and is no longer available. Do not wait for its result; "
-                    f"reload it from its log if still needed.",
+                    f"reload it from its log if still needed.{_log_clause}",
                 )
                 # Wake an IDLE spawner so it actually drains the queued notification (mirrors Fix B above).
                 parent = self.get_instance(parent_name)

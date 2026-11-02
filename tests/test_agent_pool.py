@@ -385,6 +385,40 @@ class TestDismissalNotification:
         assert parent._tool_warnings == [], \
             'doomed parent must not receive a spawner notification'
 
+    def test_notification_includes_log_path(self, agent_pool):
+        """BUG_0208: the spawner notification must name the child's exact log file.
+
+        Seed the real logger map (the source of truth behind the read-only
+        ``instance_loggers`` property) so ``_resolve_child_log_path`` resolves to
+        an exact path, then assert the filename lands in the spawner's warnings."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('worker1', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['worker1'] = child
+
+        fake_logger = MagicMock()
+        fake_logger.log_path = 'N:\\work\\WD\\AgentWorkspace\\logs\\coder_worker1_2026.jsonl'
+        # Seed the backing dict (key = (instance_name, agent_class.lower())) that the
+        # read-only ``instance_loggers`` property snapshots.
+        agent_pool._logger._loggers[('worker1', 'coder')] = fake_logger
+
+        agent_pool.dismiss_instance('worker1')
+
+        assert any('worker1' in w for w in parent._tool_warnings)
+        assert any('coder_worker1_2026.jsonl' in w for w in parent._tool_warnings), \
+            'dismissal notification should name the log file'
+
+    def test_notification_degrades_without_logger(self, agent_pool):
+        """BUG_0208: with no logger registered the notification degrades to a
+        'Search logs/' hint and does NOT crash (never injects None into the string)."""
+        parent = self._make_instance('spawner', agent_class='orchestrator')
+        child = self._make_instance('ghost', agent_class='coder', parent_instance='spawner')
+        agent_pool.instances['spawner'] = parent
+        agent_pool.instances['ghost'] = child
+        # No logger seeded for 'ghost' → _resolve_child_log_path returns is_exact=False.
+        agent_pool.dismiss_instance('ghost')
+        assert any('ghost' in w and 'Search logs/' in w for w in parent._tool_warnings)
+
 
 # ===========================================================================
 # Halt / resume lifecycle
