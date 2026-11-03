@@ -274,20 +274,28 @@ def _compile_alternatives(pattern: str, literal: bool, flags: int):
     return alts, compiled
 
 
-def _incomplete_note(skipped_count: int, skipped_paths: list, max_mb: int, tail: str = '') -> str:
-    """BUG_0185/BUG_0190: the shared ``[search INCOMPLETE — …]`` note.
+def _incomplete_note(skipped_count: int, skipped_paths: list, max_mb: int, tail: str = '',
+                     *, detail: str = '') -> str:
+    """BUG_0185/BUG_0190/BUG_0221: the shared ``[search INCOMPLETE — …]`` note.
 
     A count/line claim over a scope where over-size files were skipped must never read as
-    conclusive. The count-only path reuses this so the integrity guarantee carries over from
-    BUG_0185. Returns ``''`` when nothing was skipped. ``tail`` is an optional trailing clause
-    (e.g. ``use read_file to inspect their headers/content``).
+    conclusive. Every line-mode and count-mode path routes through here so the prefix, the
+    10-path cap and the ``(+N more)`` suffix cannot drift apart. Returns ``''`` when nothing
+    was skipped and no ``detail`` was given. ``tail`` is an optional trailing clause (e.g.
+    ``use read_file to inspect their headers/content``); ``detail`` replaces the default
+    ``skipped N file(s) …`` body for the header-scan messages, which describe scanned rather
+    than skipped files.
     """
-    if not skipped_count:
+    if detail:
+        body = detail
+    elif skipped_count:
+        more = f" (+{skipped_count - 10} more)" if skipped_count > 10 else ''
+        body = (f"skipped {skipped_count} file(s) > {max_mb} MB: "
+                f"{', '.join(skipped_paths[:10])}{more}")
+    else:
         return ''
-    more = f" (+{skipped_count - 10} more)" if skipped_count > 10 else ''
     tail_part = f"; {tail}" if tail else ''
-    return (f" [search INCOMPLETE — skipped {skipped_count} file(s) > {max_mb} MB: "
-            f"{', '.join(skipped_paths[:10])}{more}{tail_part}]")
+    return f" [search INCOMPLETE — {body}{tail_part}]"
 
 
 @lru_cache(maxsize=1)
@@ -1679,15 +1687,19 @@ class GrepMixin:
                             _head_kb = _head_bytes // 1024
                             _summary = f"Found {_large['count']} matches for '{pattern}'{searched_note}"
                             _partial = ' (scan limit reached)' if _large['partial'] else ''
-                            _summary += (f" [search INCOMPLETE — matched in the first {_head_kb} KiB of "
-                                         f"{_large['scanned']} file(s) > {_max_mb} MB{_partial}; "
-                                         f"full file content was not streamed — use read_file for more]")
+                            _summary += _incomplete_note(
+                                _large['large_files'], [], _max_mb,
+                                tail='full file content was not streamed — use read_file for more',
+                                detail=(f"matched in the first {_head_kb} KiB of {_large['scanned']} "
+                                        f"file(s) > {_max_mb} MB{_partial}"))
                             return f"{_summary}:\n\n" + '\n'.join(_large['formatted'])
                         if _large['large_files']:
-                            summary += (f" [search INCOMPLETE — {_large['large_files']} file(s) > "
-                                        f"{_max_mb} MB were not searched in full (only the first "
-                                        f"{_head_bytes // 1024} KiB was scanned); use read_file to "
-                                        f"inspect their headers/content]")
+                            summary += _incomplete_note(
+                                _large['large_files'], [], _max_mb,
+                                tail='use read_file to inspect their headers/content',
+                                detail=(f"{_large['large_files']} file(s) > {_max_mb} MB were not "
+                                        f"searched in full (only the first "
+                                        f"{_head_bytes // 1024} KiB was scanned)"))
                     return f"{summary}:\n\n"
                 else:
                     output_text = _grep_body_with_legend(results, context, count)
@@ -1956,30 +1968,21 @@ class GrepMixin:
             if not results:
                 if was_timed_out:
                     _timeout_msg = f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
-                    if _large_skipped:
-                        _skipped_list = ', '.join(_large_skipped_paths[:10])
-                        _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
-                        _timeout_msg += (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
-                                         f"{_skipped_list}{_more}]")
+                    _timeout_msg += _incomplete_note(_large_skipped, _large_skipped_paths,
+                                                     _max_mb)
                     return _timeout_msg
                 exclude_info = f", excluding {exclude}" if exclude else ''
-                _large_note = ''
-                if _large_skipped:
-                    _skipped_list = ', '.join(_large_skipped_paths[:10])
-                    _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
-                    _large_note = (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
-                                   f"{_skipped_list}{_more}; use read_file to inspect their headers/content]")
+                _large_note = _incomplete_note(
+                    _large_skipped, _large_skipped_paths, _max_mb,
+                    tail='use read_file to inspect their headers/content')
                 return (f"No matches found for pattern '{pattern}' in {path}/**/{include}"
                         f"{exclude_info}{searched_note}{_large_note}")
 
             summary = f"Found {match_count} matches for '{pattern}'{searched_note}"
             if context > 0:
                 summary += f" (with {context} line(s) of context)"
-            if _large_skipped:
-                _skipped_list = ', '.join(_large_skipped_paths[:10])
-                _more = f" (+{_large_skipped - 10} more)" if _large_skipped > 10 else ''
-                summary += (f" [search INCOMPLETE — skipped {_large_skipped} file(s) > {_max_mb} MB: "
-                            f"{_skipped_list}{_more}; use read_file for more]")
+            summary += _incomplete_note(_large_skipped, _large_skipped_paths, _max_mb,
+                                        tail='use read_file for more')
             output_text = _grep_body_with_legend(results, context, match_count)
 
             if was_timed_out:
