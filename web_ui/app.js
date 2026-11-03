@@ -359,7 +359,8 @@ function saveUiPrefs(prefs) {
 // deltas via `update_settings` — never the legacy full-push `update_config`.
 let pendingSettings = null;   // optimistic working copy (diffs for queued deltas)
 let serverSettingsSnapshot = null; // AUTHORITATIVE server value — updated ONLY from state frames,
-                                   // stream_update frames, and settings_changed broadcasts; the revertControl source
+                                   // stream_update frames, settings_changed broadcasts, and import_settings
+                                   // (load-saved-settings) broadcasts; the revertControl source
 let settingsRevision = 0;        // last settings_revision seen from the server
 let endpointsRevision = 0;       // last endpoints_revision seen from the server (stale-tab guard)
 const _pendingSettingChanges = {};
@@ -2697,6 +2698,12 @@ function handleServerMessage(data) {
               el[prop] = transform ? transform(data.settings[key]) : data.settings[key];
             }
           }
+          // Keep the in-memory authoritative baseline consistent with the imported values
+          // (mirrors the settings_changed handler) so later per-key deltas / reverts compute
+          // against the post-import state, not the pre-import snapshot.
+          if (serverSettingsSnapshot) Object.assign(serverSettingsSnapshot, data.settings);
+          if (!pendingSettings) pendingSettings = {};
+          Object.assign(pendingSettings, data.settings);
 
            // Apply imported disabled_tools to agentDisabledTools and re-render checkboxes.
            if (data.settings.disabled_tools && typeof agentDisabledTools !== 'undefined') {

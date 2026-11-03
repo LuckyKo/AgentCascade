@@ -54,9 +54,30 @@ function extractFunction(name) {
   throw new Error(`Unbalanced braces for ${name}`);
 }
 
+// Extract the import_settings handler's `if (data.settings) { ... }` block — the whole
+// apply-to-controls + baseline-sync body (the "settings-applied" seam). Brace-matched so
+// the test executes the REAL code, including the serverSettingsSnapshot/pendingSettings
+// Object.assign lines that keep the in-memory baseline consistent after an import.
+function extractImportSettingsBlock() {
+ const caseIdx = APP_JS.indexOf("case 'import_settings'");
+ assert.ok(caseIdx >= 0, "Could not find case 'import_settings' in app.js");
+ const ifIdx = APP_JS.indexOf('if (data.settings) {', caseIdx);
+ assert.ok(ifIdx >= 0, "Could not find 'if (data.settings) {' in import_settings");
+ const bodyStart = APP_JS.indexOf('{', ifIdx);
+ assert.ok(bodyStart >= 0, "No body for import_settings if-block");
+ let depth = 0;
+ for (let j = bodyStart; j < APP_JS.length; j++) {
+   const c = APP_JS[j];
+   if (c === '{') depth++;
+   else if (c === '}') { depth--; if (depth === 0) return APP_JS.slice(ifIdx, j + 1); }
+ }
+ throw new Error('Unbalanced braces in import_settings if-block');
+}
+
 const MAP_SRC = extractConstArray('POOL_SETTINGS_MAP');
 const SYNC_SRC = extractFunction('syncPoolSettings');
 const REVERT_SRC = extractFunction('revertControl');
+const IMPORT_BLOCK_SRC = extractImportSettingsBlock();
 
 function makeDom(ids) {
   const elements = {};
@@ -232,4 +253,61 @@ test('syncPoolSettings skips the actively-focused textarea (no mid-edit stomp)',
     'focused textarea must not be overwritten by a server frame');
   assert.equal(dom.elements['#workAccessFoldersRO'].value, '/mnt/ro',
     'unfocused textarea must still be hydrated from the snapshot');
+	});
+
+test('settings-applied (import_settings) broadcast updates work-folder controls without a page reload', () => {
+  // The "load saved settings" (import_settings) broadcast applies the imported settings to the
+  // controls AND syncs the in-memory baseline (serverSettingsSnapshot / pendingSettings) so a
+  // later settings_changed → syncPoolSettings(pendingSettings) does not re-stomp the imported
+  // folders from a stale snapshot (symptom B: the UI only reflected the import after a refresh).
+  // Pre-seed the textareas with stale values, run the REAL import_settings block (extracted from
+  // app.js) with the imported payload, and assert both the controls and the baseline update.
+  const dom = makeDom(['#workAccessFoldersRW', '#workAccessFoldersRO']);
+  const ctx = buildSandbox(dom);
+
+  // Stub the import block's side-effect deps (disabled_tools / auto_security handling).
+  ctx.withRetry = (guard, action) => { if (guard()) action(); };
+  ctx.autoSecurityToggle = { checked: false };
+  ctx.settingToolsList = {};
+  ctx.settingAgentSelect = {};
+  // A non-null authoritative snapshot so the `if (serverSettingsSnapshot)` branch is exercised.
+  ctx.serverSettingsSnapshot = { work_access_folders_rw: [], work_access_folders_ro: [] };
+  ctx.pendingSettings = {};
+
+  // Stale (pre-import) control values.
+  dom.elements['#workAccessFoldersRW'].value = 'stale-rw';
+  dom.elements['#workAccessFoldersRO'].value = 'stale-ro';
+
+  // The imported payload (as the server broadcasts it in the import_settings frame).
+  ctx.data = {
+    settings: {
+      work_access_folders_rw: ['N:\\work\\rw', 'N:\\data'],
+      work_access_folders_ro: ['/mnt/ro'],
+    },
+  };
+
+  // Run the REAL import_settings block against the payload (no page reload).
+  vm.runInContext(IMPORT_BLOCK_SRC, ctx);
+
+  // Controls updated in place.
+  assert.equal(dom.elements['#workAccessFoldersRW'].value, 'N:\\work\\rw\nN:\\data',
+    'RW textarea was not updated by the import_settings broadcast');
+  assert.equal(dom.elements['#workAccessFoldersRO'].value, '/mnt/ro',
+    'RO textarea was not updated by the import_settings broadcast');
+
+  // The in-memory baseline must carry the imported arrays (the fix under test).
+  assert.deepEqual(ctx.serverSettingsSnapshot.work_access_folders_rw, ['N:\\work\\rw', 'N:\\data'],
+    'serverSettingsSnapshot was not synced by the import_settings broadcast');
+  assert.deepEqual(ctx.pendingSettings.work_access_folders_rw, ['N:\\work\\rw', 'N:\\data'],
+    'pendingSettings was not synced by the import_settings broadcast');
+
+  // Symptom B mechanism: a subsequent settings_changed → syncPoolSettings(pendingSettings)
+  // must NOT revert the imported folders (it would, if the baseline were still stale/empty).
+  dom.elements['#workAccessFoldersRW'].value = 'stale-rw';
+  dom.elements['#workAccessFoldersRO'].value = 'stale-ro';
+  vm.runInContext('syncPoolSettings(pendingSettings)', ctx);
+  assert.equal(dom.elements['#workAccessFoldersRW'].value, 'N:\\work\\rw\nN:\\data',
+    'syncPoolSettings(pendingSettings) re-stomped the imported RW folders (stale baseline)');
+  assert.equal(dom.elements['#workAccessFoldersRO'].value, '/mnt/ro',
+    'syncPoolSettings(pendingSettings) re-stomped the imported RO folders (stale baseline)');
 });

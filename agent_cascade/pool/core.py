@@ -156,6 +156,13 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # _apply_loaded_disabled_tools() → set_ui_disabled_tools() which acquires this lock.
         self._ui_disabled_tools: Dict[str, Any] = {}
         self._ui_disabled_tools_lock = threading.RLock()
+        # Pending-config deferral attribute: initialize to None BEFORE _load_pool_settings()
+        # so it always exists. The load path sets it to a dict when the persisted keys are
+        # present; _apply_pending_config (called right after) reads it once operation_manager
+        # exists. Previously the attribute was only ever created by the load path itself, so a
+        # `hasattr` guard on it was always False on first load and persisted work folders never
+        # reached the live OM state after a restart (the UI's extra-folders list came back empty).
+        self._pending_work_folders = None
         self._load_pool_settings()  # load persisted values, overriding defaults
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
 

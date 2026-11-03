@@ -159,8 +159,11 @@ class ConfigPersistMixin:
             # Apply work folders after operation_manager is initialized
             # (This is called during __init__ before om exists, so defer to post-init).
             # Presence-based gate (not truthiness) so an intentional clear (empty lists)
-            # round-trips: an explicit [] is a valid value, not "absent".
-            if (work_folders_ro_raw is not None or work_folders_rw_raw is not None) and hasattr(self, '_pending_work_folders'):
+            # round-trips: an explicit [] is a valid value, not "absent". The old
+            # `hasattr(self, '_pending_work_folders')` guard was self-referential — this
+            # load path was the only place that ever created the attribute — so it was
+            # always False on a fresh pool and the folders were silently dropped at boot.
+            if work_folders_ro_raw is not None or work_folders_rw_raw is not None:
                 self._pending_work_folders = {
                     'ro': work_folders_ro_raw or [],
                     'rw': work_folders_rw_raw or [],
@@ -485,8 +488,9 @@ class ConfigPersistMixin:
 
         Called after __init__ completes and operation_manager is available.
         """
-        # Apply pending work folders
-        if hasattr(self, '_pending_work_folders') and self._pending_work_folders:
+        # Apply pending work folders (attribute is initialized to None in AgentPool.__init__;
+        # getattr hardens the mixin-standalone / test path where it may be absent).
+        if getattr(self, '_pending_work_folders', None):
             om = getattr(self, 'operation_manager', None)
             if om:
                 try:

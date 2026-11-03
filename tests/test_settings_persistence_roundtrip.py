@@ -110,7 +110,12 @@ def _make_pool(tmp_path, ro=(), rw=()):
     import threading
 
     class _Om:
-        pass
+        # Mirrors OperationManager.set_extra_work_folders (the live-state seam that
+        # _apply_pending_config drives). Records the last-applied folders so tests can
+        # assert the startup restore reached the live OM state.
+        def set_extra_work_folders(self, ro, rw):
+            self.extra_work_folders_ro = list(ro or [])
+            self.extra_work_folders_rw = list(rw or [])
 
     om = _Om()
     om.extra_work_folders_ro = list(ro)
@@ -161,6 +166,35 @@ def test_empty_work_folders_clear_roundtrips(tmp_path):
     pool2 = _make_pool(tmp_path)
     pool2._load_pool_settings()
     assert pool2._pending_work_folders == {'ro': [], 'rw': []}
+
+
+def test_startup_restore_work_folders_into_live_state(tmp_path):
+    """A fresh load of pool_settings.json restores extra work folders into the live OM state.
+
+    Regression (2026-11-03): the load path's ``hasattr(self, '_pending_work_folders')`` guard
+    was self-referential — the attribute was only ever created by the load path itself — so on
+    a fresh pool it was always False, the pending dict was never set, and
+    ``_apply_pending_config`` skipped the folders. Persisted work folders therefore never
+    reached the live OM state after a restart (the UI's extra-folders list came back empty).
+    The fix initializes the attribute in ``__init__`` (core.py) and drops the guard
+    (config_persist.py); this test drops the attribute to simulate a fresh pool and proves the
+    load path restores the folders into the live OM state.
+    """
+    # Pool 1: set work folders and persist them to disk.
+    pool1 = _make_pool(tmp_path, ro=['C:\\ro'], rw=['C:\\rw'])
+    pool1._save_pool_settings()
+
+    # Pool 2: simulate a fresh restart. _make_pool initializes _pending_work_folders = None
+    # (mirroring the __init__ init added by the fix); drop it to prove the load path itself
+    # creates the attribute and _apply_pending_config applies it to the live OM state.
+    pool2 = _make_pool(tmp_path)
+    del pool2._pending_work_folders
+    pool2._load_pool_settings()
+    pool2._apply_pending_config()
+
+    # The live OM state must carry the restored folders.
+    assert [str(p) for p in pool2.operation_manager.extra_work_folders_ro] == ['C:\\ro']
+    assert [str(p) for p in pool2.operation_manager.extra_work_folders_rw] == ['C:\\rw']
 
 
 # ── disabled_tools + compression round-trip ─────────────────────────────
