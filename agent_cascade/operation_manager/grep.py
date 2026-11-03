@@ -1699,11 +1699,9 @@ class GrepMixin:
                     return f"{summary}:\n\n" + output_text
 
             # ── Slow path: pure Python fallback ──
-            import os
-
-            _rg_avail, _grep_avail = _check_tool_availability()
+            _rg_avail, _ = _check_tool_availability()
             logger.debug(
-                f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
+                f"grep: subprocess fast path unavailable (rg={_rg_avail}), falling back to Python")
             results = []
 
             flags = _smart_case_flags(pattern, smart_case)
@@ -1720,17 +1718,6 @@ class GrepMixin:
             file_count = 0
             match_count = 0
 
-            # BUG_0062: honour .gitignore/.ignore/.rgignore so the fallback returns the SAME
-            # file set as the ripgrep fast path when ignore_vcs=True. The resolver owns
-            # DEFAULT_IGNORED_DIRS as its lowest-precedence source, so no local skip_dirs
-            # literal remains here. Degrades to the hardcoded-dir-only behaviour when
-            # `pathspec` is unavailable.
-            _ignore_resolver = IgnoreResolver(resolved)
-
-            # Default file excludes for Python fallback — aligns with subprocess behavior.
-            # Match against basename only (fnmatch).
-            _PY_DEFAULT_EXCLUDES = _DEFAULT_EXCLUDES
-
             # BUG_0169: the fallback must not read a multi-GB artifact into memory either.
             # Over-size files get the same bounded header scan the ripgrep path uses.
             _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
@@ -1739,93 +1726,21 @@ class GrepMixin:
             _large_scanned = 0
             _large_skipped_paths: list = []
 
-            # When include is "*" (all files), use os.walk with directory skipping to match
-            # subprocess behavior. rglob("*") doesn't respect ignores and only matches root level.
-            # BUG_0056: support comma-separated globs — union of rglob for each pattern.
-            _include_patterns = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
-            if not _include_patterns:
-                # Mutate dirs in-place to skip unwanted directories during walk. Pruning here
-                # rather than post-hoc is a performance requirement: it is what stops the
-                # fallback from descending into an ignored node_modules/ at all.
-                def _walk_with_skips():
-                    for root, dirs, files in os.walk(resolved):
-                        if ignore_vcs:
-                            dirs[:] = [d for d in dirs
-                                       if not _ignore_resolver.is_ignored(Path(root) / d, is_dir=True)]
-                        yield root, dirs, files
-
-                file_iter_gen = (Path(os.path.join(root, f)) for root, dirs, files in _walk_with_skips() for f in files)
-            else:
-                # Union of rglob results across all patterns (dedup via set)
-                _seen = set()
-
-                def _multi_rglob():
-                    for _pat in _include_patterns:
-                        for _fp in resolved.rglob(_pat):
-                            if _fp not in _seen:
-                                _seen.add(_fp)
-                                yield _fp
-
-                file_iter_gen = _multi_rglob()
-
-            for file_path in file_iter_gen:
+            # BUG_0221 (#2): one walker for the fallback and the over-size scan
+            # (_iter_grep_scope_files). It prunes ignored directories before descending,
+            # applies the shared default excludes, and uses the same basename-vs-relative-path
+            # include/exclude semantics as the rg fast path's scope. Two disclosed deltas from
+            # the old rglob branch: include globs now also match the relative path (so
+            # `src/*.py` works) and directory symlinks are not followed (followlinks=False,
+            # which also aligns the fallback with rg).
+            deadline = time.monotonic() + timeout
+            for file_path, rel_str in self._iter_grep_scope_files(
+                    resolved, include, exclude, ignore_vcs, deadline):
                 if time.time() - start_time > timeout:
                     was_timed_out = True
                     break
-                if not file_path.is_file():
-                    continue
 
-                # Skip files under ignored directories (for rglob path; os.walk already prunes dirs)
-                if ignore_vcs:
-                    try:
-                        file_path.relative_to(resolved)
-                    except ValueError:
-                        # File path is not relative to resolved search root — skip it
-                        continue
-                    # BUG_0062: the resolver also re-checks ancestors, so a file reached via
-                    # the rglob branch (which never prunes mid-traversal) is still filtered by
-                    # nested .gitignore files, not just by the hardcoded dir set.
-                    if _ignore_resolver.is_ignored(file_path, is_dir=False):
-                        continue
-
-                # Apply default excludes (aligns with subprocess behavior)
-                if any(fnmatch.fnmatch(file_path.name, pat) for pat in _PY_DEFAULT_EXCLUDES):
-                    continue
-
-                # Apply exclude pattern. Align with grep/rg semantics:
-                # - If pattern has no path separator → match only against basename
-                #   (e.g., "test*" excludes "test.py" but NOT "tests/main.py")
-                # - If pattern has separators → match against full relative path
-                # BUG_0056: support comma-separated excludes — check each pattern.
-                if exclude:
-                    try:
-                        rel = file_path.relative_to(resolved)
-                        rel_str = str(rel).replace('\\', '/')
-                        should_exclude = False
-
-                        for _exc in exclude.split(','):
-                            _exc = _exc.strip()
-                            if not _exc:
-                                continue
-                            if '/' not in _exc and '\\' not in _exc:
-                                # No separator: match only basename (like grep --exclude)
-                                if fnmatch.fnmatch(file_path.name, _exc):
-                                    should_exclude = True
-                                    break
-                            else:
-                                # Has separator: match against full relative path
-                                if fnmatch.fnmatch(rel_str, _exc):
-                                    should_exclude = True
-                                    break
-
-                        if should_exclude:
-                            continue
-                    except ValueError:
-                        # If we can't compute a relative path and exclude is set, skip the file.
-                        # Conservative: better to miss a match than process files outside scope.
-                        continue
-
-                # File reading and pattern matching — OUTSIDE the exclude block so it runs regardless
+                # File reading and pattern matching
                 if _large_max_bytes:
                     try:
                         _size = file_path.stat().st_size
@@ -1834,15 +1749,11 @@ class GrepMixin:
                     if _size > _large_max_bytes:
                         # BUG_0169: skip the full read; scan only the header.
                         _large_skipped += 1
-                        try:
-                            _rel_large = str(file_path.relative_to(resolved)).replace('\\', '/')
-                        except ValueError:
-                            _rel_large = file_path.name
                         if len(_large_skipped_paths) < 11:
-                            _large_skipped_paths.append(_rel_large)
+                            _large_skipped_paths.append(rel_str)
                         if _large_scanned < _scan_limit:
                             _large_scanned += 1
-                            _head_hits = self._head_scan_matches(file_path, _rel_large,
+                            _head_hits = self._head_scan_matches(file_path, rel_str,
                                                                  pattern_re, _head_bytes)
                             if _head_hits:
                                 results.extend(_head_hits)
@@ -1856,14 +1767,6 @@ class GrepMixin:
                     lines = content.split('\n')
 
                     if context > 0:
-                        try:
-                            normalized_rel_path = str(file_path.relative_to(resolved)).replace('\\', '/')
-                        except ValueError:
-                            try:
-                                normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
-                            except ValueError:
-                                normalized_rel_path = file_path.name
-
                         for line_num, line in enumerate(lines, 1):
                             if pattern_re.search(line):
                                 match_count += 1
@@ -1871,7 +1774,7 @@ class GrepMixin:
                                 end = min(len(lines), line_num + context)
                                 for ctx_line in range(start - 1, end):
                                     marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
-                                    results.append(_format_grep_entry(normalized_rel_path, ctx_line + 1,
+                                    results.append(_format_grep_entry(rel_str, ctx_line + 1,
                                                                       lines[ctx_line], marker))
                                 results.append('---')
                             if len(results) % 200 == 0 and time.time() - start_time > timeout:
@@ -1881,19 +1784,10 @@ class GrepMixin:
                                 hit_result_limit = True
                                 break
                     else:
-                        try:
-                            rel_path = file_path.relative_to(resolved)
-                        except ValueError:
-                            try:
-                                rel_path = file_path.relative_to(self.base_dir)
-                            except ValueError:
-                                rel_path = file_path.name
-                        normalized_rel_path = str(rel_path).replace('\\', '/')
-
                         for line_num, line in enumerate(lines, 1):
                             if pattern_re.search(line):
                                 match_count += 1
-                                results.append(f"{normalized_rel_path}:{line_num}: {line}")
+                                results.append(_format_grep_entry(rel_str, line_num, line))
                             if len(results) % 500 == 0 and time.time() - start_time > timeout:
                                 was_timed_out = True
                                 break
@@ -1907,6 +1801,11 @@ class GrepMixin:
                 except Exception as e:
                     logger.debug(f"Error reading file during grep (skipping): {e}")
                     continue
+
+            # The walker self-terminates at `deadline`, so when it stopped early the loop above
+            # exits without seeing another file. Disclose that truncation here.
+            if time.time() - start_time > timeout:
+                was_timed_out = True
 
             if not results and not was_timed_out:
                 logger.debug(
