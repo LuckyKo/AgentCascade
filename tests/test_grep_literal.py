@@ -138,44 +138,6 @@ class TestGrepLiteral:
         argv_false = om._build_rg_argv('test', '*', '', 0, True, literal=False)
         assert '-F' not in argv_false, f"Expected no -F in rg argv when literal=False; got: {argv_false}"
 
-    def test_system_grep_argv_literal_flag(self, tmp_path):
-        """The system-grep branch should emit -F when literal=True and -E when literal=False.
-
-        Mocks _check_tool_availability → (False, True) to select the grep (non-rg)
-        branch, and captures the argv passed to subprocess.run.
-        """
-        from agent_cascade.operation_manager import grep as grep_mod
-        from types import SimpleNamespace
-
-        file = tmp_path / 'target.txt'
-        file.write_text('hello world\n')
-
-        om = _make_om(tmp_path)
-        calls = []
-
-        def _fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            r = SimpleNamespace(returncode=1, stdout='', stderr='')
-            return r
-
-        # literal=True → expect -F, not -E
-        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, True)), \
-             mock.patch('subprocess.run', side_effect=_fake_run):
-            om.grep(pattern='hello', path='.', literal=True)
-        # Filter to the system-grep call (argv[0] == 'grep') to avoid coupling to call order
-        grep_cmd = next(c for c in calls if c[0] == 'grep')
-        assert '-F' in grep_cmd, f"Expected -F in system grep cmd; got: {grep_cmd}"
-        assert '-E' not in grep_cmd, f"Expected no -E in system grep cmd; got: {grep_cmd}"
-
-        # literal=False → expect -E, not -F
-        calls.clear()
-        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, True)), \
-             mock.patch('subprocess.run', side_effect=_fake_run):
-            om.grep(pattern='hello', path='.', literal=False)
-        grep_cmd = next(c for c in calls if c[0] == 'grep')
-        assert '-E' in grep_cmd, f"Expected -E in system grep cmd; got: {grep_cmd}"
-        assert '-F' not in grep_cmd, f"Expected no -F in system grep cmd; got: {grep_cmd}"
-
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

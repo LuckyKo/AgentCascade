@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Optional
 
 from agent_cascade.tool_utils import truncate_with_spillover, format_truncation_notice
-from agent_cascade.operation_manager.grep_ignore import DEFAULT_IGNORED_DIRS, IgnoreResolver
+from agent_cascade.operation_manager.grep_ignore import IgnoreResolver
 
 # ─── Module-level cached helpers ──────────────────────────────────────────
 
-# Default file excludes shared by every grep path (the fallback walker, the over-cap scan
-# and the GNU-grep argv). BUG_0221: one literal instead of three copies that could drift.
+# Default file excludes shared by every grep path (the fallback walker and the over-cap
+# scan). BUG_0221: one literal instead of three copies that could drift.
 _DEFAULT_EXCLUDES = frozenset({
     '*.pyc',
     '*.so',
@@ -88,7 +88,7 @@ def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str =
     trivially stripped, and the always-present ``<path>:<line>: `` prefix tells the reader
     exactly where the content begins.
 
-    Every render path (rg --json, GNU grep, Python fallback, single-file) MUST go through
+    Every render path (rg --json, Python fallback, single-file) MUST go through
     here so their byte-level output cannot drift apart.
     """
     return f"{rel_path}:{line_num}: {marker}{content}"
@@ -332,20 +332,17 @@ def _incomplete_note(skipped_count: int, skipped_paths: list, max_mb: int, tail:
 
 @lru_cache(maxsize=1)
 def _check_tool_availability():
-    """Check if ripgrep or system grep are available at runtime.
+    """Check whether ripgrep is available at runtime.
 
-    Returns a tuple of (rg_available, grep_available).
+    Returns a 2-tuple ``(rg_available, grep_available)``. ``grep_available`` is retained
+    only so the many existing patch sites keep their shape; BUG_0221 removed the GNU-grep
+    branch, so it is always False and no path reads it.
+
     Uses lru_cache for performance — tool availability doesn't change during execution.
     """
-    import os
     import shutil
-    rg_path = shutil.which('rg')
-    grep_path = shutil.which('grep')
 
-    rg_available = rg_path is not None
-    grep_available = (grep_path is not None) and (os.name != 'nt')
-
-    return rg_available, grep_available
+    return shutil.which('rg') is not None, False
 
 
 def _has_inline_case_flag(pattern: str) -> bool:
@@ -399,17 +396,6 @@ def _grep_large_file_limits() -> tuple:
 
 class GrepMixin:
     """Grep/search methods. Expects self to have __init__-set attributes including class-level exclude constants."""
-
-    # Default exclude patterns for standard grep (basename matching). Derived from the one
-    # shared literal; sorted so the GNU argv stays deterministic.
-    _GREP_DEFAULT_EXCLUDES = sorted(_DEFAULT_EXCLUDES)
-
-    # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems).
-    # BUG_0062: widened to the shared union so this path, the Python fallback, and the
-    # rg fast path stop carrying three different dir lists. GNU grep cannot read ignore
-    # files at all, so this stays an honest approximation — a documented, POSIX-only
-    # residual divergence, not an oversight.
-    _GREP_DEFAULT_EXCLUDE_DIRS = sorted(DEFAULT_IGNORED_DIRS)
 
     @staticmethod
     def _sanitize_glob_pattern(pattern: str, *, allow_traversal: bool = False) -> str:
@@ -842,7 +828,7 @@ class GrepMixin:
                              smart_case: bool = True,
                              literal: bool = False,
                              spill_file_path: Optional[str] = None):
-        """Fast-path grep using system ripgrep or grep via subprocess.
+        """Fast-path grep using ripgrep via subprocess (the only supported engine).
 
         Returns (results_list, count, was_timed_out, was_truncated, original_output_size,
                  spillover_rel_path, total_lines_before, shown_lines_after) on success, or
@@ -853,67 +839,31 @@ class GrepMixin:
 
         from agent_cascade.log import logger
 
-        _rg_available, _grep_available = _check_tool_availability()
+        # BUG_0221: ripgrep is the only subprocess engine (the GNU-grep branch was deleted).
+        _rg_available, _ = _check_tool_availability()
 
-        if not _rg_available and not _grep_available:
-            logger.debug('grep: subprocess fast path unavailable (rg=%s, grep=%s), falling back to Python',
-                         _rg_available, _grep_available)
+        if not _rg_available:
+            logger.debug('grep: subprocess fast path unavailable (rg=%s), falling back to Python',
+                         _rg_available)
             return None, 0, False, False, 0, None, 0, 0
 
         try:
-            if _rg_available:
-                is_vcs_search = not ignore_vcs
-                # WHY these two flags: ignore_vcs=False means "search everything" (per
-                # dna.py contract), including .git. --no-ignore disables rg's built-in
-                # ignores; combined with --hidden this lets rg descend into .git, matching the
-                # Python fallback which does not prune skip_dirs when ignore_vcs=False.
-                # Conversely ignore_vcs=True must KEEP .git excluded (see the builder's
-                # exclude_git note), so the two knobs are complementary here. The probe
-                # passes force_no_ignore=True, exclude_git=True — both always on.
-                cmd = self._build_rg_argv(pattern,
-                                          include,
-                                          exclude,
-                                          context,
-                                          smart_case,
-                                          force_no_ignore=is_vcs_search,
-                                          exclude_git=not is_vcs_search,
-                                          literal=literal)
-            else:
-                cmd = [
-                    'grep',
-                    '-r',
-                    '-n',
-                    '-F' if literal else '-E',  # -F: fixed-string (literal); -E: extended regex
-                ]
-                # BUG_0056: support comma-separated globs — one --include per pattern.
-                if include and include != '*':
-                    for _g in include.split(','):
-                        _g = _g.strip()
-                        if _g:
-                            cmd.append('--include=' + _g)
-
-                if _smart_case_ignorecase(pattern, smart_case):
-                    cmd.append('-i')
-
-                if context > 0:
-                    cmd.extend(['-C', str(context)])
-
-                # BUG_0056: comma-separated excludes — one --exclude per pattern.
-                if exclude:
-                    for _e in exclude.split(','):
-                        _e = _e.strip()
-                        if _e:
-                            cmd.append('--exclude=' + _e)
-
-                if ignore_vcs:
-                    for _dir in self._GREP_DEFAULT_EXCLUDE_DIRS:
-                        cmd.extend(['--exclude-dir', _dir])
-
-                for _exc in self._GREP_DEFAULT_EXCLUDES:
-                    cmd.append('--exclude=' + _exc)
-
-                cmd.extend(['-e', pattern])
-
+            is_vcs_search = not ignore_vcs
+            # WHY these two flags: ignore_vcs=False means "search everything" (per
+            # dna.py contract), including .git. --no-ignore disables rg's built-in
+            # ignores; combined with --hidden this lets rg descend into .git, matching the
+            # Python fallback which does not prune skip_dirs when ignore_vcs=False.
+            # Conversely ignore_vcs=True must KEEP .git excluded (see the builder's
+            # exclude_git note), so the two knobs are complementary here. The probe
+            # passes force_no_ignore=True, exclude_git=True — both always on.
+            cmd = self._build_rg_argv(pattern,
+                                      include,
+                                      exclude,
+                                      context,
+                                      smart_case,
+                                      force_no_ignore=is_vcs_search,
+                                      exclude_git=not is_vcs_search,
+                                      literal=literal)
             result = subprocess.run(cmd,
                                     cwd=str(path),
                                     capture_output=True,
@@ -978,71 +928,27 @@ class GrepMixin:
             # error (rc=2 with no parseable matches) is detected inside this block and falls back
             # to Python before reaching the truncation code.
             _rg_partial_error = False
-            if result.returncode == 0 or (result.returncode == 2 and _rg_available):
-                lines = result.stdout.split('\n') if result.stdout.strip() else []
-
+            if result.returncode == 0 or result.returncode == 2:
                 formatted = []
-
-                if _rg_available:
-                    formatted, count = _parse_rg_json(result.stdout)
-                    # rc==2 with NO parseable matches is a genuine error (e.g. invalid regex or an
-                    # unrecognized flag), NOT "matches found but some files skipped". Fall back to
-                    # Python so the real error surfaces (Python raises re.error for bad patterns).
-                    if result.returncode == 2 and count == 0:
-                        stderr_msg = (result.stderr or '').strip()[:500]
-                        # BUG_0169: when --max-filesize filtered out EVERY candidate, rg exits 2
-                        # with "No files were searched" — that is a normal empty result, not a
-                        # usage error. Reporting it as one made grep() fall back to the Python
-                        # scan instead of taking the over-size header path.
-                        if 'No files were searched' in stderr_msg and _grep_large_file_limits()[0] > 0:
-                            return [], 0, False, False, 0, None, 0, 0
-                        logger.warning(
-                            f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
-                        return None, 0, False, False, 0, None, 0, 0
-                    # rc==2 that DID yield matches means some files were skipped (e.g. permission
-                    # denied) — warn once so the partial nature is visible without discarding matches.
-                    if result.returncode == 2 and count > 0:
-                        _rg_partial_error = True
-
-                else:
-                    _match_re = re.compile(r'^(.+?):(\d+):(.*)$')
-                    _ctx_re = re.compile(r'^(.+?)-(\d+)-(.*)$')
-
-                    for line in lines:
-                        if not line:
-                            continue
-                        if line == '---' or line == '--':
-                            formatted.append('---')
-                            continue
-
-                        m = _match_re.match(line)
-                        if m:
-                            raw_path, linenum, content = m.groups()
-                            normalized_path = raw_path.replace('\\', '/')
-                            # BUG_0144: content stays verbatim; only the match marker is added.
-                            if context > 0 and normalized_path.startswith(' '):
-                                normalized_path = normalized_path[1:]
-                                formatted.append(_format_grep_entry(normalized_path, linenum, content))
-                            elif context > 0:
-                                formatted.append(_format_grep_entry(normalized_path, linenum, content,
-                                                                    _GREP_MATCH_MARKER))
-                            else:
-                                formatted.append(_format_grep_entry(normalized_path, linenum, content))
-                        elif context > 0:
-                            c = _ctx_re.match(line)
-                            if c:
-                                ctx_path, ctx_linenum, ctx_content = c.groups()
-                                normalized_ctx_path = ctx_path.replace('\\', '/')
-                                formatted.append(_format_grep_entry(normalized_ctx_path, ctx_linenum, ctx_content))
-                            else:
-                                formatted.append(line)
-                        else:
-                            formatted.append(line)
-
-                    if context > 0:
-                        count = sum(1 for entry in formatted if '>>>' in entry)
-                    else:
-                        count = sum(1 for entry in formatted if entry != '---')
+                formatted, count = _parse_rg_json(result.stdout)
+                # rc==2 with NO parseable matches is a genuine error (e.g. invalid regex or an
+                # unrecognized flag), NOT "matches found but some files skipped". Fall back to
+                # Python so the real error surfaces (Python raises re.error for bad patterns).
+                if result.returncode == 2 and count == 0:
+                    stderr_msg = (result.stderr or '').strip()[:500]
+                    # BUG_0169: when --max-filesize filtered out EVERY candidate, rg exits 2
+                    # with "No files were searched" — that is a normal empty result, not a
+                    # usage error. Reporting it as one made grep() fall back to the Python
+                    # scan instead of taking the over-size header path.
+                    if 'No files were searched' in stderr_msg and _grep_large_file_limits()[0] > 0:
+                        return [], 0, False, False, 0, None, 0, 0
+                    logger.warning(
+                        f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
+                    return None, 0, False, False, 0, None, 0, 0
+                # rc==2 that DID yield matches means some files were skipped (e.g. permission
+                # denied) — warn once so the partial nature is visible without discarding matches.
+                if result.returncode == 2 and count > 0:
+                    _rg_partial_error = True
 
                 _was_truncated = False
                 _original_output_size = 0
@@ -1562,8 +1468,8 @@ class GrepMixin:
              count_only: bool = False) -> str:
         """Search for text pattern in files.
 
-        Uses subprocess-based grep (ripgrep or system grep) as a fast path,
-        falling back to pure Python if the subprocess approach fails/times out.
+        Uses ripgrep via subprocess as a fast path, falling back to pure Python if the
+        subprocess approach fails/times out. ripgrep is a hard dependency (BUG_0221).
         """
 
         try:
@@ -1628,7 +1534,7 @@ class GrepMixin:
                                              agent_name,
                                              searched_note)
 
-            # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
+            # ── Fast path: try subprocess-based ripgrep ──
             (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,
              _sub_shown_lines) = self._try_subprocess_grep(
                   pattern=pattern,
@@ -1687,7 +1593,7 @@ class GrepMixin:
                     if survivors:
                         # BUG_0202 (F3): route the recovered body through the shared render rule
                         # (_format_grep_entry / _grep_body_with_legend) so it cannot drift from
-                        # the rg/GNU/Python paths, and cap it with truncate_with_spillover. The
+                        # the rg/Python paths, and cap it with truncate_with_spillover. The
                         # probe yields match events only (no context lines), so context is
                         # dropped here — disclose it rather than silently discarding it.
                         _body_lines = [_format_grep_entry(rel, ln, text)
