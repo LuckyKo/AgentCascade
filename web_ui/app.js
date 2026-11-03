@@ -255,6 +255,14 @@ const POOL_SETTINGS_MAP = [
     transform: (v) => Array.isArray(v) ? v.join('\n') : (v ?? '') },
   { id: '#workAccessFoldersRO', prop: 'value', key: 'work_access_folders_ro',
     transform: (v) => Array.isArray(v) ? v.join('\n') : (v ?? '') },
+  // Same hydration-gap family as work folders (diagnose-settings-control-resets-on-refresh):
+  // server-backed, broadcast in the pool_settings snapshot, but previously absent from this
+  // map, so these controls fell back to their HTML defaults (3 / checked / 2) on refresh.
+  // All scalar — no transform needed. max_parallel_agents is the broadcast alias of
+  // max_workers (registry §alias); auto_continue and max_images_for_llm are plain pool keys.
+  { id: '#setting-max-parallel', prop: 'value', key: 'max_parallel_agents' },
+  { id: '#setting-auto-continue', prop: 'checked', key: 'auto_continue' },
+  { id: '#setting-max-images-for-llm', prop: 'value', key: 'max_images_for_llm' },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────

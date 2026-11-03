@@ -116,6 +116,35 @@ test('POOL_SETTINGS_MAP wires both work-folder keys (source-level)', () => {
     "#workAccessFoldersRW DOM id missing from POOL_SETTINGS_MAP");
   assert.ok(MAP_SRC.includes("#workAccessFoldersRO"),
     "#workAccessFoldersRO DOM id missing from POOL_SETTINGS_MAP");
+  // Same family: scalar server-backed keys that were also absent from the map and
+  // silently fell back to their HTML defaults (3 / checked / 2) on refresh.
+  assert.ok(MAP_SRC.includes("key: 'max_parallel_agents'"),
+    "max_parallel_agents missing from POOL_SETTINGS_MAP (hydration seam)");
+  assert.ok(MAP_SRC.includes("key: 'auto_continue'"),
+    "auto_continue missing from POOL_SETTINGS_MAP (hydration seam)");
+  assert.ok(MAP_SRC.includes("key: 'max_images_for_llm'"),
+    "max_images_for_llm missing from POOL_SETTINGS_MAP (hydration seam)");
+});
+
+test('syncPoolSettings hydrates the scalar pool keys (max_parallel_agents / auto_continue / max_images_for_llm)', () => {
+  const dom = makeDom(['#setting-max-parallel', '#setting-auto-continue', '#setting-max-images-for-llm']);
+  const ctx = buildSandbox(dom);
+
+  // Pre-seed the controls with stale (HTML-default) values, then hydrate from the snapshot.
+  dom.elements['#setting-max-parallel'].value = '3';
+  dom.elements['#setting-auto-continue'].checked = true;
+  dom.elements['#setting-max-images-for-llm'].value = '2';
+
+  const snapshot = { max_parallel_agents: 5, auto_continue: false, max_images_for_llm: 7 };
+  ctx.snapshot = snapshot;
+  vm.runInContext('syncPoolSettings(snapshot)', ctx);
+
+  assert.equal(String(dom.elements['#setting-max-parallel'].value), '5',
+    'max_parallel_agents was not hydrated from the snapshot');
+  assert.equal(dom.elements['#setting-auto-continue'].checked, false,
+    'auto_continue was not hydrated from the snapshot');
+  assert.equal(String(dom.elements['#setting-max-images-for-llm'].value), '7',
+    'max_images_for_llm was not hydrated from the snapshot');
 });
 
 test('syncPoolSettings hydrates work-folder textareas from the server snapshot', () => {
