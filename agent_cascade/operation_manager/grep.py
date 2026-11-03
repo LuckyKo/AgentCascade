@@ -673,7 +673,6 @@ class GrepMixin:
                                path: Path,
                                include: str,
                                exclude: str,
-                               context: int,
                                smart_case: bool,
                                timeout: float,
                                literal: bool = False) -> tuple:
@@ -719,10 +718,13 @@ class GrepMixin:
         # '--glob !.git/' (exclude_git always True) — without that, `--hidden --no-ignore`
         # descends into .git/ internals and the probe becomes enormous and irrelevant.
         # Everything else comes from the shared builder so it cannot drift from the fast path.
+        # BUG_0221: context=0 — the probe parses match events only (_iter_rg_json_matches
+        # discards every context event), so asking rg for -C context was pure wasted work.
+        # The line-mode disclosure that context lines are unavailable stays in the caller.
         cmd = self._build_rg_argv(pattern,
                                   include,
                                   exclude,
-                                  context,
+                                  0,
                                   smart_case,
                                   force_no_ignore=True,
                                   exclude_git=True,
@@ -763,7 +765,6 @@ class GrepMixin:
                                  resolved: Path,
                                  include: str,
                                  exclude: str,
-                                 context: int,
                                  smart_case: bool,
                                  literal: bool,
                                  timeout: float,
@@ -789,7 +790,7 @@ class GrepMixin:
         if not ignore_vcs:
             return [], 0, False
         probe, probe_rc = self._probe_ignored_matches(
-            pattern, resolved, include, exclude, context, smart_case, timeout, literal)
+            pattern, resolved, include, exclude, smart_case, timeout, literal)
         if probe is None:  # probe failed / no records (rc None) — nothing to recover, not partial
             return [], 0, False
         if not probe:  # probe ran (rc 0/1) but found nothing; rc==2 is a partial result
@@ -1331,7 +1332,7 @@ class GrepMixin:
             # resolver filter (tracked or not-ignored), render them as a real count result
             # instead of a bare zero — a tracked file is a real match, not an absence.
             survivors, probe_total, probe_partial = self._recover_ignored_matches(
-                pattern, resolved, include, exclude, 0, smart_case, literal, timeout, ignore_vcs)
+                pattern, resolved, include, exclude, smart_case, literal, timeout, ignore_vcs)
             if survivors:
                 per_file = {}
                 for rel, _ln, _text in survivors:
@@ -1646,7 +1647,7 @@ class GrepMixin:
                     # append the F4 advisory (states what was consulted, never asserting git
                     # status). The probe is gated on ignore_vcs inside _recover_ignored_matches.
                     survivors, probe_total, probe_partial = self._recover_ignored_matches(
-                        pattern, resolved, include, exclude, context, smart_case,
+                        pattern, resolved, include, exclude, smart_case,
                         literal, timeout, ignore_vcs)
                     if survivors:
                         # BUG_0202 (F3): route the recovered body through the shared render rule

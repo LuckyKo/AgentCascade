@@ -973,12 +973,12 @@ def test_probe_cmd_forces_no_ignore_and_keeps_git_excluded():
                                           path=Path('.'),
                                           include='*.py',
                                           exclude='build',
-                                          context=2,
                                           smart_case=True,
                                           timeout=5.0)
 
     cmd = captured['cmd']
     assert cmd[0] == 'rg', f'expected rg branch; got: {cmd}'
+    assert '-C' not in cmd, f'BUG_0221: the probe must not request context; cmd={cmd}'
     assert cmd.count('--no-ignore') == 1, f'--no-ignore must appear exactly once; cmd={cmd}'
     assert '--glob' in cmd and '!.git/' in cmd, \
         f"probe must KEEP the '.git/' exclusion (or --no-ignore + --hidden descends into .git); cmd={cmd}"
@@ -1037,7 +1037,7 @@ def test_fastpath_and_probe_argv_relationship_is_exact():
         assert len(captured) == 1, f'fast path must run rg exactly once; got {len(captured)}'
         return captured[0]
 
-    def _probe_argv(include, exclude, context, pattern):
+    def _probe_argv(include, exclude, pattern):
         from agent_cascade.operation_manager import grep as grep_module
         captured.clear()
         with _mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
@@ -1046,7 +1046,6 @@ def test_fastpath_and_probe_argv_relationship_is_exact():
                                         path=_pl.Path('.'),
                                         include=include,
                                         exclude=exclude,
-                                        context=context,
                                         smart_case=True,
                                         timeout=5.0)
         assert len(captured) == 1, f'probe must run rg exactly once; got {len(captured)}'
@@ -1055,8 +1054,10 @@ def test_fastpath_and_probe_argv_relationship_is_exact():
     checked = 0
     for include, exclude, context, pattern in itertools.product(
             ('', '*', '*.py', '*.py, *.js'), ('', 'build', 'a,b'), (0, 2), ('needle', 'Needle')):
-        probe = _probe_argv(include, exclude, context, pattern)
-        main_vcs = _main_argv(False, include, exclude, context, pattern)
+        probe = _probe_argv(include, exclude, pattern)
+        # BUG_0221: the probe always runs context=0, so its argv is the fast path's
+        # ignore_vcs=False argv for context 0 regardless of the caller's context.
+        main_vcs = _main_argv(False, include, exclude, 0, pattern)
         # Splice rather than insert(): a user '--glob' may already be present, so index-based
         # insertion can match the wrong occurrence.
         at = main_vcs.index('-e')
@@ -1076,9 +1077,9 @@ def test_fastpath_and_probe_argv_relationship_is_exact():
     # list is edited at all.
     base = ['rg', '--no-heading', '-n', '--json', '--color', 'never', '--no-mmap',
             '--hidden', '--text', '--max-filesize=100M']
-    assert _probe_argv('', '', 0, 'needle') == base + ['--no-ignore', '-i', '--glob', '!.git/',
-                                                        '-e', 'needle'], \
-        f'shared base argv drifted from the pinned literal; got: {_probe_argv('', '', 0, 'needle')}'
+    assert _probe_argv('', '', 'needle') == base + ['--no-ignore', '-i', '--glob', '!.git/',
+                                                    '-e', 'needle'], \
+        f'shared base argv drifted from the pinned literal; got: {_probe_argv('', '', 'needle')}'
     assert _main_argv(True, '', '', 0, 'needle') == base + ['-i', '--glob', '!.git/', '-e', 'needle'], \
         f'shared base argv drifted from the pinned literal; got: {_main_argv(True, '', '', 0, 'needle')}'
 
@@ -1182,7 +1183,7 @@ def test_probe_failure_is_silent():
             with mock.patch('subprocess.run', side_effect=exc):
                 assert GrepMixin()._probe_ignored_matches(
                     pattern='x', path=Path(root), include='*', exclude='',
-                    context=0, smart_case=True, timeout=5.0) == (None, None), \
+                    smart_case=True, timeout=5.0) == (None, None), \
                     f'probe must return (None, None) (not raise) for {exc!r}'
 
         print('  probe failure swallowed at every layer; zero-match result unchanged')
