@@ -52,7 +52,7 @@ Why wrong? → approval registered with static template name, not runtime instan
 
 **3 — Hypothesis + single-variable test.** Write ONE concrete hypothesis ("bug at file.py:LINE because VALUE_X should be Y but is Z"). Smallest test that distinguishes it from alternatives. Change one variable, run, observe. Confirmed → Phase 4; not confirmed → back to Phase 2 (do NOT add a second change). Anti-pattern: fix yield + force-release fallback + logging all at once — if it works you can't tell which fixed it.
 
-**4 — Fix & verify.** Regression test FIRST (the repro, now asserting correct behavior) → minimal fix → regression passes → full suite no regressions → ideally replay the original prod scenario.
+**4 — Fix & verify.** Regression test FIRST (the repro, now asserting correct behavior) → minimal fix → regression passes → scoped affected test files green (full suite only on supervisor instruction / milestone gate; see scoped-tests-default-full-suite-on-instruction) → ideally replay the original prod scenario.
 
 **5 — Post-fix review.** Does the fix address root cause or just this instance? Grep for other sites with the same pattern. Add a memory/lesson (what, why missed, actual root cause). If prior investigation missed it, write a post-mortem on why.
 

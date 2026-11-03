@@ -1,18 +1,19 @@
 ---
-version: 1.0.3
+version: 1.0.4
 name: pytest-ini-addopts-xdist-serial-run
-description: Run a focused pytest file serially (no xdist) in a repo whose pytest.ini pins -n auto via addopts, without triggering unrecognized-arguments or accidentally re-including excluded suites; also covers the missing-plugin CI root cause, capping -n in containers, and why a marker filter cannot suppress a collection-time ImportError.
+description: "Run a focused pytest file serially (no xdist) in a repo whose pytest.ini pins -n auto via addopts, without triggering unrecognized-arguments or accidentally re-including excluded suites; also covers the missing-plugin CI root cause, capping -n in containers, why a marker filter cannot suppress a collection-time ImportError, and the xdist worker-crash 'no tests ran' signature."
 triggers:
-  - pytest
-  - pytest.ini
-  - addopts
-  - xdist
-  - pytest-xdist
-  - -n auto
-  - unrecognized arguments
-  - collection error
-  - CI test selection
-  - conftest.py
+  - "pytest"
+  - "pytest.ini"
+  - "addopts"
+  - "xdist"
+  - "pytest-xdist"
+  - "-n auto"
+  - "unrecognized arguments"
+  - "collection error"
+  - "CI test selection"
+  - "conftest.py"
+  - "no tests ran"
 ---
 
 # Running focused / CI pytest in a repo with pinned xdist addopts
@@ -54,6 +55,15 @@ whole run abort", run `--collect-only -q` first and read the `ERROR collecting <
 `unrecognized arguments: -n --timeout=60`. The dev machine works only because those plugins happen
 to be installed globally. This is a **packaging gap**, not a code bug.
 
+**Fifth trap — an xdist worker dies at import/setup time and the run reports "no tests ran".**
+With `-n auto`, a shared `conftest.py` that imports a heavy or broken dependency (observed: an
+`openai`/`pydantic` version clash) can kill each worker during startup. The output is a crash
+notice plus **`no tests ran`** — no `ERROR collecting` line, no traceback pointing at your files,
+and no failure count. It is indistinguishable from "the selection matched nothing", so a baseline
+run silently produces no baseline. Serial execution removes it (the import happens in one process);
+if you must stay parallel, reproduce with `-n 1` first to confirm the crash is worker-related
+before blaming the tests.
+
 ## Procedure
 
 ### Step 1 — Read the addopts line and copy the marker filter verbatim
@@ -79,7 +89,7 @@ almost certainly mean you dropped part of the filter.
 
 ### Step 3 — Verify it is actually serial AND that exclusions held
 
-Confirm a final line like `N passed in Xs` with an item count. A quick sanity check:
+Confirm a final line like `N passed in Xs` with a **non-zero** item count. A quick sanity check:
 `python -m pytest <file> --collect-only -q` should show `no tests collected (N deselected)` for a
 file entirely excluded by markers.
 
@@ -105,10 +115,15 @@ file entirely excluded by markers.
 
 ## Tips
 
-- **Distinguish three failure signatures — different fixes.** `unrecognized arguments: -n` =
+- **Distinguish four failure signatures — different fixes.** `unrecognized arguments: -n` =
   missing xdist/timeout plugin (add to manifest); `can't start new thread` or an OpenBLAS
-  `pthread_create` abort = thread/worker limit (cap `-n`, set thread env vars); `ModuleNotFoundError:
-  <app dep>` = missing runtime dep (install requirements). Don't treat them as one problem.
+  `pthread_create` abort = thread/worker limit (cap `-n`, set thread env vars);
+  `ModuleNotFoundError: <app dep>` = missing runtime dep (install requirements);
+  `no tests ran` after a worker crash = a shared-conftest import dying inside a worker (run
+  serially, or `-n 1` to confirm). Don't treat them as one problem.
+- **A zero-test run is a failure, not a result.** Before using any run as a baseline, read the
+  passed count. `no tests ran`, `Interrupted: 1 error during collection`, and `1 passed` when you
+  expected 84 are all the same class of error: the harness told you nothing about the code.
 - **A/B toggle one variable at a time when measuring.** To learn what a plugin actually affects,
   `pip uninstall` it, re-measure, reinstall, re-measure — inside the same environment. A
   before/after delta taken across an environment change (e.g. installing requirements between the
@@ -118,3 +133,13 @@ file entirely excluded by markers.
   plugins against the CI manifest — the gap is almost always there.
 - On Windows hosts there is no grep or tail; pipe through
   `python -c "import sys; [print(l) for l in sys.stdin if 'PASSED' in l]"` to filter verbose output.
+
+## Anti-patterns
+
+| Pattern | Why it fails |
+|---|---|
+| `-p no:xdist` or `-n 0` to get a serial run in a repo pinning `-n auto` | The token lives in addopts; you get `unrecognized arguments` |
+| `-o addopts=""` with no marker filter | Wipes the exclusion filter; excluded suites run and a known-excluded failure reads as a regression |
+| Trusting a run that printed `no tests ran` as a green baseline | A worker died at import time; nothing about the code was observed |
+| Chasing a marker to hide a broken import | Markers deselect after collection; the import already aborted the run |
+| Capping `-n` on a healthy CI runner | Halves parallelism for a problem that is not thread exhaustion |

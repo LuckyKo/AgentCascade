@@ -48,8 +48,8 @@ Identify the ONE thing that differs between your working mental model and the tr
 ### Step 5 — Recompute EVERY over-specific assertion, not just the failing one
 Loop tests often have hand-counted assertions (conversation length, call counts, warning counts). With the corrected stub, recompute each and check it matches the trace. A test that "passes" may be passing by luck of a miscount that happens to cancel out — verify against the actual message layout, not the comment's arithmetic.
 
-### Step 6 — Fix the fixture/assertions (NOT production), then run the whole class + full suite
-Apply minimal edits with comments explaining the real layout so the next person doesn't re-derive it. Run the failing class first (`-n 0`), then the full required suite. Confirm green on host shell.
+### Step 6 — Fix the fixture/assertions (NOT production), then run the whole class (full suite only on supervisor instruction; see scoped-tests-default-full-suite-on-instruction)
+Apply minimal edits with comments explaining the real layout so the next person doesn't re-derive it. Run the failing class (use the normal xdist invocation; `-n 0` only for flake isolation). Confirm green on host shell; the full suite is a milestone gate.
 
 ## Tips
 - The "got X expected Y" value pair is a CLUE about WHERE in the loop the state diverged — trace backward from that value to the exact iteration/message, not forward through the whole run.

@@ -55,7 +55,7 @@ A failing ASSERTION (not a crash) at the RIGHT line is the proof. If it still pa
 ### Step 4 — Revert completely and verify with git
 Revert BOTH the mutation and any helper (guard/import). Then:
 - `git diff <file>` must be EMPTY (a whitespace-only CRLF warning on Windows does not count as a diff).
-- Re-run the full suite to confirm green (the FIXED code).
+- Re-run the affected test files to confirm green (the FIXED code); full suite only on supervisor instruction (see scoped-tests-default-full-suite-on-instruction).
 If the edit tool refuses the revert, restore from its auto-backup path shown in the edit/reject response.
 
 ## Tips / gotchas

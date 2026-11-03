@@ -77,7 +77,7 @@ A plan saying "don't refactor the serializer" is usually about the **write** pat
 4. **Frontend: markup + renderer + wiring.** Unique `tbody` id, sensible empty-state row (`colspan` = column count), a renderer that guards `if (!rows || rows.length === 0)` and null-safes optional numerics. Wire into the EXISTING fetch handler — do not add a second fetch.
 5. **Settings pipeline: edit all six seams with IDENTICAL names.** After editing, grep each extension for the NEW key (should appear in every seam) AND the OLD key on renames (should be zero). Generic-app stacks use the FOUR-seam variant above instead.
 6. **Verify helpers exist before using them.** Grep the frontend for existing formatters/class helpers; reuse, don't reinvent.
-7. **Tests + full suite.** One test per new getter (happy + empty/null edge). For a "top-N by score" cap: assert exactly N of N+1 survive with the last excluded. Run the targeted file first, then the full suite.
+7. **Tests.** One test per new getter (happy + empty/null edge). For a "top-N by score" cap: assert exactly N of N+1 survive with the last excluded. Run the targeted file; the full suite is a milestone gate — only on supervisor instruction (see scoped-tests-default-full-suite-on-instruction).
 
 ## Byte-identical-UI constraint (generic-app stacks only)
 

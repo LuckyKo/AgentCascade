@@ -50,7 +50,7 @@ os.replace(str(tmp_out), str(target))
 # a copy (not move) leaves src behind — best-effort cleanup after
 ```
 
-### Step 6 — Verify the full suite, not just the failing class
+### Step 6 — Verify the whole affected test set, not just the failing class (full suite only on supervisor instruction; see scoped-tests-default-full-suite-on-instruction)
 Run the whole affected test set; a fix that clears the target class can regress sibling tests that relied on the old shared-key behavior.
 
 ## Tips

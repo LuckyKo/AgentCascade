@@ -40,5 +40,5 @@ If eviction is gated on a PROTECTED/fair-window check that depends on an activit
 ## Tips
 - "got 0 expected N" usually means a filter/cap excluded everything — find which one (PROTECTED? safety cap? threshold math?) by reading the code, not by re-running.
 - A self-contradictory comment in a failing test (e.g. "30 - 30 = 10") is a strong signal the whole fixture was written for old semantics — rewrite it, don't patch one assert.
-- After fixing, run the FULL suite serially (`-n0`) to catch sibling tests that shared the same stale assumption.
+- After fixing, run the sibling test files that share the old assumption (find them by grepping the changed symbol); full suite only on supervisor instruction (see scoped-tests-default-full-suite-on-instruction).
 - Save the non-obvious formula facts (threshold-as-target, OR-condition qualification, safety-cap default) as a project memory so the next phase doesn't re-derive them.

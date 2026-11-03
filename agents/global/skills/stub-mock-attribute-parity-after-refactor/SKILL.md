@@ -73,7 +73,7 @@ else:
 
 ### Step 4 — Verify both directions
 - Run the affected test file(s) post-change: closed-stub updates must pass; open-mock traps must no longer route into the wrong branch (assert on a call-count or log line, not just "no exception").
-- Re-run the full suite if the changed surface is widely shadowed (grep hit count > 5 files).
+- Re-run the files that shadow the changed surface (grep for the changed names; hit count > 5 files = wide); full suite only on supervisor instruction (see scoped-tests-default-full-suite-on-instruction).
 
 ## Tips
 - **Closed stubs fail loud, open mocks fail silent.** A new AttributeError in tests after a refactor = closed stub missing the member (easy fix). A test that passes but production misbehaves = MagicMock no-op or truthy auto-attribute (harder — instrument with call counts).

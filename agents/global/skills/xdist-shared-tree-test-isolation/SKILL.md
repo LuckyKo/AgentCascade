@@ -63,7 +63,7 @@ A single green run does NOT prove a race is gone. Run the affected file **N time
 ```bash
 # Windows cmd (NOT bash `for i in`):
 cd <repo> && for /L %i in (1,1,5) do @echo === RUN %i === & python -m pytest tests/test_skill_generation.py -n auto -q
-# Then the full suite to catch cross-file effects on any remaining shared tree:
+# Then (full suite only on supervisor instruction; see scoped-tests-default-full-suite-on-instruction) to catch cross-file effects on any remaining shared tree:
 python -m pytest tests/ -n auto -q
 ```
 Also keep a serial baseline (`-n 0`) for a deterministic signal. Note: `pytest.ini` may hard-code `-n auto` in `addopts` — see [[pytest-ini-addopts-xdist-serial-run]] for forcing a true serial run if needed (a plain `-n 0` on the CLI does override it).
