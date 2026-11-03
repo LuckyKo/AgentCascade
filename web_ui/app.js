@@ -246,6 +246,15 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction' },
   // Image caption mode (auto/always/off) — stored under the underscore key written by saveSettings()/getGenerateCfg()
   { id: '#setting-image-caption-mode', prop: 'value', key: 'image_caption_mode' },
+  // Work folders (server-backed, Batch A round-trip incl. empty-list clear): the server
+  // snapshot carries them as newline-free arrays; the textareas render them joined by
+  // newlines. They were previously absent from this map, so syncPoolSettings() never
+  // hydrated the textareas from the authoritative snapshot and the saved folders "reset"
+  // to the empty HTML default on every page refresh.
+  { id: '#workAccessFoldersRW', prop: 'value', key: 'work_access_folders_rw',
+    transform: (v) => Array.isArray(v) ? v.join('\n') : (v ?? '') },
+  { id: '#workAccessFoldersRO', prop: 'value', key: 'work_access_folders_ro',
+    transform: (v) => Array.isArray(v) ? v.join('\n') : (v ?? '') },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
@@ -374,8 +383,13 @@ function revertControl(key) {
   const el = $(entry.id);
   if (!el) return;
   const v = serverSettingsSnapshot[key];
-  if (entry.prop === 'checked') el.checked = !!v;
-  else el.value = (v === undefined || v === null) ? '' : String(v);
+  if (entry.prop === 'checked') el.checked = entry.transform ? !!entry.transform(v) : !!v;
+  else {
+    // Apply the map's transform for collection-valued keys (e.g. work folders are
+    // newline-free arrays in the snapshot, rendered as a newline-joined string);
+    // scalar keys keep the historical String() coercion.
+    el.value = (v === undefined || v === null) ? '' : (entry.transform ? entry.transform(v) : String(v));
+  }
   if (typeof showInSystemToastBar === 'function') showInSystemToastBar(`↩ ${key} reverted to server value`);
 }
 
@@ -1267,8 +1281,7 @@ function saveSettings(sendToServer) {
   if (settingMaxImagesForLlm) s['max_images_for_llm'] = parseInt(settingMaxImagesForLlm.value) || 2;
   if (settingImageCaptionMode) s['image_caption_mode'] = settingImageCaptionMode.value || 'auto';
 
-  if (workAccessFoldersRW) s['work-access-folders-rw'] = workAccessFoldersRW.value;
-  if (workAccessFoldersRO) s['work-access-folders-ro'] = workAccessFoldersRO.value;
+  // Work folders are server-backed (hydrated via POOL_SETTINGS_MAP) — not class-D ui-prefs.
 
   ranges.forEach(r => {
     if (r.input) s[r.input.id] = r.input.value;
