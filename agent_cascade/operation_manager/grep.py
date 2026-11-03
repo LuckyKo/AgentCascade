@@ -568,17 +568,24 @@ class GrepMixin:
                 if pattern_re.search(line)]
 
     def _iter_grep_scope_files(self, root: Path, include: str, exclude: str,
-                               ignore_vcs: bool, deadline: float):
+                               ignore_vcs: bool, deadline: float, resolver=None):
         """Yield ``(path, rel_path)`` for files matching grep's include/exclude/ignore rules.
 
         Mirrors the Python fallback's filtering (default excludes, basename-vs-path exclude
         semantics, .gitignore handling) so the over-size scan reports the same candidate set
         the streaming search saw. Bounded by ``deadline`` (a ``time.monotonic()`` value) so a
         pathological tree can never add more than the configured budget to a grep.
+
+        ``resolver`` (BUG_0221 #7): an optional shared :class:`IgnoreResolver` so one
+        count-only grep can reuse the same instance (and its cached ``git ls-files`` set)
+        across the fallback walk, the over-cap walk and the ignored-match probe.
         """
         import os
 
-        resolver = IgnoreResolver(root) if ignore_vcs else None
+        if resolver is None and ignore_vcs:
+            resolver = IgnoreResolver(root)
+        elif not ignore_vcs:
+            resolver = None
         includes = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
         excludes = [p.strip() for p in exclude.split(',') if p.strip()] if exclude else []
         default_excludes = _DEFAULT_EXCLUDES
@@ -763,7 +770,8 @@ class GrepMixin:
                                  smart_case: bool,
                                  literal: bool,
                                  timeout: float,
-                                 ignore_vcs: bool) -> tuple:
+                                 ignore_vcs: bool,
+                                 resolver=None) -> tuple:
         """BUG_0202 (F3): shared recovery helper for both zero-match call sites.
 
         Runs the ``--no-ignore`` probe, then filters its records through the resolver (F1+F2):
@@ -790,7 +798,8 @@ class GrepMixin:
             return [], 0, False
         if not probe:  # probe ran (rc 0/1) but found nothing; rc==2 is a partial result
             return [], 0, (probe_rc == 2)
-        resolver = IgnoreResolver(resolved)
+        if resolver is None:
+            resolver = IgnoreResolver(resolved)
         survivors = []
         for rel, ln, text in probe:
             path = resolved / rel
@@ -1088,7 +1097,7 @@ class GrepMixin:
         return None, 0, False, False, 0, None, 0, 0
 
     def _over_cap_rel_paths(self, root: Path, include: str, exclude: str,
-                            ignore_vcs: bool, max_bytes: int, deadline: float):
+                            ignore_vcs: bool, max_bytes: int, deadline: float, resolver=None):
         """BUG_0190/BUG_0202: ``(count, rel_paths, truncated)`` for in-scope files over the cap.
 
         Reuses :func:`_iter_grep_scope_files` (the same include/exclude/ignore filtering the rg
@@ -1099,7 +1108,8 @@ class GrepMixin:
         """
         paths: list = []
         count = 0
-        for fp, rel_str in self._iter_grep_scope_files(root, include, exclude, ignore_vcs, deadline):
+        for fp, rel_str in self._iter_grep_scope_files(root, include, exclude, ignore_vcs,
+                                                       deadline, resolver=resolver):
             try:
                 size = fp.stat().st_size
             except OSError:
@@ -1153,6 +1163,10 @@ class GrepMixin:
 
         _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
         max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else 0
+        # BUG_0221 (#7): ONE resolver for this count-only grep. The fallback walk, the over-cap
+        # walk and the ignored-match probe all reuse it, so the repo's `git ls-files -z` index is
+        # queried at most once per grep instead of once per resolver instance.
+        _count_resolver = IgnoreResolver(resolved) if ignore_vcs else None
 
         per_file: dict = {}
         per_pattern: dict = {}
@@ -1228,7 +1242,7 @@ class GrepMixin:
                 if max_bytes:
                     skipped_count, skipped_paths, _over_cap_truncated = self._over_cap_rel_paths(
                         resolved, include, exclude, ignore_vcs, max_bytes,
-                        time.monotonic() + _budget_s)
+                        time.monotonic() + _budget_s, resolver=_count_resolver)
                     # F5 (BUG_0202/RC-B): a truncated over-cap walk means the skip set (and thus
                     # the count) is partial — surface it through its own flag, NOT the caller-
                     # deadline flags (the walk's 0.75 s budget is not the caller's deadline).
@@ -1237,7 +1251,8 @@ class GrepMixin:
             # Python count fallback: walk the same scope, count per file, header-scan over-cap.
             deadline = time.monotonic() + timeout
             scanned = 0
-            for fp, rel_str in self._iter_grep_scope_files(resolved, include, exclude, ignore_vcs, deadline):
+            for fp, rel_str in self._iter_grep_scope_files(resolved, include, exclude, ignore_vcs,
+                                                           deadline, resolver=_count_resolver):
                 try:
                     size = fp.stat().st_size
                 except OSError:
@@ -1273,7 +1288,7 @@ class GrepMixin:
             alts, partial_error, rg_path_timed_out, fallback_truncated, over_cap_walk_partial,
             skipped_count, skipped_paths, _max_mb,
             ignore_vcs, resolved, include, exclude, smart_case, literal, timeout,
-            over_cap_budget_s=_budget_s)
+            over_cap_budget_s=_budget_s, resolver=_count_resolver)
 
     def _format_count_result(self,
                              pattern: str,
@@ -1297,7 +1312,8 @@ class GrepMixin:
                              literal: bool,
                              timeout: float,
                              *,
-                             over_cap_budget_s: Optional[float] = None) -> str:
+                             over_cap_budget_s: Optional[float] = None,
+                             resolver=None) -> str:
         """BUG_0190: render a count-only result.
 
         Zero matches get a bare line (plus the BUG_0061 hidden-matches probe note and the
@@ -1327,7 +1343,8 @@ class GrepMixin:
             # resolver filter (tracked or not-ignored), render them as a real count result
             # instead of a bare zero — a tracked file is a real match, not an absence.
             survivors, probe_total, probe_partial = self._recover_ignored_matches(
-                pattern, resolved, include, exclude, smart_case, literal, timeout, ignore_vcs)
+                pattern, resolved, include, exclude, smart_case, literal, timeout, ignore_vcs,
+                resolver=resolver)
             if survivors:
                 per_file = {}
                 for rel, _ln, _text in survivors:

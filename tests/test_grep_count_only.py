@@ -313,15 +313,10 @@ class TestCounts:
                 ls_calls.append(cmd)
             return real_run(cmd, *a, **k)
 
-        # Suppress the over-cap DIAGNOSTIC walk so the ONLY resolver that queries the index is the
-        # recovery's (the over-cap walk would add a second resolver instance and obscure the
-        # per-repo keying we are pinning). All files are tiny, so skipping the walk changes
-        # nothing about the result.
-        def _no_over_cap(self, *a, **k):
-            return 0, [], False
-
-        with patch.object(gi_mod.subprocess, 'run', _spy_run), \
-             patch.object(grep_mod.GrepMixin, '_over_cap_rel_paths', _no_over_cap):
+        # BUG_0221 (#7): the over-cap walk and the recovery now share ONE resolver, so this
+        # spies on the real path with no patch-out. A second resolver would query the index a
+        # second time and fail the exactly-once assertion below.
+        with patch.object(gi_mod.subprocess, 'run', _spy_run):
             out = om.grep('needle', str(repo), count_only=True)
 
         # F2: the whole-repo index is queried EXACTLY ONCE (keyed by repo_root only). A
