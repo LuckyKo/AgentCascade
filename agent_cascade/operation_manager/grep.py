@@ -14,6 +14,16 @@ from agent_cascade.operation_manager.grep_ignore import DEFAULT_IGNORED_DIRS, Ig
 
 # ─── Module-level cached helpers ──────────────────────────────────────────
 
+# Default file excludes shared by every grep path (the fallback walker, the over-cap scan
+# and the GNU-grep argv). BUG_0221: one literal instead of three copies that could drift.
+_DEFAULT_EXCLUDES = frozenset({
+    '*.pyc',
+    '*.so',
+    '*.dll',
+    '*.exe',
+    '*.zip',
+})
+
 
 def _resolve_spill_path(spill_file_path: Optional[str]) -> Optional[Path]:
     """Convert optional string spill path to Path, or None."""
@@ -373,14 +383,9 @@ def _grep_max_file_size_mb() -> int:
 class GrepMixin:
     """Grep/search methods. Expects self to have __init__-set attributes including class-level exclude constants."""
 
-    # Default exclude patterns for standard grep (basename matching)
-    _GREP_DEFAULT_EXCLUDES = [
-        '*.pyc',
-        '*.so',
-        '*.dll',
-        '*.exe',
-        '*.zip',
-    ]
+    # Default exclude patterns for standard grep (basename matching). Derived from the one
+    # shared literal; sorted so the GNU argv stays deterministic.
+    _GREP_DEFAULT_EXCLUDES = sorted(_DEFAULT_EXCLUDES)
 
     # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems).
     # BUG_0062: widened to the shared union so this path, the Python fallback, and the
@@ -581,7 +586,7 @@ class GrepMixin:
         resolver = IgnoreResolver(root) if ignore_vcs else None
         includes = [p.strip() for p in include.split(',') if p.strip()] if include != '*' else []
         excludes = [p.strip() for p in exclude.split(',') if p.strip()] if exclude else []
-        default_excludes = ('*.pyc', '*.so', '*.dll', '*.exe', '*.zip')
+        default_excludes = _DEFAULT_EXCLUDES
 
         for dirpath, dirnames, filenames in os.walk(root):
             if time.monotonic() > deadline:
@@ -1782,7 +1787,7 @@ class GrepMixin:
 
             # Default file excludes for Python fallback — aligns with subprocess behavior.
             # Match against basename only (fnmatch).
-            _PY_DEFAULT_EXCLUDES = {'*.pyc', '*.so', '*.dll', '*.exe', '*.zip'}
+            _PY_DEFAULT_EXCLUDES = _DEFAULT_EXCLUDES
 
             # BUG_0169: the fallback must not read a multi-GB artifact into memory either.
             # Over-size files get the same bounded header scan the ripgrep path uses.
