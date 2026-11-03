@@ -372,11 +372,6 @@ def _grep_large_file_limits() -> tuple:
         return 100, 64 * 1024, 50, 0.75
 
 
-def _grep_max_file_size_mb() -> int:
-    """The streaming cap in MB (0 disables it)."""
-    return _grep_large_file_limits()[0]
-
-
 # ─── Mixin: Grep methods for OperationManager ─────────────────────────────
 
 
@@ -506,7 +501,7 @@ class GrepMixin:
         # BUG_0169: `--text` on a multi-GB model artifact streams the whole file. Skip files
         # above the cap during the streaming search; grep() then scans only their headers and
         # reports the partial coverage instead of timing out with misleading advice.
-        _max_file_mb = _grep_max_file_size_mb()
+        _max_file_mb = _grep_large_file_limits()[0]
         if _max_file_mb > 0:
             cmd.append(f'--max-filesize={_max_file_mb}M')
 
@@ -968,7 +963,7 @@ class GrepMixin:
                         # with "No files were searched" — that is a normal empty result, not a
                         # usage error. Reporting it as one made grep() fall back to the Python
                         # scan instead of taking the over-size header path.
-                        if 'No files were searched' in stderr_msg and _grep_max_file_size_mb() > 0:
+                        if 'No files were searched' in stderr_msg and _grep_large_file_limits()[0] > 0:
                             return [], 0, False, False, 0, None, 0, 0
                         logger.warning(
                             f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
