@@ -913,14 +913,15 @@ def test_gitignored_only_match_gets_note():
             f'witness: probe must run exactly once on zero-match + ignore_vcs=True; ' \
             f'call_count={spy.call_count}; output: {tool_output[:300]}'
         # The note text itself is the observable side effect: it must report the hidden count.
-        assert '[note: 1 match(es) exist in gitignored path(s)' in tool_output, \
+        # BUG_0202 (F4): the advisory now names the consulted rules, never asserting git status.
+        assert '[note: 1 match(es) were skipped by ignore rules' in tool_output, \
             f'note must report the 1 hidden match; output: {tool_output[:300]!r}'
 
         assert 'No matches found' in tool_output, \
             f"summary prefix must be preserved; output: {tool_output[:300]}"
         assert 'ignore_vcs=False' in tool_output, \
             f"BUG_0061: advisory note missing for gitignored-only match; output: {tool_output[:300]}"
-        assert 'gitignored path(s)' in tool_output
+        assert 'skipped by ignore rules' in tool_output
         assert 'app.log' not in tool_output, \
             f"the match must still be reported as NOT found (note is advisory only); output: {tool_output[:300]}"
 
@@ -987,7 +988,9 @@ def test_probe_cmd_forces_no_ignore_and_keeps_git_excluded():
     assert git_glob_idx > user_glob_idx, \
         f"'!.git/' must be appended last so it wins over user globs; cmd={cmd}"
     assert cmd[-2:] == ['-e', 'needle'], f'pattern must be last; cmd={cmd}'
-    assert out == 0, f'empty stdout with rc=1 must yield count 0, got {out!r}'
+    # BUG_0202 (F3): the probe now returns (records, rc) — empty stdout with rc=1 yields
+    # (an empty list, 1).
+    assert out == ([], 1), f'empty stdout with rc=1 must yield ([], 1), got {out!r}'
     assert captured['kwargs'].get('cwd') == '.', 'probe must run in the search root'
 
 
@@ -1173,14 +1176,14 @@ def test_probe_failure_is_silent():
             assert 'Error searching' not in tool_output, \
                 f'probe failure must never surface as an error; got: {tool_output[:300]!r}'
 
-        # The probe in isolation returns None (never raises) for every failure mode.
+        # The probe in isolation returns (None, None) (never raises) for every failure mode.
         for exc in (_sp.TimeoutExpired('rg', 5.0), OSError('boom'),
                     PermissionError('denied'), FileNotFoundError('no rg')):
             with mock.patch('subprocess.run', side_effect=exc):
                 assert GrepMixin()._probe_ignored_matches(
                     pattern='x', path=Path(root), include='*', exclude='',
-                    context=0, smart_case=True, timeout=5.0) is None, \
-                    f'probe must return None (not raise) for {exc!r}'
+                    context=0, smart_case=True, timeout=5.0) == (None, None), \
+                    f'probe must return (None, None) (not raise) for {exc!r}'
 
         print('  probe failure swallowed at every layer; zero-match result unchanged')
         print('  [PASS]')
@@ -1210,8 +1213,8 @@ def test_note_absent_when_no_hidden_matches():
         from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
 
-        # Execution witness: probe WAS called, and returned 0.
-        spy = mock.Mock(return_value=0)
+        # Execution witness: probe WAS called, and found nothing (empty records, rc=1).
+        spy = mock.Mock(return_value=([], 1))
         with mock.patch.object(GrepMixin, '_probe_ignored_matches', spy):
             tool_output = om.grep(pattern='ABSENT_TOKEN_XYZ', path='.',
                                   ignore_vcs=True, char_limit=-1)
@@ -1305,7 +1308,8 @@ def test_grep_compare_parser_unaffected():
 
         tool_output = om.grep(pattern='PARSE_TOKEN', path='.', ignore_vcs=True, char_limit=-1)
 
-        assert 'gitignored path(s)' in tool_output, \
+        # BUG_0202 (F4): the advisory now names the consulted rules, never asserting git status.
+        assert 'skipped by ignore rules' in tool_output, \
             f'expected a note here (Case A); got: {tool_output[:300]!r}'
 
         lines, count = cmp_mod.parse_om_result(tool_output)

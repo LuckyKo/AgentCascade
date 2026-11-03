@@ -76,6 +76,29 @@ def _grep_body_with_legend(body_lines: list, context: int, match_count: int) -> 
     return body
 
 
+def _ignore_advisory_note(n: int) -> str:
+    """BUG_0202 (F4): the zero-match advisory for matches hidden behind ignore rules.
+
+    States what was consulted (the ignore rules) and never asserts git status — a tracked file
+    can be pruned by an ignore rule it does not apply to. One helper so the count and line
+    paths cannot drift apart.
+    """
+    return (f" [note: {n} match(es) were skipped by ignore rules (.gitignore/.ignore/.rgignore); "
+            f"grep follows ignore rules, not the git index — re-run with ignore_vcs=False "
+            f"to include them]")
+
+
+def _over_cap_partial_note(budget_s: float) -> str:
+    """BUG_0202 (F5): the note for a truncated over-cap DIAGNOSTIC walk.
+
+    Worded per the walk's OWN budget (GREP_LARGE_FILE_SCAN_BUDGET_S), never the caller's
+    deadline — a walk that merely ran out of its budget is not a caller timeout. One helper so
+    the count path's zero and non-zero branches cannot drift apart.
+    """
+    return (f" [note: the over-cap file list is partial — its {budget_s:.2f} s diagnostic walk "
+            'did not finish, so the list of skipped files above is incomplete]')
+
+
 def _exclude_matches(basename: str, rel_path: str, pattern: str) -> bool:
     """grep exclude semantics: no separator → basename; separator → relative path."""
     if not pattern:
@@ -618,8 +641,8 @@ class GrepMixin:
                                context: int,
                                smart_case: bool,
                                timeout: float,
-                               literal: bool = False) -> Optional[int]:
-        """Best-effort count of matches hiding behind VCS ignore rules (BUG_0061).
+                               literal: bool = False) -> tuple:
+        """Best-effort match records hiding behind VCS ignore rules (BUG_0061 / BUG_0202).
 
         With ignore_vcs=True the fast path passes NO explicit ignore flag, so ripgrep applies
         its built-in .gitignore/.ignore/.rgignore rules and silently prunes matching files. A
@@ -628,10 +651,18 @@ class GrepMixin:
         context/summary — no ignored-path message). The only way to disambiguate is to ask rg
         a second time with the ignores turned off.
 
-        Returns the number of `match` messages ripgrep reports when `--no-ignore` is forced
-        on, or None if the probe could not be completed (ripgrep missing, timeout, error).
-        Callers MUST treat None as "unknown" and stay silent — this probe exists only to
-        disambiguate a zero-match result and must never turn a good search into an error.
+        Returns ``(records, rc)`` where ``records`` is a list of ``(rel_path, line_number,
+        match_text)`` tuples ripgrep reports when `--no-ignore` is forced on, and ``rc`` is
+        ripgrep's return code (0/1/2). Both are None if the probe could not be completed
+        (ripgrep missing, timeout, error). Callers MUST treat ``(None, None)`` as "unknown" and
+        stay silent — this probe exists only to disambiguate a zero-match result and must never
+        turn a good search into an error. ``rc == 2`` means ripgrep hit a partial result (some
+        files were skipped), so the caller can surface that as a partial-coverage flag.
+
+        BUG_0202 (F3): returns the match RECORDS (not just a count) so the caller can filter
+        them through the resolver and recover the tracked / not-ignored survivors. R2: the
+        probe forces ``force_no_ignore=True, exclude_git=True`` — the SAME builder as the fast
+        path but with DIFFERENT flags, so it is NOT an "identical argv" re-run.
 
         Note: only meaningful on the ripgrep fast path. Since BUG_0062 the Python fallback
         also honours ignore files (.gitignore/.ignore/.rgignore), so it is no longer immune
@@ -646,7 +677,7 @@ class GrepMixin:
 
         _rg_available, _ = _check_tool_availability()
         if not _rg_available:
-            return None
+            return None, None
 
         # WHY these two flags (BUG_0061): the probe's whole purpose is to ask rg a second
         # question with ignores turned OFF, so force_no_ignore is always True. It still keeps
@@ -681,14 +712,60 @@ class GrepMixin:
                                     timeout=probe_timeout)
         except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError) as e:
             logger.debug('grep: ignored-path probe failed: %s', e)
-            return None
+            return None, None
 
         if result.returncode not in (0, 1, 2):
-            return None
+            return None, None
 
         # BUG_0190: reuse the shared rg-JSON match parser (one `match` event == one match line;
         # submatches deliberately NOT counted) so the probe and the count path cannot drift apart.
-        return sum(1 for _ in _iter_rg_json_matches(result.stdout))
+        # BUG_0202 (F3): return the records (and the rc, so a partial rc==2 is surfaced) so the
+        # caller can filter them through the resolver.
+        return list(_iter_rg_json_matches(result.stdout)), result.returncode
+
+    def _recover_ignored_matches(self,
+                                 pattern: str,
+                                 resolved: Path,
+                                 include: str,
+                                 exclude: str,
+                                 context: int,
+                                 smart_case: bool,
+                                 literal: bool,
+                                 timeout: float,
+                                 ignore_vcs: bool) -> tuple:
+        """BUG_0202 (F3): shared recovery helper for both zero-match call sites.
+
+        Runs the ``--no-ignore`` probe, then filters its records through the resolver (F1+F2):
+        a record survives when its path is NOT ignored — which, after F2, includes git-TRACKED
+        files that an ignore rule would otherwise prune. Returns ``(survivors, probe_total,
+        probe_partial)`` where ``survivors`` is a list of ``(rel_path, line_no, text)``,
+        ``probe_total`` is the number of probe records, and ``probe_partial`` is True when the
+        probe hit a partial result (rg rc==2) so the caller can surface it.
+
+        Returns ``([], 0, False)`` when ``ignore_vcs`` is False (no rules were applied, so
+        nothing was hidden) or the probe found nothing / could not be completed.
+
+        KNOWN LIMITATION (R5): recovery only fires when the MAIN search returned ZERO matches.
+        A tracked-but-ignored file is therefore invisible whenever at least one non-ignored
+        match exists — the fast path returns that match and never runs the probe. The Python
+        fallback (which honours F2 directly) does surface it, so the two paths can diverge in
+        exactly that case; that residual is accepted, not fixed here.
+        """
+        if not ignore_vcs:
+            return [], 0, False
+        probe, probe_rc = self._probe_ignored_matches(
+            pattern, resolved, include, exclude, context, smart_case, timeout, literal)
+        if probe is None:  # probe failed / no records (rc None) — nothing to recover, not partial
+            return [], 0, False
+        if not probe:  # probe ran (rc 0/1) but found nothing; rc==2 is a partial result
+            return [], 0, (probe_rc == 2)
+        resolver = IgnoreResolver(resolved)
+        survivors = []
+        for rel, ln, text in probe:
+            path = resolved / rel
+            if not resolver.is_ignored(path, is_dir=False):
+                survivors.append((rel, ln, text))
+        return survivors, len(probe), (probe_rc == 2)
 
     def _try_subprocess_grep(self,
                              pattern: str,
@@ -983,11 +1060,13 @@ class GrepMixin:
 
     def _over_cap_rel_paths(self, root: Path, include: str, exclude: str,
                             ignore_vcs: bool, max_bytes: int, deadline: float):
-        """BUG_0190: ``(count, rel_paths)`` for in-scope files over the size cap.
+        """BUG_0190/BUG_0202: ``(count, rel_paths, truncated)`` for in-scope files over the cap.
 
         Reuses :func:`_iter_grep_scope_files` (the same include/exclude/ignore filtering the rg
         ``--max-filesize`` fast path applies) so the over-cap set the INCOMPLETE note names is
         exactly the set rg skipped. Paths are capped at 11 (the note shows 10 + a "+N more").
+        ``truncated`` (F5) is True when the walk hit its deadline before seeing the whole scope,
+        so the caller knows the over-cap set — and any count built on it — is partial, not total.
         """
         paths: list = []
         count = 0
@@ -1000,7 +1079,12 @@ class GrepMixin:
                 count += 1
                 if len(paths) < 11:
                     paths.append(rel_str)
-        return count, paths
+        # F5 (BUG_0202/RC-B): the generator self-terminates at `deadline`, so a single post-loop
+        # check is the per-call truncation signal (the same post-loop deadline idiom
+        # _scan_large_files uses for its scan-limit budget). Without it a truncated over-cap
+        # walk is indistinguishable from a complete one.
+        truncated = time.monotonic() > deadline
+        return count, paths, truncated
 
     def _grep_count_only(self,
                          resolved: Path,
@@ -1052,7 +1136,18 @@ class GrepMixin:
         total = 0
         skipped_count = 0
         skipped_paths: list = []
-        timed_out = False
+        # F5 (BUG_0202/RC-B): two INDEPENDENT truncation flags. rg_path_timed_out = the rg fast
+        # path was killed at the caller's deadline (the Python fallback below may still finish
+        # the whole scope, in which case the total is COMPLETE); fallback_truncated = the Python
+        # fallback walk itself hit the deadline (the total is genuinely partial). A "partial"
+        # claim is only valid for the latter — a fast-path timeout whose fallback completed must
+        # not be read as a partial total.
+        rg_path_timed_out = False
+        fallback_truncated = False
+        # F5 (BUG_0202/RC-B): a separate flag for the over-cap DIAGNOSTIC walk hitting its own
+        # 0.75 s budget (GREP_LARGE_FILE_SCAN_BUDGET_S) — independent of the caller's deadline,
+        # so a walk that merely ran out of its budget is not misreported as a caller timeout.
+        over_cap_walk_partial = False
         partial_error = False
         used_rg = False
 
@@ -1089,6 +1184,12 @@ class GrepMixin:
                                         stdin=subprocess.DEVNULL,
                                         timeout=timeout)
             except subprocess.TimeoutExpired:
+                # The rg subprocess ran for the caller's `timeout` seconds before being killed,
+                # so the FAST PATH hit the deadline. The Python fallback below may still finish
+                # the whole scope — in which case the total is complete — so this is a
+                # fast-path-only flag, NOT a "partial" claim (the fallback's own deadline check
+                # sets `fallback_truncated` if it too runs out of time).
+                rg_path_timed_out = True
                 logger.warning(f"grep count subprocess timed out after {int(timeout)}s; falling back to Python")
             except (FileNotFoundError, PermissionError, OSError) as e:
                 logger.debug(f"grep count subprocess unavailable (falling back to Python): {e}")
@@ -1102,17 +1203,18 @@ class GrepMixin:
                 # read as a full-scope total (the BUG_0185 integrity link). "No files were
                 # searched" (every candidate over-cap) is a normal empty result — the note below.
                 if max_bytes:
-                    skipped_count, skipped_paths = self._over_cap_rel_paths(
+                    skipped_count, skipped_paths, _over_cap_truncated = self._over_cap_rel_paths(
                         resolved, include, exclude, ignore_vcs, max_bytes,
                         time.monotonic() + _budget_s)
+                    # F5 (BUG_0202/RC-B): a truncated over-cap walk means the skip set (and thus
+                    # the count) is partial — surface it through its own flag, NOT the caller-
+                    # deadline flags (the walk's 0.75 s budget is not the caller's deadline).
+                    over_cap_walk_partial = over_cap_walk_partial or _over_cap_truncated
         if not used_rg:
             # Python count fallback: walk the same scope, count per file, header-scan over-cap.
             deadline = time.monotonic() + timeout
             scanned = 0
             for fp, rel_str in self._iter_grep_scope_files(resolved, include, exclude, ignore_vcs, deadline):
-                if time.monotonic() > deadline:
-                    timed_out = True
-                    break
                 try:
                     size = fp.stat().st_size
                 except OSError:
@@ -1136,11 +1238,19 @@ class GrepMixin:
                 for line in content.split('\n'):
                     if pattern_re.search(line):
                         _tally(rel_str, line)
+            # F5 (BUG_0202/RC-B): the generator self-terminates at `deadline`, so the in-loop
+            # deadline check was unreachable — a single post-loop check is the per-call
+            # truncation signal (the _scan_large_files idiom). Without it a truncated fallback
+            # walk reports a bare total (or a bare zero) with no timeout disclosure.
+            if time.monotonic() > deadline:
+                fallback_truncated = True
 
         return self._format_count_result(
             pattern, searched_note, per_file, per_pattern, total,
-            alts, partial_error, timed_out, skipped_count, skipped_paths, _max_mb,
-            ignore_vcs, resolved, include, exclude, smart_case, literal, timeout)
+            alts, partial_error, rg_path_timed_out, fallback_truncated, over_cap_walk_partial,
+            skipped_count, skipped_paths, _max_mb,
+            ignore_vcs, resolved, include, exclude, smart_case, literal, timeout,
+            over_cap_budget_s=_budget_s)
 
     def _format_count_result(self,
                              pattern: str,
@@ -1150,7 +1260,9 @@ class GrepMixin:
                              total: int,
                              alts,
                              partial_error: bool,
-                             timed_out: bool,
+                             rg_path_timed_out: bool,
+                             fallback_truncated: bool,
+                             over_cap_walk_partial: bool,
                              skipped_count: int,
                              skipped_paths: list,
                              max_mb: int,
@@ -1160,29 +1272,68 @@ class GrepMixin:
                              exclude: str,
                              smart_case: bool,
                              literal: bool,
-                             timeout: float) -> str:
+                             timeout: float,
+                             *,
+                             over_cap_budget_s: Optional[float] = None) -> str:
         """BUG_0190: render a count-only result.
 
         Zero matches get a bare line (plus the BUG_0061 hidden-matches probe note and the
         over-cap INCOMPLETE note). Non-zero gets the per-file list (capped at 50, totals always
         full) + the per-pattern breakdown + the integrity notes.
         """
+        # F5 (BUG_0202/RC-B): word the timeout note PER PATH. A fallback truncation is a real
+        # "partial" (the totals are incomplete); a fast-path timeout whose fallback completed is
+        # a complete total computed by the fallback — say so, and do NOT claim "partial".
+        if fallback_truncated:
+            _timeout_note = f" [TIMED OUT after {int(timeout)}s — counts are partial, not totals]"
+        elif rg_path_timed_out:
+            _timeout_note = (f" [note: the ripgrep fast path timed out after {int(timeout)}s; "
+                             'totals were computed by the Python fallback]')
+        else:
+            _timeout_note = ''
+        # The over-cap budget is derived from the same settings source _grep_large_file_limits()
+        # uses (no re-hardcoded default); a direct caller that omits it gets the live value.
+        if over_cap_budget_s is None:
+            over_cap_budget_s = _grep_large_file_limits()[3]
         if total == 0:
             # BUG_0190: no (N files searched) parenthetical — the rg path does not
             # track a file count (rg handles traversal internally), so the number
             # would be 0 on the fast path and non-zero on the fallback. The
             # searched_note already names the search root.
-            base = f"0 matching lines for '{pattern}'{searched_note}"
-            if ignore_vcs:
-                _hidden = self._probe_ignored_matches(
-                    pattern=pattern, path=resolved, include=include, exclude=exclude,
-                    context=0, smart_case=smart_case, timeout=timeout, literal=literal)
-                if _hidden:
-                    base += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
-                             f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
-                             f"to include them]")
-            base += _incomplete_note(skipped_count, skipped_paths, max_mb)
-            return base
+            # BUG_0202 (F3): recover matches hidden behind ignore rules. If any survive the
+            # resolver filter (tracked or not-ignored), render them as a real count result
+            # instead of a bare zero — a tracked file is a real match, not an absence.
+            survivors, probe_total, probe_partial = self._recover_ignored_matches(
+                pattern, resolved, include, exclude, 0, smart_case, literal, timeout, ignore_vcs)
+            if survivors:
+                per_file = {}
+                for rel, _ln, _text in survivors:
+                    per_file[rel] = per_file.get(rel, 0) + 1
+                total = len(survivors)
+                # The probe records carry no per-alternative breakdown, so drop `alts`; the
+                # caller-deadline flags (rg_path_timed_out / fallback_truncated) pass through
+                # unchanged, and the probe's rc==2 partial is ORed into partial_error so a
+                # recovered result is never read as a clean total when the search was partial.
+                alts = []
+                partial_error = partial_error or probe_partial
+                # fall through to the non-zero rendering below
+            else:
+                base = f"0 matching lines for '{pattern}'{searched_note}"
+                if probe_total:
+                    # F4 (BUG_0202/RC-C): state what was consulted, never assert git status.
+                    base += _ignore_advisory_note(probe_total)
+                if probe_partial:
+                    # F5 (BUG_0202/RC-B): the probe itself was truncated (rg rc==2) — the "no
+                    # survivors" verdict only covers a partial probe, so disclose it (mirrors the
+                    # line-mode note; the count path previously dropped probe_partial here).
+                    base += ' [note: the ignore-rule probe returned a partial result]'
+                base += _incomplete_note(skipped_count, skipped_paths, max_mb)
+                # F5 (BUG_0202/RC-B): a truncation must be disclosed in the zero-match branch too
+                # (worded per path — a fast-path timeout whose fallback finished is not "partial").
+                base += _timeout_note
+                if over_cap_walk_partial:
+                    base += _over_cap_partial_note(over_cap_budget_s)
+                return base
 
         out = f"Count-only results for '{pattern}'{searched_note}:"
         items = sorted(per_file.items(), key=lambda kv: kv[1], reverse=True)
@@ -1198,8 +1349,9 @@ class GrepMixin:
         out += _incomplete_note(skipped_count, skipped_paths, max_mb)
         if partial_error:
             out += ' [note: some files were skipped due to errors — counts are partial]'
-        if timed_out:
-            out += f" [TIMED OUT after {int(timeout)}s — counts are partial, not totals]"
+        out += _timeout_note
+        if over_cap_walk_partial:
+            out += _over_cap_partial_note(over_cap_budget_s)
         return out
 
     def _grep_single_file(self,
@@ -1463,25 +1615,50 @@ class GrepMixin:
                 if count == 0 and not _sub_truncated:
                     logger.debug(f"grep: subprocess found no matches for '{pattern}'")
                     summary = f"No matches found for '{pattern}' in {path}{searched_note}"
-                    # BUG_0061: with ignore_vcs=True the fast path passes no explicit ignore
-                    # flag, so ripgrep's built-in .gitignore rules can prune the only matching
-                    # file — making "no matches" indistinguishable from "matches were hidden".
-                    # Probe once with --no-ignore; report only if it finds something. Advisory
-                    # text appended to the summary line, so the existing "No matches found"
-                    # prefix every format consumer matches on stays byte-preserved.
-                    if ignore_vcs:
-                        _hidden = self._probe_ignored_matches(pattern=pattern,
-                                                              path=resolved,
-                                                              include=include,
-                                                              exclude=exclude,
-                                                              context=context,
-                                                              smart_case=smart_case,
-                                                              timeout=timeout,
-                                                              literal=literal)
-                        if _hidden:
-                            summary += (f" [note: {_hidden} match(es) exist in gitignored path(s) "
-                                        f"excluded by ignore_vcs=True; re-run with ignore_vcs=False "
-                                        f"to include them]")
+                    # BUG_0061 / BUG_0202 (F3): with ignore_vcs=True the fast path passes no
+                    # explicit ignore flag, so ripgrep's built-in .gitignore rules can prune the
+                    # only matching file — making "no matches" indistinguishable from "matches
+                    # were hidden". Probe once with --no-ignore, then filter through the resolver
+                    # (F1+F2): if any record survives (tracked or not-ignored), return it as a
+                    # real result instead of "No matches" — a tracked file is a real match, not an
+                    # absence. When nothing survives, keep "No matches found" byte-preserved and
+                    # append the F4 advisory (states what was consulted, never asserting git
+                    # status). The probe is gated on ignore_vcs inside _recover_ignored_matches.
+                    survivors, probe_total, probe_partial = self._recover_ignored_matches(
+                        pattern, resolved, include, exclude, context, smart_case,
+                        literal, timeout, ignore_vcs)
+                    if survivors:
+                        # BUG_0202 (F3): route the recovered body through the shared render rule
+                        # (_format_grep_entry / _grep_body_with_legend) so it cannot drift from
+                        # the rg/GNU/Python paths, and cap it with truncate_with_spillover. The
+                        # probe yields match events only (no context lines), so context is
+                        # dropped here — disclose it rather than silently discarding it.
+                        _body_lines = [_format_grep_entry(rel, ln, text)
+                                      for rel, ln, text in survivors]
+                        _recovered_body = _grep_body_with_legend(_body_lines, 0, len(survivors))
+                        _ctx_note = (f"\n\n[context lines not shown — recovery re-runs the probe, "
+                                     f"which yields match lines only]" if context > 0 else '')
+                        _recovered_out = (f"Found {len(survivors)} matches for '{pattern}'"
+                                         f"{searched_note}:\n\n" + _recovered_body + _ctx_note)
+                        # truncate_with_spillover appends its own spill/truncation notice; the main
+                        # line-mode path keeps [TRUNCATED] in the header, so do not double it here.
+                        return truncate_with_spillover(
+                            _recovered_out,
+                            char_limit,
+                            instance_name=agent_name,
+                            tool_name='grep',
+                            base_dir=self.base_dir,
+                            operation_mode='head',
+                            spill_path=_resolve_spill_path(spill_file_path),
+                        )
+                    if probe_total:
+                        # F4 (BUG_0202/RC-C): state what was consulted, never assert git status.
+                        summary += _ignore_advisory_note(probe_total)
+                    if probe_partial:
+                        # F5 (BUG_0202/RC-B): the probe itself was truncated (rg rc==2), so the
+                        # "no survivors" verdict only covers a partial probe — disclose it rather
+                        # than dropping the flag silently (count mode surfaces it in its own note).
+                        summary += ' [note: the ignore-rule probe returned a partial result]'
                     # BUG_0169: the streaming search skipped over-size files. Recover header
                     # matches from them; otherwise say the scope was only partially covered
                     # instead of claiming a clean "No matches".

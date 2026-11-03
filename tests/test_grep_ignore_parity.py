@@ -295,3 +295,50 @@ def test_fallback_without_pathspec_degrades():
             f'degraded fallback should not honour .ignore: {sorted(files)}'
     finally:
         _rmtree_force(str(root))
+
+
+def test_nested_repo_parent_root_parity():
+    """BUG_0202 (F1/F2/F3): a git-TRACKED file inside a NESTED repo is recovered when searching
+    from a NON-REPO parent root, and the fast path agrees with the fallback.
+
+    The parent root has no .git, so F1's per-directory repo detection must resolve the nested
+    repo's root for the nested file; F2's index exemption keeps the tracked file searchable
+    despite the nested .gitignore rule. No other file matches NEEDLE, so the main search
+    returns zero and F3's recovery fires (the R5 residual: a non-ignored match would suppress
+    it). The fixture git-inits the nested repo in a temp dir, never the AgentCascade tree.
+    """
+    import shutil
+    if not shutil.which('git'):
+        raise unittest.SkipTest('git not available')
+
+    parent = Path(tempfile.mkdtemp(prefix='bug202_'))
+    try:
+        repo = parent / 'nested_repo'
+        repo.mkdir()
+        (repo / 'tracked.txt').write_text(f'{NEEDLE}_T\n', encoding='utf-8')
+        _write(repo / '.gitignore', 'tracked.txt\n')
+        _sp.run(['git', 'init', '-q'], cwd=str(repo), check=True, stdin=_sp.DEVNULL)
+        # -f: tracked.txt is matched by the .gitignore rule, so a plain `git add` refuses it.
+        _sp.run(['git', 'add', '-f', 'tracked.txt', '.gitignore'], cwd=str(repo), check=True,
+                stdin=_sp.DEVNULL)
+        _sp.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'],
+                cwd=str(repo), check=True, stdin=_sp.DEVNULL)
+
+        from agent_cascade.operation_manager import OperationManager
+        from agent_cascade.operation_manager import grep as grep_mod
+
+        om = OperationManager(base_dir=str(parent))
+        fast = om.grep(pattern=NEEDLE, path='.', ignore_vcs=True, char_limit=-1)
+        with mock.patch.object(grep_mod, '_check_tool_availability', return_value=(False, False)):
+            fallback = om.grep(pattern=NEEDLE, path='.', ignore_vcs=True, char_limit=-1)
+
+        fast_files = _files_in(fast)
+        fallback_files = _files_in(fallback)
+        # The nested repo's tracked file must be recovered from the parent root on BOTH paths.
+        assert 'nested_repo/tracked.txt' in fast_files, f'fast: {sorted(fast_files)}'
+        assert 'nested_repo/tracked.txt' in fallback_files, f'fallback: {sorted(fallback_files)}'
+        assert fast_files == fallback_files, (
+            f'fast/fallback divergence: fast={sorted(fast_files)} '
+            f'fallback={sorted(fallback_files)}')
+    finally:
+        _rmtree_force(str(parent))

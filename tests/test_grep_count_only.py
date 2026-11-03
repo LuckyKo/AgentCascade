@@ -94,7 +94,12 @@ class TestCounts:
         assert '> 1 MB' in out, out
 
     def test_zero_match_with_gitignored_probe_note(self, tmp_path):
-        """Case 5: zero in-scope matches + a gitignored match surfaces the BUG_0061 probe note."""
+        """Case 5 (BUG_0202 F3/F4): zero in-scope matches + an ignored (untracked) match.
+
+        The match is ignored AND untracked (the fixture uses a bare .git dir, not a committed
+        repo), so F3 recovers nothing and the F4 advisory fires — stating what was consulted
+        (ignore rules), never asserting git status. The old "gitignored path(s)" wording is gone.
+        """
         # A .git dir (with HEAD) anchors the repo so rg applies the .gitignore rules.
         (tmp_path / '.git').mkdir()
         (tmp_path / '.git' / 'HEAD').write_text('ref: refs/heads/main', encoding='utf-8')
@@ -107,7 +112,9 @@ class TestCounts:
         out = om.grep('needle', '.', count_only=True)  # ignore_vcs=True by default
 
         assert out.startswith('0 matching lines'), out
-        assert 'gitignored' in out, out
+        # F4 (BUG_0202/RC-C): the advisory names the consulted rules, never asserts git status.
+        assert 'skipped by ignore rules' in out, out
+        assert 'gitignored' not in out, out
 
     def test_single_file_count_only(self, tmp_path):
         """Case 6: count_only on a single-file path goes through _grep_single_file."""
@@ -169,6 +176,163 @@ class TestCounts:
 
         assert 'search INCOMPLETE' in out, out
         assert '2 file(s) > 1 MB' in out, out
+
+    def test_tracked_file_found_from_both_roots(self, tmp_path):
+        """Case 10 (BUG_0202 F1/F2/F3): a git-TRACKED file that .gitignore would prune is
+        recovered from BOTH the repo root (child) and a non-repo parent root — the root-cause
+        demonstration. The fixture git-inits a real repo in tmp_path (never the AgentCascade
+        tree) so the F2 index query (``git ls-files``) sees the committed file.
+        """
+        import shutil
+        import subprocess
+
+        if not shutil.which('git'):
+            pytest.skip('git not available')
+
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        (repo / 'tracked.txt').write_text('needle\n', encoding='utf-8')
+        (repo / '.gitignore').write_text('tracked.txt\n', encoding='utf-8')
+
+        def git(*args):
+            subprocess.run(['git', *args], cwd=str(repo), capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+
+        git('init')
+        # -f: tracked.txt is already matched by the .gitignore rule, so a plain `git add`
+        # refuses it; force-add so it lands in the index (the F2 query needs it committed).
+        git('add', '-f', 'tracked.txt', '.gitignore')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'init')
+        # A sibling file in the (non-repo) parent so the parent search has an in-scope root.
+        (tmp_path / 'parent_marker.txt').write_text('parent\n', encoding='utf-8')
+        om = _make_om(tmp_path)
+
+        # Child (repo root): .gitignore prunes the tracked file, F3 recovers it (F2 exemption).
+        child_out = om.grep('needle', str(repo), count_only=True)
+        assert 'tracked.txt: 1' in child_out, child_out
+
+        # Parent (non-repo): the nested repo's tracked file is recovered (nested-repo parity).
+        parent_out = om.grep('needle', str(tmp_path), count_only=True)
+        assert 'repo/tracked.txt: 1' in parent_out, parent_out
+
+    def test_truncated_zero_match_discloses_timeout(self, tmp_path):
+        """Case 11 (BUG_0202 F5/RC-B): a truncated search that finds nothing must disclose the
+        timeout, never read as a conclusive "0 matching lines"."""
+        (tmp_path / 'a.txt').write_text('nothing\n', encoding='utf-8')
+        om = _make_om(tmp_path)
+        # A genuinely partial total is the FALLBACK walk hitting its deadline (fallback_truncated);
+        # a fast-path-only timeout whose fallback completed is NOT partial (see case 12).
+        out = om._format_count_result(
+            pattern='needle', searched_note='', per_file={}, per_pattern={}, total=0,
+            alts=[], partial_error=False, rg_path_timed_out=False, fallback_truncated=True,
+            over_cap_walk_partial=False,
+            skipped_count=0, skipped_paths=[],
+            max_mb=100, ignore_vcs=False, resolved=tmp_path, include='*', exclude='',
+            smart_case=True, literal=False, timeout=5.0)
+        assert out.startswith('0 matching lines'), out
+        assert 'TIMED OUT' in out, out
+
+    def test_pipeline_truncated_count_only_discloses_timeout(self, tmp_path):
+        """Case 12 (BUG_0202 F5): a PIPELINE-level truncated count-only search (rg times out)
+        must disclose the caller-deadline timeout through grep(). Case 11 pins the rendering
+        via a direct _format_count_result call; this pins the F5 wiring (timed_out propagates
+        from the rg path into the zero-match branch)."""
+        import subprocess as _sp
+        (tmp_path / 'a.txt').write_text('nothing\n', encoding='utf-8')
+        om = _make_om(tmp_path)
+
+        def _raise_timeout(*a, **k):
+            raise _sp.TimeoutExpired(cmd='rg', timeout=5.0)
+
+        # grep.py imports `subprocess` locally (not module-level), so patch the global
+        # subprocess.run that its local `import subprocess` binds to. The rg fast path times out;
+        # the (pure-Python) fallback completes the tiny scope, so this is a COMPLETE total — the
+        # note must name the fast-path timeout and must NOT claim "partial" (guards finding 1).
+        with patch('subprocess.run', side_effect=_raise_timeout):
+            out = om.grep('needle', '.', count_only=True, timeout=5.0)
+
+        assert out.startswith('0 matching lines'), out
+        assert 'the ripgrep fast path timed out after 5s' in out, out
+        assert 'partial' not in out, out  # the fallback finished the scope — not a partial total
+
+    def test_over_cap_truncated_not_reported_as_caller_timeout(self, tmp_path):
+        """Case 13 (BUG_0202 F5): a zero-match count-only grep whose over-cap DIAGNOSTIC walk is
+        truncated must NOT emit 'TIMED OUT after {timeout}s' — the walk's 0.75 s budget is not the
+        caller's deadline. It gets the over-cap partial note instead (guards finding 1)."""
+        (tmp_path / 'a.txt').write_text('nothing\n', encoding='utf-8')
+        om = _make_om(tmp_path)
+
+        # Force the over-cap diagnostic walk to report itself truncated (its budget ran out)
+        # while the caller's deadline was NOT hit.
+        def _truncated_walk(self, *a, **k):
+            return 1, ['big.bin'], True
+
+        with patch.object(grep_mod.GrepMixin, '_over_cap_rel_paths', _truncated_walk):
+            out = om.grep('needle', '.', count_only=True, timeout=30.0)
+
+        assert out.startswith('0 matching lines'), out
+        assert 'TIMED OUT after' not in out, out            # caller deadline was not hit
+        assert 'over-cap file list is partial' in out, out  # the walk's own-budget note
+
+    def test_whole_repo_ls_files_queried_once(self, tmp_path):
+        """Case 14 (BUG_0202 F2): the git index is queried ONCE per repo (whole-repo
+        ``git ls-files -z``), not once per tracked-but-ignored file — pins the whole-repo
+        caching deviation against a per-directory regression."""
+        import shutil
+        import subprocess as _sp
+        from agent_cascade.operation_manager import grep_ignore as gi_mod
+
+        if not shutil.which('git'):
+            pytest.skip('git not available')
+
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        n = 5
+        for i in range(n):
+            (repo / f't{i}.txt').write_text(f'needle {i}\n', encoding='utf-8')
+        # A nested subdir with its own tracked file: a (repo_root, matched_dir) keying regression
+        # would query the index once per matched directory (repo/ AND repo/sub), so pinning the
+        # count to exactly 1 proves whole-repo (repo_root-only) keying.
+        (repo / 'sub').mkdir()
+        (repo / 'sub' / 'nested.txt').write_text('needle nested\n', encoding='utf-8')
+        (repo / '.gitignore').write_text('t*.txt\nsub/\n', encoding='utf-8')
+
+        def git(*args):
+            _sp.run(['git', *args], cwd=str(repo), capture_output=True, text=True)
+
+        git('init')
+        git('add', '-f', *[f't{i}.txt' for i in range(n)], 'sub/nested.txt', '.gitignore')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'init')
+
+        om = _make_om(repo)
+        real_run = gi_mod.subprocess.run
+        ls_calls: list = []
+
+        def _spy_run(cmd, *a, **k):
+            if cmd[:3] == ['git', 'ls-files', '-z']:
+                ls_calls.append(cmd)
+            return real_run(cmd, *a, **k)
+
+        # Suppress the over-cap DIAGNOSTIC walk so the ONLY resolver that queries the index is the
+        # recovery's (the over-cap walk would add a second resolver instance and obscure the
+        # per-repo keying we are pinning). All files are tiny, so skipping the walk changes
+        # nothing about the result.
+        def _no_over_cap(self, *a, **k):
+            return 0, [], False
+
+        with patch.object(gi_mod.subprocess, 'run', _spy_run), \
+             patch.object(grep_mod.GrepMixin, '_over_cap_rel_paths', _no_over_cap):
+            out = om.grep('needle', str(repo), count_only=True)
+
+        # F2: the whole-repo index is queried EXACTLY ONCE (keyed by repo_root only). A
+        # (repo_root, matched_dir) keying regression would query once per matched directory
+        # (repo/ for t*.txt, repo/sub for sub/) = 2 here, so this pins whole-repo keying.
+        assert len(ls_calls) == 1, \
+            f'whole-repo caching: expected exactly 1 query (repo_root key), got {len(ls_calls)}'
+        assert ls_calls[0] == ['git', 'ls-files', '-z'], \
+            f'whole-repo query must carry NO dir argument; got {ls_calls[0]}'
+        assert 't0.txt: 1' in out, out            # root-level tracked files recovered (F2)
+        assert 'sub/nested.txt: 1' in out, out    # nested tracked file recovered (F2)
 
 
 if __name__ == '__main__':
