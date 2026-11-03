@@ -108,6 +108,48 @@ def _grep_body_with_legend(body_lines: list, context: int, match_count: int) -> 
     return body
 
 
+def _collect_file_matches(results: list, lines: list, pattern_re, rel_path: str,
+                          context: int, timeout: float, start_time: float) -> tuple:
+    """Append one file's rendered matches to ``results``; return ``(count, timed_out, hit_limit)``.
+
+    BUG_0221 (#6): the per-file match renderer shared by :meth:`GrepMixin._grep_single_file`
+    and the Python fallback. Both had byte-identical context-window, marker, timeout and
+    5000-result-cap loops; keeping one copy is what stops the two paths from drifting.
+    """
+    match_count = 0
+    was_timed_out = False
+    hit_result_limit = False
+    if context > 0:
+        for line_num, line in enumerate(lines, 1):
+            if pattern_re.search(line):
+                match_count += 1
+                start = max(1, line_num - context)
+                end = min(len(lines), line_num + context)
+                for ctx_line in range(start - 1, end):
+                    marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
+                    results.append(_format_grep_entry(rel_path, ctx_line + 1,
+                                                      lines[ctx_line], marker))
+                results.append('---')
+            if len(results) % 200 == 0 and time.time() - start_time > timeout:
+                was_timed_out = True
+                break
+            if len(results) > 5000:
+                hit_result_limit = True
+                break
+    else:
+        for line_num, line in enumerate(lines, 1):
+            if pattern_re.search(line):
+                match_count += 1
+                results.append(_format_grep_entry(rel_path, line_num, line))
+            if len(results) % 500 == 0 and time.time() - start_time > timeout:
+                was_timed_out = True
+                break
+            if len(results) > 5000:
+                hit_result_limit = True
+                break
+    return match_count, was_timed_out, hit_result_limit
+
+
 def _ignore_advisory_note(n: int) -> str:
     """BUG_0202 (F4): the zero-match advisory for matches hidden behind ignore rules.
 
@@ -1390,38 +1432,9 @@ class GrepMixin:
             return out
 
         results = []
-        match_count = 0
-        hit_result_limit = False
-        was_timed_out = False
         start_time = time.time()
-
-        if context > 0:
-            for line_num, line in enumerate(lines, 1):
-                if pattern_re.search(line):
-                    match_count += 1
-                    start = max(1, line_num - context)
-                    end = min(len(lines), line_num + context)
-                    for ctx_line in range(start - 1, end):
-                        marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
-                        results.append(_format_grep_entry(normalized_rel_path, ctx_line + 1, lines[ctx_line], marker))
-                    results.append('---')
-                if len(results) % 200 == 0 and time.time() - start_time > timeout:
-                    was_timed_out = True
-                    break
-                if len(results) > 5000:
-                    hit_result_limit = True
-                    break
-        else:
-            for line_num, line in enumerate(lines, 1):
-                if pattern_re.search(line):
-                    match_count += 1
-                    results.append(f"{normalized_rel_path}:{line_num}: {line}")
-                if len(results) % 500 == 0 and time.time() - start_time > timeout:
-                    was_timed_out = True
-                    break
-                if len(results) > 5000:
-                    hit_result_limit = True
-                    break
+        match_count, was_timed_out, hit_result_limit = _collect_file_matches(
+            results, lines, pattern_re, normalized_rel_path, context, timeout, start_time)
 
         if not results:
             return f"No matches found for pattern '{pattern}' in {file_path.name}{searched_note}"
@@ -1766,37 +1779,15 @@ class GrepMixin:
                     content = file_path.read_text(encoding='utf-8', errors='replace')
                     lines = content.split('\n')
 
-                    if context > 0:
-                        for line_num, line in enumerate(lines, 1):
-                            if pattern_re.search(line):
-                                match_count += 1
-                                start = max(1, line_num - context)
-                                end = min(len(lines), line_num + context)
-                                for ctx_line in range(start - 1, end):
-                                    marker = _GREP_MATCH_MARKER if ctx_line + 1 == line_num else ''
-                                    results.append(_format_grep_entry(rel_str, ctx_line + 1,
-                                                                      lines[ctx_line], marker))
-                                results.append('---')
-                            if len(results) % 200 == 0 and time.time() - start_time > timeout:
-                                was_timed_out = True
-                                break
-                            if len(results) > 5000:
-                                hit_result_limit = True
-                                break
-                    else:
-                        for line_num, line in enumerate(lines, 1):
-                            if pattern_re.search(line):
-                                match_count += 1
-                                results.append(_format_grep_entry(rel_str, line_num, line))
-                            if len(results) % 500 == 0 and time.time() - start_time > timeout:
-                                was_timed_out = True
-                                break
-                        if was_timed_out:
-                            break
-
+                    _file_matches, _file_timed_out, _file_hit_limit = _collect_file_matches(
+                        results, lines, pattern_re, rel_str, context, timeout, start_time)
+                    match_count += _file_matches
                     file_count += 1
-                    if len(results) > 5000:
+                    if _file_timed_out:
+                        was_timed_out = True
+                    if _file_hit_limit:
                         hit_result_limit = True
+                    if was_timed_out or hit_result_limit:
                         break
                 except Exception as e:
                     logger.debug(f"Error reading file during grep (skipping): {e}")
