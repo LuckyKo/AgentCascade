@@ -308,6 +308,36 @@ def _check_tool_availability():
     return rg_available, grep_available
 
 
+def _has_inline_case_flag(pattern: str) -> bool:
+    """True when the pattern carries its own case-sensitivity switch (``(?i:``/``(?-i:``)."""
+    return '(?-i:' in pattern or '(?i:' in pattern
+
+
+def _smart_case_flags(pattern: str, smart_case: bool) -> int:
+    """Flags for the Python matcher under smart case (no uppercase → case-insensitive).
+
+    BUG_0221: one rule, one implementation. This block was hand-copied into every Python
+    search path; a divergence would make the same pattern case-sensitive on one path and
+    case-insensitive on another.
+    """
+    if not smart_case:
+        return 0
+    if re.search(r'[A-Z]', pattern) and not _has_inline_case_flag(pattern):
+        return 0
+    return re.IGNORECASE
+
+
+def _smart_case_ignorecase(pattern: str, smart_case: bool) -> bool:
+    """True when the subprocess argv needs ``-i`` under smart case.
+
+    Deliberately NOT the same predicate as :func:`_smart_case_flags`: the argv path relies on
+    an inline ``(?i:``/``(?-i:`` switch instead of adding a global ``-i``, while the Python
+    matcher still receives ``re.IGNORECASE`` in that case. Preserved as-is.
+    """
+    return bool(smart_case and not re.search(r'[A-Z]', pattern)
+                and not _has_inline_case_flag(pattern))
+
+
 def _grep_large_file_limits() -> tuple:
     """Return ``(max_file_size_mb, head_bytes, scan_limit, budget_s)`` for BUG_0169.
 
@@ -476,10 +506,8 @@ class GrepMixin:
         if context > 0:
             cmd.extend(['-C', str(context)])
 
-        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-        if smart_case:
-            if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-                cmd.append('-i')
+        if _smart_case_ignorecase(pattern, smart_case):
+            cmd.append('-i')
 
         # "*" with --glob breaks ripgrep (matches only root files). Searches all by default.
         # BUG_0056: support comma-separated globs (e.g. "*.py,*.js") — one --glob per pattern.
@@ -592,13 +620,7 @@ class GrepMixin:
         if max_mb <= 0:
             return out
 
-        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-            flags = 0
-        elif smart_case:
-            flags = re.IGNORECASE
-        else:
-            flags = 0
+        flags = _smart_case_flags(pattern, smart_case)
         try:
             pattern_re = _compile_grep_pattern(re.escape(pattern) if literal else pattern, flags=flags)
         except re.error:
@@ -830,10 +852,8 @@ class GrepMixin:
                         if _g:
                             cmd.append('--include=' + _g)
 
-                has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-                if smart_case:
-                    if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-                        cmd.append('-i')
+                if _smart_case_ignorecase(pattern, smart_case):
+                    cmd.append('-i')
 
                 if context > 0:
                     cmd.extend(['-C', str(context)])
@@ -1113,13 +1133,7 @@ class GrepMixin:
         from agent_cascade.log import logger
 
         # Compile once for the Python fallback and the per-alternative breakdown.
-        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-            flags = 0
-        elif smart_case:
-            flags = re.IGNORECASE
-        else:
-            flags = 0
+        flags = _smart_case_flags(pattern, smart_case)
         _compile_pattern = re.escape(pattern) if literal else pattern
         try:
             pattern_re = _compile_grep_pattern(_compile_pattern, flags=flags)
@@ -1381,13 +1395,7 @@ class GrepMixin:
         if exclude and fnmatch.fnmatch(normalized_rel_path, exclude):
             return f"No matches found for pattern '{pattern}' in {file_path.name} (excluded by {exclude}){searched_note}"
 
-        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-            flags = 0
-        elif smart_case:
-            flags = re.IGNORECASE
-        else:
-            flags = 0
+        flags = _smart_case_flags(pattern, smart_case)
 
         _compile_pattern = re.escape(pattern) if literal else pattern
         try:
@@ -1739,13 +1747,7 @@ class GrepMixin:
                 f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
             results = []
 
-            has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
-            if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
-                flags = 0
-            elif smart_case:
-                flags = re.IGNORECASE
-            else:
-                flags = 0
+            flags = _smart_case_flags(pattern, smart_case)
             _compile_pattern = re.escape(pattern) if literal else pattern
             try:
                 pattern_re = _compile_grep_pattern(_compile_pattern, flags=flags)
