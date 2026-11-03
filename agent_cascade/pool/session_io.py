@@ -732,7 +732,7 @@ class SessionIOMixin:
                 self, instance_name,
                 f"[SESSION LOADED]: Session '{instance_name}' ({agent_class}) was restored from "
                 f"{log_source} — {len(msg_objects)} conversation messages reloaded from disk. "
-                f"Context was reloaded; re-read key files/logs if you need up-to-date detail.",
+                f"Context was reloaded and all agents were dismissed; re-load them from their logs if you need them again.",
             )
         except Exception as e:
             logger.warning(f"[SESSION LOADED] notification failed for {instance_name} (non-critical): {e}")
