@@ -224,11 +224,9 @@ class TestCounts:
         # a fast-path-only timeout whose fallback completed is NOT partial (see case 12).
         out = om._format_count_result(
             pattern='needle', searched_note='', per_file={}, per_pattern={}, total=0,
-            alts=[], partial_error=False, rg_path_timed_out=False, fallback_truncated=True,
-            over_cap_walk_partial=False,
+            alts=[], disclosure=grep_mod._CountDisclosure(fallback_truncated=True),
             skipped_count=0, skipped_paths=[],
-            max_mb=100, ignore_vcs=False, resolved=tmp_path, include='*', exclude='',
-            smart_case=True, literal=False, timeout=5.0)
+            max_mb=100, timeout=5.0)
         assert out.startswith('0 matching lines'), out
         assert 'TIMED OUT' in out, out
 

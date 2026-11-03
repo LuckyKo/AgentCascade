@@ -5,6 +5,7 @@ import fnmatch
 import json
 import re
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,27 @@ _DEFAULT_EXCLUDES = frozenset({
     '*.exe',
     '*.zip',
 })
+
+
+@dataclass(frozen=True)
+class _CountDisclosure:
+    """The independent disclosure truths of one count-only result (BUG_0221 #9).
+
+    BUG_0202/RC-B: these must NOT collapse into fewer flags — each one selects a different
+    literal string, and two are pinned by absence assertions (`'partial' not in out`,
+    `'TIMED OUT after' not in out`). Bundling the plumbing keeps them distinct without a
+    22-parameter formatter.
+
+    ``probe_total`` is the number of matches the ignore-rule probe found (0 when it found
+    none); ``probe_partial`` is True when that probe itself was truncated (rg rc==2).
+    """
+
+    partial_error: bool = False
+    rg_path_timed_out: bool = False
+    fallback_truncated: bool = False
+    over_cap_walk_partial: bool = False
+    probe_partial: bool = False
+    probe_total: int = 0
 
 
 def _resolve_spill_path(spill_file_path: Optional[str]) -> Optional[Path]:
@@ -1283,12 +1305,41 @@ class GrepMixin:
             if time.monotonic() > deadline:
                 fallback_truncated = True
 
+        # BUG_0202 (F3): recover matches hidden behind ignore rules. If any survive the
+        # resolver filter (tracked or not-ignored), render them as a real count result
+        # instead of a bare zero — a tracked file is a real match, not an absence.
+        # BUG_0221 #9: recovery lives here (not in the renderer) so the formatter is a pure
+        # renderer and the probe's flags/total travel in the same disclosure object.
+        probe_total = 0
+        probe_partial = False
+        if total == 0:
+            survivors, probe_total, probe_partial = self._recover_ignored_matches(
+                pattern, resolved, include, exclude, smart_case, literal, timeout, ignore_vcs,
+                resolver=_count_resolver)
+            if survivors:
+                per_file = {}
+                for rel, _ln, _text in survivors:
+                    per_file[rel] = per_file.get(rel, 0) + 1
+                total = len(survivors)
+                # The probe records carry no per-alternative breakdown, so drop `alts`; the
+                # caller-deadline flags (rg_path_timed_out / fallback_truncated) pass through
+                # unchanged, and the probe's rc==2 partial is ORed into partial_error so a
+                # recovered result is never read as a clean total when the search was partial.
+                alts = []
+                partial_error = partial_error or probe_partial
+
+        disclosure = _CountDisclosure(
+            partial_error=partial_error,
+            rg_path_timed_out=rg_path_timed_out,
+            fallback_truncated=fallback_truncated,
+            over_cap_walk_partial=over_cap_walk_partial,
+            probe_partial=probe_partial,
+            probe_total=probe_total,
+        )
         return self._format_count_result(
-            pattern, searched_note, per_file, per_pattern, total,
-            alts, partial_error, rg_path_timed_out, fallback_truncated, over_cap_walk_partial,
-            skipped_count, skipped_paths, _max_mb,
-            ignore_vcs, resolved, include, exclude, smart_case, literal, timeout,
-            over_cap_budget_s=_budget_s, resolver=_count_resolver)
+            pattern, searched_note, per_file, per_pattern, total, alts, disclosure,
+            skipped_count, skipped_paths, _max_mb, timeout,
+            over_cap_budget_s=_budget_s)
 
     def _format_count_result(self,
                              pattern: str,
@@ -1297,35 +1348,26 @@ class GrepMixin:
                              per_pattern: dict,
                              total: int,
                              alts,
-                             partial_error: bool,
-                             rg_path_timed_out: bool,
-                             fallback_truncated: bool,
-                             over_cap_walk_partial: bool,
+                             disclosure: _CountDisclosure,
                              skipped_count: int,
                              skipped_paths: list,
                              max_mb: int,
-                             ignore_vcs: bool,
-                             resolved: Path,
-                             include: str,
-                             exclude: str,
-                             smart_case: bool,
-                             literal: bool,
                              timeout: float,
                              *,
-                             over_cap_budget_s: Optional[float] = None,
-                             resolver=None) -> str:
+                             over_cap_budget_s: Optional[float] = None) -> str:
         """BUG_0190: render a count-only result.
 
         Zero matches get a bare line (plus the BUG_0061 hidden-matches probe note and the
         over-cap INCOMPLETE note). Non-zero gets the per-file list (capped at 50, totals always
-        full) + the per-pattern breakdown + the integrity notes.
+        full) + the per-pattern breakdown + the integrity notes. A pure renderer since
+        BUG_0221 #9 — recovery runs in :meth:`_grep_count_only`.
         """
         # F5 (BUG_0202/RC-B): word the timeout note PER PATH. A fallback truncation is a real
         # "partial" (the totals are incomplete); a fast-path timeout whose fallback completed is
         # a complete total computed by the fallback — say so, and do NOT claim "partial".
-        if fallback_truncated:
+        if disclosure.fallback_truncated:
             _timeout_note = f" [TIMED OUT after {int(timeout)}s — counts are partial, not totals]"
-        elif rg_path_timed_out:
+        elif disclosure.rg_path_timed_out:
             _timeout_note = (f" [note: the ripgrep fast path timed out after {int(timeout)}s; "
                              'totals were computed by the Python fallback]')
         else:
@@ -1339,41 +1381,22 @@ class GrepMixin:
             # track a file count (rg handles traversal internally), so the number
             # would be 0 on the fast path and non-zero on the fallback. The
             # searched_note already names the search root.
-            # BUG_0202 (F3): recover matches hidden behind ignore rules. If any survive the
-            # resolver filter (tracked or not-ignored), render them as a real count result
-            # instead of a bare zero — a tracked file is a real match, not an absence.
-            survivors, probe_total, probe_partial = self._recover_ignored_matches(
-                pattern, resolved, include, exclude, smart_case, literal, timeout, ignore_vcs,
-                resolver=resolver)
-            if survivors:
-                per_file = {}
-                for rel, _ln, _text in survivors:
-                    per_file[rel] = per_file.get(rel, 0) + 1
-                total = len(survivors)
-                # The probe records carry no per-alternative breakdown, so drop `alts`; the
-                # caller-deadline flags (rg_path_timed_out / fallback_truncated) pass through
-                # unchanged, and the probe's rc==2 partial is ORed into partial_error so a
-                # recovered result is never read as a clean total when the search was partial.
-                alts = []
-                partial_error = partial_error or probe_partial
-                # fall through to the non-zero rendering below
-            else:
-                base = f"0 matching lines for '{pattern}'{searched_note}"
-                if probe_total:
-                    # F4 (BUG_0202/RC-C): state what was consulted, never assert git status.
-                    base += _ignore_advisory_note(probe_total)
-                if probe_partial:
-                    # F5 (BUG_0202/RC-B): the probe itself was truncated (rg rc==2) — the "no
-                    # survivors" verdict only covers a partial probe, so disclose it (mirrors the
-                    # line-mode note; the count path previously dropped probe_partial here).
-                    base += ' [note: the ignore-rule probe returned a partial result]'
-                base += _incomplete_note(skipped_count, skipped_paths, max_mb)
-                # F5 (BUG_0202/RC-B): a truncation must be disclosed in the zero-match branch too
-                # (worded per path — a fast-path timeout whose fallback finished is not "partial").
-                base += _timeout_note
-                if over_cap_walk_partial:
-                    base += _over_cap_partial_note(over_cap_budget_s)
-                return base
+            base = f"0 matching lines for '{pattern}'{searched_note}"
+            if disclosure.probe_total:
+                # F4 (BUG_0202/RC-C): state what was consulted, never assert git status.
+                base += _ignore_advisory_note(disclosure.probe_total)
+            if disclosure.probe_partial:
+                # F5 (BUG_0202/RC-B): the probe itself was truncated (rg rc==2) — the "no
+                # survivors" verdict only covers a partial probe, so disclose it (mirrors the
+                # line-mode note; the count path previously dropped probe_partial here).
+                base += ' [note: the ignore-rule probe returned a partial result]'
+            base += _incomplete_note(skipped_count, skipped_paths, max_mb)
+            # F5 (BUG_0202/RC-B): a truncation must be disclosed in the zero-match branch too
+            # (worded per path — a fast-path timeout whose fallback finished is not "partial").
+            base += _timeout_note
+            if disclosure.over_cap_walk_partial:
+                base += _over_cap_partial_note(over_cap_budget_s)
+            return base
 
         out = f"Count-only results for '{pattern}'{searched_note}:"
         items = sorted(per_file.items(), key=lambda kv: kv[1], reverse=True)
@@ -1387,10 +1410,10 @@ class GrepMixin:
             pp = ', '.join(f"'{alt}': {per_pattern.get(alt, 0)}" for alt in alts)
             out += f"\n[per-pattern: {pp} across {total} matching lines]"
         out += _incomplete_note(skipped_count, skipped_paths, max_mb)
-        if partial_error:
+        if disclosure.partial_error:
             out += ' [note: some files were skipped due to errors — counts are partial]'
         out += _timeout_note
-        if over_cap_walk_partial:
+        if disclosure.over_cap_walk_partial:
             out += _over_cap_partial_note(over_cap_budget_s)
         return out
 
