@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = '0.3.240'
+__version__ = '0.3.241'
 
 
 # Lazy imports to avoid circular dependency deadlocks when importing submodules
