@@ -270,7 +270,8 @@ class TestCounts:
 
         assert out.startswith('0 matching lines'), out
         assert 'TIMED OUT after' not in out, out            # caller deadline was not hit
-        assert 'over-cap file list is partial' in out, out  # the walk's own-budget note
+        assert 'lower bound' in out, out                    # BUG_0227: says what the zero IS
+        assert 'list of skipped files above' not in out, out  # no such list in count mode
 
     def test_whole_repo_ls_files_queried_once(self, tmp_path):
         """Case 14 (BUG_0202 F2): the git index is queried ONCE per repo (whole-repo

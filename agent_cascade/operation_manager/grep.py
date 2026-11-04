@@ -163,14 +163,20 @@ def _ignore_advisory_note(n: int) -> str:
 
 
 def _over_cap_partial_note(budget_s: float) -> str:
-    """BUG_0202 (F5): the note for a truncated over-cap DIAGNOSTIC walk.
+    """BUG_0202 (F5) / BUG_0227: disclose a truncated over-cap DIAGNOSTIC walk.
 
-    Worded per the walk's OWN budget (GREP_LARGE_FILE_SCAN_BUDGET_S), never the caller's
-    deadline — a walk that merely ran out of its budget is not a caller timeout. One helper so
-    the count path's zero and non-zero branches cannot drift apart.
+    Worded per the walk's OWN budget (GREP_LARGE_FILE_SCAN_BUDGET_S, widened to the
+    caller's ``timeout`` when larger — BUG_0227), never the caller's deadline — a walk
+    that merely ran out of its budget is not a caller timeout.
+
+    Count-only output has no skipped-file list and presents its total as the answer, so
+    this says what the number IS (a lower bound) instead of pointing at a "list above"
+    that does not exist in this mode. One helper so the zero and non-zero branches
+    cannot drift apart.
     """
-    return (f" [note: the over-cap file list is partial — its {budget_s:.2f} s diagnostic walk "
-            'did not finish, so the list of skipped files above is incomplete]')
+    return (f"[search INCOMPLETE — the over-cap file enumeration stopped at its "
+            f"{budget_s:.2f} s budget, so files it never reached are unaccounted "
+            f"for; treat the count as a lower bound]")
 
 
 def _exclude_matches(basename: str, rel_path: str, pattern: str) -> bool:
@@ -1133,6 +1139,11 @@ class GrepMixin:
 
         _max_mb, _head_bytes, _scan_limit, _budget_s = _grep_large_file_limits()
         max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else 0
+        # BUG_0227: the over-cap enumeration is a diagnostic walk, but its budget must be
+        # widen-able by the caller. A fixed 0.75 s cap meant raising `timeout` to handle a
+        # large tree still produced a truncated skip set (and a lower-bound total). Take
+        # whichever is larger: the safety budget or the caller's own deadline.
+        _walk_budget_s = max(_budget_s, timeout)
         # BUG_0221 (#7): ONE resolver for this count-only grep. The fallback walk, the over-cap
         # walk and the ignored-match probe all reuse it, so the repo's `git ls-files -z` index is
         # queried at most once per grep instead of once per resolver instance.
@@ -1212,7 +1223,7 @@ class GrepMixin:
                 if max_bytes:
                     skipped_count, skipped_paths, _over_cap_truncated = self._over_cap_rel_paths(
                         resolved, include, exclude, ignore_vcs, max_bytes,
-                        time.monotonic() + _budget_s, resolver=_count_resolver)
+                        time.monotonic() + _walk_budget_s, resolver=_count_resolver)
                     # F5 (BUG_0202/RC-B): a truncated over-cap walk means the skip set (and thus
                     # the count) is partial — surface it through its own flag, NOT the caller-
                     # deadline flags (the walk's 0.75 s budget is not the caller's deadline).
@@ -1287,7 +1298,7 @@ class GrepMixin:
         return self._format_count_result(
             pattern, searched_note, per_file, per_pattern, total, alts, disclosure,
             skipped_count, skipped_paths, _max_mb, timeout,
-            over_cap_budget_s=_budget_s)
+            over_cap_budget_s=_walk_budget_s)
 
     def _format_count_result(self,
                              pattern: str,
@@ -1343,10 +1354,19 @@ class GrepMixin:
             # (worded per path — a fast-path timeout whose fallback finished is not "partial").
             base += _timeout_note
             if disclosure.over_cap_walk_partial:
-                base += _over_cap_partial_note(over_cap_budget_s)
+                # BUG_0227: count mode has no skipped-file list, so say what the zero IS.
+                base += ' ' + _over_cap_partial_note(over_cap_budget_s)
             return base
 
-        out = f"Count-only results for '{pattern}'{searched_note}:"
+        # BUG_0227: when the over-cap enumeration was truncated the total is a lower bound,
+        # and that must be a header — a trailing note after "[total: …]" reads as a footnote
+        # to a finished count. Count-only mode also has no file list for the old "list above"
+        # wording to refer to.
+        _over_cap_header = (
+            _over_cap_partial_note(over_cap_budget_s)
+            if disclosure.over_cap_walk_partial else '')
+        out = (_over_cap_header + '\n' if _over_cap_header else '') \
+            + f"Count-only results for '{pattern}'{searched_note}:"
         items = sorted(per_file.items(), key=lambda kv: kv[1], reverse=True)
         shown = items[:50]
         for rel, c in shown:
@@ -1356,13 +1376,16 @@ class GrepMixin:
         out += f"\n[total: {total} matching lines in {len(per_file)} file(s)]"
         if alts:
             pp = ', '.join(f"'{alt}': {per_pattern.get(alt, 0)}" for alt in alts)
-            out += f"\n[per-pattern: {pp} across {total} matching lines]"
+            # BUG_0227: do not present a truncated breakdown as complete. Complete
+            # results keep the byte-identical historical line.
+            out += f"\n[per-pattern: {pp} across {total} matching lines"
+            if disclosure.over_cap_walk_partial:
+                out += ' — partial, lower bound'
+            out += ']'
         out += _incomplete_note(skipped_count, skipped_paths, max_mb)
         if disclosure.partial_error:
             out += ' [note: some files were skipped due to errors — counts are partial]'
         out += _timeout_note
-        if disclosure.over_cap_walk_partial:
-            out += _over_cap_partial_note(over_cap_budget_s)
         return out
 
     def _grep_single_file(self,
