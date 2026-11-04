@@ -242,6 +242,34 @@ def _make_usage_callback(instance, telemetry_collector):
     return _on_usage
 
 
+def _make_session_digest_callback(instance):
+    """Create a callback capturing NInfer's retained-session digest (BUG_0187).
+
+    NInfer assigns each retained conversation its own catalog cell and reports the
+    digest of the cell the finished turn was retained under in the final SSE chunk.
+    Recording it on the instance lets ``state_ops.save_instance_state`` address that
+    exact cell instead of the autoloader's hardcoded slot 0, which under concurrent
+    fleet traffic holds whichever sibling dominated the single shared slot.
+
+    The endpoint tuple is captured at callback time (``_last_endpoint_config`` is set
+    immediately before the call) so a digest produced by one endpoint is never sent
+    to a different endpoint's state/save.
+    """
+
+    def _on_session_digest(digest, id_slot=None):
+        if not digest:
+            return
+        with instance._state_lock:
+            cfg = instance._last_endpoint_config or {}
+            instance._session_digest = str(digest)
+            instance._session_digest_endpoint = (
+                cfg.get('api_base', '') or '',
+                cfg.get('model', '') or '',
+            )
+
+    return _on_session_digest
+
+
 def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0

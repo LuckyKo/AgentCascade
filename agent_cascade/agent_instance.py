@@ -360,6 +360,13 @@ class AgentInstance:
     _state_label: Optional[str] = None  # Last saved state label for this instance
     _last_endpoint_config: Optional[
         dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
+    # BUG_0187: NInfer publishes one retained KV session per catalog cell and reports the
+    # digest the finished turn was retained under in its final SSE chunk. state_ops sends
+    # it with /state/save so the autoloader saves THIS session's cell instead of assuming
+    # slot 0 (which under concurrency holds a sibling agent's KV). The endpoint tuple is
+    # recorded alongside so a digest from a previous endpoint is never sent to another.
+    _session_digest: Optional[str] = None
+    _session_digest_endpoint: Optional[tuple] = None
     # True while this instance is running a shell_cmd `safe`-mode command — forces KV
     # save/restore ON for the window regardless of the checkpoint toggle (see
     # state_ops.kv_save_effectively_enabled). Set/cleared by shell_cmd._execute_safe;

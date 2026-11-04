@@ -120,6 +120,8 @@ def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bo
     try:
         with instance._state_lock:
             endpoint_cfg = instance._last_endpoint_config
+            session_digest = getattr(instance, '_session_digest', None)
+            digest_endpoint = getattr(instance, '_session_digest_endpoint', None)
 
         if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
             logger.debug('No cached endpoint config for %s', instance.instance_name)
@@ -136,7 +138,18 @@ def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bo
             logger.debug('Missing api_base/model for state save on %s', instance.instance_name)
             return False
 
-        label = save_state(api_base, model, instance.instance_name)
+        # BUG_0187: the digest is the NInfer catalog cell the last turn was retained
+        # under. Only forward it when it was produced by THIS endpoint — a digest from
+        # a previous endpoint names a different model's session and must not be sent.
+        if not (isinstance(session_digest, str) and session_digest
+                and isinstance(digest_endpoint, tuple) and len(digest_endpoint) == 2
+                and digest_endpoint == (api_base, model)):
+            session_digest = None
+
+        if session_digest:
+            label = save_state(api_base, model, instance.instance_name, session_digest=session_digest)
+        else:
+            label = save_state(api_base, model, instance.instance_name)
         if label:
             if set_label:
                 with instance._state_lock:
@@ -243,8 +256,17 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
         return False
 
 
-def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
-    """Save KV cache state. Returns label if successful, None on failure."""
+def save_state(api_base: str, model: str, instance_name: str,
+               session_digest: Optional[str] = None) -> Optional[str]:
+    """Save KV cache state. Returns label if successful, None on failure.
+
+    ``session_digest`` (BUG_0187) is NInfer's identity for the retained session the
+    caller's last turn produced. The autoloader resolves it to the matching catalog
+    cell and saves THAT cell (with an ``if_digest`` precondition), instead of the old
+    unconditional ``slot 0`` — which under concurrent fleet traffic holds a sibling
+    agent's KV and captured the wrong session. Omitting it preserves the legacy
+    single-slot behaviour for engines that do not publish session digests.
+    """
     try:
         # Defensive check: reject obviously dangerous instance_names (belt-and-suspenders).
         # Autoloader also sanitizes labels via _sanitize_label().
@@ -259,10 +281,13 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
         # Autoloader's _sanitize_label() strips \, /, .. to prevent path traversal.
         label = instance_name
         url = f"{base}/v1/models/{model}/state/save"
+        body = {'label': label}
+        if isinstance(session_digest, str) and session_digest:
+            body['session_digest'] = session_digest
         # Must exceed the autoloader's own 120 s slot-action budget: the shortest timeout in the
         # chain always wins, and a 30 s ceiling abandoned a multi-GB save that was still writing
         # (leaving an orphan 1.4 GB .tmp, the save killed by the unload that followed it).
-        resp = httpx.post(url, json={'label': label}, timeout=180)
+        resp = httpx.post(url, json=body, timeout=180)
 
         if resp.status_code == 200:
             # Cleanup old states for this instance after successful save

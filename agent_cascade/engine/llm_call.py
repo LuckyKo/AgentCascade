@@ -59,8 +59,8 @@ STREAM_UPDATE_MAX_CHARS = 150
 
 from agent_cascade.engine.compression_exec import (_COMPRESSOR_WINDOW_SAFETY_FACTOR, FALLBACK_COMPRESSION_MAX_ROUNDS,
                                                    FALLBACK_COMPRESSION_MIN_SLICE_FRACTION)
-from agent_cascade.engine.helpers import (_get_active_functions_from_template, _make_token_count_callback,
-                                          _make_usage_callback)
+from agent_cascade.engine.helpers import (_get_active_functions_from_template, _make_session_digest_callback,
+                                          _make_token_count_callback, _make_usage_callback)
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint. This constant lived at module scope in the original
@@ -1709,6 +1709,10 @@ class LLMCallMixin:
                 if _telemetry_collector is not None:
                     merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
 
+                # Capture NInfer's retained-session digest so a later state/save targets
+                # the caller's catalog cell, not slot 0 (BUG_0187). Independent of telemetry.
+                merged_cfg['_on_session_digest'] = _make_session_digest_callback(instance)
+
                 return llm.chat(
                     messages=messages,
                     functions=active_functions,
@@ -1759,6 +1763,10 @@ class LLMCallMixin:
             _telemetry_collector = getattr(self.pool, 'telemetry', None)  # Same pattern as self._telemetry() helper
             if _telemetry_collector is not None:
                 merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
+
+            # Capture NInfer's retained-session digest so a later state/save targets
+            # the caller's catalog cell, not slot 0 (BUG_0187). Independent of telemetry.
+            merged_cfg['_on_session_digest'] = _make_session_digest_callback(instance)
 
             return llm.chat(
                 messages=messages,

@@ -30,7 +30,7 @@ if openai.__version__.startswith('0.'):
 else:
     from openai import OpenAIError
 
-from agent_cascade.llm.base import ModelServiceError, _fire_usage_callback, register_llm
+from agent_cascade.llm.base import ModelServiceError, _fire_session_digest_callback, _fire_usage_callback, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
@@ -270,6 +270,21 @@ def _extract_reasoning_blocks(reasoning) -> Optional[List[dict]]:
             continue
         blocks.append({'id': rid, 'encrypted_content': enc})
     return blocks or None
+
+
+def _fire_slot_identity_from_raw(raw) -> None:
+    """Forward NInfer's ``session_digest``/``id_slot`` from a raw SSE chunk (BUG_0187).
+
+    The parsed SDK chunk type drops fields it does not model, so the digest must be
+    read from the raw JSON payload before it is converted. This identifies the catalog
+    cell the finished turn was retained under; state_ops later sends it with /state/save
+    so the autoloader saves the caller's session rather than slot 0.
+    """
+    if not isinstance(raw, dict):
+        return
+    digest = raw.get('session_digest')
+    if digest:
+        _fire_session_digest_callback(digest, raw.get('id_slot'))
 
 
 def _extract_usage(usage_obj):
@@ -693,7 +708,9 @@ class TextChatAtOAI(BaseFnCallModel):
                     # BUG_0157: surface mid-generation provider errors (SSE error frames)
                     # instead of letting them look like a clean empty completion.
                     _raise_on_stream_error(sse)
-                    chunk = response._client._process_response_data(data=sse.json(),
+                    raw_chunk = sse.json()
+                    _fire_slot_identity_from_raw(raw_chunk)
+                    chunk = response._client._process_response_data(data=raw_chunk,
                                                                     cast_to=response._cast_to,
                                                                     response=response.response)
 
@@ -735,7 +752,9 @@ class TextChatAtOAI(BaseFnCallModel):
                     # BUG_0157: surface mid-generation provider errors (SSE error frames)
                     # instead of letting them look like a clean empty completion.
                     _raise_on_stream_error(sse)
-                    chunk = response._client._process_response_data(data=sse.json(),
+                    raw_chunk = sse.json()
+                    _fire_slot_identity_from_raw(raw_chunk)
+                    chunk = response._client._process_response_data(data=raw_chunk,
                                                                     cast_to=response._cast_to,
                                                                     response=response.response)
 

@@ -85,6 +85,41 @@ def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
         logger.debug('Telemetry usage callback failed: %s', e)  # Never break streaming
 
 
+# Thread-local storage for the NInfer session-digest callback (BUG_0187). Separate from
+# the usage callback so a backend that reports no usage still records the KV identity.
+_chat_on_session_digest_cb = threading.local()
+
+
+def _get_on_session_digest_cb():
+    """Get the current thread's session-digest callback, or None."""
+    return getattr(_chat_on_session_digest_cb, 'cb', None)
+
+
+def _set_on_session_digest_cb(cb):
+    """Set the current thread's session-digest callback."""
+    _chat_on_session_digest_cb.cb = cb
+
+
+def _fire_session_digest_callback(digest: Optional[str], id_slot: Optional[int] = None) -> None:
+    """Fire the session-digest callback when a backend reports the retained KV identity.
+
+    NInfer attaches ``id_slot`` and ``session_digest`` to the final/usage SSE chunk.
+    The digest names the catalog cell the just-finished turn was retained under, which
+    is what lets a later /state/save address the caller's session instead of slot 0
+    (BUG_0187). Never raises — a missing callback or a broken sink must not break
+    streaming.
+    """
+    if not digest:
+        return
+    _on_digest_cb = _get_on_session_digest_cb()
+    if not callable(_on_digest_cb):
+        return
+    try:
+        _on_digest_cb(digest, id_slot)
+    except Exception as e:
+        logger.debug('Session digest callback failed: %s', e)  # Never break streaming
+
+
 def register_llm(model_type):
 
     def decorator(cls):
@@ -330,6 +365,11 @@ class BaseChatModel(ABC):
         on_usage_cb = generate_cfg.pop('_on_usage', None)
         _set_on_usage_cb(on_usage_cb)
 
+        # Extract the NInfer session-digest callback (BUG_0187) and store it thread-locally,
+        # exactly like the usage callback: streaming backends fire it without extra parameters.
+        on_session_digest_cb = generate_cfg.pop('_on_session_digest', None)
+        _set_on_session_digest_cb(on_session_digest_cb)
+
         agent_settings = [
             'disabled_tools',
             'max_turns',
@@ -343,6 +383,7 @@ class BaseChatModel(ABC):
             'code_char_limit',
             'seed',
             '_on_token_count',  # Safety net: also pop here in case it wasn't extracted above
+            '_on_session_digest',  # Safety net: internal callback, never an LLM parameter (BUG_0187)
             '_use_custom_sampling',  # Internal routing flag — not an LLM parameter
         ]
         for setting in agent_settings:
