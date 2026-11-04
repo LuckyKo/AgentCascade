@@ -628,11 +628,11 @@ class ToolExecMixin:
         if not (template and (tool_name in disabled_tools or tool_name not in function_map)):
             return None
         if tool_name in disabled_tools and tool_name not in function_map:
-            return 'disabled and does not exist'
+            return 'disabled and absent'
         elif tool_name in disabled_tools:
             return 'disabled'
         else:
-            return 'does not exist'
+            return 'not available'
 
     def _auto_deny_tool_call(self, instance: AgentInstance, inst_name: str, out: Message, tool_name: str,
                              deny_reason: str, response: List[Message],
