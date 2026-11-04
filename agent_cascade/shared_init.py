@@ -10,9 +10,22 @@ Issue: C2 - Extract shared initialization code
 import os
 import signal as _signal_mod  # internal alias — avoids polluting module namespace with bare 'signal'
 from pathlib import Path
+from typing import Optional
 
 from agent_cascade.log import logger
 from agent_cascade.telemetry import TelemetryCollector
+
+
+def _env_float(name: str) -> Optional[float]:
+    """Read a float env var, returning None when the var is ABSENT.
+
+    Returning None (instead of a hardcoded default) lets boot-time startup config leave
+    the user's persisted value untouched: a key is only applied/saved when its env var is
+    explicitly set. Mirrors api_server.py main()'s "only apply when explicitly set" logic.
+    """
+    raw = os.getenv(name)
+    return float(raw) if raw is not None else None
+
 
 # Single source of truth for "system agents with a stable, reusable conversation[0]". For these
 # classes the per-run identity lines (Supervisor+log filename, own log path) are NOT emitted into
@@ -174,26 +187,36 @@ def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_m
         raise SystemExit(1)
 
 
-def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_timeout: float,
-                             idle_check_interval: float):
+def configure_and_start_pool(agent_pool, idle_timeout: Optional[float],
+                             system_agent_idle_timeout: Optional[float],
+                             idle_check_interval: Optional[float]):
     """
     Configure pool settings (idle timeout), set the back-reference on OperationManager,
     and start background services.
+
+    Only explicitly-overridden values (non-None) are applied to pool.settings and persisted.
+    A None value means "leave the user's persisted value untouched" — so when no env var is
+    set, boot does NOT clobber pool_settings.json. Mirrors api_server.py main()'s guarded logic.
     """
     # Set back-reference so OperationManager can check pool.stopped during approval loops
     agent_pool.operation_manager.agent_pool = agent_pool
 
     # Configure pool settings before starting background services (avoids race window).
     # Uses config handlers directly for consistency with runtime updates and validation.
+    # Only explicitly-overridden (non-None) keys are applied + persisted; None leaves the
+    # user's persisted value untouched (no clobber, no re-save).
     if hasattr(agent_pool, 'settings'):
         from agent_cascade.config_handlers import CONFIG_HANDLERS
 
-        startup_cfg = {
-            'idle_timeout_seconds': idle_timeout,
-            'system_agent_idle_timeout_seconds': system_agent_idle_timeout,
-            'idle_check_interval': idle_check_interval,
-        }
-        for key, value in startup_cfg.items():
+        startup_cfg = {}
+        if idle_timeout is not None:
+            startup_cfg['idle_timeout_seconds'] = idle_timeout
+        if system_agent_idle_timeout is not None:
+            startup_cfg['system_agent_idle_timeout_seconds'] = system_agent_idle_timeout
+        if idle_check_interval is not None:
+            startup_cfg['idle_check_interval'] = idle_check_interval
+
+        for key in startup_cfg:
             handler = CONFIG_HANDLERS.get(key)
             if handler:
                 try:
@@ -201,8 +224,8 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_
                 except Exception as e:
                     logger.warning(f"[INIT] Config update failed for '{key}': {e}")
 
-        if hasattr(agent_pool, '_save_pool_settings'):
-            agent_pool._save_pool_settings()  # Persist startup-effective values
+        if startup_cfg and hasattr(agent_pool, '_save_pool_settings'):
+            agent_pool._save_pool_settings()  # Persist the explicitly-overridden values
 
     try:
         agent_pool.start()
@@ -285,9 +308,11 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     # Ensure config files exist before any agent/infrastructure that depends on them
     ensure_config_files(project_root)
 
-    idle_timeout = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT', 900.0))
-    system_agent_idle_timeout = float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
-    idle_check_interval = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))
+    # Read env vars with NO hardcoded default: an absent var yields None so the user's
+    # persisted value in pool_settings.json is left untouched (no boot clobber).
+    idle_timeout = _env_float('AGENT_CASCADE_IDLE_TIMEOUT')
+    system_agent_idle_timeout = _env_float('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT')
+    idle_check_interval = _env_float('AGENT_CASCADE_IDLE_CHECK_INTERVAL')
 
     operation_mgr = create_operation_manager(workspace_dir)
 
