@@ -30,6 +30,14 @@ from .manager import (
     SKILL_REF_TOKENS,
 )
 from .matcher import MemoryMatcher
+from .skill_gate import (
+    MIN_CONTENT_TERMS,
+    STOP_FUNCTION,
+    STOP_GENERIC,
+    describe_dropped,
+    filter_stopword_only_names,
+    matched_term_counts,
+)
 from .vault import VaultIndex, discover_vaults, parse_frontmatter, identity_text, is_under_vault
 from .stats import bump_read_count, load_stats
 
@@ -52,6 +60,12 @@ __all__ = [
     'SKILL_JUNK_MIN',
     'SKILL_REF_TOKENS',
     'MemoryMatcher',
+    'MIN_CONTENT_TERMS',
+    'STOP_FUNCTION',
+    'STOP_GENERIC',
+    'describe_dropped',
+    'filter_stopword_only_names',
+    'matched_term_counts',
     'VaultIndex',
     'discover_vaults',
     'parse_frontmatter',

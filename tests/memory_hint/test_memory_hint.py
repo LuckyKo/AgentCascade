@@ -35,6 +35,10 @@ from agent_cascade.memory_hint import (
     SKILL_REF_TOKENS,
 )
 from agent_cascade.memory_hint.stats import bump_read_count, load_stats
+from agent_cascade.memory_hint.skill_gate import (
+    filter_stopword_only_names,
+    matched_term_counts,
+)
 from agent_cascade.memory_hint.vault import (
     VaultIndex,
     discover_vaults,
@@ -1554,6 +1558,197 @@ class TestSkillSubpipelineRealManager:
         with patch.object(_skill_manager_mod, 'parse_skill_file', side_effect=_boom):
             mgr._process_job(fresh_job)  # must not raise; worker keeps processing
         assert len(inst._tool_warnings) >= 1, 'worker must stay alive and keep processing after the error'
+
+
+# ── Skill content gate (BUG_0226) ───────────────────────────────────────────
+#
+# The decoder below is the real `webui-feature-mirroring-research` frontmatter
+# reduced to the parts that made it false-positive during a C++ engine edit: the
+# skill shares only function words (`the`/`and`/`for`/`is`/`its`) or engineering
+# boilerplate (`add`/`existing`) with the turn. The two turn texts are the exact
+# incident queries from BUG_0226.
+#
+# These are END-TO-END tests: a real hermetic SkillManager, the real matcher, the
+# real gate. They fail on the pre-fix code (the decoy is delivered) and pass only
+# if the content gate runs — and runs AFTER the noise gate, so the fire/skip
+# decision itself is unchanged.
+
+BUG_0226_WEBUI = 'webui-feature-mirroring-research'
+BUG_0226_EDIT = 're-derive-line-ranges-before-each-ranged-edit'
+BUG_0226_AUDIT = 'audit-tool-side-kv-seam-against-engine-ownership'
+BUG_0226_GENERIC = 'generic-notes'
+
+BUG_0226_TURN_TABLE_ROW = (
+    'Now fix §2(a) table row and §2(b). §2(a) — add `release_private_owner`. '
+    'Let me edit the table row for "Engine-side (correct route)". '
+    '[tool-justification] Add the exact existing per-cell release primitives found by the audit.')
+BUG_0226_TURN_SHARED_PREFIX = (
+    'Now fix §2(b) shared prefixes. [tool-justification] Correct the shared-prefix section per '
+    'the reviewer audit: reclaim_automatic_shared_prefix exists; the real limit is its '
+    'eligibility gate, and pinned grafts are excluded for free.')
+
+
+class TestSkillContentGateBug0226:
+    """A memory hint must not suggest a skill carried only by stopwords (BUG_0226)."""
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, description: str, triggers) -> None:
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        trg = ''.join(f'  - {t}\n' for t in triggers)
+        (d / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {description}\ntriggers:\n{trg}---\n# Body\n',
+            encoding='utf-8')
+
+    @classmethod
+    def _seed(cls, tmp_path, include_generic=False):
+        from tests.conftest import make_hermetic_skill_manager
+        sm = make_hermetic_skill_manager(tmp_path)
+        root = tmp_path / 'skills'
+        # Decoy: same frontmatter shape as the real skill — including the closing
+        # clause whose function words (`and the feature is ... by its consumer`)
+        # are what the production matcher keyed on.
+        cls._write_skill(
+            root, BUG_0226_WEBUI,
+            'Produce a line-cited, implementation-ready plan for adding a new settings '
+            'section to an unfamiliar webUI by reverse-engineering one existing analogous '
+            'feature end-to-end, including whether the save path merges or replaces, and '
+            'whether the feature is actually reachable by its consumer.',
+            ['add a settings section to an existing webUI',
+             'mirror an existing feature when adding a new backend',
+             'map the API + config + UI integration surface for a new feature'])
+        # Genuinely on-topic for the table-row turn.
+        cls._write_skill(
+            root, BUG_0226_EDIT,
+            'Line ranges for delete_and_insert edits are resolved against the CURRENT file '
+            'state; inserting lines earlier silently shifts every later range, corrupting '
+            'tables and duplicating paragraphs. Re-read the region and edit bottom-up.',
+            ['delete_and_insert edit', 'table header deleted by an edit',
+             'line range edit shifted', 'multiple edits to the same file'])
+        # Genuinely on-topic for the shared-prefix turn.
+        cls._write_skill(
+            root, BUG_0226_AUDIT,
+            'Audit whether a tool-side kv seam is owned by the engine or the tool: the real '
+            'limit is the eligibility gate of each shared prefix, and pinned grafts are '
+            'excluded for free.',
+            ['shared prefix eligibility gate', 'pinned grafts excluded',
+             'kv seam ownership audit'])
+        if include_generic:
+            # Fourth candidate, plausible on boilerplate only — used to prove the
+            # content gate did NOT shrink the candidate list before the noise gate.
+            cls._write_skill(
+                root, BUG_0226_GENERIC,
+                'Add and check the existing file for the line and the test.',
+                ['add a new line to the existing file', 'check the test file'])
+        sm.discover([root])
+        return sm
+
+    def _make_mgr(self, tmp_path, query, sm):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True, exist_ok=True)
+        _write_lesson(v, 'compression-debug.md', 'Compression Debug',
+                      'How to debug compression hangs in the engine loop',
+                      'When compression hangs check the daemon thread and lock ordering.')
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        pool.skill_manager = sm
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        job = {'instance_name': 'w', 'query': query,
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        return mgr, inst, job
+
+    @pytest.mark.parametrize('query, on_topic', [
+        (BUG_0226_TURN_TABLE_ROW, BUG_0226_EDIT),
+        (BUG_0226_TURN_SHARED_PREFIX, BUG_0226_AUDIT),
+    ])
+    def test_incident_turns_do_not_suggest_the_decoy(self, tmp_path, query, on_topic):
+        sm = self._seed(tmp_path)
+        # Sanity: the production matcher DOES return the decoy for this turn, so the
+        # assertion below is meaningful rather than vacuous.
+        raw = [n for n, _s in sm.match_skills(query)]
+        assert BUG_0226_WEBUI in raw, f'fixture no longer reproduces the bug: {raw}'
+        assert on_topic in raw
+
+        mgr, inst, job = self._make_mgr(tmp_path, query, sm)
+        mgr._process_job(job)
+        hint = '\n'.join(inst._tool_warnings)
+        assert 'Skills you may want to load' in hint, f'no skill hint delivered: {inst._tool_warnings!r}'
+        assert BUG_0226_WEBUI not in hint, f'stopword-only skill was suggested: {hint!r}'
+        # Over-filtering guard: the genuinely relevant skill survives.
+        assert on_topic in hint, f'relevant skill was filtered out: {hint!r}'
+
+    def test_no_suggestion_at_all_when_only_stopwords_remain(self, tmp_path):
+        """The shared-prefix turn minus the on-topic skill → no skill hint, not a
+        stopword-only hint. (The decoy was the ONLY other candidate.)"""
+        sm = self._seed(tmp_path)
+        ok, _ = sm.disable_skill(BUG_0226_AUDIT)
+        assert ok
+        mgr, inst, job = self._make_mgr(tmp_path, BUG_0226_TURN_SHARED_PREFIX, sm)
+        mgr._process_job(job)
+        assert not any('Skills you may want to load' in w for w in inst._tool_warnings), \
+            f'expected no skill hint, got {inst._tool_warnings!r}'
+
+    def test_noise_gate_still_counts_pre_filter_candidates(self, tmp_path):
+        """The content gate must not unblock the noise gate (BUG_0226 ordering).
+
+        Four candidates clear the floor, so the pre-fix noise gate skips (4 > 3).
+        Two of them are stopword-only; if the content gate ran BEFORE the noise
+        gate, only 2 survivors would remain and the hint would fire — a behaviour
+        change the fix must not introduce."""
+        sm = self._seed(tmp_path, include_generic=True)
+        raw = sm.match_skills(BUG_0226_TURN_TABLE_ROW)
+        assert len(raw) == 4, f'fixture drifted, expected 4 candidates: {raw}'
+        mgr, inst, job = self._make_mgr(tmp_path, BUG_0226_TURN_TABLE_ROW, sm)
+        mgr._process_job(job)
+        assert not any('Skills you may want to load' in w for w in inst._tool_warnings), \
+            f'noise gate was bypassed by the content filter: {inst._tool_warnings!r}'
+
+    def test_gate_fails_open_without_a_real_index(self):
+        """A MagicMock / unavailable index must leave the candidates untouched."""
+        sm = MagicMock()                       # auto-creates _matcher (not a dict)
+        assert filter_stopword_only_names('the and for', ['a', 'b'], sm) == ['a', 'b']
+
+    def test_gate_keeps_candidates_without_lexical_overlap(self):
+        """Unknown provenance is kept: the API skill selector may return a name the
+        keyword index never matched, and this gate must not overrule it."""
+        sm = MagicMock()
+        sm._matcher._field_index = {'table': {'x': frozenset({'desc'})}}
+        assert filter_stopword_only_names('fix the table row', ['semantic-only'], sm) \
+            == ['semantic-only']
+
+    def test_content_terms_ignore_function_and_generic_words(self):
+        """The classification itself: the decoy has zero content terms; the on-topic
+        skill keeps at least two."""
+        from agent_cascade.skills.matcher import SkillMatcher
+        matcher = SkillMatcher()
+        matcher.build_index([
+            {'name': BUG_0226_WEBUI,
+             'description': 'plan for adding a new settings section to an unfamiliar webUI, '
+                            'and whether the feature is actually reachable by its consumer',
+             'triggers': ['add a settings section to an existing webUI']},
+            {'name': BUG_0226_EDIT,
+             'description': 'Line ranges for edits are resolved against the current file '
+                            'state; shifts corrupt tables and duplicate paragraphs.',
+             'triggers': ['table header deleted by an edit']},
+        ])
+        sm = MagicMock()
+        sm._matcher = matcher
+        counts = matched_term_counts(BUG_0226_TURN_TABLE_ROW,
+                                     [BUG_0226_WEBUI, BUG_0226_EDIT],
+                                     matcher._field_index)
+        matched_decoy, content_decoy = counts[BUG_0226_WEBUI]
+        assert matched_decoy >= 2, 'fixture must reproduce a multi-term overlap'
+        assert content_decoy == 0, f'decoy should have no content terms: {counts}'
+        assert counts[BUG_0226_EDIT][1] >= 2, f'on-topic skill lost its signal: {counts}'
+        assert filter_stopword_only_names(
+            BUG_0226_TURN_TABLE_ROW, [BUG_0226_WEBUI, BUG_0226_EDIT], sm) == [BUG_0226_EDIT]
 
 
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────

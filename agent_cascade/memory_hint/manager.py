@@ -31,6 +31,7 @@ from agent_cascade.log import logger
 from agent_cascade.settings import SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL
 
 from .matcher import MemoryMatcher
+from .skill_gate import describe_dropped, filter_stopword_only_names
 from .vault import VaultIndex, discover_vaults
 
 # Cooldown (seconds) before the same memory may be re-hinted to an instance.
@@ -677,10 +678,12 @@ class MemoryHintManager:
         Returns the skill names to suggest (score-descending, capped), or ``[]``. The
         gate is a self-calibrating **absolute junk guard + adaptive floor** (BUG_0041),
         then the unchanged cooldown/loaded dedup, then a **relative noise gate**
-        evaluated on the post-dedup survivors, then the entry cap. There is *no*
-        specificity-gap requirement — multiple relevant skills are legitimate. All
-        floor state is independent of the memory pipeline (different measure, different
-        lock). A failure here can never break the memory path (plan §D6).
+        evaluated on the post-dedup survivors, then a **content gate** that drops
+        candidates carried only by function/boilerplate words (BUG_0226), then the
+        entry cap. There is *no* specificity-gap requirement — multiple relevant
+        skills are legitimate. All floor state is independent of the memory pipeline
+        (different measure, different lock). A failure here can never break the
+        memory path (plan §D6).
         """
         name = job['instance_name']
         if not settings['skill_suggestions']:          # master sub-toggle (plan §D7)
@@ -783,6 +786,22 @@ class MemoryHintManager:
                          'in_vocab=%d → skip(noise) %d/%d after dedup (max=%d)',
                          name, top1, floor, n_tokens, n_in_vocab, len(to_hint),
                          len(matches), noise_max)
+            return []
+
+        # ── Gate 3: CONTENT gate (BUG_0226) ─────────────────────────────────
+        # Deliberately LAST, after the noise gate, so the fire/skip decision, the
+        # EWMA feed and the noise denominator are byte-identical to the pre-fix
+        # behaviour — only WHICH names get shown changes. A candidate is dropped
+        # when its only overlap with the turn is stopwords (`the`/`and`/`for`, or
+        # the engineering boilerplate `add`/`existing`/`line`/...). See skill_gate.
+        candidates = to_hint
+        to_hint = filter_stopword_only_names(job['query'], candidates, sm)
+        dropped = describe_dropped(job['query'], to_hint, candidates, sm)
+        if dropped:
+            logger.debug('[MEMORY_HINT] %s: content gate dropped stopword-only '
+                         'match(es): %s', name, dropped)
+        if not to_hint:
+            logger.debug('[MEMORY_HINT] %s: content gate left no skill hint', name)
             return []
 
         max_entries = SKILL_HINT_MAX_ENTRIES            # plan §D3 cap (after dedup/cooldown)
