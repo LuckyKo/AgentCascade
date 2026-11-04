@@ -140,6 +140,15 @@ SKILL_HINT_NOISE_RATIO = 0.6
 SKILL_JUNK_MIN = 0.0375   # pinned literal; was derived from SKILL_HINT_MIN_SCORE * 0.25
 
 
+def _ordinal(n: int) -> str:
+    """English ordinal for the recurrence marker (BUG_0225): 1->'1st', 2->'2nd', 3->'3rd'..."""
+    if 10 <= n % 100 <= 20:
+        suffix = 'th'
+    else:
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+    return f'{n}{suffix}'
+
+
 class MemoryHintManager:
     """Owns the daemon worker, job queue, vault indexes and hint delivery."""
 
@@ -528,23 +537,30 @@ class MemoryHintManager:
         if not memory_bare and not skill_names:
             return
 
-        hint_text = self._build_combined(memory_display, skill_names)
-        if not hint_text:
-            return
-
-        # Record cooldowns BEFORE delivery (only for what we actually deliver), so a
-        # fast re-match is throttled. Memory and skill state are recorded together in
-        # one lock block — they must never be partially updated.
+        # Record cooldowns + per-session hint counts BEFORE building the block, so the
+        # recurrence marker (BUG_0225) reflects THIS delivery (the Nth hint). Memory and
+        # skill state are recorded together in one lock block — never partially updated.
         now = time.monotonic()
+        skill_counts: Dict[str, int] = {}
+        loaded: set = set()
         with inst._compression_lock:
             for path in memory_bare:
                 inst._recently_hinted[path] = now
             if memory_bare:
                 inst._last_memory_hint_turn = job.get('turn', -1)
+            counts = inst._skill_hint_counts
             for skill_name in skill_names:
                 inst._recently_skill_hinted[skill_name] = now
+                counts[skill_name] = counts.get(skill_name, 0) + 1
             if skill_names:
                 inst._last_skill_hint_turn = job.get('turn', -1)
+                # Snapshot counts + loaded-set for rendering (read under the same lock).
+                skill_counts = {n: counts.get(n, 0) for n in skill_names}
+                loaded = {str(x).lower() for x in (getattr(inst, '_loaded_skill_names', None) or [])}
+
+        hint_text = self._build_combined(memory_display, skill_names, skill_counts, loaded)
+        if not hint_text:
+            return
 
         self._deliver(inst, name, hint_text)
 
@@ -775,23 +791,52 @@ class MemoryHintManager:
         logger.debug('[MEMORY_HINT] %s: skill hint fire → %s', name, to_hint)
         return to_hint
 
-    def _skill_block(self, names: List[str]) -> str:
+    def _skill_block(self, names: List[str],
+                     skill_counts: Optional[Dict[str, int]] = None,
+                     loaded: Optional[set] = None) -> str:
         """Skill section of a combined hint ('' when empty). Skill names are short
-        snake_case strings — no per-entry clipping needed."""
+        snake_case strings — no per-entry clipping needed.
+
+        BUG_0225: a skill hinted ≥3× this session (and not loaded) gets a concise
+        recurrence marker appended to its line, so repetition carries weight. The marker
+        is advisory-only text — it never changes the delivery mechanism (no user-message
+        injection, preserving the e2e contract).
+
+        Side effect on delivery: the marker makes each repeat a DISTINCT string, so
+        ``_queue_tool_warning``'s identical-string dedup no longer collapses repeats —
+        each repeat is re-queued (that is the point: repetition now carries weight).
+        The ``loaded`` set is defense-in-depth: the gate already filters loaded skills
+        out of ``names``, so in production the suffix is always appended; the set is
+        passed so the branch stays correct if that gate ever changes.
+        """
         if not names:
             return ''
-        lines = [f"  - {n}" for n in names]
+        counts = skill_counts or {}
+        loaded = loaded or set()
+        lines = []
+        for n in names:
+            line = f"  - {n}"
+            c = counts.get(n)
+            if c is not None and c >= 3:
+                suffix = f"hinted {_ordinal(c)} time this session"
+                if n.lower() not in loaded:
+                    suffix += ', not loaded'
+                line += f" — {suffix}"
+            lines.append(line)
         return f"Skills you may want to load ({len(names)}):\n" + '\n'.join(lines)
 
-    def _build_combined(self, memory_display: List[str], skill_names: List[str]) -> str:
+    def _build_combined(self, memory_display: List[str], skill_names: List[str],
+                        skill_counts: Optional[Dict[str, int]] = None,
+                        loaded: Optional[set] = None) -> str:
         """Merge the two sub-pipelines into ONE hint string (plan §D5).
 
         Memory-only output is BYTE-IDENTICAL to the legacy ``_build_hint`` result; a
         skill-only hint gets the ``[MEMORY HINT]`` umbrella tag so log/UI filtering keyed
-        on that tag still catches it.
+        on that tag still catches it. ``skill_counts`` / ``loaded`` (BUG_0225) drive the
+        per-line recurrence marker and are optional (default ``None`` → no marker).
         """
         mem_block = self._build_hint(memory_display)   # UNCHANGED method; '' if empty
-        skill_block = self._skill_block(skill_names)   # '' if empty
+        skill_block = self._skill_block(skill_names, skill_counts, loaded)   # '' if empty
         if mem_block and skill_block:
             return mem_block + '\n' + skill_block      # both sections, memory first (stable order)
         if mem_block:

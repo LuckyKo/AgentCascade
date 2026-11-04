@@ -68,6 +68,7 @@ class TestMemoryHintE2E:
         # Skill-hint state (feature: skills-in-memory-hints).
         inst._recently_skill_hinted = {}
         inst._last_skill_hint_turn = -1
+        inst._skill_hint_counts = {}
         return inst
 
     @staticmethod
@@ -337,6 +338,7 @@ class TestMemoryHintPoolStopResume:
         inst._last_memory_hint_turn = -1
         inst._recently_skill_hinted = {}
         inst._last_skill_hint_turn = -1
+        inst._skill_hint_counts = {}
         # parent_instance: the idle checker reads it for every registered instance; a
         # __new__ instance lacks dataclass defaults, so set it to keep the (unrelated)
         # idle-checker thread from logging AttributeError noise during the test.

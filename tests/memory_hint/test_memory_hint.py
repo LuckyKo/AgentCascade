@@ -283,6 +283,7 @@ class _FakeInst:
         # Skill-hint state (feature: skills-in-memory-hints).
         self._recently_skill_hinted = {}
         self._last_skill_hint_turn = -1
+        self._skill_hint_counts = {}
 
 
 class TestManagerDedup:
@@ -1156,6 +1157,149 @@ class TestManagerSkillHints:
         assert inst._tool_warnings == []
 
 
+class TestSkillHintRecurrence:
+    """BUG_0225: a skill hinted repeatedly this session gets a recurrence marker.
+
+    The per-session counter (``inst._skill_hint_counts``) is incremented on each
+    delivery; the marker (``— hinted Nth time this session, not loaded``) appears on
+    the 3rd+ delivery and is suppressed once the skill is loaded. Cooldown normally
+    gates repeats, so each test clears ``inst._recently_skill_hinted`` between runs to
+    model the cooldown window expiring.
+    """
+
+    @staticmethod
+    def _stub_skill_manager(matches):
+        sm = MagicMock()
+        sm.match_skills.return_value = matches
+        return sm
+
+    def _make_mgr(self, tmp_path, query, skill_manager, **cfg_over):
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        _write_lesson(v, 'compression-debug.md', 'Compression Debug',
+                      'How to debug compression hangs in the engine loop',
+                      'When compression hangs check the daemon thread and lock ordering.')
+        inst = _FakeInst()
+        pool = MagicMock()
+        cfg = {'memory_hint_enabled': True,
+               'memory_hint_max_entries': 3,
+               'memory_hint_cooldown_seconds': 600,
+               'memory_hint_query_chars': 1000}
+        cfg.update(cfg_over)
+        pool.llm_cfg = cfg
+        pool.skill_manager = skill_manager
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.rescan_vaults()
+        return mgr, inst
+
+    @staticmethod
+    def _job(turn):
+        return {'instance_name': 'w',
+                'query': 'debugging a compression hang in the engine loop',
+                'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': turn}
+
+    @staticmethod
+    def _clear_cooldown(inst):
+        with inst._compression_lock:
+            inst._recently_skill_hinted = {}
+
+    def _mgr_for(self, tmp_path):
+        from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
+        return self._make_mgr(
+            tmp_path, 'debugging a compression hang in the engine loop',
+            self._stub_skill_manager([('re-derive-line-ranges', SKILL_HINT_MIN_SCORE + 0.1)]))
+
+    def test_single_hint_has_no_marker(self, tmp_path):
+        """A skill hinted once → no recurrence marker; counter is 1."""
+        mgr, inst = self._mgr_for(tmp_path)
+        mgr._process_job(self._job(1))
+        assert len(inst._tool_warnings) == 1
+        hint = inst._tool_warnings[0]
+        assert 're-derive-line-ranges' in hint
+        assert 'time this session' not in hint
+        assert inst._skill_hint_counts['re-derive-line-ranges'] == 1
+
+    def test_third_hint_carries_recurrence_marker(self, tmp_path):
+        """Hinted 3× in one session → only the 3rd block carries the marker."""
+        mgr, inst = self._mgr_for(tmp_path)
+        for turn in (1, 2, 3):
+            mgr._process_job(self._job(turn))
+            self._clear_cooldown(inst)
+        assert len(inst._tool_warnings) == 3
+        first, second, third = inst._tool_warnings
+        # 1st and 2nd deliveries carry NO recurrence marker.
+        assert 'time this session' not in first
+        assert 'time this session' not in second
+        # 3rd delivery carries the marker + the not-loaded annotation.
+        assert '3rd time this session' in third
+        assert 'not loaded' in third
+        assert inst._skill_hint_counts['re-derive-line-ranges'] == 3
+
+    def test_marker_suppressed_once_skill_loaded(self, tmp_path):
+        """A loaded skill is excluded from suggestions (dedup), so no marker appears."""
+        mgr, inst = self._mgr_for(tmp_path)
+        mgr._process_job(self._job(1))
+        self._clear_cooldown(inst)
+        mgr._process_job(self._job(2))
+        self._clear_cooldown(inst)
+        # Simulate the skill being loaded this session.
+        with inst._compression_lock:
+            inst._loaded_skill_names = ['re-derive-line-ranges']
+        mgr._process_job(self._job(3))
+        # A loaded skill is dedup'd out of the suggestions (gate excludes it), so the
+        # 3rd delivery produces no new skill hint (memory is in cooldown too) → no
+        # 3rd tool warning is created. The count is capped at 2, so no marker appears.
+        assert len(inst._tool_warnings) == 2
+        for w in inst._tool_warnings:
+            assert 'time this session' not in w
+        assert inst._skill_hint_counts['re-derive-line-ranges'] == 2
+
+    def test_marker_uses_ordinal_for_higher_counts(self, tmp_path):
+        """The 5th delivery reports '5th time' (ordinal handling)."""
+        mgr, inst = self._mgr_for(tmp_path)
+        for turn in (1, 2, 3, 4, 5):
+            mgr._process_job(self._job(turn))
+            self._clear_cooldown(inst)
+        last = inst._tool_warnings[-1]
+        assert '5th time this session' in last
+        assert inst._skill_hint_counts['re-derive-line-ranges'] == 5
+
+    def test_skill_block_loaded_skill_omits_not_loaded_suffix(self, tmp_path):
+        """Direct _skill_block test: the loaded-set controls the 'not loaded' suffix.
+
+        The gate normally filters loaded skills out of the suggestion list, so this is
+        defense-in-depth: a loaded skill gets the marker WITHOUT the 'not loaded' claim.
+        """
+        mgr, _inst = self._mgr_for(tmp_path)
+        out = mgr._skill_block(['re-derive-line-ranges'],
+                               {'re-derive-line-ranges': 4}, {'re-derive-line-ranges'})
+        assert 'hinted 4th time this session' in out
+        assert 'not loaded' not in out
+        # Not in the loaded set → the 'not loaded' suffix IS appended.
+        out2 = mgr._skill_block(['re-derive-line-ranges'],
+                                {'re-derive-line-ranges': 4}, set())
+        assert 'hinted 4th time this session, not loaded' in out2
+
+    def test_skill_block_no_marker_below_threshold(self, tmp_path):
+        """A count < 3 → no recurrence marker, even if a count is provided."""
+        mgr, _inst = self._mgr_for(tmp_path)
+        out = mgr._skill_block(['x'], {'x': 2}, set())
+        assert 'time this session' not in out
+        assert out == 'Skills you may want to load (1):\n  - x'
+
+    @pytest.mark.parametrize('n,expected', [
+        (1, '1st'), (2, '2nd'), (3, '3rd'), (4, '4th'),
+        (11, '11th'), (12, '12th'), (13, '13th'),
+        (21, '21st'), (22, '22nd'), (23, '23rd'),
+        (100, '100th'), (101, '101st'), (111, '111th'),
+    ])
+    def test_ordinal(self, n, expected):
+        from agent_cascade.memory_hint.manager import _ordinal
+        assert _ordinal(n) == expected
+
+
 # ── Worker lifecycle: respawn after stop (todo162 regression) ───────────────
 #
 # The memory-hint worker is a single bare daemon thread with NO supervisor. It was
@@ -1425,12 +1569,47 @@ class TestInstanceReset:
         # Skill-hint state (feature: skills-in-memory-hints) is cleared too.
         inst._recently_skill_hinted = {'docker-best-practices': 456.0}
         inst._last_skill_hint_turn = 9
+        # The session-scoped recurrence counter (BUG_0225) is deliberately NOT reset by
+        # this compression-path helper — it must survive, so the "this session" marker
+        # stays accurate across a within-session compression.
+        inst._skill_hint_counts = {'docker-best-practices': 4}
         inst._reset_memory_hint_state()
         assert inst._memories_read == set()
         assert inst._recently_hinted == {}
         assert inst._last_memory_hint_turn == -1
         assert inst._recently_skill_hinted == {}
         assert inst._last_skill_hint_turn == -1
+        assert inst._skill_hint_counts == {'docker-best-practices': 4}, \
+            'the session-scoped counter must survive a compression reset'
+
+    def test_session_reset_clears_skill_hint_counts(self):
+        """reset_conversation() (the true session boundary) clears the counter (BUG_0225)."""
+        from agent_cascade.agent_instance import AgentInstance
+        inst = AgentInstance.__new__(AgentInstance)
+        # Minimal state for reset_conversation() to run without AttributeError.
+        inst._compression_lock = threading.RLock()
+        inst.conversation = []
+        inst._cached_messages = []
+        inst._cached_llm_messages = []
+        inst._cached_token_count = 0
+        inst._last_token_count_conversation_length = -1
+        inst._last_actual_token_count = 0
+        inst._last_config_version = -1
+        inst._system_prompt_frozen = False
+        inst._last_force_compress_time = 0.0
+        inst._force_compress_count = 0
+        inst._current_turn = 0
+        inst._pending_notifications = []
+        inst._tool_warnings = []
+        inst._cache_notifications = []
+        inst._memories_read = set()
+        inst._recently_hinted = {}
+        inst._last_memory_hint_turn = -1
+        inst._recently_skill_hinted = {}
+        inst._last_skill_hint_turn = -1
+        inst._skill_hint_counts = {'docker-best-practices': 4}
+        inst.reset_conversation()
+        assert inst._skill_hint_counts == {}
 
     def test_reset_never_raises_on_broken_lock(self):
         """Best-effort: a broken lock must not propagate (swallowed at debug)."""

@@ -428,8 +428,10 @@ class AgentInstance:
 
     # ── Memory-Hint State (feature: memory_hint) ──────────────────────────────
     # Vault-relative paths of lessons already read via read_file; never re-hint a
-    # memory in this set. All five fields are mutated under _compression_lock and
-    # reset together by _reset_memory_hint_state() (L1/L2 compression + session reset).
+    # memory in this set. All six fields below are mutated under _compression_lock; all
+    # but _skill_hint_counts are reset by _reset_memory_hint_state() (L1/L2 compression
+    # + session reset). The session-scoped _skill_hint_counts counter is cleared only by
+    # reset_conversation() (the true session boundary), so it survives compression.
     _memories_read: set = field(default_factory=set)
     # Vault-relative path -> last-hint monotonic timestamp (cooldown guard).
     _recently_hinted: dict = field(default_factory=dict)
@@ -440,6 +442,11 @@ class AgentInstance:
     _recently_skill_hinted: dict = field(default_factory=dict)
     # Last turn a skill hint was issued (diagnostics; mirrors _last_memory_hint_turn).
     _last_skill_hint_turn: int = field(default=-1)
+    # Per-session count of how many times each skill name has been hinted (BUG_0225:
+    # recurrence marker on the skill-hint block). SESSION-scoped (the marker says
+    # "this session"), so it is reset ONLY by reset_conversation() — NOT by
+    # _reset_memory_hint_state(), which also runs on within-session compression.
+    _skill_hint_counts: dict = field(default_factory=dict)
 
     # ── Cache Notification Queue ──────────────────────────────────────────────
     # Parallel to _tool_warnings but for cache pool events. Drained into tool
@@ -718,15 +725,18 @@ class AgentInstance:
             # Skill-hint cooldown state resets with the session (skills-in-memory-hints).
             self._recently_skill_hinted = {}
             self._last_skill_hint_turn = -1
+            self._skill_hint_counts = {}
 
     def _reset_memory_hint_state(self) -> None:
-        """Clear all memory-hint tracking state under _compression_lock.
+        """Clear the memory-hint read-set and cooldown state under _compression_lock.
 
         Called on L1/L2 compression success (plan §5.2) and session reset. Resets
         the WHOLE read-set + cooldown map (not a reconstruction of which files were
         in the compressed window — see plan §5.3), including the skill-hint cooldown
         state (_recently_skill_hinted / _last_skill_hint_turn, feature:
-        skills-in-memory-hints). Best-effort: never raises.
+        skills-in-memory-hints). The session-scoped _skill_hint_counts is deliberately
+        EXCLUDED (see NOTE in the reset block below) — it is cleared only by
+        reset_conversation(). Best-effort: never raises.
         """
         try:
             with self._compression_lock:
@@ -735,6 +745,11 @@ class AgentInstance:
                 self._last_memory_hint_turn = -1
                 self._recently_skill_hinted = {}
                 self._last_skill_hint_turn = -1
+                # NOTE: _skill_hint_counts is intentionally NOT reset here. It is
+                # SESSION-scoped (BUG_0225 recurrence marker says "this session"), whereas
+                # this method also runs on L1/L2 compression (a within-session compaction).
+                # Resetting it on compression would make the "this session" wording false.
+                # It is reset only by reset_conversation() (the true session boundary).
         except Exception as e:  # noqa: BLE001 — best-effort, never affect the caller
             logging.getLogger(__name__).debug('[MEMORY_HINT] _reset_memory_hint_state failed: %s', e)
 
