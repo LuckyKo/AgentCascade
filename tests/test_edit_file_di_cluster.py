@@ -343,6 +343,120 @@ def test_edit_file_insert_only_has_no_residue_note():
             f"insert-only edit must not carry a residue note: {res!r}"
 
 
+# ── BUG_0224: range starts on a structural opener the replacement does not restore ──
+
+
+def test_edit_file_range_starting_on_heading_notes_unrestored_opener():
+    """The BUG_0224 repro: a range that begins on a '###' heading whose new_content is
+    body-only deletes the heading and leaves the section without a title. The edit still
+    succeeds (advisory only) but the message must now flag that the opener was dropped.
+    Red/green discriminator: pre-fix the message carried no such note."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('# Doc\n'
+                    '\n'
+                    '### Section title\n'
+                    'body line one\n'
+                    'body line two\n'
+                    '\n'
+                    '### Next\n'
+                    'more\n')
+        f = _owned_file(om, d, 'opener.md', original)
+        # Delete the heading + body (lines 3-5), replace with body text only.
+        res = _d_and_i(om, f, new_content='new body only\n', range_param='3:5')
+        assert res.startswith('OK'), f"edit should still succeed (advisory only), got: {res!r}"
+        assert 'note: range started on a heading/structural opener' in res, \
+            f"message must flag the dropped heading: {res!r}"
+        assert 'Section title' in res, f"message must quote the dropped opener: {res!r}"
+        # The heading is genuinely gone now.
+        assert '### Section title' not in f.read_text(encoding='utf-8'), \
+            'the heading must in fact be removed by the edit'
+
+
+def test_edit_file_range_starting_on_heading_restored_no_note():
+    """A range that begins on a heading whose new_content RE-SUPPLIES a heading must NOT
+    carry the note — no false positive when the opener is intentionally restored."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('### Old title\n'
+                    'body line one\n'
+                    'body line two\n'
+                    '\n'
+                    '## Next section\n')
+        f = _owned_file(om, d, 'restored.md', original)
+        # Replace the first section (lines 1-3), but re-supply a heading.
+        res = _d_and_i(om, f, new_content='### New title\nnew body\n', range_param='1:3')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'heading/structural opener' not in res, \
+            f"a restored heading must not carry the note: {res!r}"
+        assert f.read_text(encoding='utf-8') == '### New title\nnew body\n\n## Next section\n', \
+            'replacement must be exact'
+
+
+def test_edit_file_plain_body_range_has_no_opener_note():
+    """A range whose first deleted line is plain prose (no structural opener) must NOT
+    carry the note — no false positive on an ordinary body replacement."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('# Doc\n'
+                    'plain body one\n'
+                    'plain body two\n')
+        f = _owned_file(om, d, 'plain.md', original)
+        res = _d_and_i(om, f, new_content='replacement\n', range_param='2:3')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'heading/structural opener' not in res, \
+            f"a plain-body range must not carry the opener note: {res!r}"
+        assert f.read_text(encoding='utf-8') == '# Doc\nreplacement\n', \
+            'plain-body replacement must be exact'
+
+
+def test_edit_file_fence_opener_unrestored_notes():
+    """A range starting on a code fence whose replacement is not a fence must be flagged
+    (fence is a recognised structural opener)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('intro\n'
+                    '```\n'
+                    'code here\n'
+                    '```\n')
+        f = _owned_file(om, d, 'fence.md', original)
+        res = _d_and_i(om, f, new_content='plain text\n', range_param='2:4')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'heading/structural opener' in res, \
+            f"a dropped code fence must be flagged: {res!r}"
+
+
+def test_edit_file_defclass_opener_unrestored_notes():
+    """A range starting on a 'def' header whose replacement is not a def/class must be
+    flagged (def/class is a recognised structural opener)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('def foo():\n'
+                    '    return 1\n'
+                    '\n'
+                    'def bar():\n'
+                    '    return 2\n')
+        f = _owned_file(om, d, 'func.py', original)
+        res = _d_and_i(om, f, new_content='x = 1\n', range_param='1:2')
+        assert res.startswith('OK'), f"edit should succeed, got: {res!r}"
+        assert 'heading/structural opener' in res, \
+            f"a dropped def header must be flagged: {res!r}"
+
+
+def test_edit_file_advisory_does_not_block_edit():
+    """The note is advisory: even when it fires, the file is written with the new content
+    (the edit is not rejected)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = '### Title\nbody one\nbody two\n\n## Next\n'
+        f = _owned_file(om, d, 'block.md', original)
+        res = _d_and_i(om, f, new_content='replaced body\n', range_param='1:3')
+        assert res.startswith('OK'), f"advisory must not block the edit, got: {res!r}"
+        assert 'heading/structural opener' in res, f"note should fire: {res!r}"
+        assert f.read_text(encoding='utf-8') == 'replaced body\n\n## Next\n', \
+            'the edit must be applied despite the advisory'
+
+
 # ── BUG_0105: verbatim indentation of inserted lines (regression, no code change)
 
 

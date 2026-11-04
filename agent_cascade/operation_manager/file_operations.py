@@ -257,6 +257,50 @@ def _orphan_residue_reason(last_deleted: str, next_line: str) -> Optional[str]:
     return 'continues the deleted block'
 
 
+# ─── edit_file delete_and_insert structural-opener heuristic (BUG_0224) ────
+
+# A markdown table separator row: pipes/dashes/colons/spaces with at least one dash
+# (e.g. "|---|---|" or "| --- |").
+_MD_TABLE_SEP_RE = re.compile(r'\s*\|?[\s:|-]*-[\s:|-]*\|?\s*')
+
+def _structural_opener_kind(line: str) -> Optional[str]:
+    """Return a structural-opener kind for *line*, or None if it is not one.
+
+    BUG_0224: a ``delete_and_insert`` range whose FIRST deleted line is a
+    structural opener (markdown heading, code fence, def/class header, table
+    separator) can silently drop the section's heading when the replacement
+    carries only the body. The kind is used only to decide whether to flag the
+    edit — purely advisory. Deliberately conservative: prefer no note over a
+    false positive, so only a handful of unambiguous openers are recognised.
+    """
+    s = line.strip()
+    if not s:
+        return None
+    if _MD_HEADING_RE.match(s):
+        return 'heading'
+    if s.startswith('```') or s.startswith('~~~'):
+        return 'fence'
+    if re.match(r'^(?:def|class)\s+\w', s):
+        return 'defclass'
+    if '|' in s and _MD_TABLE_SEP_RE.fullmatch(s):
+        return 'table_sep'
+    return None
+
+
+def _new_content_restores_opener(new_content: str, kind: str) -> bool:
+    """True when *new_content* re-supplies a structural opener of *kind*.
+
+    Any line of the same kind counts (a re-heading of a section is a valid edit),
+    so this errs toward "restored" to keep the advisory conservative.
+    """
+    if not new_content:
+        return False
+    for line in new_content.splitlines():
+        if _structural_opener_kind(line) == kind:
+            return True
+    return False
+
+
 def _describe_list_filters(
     include: Optional[str],
     exclude: Optional[str],
@@ -2250,6 +2294,23 @@ class FileOpsMixin:
                             f'{_residue_reason}: "{_next_snip}" — if that line belongs to '
                             f'the replaced block, re-read and extend the range to cover it '
                             f'(or use match_mode=\'exact\').')
+
+                # BUG_0224: the opposite direction of the residue check — the range may
+                # START on a structural opener (heading / fence / def-class / table
+                # separator) that the replacement does not re-supply, silently leaving a
+                # section without its heading. Advisory only: re-heading a section on
+                # purpose is valid, so never reject the edit.
+                if old_lc > 0 and start_idx < len(_orig_msg_lines):
+                    _first_deleted = _orig_msg_lines[start_idx].rstrip('\r\n')
+                    _opener_kind = _structural_opener_kind(_first_deleted)
+                    if _opener_kind and not _new_content_restores_opener(new_content, _opener_kind):
+                        _fd_snip = _first_deleted.strip()
+                        if len(_fd_snip) > 60:
+                            _fd_snip = _fd_snip[:60] + '…'
+                        res_msg += (
+                            f'\n  note: range started on a heading/structural opener '
+                            f'("{_fd_snip}") that the replacement does not restore — '
+                            f'the section may now be missing its heading.')
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
