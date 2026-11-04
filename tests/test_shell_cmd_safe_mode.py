@@ -948,9 +948,11 @@ class TestSafeModeGuaranteeVerification:
 
     def test_reload_mid_command_reports_a_violation(self):
         # BUG_0153 shape: the model safe mode freed comes back mid-command → real contention.
+        # uptime_s=None exercises the conservative fallback: no uptime info → cannot distinguish
+        # start-load from mid-run → VOID.
         caller_model = [{'id': 'test-model', 'uptime_s': 1200.0}]
         result = self._run([], probe=[caller_model, [],
-                                      [{'id': 'test-model', 'uptime_s': 999.0}]])
+                                      [{'id': 'test-model', 'uptime_s': None}]])
 
         assert '[safe] WARNING:' in result
         assert 'resident again when the command finished' in result
@@ -1069,6 +1071,33 @@ class TestSafeModeViolationClassifier:
             unloaded_models=[{'id': 'caller', 'uptime_s': 900}], owner_model='caller')
         assert kind == 'unattributed_load'
         assert 'VOID' not in text
+
+    def test_start_load_uptime_spans_command_is_not_void(self):
+        # BUG_0161: freed model 'm' was (re)loaded at command start by the command's own
+        # on-demand (JIT) autoloader. uptime 238s ≈ elapsed 240s → start-load, NOT concurrent.
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'm', 'uptime_s': 238.0}], 240.0,
+            unloaded_models=[{'id': 'm', 'uptime_s': 10.0}])
+        assert kind == 'command_loaded'
+        assert 'VOID' not in text
+        assert 'on-demand load' in text
+
+    def test_mid_run_load_still_voids(self):
+        # uptime 140s < elapsed 240s - tolerance 5s → loaded mid-run by a concurrent session.
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'm', 'uptime_s': 140.0}], 240.0,
+            unloaded_models=[{'id': 'm', 'uptime_s': 10.0}])
+        assert kind == 'reloaded'
+        assert 'VOID' in text
+
+    def test_short_command_always_voids_conservatively(self):
+        # elapsed 4s <= tolerance 5s → the start-load discrimination is inactive;
+        # any freed model that came back is a conservative VOID.
+        kind, text = _safe_mode_violation(
+            [], [{'id': 'm', 'uptime_s': 1.0}], 4.0,
+            unloaded_models=[{'id': 'm', 'uptime_s': 10.0}])
+        assert kind == 'reloaded'
+        assert 'VOID' in text
 
 
 class TestProbeResidentModels:

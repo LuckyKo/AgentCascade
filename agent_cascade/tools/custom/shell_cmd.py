@@ -112,6 +112,11 @@ def _polling_wait(task, tool_id: int, agent_name: str, timeout: float, pool) -> 
 
 _UNKNOWN_MODEL_IDS = frozenset({'', 'unknown model', None})
 
+# BUG_0161: a freed model whose process uptime spans the whole command was (re)loaded
+# within the start window — the command's own on-demand (JIT) load, not a concurrent session.
+# Only applied when elapsed_s exceeds this tolerance (short commands always VOID conservatively).
+_SAFE_MODE_START_LOAD_TOLERANCE_S = 5.0
+
 
 def _resident_ids(models):
     """Model ids from a probe result, dropping placeholders the endpoint could not name."""
@@ -144,6 +149,11 @@ def _safe_mode_violation(resident_before, resident_after, elapsed_s, *,
       ``('reloaded', text)``            — a model safe mode freed came back mid-command.
                                           ``uptime_s`` is the model process's own uptime, so
                                           ``elapsed - uptime`` is *when* it came back ("T+Ns").
+      ``('command_loaded', text)``   — a freed model's process uptime spans (nearly) the whole
+                                          command (``elapsed - min_uptime <= TOLERANCE``), i.e. it was
+                                          (re)loaded within the start window by the command's own
+                                          on-demand (JIT) load into the VRAM safe mode freed.
+                                          Informational, NOT void.
       ``('self_loaded', text)``         — a model safe mode never freed appeared; that is the
                                           command's own load (informational, NOT void).
       ``('unattributed_load', text)``   — a model appeared and the freed set is unknown, so
@@ -178,8 +188,21 @@ def _safe_mode_violation(resident_before, resident_after, elapsed_s, *,
         returned_names = ', '.join(sorted({m.get('id') or 'unknown model' for m in returned}))
         uptimes = [m.get('uptime_s') for m in returned
                    if isinstance(m.get('uptime_s'), (int, float))]
-        if isinstance(elapsed_s, (int, float)) and uptimes and min(uptimes) < elapsed_s:
-            when = f'T+{max(0.0, elapsed_s - min(uptimes)):.0f}s'
+        # BUG_0161: if the freed model's process uptime spans (nearly) the whole command,
+        # it was (re)loaded within the start window — the command's own on-demand (JIT)
+        # load into the VRAM safe mode freed, not a concurrent session. Only applies when
+        # the command ran long enough for the discrimination to be meaningful.
+        if uptimes and isinstance(elapsed_s, (int, float)) and elapsed_s > _SAFE_MODE_START_LOAD_TOLERANCE_S:
+            min_uptime = min(uptimes)
+            if min_uptime >= elapsed_s - _SAFE_MODE_START_LOAD_TOLERANCE_S:
+                return 'command_loaded', (
+                    f'local model(s) {returned_names} were (re)loaded T+{max(0.0, elapsed_s - min_uptime):.0f}s '
+                    f'into the command (process uptime {min_uptime:.0f}s vs command duration {elapsed_s:.0f}s), '
+                    "consistent with the command's own on-demand load into the VRAM safe mode freed — "
+                    'a concurrent load inside the start window cannot be ruled out. The freed cards '
+                    'were available and used, so the run is NOT voided. Verify free VRAM yourself '
+                    'only if the result depends on it.')
+            when = f'T+{max(0.0, elapsed_s - min_uptime):.0f}s'
             return 'reloaded', (
                 f'local model(s) {returned_names} were loaded again {when} into the command by a '
                 'concurrent session, so safe mode did NOT have the cards to itself. Any result '
@@ -1361,7 +1384,7 @@ class ShellCmd(BaseTool):
                     violation_text += ' (the pre-command unload request itself failed)'
             # BUG_0161: "a model appeared" is not by itself a broken guarantee. Only a freed
             # model coming back voids the run; a self-load is a NOTE, not a WARNING.
-            informational = violation_kind in ('self_loaded', 'unattributed_load')
+            informational = violation_kind in ('self_loaded', 'unattributed_load', 'command_loaded')
             if restored:
                 tail = 'KV state restored after.'
             elif saved or advisor_will_run:
