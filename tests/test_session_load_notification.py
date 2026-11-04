@@ -19,7 +19,7 @@ import pytest
 
 
 @pytest.fixture
-def agent_pool():
+def agent_pool(tmp_path):
     """Create a real AgentPool with mocked dependencies so it can be instantiated (no LLM)."""
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
          patch('agent_cascade.telemetry.TelemetryCollector'), \
@@ -34,6 +34,7 @@ def agent_pool():
 
         router = MagicMock()
         router.get_effective_concurrency.return_value = 3
+        router._config_dir = tmp_path  # BUG_0218: real path so persistence doesn't write junk
         mock_router.return_value = router
 
         from agent_cascade.agent_pool import AgentPool

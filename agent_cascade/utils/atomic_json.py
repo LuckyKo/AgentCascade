@@ -25,9 +25,18 @@ def atomic_write_json(path: Path, payload: Any, *,
     file keeps the same extension and stays on the same filesystem as the target, which
     ``os.replace`` requires).
 
+    Raises ``TypeError`` if ``path`` is not a real path type (``str`` / ``pathlib.Path``) —
+    this catches test fixtures that accidentally pass a ``MagicMock`` (which stringifies
+    to a junk directory name like ``MagicMock/APIRouter()._config_dir.__truediv__()``).
+
     Raises the original OSError on failure; the temp file is unlinked in that case so a
     failed save never leaves a stray ``.tmp`` behind.
     """
+    if not isinstance(path, (str, Path)):
+        raise TypeError(
+            f"atomic_write_json: path must be str or pathlib.Path, got {type(path).__name__}. "
+            'Did a test fixture pass a MagicMock as the config directory?'
+        )
     path = Path(path)
     tmp = Path(tmp_path) if tmp_path is not None else path.with_suffix(path.suffix + '.tmp')
     try:

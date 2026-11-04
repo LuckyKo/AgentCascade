@@ -46,6 +46,7 @@ def agent_pool(tmp_path):
 
         router = MagicMock()
         router.get_effective_concurrency.return_value = 3
+        router._config_dir = tmp_path  # BUG_0218: real path so persistence doesn't write junk
         mock_router.return_value = router
 
         from agent_cascade.agent_pool import AgentPool

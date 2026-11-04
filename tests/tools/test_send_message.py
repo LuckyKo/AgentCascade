@@ -28,7 +28,7 @@ def _make_mock_agent(name, state=None):
 
 
 @pytest.fixture
-def agent_pool_with_agents():
+def agent_pool_with_agents(tmp_path):
     """Create an AgentPool with two mock RUNNING agents ('agentA', 'agentB')."""
     with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
          patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
@@ -43,6 +43,7 @@ def agent_pool_with_agents():
 
         router = MagicMock()
         router.get_effective_concurrency.return_value = 3
+        router._config_dir = tmp_path  # BUG_0218: real path so persistence doesn't write junk
         mock_router.return_value = router
 
         from agent_cascade.agent_pool import AgentPool
