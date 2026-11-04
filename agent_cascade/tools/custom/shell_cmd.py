@@ -689,6 +689,40 @@ class ShellCmd(BaseTool):
                         f"{ShellCmd._dialect_hint(ShellCmd._WINDOWS_PS_CMDLETS[name])}")
         return None
 
+    # BUG_0200: curl's %{...} write-out format strings are mangled by cmd.exe
+    # (the %% escape convention collides with curl's %{var} syntax). Advisory only.
+    _CURL_FORMAT_HINT = (
+        '[note] curl -w "%{...}" write-out format strings are unreliable on this '
+        'Windows host — cmd.exe mangles the %% escapes, so %{http_code} prints '
+        'literally. For a status probe, prefer python -c "import urllib.request; '
+        '..." or drop -w and check the exit code + response body.\n'
+    )
+
+    @staticmethod
+    def _curl_format_hint(command: str) -> str:
+        """BUG_0200: advisory hint for curl %{...} write-out format strings on Windows.
+
+        Returns a single-line ``[note]`` hint (with trailing newline) when:
+        - running on a Windows host (``ON_WINDOWS``), AND
+        - some stage invokes ``curl``, AND
+        - the command contains ``%{``.
+
+        Returns ``''`` otherwise. Detection-only; the command is never rewritten.
+        """
+        if not ON_WINDOWS or not command:
+            return ''
+        names = [ShellCmd._stage_command_name(st) for st in ShellCmd._split_command_stages(command)]
+        if 'curl' not in names:
+            return ''
+        if '%{' not in command:
+            return ''
+        return ShellCmd._CURL_FORMAT_HINT
+
+    @staticmethod
+    def _execution_notes(command: str, was_stripped: bool) -> str:
+        """Combine the pipe-strip note and the curl format hint into a single prefix."""
+        return ShellCmd._strip_note(was_stripped) + ShellCmd._curl_format_hint(command)
+
     @staticmethod
     def _strip_head_tail_pipes(command: str) -> tuple[str, bool]:
         """Strip post-``|`` ``head``/``tail`` stages from a shell command.
@@ -915,7 +949,7 @@ class ShellCmd(BaseTool):
             approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
             if not is_safe and justification_text:
                 approval_line += f"Security Justification: {justification_text}\n"
-            strip_note = ShellCmd._strip_note(was_stripped)
+            strip_note = ShellCmd._execution_notes(command, was_stripped)
             result = (f"⟨shell_cmd completed⟩ Tool ID: {tool_id} | PID: {pid}\n"
                       f"{approval_line}"
                       f"{strip_note}"
@@ -947,7 +981,7 @@ class ShellCmd(BaseTool):
         approval_line = 'AUTO-APPROVED\n' if is_safe else 'APPROVED\n'
         if not is_safe and justification_text:
             approval_line += f"Security Justification: {justification_text}\n"
-        strip_note = ShellCmd._strip_note(was_stripped)
+        strip_note = ShellCmd._execution_notes(command, was_stripped)
         launched_msg = (
             f"⟨shell_cmd launched⟩ Tool ID: {tool_id} | PID: {pid}\n"
             f"{approval_line}"
@@ -1157,7 +1191,7 @@ class ShellCmd(BaseTool):
             timeout=timeout,
             execution_mode='sync',
         )
-        note = ShellCmd._strip_note(was_stripped)
+        note = ShellCmd._execution_notes(command, was_stripped)
         return f"{note}{result}"
 
     # ────────────────────────────────────────────────────────────────

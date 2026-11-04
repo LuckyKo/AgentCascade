@@ -258,5 +258,53 @@ class TestCallSitePlacement:
         pool.operation_manager.evaluate_shell_command_safety.assert_not_called()
 
 
+class TestCurlFormatHint:
+    """BUG_0200: advisory hint for curl %{...} write-out format strings on Windows."""
+
+    CURL_CMD = 'curl -s -m 10 http://127.0.0.1:1234/v1/models -o nul -w "HTTP=%{http_code}\\n"'
+
+    def test_hint_present_on_windows(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        hint = ShellCmd._curl_format_hint(self.CURL_CMD)
+        assert hint
+        assert 'curl' in hint
+        assert 'urllib' in hint
+
+    def test_no_percent_brace_no_hint(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        assert ShellCmd._curl_format_hint('curl -s http://x') == ''
+
+    def test_no_curl_stage_no_hint(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        assert ShellCmd._curl_format_hint('echo %{http_code}') == ''
+
+    def test_curl_as_argument_not_command(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        assert ShellCmd._curl_format_hint('echo curl %{x}') == ''
+
+    def test_gate_off_on_posix(self, not_on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        assert ShellCmd._curl_format_hint(self.CURL_CMD) == ''
+
+    def test_execution_notes_stacks_strip_and_curl(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        notes = ShellCmd._execution_notes('curl -s http://x | head -5', True)
+        assert 'stripped' in notes
+        # No %{ in this variant, so curl hint should NOT be present
+        assert 'urllib' not in notes
+
+    def test_execution_notes_strips_only(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        notes = ShellCmd._execution_notes('dir /s | head', True)
+        assert 'stripped' in notes
+        assert 'urllib' not in notes
+
+    def test_execution_notes_curl_only(self, on_windows):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        notes = ShellCmd._execution_notes(self.CURL_CMD, False)
+        assert 'stripped' not in notes
+        assert 'urllib' in notes
+
+
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-q']))
