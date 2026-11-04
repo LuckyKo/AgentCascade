@@ -1,5 +1,6 @@
 """File operations — directory listing, read, write, edit, re-indent, delete, copy, move, backup cleanup."""
 
+import difflib
 import fnmatch
 import json
 import logging
@@ -371,6 +372,100 @@ class FilterContext:
 
 
 # ─── Mixin: File operations for OperationManager ─────────────────────────
+
+
+def _classify_line_difference(old_line: str, file_line: str) -> str:
+    """Name the *kind* of difference between two lines (BUG_0231).
+
+    Exact-match failures are usually one of three things, and knowing which is
+    the whole value of the diagnostic: a tab/space transcription mismatch, an
+    indentation/whitespace mismatch, or a genuine wording change.
+    """
+    old_core, file_core = old_line.strip(), file_line.strip()
+    if old_core != file_core:
+        return 'text differs'
+
+    old_lead = old_line[:len(old_line) - len(old_line.lstrip(' \t'))]
+    file_lead = file_line[:len(file_line) - len(file_line.lstrip(' \t'))]
+    old_trail = old_line[len(old_line.rstrip(' \t')):]
+    file_trail = file_line[len(file_line.rstrip(' \t')):]
+    lead_differs = old_lead != file_lead
+    trail_differs = old_trail != file_trail
+
+    if lead_differs and trail_differs:
+        return 'leading and trailing whitespace differ'
+    if lead_differs:
+        return 'leading whitespace/indentation differs'
+    if trail_differs:
+        return 'trailing whitespace differs'
+    # Same text and same whitespace runs: the only difference is tab vs spaces.
+    return 'tab/space mismatch (same text)'
+
+
+def _describe_exact_miss(old_content: str, file_content: str,
+                         tab_width: int = 4) -> str:
+    """Explain why an exact edit missed, in terms of the nearest candidate.
+
+    BUG_0231: the BUG_0186 diagnostic compared ``old_content`` line *i* against
+    file line *i*. For any block below line 1 that reports "first diff at line 1"
+    against the file header, which is both useless and misleading.
+
+    Instead, align ``old_content`` to the file with ``difflib``'s longest
+    matching line block, then report the first mismatch in that region and what
+    kind of mismatch it is. If not a single line is shared, say so plainly.
+    """
+    old_ls = old_content.splitlines()
+    file_ls = file_content.splitlines()
+    if not old_ls:
+        return f'old_content is empty (file has {len(file_ls)} line(s))'
+
+    def _norm(s: str) -> str:
+        return s.replace('\t', ' ' * tab_width)
+
+    match = difflib.SequenceMatcher(
+        None, [_norm(x) for x in file_ls], [_norm(x) for x in old_ls],
+        autojunk=False,
+    ).find_longest_match(0, len(file_ls), 0, len(old_ls))
+
+    if match.size == 0:
+        return (f'pattern not found anywhere in the file (no line of '
+                f'old_content matches); old_content has {len(old_ls)} line(s), '
+                f'file has {len(file_ls)}')
+
+    # Where old_content[0] would land if the matched block were aligned. May be
+    # negative when the shared block starts deeper inside old_content than it
+    # does in the file (old_content begins before the file's matching region).
+    offset = match.a - match.b
+    nearest_line = match.a + 1
+    candidate_line = offset + 1 if offset >= 0 else nearest_line
+    leading_unmatched = max(0, -offset)
+
+    for i, a in enumerate(old_ls):
+        f_idx = offset + i
+        if f_idx < 0:
+            continue
+        if f_idx >= len(file_ls):
+            return (f'old_content runs past the end of the file: line {i + 1} '
+                    f'has no counterpart (nearest candidate at file line '
+                    f'{candidate_line})')
+        b = file_ls[f_idx]
+        if _norm(a) == _norm(b):
+            continue
+        kind = _classify_line_difference(a, b)
+        return (f"first diff at line {f_idx + 1} (nearest candidate at file "
+                f"line {candidate_line}): old_content={a[:50]!r} vs "
+                f"file={b[:50]!r} — {kind}")
+
+    if leading_unmatched:
+        return (f'old_content has {leading_unmatched} leading line(s) before the '
+                f'nearest candidate at file line {nearest_line}')
+    if len(old_ls) != len(file_ls):
+        return (f'nearby content matches line-for-line from file line '
+                f'{candidate_line}, but old_content has {len(old_ls)} line(s) and '
+                f'the file has {len(file_ls)}')
+    return (f'lines match after tab/space normalization from file line '
+            f'{candidate_line}, but not as one contiguous block (check line '
+            f'endings)')
 
 
 class FileOpsMixin:
@@ -1509,8 +1604,6 @@ class FileOpsMixin:
         delta_width = 0  # Indent delta for heuristic feedback
         absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
 
-        import difflib
-
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
 
         # ── Helper: parse range spec for delete_and_insert mode ──────────────
@@ -1603,23 +1696,9 @@ class FileOpsMixin:
                 norm_count = norm_file.count(norm_old)
 
                 if norm_count == 0:
-                    # No match even after normalization — emit a helpful diff hint
-                    _old_ls = old_content.splitlines()
-                    _file_ls = file_content.splitlines()
-                    _hint = ''
-                    for _i in range(min(len(_old_ls), len(_file_ls))):
-                        _a = _old_ls[_i].replace('\t', ' ' * _TAB_W)
-                        _b = _file_ls[_i].replace('\t', ' ' * _TAB_W)
-                        if _a != _b:
-                            _hint = (f"first diff at line {_i + 1}: "
-                                    f"old_content={_a[:50]!r} vs file={_b[:50]!r}")
-                            break
-                    if not _hint:
-                        if len(_old_ls) != len(_file_ls):
-                            _hint = (f"old_content has {len(_old_ls)} line(s) "
-                                    f"but file has {len(_file_ls)}")
-                        else:
-                            _hint = 'whitespace-only mismatch (tab vs space)'
+                    # BUG_0231: locate the nearest candidate region instead of
+                    # comparing old_content line 1 against file line 1.
+                    _hint = _describe_exact_miss(old_content, file_content, _TAB_W)
                     return (f"ERROR: Pattern not found in {path} (exact) — {_hint}. "
                             f"Try heuristic match_mode or include more context lines")
 
