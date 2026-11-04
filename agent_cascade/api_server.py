@@ -2733,6 +2733,10 @@ if __name__ == '__main__':
         'model': os.getenv('AGENT_CASCADE_MODEL', 'gpt-4o'),
         'api_base': os.getenv('AGENT_CASCADE_API_BASE', 'https://api.openai.com/v1'),
         'api_key': os.getenv('AGENT_CASCADE_API_KEY', 'EMPTY'),
+        # LLM generation params (persisted to config/api_endpoints.json::default_llm_cfg).
+        'max_output_tokens': 4096,
+        'stop_sequences': '',  # LLM stop-sequences param (NOT the UI Stop button).
+        'timeout': 120.0,
         # Tool output char limits (defaults from user config)
         'tool_result_max_chars': 25000,
         'wild_read_truncation_chars': DEFAULT_WILD_READ_TRUNCATION_CHARS,

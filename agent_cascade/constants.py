@@ -158,7 +158,7 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
 LLM_CONFIG_KEYS: frozenset[str] = frozenset({
     'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
     'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
-    'presence_penalty', 'stop', 'timeout', 'model_type',
+    'presence_penalty', 'stop_sequences', 'timeout', 'model_type',
     # Operational logging toggle: when True the engine logs the raw API POST body.
     # Popped from generate_cfg in llm/oai.py before the LLM call (never sent to the model).
     'log_api_post',

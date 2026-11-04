@@ -108,7 +108,7 @@ _LLM_KEYS: Tuple[str, ...] = (
     'temperature', 'top_p', 'top_k', 'min_p', 'repeat_penalty',
     'presence_penalty', 'frequency_penalty',
     'max_tokens', 'max_input_tokens', 'max_output_tokens',
-    'stop', 'timeout', 'model_type', 'log_api_post',
+    'stop_sequences', 'timeout', 'model_type', 'log_api_post',
 )
 
 # Server-wide session identity, persisted to config/session_state.json (Phase 1).
@@ -234,7 +234,7 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'max_tokens': 8192,
     'max_input_tokens': DEFAULT_MAX_INPUT_TOKENS,
     'max_output_tokens': 4096,
-    'stop': '',
+    'stop_sequences': '',
     'timeout': 120.0,
     'model_type': 'chat',
     'log_api_post': False,
@@ -266,7 +266,7 @@ _PY_TYPES: Dict[str, Any] = {
     'disabled_tools': (dict, list),
     'work_access_folders_ro': list,
     'work_access_folders_rw': list,
-    'stop': (str, list),
+    'stop_sequences': (str, list),
 }
 
 #: Keys the server never imports from a client-side blob during migration.

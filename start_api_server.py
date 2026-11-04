@@ -72,12 +72,22 @@ ensure_workspace(WORKSPACE_DIR)
 #     endpoints of its own. It is intentionally NOT filtered by cooldown/blacklist.
 #   - Values are deliberately left as-is (do not "fix" them); they are only documented +
 #     logged at startup so the source of this fallback is visible in the logs.
+from agent_cascade.settings import SKILL_ALWAYS_PROTECTED_DEFAULT
+
 llm_cfg = {
     'model': 'whatever_is_on',
     'model_server': 'http://localhost:1234/v1',
     'api_key': 'EMPTY',
     'model_type': 'qwenvl_oai',
     'max_input_tokens': 65536,
+    # LLM generation params (persisted to config/api_endpoints.json::default_llm_cfg).
+    'max_output_tokens': 4096,
+    'stop_sequences': '',  # LLM stop-sequences param (NOT the UI Stop button).
+    'timeout': 120.0,
+    # llm_cfg-sourced skill/memory settings (persisted to config/pool_settings.json).
+    'memory_hint_skill_suggestions': True,
+    'memory_hint_skill_threshold': 0.0,
+    'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
 }
 # NOTE (Fix 4): the Tier-4 visibility log for this cfg is emitted in __main__ AFTER
 # init_logging() — logging a bare logger at module-import time would be dropped because
