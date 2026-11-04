@@ -16,9 +16,9 @@ _INDEX_HTML = _REPO / 'web_ui' / 'index.html'
 
 def test_turns_card_uses_completed_turns():
     js = _APP_JS.read_text(encoding='utf-8')
-    assert "set('telem-turns', formatNumber(telemetry.total_turns))" in js
+    assert "set('telem-turns', formatNumber(telemetry.total_runs))" in js
     # The ambiguous user-turn fallback must be gone.
-    assert 'total_user_turns ?? telemetry.total_turns' not in js
+    assert 'total_user_runs ?? telemetry.total_runs' not in js
 
 
 def test_config_table_shows_llm_time_and_turn_time():

@@ -72,13 +72,13 @@ def test_terminated_run_records_turn_end(tmp_path):
     list(engine.run(inst))
 
     summary = collector.get_session_summary()
-    assert summary['total_turns'] == 1
+    assert summary['total_runs'] == 1
     assert len(_turn_events(collector)) == 1
 
     # Time and attribution made it into both tables, not just the session total.
     configs = collector.get_config_comparison()
     classes = collector.get_agent_class_summary()
-    assert configs and configs[0]['turns'] == 1
+    assert configs and configs[0]['runs'] == 1
     assert collector._config_stats[configs[0]['config_fingerprint']]['total_duration_ms'] > 0
     assert classes and classes[0]['agent_class'] == 'coder'
     assert collector._agent_class_stats['coder']['total_time_ms'] > 0
@@ -92,7 +92,7 @@ def test_unhandled_exception_records_exactly_one_turn_end(tmp_path):
 
     list(engine.run(inst))
 
-    assert collector.get_session_summary()['total_turns'] == 1
+    assert collector.get_session_summary()['total_runs'] == 1
     assert len(_turn_events(collector)) == 1
 
 
@@ -104,7 +104,7 @@ def test_early_exit_records_exactly_one_turn_end(tmp_path):
 
     list(engine.run(inst))
 
-    assert collector.get_session_summary()['total_turns'] == 1
+    assert collector.get_session_summary()['total_runs'] == 1
     assert len(_turn_events(collector)) == 1
 
 
@@ -127,7 +127,7 @@ def test_abandoned_generator_records_exactly_one_turn_end(tmp_path):
     next(gen)  # drive to the first yield; record_turn_start has already run
     gen.close()  # raises GeneratorExit at the yield -> run()'s exit finally
 
-    assert collector.get_session_summary()['total_turns'] == 1
+    assert collector.get_session_summary()['total_runs'] == 1
     assert len(_turn_events(collector)) == 1
 
 
@@ -139,6 +139,6 @@ def test_no_active_turn_is_a_silent_noop(tmp_path):
 
     list(engine.run(inst))
 
-    assert collector.get_session_summary()['total_turns'] == 0
+    assert collector.get_session_summary()['total_runs'] == 0
     assert _turn_events(collector) == []
     assert inst.state != AgentState.RUNNING

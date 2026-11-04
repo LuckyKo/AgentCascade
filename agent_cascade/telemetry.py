@@ -73,8 +73,8 @@ class TelemetryCollector:
 
         # Session-level aggregates (updated on each event)
         self._session_stats = {
-            'total_turns': 0,
-            'total_user_turns': 0,
+            'total_runs': 0,
+            'total_user_runs': 0,
             'total_llm_calls': 0,
             'total_tool_calls': 0,
             'total_input_tokens_est': 0,
@@ -216,7 +216,7 @@ class TelemetryCollector:
         if fingerprint and fingerprint not in self._config_stats:
             self._config_stats[fingerprint] = {
                 'config_description': config_description or {},
-                'turns': 0,
+                'runs': 0,
                 'llm_calls': 0,
                 'tool_calls': 0,
                 'input_tokens_est': 0,
@@ -294,9 +294,9 @@ class TelemetryCollector:
             # Live per-config / per-class turn count (moved from record_turn_end).
             # A run counts as an engagement the moment it starts.
             if config_fingerprint:
-                self._config_stats[config_fingerprint]['turns'] += 1
+                self._config_stats[config_fingerprint]['runs'] += 1
             if agent_class:
-                self._ensure_agent_class_stats(agent_class)['turns'] += 1
+                self._ensure_agent_class_stats(agent_class)['runs'] += 1
 
         event = {
             'type': 'turn_start',
@@ -349,7 +349,7 @@ class TelemetryCollector:
             }
 
             # Update session stats (inside lock since RLock is reentrant)
-            self._session_stats['total_turns'] += 1
+            self._session_stats['total_runs'] += 1
             self._session_stats['total_turn_time_ms'] += duration_ms
             self._session_stats['total_retries'] += turn['retries']
 
@@ -379,7 +379,7 @@ class TelemetryCollector:
         record_* methods; the counter is a session-level aggregate.
         """
         with _telemetry_lock:
-            self._session_stats['total_user_turns'] += 1
+            self._session_stats['total_user_runs'] += 1
 
     def _ensure_agent_class_stats(self, agent_class: str):
         """Ensure per-agent-class stats dict exists for *agent_class*, creating it if needed.
@@ -388,7 +388,7 @@ class TelemetryCollector:
         """
         if agent_class not in self._agent_class_stats:
             self._agent_class_stats[agent_class] = {
-                'turns': 0,
+                'runs': 0,
                 'total_time_ms': 0,          # turn wall-clock (sum of turn_end durations)
                 'total_llm_latency_ms': 0,   # sum of this class's LLM call latencies
                 'total_streaming_time_ms': 0,
@@ -950,8 +950,8 @@ class TelemetryCollector:
 
         return {
             'session_id': self.session_id,
-            'total_turns': stats['total_turns'],
-            'total_user_turns': stats['total_user_turns'],
+            'total_runs': stats['total_runs'],
+            'total_user_runs': stats['total_user_runs'],
             'total_llm_calls': stats['total_llm_calls'],
             'total_tool_calls': stats['total_tool_calls'],
             'total_input_tokens_est': stats['total_input_tokens_est'],
@@ -1009,8 +1009,8 @@ class TelemetryCollector:
             for fp, cs in self._config_stats.items():
                 total_tokens = cs['input_tokens_est'] + cs['output_tokens_est']
                 total_time_sec = cs['total_duration_ms'] / 1000 if cs['total_duration_ms'] > 0 else 0
-                avg_turn_time = cs['total_duration_ms'] / cs['turns'] if cs['turns'] > 0 else 0
-                avg_tokens_per_turn = total_tokens / cs['turns'] if cs['turns'] > 0 else 0
+                avg_turn_time = cs['total_duration_ms'] / cs['runs'] if cs['runs'] > 0 else 0
+                avg_tokens_per_turn = total_tokens / cs['runs'] if cs['runs'] > 0 else 0
 
                 # Streaming time and TPS for this config
                 config_streaming_sec = cs['total_streaming_time_ms'] / 1000 if cs['total_streaming_time_ms'] > 0 else 0
@@ -1029,7 +1029,7 @@ class TelemetryCollector:
                 result.append({
                     'config_fingerprint': fp,
                     'config_description': dict(cs['config_description']),
-                    'turns': cs['turns'],
+                    'runs': cs['runs'],
                     'llm_calls': cs['llm_calls'],
                     'tool_calls': cs['tool_calls'],
                     'input_tokens_est': cs['input_tokens_est'],
@@ -1089,7 +1089,7 @@ class TelemetryCollector:
                     'tool_time_sec': round(acs['total_tool_latency_ms'] / 1000, 1),
                     'call_agent_time_sec': round(acs['call_agent_latency_ms'] / 1000, 1),
                     'tokens_generated': acs['tokens_generated'],
-                    'turns': acs['turns'],
+                    'runs': acs['runs'],
                 })
         return result
 
@@ -1193,9 +1193,9 @@ class TelemetryCollector:
         except Exception as e:
             # Fallback — log the full summary at INFO so it appears in console logs
             _logger.info(
-                '[TELEMETRY] Session %s end (summary: turns=%d, llm_calls=%d, tool_calls=%d, '
+                '[TELEMETRY] Session %s end (summary: runs=%d, llm_calls=%d, tool_calls=%d, '
                 'write_failures=%d) — file write failed: %s',
-                self.session_id, summary['total_turns'], summary['total_llm_calls'],
+                self.session_id, summary['total_runs'], summary['total_llm_calls'],
                 summary['total_tool_calls'], summary.get('write_failures', 0), e,
             )
 

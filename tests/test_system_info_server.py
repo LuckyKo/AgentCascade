@@ -129,7 +129,7 @@ class _FakeTelemetry:
 
     def get_session_summary(self):
         return {
-            'total_turns': 3,
+            'total_runs': 3,
             'total_llm_calls': 7,
             'total_tool_calls': 12,
             'total_input_tokens_est': 5000,
@@ -156,7 +156,7 @@ class _FakeTelemetry:
                 'model': 'qwen3.8-27b',
                 'api_base': 'http://x'
             },
-            'turns': 3,
+            'runs': 3,
             'llm_calls': 7,
             'avg_tps': 42.5,
         }]
@@ -167,7 +167,7 @@ class _FakeTelemetry:
             'tool_usage_accuracy': 91.7,
             'total_time_sec': 12.3,
             'tokens_generated': 1500,
-            'turns': 3,
+            'runs': 3,
             # BUG_0181: LLM-turn count (distinct from engagements/turns) must be surfaced.
             'llm_calls': 12,
         }]
@@ -303,7 +303,7 @@ class TestSystemInfoTelemetryDump:
 
             def get_session_summary(self):
                 return {
-                    'total_turns': 1,
+                    'total_runs': 1,
                     'total_llm_calls': 0,
                     'llm_cache_hits': 0,
                     'llm_cache_misses': 0,

@@ -84,7 +84,7 @@ class SystemInfo(BaseTool):
             # ── Session totals ──
             lines.append('')
             lines.append('Session:')
-            for k in ('total_turns', 'total_llm_calls', 'total_tool_calls', 'total_input_tokens_est',
+            for k in ('total_runs', 'total_llm_calls', 'total_tool_calls', 'total_input_tokens_est',
                       'total_output_tokens_est', 'avg_tps', 'total_retries', 'total_compressions',
                       'total_llm_latency_ms', 'total_tool_latency_ms', 'total_ttft_ms',
                       'total_streaming_time_ms', 'total_turn_time_ms', 'call_agent_latency_ms'):
@@ -115,9 +115,9 @@ class SystemInfo(BaseTool):
                     fp = c.get('config_fingerprint', '?')
                     model = (c.get('config_description') or {}).get('model', '?')
                     llm_calls = c.get('llm_calls', '')
-                    turns = c.get('turns', '')
+                    runs = c.get('runs', '')
                     avg_tps = c.get('avg_tps', '')
-                    lines.append(f"  {fp}  model={model}  turns={turns} "
+                    lines.append(f"  {fp}  model={model}  runs={runs} "
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "
@@ -132,10 +132,10 @@ class SystemInfo(BaseTool):
                     acc = a.get('tool_usage_accuracy')
                     acc_str = f"{acc:.1f}%" if isinstance(acc, (int, float)) else 'n/a'
                     # BUG_0181: surface llm_calls (actual LLM turns) alongside
-                    # turns (engagements) — a multi-turn agent (e.g. the warm-reused
+                    # runs (engagements) — a multi-turn agent (e.g. the warm-reused
                     # Security guard) runs far more LLM turns than engagements, and
-                    # showing only `turns` made the guard look ~2.7x cheaper than it is.
-                    lines.append(f"  {cls}: turns={a.get('turns', '')} "
+                    # showing only `runs` made the guard look ~2.7x cheaper than it is.
+                    lines.append(f"  {cls}: runs={a.get('runs', '')} "
                                  f"llm_calls={a.get('llm_calls', '')} "
                                  f"turn_time={a.get('total_time_sec', '')}s "
                                  f"llm_time={a.get('llm_time_sec', '')}s "

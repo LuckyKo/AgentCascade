@@ -6498,9 +6498,9 @@ function updateTelemetryPanel(telemetry) {
     if (el) el.textContent = val;
   };
 
-  // Completed runs, matching the sum of the Agent Class Usage "Turns" column
-  // (total_user_turns counts only runs that consumed a budget, so it can differ).
-  set('telem-turns', formatNumber(telemetry.total_turns));
+  // Completed runs, matching the sum of the Agent Class Usage "Runs" column
+  // (total_user_runs counts only runs that consumed a budget, so it can differ).
+  set('telem-turns', formatNumber(telemetry.total_runs));
   set('telem-llm-calls', formatNumber(telemetry.total_llm_calls));
   set('telem-tool-calls', formatNumber(telemetry.total_tool_calls));
   set('telem-sa-calls', formatNumber(telemetry.agent_instance_calls));
@@ -6588,7 +6588,7 @@ function updateTelemetryAgentClassTable(rows) {
       : '—';
     return `<tr>
       <td>${escapeHtml(r.agent_class)}</td>
-      <td>${formatNumber(r.turns || 0)}</td>
+      <td>${formatNumber(r.runs || 0)}</td>
       <td>${accCell}</td>
       <td>${formatMs((r.total_time_sec || 0) * 1000)}</td>
       <td>${formatMs((r.llm_time_sec || 0) * 1000)}</td>
