@@ -307,6 +307,9 @@ class FilterContext:
     # just the bare basename. Kept separate from exclude_fn on purpose: the name
     # filter stays basename-only (BUG_0008 invariant), only dir PRUNING widens.
     exclude_patterns: Tuple[str, ...] = ()
+    # Raw include pattern list, so directory-level pruning can check whether an
+    # explicit include names a VCS/build category (BUG_0221 re-admission).
+    include_patterns: Tuple[str, ...] = ()
     # When True, prune any subdir whose name is in grep's DEFAULT_IGNORED_DIRS
     # (mirrors grep's ignore_vcs=True default). Default False so the raw
     # _list_recursive/_list_flat helpers stay behavior-neutral; list_directory opts in.
@@ -627,6 +630,30 @@ class FileOpsMixin:
         grep's DEFAULT_IGNORED_DIRS.
         """
         if ctx.skip_vcs and any(fnmatch.fnmatch(d_name, pat) for pat in DEFAULT_IGNORED_DIRS):
+            # BUG_0221: an explicit include naming a VCS category re-admits it over
+            # skip_vcs, unless an explicit exclude also names this dir (exclude wins).
+            # Only specific patterns (not catch-alls like '*') can trigger re-admission:
+            # a pattern "names a VCS category" iff its rstripped form matches a
+            # DEFAULT_IGNORED_DIRS entry (e.g. '.git' → '.git', '.git/*' → '.git').
+            if ctx.include_patterns:
+                vcs_named = any(
+                    any(fnmatch.fnmatch(p.rstrip('/*'), d) for d in DEFAULT_IGNORED_DIRS)
+                    for p in ctx.include_patterns
+                )
+                if vcs_named:
+                    rel = _safe_relpath(str(current_dir / d_name), str(root))
+                    include_matches = any(
+                        fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
+                        or p.rstrip('/*') == rel
+                        for p in ctx.include_patterns
+                    )
+                    exclude_matches = any(
+                        fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
+                        or p.rstrip('/*') == rel
+                        for p in ctx.exclude_patterns
+                    ) if ctx.exclude_patterns else False
+                    if include_matches and not exclude_matches:
+                        return False  # include re-admits, exclude does not override
             ctx.vcs_pruned += 1
             return True
         if ctx.exclude_fn is None:
@@ -1173,10 +1200,12 @@ class FileOpsMixin:
             # Parse exclude once: the pattern tuple feeds both the name filter and the
             # directory-pruning helper (avoids splitting the string twice).
             ex_patterns = _parse_patterns(exclude)
+            inc_patterns = _parse_patterns(include)
             ctx = FilterContext(
                 include_fn=_build_pattern_fn(include),
                 exclude_fn=_build_pattern_fn_from_patterns(ex_patterns),
                 exclude_patterns=ex_patterns,
+                include_patterns=inc_patterns,
                 skip_vcs=skip_vcs,
                 min_size=ctx_min_size,
                 max_size=ctx_max_size,
@@ -1197,6 +1226,19 @@ class FileOpsMixin:
                 output, total_dirs, total_files, total_size, raw_entries = self._list_flat(
                     resolved, ctx, sort_by, max_entries)
                 is_empty = not (total_dirs or total_files)
+
+            # BUG_0221: disclose VCS pruning in the header region (survives
+            # head-truncation) when the caller's patterns name a pruned category.
+            # Preserves the BUG_0166 invariant: skip_vcs is only blamed when it hid
+            # something. Suppressed on empty results (the BUG_0160/0166 message already
+            # names skip_vcs there).
+            if (recursive and not is_empty and ctx.vcs_pruned > 0):
+                all_pats = ctx.include_patterns + ctx.exclude_patterns
+                if any(fnmatch.fnmatch(p.rstrip('/*'), d)
+                       for p in all_pats for d in DEFAULT_IGNORED_DIRS):
+                    output = (f"  [note] {ctx.vcs_pruned} VCS/build dir(s) pruned by skip_vcs "
+                              f"(your include/exclude patterns name a pruned category)\n"
+                              + output)
 
             # BUG_0160: distinguish a genuinely empty directory from a listing whose
             # entries all failed the filters. The old single message ("empty directory
