@@ -583,7 +583,10 @@ class TestIntegrationMockServers:
         healthy_base = mock_servers['healthy']
 
         # N models on ONE physical (busy) server + one healthy endpoint elsewhere.
-        ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}') for i in range(3)]
+        # Card retries are 0 so each model gets exactly ONE attempt before the breaker
+        # skip moves the pass on: this isolates the CROSS-CALLER no-hammering invariant
+        # from the per-caller card budget (BUG_0210 made the card authoritative on busy).
+        ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}', max_retries=0) for i in range(3)]
         id_h = _add_endpoint(router, 'healthy', healthy_base, model='hm')
         router.set_agent_priorities('coder', ids + [id_h])
 

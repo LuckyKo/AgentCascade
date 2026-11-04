@@ -2461,34 +2461,18 @@ class APIRouter:
                         # trip it — they only earn the per-(base,model) cooldown on exhaustion.
                         if self._is_server_busy_loading(e):
                             self._record_server_busy(endpoint_base, e)
-                            # Stop hammering a base that just confirmed busy: if there is another
-                            # endpoint later in the chain, break out of the per-endpoint retry loop
-                            # and failover (a same-base next endpoint is caught by the breaker skip
-                            # at the top of its iteration; a different-base one is real failover).
-                            # If this is the LAST endpoint (no failover target), do NOT break — allow
-                            # the within-endpoint retry so single-endpoint recovery still works.
-                            # EXCEPTION: the designated single-probe holder (_holds_probe) must be
-                            # allowed to COMPLETE its probe attempt — success closes the breaker,
-                            # failure re-trips it — so the state machine sees a clean outcome. If the
-                            # prober broke out and failed over instead, no endpoint on that base would
-                            # ever deliver a successful probe during this pass and recovery would stall.
-                            # Only non-probers break out to failover. This preserves both no-hammering
-                            # (non-probers bail after one 503) and single-probe recovery (the prober
-                            # finishes its job).
-                            if cfg_idx < len(chain) - 1 and not _holds_probe:
-                                # Only break out (failover) when the NEXT endpoint is on a DIFFERENT
-                                # physical server. If it shares this normalized base, the breaker skip
-                                # at the top of its iteration will catch it anyway — breaking out here
-                                # would just re-skip it and waste a pass. This preserves the single-probe
-                                # invariant: the prober stays in the loop so the breaker machinery can
-                                # claim/release the probe cleanly, and recovery is not stalled by a
-                                # failed-over prober leaving the probe slot held.
-                                _next_base = (chain[cfg_idx + 1].get('api_base') or
-                                              chain[cfg_idx + 1].get('model_server', 'unknown'))
-                                if normalize_api_base(_next_base) != normalize_api_base(endpoint_base):
-                                    logger.info(f"[APIRouter] Server busy on '{endpoint_name}' @ {endpoint_base} — "
-                                                f"stopping retries for this endpoint (failover to next)")
-                                    break
+                            # BUG_0210: the endpoint card's retry count is authoritative even when
+                            # the server reports busy/loading. This caller keeps retrying the SAME
+                            # endpoint up to `max_retries` (with normal exponential backoff) before
+                            # failing over. Cross-caller protection is unchanged: the breaker above
+                            # makes every OTHER caller skip this base (consult-before-fire), and the
+                            # single-probe holder still owns recovery. Previously a busy 503 broke
+                            # out to failover as soon as the next chain entry was on a different
+                            # base, silently capping the card's retry count at 1 regardless of what
+                            # the user configured (autoloader model-load/queue 503s hit this path).
+                            logger.debug(
+                                f"[APIRouter] Server busy on '{endpoint_name}' @ {endpoint_base} "
+                                f"(attempt {attempt+1}/{max_retries+1}) — honoring endpoint retry budget")
 
                         # Detect context window exceeded errors and advance cursor.
                         # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming

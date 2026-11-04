@@ -133,7 +133,9 @@ class TestBreakerStress:
         healthy_base = mock_servers['healthy']
 
         # 3 models on ONE physical (busy) server + one healthy endpoint elsewhere.
-        ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}') for i in range(3)]
+        # Card retries are 0 so each model gets exactly ONE attempt: this stress measures
+        # the CROSS-CALLER breaker bound, not the per-caller card budget (BUG_0210).
+        ids = [_add_endpoint(router, f"busy_m{i}", busy_base, model=f'model-{i}', max_retries=0) for i in range(3)]
         id_h = _add_endpoint(router, 'healthy', healthy_base, model='hm')
         router.set_agent_priorities('coder', ids + [id_h])
 
@@ -189,8 +191,8 @@ class TestBreakerStress:
             #     This is unavoidable without a global in-flight gate, so the bound MUST be >= 24.
             #   * + single-probes: at most ONE probe per half-open window (~1-2 across the short
             #     0.3s window cycles).
-            #   * + bounded prober retries: the designated prober completes its probe attempt
-            #     (within-endpoint retries on a re-tripped base), ~3-6 extra hits.
+            #   * + the designated prober finishes its probe attempt: with card retries=0 this
+            #     adds no within-endpoint retries (BUG_0210 keeps card retries per caller).
             #   * Worst-case observed total = 32. Naive no-breaker hammering would be
             #     N_INTEGRATION x 3 models = 72+.
             # So a hard bound comfortably above the worst case (32) and the initial-race floor
