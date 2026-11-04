@@ -149,11 +149,20 @@ def test_drive_root_mapping_still_matches_children():
 
 # ── Boundary at the end of the path ──────────────────────────────────────────
 
-@pytest.mark.parametrize('path', [MAIN, MAIN + '\\', MAIN.replace('\\', '/')])
+@pytest.mark.parametrize('path', [MAIN, MAIN.replace('\\', '/')])
 def test_exact_prefix_maps_to_the_container_root(path):
     set_active_mappings({'work_dir': {'host': MAIN, 'container': '/workspace'}})
 
     assert _resolve_single_path(path) == '/workspace'
+
+
+@pytest.mark.parametrize('path', [MAIN + '\\', MAIN + '/'])
+def test_exact_prefix_with_trailing_separator_preserves_it(path):
+    """BUG_0228: the mount root *with* a trailing separator keeps the separator,
+    so callers doing ``base + 'child'`` retain the boundary."""
+    set_active_mappings({'work_dir': {'host': MAIN, 'container': '/workspace'}})
+
+    assert _resolve_single_path(path) == '/workspace/'
 
 
 def test_resolution_is_idempotent():

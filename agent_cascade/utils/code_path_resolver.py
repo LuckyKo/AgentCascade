@@ -158,7 +158,10 @@ def _resolve_single_path(path: str) -> str:
         relative_part = normalized[len(normalized_host) + 1:]
         if relative_part:
             return f"{container_prefix}/{relative_part}"
-        return container_prefix
+        # The path is exactly the mount root. Preserve a trailing separator so that
+        # callers doing string concatenation (base + "child") keep the boundary
+        # (BUG_0228): 'N:/x/' -> '/extra_rw_N/' not '/extra_rw_N'.
+        return container_prefix + ('/' if normalized.endswith('/') else '')
 
     # No mapping found, return original path unchanged
     return path
