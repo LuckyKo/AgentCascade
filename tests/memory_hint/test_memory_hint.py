@@ -1751,6 +1751,86 @@ class TestSkillContentGateBug0226:
             BUG_0226_TURN_TABLE_ROW, [BUG_0226_WEBUI, BUG_0226_EDIT], sm) == [BUG_0226_EDIT]
 
 
+# ── SkillManager stats passthrough (BUG_0230) ───────────────────────────────
+#
+# `SkillManager.match_skills_with_stats` was indented INSIDE `_keyword_match`
+# after its `return`, so it never existed on the class. The hint gate's
+# `getattr(..., None)` fallback made that silent: every turn reported
+# n_in_vocab=0, disabling the BUG_0041 length correction on the adaptive floor.
+#
+# These tests fail on the pre-fix code (the attribute is missing / the floor is
+# fed the raw top-1) and pin both halves: the public API and its actual use.
+
+class TestSkillManagerMatchStatsBug0230:
+    """The stats passthrough must exist AND its counts must reach the floor."""
+
+    @staticmethod
+    def _seed(tmp_path):
+        from tests.conftest import make_hermetic_skill_manager
+        sm = make_hermetic_skill_manager(tmp_path)
+        root = tmp_path / 'skills'
+        for name, desc, triggers in (
+            ('docker-best-practices',
+             'Docker container networking image build and orchestration best practices',
+             ['docker', 'container', 'image', 'networking']),
+            ('python-testing',
+             'Python unit testing with pytest fixtures and mocking patterns',
+             ['pytest', 'unittest', 'mock']),
+        ):
+            d = root / name
+            d.mkdir(parents=True, exist_ok=True)
+            trg = ''.join(f'  - {t}\n' for t in triggers)
+            (d / 'SKILL.md').write_text(
+                f'---\nname: {name}\ndescription: {desc}\ntriggers:\n{trg}---\n# Body\n',
+                encoding='utf-8')
+        sm.discover([root])
+        return sm
+
+    QUERY = 'docker container networking image build best practices'
+
+    def test_passthrough_is_public_and_matches_match_skills(self, tmp_path):
+        """The method exists at class level and is a transparent wrapper."""
+        from agent_cascade.skills.manager import SkillManager
+        assert hasattr(SkillManager, 'match_skills_with_stats'), \
+            'BUG_0230 regression: match_skills_with_stats is not on the class'
+        sm = self._seed(tmp_path)
+        results, n_tokens, n_in_vocab = sm.match_skills_with_stats(self.QUERY)
+        assert results == sm.match_skills(self.QUERY)
+        assert isinstance(n_tokens, int) and isinstance(n_in_vocab, int)
+        assert n_in_vocab > 0, 'stats must be real, not the zero fallback'
+        assert 0 < n_in_vocab <= n_tokens
+        # cap parity (the advisor path passes cap; the wrapper must not change it)
+        assert sm.match_skills_with_stats(self.QUERY, cap=1)[0] == sm.match_skills(self.QUERY, cap=1)
+
+    def test_hint_floor_is_fed_the_length_corrected_score(self, tmp_path):
+        """End-to-end: the gate now receives real counts, so the EWMA feed is
+        `top1 * n/max(n, REF)` instead of the raw `top1`."""
+        sm = self._seed(tmp_path)
+        results, n_tokens, n_in_vocab = sm.match_skills_with_stats(self.QUERY)
+        top1 = results[0][1]
+        # A short query in a 2-skill corpus: few in-vocab tokens, so the
+        # correction is a real DEFLATION and the two feeds are distinguishable.
+        assert top1 >= SKILL_JUNK_MIN
+        assert 0 < n_in_vocab < SKILL_REF_TOKENS
+
+        pool = MagicMock()
+        pool.llm_cfg = {}
+        pool.skill_manager = sm
+        mgr = MemoryHintManager(pool)
+        inst = _FakeInst()
+        settings = {'skill_suggestions': True, 'skill_threshold': 0.0,
+                    'cooldown_seconds': 600}
+        mgr._match_skills_for_hint({'instance_name': 'w', 'query': self.QUERY},
+                                   settings, inst)
+
+        corrected = top1 * (n_in_vocab / SKILL_REF_TOKENS)
+        expected = SKILL_EWMA_ALPHA * corrected + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        raw_feed = SKILL_EWMA_ALPHA * top1 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
+        assert abs(mgr._skill_adaptive_floor - expected) < 1e-9, \
+            f'floor fed {mgr._skill_adaptive_floor!r}, expected corrected {expected!r}'
+        assert abs(expected - raw_feed) > 1e-6, 'fixture cannot distinguish the two feeds'
+
+
 # ── 5. Instance reset helper + defaults ─────────────────────────────────────
 
 class TestInstanceReset:

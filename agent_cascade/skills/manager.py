@@ -1543,27 +1543,30 @@ class SkillManager:
                 results = results[:cap]
             return results
 
-        def match_skills_with_stats(self, query: str, include_inactive: bool = False,
-                                    cap: Optional[int] = None
-                                    ) -> Tuple[List[Tuple[str, float]], int, int]:
-            """Public passthrough for :meth:`SkillMatcher.match_with_stats`.
+    def match_skills_with_stats(self, query: str, include_inactive: bool = False,
+                                cap: Optional[int] = None
+                                ) -> Tuple[List[Tuple[str, float]], int, int]:
+        """Public passthrough for :meth:`SkillMatcher.match_with_stats`.
 
-            Additive (BUG_0041). Returns ``(results, n_tokens, n_in_vocab)`` where
-            ``results`` is byte-identical to ``match_skills(query, include_inactive,
-            cap)`` — the same lazy-index-init, the same active-only filter, the same
-            ordering and cap. The extra counts let the memory-hint gate length-correct
-            its adaptive floor; ``match_skills`` is left untouched so ``scan_skills``
-            and AUTO-mode callers observe no change at all.
+        Additive (BUG_0041). Returns ``(results, n_tokens, n_in_vocab)`` where
+        ``results`` is byte-identical to ``match_skills(query, include_inactive,
+        cap)`` — the same lazy-index-init, the same active-only filter, the same
+        ordering and cap. The extra counts let the memory-hint gate length-correct
+        its adaptive floor; ``match_skills`` is left untouched so ``scan_skills``
+        and AUTO-mode callers observe no change at all.
 
-            Callers that do not need the counts keep using ``match_skills``.
-            """
-            results = self.match_skills(query, include_inactive=include_inactive, cap=cap)
-            # This runs the scorer twice per hinted turn (once via match_skills,
-            # once via match_with_stats). The cost is accepted because the in-vocab
-            # count must come from the matcher's tokenizer/index. Callers that do
-            # not need counts use match_skills.
-            _, n_tokens, n_in_vocab = self._matcher.match_with_stats(query)
-            return results, n_tokens, n_in_vocab
+        Callers that do not need the counts keep using ``match_skills``.
+
+        The counts must come from the matcher's OWN tokenizer/index, so this runs
+        the scorer a second time (``match_skills`` already ran it). The cost is
+        accepted because only the memory-hint path calls this, once per hinted
+        turn. BUG_0230: this method was previously indented inside
+        ``_keyword_match`` after its ``return``, so it never existed on the class
+        and the caller silently fell back to ``match_skills`` with zero counts.
+        """
+        results = self.match_skills(query, include_inactive=include_inactive, cap=cap)
+        _, n_tokens, n_in_vocab = self._matcher.match_with_stats(query)
+        return results, n_tokens, n_in_vocab
 
     def get_all_metadata(self, include_active_only: bool = False) -> List[Dict[str, Any]]:
         """Return Tier 1 metadata for the scan_skills tool.
