@@ -1219,6 +1219,11 @@ class TestPreLlmChecksIntegration:
         engine._inline_rollback_and_hint.assert_called_once()
         pool.terminate_instance.assert_called_once()
         assert pool.terminate_instance.call_args.kwargs.get('set_global_stopped') is False
+        # BUG_0205: the Tier-2 write site records the machine-readable reason, kept in
+        # sync with the Tier-1 path (see tests/test_bug0205_loop_termination_reason.py).
+        assert hasattr(inst, '_terminated_reason') and inst._terminated_reason
+        assert '1 rollbacks' in inst._terminated_reason
+        assert 'max_auto_rollbacks=0' in inst._terminated_reason
 
 
 def test_fuzzy_warning_template_removed():

@@ -178,6 +178,15 @@ def _termination_reason(pool, instance_name: str, inst, was_stopped: bool, resul
     except Exception:
         comp = False
 
+    # BUG_0205: loop-recovery exhaustion is the most specific, actionable cause — check it
+    # first. The loop detector records a machine-readable reason on the instance
+    # (agent_instance._terminated_reason) before terminating it. Strict isinstance guard:
+    # a bare MagicMock instance auto-creates truthy attributes, so a mock inst must still
+    # fall through to the honest default (test-mock-interface-parity gotcha).
+    loop_reason = getattr(inst, '_terminated_reason', None) if inst is not None else None
+    if isinstance(loop_reason, str) and loop_reason:
+        return f'loop-stuck: {loop_reason}.'
+
     if hit_turns_marker or hit_turn_budget:
         return f'hit its turn budget (reached turn {cur} of {eff}).'
     if was_stopped:

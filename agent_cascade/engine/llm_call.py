@@ -62,6 +62,20 @@ from agent_cascade.engine.compression_exec import (_COMPRESSOR_WINDOW_SAFETY_FAC
 from agent_cascade.engine.helpers import (_get_active_functions_from_template, _make_session_digest_callback,
                                           _make_token_count_callback, _make_usage_callback)
 
+
+def _build_loop_termination_reason(rollbacks: int, max_rb: int, reason: str) -> str:
+    """Machine-readable reason written to ``inst._terminated_reason`` on loop exhaustion.
+
+    Shared by the Tier-1 (exact) and Tier-2 (fuzzy) exhaustion sites so the format
+    stays in one place. The 60-char pattern cap keeps the actionable head
+    ("exhausted loop-recovery budget (N, max_auto_rollbacks=M)") within
+    format_crash's 160-char budget; the pattern tail may be truncated.
+    """
+    return (
+        f"exhausted loop-recovery budget ({rollbacks} rollbacks, "
+        f"max_auto_rollbacks={max_rb}); pattern: {str(reason)[:60]}"
+    )
+
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint. This constant lived at module scope in the original
 # execution_engine.py; it is used by _build_merged_cfg (moved here), so its true
@@ -229,6 +243,10 @@ class LLMCallMixin:
                                      f"The detected pattern was: {reason}. Please adjust your prompt or task."),
                         )
                         self._append_and_log(instance, fail_msg)
+                        # BUG_0205: record a machine-readable reason the parent can read
+                        # (child_runner._termination_reason) and the re-arm helper can key on
+                        # (utils/termination_recovery).
+                        instance._terminated_reason = _build_loop_termination_reason(rollbacks, max_rb, reason)
                         # Terminate this instance (and its children). Use set_global_stopped=False
                         # so other agents are unaffected.
                         self.pool.terminate_instance(inst_name, set_global_stopped=False)
@@ -325,6 +343,9 @@ class LLMCallMixin:
                                          f"The detected pattern was: {reason}. Please adjust your prompt or task."),
                             )
                             self._append_and_log(instance, fail_msg)
+                            # BUG_0205: same machine-readable reason as the Tier-1 path
+                            # (see tests/test_tool_loop_detect.py for the shared format).
+                            instance._terminated_reason = _build_loop_termination_reason(rollbacks, max_rb, reason)
                             self.pool.terminate_instance(inst_name, set_global_stopped=False)
                             turns_wrapper[0] = self._consume_turn(instance, turns_wrapper[0])
                             return True  # Caller will break on _check_stop_conditions next iteration

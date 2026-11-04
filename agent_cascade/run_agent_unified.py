@@ -27,6 +27,20 @@ from agent_cascade.log import logger
 
 from .agent_pool import AgentPool
 from .execution_engine import ExecutionEngine
+from .utils.termination_recovery import rearm_terminated_instance
+
+
+def _guarded_rearm(pool, instance_name: str) -> bool:
+    """Call ``rearm_terminated_instance`` with a best-effort guard (BUG_0205).
+
+    Swallows any exception so a pool-shape regression never blocks the run.
+    Returns True on success, False when the re-arm was skipped.
+    """
+    try:
+        return rearm_terminated_instance(pool, instance_name, origin='user-message')
+    except Exception as e:
+        logger.warning(f'[REARM] skipped for {instance_name}: {e}')
+        return False
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. Unified run_agent_thread Replacement
@@ -160,6 +174,13 @@ def run_agent_thread_unified(
         _tg_instance = pool.get_instance(instance_name)
         if _tg_instance is not None:
             _reset_run_scoped_tg_state(_tg_instance)
+
+        # BUG_0205: the user explicitly asked this root agent to run again. If a prior run
+        # was terminated by the loop detector (recoverable — _terminated_reason set), re-arm
+        # it so this run can start fresh. Dismissals / teardowns / Stop have no reason
+        # recorded and stay dead. Root-only gate is enforced inside the helper
+        # (parent_instance must be None); children go through child_runner.
+        _guarded_rearm(pool, instance_name)
 
         _run_gen = run_agent_in_pool_with_recovery(
             pool=pool,

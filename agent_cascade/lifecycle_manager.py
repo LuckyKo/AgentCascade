@@ -448,6 +448,9 @@ class AgentLifecycleManager:
 
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
+                # BUG_0205: clear the loop-termination reason so a reused child doesn't
+                # report a stale cause on a later, unrelated termination.
+                instance._terminated_reason = None
 
                 # SLOT_LEAK HARDENING: Release any held slot permit BEFORE clearing it.
                 # Normal case is a no-op (reused instances are IDLE/TERMINATED). Guards

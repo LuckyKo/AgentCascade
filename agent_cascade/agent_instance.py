@@ -383,6 +383,12 @@ class AgentInstance:
     _suppress_loop_detection_next_turn: bool = field(
         default=False)  # Cooldown flag for loop detection after compression/rollback
     _loop_rollback_count: int = field(default=0)  # Track rollback count to prevent infinite recovery loops
+    # BUG_0205: machine-readable reason recorded when the loop detector exhausts its
+    # auto-rollback budget and terminates the instance. Survives terminate() (which
+    # does not clear it) so the parent can report *why* the child died, and so the
+    # re-arm helper (utils/termination_recovery.py) can distinguish a recoverable
+    # loop-termination from a dismissal/cascade teardown (which leave this None).
+    _terminated_reason: Optional[str] = field(default=None)
 
     # ── Fuzzy (Tier 2) loop-detection state machine (two-tier redesign) ───────
     # Warning-first throttling + optional escalation countdown, driven per
