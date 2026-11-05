@@ -1,61 +1,69 @@
 ---
 name: regression-test-revert-proof
-description: Prove a new regression test is genuine by making it fail on pre-fix code via a minimal temporary revert, then restoring the fix — not by reasoning that it "should" fail.
+description: Prove a new/updated regression test genuinely guards the bug by reverting ONLY the production fix and confirming the test flips to failing, then restoring. Catches tautological tests that would pass pre-fix too.
 source: auto-generated
-version: 1.0.1
+version: 1.1.0
 triggers:
-  - "non-vacuous test"
-  - "pre-fix red"
-  - "post-fix green"
-  - "regression evidence"
+  - "regression test"
+  - "prove test fails pre-fix"
+  - "tautological test"
   - "revert proof"
-  - "test would fail pre-fix"
+  - "test guards the bug"
+  - "non-vacuous assertion"
+  - "mutation proof"
+  - "pin the assertion"
 generated_by: coder
-generated_from_task: "TG final-answer extraction fix — plan required proving tests 1-2 FAIL against pre-fix extraction and pass post-fix"
+generated_from_task: "T1.5 stale _last_released_endpoint fix — prove new session-restore tests fail pre-fix / pass post-fix"
 ---
 
 ## Goal
-Turn a claimed regression test into a *proven* one: demonstrate it fails against the unfixed behavior with an actual run, so you know it guards the real bug and not a tautology.
+A passing regression test proves nothing if it would have passed on pre-fix code too (a tautology). This procedure mechanically demonstrates the test actually guards the bug by flipping the production change off and confirming the assertion fails.
 
 ## Procedure
 
-### Step 1 — Write the test to assert the FIXED (correct) behavior
-The assertion must encode the desired post-fix state (e.g. "triggering turn kept tools enabled"). It will pass once the fix is in, but you cannot yet trust it catches the bug.
+### Step 1 — Write the fix, then write the test against post-fix behavior
+Make the production change first (so you know the exact lines to revert), then add the regression test asserting the corrected behavior. Run it once to confirm it PASSES post-fix. A test that doesn't pass post-fix is broken before you even ask whether it guards anything.
 
-### Step 2 — Revert ONLY the fix, minimally and reversibly
-Introduce the smallest change that restores pre-fix behavior at the decision point. Prefer a one-line neutralization over deleting code:
+### Step 2 — Revert ONLY the production change, keep the test in place
+Use a targeted `edit_file` (or `git stash push <prod-file>`) to remove JUST the fix — leave the new test file untouched and do NOT touch unrelated working-tree edits (e.g. pre-existing logging changes on a dirty tree).
 ```python
-_auto_skill_will_extend = False  # TEMP-REVERT: prove pre-fix failure
+# edit_file: replace the fixed block with the original, e.g.
+old:  self.instances[name] = new_inst
+      new_inst._pool_ref = self        # <- THE fix
+new:  self.instances[name] = new_inst  # reverted; test stays
 ```
-This is safer than reverting via `git` (keeps the rest of your uncommitted work intact) and leaves an obvious marker to restore. Do NOT revert test files or unrelated logic.
 
-**Variant — call the old function directly (no revert needed):** When the fix REPLACES a function (e.g. `extract_instance_output` → `extract_final_answer_text`) rather than modifying one in place, you can skip the revert entirely. Call the OLD function with the same inputs the new test uses and capture its output:
-```python
-# Pre-fix behavior: what extract_instance_output returns for a turn-limit-tail conversation
-old_result = extract_instance_output(list(conv), 'Maine', instance=None)
-# → 'The final answer\n\n[Turn limit reached — ...]' (notice NOT stripped)
-# The new test asserts 'Turn limit reached' not in result → would FAIL against old_result ✓
+### Step 3 — Run the test; it MUST fail for the right reason
 ```
-This is faster and safer than a temporary revert when the old function still exists unchanged.
-
-### Step 3 — Run and confirm the NEW test fails with the bug's exact signature
-Run just the affected test/class. The failure message should show the wrong value, not a crash:
+python -m pytest tests/test_new_regression.py -q   # expect FAIL (serial `-n 0` only if the result is flaky)
 ```
-assert ['tool_a', 'tool_b'] is None   # tools were disabled -> full reprocess
+Read the assertion failure. It must be the *semantically expected* one (e.g. `assert holder._pool_ref is not None` → `None is ...`). Which line goes red matters more than the exception type — a crash at the asserted line is valid pre-fix evidence. If it fails for an unrelated reason (fixture error, missing attr), your test is under-specified — fix the test, not the conclusion.
+
+### Step 4 — Restore the fix and re-run; it MUST pass
 ```
-A failure that looks like the actual symptom (wrong value / missing message) is strong evidence the test targets the right code path.
+# edit_file: put the fixed block back
+python -m pytest tests/test_new_regression.py -q   # expect PASS (serial `-n 0` only if the result is flaky)
+```
+FAIL pre-fix + PASS post-fix = a real regression guard. Either half missing = not proven.
 
-### Step 4 — Restore the fix and confirm green
-Revert your temporary revert, re-run the same tests, confirm they now pass. Keep the diff minimal so review is clean.
+### Step 5 — Confirm the working tree is back to exactly the intended state
+`git diff <prod-file>` must show ONLY your fix (no leftover revert artifacts). On a dirty tree, verify you didn't accidentally touch the pre-existing unrelated changes.
 
-### Step 5 — Report the evidence in the handoff (one line per scenario)
-Format: "Pre-fix (function X) returns Y; test asserts Z → FAIL. Post-fix (function W) returns V; test passes." This makes the non-vacuity claim auditable without re-running anything. For silent-skip tests (logging), the pre-fix evidence is simpler: grep the old code for the log line — its absence IS the red evidence.
+### Step 6 — Pin each assertion of a multi-assertion test with its OWN mutation
+When one test guards several behaviours (state restored, flag cleared, no reload, exception propagated), a single revert only proves the *first* one. For every distinct assertion, apply a separate targeted mutation to the production code and confirm that specific assertion — and only it — flips to failing, then restore:
+```
+mutation A: comment out the restore line      -> expect KeyError on the registry lookup
+mutation B: comment out the re-raise         -> expect the "propagated reason" assert to fail
+```
+If a mutation flips nothing, that assertion is decorative: either tighten it or delete it. Record in the test (or the memory) which mutation proves which assertion, so a later reader does not weaken one believing another still covers it.
 
 ## Tips
-- **Reasoning alone is not proof.** "This should fail pre-fix" is a claim; a failing run is evidence. The task bar for a regression test is the Step 3 red line.
-- **Multiple new tests may share one bug** — expect several to fail on revert (e.g. tool-enable, warning-suppress, and prefix-stability all encode the same fix). That's fine and confirms coverage; but each should still fail for its own reason.
-- **Watch assertion placement against real layout.** A test can be "logically correct" yet assert on the wrong slot and pass even pre-fix (e.g. checking the message *after* the trigger reply when the warning actually lands *before* it). When a supposedly-regression test passes on reverted code, dump the actual data structure (conversation/ordering) and fix the assertion — don't assume.
-- **Use a tracer for per-call state.** For loop/engine bugs, wrap the per-iteration entry point (e.g. `_call_llm_with_injection`) to record the relevant instance state each call; assert on the specific iteration (trigger boundary), not just final state. See [[engine-loop-test-offbyone-diagnosis]].
-- **Keep it reversible and scoped.** The temporary revert must be a single obvious edit you can undo in one step, so the final diff contains only the real fix + tests.
-- **Serial runs for flaky suites.** Run with xdist disabled (e.g. `-o addopts=""` in AgentCascade) so a red/green comparison isn't muddied by parallelism flakiness — see [[pytest-docker-subprocess-hang]].
-- **When the per-run reset makes a branch unreachable through the full path**, extract the decision logic into a module-level helper for unit-testability, and drive the full path separately for call-site wiring proof. The direct-branch test covers the log line; the full-path test covers the dedup guard (call_count assertion).
+- **Do this on the actual dirty tree, not a clean checkout.** The whole point is the guard works in the real build state; pre-existing edits in other files must stay intact throughout.
+- **Revert the minimal fix, not "a lot of code."** If reverting one line doesn't flip the test, the test isn't actually exercising that line — tighten the assertion or find the true load-bearing change.
+- **`git stash push <file>` is the cleanest revert for multi-line fixes**, but a manual `edit_file` round-trip is fine and more surgical when the fix is a few lines. Always confirm with `git diff` afterward.
+- **A test that passes on pre-fix code is a coverage illusion.** It reads as "we have a regression guard" during review while guarding nothing. This check is what turns it into a real one.
+- **Stub-call recording does NOT pin control flow that dies before the stub.** `monkeypatch`-ing a function to append to a list and asserting `calls == []` looks like it proves "we never reached there", but if the call site's *arguments* fail to evaluate (e.g. a local is unbound after a swallowed exception), Python raises while building the argument tuple and the stub is never entered — the list stays empty and the test passes for the wrong reason. Pin such control flow on an observable *side effect of the real path* instead: a recorded reason string, a state flag, a log line, or a persisted failure record.
+- **Prefer pinning an observable consequence over an absence.** `assert calls == []` is satisfied by many wrong worlds (never called, called-but-crashed, short-circuited). `assert failure.reason contains "<the original exception text>"` is satisfied by exactly one.
+- **Make "must not happen" stubs recorders, not raisers.** A stub that raises `AssertionError` to assert unreachability is silently swallowed whenever the production code catches `Exception` on that path — the test then passes while the guard did nothing. Append to a list and assert the list is empty.
+- **Guard your own guards against vacuity.** If an assertion checks that something is *absent* (a flag not set, a key missing), first prove the thing was ever *present* — record it mid-operation and assert that. Otherwise the absence assertion is trivially true in any fixture where the precondition never held.
+- **Separate this from re-running the agent's claimed suite.** Re-running proves the *current* state is green; revert-proofing proves the *test* is meaningful. Do both — they catch different failures: the change-maker performs this; the orchestrator may re-run it as a spot-check.

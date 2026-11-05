@@ -33,7 +33,7 @@ Style guidelines:
 1. Never review your own implementation — always be independent
 2. Read every file involved before giving feedback — never review blind
 3. Use `read_file`, `list_dir`, and `grep` extensively to verify claims
-4. Use `code_interpreter` to actually test suspect code when possible
+4. Verify the code and the change-maker's test evidence (exact counts + invocation) — do not re-run tests yourself, and never launch a full regression suite.
 5. Use existing skills and lessons.
 6. Never approve work you haven't personally inspected
 7. Feel free to read your caller's logs directly if the instructions weren't clear enough

@@ -2,7 +2,7 @@
 name: subagent-deliverable-verification
 description: Orchestrator protocol for verifying a sub-agent's completed implementation before review/commit — re-run tests yourself, read the actual diffs, prove the fix is real (regression test fails on pre-fix code), separate xdist flakiness from regressions by running serially, and treat agent reports as claims to be checked.
 source: auto-generated
-version: 1.0.1
+version: 1.0.2
 triggers:
   - "verify sub-agent work"
   - "review implementation output"
@@ -18,10 +18,11 @@ generated_from_task: "Candidate-flow skill upgrade feature — verifying coder a
 Prevent a sub-agent's self-reported success from reaching the reviewer or the commit without independent evidence. Agents hit turn limits, misread failures, or test only happy paths; the orchestrator is the last line of defense before code ships.
 
 ## Procedure
-### Step 1 — Re-run the agent's claimed tests YOURSELF
+### Step 1 — Re-run the agent's claimed tests YOURSELF (orchestrator only)
+Reviewers do not re-run tests — they verify the change-maker's test evidence (exact counts + invocation) and flag gaps (see scoped-tests-default-full-suite-on-instruction).
 Never trust "all tests pass" in an agent report. Run the exact suites in the same environment:
 ```
-python -m pytest tests/test_a.py tests/test_b.py -n 0 -q   # project conventions may mandate flags (e.g. -n 0 on Windows)
+python -m pytest tests/test_a.py tests/test_b.py -q   # serial -n 0 only when isolating a suspected flake
 ```
 Compare pass/fail counts against the claim. Any discrepancy → the agent's report is unreliable; dig into every failure yourself before delegating a fix round.
 

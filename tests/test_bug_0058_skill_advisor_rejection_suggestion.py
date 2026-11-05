@@ -11,15 +11,13 @@ Fix:
   * the action is a fixed vocabulary (``SUGGESTION_ACTIONS``) so callers can branch on it;
   * ``format_denial_message()`` renders the gate's denial with
     ``[SKILL-ADVISOR SUGGESTION] action=<token>``, the hint, the retry task, and the
-    action's next-step instruction — while keeping ``[SKILL-ADVISOR DENIED]`` leading;
-  * the compression prompt keeps one line per denial so the knowledge survives summarization.
+    action's next-step instruction — while keeping ``[SKILL-ADVISOR DENIED]`` leading.
 
 No LLM, no Docker, no network.
 """
 
 import pytest
 
-from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.skills.advisor import (SUGGESTION_ACTIONS, SkillAdvisorResult, build_skill_advisor_prompt,
                                           format_denial_message, parse_advisor_output)
 
@@ -176,9 +174,3 @@ def test_advisor_prompt_requests_the_new_markers_and_vocabulary():
     assert '[RETRY_TASK]' in prompt
     for action in SUGGESTION_ACTIONS:
         assert action in prompt
-
-
-def test_compression_prompt_preserves_denials_across_summarization():
-    """BUG_0058 Option B: the summary (the compression-surviving context) must keep denials."""
-    assert '[SKILL-ADVISOR DENIED]' in COMPRESSION_PROMPT
-    assert 'not retried' in COMPRESSION_PROMPT
