@@ -15,6 +15,32 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def _json_safe(payload: Any) -> Any:
+    """Recursively convert non-JSON-serializable containers to JSON-safe equivalents.
+
+    ``set``/``frozenset`` → sorted ``list`` (an unsortable set falls back to a plain
+    ``list``), ``tuple`` → ``list``, ``dict``/``list`` recurse; everything else passes
+    through untouched. Applied at the persistence boundary so a set-valued key can never
+    veto a whole save (``TypeError``) — and, unlike ``default=str``, never silently
+    persists the literal string ``"frozenset({...})"`` that re-parsers would misread.
+    Dict KEYS are not normalized (JSON keys are str/int by construction); a
+    non-string key would still raise from ``json.dump``.
+    """
+    if isinstance(payload, (set, frozenset)):
+        try:
+            items = sorted(payload)
+        except TypeError:
+            items = list(payload)
+        return [_json_safe(v) for v in items]
+    if isinstance(payload, tuple):
+        return [_json_safe(v) for v in payload]
+    if isinstance(payload, dict):
+        return {k: _json_safe(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_json_safe(v) for v in payload]
+    return payload
+
+
 def atomic_write_json(path: Path, payload: Any, *,
                       tmp_path: Optional[Path] = None,
                       backup: bool = True,
@@ -42,7 +68,9 @@ def atomic_write_json(path: Path, payload: Any, *,
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, indent=indent, ensure_ascii=False)
+            # Normalize non-JSON containers (set/frozenset/tuple) first: a set-valued key
+            # must not raise TypeError and veto the whole file.
+            json.dump(_json_safe(payload), f, indent=indent, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
         if backup and path.exists():

@@ -200,13 +200,14 @@ class TestAlwaysProtectedWiring:
 
     KEY = 'skill_always_protected'
 
-    def test_handler_registered_and_parses_to_lowercase_set(self):
+    def test_handler_registered_and_normalizes_to_canonical_string(self):
+        """Handler stores the sorted comma-separated STRING (JSON-safe in llm_cfg)."""
         from agent_cascade.config_handlers import CONFIG_HANDLERS
         pool = MagicMock()
         pool.llm_cfg = {}
         assert self.KEY in CONFIG_HANDLERS, f"missing handler for {self.KEY}"
         CONFIG_HANDLERS[self.KEY]({self.KEY: 'Self-Augmentation, x'}, pool, [])
-        assert pool.llm_cfg[self.KEY] == {'self-augmentation', 'x'}
+        assert pool.llm_cfg[self.KEY] == 'self-augmentation,x'
 
     def test_in_persist_list_and_broadcast(self):
         from agent_cascade.config_handlers import POOL_SETTINGS_KEYS
@@ -227,6 +228,13 @@ class TestAlwaysProtectedWiring:
         assert s.SKILL_ALWAYS_PROTECTED_DEFAULT == (
             'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
         assert callable(s.parse_skill_always_protected)
+
+    def test_poisoned_frozenset_literal_falls_back_to_default(self):
+        """A legacy 'frozenset({...})' string must not be tokenized into junk skill names."""
+        import agent_cascade.settings as s
+        default = s.parse_skill_always_protected(None)
+        for poisoned in ("frozenset({'a', 'b'})", " set({'x'})"):
+            assert s.parse_skill_always_protected(poisoned) == default
 
     def test_not_in_numeric_clamp_table(self):
         """It is a STRING setting — deliberately NOT in the numeric-only SKILL_SCORE_SETTINGS table."""

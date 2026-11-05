@@ -278,3 +278,67 @@ def test_default_llm_cfg_save_bumps_revision(tmp_path):
     r0 = _runtime_state.settings_revision
     router._save()
     assert _runtime_state.settings_revision == r0 + 1
+
+
+# ── frozenset regression: set-valued llm_cfg keys must not veto a save (Todo.md:134) ──
+
+def test_set_valued_key_does_not_break_pool_settings_save(tmp_path):
+    """A frozenset in llm_cfg must not veto the whole pool_settings bucket.
+
+    Regression (Todo.md:134): a frozenset stored in the shared llm_cfg made
+    atomic_write_json raise TypeError inside _save_pool_settings()'s try, so the
+    entire file (work folders, disabled tools, ...) was silently lost.
+    """
+    pool = _make_pool(tmp_path, ro=['C:\\ro'], rw=['C:\\rw'])
+    pool.llm_cfg['skill_always_protected'] = frozenset({'a', 'b'})
+    pool._save_pool_settings()
+    assert pool._pool_settings_path.exists()
+    on_disk = json.loads(pool._pool_settings_path.read_text())
+    # The bucket's keys are written, and the offending key lands as a sorted list.
+    assert on_disk['work_access_folders_ro'] == ['C:\\ro']
+    assert on_disk['skill_always_protected'] == ['a', 'b']
+
+
+def test_skill_always_protected_roundtrip(tmp_path):
+    """Ingress normalization stores the canonical string; a fresh load re-parses the same set."""
+    from agent_cascade.settings import format_skill_always_protected, parse_skill_always_protected
+    pool = _make_pool(tmp_path)
+    pool.llm_cfg['skill_always_protected'] = format_skill_always_protected('B, A')
+    pool._save_pool_settings()
+    on_disk = json.loads(pool._pool_settings_path.read_text())
+    assert on_disk['skill_always_protected'] == 'a,b'
+    # A fresh pool loads the string form; the consumer re-parses the same semantic set.
+    pool2 = _make_pool(tmp_path)
+    pool2._load_pool_settings()
+    assert parse_skill_always_protected(pool2.llm_cfg['skill_always_protected']) == frozenset({'a', 'b'})
+
+
+def test_endpoint_card_survives_frozenset_in_llm_cfg(tmp_path):
+    """add_endpoint() persists the card even when default_llm_cfg carries a frozenset.
+
+    Direct regression (Todo.md:134): pool/core.py aliases llm_cfg into
+    router.default_llm_cfg, so a frozenset there made _save() raise and the
+    endpoint card was silently dropped from api_endpoints.json.
+    """
+    from agent_cascade.api_router_pkg.router import APIRouter
+    from agent_cascade.api_router_pkg.endpoints import APIEndpoint
+    import threading
+
+    router = APIRouter.__new__(APIRouter)
+    router._config_dir = tmp_path
+    router._config_path = tmp_path / 'api_endpoints.json'
+    router._tmp_path = lambda: tmp_path / 'api_endpoints.json.tmp'
+    router._backup_path = lambda: tmp_path / 'api_endpoints.json.bak'
+    router._lock = threading.Lock()
+    router.endpoints = {}
+    router.agent_priorities = {}
+    router._agent_types_with_priorities = set()
+    router._dirty_endpoints = False
+    router._dirty_llm_cfg = False
+    router.default_llm_cfg = {'skill_always_protected': frozenset({'x'})}
+
+    ep_id = router.add_endpoint(APIEndpoint(name='test', api_base='http://x', model='m'))
+
+    on_disk = json.loads((tmp_path / 'api_endpoints.json').read_text())
+    assert on_disk['endpoints'][0]['id'] == ep_id
+    assert on_disk['default_llm_cfg']['skill_always_protected'] == ['x']

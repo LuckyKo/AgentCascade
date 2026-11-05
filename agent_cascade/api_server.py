@@ -49,8 +49,9 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-expor
 from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.settings import (DEFAULT_WILD_READ_TRUNCATION_CHARS, DEFAULT_WORKSPACE,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS,
-                                    clamp_skill_setting, normalize_afk_mode)
-from agent_cascade.utils.atomic_json import atomic_write_json
+                                    clamp_skill_setting, format_skill_always_protected,
+                                    normalize_afk_mode)
+from agent_cascade.utils.atomic_json import _json_safe, atomic_write_json
 from agent_cascade.utils.thinking_block import _CONTEXT_SUMMARY_RE  # noqa: F401 (re-export)
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.operation_manager import OperationManager
@@ -928,7 +929,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """
         nonlocal ws_connections, _last_broadcast_mono
         _last_broadcast_mono = time.monotonic()
-        text = json.dumps(data, ensure_ascii=False, default=str)
+        # Normalize set/frozenset/tuple values (e.g. a set-valued llm_cfg key) before
+        # serializing: default=str alone would degrade them to the literal string
+        # "frozenset({...})", which clients/re-parsers would misread. default=str is
+        # kept only as a last resort for other exotic types.
+        text = json.dumps(_json_safe(data), ensure_ascii=False, default=str)
         # Snapshot the set so concurrent add/discard from other coroutines
         # (e.g. a new client connecting) won't raise RuntimeError.
         snapshot = frozenset(ws_connections)
@@ -2767,9 +2772,9 @@ if __name__ == '__main__':
         # (config handlers, frontend inputs) lands in Phase E — seeding here keeps the keys
         # visible to any consumer before then. Defaults come from the single source-of-truth table.
         **{key: spec['default'] for key, spec in SKILL_SCORE_SETTINGS.items()},
-        # Always-protected (unremovable) meta-skill set — STRING setting; seeded as its default
-        # comma-separated string so an old config that never persisted it still protects the four.
-        'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
+        # Always-protected (unremovable) meta-skill set — STRING setting; seeded via
+        # format_skill_always_protected() so the canonical sorted order is enforced everywhere.
+        'skill_always_protected': format_skill_always_protected(SKILL_ALWAYS_PROTECTED_DEFAULT),
     }
 
     # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)

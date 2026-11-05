@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting,
-                                    parse_skill_always_protected)
+                                    format_skill_always_protected)
 from agent_cascade.settings_registry import (
     EXPORT_IMPORT_ALLOWLIST, EXTRA_PERSIST_KEYS, LLM_CFG_KEYS, LLM_CFG_PERSIST_KEYS, POOL_SETTINGS_KEYS,
 )
@@ -718,13 +718,16 @@ def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any
 def _handle_skill_always_protected(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Comma-separated set of meta/process skills that are NEVER evicted by the rebalance pass.
 
-    Parsed into a lowercase frozenset (empty/whitespace tokens ignored; case-insensitive on both
-    sides). A missing/blank value falls back to the DEFAULT four meta-skills, so an old config or a
-    cleared field always keeps them protected. Non-clamped STRING setting — modeled on
-    ``skill_auto_invalidate_enabled`` (not the numeric SKILL_SCORE_SETTINGS table)."""
+    Normalized to the canonical sorted comma-separated STRING (lowercase; empty/whitespace tokens
+    ignored; case-insensitive on both sides) so the value stays JSON-serializable inside the shared
+    llm_cfg dict (pool_settings.json / api_endpoints.json). Consumers re-parse it via
+    parse_skill_always_protected(). A missing/blank value falls back to the DEFAULT four
+    meta-skills, so an old config or a cleared field always keeps them protected. Non-clamped
+    STRING setting — modeled on ``skill_auto_invalidate_enabled`` (not the numeric
+    SKILL_SCORE_SETTINGS table)."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         raw = ui_cfg.get('skill_always_protected', SKILL_ALWAYS_PROTECTED_DEFAULT)
-        agent_pool.llm_cfg['skill_always_protected'] = parse_skill_always_protected(raw)
+        agent_pool.llm_cfg['skill_always_protected'] = format_skill_always_protected(raw)
 
 
 @register_config_handler('skill_active_target_k')

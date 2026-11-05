@@ -44,7 +44,8 @@ from agent_cascade.settings import (
     DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
     DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_MAX_TURNS, DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
-    DEFAULT_WORKSPACE, DISMISS_THREAD_JOIN_TIMEOUT, HOLDER_DMS_MAX_BOUND_S, HOLDER_DMS_WINDOW_S,
+    DEFAULT_WORKSPACE, DISMISS_THREAD_JOIN_TIMEOUT, format_skill_always_protected,
+    HOLDER_DMS_MAX_BOUND_S, HOLDER_DMS_WINDOW_S,
     LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, SAFE_MODE_AUTO_RAM_FLOOR_MB,
     SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS,
     SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
@@ -217,7 +218,7 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'skill_active_target_k': 1.0,
     'skill_active_min_cap': 20,
     'skill_active_max_cap': 200,
-    'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
+    'skill_always_protected': format_skill_always_protected(SKILL_ALWAYS_PROTECTED_DEFAULT),
     **{key: spec['default'] for key, spec in SKILL_SCORE_SETTINGS.items()},
     # LLM-config keys: the real values come from config/env; these are the type
     # defaults used for validation and for an empty default_llm_cfg.

@@ -680,9 +680,10 @@ class SkillManager:
         """Resolve the always-protected (unremovable) meta-skill set as a lowercase name set.
 
         Reads ``skill_always_protected`` from the pool's llm_cfg when available (set by the config
-        handler / persistence restore, already normalized to a lowercase frozenset); otherwise parses
-        the raw string defensively. Falls back to the DEFAULT four meta-skills on any missing/blank
-        value so they are always protected. Case-insensitive on both sides by construction.
+        handler / persistence restore, already normalized to the canonical lowercase comma-separated
+        string via ``format_skill_always_protected``); otherwise parses the raw string defensively.
+        Falls back to the DEFAULT four meta-skills on any missing/blank value so they are always
+        protected. Case-insensitive on both sides by construction.
         """
         pool = getattr(self, 'pool', None)
         cfg = getattr(pool, 'llm_cfg', None) if pool is not None else None

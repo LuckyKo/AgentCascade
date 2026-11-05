@@ -753,7 +753,8 @@ SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICT
 # Meta/process skills that must NEVER be evicted by the rebalance pass, even if their metrics
 # would classify them BAD (BAD normally overrides the fair-window PROTECTED). This is a STRING
 # setting (comma-separated names), NOT one of the clamped numeric SKILL_SCORE_SETTINGS above — it
-# is parsed into a lowercase set via parse_skill_always_protected() at load time. The four defaults
+# is normalized to the canonical lowercase comma-separated string via
+# format_skill_always_protected() at load/ingress time (consumers re-parse it). The four defaults
 # are the process skills the system itself depends on; a user can add/remove without code changes.
 SKILL_ALWAYS_PROTECTED_DEFAULT: str = (
     'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
@@ -772,8 +773,13 @@ def parse_skill_always_protected(value) -> frozenset:
         raw = SKILL_ALWAYS_PROTECTED_DEFAULT
     elif isinstance(value, str):
         raw = value
+        if raw.strip().lower().startswith(('frozenset(', 'set(')):
+            # Legacy poisoned literal (e.g. "frozenset({'a','b'})") — tokenizing it would
+            # mint junk "skills" and silently unprotect the meta-skills; the default four are
+            # the only safe interpretation of a value that is no longer a name list.
+            return _DEFAULT_SET
     elif isinstance(value, (list, tuple, set, frozenset)):
-        # A pre-parsed collection (e.g. a stored frozenset) — normalize the same way; an empty
+        # An incoming collection (UI may send a list) — normalize the same way; an empty
         # collection falls back to the default so it can never silently unprotect the meta-skills.
         # NOTE: frozenset is NOT a subclass of set, so it must be listed explicitly here.
         result = frozenset(str(v).strip().lower() for v in value if str(v).strip())
@@ -786,6 +792,18 @@ def parse_skill_always_protected(value) -> frozenset:
     tokens = [t.strip().lower() for t in raw.split(',')]
     result = frozenset(t for t in tokens if t)
     return result or _DEFAULT_SET
+
+
+def format_skill_always_protected(value) -> str:
+    """Canonical persistable STRING form of ``skill_always_protected``.
+
+    Parses via :func:`parse_skill_always_protected` and re-joins the sorted names
+    comma-separated, so the value stored in ``llm_cfg`` (and persisted through
+    pool_settings.json / api_endpoints.json) is always JSON-serializable. Consumers
+    re-parse the string with ``parse_skill_always_protected`` (order- and
+    case-insensitive), so the sorted canonical form is lossless.
+    """
+    return ','.join(sorted(parse_skill_always_protected(value)))
 
 
 # ── Single source of truth for the skill-scoring clamp ranges (POLISH dedup) ─

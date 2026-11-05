@@ -3845,18 +3845,22 @@ class TestAlwaysProtectedSkills:
         assert parse_skill_always_protected(['My-Skill', '  other ', '']) == {'my-skill', 'other'}
 
     # ------------------------------------------------------------------ config handler
-    def test_handler_parses_to_lowercase_set(self):
+    def test_handler_normalizes_to_canonical_string(self):
+        """The handler stores the sorted comma-separated STRING (JSON-safe in llm_cfg);
+        the semantic set is recovered via parse_skill_always_protected."""
         from agent_cascade.config_handlers import CONFIG_HANDLERS
+        from agent_cascade.settings import parse_skill_always_protected
         pool = _fake_pool({})
         CONFIG_HANDLERS['skill_always_protected']({'skill_always_protected': 'Self-Augmentation, x'}, pool, [])
-        assert pool.llm_cfg['skill_always_protected'] == {'self-augmentation', 'x'}
+        assert pool.llm_cfg['skill_always_protected'] == 'self-augmentation,x'
+        assert parse_skill_always_protected(pool.llm_cfg['skill_always_protected']) == {'self-augmentation', 'x'}
 
     def test_handler_missing_key_uses_default(self):
         from agent_cascade.config_handlers import CONFIG_HANDLERS
         pool = _fake_pool({})
         CONFIG_HANDLERS['skill_always_protected']({}, pool, [])
-        assert pool.llm_cfg['skill_always_protected'] == {'self-augmentation', 'project-memory-writing',
-                                                          'bug-tracker-entry-format', 'skill-creator'}
+        assert pool.llm_cfg['skill_always_protected'] == \
+            'bug-tracker-entry-format,project-memory-writing,self-augmentation,skill-creator'
 
     # ------------------------------------------------------------------ backward-compat (persistence)
     def test_persist_missing_key_leaves_unset(self, tmp_path):
@@ -3888,7 +3892,9 @@ class TestAlwaysProtectedSkills:
         f.write_text(json.dumps({'skill_always_protected': 'My-Skill, other'}), encoding='utf-8')
         pool = _Pool(f)
         pool._load_pool_settings()
-        assert pool.llm_cfg['skill_always_protected'] == {'my-skill', 'other'}
+        # Restored as the canonical sorted string (JSON-safe); the semantic set is
+        # recovered by consumers via parse_skill_always_protected.
+        assert pool.llm_cfg['skill_always_protected'] == 'my-skill,other'
 
     # ------------------------------------------------------------------ override: BAD → PROTECTED
     def test_bad_meta_skill_forced_protected_not_evicted(self):

@@ -14,6 +14,7 @@ from agent_cascade.constants import POOL_SETTINGS_TO_BROADCAST
 from agent_cascade.llm.schema import ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, Message
 from agent_cascade.log import logger
 from agent_cascade.settings_registry import SETTINGS_REGISTRY
+from agent_cascade.utils.atomic_json import _json_safe
 
 
 def _msg_fingerprint(msg: Any) -> Optional[tuple]:
@@ -414,7 +415,9 @@ def build_pool_settings_snapshot(pool: Any) -> Dict[str, Any]:
         pool_settings['work_access_folders_rw'] = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
         pool_settings['default_workspace'] = str(om.base_dir)
 
-    return pool_settings
+    # Normalize any non-JSON containers (e.g. a set-valued llm_cfg key) at the boundary
+    # so the snapshot is always JSON-serializable for the settings endpoint / WS broadcast.
+    return _json_safe(pool_settings)
 
 
 def build_state_from_pool(

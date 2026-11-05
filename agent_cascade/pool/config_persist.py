@@ -372,14 +372,15 @@ class ConfigPersistMixin:
                             pass
 
                 # ── Always-protected (unremovable) meta-skill set — restore into llm_cfg ──
-                # STRING setting: parse to a lowercase frozenset (case-insensitive, empty tokens
-                # ignored). A MISSING key leaves llm_cfg unset so the manager falls back to the
-                # DEFAULT four skills (backward-compat, no crash); a blank value is normalized by
-                # parse_skill_always_protected() back to that same default.
-                from agent_cascade.settings import parse_skill_always_protected
+                # STRING setting: normalize to the canonical sorted comma-separated string
+                # (case-insensitive, empty tokens ignored) so llm_cfg stays JSON-serializable for
+                # _save_pool_settings(). A MISSING key leaves llm_cfg unset so the manager falls
+                # back to the DEFAULT four skills (backward-compat, no crash); a blank value is
+                # normalized by format_skill_always_protected() back to that same default.
+                from agent_cascade.settings import format_skill_always_protected
                 val = data.pop('skill_always_protected', None)
                 if val is not None:
-                    self.llm_cfg['skill_always_protected'] = parse_skill_always_protected(val)
+                    self.llm_cfg['skill_always_protected'] = format_skill_always_protected(val)
 
         except Exception as e:
             logger.error(
