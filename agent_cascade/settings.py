@@ -745,7 +745,33 @@ MAX_ACTIVE_SKILLS_PER_SESSION: int = int(os.getenv('AGENT_CASCADE_MAX_ACTIVE_SKI
 # memory cooldown can never turn skill suggestions into per-turn spam (nor can a high one
 # shorten this guard).
 SKILL_HINT_ENTRY_COOLDOWN_SECONDS: float = float(
-    os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 1800.0))
+    os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 300.0))
+# ── BUG_0189 #5: skill-hint SELECTOR-PRECISION lever (memory-hint sub-pipeline only) ──
+# A post-Gate-3 ranking layer in memory_hint/manager.py._match_skills_for_hint (Gate 4).
+# It reads the persistent load ledger (agents/global/skills-metrics.json) and DEMOTES a
+# skill that is hinted often but loaded rarely, and hard-drops one hinted many times yet
+# NEVER loaded. It never feeds SKILL_MATCH_THRESHOLD or the AUTO-mode loader — it only
+# changes WHICH names the hint block lists and in what order. All four knobs are
+# env-reversible; set weight to 0 and N to 0 to disable the layer entirely.
+# SKILL_PRECISION_WEIGHT: master toggle for the re-rank — 1 = on (default), 0 = off.
+# When off, the candidate order is the raw score-descending order, unchanged.
+SKILL_PRECISION_WEIGHT: int = int(os.getenv('AGENT_CASCADE_SKILL_PRECISION_WEIGHT', '1'))
+# SKILL_PRECISION_K: Laplace smoothing pseudo-count in
+# w(s) = max(FLOOR, min(1, (loads+K)/(hints+K))). Larger K shrinks the swing on thin
+# evidence; 1.0 means a single load already lifts a 0-load skill to full weight.
+SKILL_PRECISION_K: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_K', '1.0'))
+# SKILL_PRECISION_FLOOR: lower bound on w(s), so a heavy-hint / low-load skill is demoted
+# but never buried below FLOOR × score — other skills stay promotable (the guardrail for
+# rare-but-correct skills that are rarely topical and so never accumulate enough hints).
+SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.35'))
+# SKILL_ZERO_LOAD_SUPPRESS_HINTS (N): hard-drop a skill from hints when its lifetime
+# total_loads == 0 AND lifetime hints >= N. 0 = off. The only hard drop; everything else is
+# demotion only. Calibrated on ~2 months of one deployment's logs: N=50 removes 25.2% of
+# hint traffic while leaving 84.7% of the zero-load set untouched (expose + re-check after a
+# month — the counters are persisted in the ledger, no schema bump was needed).
+SKILL_ZERO_LOAD_SUPPRESS_HINTS: int = int(
+    os.getenv('AGENT_CASCADE_SKILL_ZERO_LOAD_SUPPRESS_HINTS', '50'))
+
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

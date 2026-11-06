@@ -4530,3 +4530,74 @@ class TestScanSkillsPerfFix:
         assert 'flip-a' in names, 'just-disabled skill must still re-surface without re-discovery'
         # 'flip-b' stays active (registry branch); no duplicate.
         assert names.count('flip-a') == 1
+
+
+# ===========================================================================
+# BUG_0189 #5 — Hint-side ledger (skills-metrics.json 'hints' field)
+# ===========================================================================
+
+class TestSkillHintLedger:
+    """The persistent HINT counter that backs the Gate-4 precision re-rank.
+
+    Shares the durable ``skills-metrics.json`` store with ``total_loads``; these tests
+    prove the new field accumulates, persists across a restart, tolerates a record that
+    predates it (no 'hints' key → reads back 0), and never touches the load-side fields."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    def test_bump_accumulates_without_touching_load_fields(self):
+        """hints is the ONLY field bump_skill_hints writes; loads stay untouched."""
+        m = make_hermetic_skill_manager(self.tmp)
+        m.bump_skill_hints(['x'])
+        m.bump_skill_hints(['x', 'y'])        # multiple names in one call
+        m.bump_skill_hints(['x'])
+        with m._metrics_lock:
+            x = m._metrics['x']
+            y = m._metrics['y']
+        assert x['hints'] == 3, 'three hint events must accumulate to 3'
+        assert y['hints'] == 1
+        assert x.get('total_loads', 0) == 0, 'a hint must never bump total_loads'
+        assert 'last_used' not in x, 'a hint must not stamp last_used'
+
+    def test_bump_rejects_empty_and_none(self):
+        """No-op on empty/None so the write-site guard is belt-and-braces."""
+        m = make_hermetic_skill_manager(self.tmp)
+        m.bump_skill_hints([])
+        m.bump_skill_hints(None)
+        assert m._metrics == {}
+
+    def test_hints_persist_across_reload(self):
+        """Force a flush, then simulate a restart by loading the on-disk store fresh."""
+        m = make_hermetic_skill_manager(self.tmp)
+        for _ in range(3):
+            m.bump_skill_hints(['x'])
+        m._flush_metrics_to_disk()
+        store = _read_store(m._metrics_file)
+        assert store['skills']['x']['hints'] == 3, store
+
+        m2 = SkillManager()
+        m2._metrics_file = m._metrics_file
+        m2._load_metrics()
+        assert m2._metrics['x']['hints'] == 3, 'hint counter must survive a restart'
+
+    def test_legacy_record_without_hints_field_reads_zero(self):
+        """A record written BEFORE this field (no 'hints' key) must load and read as 0,
+        then accept a fresh bump — the .get('hints', 0) read path that Gate 4 relies on."""
+        m = make_hermetic_skill_manager(self.tmp)
+        # Seed a pre-BUG_0189 entry directly, then flush it as-is (no 'hints' key on disk).
+        with m._metrics_lock:
+            m._metrics['x'] = {'total_loads': 5, 'by_version': {}, 'status': 'active',
+                               'last_activity_turn': None}
+        m._flush_metrics_to_disk()
+        assert 'hints' not in _read_store(m._metrics_file)['skills']['x']
+
+        m2 = SkillManager()
+        m2._metrics_file = m._metrics_file
+        m2._load_metrics()
+        assert m2._metrics['x'].get('hints', 0) == 0, 'missing hints must read back as 0'
+        assert m2._metrics['x'].get('total_loads', 0) == 5, 'load-side field must be preserved'
+        m2.bump_skill_hints(['x'])
+        assert m2._metrics['x']['hints'] == 1, 'a legacy record must accept a fresh bump'

@@ -116,8 +116,11 @@ def _iso_to_epoch(iso: str) -> float:
 def _default_metrics_entry(status: str = 'active') -> dict:
     """Fresh per-skill metrics record (schema 1.3). Single source for the default shape so
     a future field addition happens in one place instead of being copy-pasted at every
-    ``setdefault`` site."""
-    return {'total_loads': 0, 'by_version': {}, 'status': status, 'last_activity_turn': None}
+    ``setdefault`` site. NOTE: two fresh-entry sites (``_migrate_metrics_to_v13`` near :537 and
+    ``_increment_load_count``) build a bare dict by hand and bypass this helper, so every
+    reader of these fields must use ``.get(field, default)`` — never assume this shape."""
+    return {'total_loads': 0, 'by_version': {}, 'status': status,
+            'last_activity_turn': None, 'hints': 0}
 
 
 def _priority_for_root(root: Path) -> int:
@@ -1041,6 +1044,45 @@ class SkillManager:
                 self._pending_flush_count = 0
                 self._last_flush_time = now
                 # Flush outside lock to avoid holding it during I/O
+                flush_needed = True
+            else:
+                flush_needed = False
+
+        if flush_needed:
+            self._flush_metrics_to_disk()
+
+    def bump_skill_hints(self, names) -> None:
+        """Increment the per-skill HINT counter for each name (buffered, BUG_0189 #5).
+
+        This is the DENOMINATOR of the Gate-4 precision weight in the memory-hint skill
+        sub-pipeline — it counts how many times a skill was SUGGESTED to the agent, as
+        opposed to ``total_loads`` (the numerator), which counts how many times it was
+        ACTUALLY loaded. Kept in the same file-backed store so the two live together.
+
+        Touches only ``hints`` — never ``total_loads`` / ``last_used`` / ``last_activity_turn``.
+        A fresh entry uses the same hand-built shape as ``_increment_load_count`` (which
+        bypasses ``_default_metrics_entry``), hence the ``.get('hints', 0)`` read tolerates
+        an on-disk record that predates this field. Reuses the buffered-flush decision, so
+        hints ride the same batched write path as load counts (no extra I/O per turn).
+        Lock order: takes ``_metrics_lock`` ONLY — the caller (memory-hint worker) must
+        NOT hold ``_write_lock`` or the engine-owned ``_compression_lock`` when calling.
+        """
+        names = [n for n in (names or []) if n]
+        if not names:
+            return
+        with self._metrics_lock:
+            for skill_name in names:
+                entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
+                entry['hints'] = entry.get('hints', 0) + 1
+                self._pending_flush_count += 1
+
+            now = time.monotonic()
+            should_flush = (self._pending_flush_count >= self._FLUSH_THRESHOLD or
+                            (now - self._last_flush_time) >= self._FLUSH_INTERVAL)
+
+            if should_flush:
+                self._pending_flush_count = 0
+                self._last_flush_time = now
                 flush_needed = True
             else:
                 flush_needed = False
