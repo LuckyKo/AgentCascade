@@ -6157,8 +6157,8 @@ function getGenerateCfg() {
   // Empty input → NaN; fall back to the HTML default (3). Use an explicit NaN check (NOT `|| 3`)
   // so a legitimate `0` (no rollbacks) is preserved — `0 || 3` would wrongly coerce it to 3. `-1` (unlimited) also survives.
   if ($('#setting-max-rollbacks')) { const _mar = parseInt($('#setting-max-rollbacks').value); cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar; }
-  if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;
-  if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
+  if ($('#setting-idle-timeout')) { const _it = parseFloat($('#setting-idle-timeout').value); cfg.idle_timeout_seconds = Number.isNaN(_it) ? 900 : _it; }
+  if ($('#setting-system-idle-timeout')) { const _sit = parseFloat($('#setting-system-idle-timeout').value); cfg.system_agent_idle_timeout_seconds = Number.isNaN(_sit) ? 900 : _sit; }
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-wild-read-truncation-chars')) cfg.wild_read_truncation_chars = parseInt($('#setting-wild-read-truncation-chars').value) || 2000;
   // Memory-hint feature (plan §7) — clamped to match the server-side config handlers.

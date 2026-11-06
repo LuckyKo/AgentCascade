@@ -343,3 +343,26 @@ test('syncPoolSettings hydrates the idle-timeout inputs from the server snapshot
   assert.equal(String(dom.elements['#setting-system-idle-timeout'].value), '1200',
     'system_agent_idle_timeout_seconds was not hydrated from the snapshot (kept stale HTML default)');
 });
+
+test('getGenerateCfg idle-timeout getters use Number.isNaN, not || 900 (BUG_0238)', () => {
+  // Source-level anti-regression for BUG_0238: `parseFloat(x) || 900` silently coerces a
+  // legitimate 0 ("0 = off") to 900. Both idle-timeout getters in getGenerateCfg must use the
+  // explicit Number.isNaN guard (same pattern as max_auto_rollbacks at app.js:6159) so 0 survives.
+  // We assert the FORM of the getter code (not a value), so a revert to `|| 900` fails here.
+  // Scoped to the getGenerateCfg body (not the whole file) so a same-named assignment
+  // elsewhere in app.js can't satisfy or break this guard.
+  const getGenerateCfgSrc = extractFunction('getGenerateCfg');
+  const getters = [
+    ['idle_timeout_seconds', /cfg\.idle_timeout_seconds\s*=[^\n]*/],
+    ['system_agent_idle_timeout_seconds', /cfg\.system_agent_idle_timeout_seconds\s*=[^\n]*/],
+  ];
+  for (const [key, re] of getters) {
+    const m = getGenerateCfgSrc.match(re);
+    assert.ok(m, `${key} getter not found in getGenerateCfg (app.js)`);
+    const line = m[0];
+    assert.ok(!/\|\|\s*900\b/.test(line),
+      `${key} must not use '|| 900' — it coerces a legitimate 0 ("off") to 900 (BUG_0238 regression)`);
+    assert.ok(/Number\.isNaN\(\w+\)\s*\?\s*900\b\s*:\s*\w+/.test(line),
+      `${key} must use the 'Number.isNaN(x) ? 900 : x' guard so a 0 ("off") is preserved`);
+  }
+});
