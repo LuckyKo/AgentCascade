@@ -1055,6 +1055,23 @@ class TestSkillManager:
         )
         assert len(result) <= MAX_AUTO_SKILLS_PER_CALL
 
+    def test_resolve_auto_threshold_excludes_below_keeps_above(self, monkeypatch):
+        """(iii) AUTO: skill scoring below SKILL_MATCH_THRESHOLD is dropped; >= threshold is kept.
+
+        BUG_0247 raised the default floor 0.15 -> 0.25. This pins the filter behavior at the
+        live threshold without relying on keyword scores — the matcher is stubbed with two real,
+        loadable skills straddling it, so the assertion holds regardless of env overrides.
+        """
+        self._setup_manager_with_skills()
+        from agent_cascade.skills import manager as _skill_mgr
+        thr = _skill_mgr.SKILL_MATCH_THRESHOLD
+        monkeypatch.setattr(
+            self.manager, 'match_skills',
+            lambda q: [('systematic-debugging', thr + 0.05), ('version-control', thr - 0.05)])
+        names = self.manager.resolve_load_skill_names('AUTO', task_text='anything at all')
+        assert 'systematic-debugging' in names  # >= threshold -> kept
+        assert 'version-control' not in names  # < threshold -> excluded
+
     # -- resolve_load_skill_names (shared name-computation) --
 
     def test_resolve_names_explicit_returns_only_loadable(self):
@@ -1446,6 +1463,98 @@ class TestSkillsBlockFormatting:
         )
         assert injected is True
         assert '### Skill 1' in sys_msg.content
+
+
+class TestActiveSkillsBlockCap:
+    """BUG_0247: bound the static `## Active Skills` block at assembly time.
+
+    The block is built once at spawn and never rebuilt (helpers.py idempotency guard), so a
+    count ceiling (MAX_ACTIVE_SKILLS_PER_SESSION) and a total-char budget
+    (SKILL_BLOCK_MAX_TOTAL_CHARS) prune it at assembly; self-augmentation is always emitted
+    first so it survives every truncation. Each knob is independently env-reversible (0 = off).
+    """
+
+    def _explicit_list(self, n, body_len=2200):
+        # Realistic assembly order: explicit skills first, self-augmentation appended LAST.
+        skills = [('explicit-%d' % i, 'x' * body_len) for i in range(n)]
+        skills.append(('self-augmentation', 'y' * 300))
+        return skills
+
+    def test_new_knob_defaults(self):
+        from agent_cascade.settings import (MAX_ACTIVE_SKILLS_PER_SESSION, SKILL_BLOCK_MAX_TOTAL_CHARS,
+                                            SKILL_MATCH_THRESHOLD)
+        assert MAX_ACTIVE_SKILLS_PER_SESSION == 4
+        assert SKILL_BLOCK_MAX_TOTAL_CHARS == 9000
+        assert abs(SKILL_MATCH_THRESHOLD - 0.25) < 1e-9  # BUG_0247: 0.15 -> 0.25
+
+    def test_order_self_augmentation_first(self):
+        from agent_cascade.engine.helpers import _order_self_augmentation_first
+        skills = [('a', 'A'), ('self-augmentation', 'S'), ('b', 'B')]
+        assert [x[0] for x in _order_self_augmentation_first(skills)] == ['self-augmentation', 'a', 'b']
+        plain = [('a', 'A'), ('b', 'B')]
+        assert _order_self_augmentation_first(plain) is plain  # no-op returns the same object
+        mixed = [('self-augmentation', 'S'), 'PLAIN']
+        assert _order_self_augmentation_first(mixed)[1] == 'PLAIN'  # plain string untouched
+
+    def test_explicit_list_capped_by_count_and_chars(self):
+        """(i) 10 explicit skills -> <= count cap entries, <= char budget, self-aug present."""
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+        from agent_cascade.llm.schema import SYSTEM, Message
+        from agent_cascade.settings import MAX_ACTIVE_SKILLS_PER_SESSION, SKILL_BLOCK_MAX_TOTAL_CHARS
+        sys_msg = Message(role=SYSTEM, content='base')
+        _inject_skills_to_system_message(None, sys_msg, self._explicit_list(10))
+        block = sys_msg.content[sys_msg.content.index('## Active Skills'):]
+        assert block.count('### Skill') <= MAX_ACTIVE_SKILLS_PER_SESSION
+        assert len(block) <= SKILL_BLOCK_MAX_TOTAL_CHARS
+        assert '### Skill self-augmentation' in block
+
+    def test_char_budget_keeps_leading_drops_tail(self, monkeypatch):
+        """(ii) char budget keeps self-aug + leading skills and drops the tail."""
+        import agent_cascade.settings as settings
+        from agent_cascade.engine.helpers import _build_skills_block
+        monkeypatch.setattr(settings, 'SKILL_BLOCK_MAX_TOTAL_CHARS', 2500)
+        skills = [('self-augmentation', 's' * 100)] + [('skill-%d' % i, 'x' * 1000) for i in range(6)]
+        block = _build_skills_block(skills)
+        assert '### Skill self-augmentation' in block  # front, survives truncation
+        assert '### Skill skill-0' in block and '### Skill skill-1' in block  # leading kept
+        assert '### Skill skill-5' not in block  # tail dropped
+        assert len(block) <= 2500
+
+    def test_self_augmentation_survives_tiny_budget(self, monkeypatch):
+        """self-augmentation is the irreducible floor: emitted even under a tiny budget."""
+        import agent_cascade.settings as settings
+        from agent_cascade.engine.helpers import _build_skills_block
+        monkeypatch.setattr(settings, 'SKILL_BLOCK_MAX_TOTAL_CHARS', 150)
+        skills = [('self-augmentation', 's' * 100)] + [('skill-%d' % i, 'x' * 1000) for i in range(5)]
+        block = _build_skills_block(skills)
+        assert '### Skill self-augmentation' in block
+        assert block.count('### Skill') == 1  # only the protected root skill survives
+
+    def test_knobs_disabled_by_zero(self, monkeypatch):
+        """Both knobs are env-reversible: 0 disables the cap entirely."""
+        import agent_cascade.settings as settings
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+        from agent_cascade.llm.schema import SYSTEM, Message
+        monkeypatch.setattr(settings, 'MAX_ACTIVE_SKILLS_PER_SESSION', 0)
+        monkeypatch.setattr(settings, 'SKILL_BLOCK_MAX_TOTAL_CHARS', 0)
+        sys_msg = Message(role=SYSTEM, content='base')
+        _inject_skills_to_system_message(None, sys_msg, self._explicit_list(10))
+        assert sys_msg.content.count('### Skill') == 11  # 10 explicit + self-augmentation, uncapped
+
+    def test_count_cap_is_only_bound_for_small_skills(self):
+        """Knob 2 isolation: skills small enough to fit well under the char budget must STILL be
+        count-capped. This is the explicit/advisor long-tail scenario knob 2 exists for, where the
+        9000-char budget alone would not bind and only MAX_ACTIVE_SKILLS_PER_SESSION does."""
+        import agent_cascade.settings as settings
+        from agent_cascade.engine.helpers import _inject_skills_to_system_message
+        from agent_cascade.llm.schema import SYSTEM, Message
+        # Char budget left at default (9000): deliberately NOT the binding constraint here.
+        sys_msg = Message(role=SYSTEM, content='base')
+        _inject_skills_to_system_message(None, sys_msg, self._explicit_list(10, body_len=100))
+        block = sys_msg.content[sys_msg.content.index('## Active Skills'):]
+        assert block.count('### Skill') == settings.MAX_ACTIVE_SKILLS_PER_SESSION  # count is the only bound
+        assert len(block) < settings.SKILL_BLOCK_MAX_TOTAL_CHARS  # far below the char budget
+        assert '### Skill self-augmentation' in block  # front survives the count cut
 
 
 # ===========================================================================

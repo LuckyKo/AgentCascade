@@ -724,8 +724,19 @@ DEFAULT_SKILL_SELECTOR_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_SKILL_SELECT
 SKILL_SELECTOR_MODE_KEYWORD: str = 'keyword'
 SKILL_SELECTOR_MODE_API: str = 'api'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
-                                                '0.15'))  # Minimum relevance score for AUTO mode skill loading
+                                                '0.25'))  # Minimum relevance score for AUTO mode skill loading (BUG_0247: 0.15 -> 0.25, shrinks AUTO tail entering the block cap)
 MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skills per call (self-augmentation excluded)
+# BUG_0247: the `## Active Skills` block is assembled ONCE at spawn and never rebuilt (idempotency
+# guard in engine/helpers.py), so all pruning happens at assembly time. These two independent,
+# env-reversible knobs bound that static block (count + total chars); set either to 0 to disable.
+# SKILL_MATCH_THRESHOLD (above) is the separate AUTO-mode floor that shrinks the tail entering them.
+# Total char budget for the rendered `## Active Skills` block; on overflow the tail stops being
+# added (self-augmentation is always emitted first, so it survives). 0 = off. Env-reversible.
+SKILL_BLOCK_MAX_TOTAL_CHARS: int = int(os.getenv('AGENT_CASCADE_SKILL_BLOCK_MAX_TOTAL_CHARS', 9000))
+# Hard ceiling on the number of skills in the per-session block (self-augmentation COUNTED). The
+# only knob covering the uncapped explicit-list and advisor paths that MAX_AUTO_SKILLS_PER_CALL
+# misses. 0 = off. Env-reversible.
+MAX_ACTIVE_SKILLS_PER_SESSION: int = int(os.getenv('AGENT_CASCADE_MAX_ACTIVE_SKILLS_PER_SESSION', 4))
 # SKILL_HINT_ENTRY_COOLDOWN_SECONDS (BUG_0233): minimum interval before the SAME skill may be
 # hinted again. ``memory_hint_cooldown_seconds`` is a MEMORY-re-read knob and a user may
 # legitimately set it very low (the reporting session had 5 s); reusing it for skills let one

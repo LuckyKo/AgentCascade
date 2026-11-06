@@ -570,6 +570,28 @@ def _build_resources_block(pool, template, instance=None) -> str:
     return '\n\n## AVAILABLE AGENTS\n' + ''.join(content_parts)
 
 
+_SELF_AUG_SKILL_NAME = 'self-augmentation'
+
+
+def _order_self_augmentation_first(loaded_skills: list) -> list:
+    """Return a list with ``self-augmentation`` entries moved to the front.
+
+    Self-augmentation is appended LAST at block-assembly time but must never be evicted by
+    the count/char caps in ``_build_skills_block`` / ``_inject_skills_to_system_message``,
+    which prune from the tail (BUG_0247). Promoting it to the front makes "keep the leading
+    entries" and "stop on overflow" preserve it without special-casing. Only ``(name, body)``
+    tuples — the form self-augmentation is always injected as — are matched; plain strings and
+    all other entries keep their relative order.
+    """
+    front, rest = [], []
+    for item in loaded_skills:
+        if isinstance(item, tuple) and len(item) == 2 and str(item[0]).lower() == _SELF_AUG_SKILL_NAME:
+            front.append(item)
+        else:
+            rest.append(item)
+    return front + rest if front else loaded_skills
+
+
 def _build_skills_block(loaded_skills: list) -> str:
     """Build the skills section for system prompt injection.
 
@@ -589,18 +611,31 @@ def _build_skills_block(loaded_skills: list) -> str:
     if not loaded_skills:
         return ''
 
+    from agent_cascade.settings import SKILL_BLOCK_MAX_TOTAL_CHARS
+    max_chars = int(SKILL_BLOCK_MAX_TOTAL_CHARS or 0)  # 0 = char cap disabled
+    ordered = _order_self_augmentation_first(loaded_skills)
+
     parts = ['\n\n## Active Skills']
-    for idx, item in enumerate(loaded_skills, 1):
+    running = len(parts[0])  # char count of '\n'.join(parts) so far
+    for idx, item in enumerate(ordered, 1):
         if isinstance(item, tuple) and len(item) == 2:
             name, body = item
-            parts.append(f"\n### Skill {name}\n{body}")
+            part = f"\n### Skill {name}\n{body}"
         else:
-            # Backward compat: plain string without a name → positional label.
-            parts.append(f"\n### Skill {idx}\n{item}")
+            # Backward compat: plain string without a name -> positional label.
+            part = f"\n### Skill {idx}\n{item}"
+        # '\n'.join adds one separator per part, so a part's marginal cost is len(part) + 1.
+        # The first skill is always kept (header + first skill is the irreducible floor; with
+        # self-augmentation promoted to front that floor is header + self-augmentation). Beyond
+        # the first, stop on the first part that would push the block past the char budget.
+        if idx > 1 and max_chars and running + len(part) + 1 > max_chars:
+            break
+        parts.append(part)
+        running += len(part) + 1
 
     logger.debug(
-        '[SKILLS] Built skills block with %d skill(s), total ~%d chars', len(loaded_skills),
-        sum(len(item[1]) if isinstance(item, tuple) and len(item) == 2 else len(item) for item in loaded_skills))
+        '[SKILLS] Built skills block: %d/%d skill(s), %d chars (budget %d)', len(parts) - 1, len(ordered), running,
+        max_chars)
     return '\n'.join(parts)
 
 
@@ -628,6 +663,18 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     """
     if not skills_to_inject:
         return False
+
+    # BUG_0247 knob 2: hard count ceiling on the static per-session block. The block is built
+    # once at spawn and never rebuilt (idempotency guard below), so this is the only cap that
+    # covers the uncapped explicit-list and advisor paths that MAX_AUTO_SKILLS_PER_CALL misses.
+    # Promote self-augmentation to the front FIRST so truncating to the leading entries can never
+    # drop it. Read the env-backed module constant directly (not pool.settings): these knobs are
+    # not UI-runtime-tunable, and this keeps them patchable via agent_cascade.settings (and avoids
+    # a MagicMock pool.settings returning a truthy non-int).
+    from agent_cascade.settings import MAX_ACTIVE_SKILLS_PER_SESSION
+    max_skills = int(MAX_ACTIVE_SKILLS_PER_SESSION or 0)  # 0 = count cap disabled
+    if max_skills > 0 and len(skills_to_inject) > max_skills:
+        skills_to_inject = _order_self_augmentation_first(list(skills_to_inject))[:max_skills]
 
     # Support both AgentInstance and direct Message object
     from agent_cascade.agent_instance import AgentInstance
