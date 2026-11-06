@@ -548,6 +548,10 @@ class ConfigPersistMixin:
         or vice versa (e.g. tool_dispatcher lowercases to 'security' but key is 'Security'),
         this will still find it.
 
+        Also performs BUG_0235 mtime-based staleness detection: templates are a startup
+        cache, so without this an on-disk soul edit is never served to agents spawned
+        later in the same process. See _reload_template_if_stale() for the full design.
+
         Args:
             name: Template name to look up (e.g., 'Security', 'coder', etc.)
 
@@ -560,12 +564,89 @@ class ConfigPersistMixin:
         if not name or not isinstance(name, str):
             return None
 
+        # Resolve the registered key through the case-insensitive fallback chain so the
+        # soul bookkeeping lookups below hit the right entry regardless of caller casing
+        # ('Security'/'security' → whichever key the template is actually registered under).
         template = self.templates.get(name)
+        key = name
         if template is None:
             template = self.templates.get(name.lower())
+            key = name.lower()
         if template is None:
             template = self.templates.get(name.title())
-        return template
+            key = name.title()
+        if template is None:
+            return None
+
+        # BUG_0235: single os.stat staleness check. get_template is called at spawn and a
+        # few times per turn (engine/run_loop.py, engine/llm_call.py) but never on the
+        # tokenization hot path, so a ~1us stat syscall here is negligible.
+        source_path = self._template_source.get(key)
+        if source_path is None:
+            # Synthetic/inline template — no on-disk soul to watch. Return as-is.
+            return template
+
+        try:
+            current_mtime = os.path.getmtime(source_path)
+        except OSError:
+            # Soul deleted between loads: keep serving the cached template rather than
+            # crashing a spawn (plan edge case). Debug-level — exceptional but not fatal.
+            logger.debug('[BUG_0235] soul file for template %r is gone (%s); keeping cached',
+                         key, source_path)
+            return template
+
+        recorded_mtime = self._template_mtime.get(key)
+        if recorded_mtime is not None and current_mtime == recorded_mtime:
+            # Hot path: file untouched since last load → byte-identical, return cached.
+            return template
+
+        # mtime differs: re-read just this soul. _reload_template_if_stale() confirms via
+        # content hash whether the bytes actually changed before swapping and notifying,
+        # so an mtime-only touch never rebuilds the shared prefix cache.
+        return self._reload_template_if_stale(key, source_path, current_mtime)
+
+    def _reload_template_if_stale(self, key: str, source_path: str, current_mtime: float) -> Optional[Assistant]:
+        """Reload a single template after its soul file's mtime changed (BUG_0235).
+
+        Mirrors refresh_agents()'s before/after + conditional-notify pattern, but scoped
+        to one template. The swap is committed and notify_config_changed() fired ONLY when
+        the content hash actually changed — a bare touch (new mtime, identical bytes) just
+        refreshes the recorded mtime with no notify, preserving the prefix-cache
+        byte-stability design intent. load_agent_template() runs OUTSIDE _template_lock;
+        the mutation itself is delegated to _register_template() (core.py), the shared
+        single mutation point.
+        """
+        from agent_cascade.agent_factory import load_agent_template
+
+        llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
+        old_hash = self._compute_template_hash(key)  # read the still-cached template
+
+        try:
+            new_template = load_agent_template(self, key, llm_cfg)
+        except Exception as e:
+            # Re-read failed (e.g. soul now malformed): keep serving the cached template,
+            # but update the recorded mtime so we don't retry-load on every subsequent
+            # lookup — a spawn must never crash because of a bad edit.
+            logger.error('[BUG_0235] reload of template %r failed: %s; keeping cached', key, e)
+            with self._template_lock:
+                self._template_mtime[key] = current_mtime
+            return self.templates.get(key)
+
+        # Commit the reload, deduplicating concurrent staleness detections: if another
+        # thread already registered this exact mtime while we were re-reading, it owns the
+        # notify for this content — a second notify would bump _config_version twice for
+        # one on-disk change (one spurious downstream prompt rebuild).
+        with self._template_lock:
+            first_to_apply = self._template_mtime.get(key) != current_mtime
+            self._register_template(key, new_template, Path(source_path))
+        new_hash = self._compute_template_hash(key)  # reads the freshly-registered template
+
+        if first_to_apply and old_hash != new_hash:
+            logger.info('[BUG_0235] template %r content changed on disk; triggering config update', key)
+            self.notify_config_changed()
+        else:
+            logger.debug('[BUG_0235] template %r mtime changed but content identical; skipping notify', key)
+        return new_template
 
     def set_ui_disabled_tools(self, disabled_tools_dict: dict | None = None) -> None:
         """Update the live UI disabled_tools config from the settings panel.
@@ -693,44 +774,56 @@ class ConfigPersistMixin:
         Only calls notify_config_changed() if something actually changed on disk.
         This prevents unnecessary cache invalidation when user clicks "Refresh Agents"
         but no files were modified.
+
+        The whole reload runs under _template_lock so a concurrent on-demand reload
+        (get_template → _reload_template_if_stale) can't interleave with the clear +
+        re-discover. _discover_agents re-enters the RLock through _register_template.
+        Note: the lock is intentionally held across the soul file I/O of
+        load_agent_template() — refresh is a rare manual op, and a concurrent
+        on-demand load of a not-yet-loaded agent simply waits for it to finish.
         """
-        # Capture current state before reload
-        old_template_keys = set(self.templates.keys())
-        old_template_state = self._get_template_state()
+        with self._template_lock:
+            # Capture current state before reload
+            old_template_keys = set(self.templates.keys())
+            old_template_state = self._get_template_state()
 
-        # Perform the reload
-        self.templates.clear()
-        self._discover_agents(str(self.agents_dir))
+            # Perform the reload. Clear the soul bookkeeping alongside templates so it
+            # doesn't go stale — _discover_agents below repopulates it via
+            # _register_template for whatever souls still exist on disk.
+            self.templates.clear()
+            self._template_source.clear()
+            self._template_mtime.clear()
+            self._discover_agents(str(self.agents_dir))
 
-        # Capture new state after reload
-        new_template_keys = set(self.templates.keys())
-        new_template_state = self._get_template_state()
+            # Capture new state after reload
+            new_template_keys = set(self.templates.keys())
+            new_template_state = self._get_template_state()
 
-        # Compare keys (agents added/removed)
-        keys_changed = old_template_keys != new_template_keys
+            # Compare keys (agents added/removed)
+            keys_changed = old_template_keys != new_template_keys
 
-        # Compare content hashes (agent system prompts edited)
-        # Only compare templates that exist in BOTH old and new states (intersection)
-        all_hashes_match = True
-        common_keys = old_template_keys & new_template_keys  # templates present before AND after reload
-        for key in common_keys:
-            if old_template_state.get(key) != new_template_state.get(key):
-                all_hashes_match = False
-                logger.debug(f"[REFRESH] Template content changed: {key}")
-                break
+            # Compare content hashes (agent system prompts edited)
+            # Only compare templates that exist in BOTH old and new states (intersection)
+            all_hashes_match = True
+            common_keys = old_template_keys & new_template_keys  # templates present before AND after reload
+            for key in common_keys:
+                if old_template_state.get(key) != new_template_state.get(key):
+                    all_hashes_match = False
+                    logger.debug(f"[REFRESH] Template content changed: {key}")
+                    break
 
-        # Only notify if something actually changed
-        if keys_changed or not all_hashes_match:
-            if keys_changed:
-                added = new_template_keys - old_template_keys
-                removed = old_template_keys - new_template_keys
-                logger.info(f"[REFRESH] Templates changed - Added: {added}, Removed: {removed}")
+            # Only notify if something actually changed
+            if keys_changed or not all_hashes_match:
+                if keys_changed:
+                    added = new_template_keys - old_template_keys
+                    removed = old_template_keys - new_template_keys
+                    logger.info(f"[REFRESH] Templates changed - Added: {added}, Removed: {removed}")
+                else:
+                    # Content modification triggers config update, log at info level for visibility
+                    logger.info('[REFRESH] Template content modified, triggering config update')
+                self.notify_config_changed()
             else:
-                # Content modification triggers config update, log at info level for visibility
-                logger.info('[REFRESH] Template content modified, triggering config update')
-            self.notify_config_changed()
-        else:
-            logger.debug('[REFRESH] No changes detected in agent templates, skipping notification')
+                logger.debug('[REFRESH] No changes detected in agent templates, skipping notification')
 
     def notify_config_changed(self):
         """Signal that global configuration has changed (workspace dir, templates, etc).

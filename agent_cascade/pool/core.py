@@ -4,6 +4,7 @@ AgentPool — thin coordinator for all agent state. Composes the Phase-2 mixins 
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -129,6 +130,22 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── Core registries (owned directly) ─────────────────────────────────
         self.instances: Dict[str, AgentInstance] = {}  # instance_name → AgentInstance
         self.templates: Dict[str, Assistant] = {}  # agent_class → template
+        # BUG_0235: soul-file bookkeeping for mtime-based template invalidation.
+        # `templates` is a startup cache filled once by _discover_agents(); with no
+        # invalidation path, a soul edited on disk is NEVER served to agents spawned
+        # later in the same process (no explicit refresh/restart). These two dicts let
+        # get_template() cheaply detect a stale soul via a single os.stat and reload just
+        # that one template. They are keyed by the SAME name templates uses (e.g. 'coder')
+        # and populated wherever a template enters templates: _discover_agents(), the
+        # on-demand path in load_agent(), and refresh_agents(). _template_lock (RLock —
+        # refresh_agents() nests _discover_agents() under it) serializes every mutation of
+        # `templates` + these dicts, used by BOTH refresh_agents() and get_template()'s
+        # reload path. The content-hash double-check in _reload_template_if_stale() keeps
+        # swaps byte-stable, so an mtime-only touch never fires a spurious
+        # notify_config_changed()/prefix-cache rebuild. See _reload_template_if_stale().
+        self._template_source: Dict[str, str] = {}  # template name → soul file path
+        self._template_mtime: Dict[str, float] = {}  # template name → recorded mtime
+        self._template_lock = threading.RLock()  # guards templates + the two dicts above
 
         # ── Configuration ───────────────────────────────────────────────────
         self.llm_cfg = llm_cfg  # fallback LLM config when no api_router
@@ -532,7 +549,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
         try:
             template = load_agent_template(self, name, llm_cfg)
-            self.templates[name] = template
+            # Register via _register_template so the soul mtime is recorded atomically
+            # for BUG_0235 mtime invalidation. If the soul file doesn't exist (synthetic
+            # default-prompt template) no watch source is recorded and get_template skips
+            # the staleness check for it.
+            self._register_template(name, template, self.agents_dir / f'{name}_soul.md')
             logger.info('[OK] Loaded agent on demand: %s', name)
             return template
         except Exception as e:
@@ -579,11 +600,45 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
     # ── Agent discovery (unchanged from existing implementation) ───────────
 
+    def _register_template(self, name: str, template: Assistant, soul_path: Optional[Path]):
+        """Single mutation point for self.templates + BUG_0235 soul bookkeeping.
+
+        Registers `template` under `name` and records the soul file's mtime for
+        mtime-based invalidation, atomically under _template_lock so get_template()
+        never observes a registered template with half-populated bookkeeping. Pass
+        `soul_path` pointing at the *_soul.md that backs the template; if the file
+        doesn't exist (synthetic default-prompt template) or vanished mid-call, no
+        watch source is recorded — get_template() then skips the staleness check for
+        it (plan edge case). Callers do the (potentially slow) load_agent_template()
+        OUTSIDE this method; the critical section here is pure dict writes.
+
+        Used by _discover_agents(), the on-demand path in load_agent(), and
+        ConfigPersistMixin._reload_template_if_stale().
+        """
+        with self._template_lock:
+            self.templates[name] = template
+            if soul_path is not None:
+                try:
+                    self._template_source[name] = str(soul_path)
+                    # One mtime accessor everywhere (os.path.getmtime) so the recorded value
+                    # can never drift from the value get_template() compares against.
+                    self._template_mtime[name] = os.path.getmtime(soul_path)
+                except OSError:
+                    # Soul vanished between load and stat — register without a watch
+                    # source so get_template() leaves this template untouched.
+                    self._template_source.pop(name, None)
+                    self._template_mtime.pop(name, None)
+            else:
+                self._template_source.pop(name, None)
+                self._template_mtime.pop(name, None)
+
     def _discover_agents(self, agents_dir: str):
         """Load all agent templates from the agents directory.
 
         Mirrors the old AgentPool._discover_agents() — scans for *_soul.md files
-        and loads each one via load_agent_template().
+        and loads each one via load_agent_template(). Each template is registered
+        through _register_template() so its soul mtime is recorded for BUG_0235
+        on-disk invalidation.
         """
         from agent_cascade.agent_factory import load_agent_template
 
@@ -598,7 +653,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 # Need llm_cfg from api_router or fall back to empty dict
                 llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
                 template = load_agent_template(self, agent_name, llm_cfg)
-                self.templates[agent_name] = template
+                self._register_template(agent_name, template, soul_file)
                 logger.info('[OK] Loaded agent: %s', agent_name)
             except Exception as e:
                 logger.error('[ERROR] Failed to load agent %s: %s', agent_name, e)
