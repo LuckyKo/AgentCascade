@@ -939,9 +939,10 @@ class GrepMixin:
         """Fast-path grep using ripgrep via subprocess (the only supported engine).
 
         Returns (results_list, count, was_timed_out, was_truncated, original_output_size,
-                 spillover_rel_path, total_lines_before, shown_lines_after, abbreviation_note)
-        on success, or an 8-tuple starting with None on failure (the optional 9th element is
-        tolerated by :meth:`grep` so legacy callers/tests keep working).
+                 spillover_rel_path, total_lines_before, shown_lines_after, abbreviation_note,
+                 total_matches_before)
+        on success, or an 8-tuple starting with None on failure (the optional 9th/10th elements
+        are tolerated by :meth:`grep` so legacy callers/tests keep working).
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         import subprocess
@@ -1027,7 +1028,15 @@ class GrepMixin:
                 The 9th element is the BUG_0236 abbreviation note computed from the FULL
                 (pre-truncation) entry list: the note must still be reported when the
                 abbreviated JSONL entries themselves fall outside the displayed budget.
+
+                The 10th element (BUG_0232) is the pre-truncation MATCH count. Element 1
+                (`count`) is recomputed from the surviving inline entries below, so it
+                collapses to 0 when every match spills to the spillover file. The header
+                must report the full match count, so it is returned separately rather than
+                repurposing element 1 — tests and the `>>>`-legend decision rely on element
+                1 keeping its post-truncation meaning.
                 """
+                _total_matches_before = count  # BUG_0232: full pre-truncation match count
                 _abbrev_note = _abbreviated_line_note(formatted)
                 _was_truncated = False
                 _original_output_size = 0
@@ -1072,7 +1081,8 @@ class GrepMixin:
                         _was_truncated = True
 
                 return (formatted, count, timed_out, _was_truncated, _original_output_size,
-                        _spill_rel_path, _total_lines_before, _shown_lines_after, _abbrev_note)
+                        _spill_rel_path, _total_lines_before, _shown_lines_after, _abbrev_note,
+                        _total_matches_before)
 
             result = subprocess.run(cmd,
                                     cwd=str(path),
@@ -1676,6 +1686,12 @@ class GrepMixin:
             # 9th element (BUG_0236): abbreviation count computed before truncation. Legacy
             # 8-tuple mocks/callers have no such element, so fall back to inspecting results.
             _sub_abbrev_note = _sub_extra[0] if _sub_extra else ''
+            # BUG_0232: pre-truncation MATCH count for the header. Element 1 (`count`) is the
+            # post-truncation count and reports 0 when every match spills to the spillover
+            # file, so the header must read element 10 instead. Legacy 8/9-tuple mocks lack it;
+            # fall back to `count` (only ever read on a non-truncated or zero-match legacy
+            # result, where the two are equal by construction).
+            _total_matches = _sub_extra[1] if len(_sub_extra) > 1 else count
             if was_timed_out and results:
                 # BUG_0236: the killed rg process still produced matches on stdout. Keep them
                 # (rendered with a partial-coverage note below) instead of discarding the work
@@ -1786,7 +1802,10 @@ class GrepMixin:
                     return f"{summary}:\n\n"
                 else:
                     output_text = _grep_body_with_legend(results, context, count)
-                    summary = f"Found {count} matches for '{pattern}'{searched_note}"
+                    # Header reports the pre-truncation match count (_total_matches), not the
+                    # post-truncation `count` passed to the legend above — when every match spills
+                    # inline, `count` is 0 but the search did find matches (BUG_0232).
+                    summary = f"Found {_total_matches} matches for '{pattern}'{searched_note}"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
                     summary += _sub_abbrev_note or _abbreviated_line_note(results)
@@ -1833,11 +1852,25 @@ class GrepMixin:
                         # notice alone lets the (already line-truncated) body read as complete.
                         omitted = (_sub_total_lines or 0) - (_sub_shown_lines or 0)
                         if omitted > 0:
-                            _marker = f"\n\n[… {omitted} more line(s) omitted — "
-                            if _sub_spill_rel:
-                                output_text += _marker + f"re-run with a narrower pattern or read the spillover file {_sub_spill_rel}]"
+                            if _sub_shown_lines == 0 and _sub_spill_rel:
+                                # BUG_0232: every match was too large to fit the inline budget, so
+                                # the (line-truncated) body is empty. Make the spillover file the
+                                # headline instead of a generic "more lines omitted" marker.
+                                # Guarded by `_sub_shown_lines == 0` so a PARTIALLY-shown result
+                                # keeps the marker below byte-identical — test_grep_usability's
+                                # fast-path truncation tests have shown_lines > 0 and pin it.
+                                output_text += (
+                                    f"\n\n[all {_total_matches} match(es) were larger than the "
+                                    f"inline budget and are not shown. Read the full results with "
+                                    f"read_logs/read_file on {_sub_spill_rel}, or re-run with "
+                                    f"count_only=true for counts and a narrower pattern to show "
+                                    f"lines inline]")
                             else:
-                                output_text += _marker + 're-run with a narrower pattern to avoid truncation]'
+                                _marker = f"\n\n[… {omitted} more line(s) omitted — "
+                                if _sub_spill_rel:
+                                    output_text += _marker + f"re-run with a narrower pattern or read the spillover file {_sub_spill_rel}]"
+                                else:
+                                    output_text += _marker + 're-run with a narrower pattern to avoid truncation]'
 
                     return f"{summary}:\n\n" + output_text
 
