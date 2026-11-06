@@ -211,7 +211,7 @@ _GOLDEN_CORE = {
     'skill_active_min_cap': 20,
     'skill_active_target_k': 1.0,
     'skill_always_protected': (
-        'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator'
+        'bug-tracker-entry-format,project-memory-writing,self-augmentation,skill-creator'
     ),
     'skill_auto_invalidate_enabled': True,
     'skill_fair_window_turns': 50,
