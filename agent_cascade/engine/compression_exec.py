@@ -156,7 +156,7 @@ class CompressionExecMixin:
             inst_name = instance.instance_name
             max_attempts = self.pool.settings.compression_max_attempts
 
-            # At >95%, if max-attempts exceeded, raise instead of silent truncation
+            # At >80%, if max-attempts exceeded, raise instead of silent truncation
             if instance._force_compress_count >= max_attempts:
                 raise ContextWindowExceeded(
                     f"Max compression attempts ({max_attempts}) exceeded at {usage_pct:.1f}% usage "
@@ -183,7 +183,7 @@ class CompressionExecMixin:
             # Call _force_compression outside the lock to avoid deadlock.
             return self._force_compression(instance, messages, llm_messages, usage_pct, response)
 
-        # Warning injection at >90% (configurable via compression_warning_threshold)
+        # Warning injection at >72% (configurable via compression_warning_threshold)
         if usage_pct > self.pool.settings.compression_warning_threshold:
             # Pass effective_limit (not the raw window) so the printed "A/B" ratio matches
             # usage_pct, which is computed against the reserve-reduced effective limit.
