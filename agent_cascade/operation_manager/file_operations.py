@@ -3296,9 +3296,19 @@ class FileOpsMixin:
                 backup_path_str = self._backup_path_str(backup_path)
                 was_overwrite = True
 
-            if src_path.is_dir():
+            # BUG_0249: destination is authoritative — treat it as a directory ONLY when
+            # explicitly so (raw trailing separator) or it already exists as one. Never infer
+            # dir-ness from the source, which silently created a directory at a file destination.
+            dest_explicit_dir = destination.endswith(('/', '\\')) or dest_path.is_dir()
+            if src_path.is_dir() and not dest_explicit_dir:
+                return (
+                    f"ERROR: source is a directory but destination is a file path "
+                    f"(source={source}, destination={destination}). "
+                    f"End the destination with '/' (or '\\') for a directory copy."
+                )
+            if src_path.is_dir():                       # dest explicitly a directory
                 shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
-            else:
+            else:                                        # file source → always a FILE at dest_path
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dest_path)
             self._own(dest_path, agent_name)
