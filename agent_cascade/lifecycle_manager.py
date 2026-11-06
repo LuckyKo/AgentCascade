@@ -725,8 +725,48 @@ class AgentLifecycleManager:
                 # (matches execution_engine.py)
                 if not target_type:
                     target_type = getattr(instance, 'agent_class', '') or ''
+                # BUG_0242: Read the live pool entry for the child's class FIRST.
+                # A live pool entry is explicit user config for that class, but the
+                # caller's _generate_cfg_override may be None (unwarmed caller, and
+                # the reuse path which nulls it in initialize_conversation). Resolving
+                # from a None override leaves the resolver's Layer-4 gate at
+                # has_explicit_config=False, which attaches the read-only
+                # DEFAULT_NEW_AGENT_DISABLED_TOOLS baseline to the child override.
+                # The live-pool union below can only ADD disabled tools, so a pool
+                # entry like {'Researcher': ['forget_last']} could never re-enable
+                # baseline tools (shell_cmd/write_file/edit_file/...). Feeding the
+                # pool entry through instance_override flips has_explicit_config=True
+                # so the baseline is skipped and the pool entry becomes authoritative
+                # for the child. Soul/discovered agents WITHOUT a pool entry keep the
+                # baseline (intended read-only-by-default behavior).
+                pool_entry = set()
+                if self.pool and hasattr(self.pool, 'get_ui_disabled_tools_for_agent'):
+                    raw_pool_entry = self.pool.get_ui_disabled_tools_for_agent(target_name, target_type)
+                    # Accept collections only — guards against None and against bare
+                    # MagicMock pool doubles whose auto-attributes are truthy.
+                    if isinstance(raw_pool_entry, (set, frozenset, list, tuple)):
+                        pool_entry = set(raw_pool_entry)
+
+                caller_override = getattr(caller_inst, '_generate_cfg_override', None)
+                child_override_src = caller_override
+                if pool_entry:
+                    # Preserve the caller's explicit dict-form entries (e.g. per-agent
+                    # dicts like {'Compressor': [...]}) and layer the pool entry under
+                    # the child's own name key. Caller-level flat lists apply to every
+                    # agent and already reach the child via caller_disabled below, so
+                    # replacing a flat form with this targeted dict loses nothing.
+                    base_override = dict(caller_override) if isinstance(caller_override, dict) else {}
+                    caller_dt = base_override.get('disabled_tools')
+                    if isinstance(caller_dt, dict):
+                        merged_dt = dict(caller_dt)
+                        merged_dt[target_name] = sorted(pool_entry | normalize_disabled_tools(caller_dt.get(target_name)))
+                    else:
+                        merged_dt = {target_name: sorted(pool_entry)}
+                    base_override['disabled_tools'] = merged_dt
+                    child_override_src = base_override
+
                 child_disabled_from_caller_cfg = resolve_disabled_tools_for_agent(
-                    instance_override=getattr(caller_inst, '_generate_cfg_override', None),
+                    instance_override=child_override_src,
                     template_cfg=getattr(caller_template.llm, 'generate_cfg', None),
                     agent_name=target_name,
                     agent_type=target_type,
@@ -748,9 +788,10 @@ class AgentLifecycleManager:
                 merged = merge_disabled_tools(merged, child_disabled_from_caller_cfg)
 
                 # Check live pool config for real-time tool updates.
-                if self.pool and hasattr(self.pool, 'get_ui_disabled_tools_for_agent'):
-                    live_disabled = self.pool.get_ui_disabled_tools_for_agent(target_name, target_type)
-                    merged = merge_disabled_tools(merged, live_disabled)
+                # (BUG_0242: pool_entry was already read above for the baseline
+                # decision; re-unioning it here is idempotent and keeps caller
+                # explicit disables additive.)
+                merged = merge_disabled_tools(merged, pool_entry)
 
                 cfg['disabled_tools'] = list(merged)  # store as list for JSON serialization
                 instance._generate_cfg_override = cfg
