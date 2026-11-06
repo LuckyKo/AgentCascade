@@ -57,7 +57,19 @@ def _make_instance(*, endpoint=CAPABLE_EP, holds_slot=True, agent_class='assista
     inst._state_label = None
     inst._slot_release = (lambda: None) if holds_slot else None
     inst._last_endpoint_config = endpoint
+    # Mirror tests/test_shell_cmd_auto_ram_floor.py::_make_instance: a REAL
+    # _tool_warnings list + REAL _compression_lock RLock, so the production
+    # _queue_tool_warning actually appends. A bare MagicMock would auto-create a
+    # truthy _tool_warnings and swallow .append(), making every channel assertion
+    # below vacuous (the documented footgun).
+    inst._tool_warnings = []
+    inst._compression_lock = threading.RLock()
     return inst
+
+
+def _note(inst):
+    """The [safe] note is queued onto _tool_warnings, not pre-pended to output."""
+    return '\n'.join(inst._tool_warnings)
 
 
 def _make_pool(*, instance, auto_security=False, kv_toggle=True, api_router=None):
@@ -167,7 +179,7 @@ def _router_held(api_base, model):
 
 def _seam_patches(order, *, save=True, unload=True, restore=True, popen=True,
                  save_factory=None, unload_factory=None, restore_factory=None,
-                 popen_factory=None, probe=None):
+                 popen_factory=None, probe=None, ram_probe=None):
     """Install the seam's four patches (save/unload/restore/Popen) as order-recorders.
 
     Each boolean opts a patch out; each ``*_factory`` overrides that patch's
@@ -184,6 +196,12 @@ def _seam_patches(order, *, save=True, unload=True, restore=True, popen=True,
         stack.enter_context(patch('agent_cascade.state_ops.probe_resident_models', return_value=None))
     else:
         stack.enter_context(patch('agent_cascade.state_ops.probe_resident_models', side_effect=probe))
+    # Safe mode samples free RAM after the restore (E2); stub it by default so unit tests
+    # never hit the live autoloader /v1/status (LM Studio runs in this env). Default
+    # ram_free_mb=None => no RAM advice; tests that exercise the advice pass `ram_probe`.
+    stack.enter_context(patch(
+        'agent_cascade.state_ops.ram_vram_pressure',
+        side_effect=ram_probe or (lambda b, rf, vf: {'ram_free_mb': None, 'force_safe': False})))
     if save:
         stack.enter_context(patch(
             'agent_cascade.state_ops.save_instance_state',
@@ -362,7 +380,7 @@ class TestSafeRejection:
         assert order == ['save', 'approval']  # saved BEFORE the guard; approval ran and denied
         m_clear.assert_called_once()          # label we set is cleared (nothing to restore)
         assert result.startswith('REJECTED:')
-        assert not result.startswith('[safe]')  # no note on rejection
+        assert inst._tool_warnings == []  # no note queued on rejection
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -388,7 +406,7 @@ class TestSafeUnloadFailure:
                                         justification='run it', cwd='.', timeout=None)
 
         assert order == ['save', 'approval', 'unload', 'run', 'restore']  # ran despite unload False
-        assert result.startswith('[safe]')              # note present (freed=True)
+        assert inst._tool_warnings  # note queued (freed=True)
 
     def test_before_execute_raises_still_restores_returns_error(self):
         # before_execute is the FIRST statement inside the try in
@@ -453,7 +471,7 @@ class TestSafeDegradation:
                                         justification='run it', cwd='.', timeout=None)
 
         assert 'save' not in order and 'unload' not in order and 'restore' not in order
-        assert not result.startswith('[safe]')  # degraded → no note
+        assert inst._tool_warnings == []  # degraded → no note queued
 
     def test_missing_instance_plain_sync_no_http(self):
         # _get_agent_name can yield 'unknown' → get_instance returns None.
@@ -465,7 +483,7 @@ class TestSafeDegradation:
             result = tool._execute_safe(agent_name='unknown', command='python heavy.py',
                                         justification='run it', cwd='.', timeout=None)
         assert 'save' not in order and 'unload' not in order and 'restore' not in order
-        assert not result.startswith('[safe]')
+        assert '[safe]' not in result  # no instance → no note
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -540,7 +558,7 @@ class TestSafeModeForcesKvOn:
         # Save + restore both run despite the toggle being off (safe-mode override).
         assert order == ['save', 'approval', 'unload', 'run', 'restore']
         # The notification no longer mentions a cold reload — safe mode always restores.
-        assert 'KV state restored after' in result
+        assert 'KV state restored after' in _note(inst)
         # The per-instance override is cleared once the command window closes.
         with inst._state_lock:
             assert inst._safe_mode_kv is False
@@ -787,7 +805,7 @@ class TestSafeStableLabelRestore:
         # this is what the old kv_toggle-gated path suppressed (restore_calls would be []).
         assert restore_calls == ['agent-1'], \
             f'safe mode must issue a state/load despite the toggle being off: {restore_calls}'
-        assert 'KV state restored after' in result  # no cold-reload branch anymore
+        assert 'KV state restored after' in _note(inst)  # no cold-reload branch anymore
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -820,9 +838,9 @@ class TestSaveFailureGate:
 
         assert order == ['save', 'approval', 'unload', 'run'], \
             f'no restore may run after a failed save: {order}'
-        assert 'KV state restored after' not in result, \
+        assert 'KV state restored after' not in _note(inst), \
             'must not claim a restore that never ran'
-        assert 'KV state save failed, no restore attempted' in result
+        assert 'KV state save failed, no restore attempted' in _note(inst)
 
     def test_successful_save_still_restores(self):
         """Unchanged happy path: a real save → the stable-label restore still runs."""
@@ -838,7 +856,7 @@ class TestSaveFailureGate:
                                         justification='run it', cwd='.', timeout=None)
 
         assert order == ['save', 'approval', 'unload', 'run', 'restore']
-        assert 'KV state restored after' in result
+        assert 'KV state restored after' in _note(inst)
 
     def test_advisor_path_is_not_gated_on_the_tools_own_save(self):
         """auto_security=True → the tool never saved (saved stays False), but the
@@ -857,7 +875,7 @@ class TestSaveFailureGate:
 
         assert 'save' not in order  # save suppressed: the advisor owns the KV
         assert order == ['approval', 'unload', 'run', 'restore']
-        assert 'KV state restored after' in result
+        assert 'KV state restored after' in _note(inst)
 
     def test_restore_ran_but_failed_note_says_cold(self):
         """restore_held_slot_state returns False (file absent / endpoint moved) →
@@ -874,8 +892,8 @@ class TestSaveFailureGate:
                                         justification='run it', cwd='.', timeout=None)
 
         assert order == ['save', 'approval', 'unload', 'run', 'restore']
-        assert 'KV state restored after' not in result
-        assert 'KV state could NOT be restored' in result
+        assert 'KV state restored after' not in _note(inst)
+        assert 'KV state could NOT be restored' in _note(inst)
 
     def test_not_capable_no_note_at_all(self):
         """Nothing was unloaded → no [safe] note whatsoever (case c)."""
@@ -891,7 +909,7 @@ class TestSaveFailureGate:
                                         justification='run it', cwd='.', timeout=None)
 
         assert 'unload' not in order
-        assert not result.startswith('[safe]')
+        assert inst._tool_warnings == []  # no note queued
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -905,6 +923,7 @@ class TestSaveFailureGate:
 class TestSafeModeGuaranteeVerification:
     def _run(self, order, *, probe):
         inst = _make_instance()
+        self.inst = inst          # exposed so assertions can read the queued [safe] note
         pool, om = _make_pool(instance=inst, auto_security=False)
         tool = _make_tool(pool)
         _wire_approval(om, order, approved=True)
@@ -927,24 +946,24 @@ class TestSafeModeGuaranteeVerification:
         assert order == ['save', 'approval', 'probe', 'unload', 'probe', 'run', 'probe',
                          'restore'], order
         # Unverifiable → claim nothing either way, and keep the legacy wording.
-        assert 'verified free' not in result
-        assert 'WARNING' not in result
-        assert 'KV state restored after' in result
+        assert 'verified free' not in _note(self.inst)
+        assert 'WARNING' not in _note(self.inst)
+        assert 'KV state restored after' in _note(self.inst)
 
     def test_verified_clean_states_the_cards_were_free(self):
         result = self._run([], probe=[[], [], []])
 
-        assert 'verified free for its full duration' in result
-        assert 'WARNING' not in result
+        assert 'were verified free' in _note(self.inst)
+        assert 'WARNING' not in _note(self.inst)
 
     def test_still_resident_after_unload_reports_never_free(self):
         resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
         result = self._run([], probe=[[], resident, resident])
 
-        assert '[safe] WARNING:' in result
-        assert 'were still resident right after the pre-command unload' in result
-        assert 'qwen3.8-flash-next-coder-iq3_xxs' in result
-        assert 'VOID' in result
+        assert '[safe] WARNING:' in _note(self.inst)
+        assert 'were still resident right after the pre-command unload' in _note(self.inst)
+        assert 'qwen3.8-flash-next-coder-iq3_xxs' in _note(self.inst)
+        assert 'VOID' in _note(self.inst)
 
     def test_reload_mid_command_reports_a_violation(self):
         # BUG_0153 shape: the model safe mode freed comes back mid-command → real contention.
@@ -954,10 +973,10 @@ class TestSafeModeGuaranteeVerification:
         result = self._run([], probe=[caller_model, [],
                                       [{'id': 'test-model', 'uptime_s': None}]])
 
-        assert '[safe] WARNING:' in result
-        assert 'resident again when the command finished' in result
-        assert 'test-model' in result
-        assert 'VOID' in result
+        assert '[safe] WARNING:' in _note(self.inst)
+        assert 'resident again when the command finished' in _note(self.inst)
+        assert 'test-model' in _note(self.inst)
+        assert 'VOID' in _note(self.inst)
 
     def test_command_own_model_load_is_not_a_violation(self):
         # BUG_0161: the harness JIT-loads a DIFFERENT model than the caller's session holds.
@@ -966,21 +985,21 @@ class TestSafeModeGuaranteeVerification:
         result = self._run([], probe=[caller_model, [],
                                       [{'id': 'Qwen3.8-27B-ninfer', 'uptime_s': 60.0}]])
 
-        assert '[safe] NOTE:' in result
-        assert '[safe] WARNING:' not in result
-        assert 'VOID' not in result
-        assert "command's own load" in result
-        assert 'Qwen3.8-27B-ninfer' in result
+        assert '[safe] NOTE:' in _note(self.inst)
+        assert '[safe] WARNING:' not in _note(self.inst)
+        assert 'VOID' not in _note(self.inst)
+        assert "command's own load" in _note(self.inst)
+        assert 'Qwen3.8-27B-ninfer' in _note(self.inst)
 
     def test_unknown_freed_set_downgrades_to_note_not_void(self):
         # BUG_0161 fallback: the pre-unload snapshot is unreadable, so self-load cannot be
         # distinguished from contention. Say so — do not assert a VOID.
         result = self._run([], probe=[None, [], [{'id': 'some-model', 'uptime_s': 60.0}]])
 
-        assert '[safe] NOTE:' in result
-        assert '[safe] WARNING:' not in result
-        assert 'VOID' not in result
-        assert 'cannot be attributed' in result
+        assert '[safe] NOTE:' in _note(self.inst)
+        assert '[safe] WARNING:' not in _note(self.inst)
+        assert 'VOID' not in _note(self.inst)
+        assert 'cannot be attributed' in _note(self.inst)
 
     def test_degraded_endpoint_never_probes(self):
         order = []
@@ -1000,7 +1019,7 @@ class TestSafeModeGuaranteeVerification:
                                         justification='run it', cwd='.', timeout=None)
 
         assert 'probe' not in order  # nothing was unloaded → nothing to verify
-        assert not result.startswith('[safe]')
+        assert inst._tool_warnings == []  # no note queued
 
 
 class TestSafeModeViolationClassifier:
@@ -1145,6 +1164,7 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
 
     def _run(self, order, *, unload_factory, probe):
         inst = _make_instance()
+        self.inst = inst          # exposed so assertions can read the queued [safe] note
         pool, om = _make_pool(instance=inst, auto_security=False)
         tool = _make_tool(pool)
         _wire_approval(om, order, approved=True)
@@ -1158,10 +1178,10 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
                            probe=None)
 
         assert order == ['save', 'approval', 'unload', 'run', 'restore']  # still ran
-        assert 'unloaded before the command' not in result
-        assert 'verified free' not in result
-        assert '[safe] WARNING: the pre-command unload FAILED' in result
-        assert 'VOID' in result
+        assert 'unloaded before the command' not in _note(self.inst)
+        assert 'verified free' not in _note(self.inst)
+        assert '[safe] WARNING: the pre-command unload FAILED' in _note(self.inst)
+        assert 'VOID' in _note(self.inst)
 
     def test_failed_unload_but_verified_free_still_states_the_guarantee(self):
         # The probe is stronger evidence than the POST result: a failed unload whose cards are
@@ -1170,8 +1190,8 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
         result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
                            probe=[[], [], []])
 
-        assert 'verified free for its full duration' in result
-        assert 'WARNING' not in result
+        assert 'were verified free' in _note(self.inst)
+        assert 'WARNING' not in _note(self.inst)
 
     def test_failed_unload_with_resident_models_names_the_failure_too(self):
         resident = [{'id': 'qwen3.8-flash-next-coder-iq3_xxs', 'uptime_s': 900.0}]
@@ -1179,10 +1199,10 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
         result = self._run(order, unload_factory=lambda b: (order.append('unload'), False)[1],
                            probe=[[], resident, resident])
 
-        assert '[safe] WARNING:' in result
-        assert 'were still resident right after the pre-command unload' in result
-        assert 'the pre-command unload request itself failed' in result
-        assert 'VOID' in result
+        assert '[safe] WARNING:' in _note(self.inst)
+        assert 'were still resident right after the pre-command unload' in _note(self.inst)
+        assert 'the pre-command unload request itself failed' in _note(self.inst)
+        assert 'VOID' in _note(self.inst)
 
     def test_unload_that_raises_is_also_not_claimed(self):
         order = []
@@ -1193,6 +1213,162 @@ class TestUnloadFailureIsNotClaimedAsUnloaded:
 
         result = self._run(order, unload_factory=_boom, probe=None)
 
-        assert 'unloaded before the command' not in result
-        assert 'the pre-command unload FAILED' in result
+        assert 'unloaded before the command' not in _note(self.inst)
+        assert 'the pre-command unload FAILED' in _note(self.inst)
         assert 'ERROR: Approved but execution failed' in result
+
+class TestSafeModeWarningChannel:
+    """The [safe] note now travels on ``_tool_warnings``, not the command output (§6.2).
+
+    Every assertion below reads the queue via ``_note``/``inst._tool_warnings``; the
+    command string is asserted *clean*. ``_seam_patches`` default-stubs
+    ``ram_vram_pressure`` (``ram_free_mb=None``) so these run hermetic — tests that
+    exercise the RAM advice pass an explicit ``ram_probe``.
+    """
+
+    # probe side_effect recipes (pre-unload, post-unload, post-command):
+    _CLEAN = ([{'id': 'test-model', 'uptime_s': 1200.0}], [], [])            # freed, stayed free
+    _RELOAD = ([{'id': 'test-model', 'uptime_s': 1200.0}], [],
+               [{'id': 'test-model', 'uptime_s': None}])                     # freed, back mid-command
+
+    def _tool(self, inst):
+        order = []
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=True)
+        return tool, order
+
+    @staticmethod
+    def _safe(tool):
+        return tool._execute_safe(agent_name='agent-1', command='python heavy.py',
+                                  justification='run it', cwd='.', timeout=None)
+
+    def test_verified_clean_note_queued_not_prepended(self):
+        # Core of the change: clean output, exactly one queue entry with both durations + KV truth.
+        inst = _make_instance()
+        tool, order = self._tool(inst)
+        with _seam_patches(order, probe=list(self._CLEAN)):
+            result = self._safe(tool)
+        assert not result.startswith('[safe]')
+        assert 'KV state restored after' not in result          # no longer part of the body
+        assert len(inst._tool_warnings) == 1
+        entry = inst._tool_warnings[0]
+        assert 'were verified free' in entry
+        assert 'Safe mode cost' in entry and 's total' in entry  # total_s is reported
+        assert 'KV state restored after' in entry
+
+    def test_rejection_queues_no_warning(self):
+        # Mirror of the rejection case: nothing freed → nothing queued.
+        inst = _make_instance()
+        order = []
+        pool, om = _make_pool(instance=inst, auto_security=False)
+        tool = _make_tool(pool)
+        _wire_approval(om, order, approved=False)
+        with _seam_patches(order):
+            result = self._safe(tool)
+        assert result.startswith('REJECTED:')
+        assert inst._tool_warnings == []
+
+    def test_total_cost_brackets_the_command_window(self):
+        # The KV re-warm (the expensive half, previously measured nowhere) must count
+        # in total_s but NOT in elapsed — assert both render and total > elapsed.
+        import re as _re
+        import time as _time
+        inst = _make_instance()
+        tool, order = self._tool(inst)
+
+        def _slow_restore(p, i, n, **kw):
+            order.append('restore')
+            _time.sleep(0.20)
+            return True
+
+        with _seam_patches(order, probe=list(self._CLEAN), restore_factory=_slow_restore):
+            self._safe(tool)
+        note = _note(inst)
+        elapsed = float(_re.search(r'window \((\d+\.\d+)s\)', note).group(1))
+        total = float(_re.search(r'cost (\d+\.\d+)s total', note).group(1))
+        assert total > elapsed
+        assert total - elapsed >= 0.15   # the 0.20s re-warm is counted in total, not elapsed
+
+    def test_ram_advice_only_below_pool_settings_floor(self):
+        # The floor must come from pool.settings (single source of truth), not a hard-coded 4096:
+        # the same 3000 MB is quiet under a 1000 floor but warns under a 4096 floor.
+        cases = [(2000, 4096, True), (12000, 4096, False), (None, 4096, False),
+                 (3000, 1000, False), (3000, 4096, True)]
+        for ram_free, floor, expected in cases:
+            inst = _make_instance()
+            tool, order = self._tool(inst)
+            tool.agent_pool.settings = SimpleNamespace(
+                state_kv_save_enabled=True,
+                safe_mode_auto_ram_floor_mb=floor, safe_mode_auto_vram_floor_mb=512)
+            with _seam_patches(order, probe=list(self._CLEAN),
+                               ram_probe=lambda b, rf, vf, r=ram_free: {
+                                   'ram_free_mb': r, 'force_safe': False}):
+                self._safe(tool)
+            has_advice = 'Free system RAM is low' in _note(inst)
+            assert has_advice is expected, \
+                f'ram_free={ram_free} floor={floor}: advice={has_advice} expected={expected}'
+
+    def test_ram_probe_failure_degrades_to_no_advice(self):
+        # Unverifiable RAM: the note is still delivered, just without advice — and no exception.
+        inst = _make_instance()
+        tool, order = self._tool(inst)
+        with _seam_patches(order, probe=list(self._CLEAN),
+                           ram_probe=lambda b, rf, vf: {'ram_free_mb': None, 'force_safe': False}):
+            self._safe(tool)
+        assert len(inst._tool_warnings) == 1
+        assert 'KV state restored after' in _note(inst)
+        assert 'Free system RAM is low' not in _note(inst)
+
+    def test_two_violation_runs_both_queued_distinct_durations(self):
+        # Two identical violations in one drain cycle: identical heads used to be byte-for-byte
+        # equal and the dedup guard (path_security.py:72) silently dropped the second. Putting
+        # total_s in the head makes them distinct, so both arrive and the tax is counted twice.
+        import time as _time
+        inst = _make_instance()
+        tool, order = self._tool(inst)
+        with _seam_patches(order, probe=list(self._RELOAD)):
+            self._safe(tool)
+
+        def _slow(order):
+            def _spawn(*a, **k):
+                order.append('run')
+                _time.sleep(0.20)
+                proc = MagicMock()
+                proc.returncode = 0
+                proc.pid = 0
+                proc.wait = lambda timeout=None: 0
+                proc.stdout = io.StringIO()
+                proc.stderr = io.StringIO()
+                return proc
+            return _spawn
+
+        with _seam_patches(order, probe=list(self._RELOAD), popen_factory=_slow(order)):
+            self._safe(tool)
+        warnings = [w for w in inst._tool_warnings if '[safe] WARNING:' in w]
+        assert len(inst._tool_warnings) == 2, inst._tool_warnings
+        assert len(warnings) == 2
+
+    def test_note_lands_on_pool_get_instance_by_name(self):
+        # The queue is addressed by agent_name and resolved via pool.get_instance — assert it
+        # lands on the right instance and nowhere else (guards object-vs-name confusion).
+        target = _make_instance()
+        decoy = _make_instance()
+        order = []
+        pool = MagicMock()
+        pool.get_instance = lambda name: {'agent-1': target, 'agent-2': decoy}[name]
+        om = OperationManager.__new__(OperationManager)
+        om.agent_pool = pool
+        om.base_dir = '/tmp'
+        from pathlib import Path as _Path
+        om._resolve_path = lambda path, mode='ro': _Path('.')
+        pool.operation_manager = om
+        pool.auto_security = False
+        pool.settings = SimpleNamespace(state_kv_save_enabled=True)
+        tool = ShellCmd()
+        tool.agent_pool = pool
+        _wire_approval(om, order, approved=True)
+        with _seam_patches(order, probe=list(self._CLEAN)):
+            self._safe(tool)
+        assert len(target._tool_warnings) == 1
+        assert decoy._tool_warnings == []

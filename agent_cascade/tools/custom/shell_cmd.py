@@ -1254,6 +1254,12 @@ class ShellCmd(BaseTool):
         that was never resident before the unload is the command's own load (e.g. a harness that
         POSTs to the autoloader to JIT-load the model under test) and produces an informational
         ``[safe] NOTE``, never a VOID.
+
+        Delivery: the assembled ``[safe]`` note is queued onto the instance's ``_tool_warnings``
+        via ``_queue_tool_warning`` — drained as a trailing ``[SYSTEM NOTIFICATIONS]`` block by
+        ``CompressionHandler``, NOT pre-pended to the command output. It reports both the command
+        window (``elapsed``) and the full safe-mode cost (``total_s``: save + gate + unload +
+        command + KV restore), plus conditional low-RAM advice when free RAM is below the floor.
         """
         instance = self._get_instance(agent_name)
         pool = self.agent_pool
@@ -1284,6 +1290,13 @@ class ShellCmd(BaseTool):
 
         saved = freed = False
         restored = False
+        # The number the agent must budget: safe-mode entry (KV save) through KV restore, i.e. the
+        # tax on top of a normal sync command. `elapsed` below stays the command-window duration —
+        # `_safe_mode_violation`'s T+Ns attribution arithmetic depends on that narrower meaning.
+        safe_t0 = time.monotonic()
+        total_s = None
+        ram_free_mb = None
+        ram_floor = None   # resolved in E2 below; initialised here so the advice compare is always bound
         # BUG_0150: the unload is a one-shot action — nothing stops another session from
         # reloading the model one second later. Verify the guarantee instead of asserting it:
         # probe residency right after the unload (cards actually free?) and again when the
@@ -1380,6 +1393,26 @@ class ShellCmd(BaseTool):
                     with instance._state_lock:
                         instance._safe_mode_kv = False
 
+        # Everything after the entry anchor is the cost the agent pays: save + approval gate +
+        # unload + probes + command + KV restore. Measured AFTER the restore so the KV re-warm is
+        # included — that is the expensive half, and it was measured nowhere before. Side-effect
+        # free, so it runs on every path (the WARNING heads want the duration too).
+        total_s = time.monotonic() - safe_t0
+        if freed and isinstance(ep, dict):
+            # Free RAM AFTER the restore = the state the next command will face. Same cheap,
+            # server-cached /v1/status body the residency probes already use (all hit
+            # `ep['api_base']`); best-effort. Gated on `freed`: a rejected or degraded command
+            # unloaded nothing, so there is no tax to advise about and no extra GET to spend.
+            # The isinstance(ep, dict) gate is load-bearing — ep is None/non-dict on the
+            # non-capable path, where the bare ep['api_base'] below would raise TypeError.
+            from agent_cascade.state_ops import ram_vram_pressure
+            settings = getattr(pool, 'settings', None)
+            ram_floor = (getattr(settings, 'safe_mode_auto_ram_floor_mb', SAFE_MODE_AUTO_RAM_FLOOR_MB)
+                         if settings is not None else SAFE_MODE_AUTO_RAM_FLOOR_MB)
+            vram_floor = (getattr(settings, 'safe_mode_auto_vram_floor_mb', SAFE_MODE_AUTO_VRAM_FLOOR_MB)
+                          if settings is not None else SAFE_MODE_AUTO_VRAM_FLOOR_MB)
+            ram_free_mb = ram_vram_pressure(ep['api_base'], ram_floor, vram_floor)['ram_free_mb']
+
         # ── Notification: gated on `freed` alone, but HONEST about what happened. ──
         # Never emitted on REJECTED/ERROR/degraded results, since freed is only ever
         # set inside before_execute, which is unreachable on the rejection path. The KV
@@ -1398,22 +1431,27 @@ class ShellCmd(BaseTool):
                 resident_before, resident_after, elapsed,
                 unloaded_models=resident_pre_unload, owner_model=owner_model)
             unload_failed = unload_ok is False
+            dur = f'{total_s:.1f}s' if total_s is not None else 'unknown'
             if violation_kind is None:
-                head = (f'[safe] Local model(s) unloaded before the command and verified free '
-                        f'for its full duration ({elapsed:.0f}s)')
+                free_for = (f' for the whole command window ({elapsed:.1f}s)'
+                            if isinstance(elapsed, (int, float)) else '')
+                head = (f'[safe] Local model(s) unloaded before the command were verified free'
+                        f'{free_for}. Safe mode cost {dur} total (save + unload + command + KV restore)')
             elif violation_kind == 'unknown' and unload_failed:
                 # BUG_0152: the POST failed AND nothing can confirm the release. The old wording
                 # ("unloaded before the command") was an outright false claim here — this is the
                 # 2026-10-25 shape: a 500 tree-drain timeout, the model still tracked, and the
                 # loader free to reload it mid-command.
                 head = ('[safe] WARNING: the pre-command unload FAILED and this endpoint cannot '
-                        'report what is resident')
+                        f'report what is resident; safe mode cost {dur} total '
+                        '(save + unload + command + KV restore)')
                 violation_kind = 'unload_failed'
                 violation_text = ('the autoloader did not confirm the release, so the model may have '
                                   'stayed loaded while the command ran. Any result that needed free '
                                   'VRAM/RAM is VOID; re-run with the cards free.')
             else:
-                head = '[safe] Local model(s) unloaded before the command'
+                head = (f'[safe] Local model(s) unloaded before the command; safe mode cost {dur} '
+                        'total (save + unload + command + KV restore)')
                 if unload_failed and violation_text:
                     violation_text += ' (the pre-command unload request itself failed)'
             # BUG_0161: "a model appeared" is not by itself a broken guarantee. Only a freed
@@ -1428,6 +1466,11 @@ class ShellCmd(BaseTool):
             else:
                 tail = 'KV state save failed, no restore attempted (the conversation will be reprocessed).'
             note = f'{head}; {tail}\n'
+            if isinstance(ram_free_mb, (int, float)) and ram_free_mb < ram_floor:
+                note += ('[safe] Free system RAM is low ('
+                         f'{ram_free_mb:.0f} MB). Prefer read_file/grep/code_interpreter over '
+                         'shell_cmd: every safe-mode command pays this extra unload/re-warm time, '
+                         'and low RAM keeps forcing it.\n')
             if violation_text:
                 if informational:
                     note += f'[safe] NOTE: {violation_text}\n'
@@ -1437,4 +1480,16 @@ class ShellCmd(BaseTool):
                     note += f'[safe] WARNING: {violation_text}\n'
                     logger.warning('[shell_cmd] safe-mode guarantee broken (%s): %s',
                                    violation_kind, violation_text)
-        return note + result
+        if note:
+            # Canonical notification channel — drained as a trailing [SYSTEM NOTIFICATIONS] block
+            # by CompressionHandler._assemble_tool_result (Step 5), so it is appended after the
+            # body and can never be cut by the 2000-char shell truncation. Never pre-pended to the
+            # command output: it is metadata about the tool call, not part of it.
+            # `note` is built with a trailing '\n' per line; _drain_tool_warnings joins entries with
+            # '\n\n', so those newlines would render as blank lines inside the block. Drop the empty
+            # ones so the queue entry is exactly one line per part (head+tail, advice, violation).
+            _lines = [ln for ln in note.splitlines() if ln.strip()]
+            if _lines:
+                from agent_cascade.operation_manager import _queue_tool_warning
+                _queue_tool_warning(pool, agent_name, '\n'.join(_lines))
+        return result

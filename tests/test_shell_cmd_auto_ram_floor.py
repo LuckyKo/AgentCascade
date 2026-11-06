@@ -16,7 +16,9 @@ Design invariants under test:
   - Forced-safe queues NO pre-command tool warning (BUG_0174/commit 42956f47): such a warning
     claimed "local model unloaded" before the approval gate ran, so it was false when the
     command was denied. The reason is still logged at INFO; the user-facing notification is
-    the `[safe]` note `_execute_safe` appends after the unload actually happened.
+    the `[safe]` note `_execute_safe` queues onto the instance's ``_tool_warnings`` once the
+    unload actually happened (drained as a trailing [SYSTEM NOTIFICATIONS] block, never in the
+    command output).
   - Best-effort: a status-fetch failure degrades to the normal path, never crashes.
 
 Mock style mirrors tests/test_shell_cmd_safe_mode.py. The instance is a real AgentInstance-
@@ -182,6 +184,9 @@ class TestAutoForcesSafe:
         # BUG_0174 / 42956f47: the queued warning claimed "local model unloaded" BEFORE the
         # approval gate, so a denied command made it false. No pre-command warning may return;
         # the accurate notification is _execute_safe's [safe] note (gated on `freed`).
+        # _execute_safe is patched above (m_safe), so this empty list proves the AUTO hook itself
+        # queued nothing pre-command; the [safe] note is queued by the REAL _execute_safe onto
+        # _tool_warnings and is covered in test_shell_cmd_safe_mode.py::TestSafeModeWarningChannel.
         assert inst._tool_warnings == [], \
             f'forced-safe must not queue a pre-command warning: {inst._tool_warnings}'
         # The "why safe" diagnostic is still emitted, at INFO (kept by the same commit).
