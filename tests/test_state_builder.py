@@ -406,3 +406,14 @@ class TestKvStateCapableField:
             out = state_builder._serialize_instance(inst, pool)
             assert 'kv_state_capable' in out
             assert out['kv_state_capable'] is expected
+
+
+def test_serialize_message_bare_number_content_stringifies():
+    """BUG_0204: bare-number reply must render, not blank — 0 (falsy) AND 42 (truthy)."""
+    import agent_cascade.api_integration_pkg.state_builder as state_builder
+    for content_in, expected in {42:'42', 0:'0', 3.14:'3.14', -7:'-7',
+                                  '42':'42', '':'', None:''}.items():
+        out = state_builder.serialize_message(
+            {'role':'assistant','content':content_in}, index=None, use_cache=False, for_ui=True)
+        assert out['content'] == expected, f"{content_in!r} -> {out['content']!r}"
+        assert isinstance(out['content'], str)

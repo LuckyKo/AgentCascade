@@ -908,8 +908,8 @@ def serialize_message(
         content = '\n'.join(parts)
 
     # Keep content intact — frontend handles truncation via renderToolResult()
-
-    d['content'] = content or ''
+    # Stringify non-str content so bare numbers (0,42,3.14,-7) render instead of blank (BUG_0204).
+    d['content'] = '' if content is None else (content if isinstance(content, str) else str(content))
 
     # Normalize function_call (handles objects with .name/.arguments attributes)
     fc = d.get('function_call')
