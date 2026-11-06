@@ -1941,6 +1941,9 @@ class TestT2SuppressionCorrectness:
         om.base_dir = '/tmp/t2'
         om.extra_work_folders_ro = ['/ro/a']
         om.extra_work_folders_rw = ['/rw/b']
+        # Bind the batch-hints accessor (production no longer swallows a non-tuple unpack on a
+        # MagicMock auto-child); (False, False) = full save + full restore, this harness's intent.
+        om._get_approval_kv_batch_hints.return_value = (False, False)
         pool.operation_manager = om
         return inst, pool
 

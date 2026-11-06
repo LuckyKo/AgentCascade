@@ -504,6 +504,14 @@ class ShellCmd(BaseTool):
         # fall through to real shell execution (e.g. `__kill` would run as a literal).
         if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
             return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
+        # Parallel-batch guard KV hints (plan kv-batch-guard-shellcmd §3.2.3): the dispatch loop
+        # tells us whether this call is the FIRST / LAST guard-needing shell_cmd in the batch, so
+        # the Security advisor can SKIP the save (non-first) and DEFER the restore (non-last) and
+        # share ONE save/restore across a CSSSSC run. Defaults True keep every non-batch path and
+        # every non-guard shell_cmd byte-identical to today. Threaded per-call via kwargs (never
+        # shared instance state) so nested/parallel agents cannot cross-contaminate their batches.
+        guard_is_first = bool(kwargs.get('is_first_guard', True))
+        guard_is_last = bool(kwargs.get('is_last_guard', True))
         if run_safe and not _system_agent:  # system agents already logged the downgrade
             return self._execute_safe(
                 agent_name=agent_name,
@@ -511,6 +519,8 @@ class ShellCmd(BaseTool):
                 justification=justification,
                 cwd=cwd,
                 timeout=timeout,
+                guard_is_first=guard_is_first,
+                guard_is_last=guard_is_last,
             )
         return self._execute_sync(
             agent_name=agent_name,
@@ -518,6 +528,8 @@ class ShellCmd(BaseTool):
             justification=justification,
             cwd=cwd,
             timeout=timeout,
+            guard_is_first=guard_is_first,
+            guard_is_last=guard_is_last,
         )
 
     # ────────────────────────────────────────────────────────────────
@@ -1156,6 +1168,8 @@ class ShellCmd(BaseTool):
         justification: str,
         cwd: str,
         timeout: int,
+        guard_is_first: bool = True,
+        guard_is_last: bool = True,
     ) -> str:
         """Execute a shell command synchronously (blocking).
 
@@ -1190,6 +1204,8 @@ class ShellCmd(BaseTool):
             char_limit=int(char_limit),
             timeout=timeout,
             execution_mode='sync',
+            guard_is_first=guard_is_first,  # batch hints: tell the advisor to skip-save / defer-restore
+            guard_is_last=guard_is_last,
         )
         note = ShellCmd._execution_notes(command, was_stripped)
         return f"{note}{result}"
@@ -1215,6 +1231,8 @@ class ShellCmd(BaseTool):
         justification: str,
         cwd: str,
         timeout: int,
+        guard_is_first: bool = True,
+        guard_is_last: bool = True,
     ) -> str:
         """Blocking execution that frees local model RAM/VRAM around the command.
 
@@ -1354,6 +1372,8 @@ class ShellCmd(BaseTool):
                 timeout=timeout,
                 execution_mode='safe',
                 before_execute=(_release_model if capable else None),
+                guard_is_first=guard_is_first,  # batch hints: tell the advisor to skip-save / defer-restore
+                guard_is_last=guard_is_last,
             )
         finally:
             # BUG_0150: probe BEFORE the restore below — that restore loads OUR model, which

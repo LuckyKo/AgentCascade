@@ -259,6 +259,10 @@ def slot_harness(tmp_path, request):
     om.extra_work_folders_rw = []
     om.enable_timeout = True
     om.approval_timeout_seconds = 180
+    # The guard reads batch KV hints via this; a bare MagicMock auto-child would crash the
+    # (skip, defer) tuple unpack in _execute_check now that the broad except is gone. Default hints
+    # (False, False) = full save + full restore, which is what this harness wants.
+    om._get_approval_kv_batch_hints.return_value = (False, False)
     pool.operation_manager = om
 
     # _cleanup needs pool._execution._state_lock; ensure it exists on the real pool.

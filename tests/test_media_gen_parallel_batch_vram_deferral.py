@@ -135,7 +135,7 @@ def _make_sim_execute_tool(pool, parent, flags_seen):
     from agent_cascade.state_ops import save_instance_state, restore_held_slot_state
 
     def _sim(instance, tool_name, tool_args, llm_messages, *, function_id=None,
-             is_first_ca=True, is_last_ca=True, is_first_vram=True, is_last_vram=True):
+             is_first_ca=True, is_last_ca=True, is_first_vram=True, is_last_vram=True, **kwargs):
         assert tool_name == 'media_gen', f'unexpected tool routed through the media_gen sim: {tool_name}'
         flags_seen.append((is_first_vram, is_last_vram))
         if is_first_vram:

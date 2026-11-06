@@ -728,6 +728,50 @@ class SecurityAdvisorHandler:
             # caller's slot so Security can acquire via the normal FIFO queue.
             caller_inst_sec = self.agent_pool.get_instance(caller_agent) if caller_agent else None
 
+            # ── shell_cmd parallel-batch guard hints (plan kv-batch-guard-shellcmd §3.2.5) ──
+            # The dispatch loop pre-scanned the turn's guard-needing shell_cmd calls and stamped
+            # (kv_skip_save, kv_defer_restore) on THIS approval's PendingApproval record. Read them
+            # back through the PRIVATE accessor — NOT list_pending_approvals(), which is the WebUI
+            # payload and the advisor's usual `ap` view and must not carry these internal hints. The
+            # hints are strict reducers: they can only SKIP a save or DEFER a restore the code would
+            # otherwise do, never enable one — so the "State KV Save/Restore" OFF case stays a free
+            # no-op (kv_save_effectively_enabled still gates both engine seams downstream).
+            _om = getattr(self.agent_pool, 'operation_manager', None)
+            _hints_fn = getattr(_om, '_get_approval_kv_batch_hints', None)
+            # The real accessor always returns a (bool, bool) 2-tuple. The ONLY non-tuple case that
+            # must degrade is an operation_manager that does not expose the accessor at all (a
+            # hand-built fake pool object): callable() is then False and we keep today's full
+            # save/restore. A MagicMock-backed operation_manager is NOT special-cased in production —
+            # every such harness binds _get_approval_kv_batch_hints.return_value=(False, False)
+            # (see tests/e2e_security_slot_deadlock.py, test_security_slot_leak_wiring.py,
+            # test_security_instance_reuse.py, test_security_handler_deadlock_fixes.py), so the
+            # accessor is never asked to launder a mock return value.
+            if callable(_hints_fn):
+                _kv_skip_save, _kv_defer_restore = _hints_fn(rid)
+            else:
+                _kv_skip_save = _kv_defer_restore = False
+            _kv_skip_save = bool(_kv_skip_save)
+            _kv_defer_restore = bool(_kv_defer_restore)
+            _safe_kv = bool(getattr(caller_inst_sec, '_safe_mode_kv', False))
+            # TRAP §4.4: safe mode owns its own save AND its post-command stable-label restore, so
+            # it FORCES the save on (kv_skip_save suppressed) and forces defer OFF — its
+            # skip_kv_restore CLEARS the pending label (slot_lifecycle.py:277-287), and defer vs
+            # skip are OPPOSITE marker policies that must not be conflated (slot_lifecycle.py:200-211).
+            _batch_skip_save = _kv_skip_save and not _safe_kv
+            _save_fn = None if _batch_skip_save else engine.save_before_slot_yield
+            # PLAN §3.2.5 binding formula: defer_kv_restore == kv_defer_restore and not
+            # skip_kv_restore, where skip_kv_restore is SAFE MODE ONLY (the tool's _safe_mode_kv).
+            # The pending _state_label this guard keeps alive belongs to the FIRST guard's save;
+            # SKIPPING this guard's save (_batch_skip_save) is exactly what PRESERVES that label for
+            # the last guard — it must NOT trigger a full mid-batch restore. The only condition that
+            # may force defer off is safe mode, because safe mode's skip_kv_restore CLEARS the label
+            # and it does its own stable-label restore after the command. (The old extra
+            # `and not _batch_skip_save` was the CSSSSC defect: guard2 skipped its save but its
+            # defer was forced off, so it did a full restore that consumed guard1's label, guard3's
+            # restore then no-op'd, and the batch ended with the caller KV unrestored — strictly
+            # WORSE than pre-fix.)
+            _batch_defer = _kv_defer_restore and not _safe_kv
+
             # Fix 4 — Defensive fallback: ensure execution lock exists before using it.
             # DEADLOCK FIX #2: Use RLock instead of Semaphore(1).
             # Note: This is a SEPARATE lock from sec_prompt_lock (_get_security_check_lock).
@@ -790,7 +834,7 @@ class SecurityAdvisorHandler:
                     log_prefix='SECURITY_SLOT_YIELD',
                     release_reason='before_security_check',
                     before_action='Security check',
-                    save_fn=engine.save_before_slot_yield,
+                    save_fn=_save_fn,  # None => this (non-first) guard reuses the batch's earlier save
                 )
 
                 # ── Engine execution loop with streaming ───────────────────
@@ -938,7 +982,7 @@ class SecurityAdvisorHandler:
             # eliminate it.
             if _yielded_slot and caller_inst_sec:
                 try:
-                    if self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent):
+                    if self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent, defer_kv_restore=_batch_defer):
                         # Success (slot re-acquired; a stop/dismiss is also returned True so the finally
                         # does NOT retry after a user stop): clear the flag so the finally does not repeat
                         # it. A repeat is itself safe via the sticky-keep fast path in reacquire_for
@@ -1022,7 +1066,7 @@ class SecurityAdvisorHandler:
             # therefore NOT dead code. Delegates to the same helper, so the raise position and the
             # _cleanup / release_claim ordering below are unchanged.
             if _yielded_slot and caller_inst_sec:
-                self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent)
+                self._reacquire_caller_slot(engine, caller_inst_sec, caller_agent, defer_kv_restore=_batch_defer)
 
             # ── Cleanup: always remove instance state and release tracking ──
             self._cleanup(sec_state_key, rid=rid)
@@ -1032,7 +1076,7 @@ class SecurityAdvisorHandler:
             # safe on every path — including fresh-spawn fallback where reuse_name is None.
             security_reuse.release_claim(reuse_name, rid)
 
-    def _reacquire_caller_slot(self, engine, caller_inst_sec, caller_agent) -> bool:
+    def _reacquire_caller_slot(self, engine, caller_inst_sec, caller_agent, defer_kv_restore: bool = False) -> bool:
         """Re-acquire the caller's slot after a Security yield and restore its saved KV.
 
         BUG_0155: shared by the early call site in ``_execute_check`` (run BEFORE the approval
@@ -1042,8 +1086,10 @@ class SecurityAdvisorHandler:
         consumed from ``_state_label`` inside ``reacquire_after_slot_yield`` ('after_security_check' is a
         log/context tag, NOT the state label) — so the existing safety-gate chain (toggle / pending-label
         / slot-ownership / safe-mode skip) is reused unchanged and the restore never clobbers a warm
-        cache ([[bug-0101-media-gen-restore-prefix-cache-verified-fixed]]). No new restore path, no
-        residency probe, no ``defer_kv_restore``.
+        cache ([[bug-0101-media-gen-restore-prefix-cache-verified-fixed]]). No new restore path, no residency
+        probe. ``defer_kv_restore`` is threaded through for the shell_cmd parallel-batch case (a non-last
+        guard re-acquires the slot but leaves the label pending for the last guard); it is NEVER passed
+        together with ``skip_kv_restore`` — the caller forces defer off whenever safe mode is set.
 
         Returns:
             The bool from ``reacquire_after_slot_yield`` (True = slot re-acquired; False = could not
@@ -1082,9 +1128,14 @@ class SecurityAdvisorHandler:
             # mid-command). _safe_mode_kv is set before execute_shell_command and cleared only in
             # the tool's finally AFTER this approval returns, so it is still True here. Every other
             # caller (plain security check) keeps the default False.
+            # defer_kv_restore is always False whenever skip_kv_restore is True here: the caller
+            # computes it as `kv_defer_restore and not safe_kv` (PLAN §3.2.5), so safe mode (the
+            # only thing that sets skip_kv_restore True) forces defer off. The two are opposite
+            # marker policies — skip CLEARS the label, defer PRESERVES it (slot_lifecycle.py:200-211).
             return engine.reacquire_after_slot_yield(
                 caller_inst_sec, caller_agent, 'after_security_check', tolerate_failure=False,
-                skip_kv_restore=bool(getattr(caller_inst_sec, '_safe_mode_kv', False)))
+                skip_kv_restore=bool(getattr(caller_inst_sec, '_safe_mode_kv', False)),
+                defer_kv_restore=defer_kv_restore)
         except SlotCancelled:
             # A stop/dismiss cancelled the reacquire. EXPECTED, not a failure. Do not let it
             # propagate — doing so made a successful APPROVED check report "Security check failed".

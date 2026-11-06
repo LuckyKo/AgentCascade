@@ -1154,6 +1154,8 @@ class ShellMixin:
         timeout: Optional[int] = None,
         execution_mode: str = 'sync',
         before_execute: Optional[Callable[[], None]] = None,
+        guard_is_first: bool = True,
+        guard_is_last: bool = True,
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
@@ -1221,6 +1223,12 @@ class ShellMixin:
                     'timeout': effective_timeout,
                 },
                 description=description,
+                # Batch guard hints → PendingApproval (read back by the advisor via
+                # _get_approval_kv_batch_hints). NOT the last guard → defer the restore; NOT the
+                # first guard → an earlier guard already saved → skip the save. Both default False
+                # on a single/non-batched guard so today's full save/restore is unchanged (plan §3.2.5).
+                kv_skip_save=not guard_is_first,
+                kv_defer_restore=not guard_is_last,
             )
 
             if not approved:

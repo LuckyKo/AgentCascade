@@ -499,6 +499,9 @@ def _make_minimal_pool():
     pool.operation_manager.extra_work_folders_rw = []
     pool.operation_manager.enable_timeout = True
     pool.operation_manager.approval_timeout_seconds = 180
+    # Bind the batch-hints accessor (production no longer swallows a non-tuple unpack on a
+    # MagicMock auto-child); (False, False) = full save + full restore, this harness's intent.
+    pool.operation_manager._get_approval_kv_batch_hints.return_value = (False, False)
     pool.instance_state = {}
     pool._execution = MagicMock()
     pool._execution._state_lock = threading.Lock()

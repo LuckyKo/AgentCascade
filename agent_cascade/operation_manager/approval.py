@@ -38,6 +38,15 @@ class PendingApproval:
     event: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
     outcome_reason: str = ''
+    # Batch guard hints (shell_cmd parallel-batch KV optimization). Set by request_user_approval from the
+    # dispatch loop's static batch flags; read by the security advisor via get_approval_kv_batch_hints.
+    # kv_skip_save: an EARLIER guard already saved this batch's KV, so THIS guard must not save again.
+    # kv_defer_restore: this is NOT the batch's last guard, so re-acquire the caller's slot but leave the
+    # _state_label PENDING (the last guard does the full restore). Opposite policy of skip_kv_restore,
+    # which CLEARS the label — see slot_lifecycle.py defer-vs-skip docstring. Defaults False keep every
+    # non-batch path (and the WebUI payload via list_pending_approvals, which never reads these) unchanged.
+    kv_skip_save: bool = False
+    kv_defer_restore: bool = False
 
 
 # ─── Constants (imported by api_server.py — must remain importable from package level) ──
@@ -109,9 +118,16 @@ class ApprovalMixin:
         tool_name: str,
         tool_args: Dict[str, Any],
         description: str = '',
+        kv_skip_save: bool = False,
+        kv_defer_restore: bool = False,
     ) -> Tuple[bool, str]:
         """
         Block the calling thread until the user approves or rejects.
+
+        kv_skip_save / kv_defer_restore carry the shell_cmd parallel-batch guard hints
+        (see PendingApproval); they are stored on the record and read back by the security
+        advisor via get_approval_kv_batch_hints. Both default False so every non-batch
+        caller (and list_pending_approvals' WebUI payload) is unchanged.
 
         Returns:
             (True, "") if approved
@@ -132,6 +148,8 @@ class ApprovalMixin:
             tool_args=tool_args,
             description=description,
             justification=str(just),
+            kv_skip_save=kv_skip_save,
+            kv_defer_restore=kv_defer_restore,
         )
 
         with self._lock:
@@ -258,3 +276,24 @@ class ApprovalMixin:
                 'justification': getattr(a, 'justification', ''),
                 'timestamp': a.timestamp,
             } for a in self.pending.values()]
+
+    def _get_approval_kv_batch_hints(self, request_id: str) -> Tuple[bool, bool]:
+        """Return ``(kv_skip_save, kv_defer_restore)`` for a pending approval record.
+
+        PRIVATE internal seam for the shell_cmd parallel-batch guard optimization: the
+        security advisor reads the batch hints stamped by request_user_approval without
+        these fields ever entering ``list_pending_approvals`` (the WebUI poll payload and
+        the advisor's own ``ap`` dict). Deliberately underscore-prefixed and kept out of
+        the public payload so a UI/transport change can never depend on them.
+
+        Returns ``(False, False)`` (full save + full restore — the conservative default)
+        when the record is absent or already popped, so a mis-prediction or a race that
+        resolves the approval before the advisor starts degrades to today's behavior,
+        never a wrong deferral.
+        """
+        with self._lock:
+            approval = self.pending.get(request_id)
+            if approval is None:
+                return False, False
+            return (bool(getattr(approval, 'kv_skip_save', False)),
+                    bool(getattr(approval, 'kv_defer_restore', False)))

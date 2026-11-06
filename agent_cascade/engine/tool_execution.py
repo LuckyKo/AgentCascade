@@ -61,7 +61,7 @@ class ToolExecMixin:
         # in-flight counter. _scan_tool_batch_indices uses the SAME _detect_tool the loop uses
         # so the detector cannot diverge from what actually runs. is_first/is_last flags are
         # threaded per-call (never shared instance state) so nested/parallel agents stay correct.
-        ca_indices, mg_indices = self._scan_tool_batch_indices(turn_output)
+        ca_indices, mg_indices, guard_indices = self._scan_tool_batch_indices(turn_output, inst_name)
 
         # Whether any call_agent actually ran in this batch — gates the safety net below so it never
         # fires for a batch that contained no call_agent (nothing was ever deferred).
@@ -75,6 +75,14 @@ class ToolExecMixin:
         # Media-gen counterparts (same polarity as the call_agent markers above).
         ran_mg = False
         reached_last_mg = False
+        # shell_cmd guard counterparts. ran_guard: a guard-needing shell_cmd actually ran
+        # (only such calls save/defer; an auto-approved shell_cmd never arms the label).
+        # reached_last_guard (control-flow marker, NOT a deferral flag): the loop reached and
+        # dispatched the batch's LAST guard. If it did, that guard performed the full restore
+        # (clearing the label), so the safety net must NOT fire. It fires only on an early exit
+        # (terminal-stop break / AgentTerminatedError raise) before the last guard.
+        ran_guard = False
+        reached_last_guard = False
 
         # The whole loop is wrapped in try/finally so the deferred restore is guaranteed to run on
         # EVERY exit path — including the terminal-stop break and the AgentTerminatedError raise, both
@@ -170,15 +178,30 @@ class ToolExecMixin:
                             if is_last_ca:
                                 reached_last_ca = True
                             is_first_vram = is_last_vram = True
+                            is_first_guard = is_last_guard = True
                         elif tool_name == 'media_gen':
                             ran_mg = True
                             is_first_vram, is_last_vram = self._batch_position(_out_idx, mg_indices)
                             if is_last_vram:
                                 reached_last_mg = True
                             is_first_ca = is_last_ca = True
+                            is_first_guard = is_last_guard = True
+                        elif tool_name == 'shell_cmd' and _out_idx in guard_indices:
+                            # Guard-needing shell_cmd: shares ONE KV save/restore with the batch.
+                            # Only the first guard arms the advisor save, only the LAST runs the full
+                            # restore; the middle guards defer (keep the label pending). A single guard
+                            # -> both True -> byte-identical to today. An auto-approved shell_cmd is NOT
+                            # in guard_indices and falls to the else branch (full save/restore default).
+                            ran_guard = True
+                            is_first_guard, is_last_guard = self._batch_position(_out_idx, guard_indices)
+                            if is_last_guard:
+                                reached_last_guard = True
+                            is_first_ca = is_last_ca = True
+                            is_first_vram = is_last_vram = True
                         else:
                             is_first_ca = is_last_ca = True
                             is_first_vram = is_last_vram = True
+                            is_first_guard = is_last_guard = True
                         tool_result = self.tool_dispatcher.execute_tool(instance,
                                                                         tool_name,
                                                                         tool_args,
@@ -187,7 +210,9 @@ class ToolExecMixin:
                                                                         is_first_ca=is_first_ca,
                                                                         is_last_ca=is_last_ca,
                                                                         is_first_vram=is_first_vram,
-                                                                        is_last_vram=is_last_vram)
+                                                                        is_last_vram=is_last_vram,
+                                                                        is_first_guard=is_first_guard,
+                                                                        is_last_guard=is_last_guard)
                     except AgentTerminatedError:
                         # Clean abort from a stop-check during tool execution. Record the termination
                         # in telemetry (success=False, error='terminated') so the finally's
@@ -284,13 +309,15 @@ class ToolExecMixin:
         finally:
             # Guarantee a still-pending deferred parent/KV restore is NOT lost when the batch
             # loop exits early (terminal-stop break / compression break / AgentTerminatedError raise),
-            # all of which bypass the orphan-handling block below. The call_agent net runs FIRST, then
-            # the media_gen net; both gate on their ran_*/reached_last_* markers plus a still-pending
-            # _state_label. Full gate rationale lives in _run_deferred_state_restore_safety_nets.
+            # all of which bypass the orphan-handling block below. The shell_cmd-guard net runs FIRST,
+            # then the call_agent net, then the media_gen net; each gates on its ran_*/reached_last_*
+            # markers plus a still-pending _state_label. Full gate rationale lives in
+            # _run_deferred_state_restore_safety_nets.
             self._run_deferred_state_restore_safety_nets(
                 instance, inst_name,
                 ran_ca=ran_ca, reached_last_ca=reached_last_ca,
-                ran_mg=ran_mg, reached_last_mg=reached_last_mg)
+                ran_mg=ran_mg, reached_last_mg=reached_last_mg,
+                ran_guard=ran_guard, reached_last_guard=reached_last_guard)
 
         # ── Handle orphaned tool calls from early break
         # ───────────────────────────────
@@ -430,19 +457,47 @@ class ToolExecMixin:
 
     def _run_deferred_state_restore_safety_nets(self, instance: AgentInstance, inst_name: str,
                                                ran_ca: bool, reached_last_ca: bool,
-                                               ran_mg: bool, reached_last_mg: bool) -> None:
+                                               ran_mg: bool, reached_last_mg: bool,
+                                               ran_guard: bool, reached_last_guard: bool) -> None:
         """Run the deferred state-restore safety nets for a tool batch.
 
         Called from the loop's ``finally`` (after the loop, before orphan handling) so a
-        still-pending deferred restore is NOT lost when the batch loop exits early. The
-        call_agent net runs FIRST, then the media_gen net (ordering matters: the call_agent
-        net clears the shared ``_state_label`` on success, so a mixed batch performs exactly
-        one restore).
+        still-pending deferred restore is NOT lost when the batch loop exits early. Nets run
+        in this order: the shell_cmd-guard net FIRST, then the call_agent net, then the media_gen
+        net (ordering matters: each net clears the shared ``_state_label`` on success, so a mixed
+        batch performs exactly one restore regardless of which of the three nets fire).
 
         Bare-instance safety: neither net calls ``reacquire_after_slot_yield`` /
         ``_restore_held_slot_state`` unless its ``ran_*`` marker is true, so a batch that
         contained no call_agent / media_gen never touches slot machinery.
         """
+        # shell_cmd guard safety net (mirrors the call_agent net below): a guard batch that saved on
+        # its first guard but exited BEFORE dispatching the LAST guard (terminal-stop break /
+        # AgentTerminatedError raise) would otherwise leak a pending _state_label and cold-reload the
+        # model on the next turn. GATE, all three required:
+        #   • ran_guard — a guard-needing shell_cmd actually ran (only those arm the label; an
+        #     auto-approved shell_cmd falls to the else branch and never saves here).
+        #   • not reached_last_guard — the loop exited BEFORE dispatching the batch's last guard, so
+        #     its full restore never ran. If it did, it cleared the label and this no-ops.
+        #   • a still-pending _state_label — the LOAD-BEARING gate: the last guard's full restore
+        #     clears the label on every success/skip path, so a completed batch never reaches a force
+        #     here. The flow marker above is belt-and-suspenders (the label gate is what actually
+        #     collapses the double-fire; see .agent_lessons/media-gen-vram-batch-net-flow-marker-
+        #     redundant-with-label-gate.md — same reasoning; a test cannot pin the flow marker).
+        # This net runs FIRST so, in a mixed batch, it consumes the shared label before the call_agent
+        # net below sees it (one restore total). tolerate_failure=True so a clean stop is not corrupted
+        # by a raise from finally; respect_toggle=False matches the call_agent net (the toggle branch
+        # would clear-and-skip, dropping a saved-but-never-restored state and forcing reprocess).
+        if ran_guard and not reached_last_guard:
+            guard_inst = self.pool.get_instance(inst_name) or instance
+            if guard_inst is not None and getattr(guard_inst, '_state_label', None) is not None:
+                logger.debug(
+                    f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last shell_cmd "
+                    f"guard; forcing the deferred advisor restore")
+                self.reacquire_after_slot_yield(
+                    guard_inst, inst_name, 'shell_cmd-guard safety net', tolerate_failure=True,
+                    respect_toggle=False)
+
         # Safety net (plan §10.4): guarantee a still-pending deferred parent restore is NOT LOST when the
         # batch loop exits BEFORE processing the last call_agent — the terminal-stop break, the
         # compression-wait break, and the AgentTerminatedError raise, all of which bypass the
@@ -586,32 +641,102 @@ class ToolExecMixin:
                     tool_result = str(tool_result) if tool_result is not None else ''
         return tool_result
 
-    def _scan_tool_batch_indices(self, turn_output: List[Message]) -> tuple[List[int], List[int]]:
-        """Return ``(ca_indices, mg_indices)`` — ordered indices of call_agent
-        and media_gen tool calls in ``turn_output``.
+    def _scan_tool_batch_indices(self, turn_output: List[Message],
+                                 inst_name: str) -> tuple[List[int], List[int], List[int]]:
+        """Return ``(ca_indices, mg_indices, guard_indices)`` — ordered indices of
+        call_agent, media_gen, and *guard-needing* shell_cmd tool calls in ``turn_output``.
 
         Static parallel-batch detection (single source of truth): ``turn_output`` is
         the complete, ordered tool-call list for this turn, already in memory, so the
         batch structure is known up-front — no runtime in-flight counter. Uses the
         SAME ``_detect_tool`` the execution loop uses so the detector cannot diverge
         from what actually runs. One ``_detect_tool`` call per element, in order.
+
+        ``guard_indices`` are the shell_cmd calls that WILL trigger the auto-security
+        advisor (and therefore the advisor's KV save/restore): a shell_cmd counts as
+        guard-needing iff the pool has ``auto_security`` on AND the command fails the
+        safety predicate. This is the SAME predicate ``shell_cmd._execute_safe`` uses to
+        decide whether to suppress its own safe-mode save (see shell_cmd.py:1280-1281), so
+        the scan cannot diverge from the tool's own view. Guards AFTER the first
+        ``compress_context`` in the batch are EXCLUDED (the run is rebuilt there, so their
+        save/restore can't share this batch's KV): they get the full-save/full-restore
+        default, the conservative (correct-but-unoptimized) choice. Any error while
+        classifying a shell_cmd is treated as NOT guard-needing — a wrongly-skipped deferral
+        is survivable (next-turn self-heal), a wrongly-forced deferral is not.
         """
         ca_indices = []
         mg_indices = []
+        guard_indices = []
+        # Truncate guard classification at the first compress_context: a compression rebuilds
+        # the run, so guards at/after that index run in a fresh KV state and must own their
+        # own save/restore. Tracked as a single bool set once, in order.
+        compress_seen = False
         for _idx, _out in enumerate(turn_output):
-            _use, _name, _, _ = self._detect_tool(_out)
-            if _use and _name == 'call_agent':
+            _use, _name, _args, _ = self._detect_tool(_out)
+            if not _use:
+                continue
+            if _name == 'call_agent':
                 ca_indices.append(_idx)
-            elif _use and _name == 'media_gen':
+            elif _name == 'media_gen':
                 mg_indices.append(_idx)
-        return ca_indices, mg_indices
+            elif _name == 'compress_context':
+                compress_seen = True
+            elif _name == 'shell_cmd':
+                if not compress_seen and self._shell_cmd_will_need_guard(_args, inst_name, inst_name):
+                    guard_indices.append(_idx)
+        return ca_indices, mg_indices, guard_indices
+
+    def _shell_cmd_will_need_guard(self, tool_args, agent_name: str, inst_name: str = None) -> bool:
+        """Whether a shell_cmd call will trigger the auto-security advisor's KV seam.
+
+        Mirrors ``shell_cmd._execute_safe``'s ``advisor_will_run`` predicate (shell_cmd.py
+        1280-1281): ``auto_security`` is on AND the command is NOT judged safe. Conservative
+        on any error (returns False → the tool does its own full save/restore, never a wrong
+        deferral). Evaluated once at scan time as the single source of truth for the batch;
+        the dispatch loop reads only the resulting indices via ``_batch_position``.
+
+        PLAN Finding 3: the runtime gate judges the PLACEHOLDER-RESOLVED command/cwd (the
+        dispatch loop resolves ``{...}`` refs before ``execute_shell_command``), so the scan
+        resolves them the SAME way before classifying. If resolution is unavailable it falls
+        back to the raw args (conservative and identical to the pre-finding behavior). The
+        resolved cwd is passed raw and let ``evaluate_shell_command_safety`` self-resolve it
+        (shell.py:1136-1142) — exactly what the runtime gate does — so no cwd-resolution path
+        is duplicated here.
+        """
+        try:
+            pool = self.pool
+            if not bool(getattr(pool, 'auto_security', True)):
+                return False
+            operation_manager = getattr(pool, 'operation_manager', None)
+            if operation_manager is None:
+                return False
+            args = tool_args if isinstance(tool_args, dict) else {}
+            # Resolve {placeholder} refs the same way _execute_tool does, so the scan and the
+            # runtime gate see the same command. Any failure keeps the raw args (conservative).
+            if inst_name is not None:
+                try:
+                    resolved = self._resolve_placeholders(tool_args, inst_name, 'shell_cmd')
+                    if isinstance(resolved, dict):
+                        args = resolved
+                except Exception:
+                    pass
+            command = args.get('command')
+            if not command:
+                return False
+            cwd = args.get('cwd', '.')
+            is_safe, _ = operation_manager.evaluate_shell_command_safety(command, cwd, agent_name)
+            return not bool(is_safe)
+        except Exception:
+            # Cannot classify — treat as NOT guard-needing so the tool keeps its own
+            # full save/restore (safe), rather than a deferral that might be wrong.
+            return False
 
     def _batch_position(self, out_idx: int, indices: List[int]) -> tuple[bool, bool]:
         """Return ``(is_first, is_last)`` for ``out_idx`` within a batch's index list.
 
-        Called only from inside the matching call_agent/media_gen branch, where ``indices``
-        is non-empty by construction of the scan (the current tool's own index was just
-        appended) — never call with an empty list (would raise IndexError).
+        Called only from inside the matching call_agent/media_gen/shell_cmd branch, where
+        ``indices`` is non-empty by construction (the current tool's own index is in the
+        list) — never call with an empty list (would raise IndexError).
         """
         return (out_idx == indices[0]), (out_idx == indices[-1])
 

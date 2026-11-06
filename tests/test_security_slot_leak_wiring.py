@@ -93,6 +93,9 @@ def wiring_harness(tmp_path, request):
     om.extra_work_folders_rw = []
     om.enable_timeout = True
     om.approval_timeout_seconds = 180
+    # Bind the batch-hints accessor (production no longer swallows a non-tuple unpack on a
+    # MagicMock auto-child); (False, False) = full save + full restore, this harness's intent.
+    om._get_approval_kv_batch_hints.return_value = (False, False)
     pool.operation_manager = om
 
     if getattr(pool, '_execution', None) is None:
