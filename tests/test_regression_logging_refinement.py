@@ -343,7 +343,8 @@ class TestReadFileWildReadHighWaterMark:
     def test_wild_read_single_long_line_hard_cut(self):
         """A single very long line (no newline before the cut point) is hard-cut."""
         with tempfile.TemporaryDirectory() as tmp:
-            out = self._read(Path(tmp), 'x' * 5000, is_wild_read=True, wild_truncation=1000, char_threshold=2500)
+            # read_char_trip=0 isolates the unbound-warning path (the new default trip would cut >3000 to 2k).
+            out = self._read(Path(tmp), 'x' * 5000, is_wild_read=True, wild_truncation=1000, char_threshold=2500, read_char_trip=0)
             assert '[TRUNCATION WARNING: Unbound read detected!]' in out
             # Content body should be bounded near the threshold (not 5000 chars).
             body = out.split('```')[1]
@@ -362,7 +363,9 @@ class TestReadFileWildReadHighWaterMark:
             lines = [f"line {i} " + 'p' * 35 for i in range(1, 200)]
             out = self._read(Path(tmp), '\n'.join(lines) + '\n', is_wild_read=False, wild_truncation=2000)
             assert 'TRUNCATION WARNING' not in out
-            # limit=150 on a 199-line file -> line-limit truncation marker.
+            # With the default read_file char trip (BUG_0246, 3000) this ~6750-char bounded read is cut by
+            # the char trip (not the line limit) — the point holds either way: an explicit limit always gets
+            # the plain [TRUNCATED] marker, NEVER the unbound-read wild warning.
             assert '[TRUNCATED]' in out
 
     def test_wild_read_between_cut_and_threshold_no_warning(self):
@@ -385,7 +388,8 @@ class TestReadFileWildReadHighWaterMark:
             content = '\n'.join(lines) + '\n'
             assert DEFAULT_WILD_READ_TRUNCATION_CHARS < len(content) < DEFAULT_TOOL_RESULT_MAX_CHARS
             # Default char_threshold (6000, BUG_0189): no explicit threshold passed.
-            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS)
+            # read_char_trip=0 isolates the pass-through path (the new default trip would cut this 2k-6k body to 2k).
+            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS, read_char_trip=0)
             assert 'Unbound read detected!' not in out
             assert '[TRUNCATED]' not in out
             # Full content returned intact (all lines present).
@@ -407,7 +411,8 @@ class TestReadFileWildReadHighWaterMark:
             content = '\n'.join(lines) + '\n'
             assert DEFAULT_TOOL_RESULT_MAX_CHARS < len(content) < 25000
             # Default char_threshold (6000, BUG_0189): no explicit threshold passed.
-            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS)
+            # read_char_trip=0 isolates the unbound-warning HWM path (the new default trip would win first, emitting [TRUNCATED]).
+            out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS, read_char_trip=0)
             assert '[TRUNCATION WARNING: Unbound read detected!]' in out
             # Content body cut near the low cut point (~2000), not the full ~8KB.
             body = out.split('```')[1]

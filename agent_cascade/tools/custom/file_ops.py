@@ -15,8 +15,9 @@ import requests
 from PIL import Image
 
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS,
-                                    DEFAULT_WILD_READ_TRUNCATION_CHARS, IMAGE_MAX_SHORT_SIDE)
+from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_CHARS, DEFAULT_READ_FILE_MAX_LINES,
+                                    DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
+                                    IMAGE_MAX_SHORT_SIDE)
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
@@ -212,14 +213,20 @@ class ReadFile(BaseTool, PathResolutionMixin):
         is_wild_read: bool = False,
         wild_truncation: int = 0,
         char_threshold: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+        read_char_trip: int = DEFAULT_READ_FILE_MAX_CHARS,
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
 
-        For wild reads (no explicit limit), if accumulated content exceeds the
-        high-water mark (`char_threshold`, default ``DEFAULT_TOOL_RESULT_MAX_CHARS``),
-        the output is truncated to the smaller cut point (`wild_truncation`) with an
-        unbound-read warning. The two values are distinct: `char_threshold` is the
-        trip threshold (when to warn), `wild_truncation` is where to cut.
+        Two independent char trips run in order, smallest cut first:
+        1. BUG_0246 read_file trip (`read_char_trip`, default ``DEFAULT_READ_FILE_MAX_CHARS``): if the
+           rendered body exceeds it (and `wild_truncation` provides a cut target), content is cut to the
+           line boundary below `wild_truncation` with a plain [TRUNCATED] marker. Runs for BOTH wild and
+           bounded reads and NEVER emits the unbound-read warning. Monotone-safe: the cut (<=2k) is never
+           larger than what a >6k read already gets from the outer 6k net. -1/0 disables.
+        2. Wild read high-water mark (`char_threshold` / `wild_truncation`): for unbound reads that still
+           exceed the trip threshold AFTER the read_file trip, an unbound-read warning is emitted. The two
+           values are distinct: `char_threshold` is when to warn, `wild_truncation` is where to cut.
+           Only reachable when the read_file trip is disabled (a >3000 read is already cut to <=2k above).
 
         Returns formatted content string ready for the user.
         """
@@ -265,10 +272,25 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         content = ''.join(lines_read)
 
-        # Wild read high-water mark: if an unbound read exceeded the trip threshold,
-        # truncate to that limit and flag it.
-        wild_truncated = False
         displayed_lines = len(lines_read)
+
+        # BUG_0246 read_file char trip — runs for BOTH wild and bounded reads, BEFORE the wild HWM so a
+        # >3000-char read is cut to the 2k window and can never be re-expanded by (or re-warned under) the
+        # outer 6k net. Cut at the line boundary below wild_truncation (same rule as the HWM below); flag a
+        # plain [TRUNCATED] (rendered in the footer). Disabled when read_char_trip <= 0 or no cut target.
+        read_char_truncated = False
+        if read_char_trip > 0 and wild_truncation > 0 and len(content) > read_char_trip:
+            cut_pos = content.rfind('\n', 0, wild_truncation)
+            if cut_pos > 0:
+                content = content[:cut_pos]  # exclude the newline -> whole lines only
+            else:
+                content = content[:wild_truncation] + ' ...\n'  # single very long line: hard-cut
+            read_char_truncated = True
+            displayed_lines = max(1, content.count('\n') + (0 if content.endswith('\n') else 1))
+
+        # Wild read high-water mark: only reachable when the read_file trip is disabled (a >3000 read is
+        # already cut to <=2k above), so this block now serves the unbound-read WARNING path.
+        wild_truncated = False
         if (is_wild_read and wild_truncation > 0 and char_threshold > 0 and len(content) > char_threshold):
             # Cut at the line boundary closest to (and below) the threshold.
             cut_pos = content.rfind('\n', 0, wild_truncation)
@@ -318,7 +340,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                              f"{wild_truncation} chars. "
                              f"Use start_line/limit for targeted reads."
                              f"\n→ continue at start_line={actual_end + 1}")
-        elif hit_line_limit:
+        elif hit_line_limit or read_char_truncated:
             header += ' [TRUNCATED]'
             # m2: Compact pagination footer
             truncated_msg = f"\n→ continue at start_line={actual_end + 1}"
@@ -433,10 +455,13 @@ class ReadFile(BaseTool, PathResolutionMixin):
         #   - wild_truncation (cut point): wild_read_truncation_chars (~2k).
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         char_threshold = DEFAULT_TOOL_RESULT_MAX_CHARS
+        # BUG_0246: read_file-specific char trip (env + per-pool llm_cfg override). -1/0 disables.
+        read_char_trip = DEFAULT_READ_FILE_MAX_CHARS
         if self.agent_pool is not None:
             _cfg = getattr(self.agent_pool, 'llm_cfg', {}) or {}
             wild_truncation = _cfg.get('wild_read_truncation_chars', wild_truncation)
             char_threshold = _cfg.get('tool_result_max_chars', char_threshold)
+            read_char_trip = _cfg.get('read_file_max_chars', read_char_trip)
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
         limit, is_wild_read = self._determine_limits(limit)
@@ -479,6 +504,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 is_wild_read=is_wild_read,
                 wild_truncation=wild_truncation,
                 char_threshold=char_threshold,
+                read_char_trip=read_char_trip,
             )
 
         except ValueError as e:

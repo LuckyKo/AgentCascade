@@ -38,8 +38,12 @@ def big_file():
     Module-scoped: written ONCE (the per-test write was racy under xdist — a worker's
     unlink could delete another worker's fixture mid-read). Left in place after the
     module; it is a tiny, name-unique scratch file inside DEFAULT_WORKSPACE.
+
+    Padding is sized so a 44-line window stays UNDER the BUG_0246 read_file char trip
+    (DEFAULT_READ_FILE_MAX_CHARS=3000): these tests validate start_line/limit windowing,
+    not the char budget, and must not be truncated by the unrelated new lever.
     """
-    lines = [f"LINE_{i:05d} " + 'x' * 60 for i in range(1, 4052)]
+    lines = [f"LINE_{i:05d} " + 'x' * 45 for i in range(1, 4052)]
     return _ws_file('bug22_big.py', '\n'.join(lines) + '\n')
 
 

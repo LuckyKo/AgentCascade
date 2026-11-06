@@ -171,7 +171,15 @@ DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_TOOL_RESULT_MA
 # (tool_result_max_chars) is exceeded. Content beyond this small window is probably useless,
 # so we hand the agent just enough to see what's there rather than a huge block of it.
 DEFAULT_WILD_READ_TRUNCATION_CHARS: int = int(os.getenv('AGENT_CASCADE_WILD_READ_TRUNCATION_CHARS', 2000))
-DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LINES', 150))
+DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LINES', 120))  # BUG_0246: 150 -> 120 (hardening)
+# BUG_0246: read_file-specific char trip, LOWER than the 6k outer net (tool_result_max_chars). The outer
+# net only trims the 2k-6k pass-through band for content >6000 (bounded or wild), so a read whose raw body
+# sits in 2k-6k was returned FULL — read_file is 26.9% of per-call input, and the median body is ~2.8k. This
+# read_file-only trip catches that band, cutting to the 2k wild window with a plain [TRUNCATED] marker (NOT
+# the unbound-read warning) for BOTH wild and bounded reads. Monotone-safe: the cut (<=2k) never exceeds what
+# a >6k read already gets from the outer net. median (~2.8k) stays intact; ~23.5% of reads (>3000) are cut.
+# Env-only (no UI key, unlike the 6k lever). -1/0 DISABLES (revert to the 6k outer-net only).
+DEFAULT_READ_FILE_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_CHARS', 3000))
 # Wall-clock ceiling (seconds) for a single grep search before it aborts with a
 # "narrow your search" error. Kept low so a pathological wide search can't hang the
 # agent for tens of seconds; ripgrep searches normally finish well under this.
