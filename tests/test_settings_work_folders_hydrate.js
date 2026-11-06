@@ -145,6 +145,17 @@ test('POOL_SETTINGS_MAP wires both work-folder keys (source-level)', () => {
     "auto_continue missing from POOL_SETTINGS_MAP (hydration seam)");
   assert.ok(MAP_SRC.includes("key: 'max_images_for_llm'"),
     "max_images_for_llm missing from POOL_SETTINGS_MAP (hydration seam)");
+  // Same family again: the idle-timeout pair. Server-backed, broadcast in the pool_settings
+  // snapshot, but absent from the map — so the inputs kept the HTML default 900 on refresh
+  // and the next saveSettings() overwrote the persisted value with the stale DOM read.
+  assert.ok(MAP_SRC.includes("key: 'idle_timeout_seconds'"),
+    "idle_timeout_seconds missing from POOL_SETTINGS_MAP (hydration seam)");
+  assert.ok(MAP_SRC.includes("key: 'system_agent_idle_timeout_seconds'"),
+    "system_agent_idle_timeout_seconds missing from POOL_SETTINGS_MAP (hydration seam)");
+  assert.ok(MAP_SRC.includes("#setting-idle-timeout"),
+    "#setting-idle-timeout DOM id missing from POOL_SETTINGS_MAP");
+  assert.ok(MAP_SRC.includes("#setting-system-idle-timeout"),
+    "#setting-system-idle-timeout DOM id missing from POOL_SETTINGS_MAP");
 });
 
 test('syncPoolSettings hydrates the scalar pool keys (max_parallel_agents / auto_continue / max_images_for_llm)', () => {
@@ -310,4 +321,25 @@ test('settings-applied (import_settings) broadcast updates work-folder controls 
     'syncPoolSettings(pendingSettings) re-stomped the imported RW folders (stale baseline)');
   assert.equal(dom.elements['#workAccessFoldersRO'].value, '/mnt/ro',
     'syncPoolSettings(pendingSettings) re-stomped the imported RO folders (stale baseline)');
+});
+
+test('syncPoolSettings hydrates the idle-timeout inputs from the server snapshot', () => {
+  // The fix under test: the idle-timeout pair is now in POOL_SETTINGS_MAP. Without it the
+  // inputs kept the HTML default 900 and the next saveSettings() overwrote the persisted
+  // server value, so hydration must yield the snapshot values — NOT the 900 placeholder.
+  const dom = makeDom(['#setting-idle-timeout', '#setting-system-idle-timeout']);
+  const ctx = buildSandbox(dom);
+
+  // Pre-seed with the stale HTML default to prove hydration overwrites it.
+  dom.elements['#setting-idle-timeout'].value = '900';
+  dom.elements['#setting-system-idle-timeout'].value = '900';
+
+  const snapshot = { idle_timeout_seconds: 1600, system_agent_idle_timeout_seconds: 1200 };
+  ctx.snapshot = snapshot;
+  vm.runInContext('syncPoolSettings(snapshot)', ctx);
+
+  assert.equal(String(dom.elements['#setting-idle-timeout'].value), '1600',
+    'idle_timeout_seconds was not hydrated from the snapshot (kept stale HTML default)');
+  assert.equal(String(dom.elements['#setting-system-idle-timeout'].value), '1200',
+    'system_agent_idle_timeout_seconds was not hydrated from the snapshot (kept stale HTML default)');
 });

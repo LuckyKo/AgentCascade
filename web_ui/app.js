@@ -263,6 +263,11 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-max-parallel', prop: 'value', key: 'max_parallel_agents' },
   { id: '#setting-auto-continue', prop: 'checked', key: 'auto_continue' },
   { id: '#setting-max-images-for-llm', prop: 'value', key: 'max_images_for_llm' },
+  // Same hydration-gap family: the idle-timeout pair is server-backed (persisted to
+  // pool_settings.json) but was absent from this map, so the inputs kept the HTML
+  // default 900 after refresh and the next saveSettings() stomped the persisted value.
+  { id: '#setting-idle-timeout', prop: 'value', key: 'idle_timeout_seconds' },
+  { id: '#setting-system-idle-timeout', prop: 'value', key: 'system_agent_idle_timeout_seconds' },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
@@ -1342,8 +1347,6 @@ function saveSettings(sendToServer) {
   if ($('#setting-skill-score-nmin')) s['skill_score_nmin'] = $('#setting-skill-score-nmin').value;
   if ($('#setting-skill-fair-window-turns')) s['skill_fair_window_turns'] = $('#setting-skill-fair-window-turns').value;
   if ($('#setting-skill-max-evictions-per-pass')) s['skill_max_evictions_per_pass'] = $('#setting-skill-max-evictions-per-pass').value;
-  if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
-  if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
   // AFK is server-backed now — the server state (pool_settings afk_enabled/afk_message) is the
   // single source of truth; localStorage no longer holds afk-enabled/afk-message.
