@@ -552,8 +552,14 @@ STREAM_FORCE_FULL_INTERVAL: float = _parse_stream_force_full_interval()
 DISMISS_THREAD_JOIN_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_DISMISS_THREAD_JOIN_TIMEOUT', 2.0))
 
 # HTTP client timeouts (passed to httpx)
+# read is a per-chunk idle backstop. It is silent on BOTH holder-DMS timestamps, so it must sit
+# well under HOLDER_DMS_WINDOW_S (300s) â€” at 300s a wedged non-streaming read parked a conc=0 holder
+# exactly AT the kill edge with zero margin. Lowered 300s -> 120s (BUG_0244 Â§6.2) to restore the
+# documented "every tool bound under the window" invariant and match the house longest tool bound
+# (CODE_EXECUTION_TIMEOUT=120 â†’ 2.5x margin). Streaming is unaffected: the 180s stream-silence
+# watchdog (utils/streaming.py) is authoritative and fires first. Env-overridable as usual.
 HTTP_READ_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_READ_TIMEOUT',
-                                           300.0))  # Timeout for reading a single chunk from server
+                                           120.0))  # Idle read backstop; strictly under HOLDER_DMS_WINDOW_S (BUG_0244)
 HTTP_CONNECT_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_CONNECT_TIMEOUT',
                                               10.0))  # Timeout for establishing TCP connection
 HTTP_WRITE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_WRITE_TIMEOUT',
