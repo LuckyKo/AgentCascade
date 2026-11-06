@@ -1692,10 +1692,21 @@ class GrepMixin:
             # fall back to `count` (only ever read on a non-truncated or zero-match legacy
             # result, where the two are equal by construction).
             _total_matches = _sub_extra[1] if len(_sub_extra) > 1 else count
-            if was_timed_out and results:
+            if was_timed_out and (results or _sub_spill_rel):
                 # BUG_0236: the killed rg process still produced matches on stdout. Keep them
                 # (rendered with a partial-coverage note below) instead of discarding the work
                 # and spending another full timeout in the Python fallback.
+                # BUG_0243: `or _sub_spill_rel` — when EVERY match spills to the spillover file,
+                # `_finish` returns `results == []` (falsy) but a known partial count
+                # (`_total_matches > 0`) and a written spillover artifact. Those are evidence, not
+                # "inconclusive", so this timeout must route to the same render path as a
+                # partially-shown timeout (the `else:` branch under `if results is not None:`
+                # emits Found N + INCOMPLETE; its `_sub_shown_lines == 0 and _sub_spill_rel`
+                # guard emits the spillover headline) instead of falling through to the
+                # `elif was_timed_out` "too broad" ERROR below, which discards a count we already
+                # know. A genuinely-empty timeout keeps `results is None` AND
+                # `_sub_spill_rel is None`, so the gate stays falsy and the ERROR/fallback
+                # behavior is preserved (the BUG_0243 discriminator).
                 logger.warning(
                     'grep subprocess timed out after %ss but yielded %s partial match(es); '
                     'returning partial results', int(timeout), count)

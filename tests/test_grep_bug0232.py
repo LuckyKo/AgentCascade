@@ -114,8 +114,11 @@ def test_timeout_partial_header_is_partial_count_not_zero(tmp_path):
     """A killed rg with inline partials shows the (lower-bound) match count + INCOMPLETE, never 0.
 
     Deliberately sized so SOME lines fit (results non-empty): a timeout whose every line
-    spills would hit the separate BUG_0169/0185 ``elif was_timed_out`` inconclusive branch
-    ("too broad") and never reach the header — that path is out of BUG_0232's scope.
+    spilled was, pre-BUG_0243, a distinct case that fell through to the ``elif was_timed_out``
+    "too broad" ERROR and never reached the header. BUG_0243 fixed that (now routed to the same
+    header via ``_sub_spill_rel`` — see
+    test_timeout_all_spilled_reports_partial_count_not_too_broad). This test pins the
+    PARTIAL-inline shape and its assertions must not be weakened.
     """
     om = _make_om(tmp_path)
     # 7 matches ~100 chars each; char_limit=360 ⇒ ~3 fit inline, 7 total partial matches.
@@ -130,6 +133,27 @@ def test_timeout_partial_header_is_partial_count_not_zero(tmp_path):
     assert out.startswith('Found 7 matches'), out
     assert 'search INCOMPLETE' in out, out
     assert 'showing 3 of 7 lines' in out, out
+    assert 'Found 0' not in out, out
+
+
+def test_timeout_all_spilled_reports_partial_count_not_too_broad(tmp_path):
+    """BUG_0243: a killed rg whose every match spills must report the partial count
+    with the search-INCOMPLETE marker + spillover headline, never the "too broad" ERROR."""
+    om = _make_om(tmp_path)
+
+    def fake_timeout(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 5.0, output=_HUGE_EVENTS)
+
+    with _force_fast_path(), patch('subprocess.run', side_effect=fake_timeout):
+        out = om.grep('x', '.', char_limit=200, timeout=5.0)
+
+    assert out.startswith('Found 7 matches'), out           # partial count, not 0
+    assert 'too broad' not in out, out                      # THE discriminating assertion
+    assert 'search INCOMPLETE' in out, out                  # lower-bound semantics
+    assert 'TIMED OUT after 5s' in out, out
+    assert 'showing 0 of 7 lines' in out, out               # all spilled (inline shows none)
+    assert 'Full output saved to:' in out, out              # BUG_0232 spillover notice
+    assert 'were larger than the inline budget' in out, out  # BUG_0232 all-spilled headline
     assert 'Found 0' not in out, out
 
 
