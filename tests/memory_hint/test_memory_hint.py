@@ -30,6 +30,7 @@ from agent_cascade.memory_hint import (
     SKILL_FLOOR_MIN,
     SKILL_FLOOR_SEED,
     SKILL_HINT_MAX_ENTRIES,
+    SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
     SKILL_HINT_NOISE_RATIO,
     SKILL_JUNK_MIN,
     SKILL_REF_TOKENS,
@@ -997,7 +998,10 @@ class TestManagerSkillHints:
         now = time.monotonic()
         with inst._compression_lock:
             # One long-expired (prunable) and one fresh (must survive) entry.
-            inst._recently_skill_hinted['stale-skill'] = now - 601.0   # > 600s cooldown
+            # Skill entries use SKILL_HINT_ENTRY_COOLDOWN_SECONDS (BUG_0233), which is
+            # deliberately longer than the memory cooldown.
+            inst._recently_skill_hinted['stale-skill'] = (
+                now - (SKILL_HINT_ENTRY_COOLDOWN_SECONDS + 1.0))
             inst._recently_skill_hinted['fresh-skill'] = now - 1.0
         mgr._process_job(job)
         assert 'stale-skill' not in inst._recently_skill_hinted, 'expired entry must be pruned'

@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from agent_cascade.log import logger
-from agent_cascade.settings import SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL
+from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL,
+                                    SKILL_HINT_ENTRY_COOLDOWN_SECONDS)
 
 from .matcher import MemoryMatcher
 from .skill_gate import describe_dropped, filter_stopword_only_names
@@ -136,9 +137,13 @@ SKILL_HINT_NOISE_RATIO = 0.6
 # SKILL_JUNK_MIN: ABSOLUTE, non-adaptive guard on top1. The adaptive floor can decay
 # toward the junk band (matcher.match() returns up to 10 results for any query sharing
 # ≥2 in-vocab terms — _MIN_MATCHED_TERMS = 2), and cooldown is per-skill-name, so a
-# rotating junk suggestion set is fully compatible with a 0.035 floor + 600 s cooldown.
-# This one comparison bounds the worst case regardless of EWMA state.
+# rotating junk suggestion set is fully compatible with a 0.035 floor + a finite
+# entry cooldown. This one comparison bounds the worst case regardless of EWMA state.
 SKILL_JUNK_MIN = 0.0375   # pinned literal; was derived from SKILL_HINT_MIN_SCORE * 0.25
+# SKILL_HINT_ENTRY_COOLDOWN_SECONDS (BUG_0233) lives in agent_cascade.settings — it is a
+# user-tunable knob (AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS), applied here as
+# max(memory_hint_cooldown_seconds, that) so a low memory-re-read cooldown can never
+# turn skill suggestions into per-turn spam.
 
 
 def _ordinal(n: int) -> str:
@@ -677,13 +682,14 @@ class MemoryHintManager:
 
         Returns the skill names to suggest (score-descending, capped), or ``[]``. The
         gate is a self-calibrating **absolute junk guard + adaptive floor** (BUG_0041),
-        then the unchanged cooldown/loaded dedup, then a **relative noise gate**
-        evaluated on the post-dedup survivors, then a **content gate** that drops
-        candidates carried only by function/boilerplate words (BUG_0226), then the
-        entry cap. There is *no* specificity-gap requirement — multiple relevant
-        skills are legitimate. All floor state is independent of the memory pipeline
-        (different measure, different lock). A failure here can never break the
-        memory path (plan §D6).
+        then cooldown/loaded dedup (the cooldown is ``max(memory cooldown,
+        SKILL_HINT_ENTRY_COOLDOWN_SECONDS)`` so skill repeats are never per-turn —
+        BUG_0233), then a **relative noise gate** evaluated on the post-dedup survivors,
+        then a **content gate** that drops candidates carried only by function/boilerplate
+        words (BUG_0226), then the entry cap. There is *no* specificity-gap requirement —
+        multiple relevant skills are legitimate. All floor state is independent of the
+        memory pipeline (different measure, different lock). A failure here can never
+        break the memory path (plan §D6).
         """
         name = job['instance_name']
         if not settings['skill_suggestions']:          # master sub-toggle (plan §D7)
@@ -749,7 +755,12 @@ class MemoryHintManager:
         if not strong:
             return []
 
-        now = time.monotonic(); cooldown = settings['cooldown_seconds']      # reuse memory cooldown (§D4)
+        now = time.monotonic()
+        # BUG_0233: skill entries have their own repeat floor. The memory cooldown is a
+        # re-read knob that can be set very low (5 s in the reporting session); using it
+        # alone let one skill re-appear on nearly every turn. max() keeps a user's LONGER
+        # cooldown authoritative.
+        cooldown = max(settings['cooldown_seconds'], SKILL_HINT_ENTRY_COOLDOWN_SECONDS)
         to_hint, skipped_loaded, skipped_cd = [], [], []
         with inst._compression_lock:
             # Read _loaded_skill_names UNDER the lock: the engine main loop writes it cross-thread

@@ -186,6 +186,14 @@ GREP_LARGE_FILE_HEAD_KB: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_HEAD
 GREP_LARGE_FILE_SCAN_LIMIT: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_LIMIT', 50))
 GREP_LARGE_FILE_SCAN_BUDGET_S: float = float(
     os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_BUDGET_S', 0.75))
+# BUG_0236: one matched line is not necessarily one line of text — a JSONL record (or any
+# minified log) can be 5-500 KB on a single line. The char budget is applied to rendered
+# entries, so without a per-line cap a handful of JSONL matches consume the whole budget and
+# dump megabytes into the spillover file. Each rendered content column is abbreviated to
+# this many characters (0 disables the cap); the omitted length is disclosed on the line so
+# the agent can re-target with read_logs/read_file. Kept generous enough that ordinary code
+# lines are byte-identical to before.
+GREP_MAX_LINE_CHARS: int = int(os.getenv('AGENT_CASCADE_GREP_MAX_LINE_CHARS', 500))
 
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_HEURISTIC_MATCH_THRESHOLD', 0.90))
 # Wall-clock ceiling (seconds) for the CPU-bound document-parse step in web_extractor /
@@ -701,6 +709,15 @@ SKILL_SELECTOR_MODE_API: str = 'api'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
                                                 '0.15'))  # Minimum relevance score for AUTO mode skill loading
 MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skills per call (self-augmentation excluded)
+# SKILL_HINT_ENTRY_COOLDOWN_SECONDS (BUG_0233): minimum interval before the SAME skill may be
+# hinted again. ``memory_hint_cooldown_seconds`` is a MEMORY-re-read knob and a user may
+# legitimately set it very low (the reporting session had 5 s); reusing it for skills let one
+# skill that sits just above the adaptive floor re-appear on nearly every turn. Skill entries
+# therefore get their own floor, applied as max(memory_hint_cooldown_seconds, this) — a low
+# memory cooldown can never turn skill suggestions into per-turn spam (nor can a high one
+# shorten this guard).
+SKILL_HINT_ENTRY_COOLDOWN_SECONDS: float = float(
+    os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 1800.0))
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

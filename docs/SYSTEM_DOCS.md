@@ -1235,7 +1235,7 @@ The skill sub-pipeline uses a **three-gate adaptive system** (BUG_0041 fix) over
 
 - **Cap:** `SKILL_HINT_MAX_ENTRIES` = `settings.MAX_AUTO_SKILLS_PER_CALL` (3), applied after dedup/cooldown in score-descending order.
 - **Dedup:** skips skills already in the instance's `_loaded_skill_names` (read under `_compression_lock`).
-- **Cooldown:** per-instance `_recently_skill_hinted` map, reusing `memory_hint_cooldown_seconds`.
+- **Cooldown:** per-instance `_recently_skill_hinted` map, applied with `max(memory_hint_cooldown_seconds, SKILL_HINT_ENTRY_COOLDOWN_SECONDS)` where `SKILL_HINT_ENTRY_COOLDOWN_SECONDS` = 1800 (30 min). The dedicated floor prevents a low memory-re-read cooldown (the BUG_0233 session had 5 s) from turning skill suggestions into per-turn spam; a longer memory cooldown still applies.
 
 > **Note:** `SKILL_HINT_MIN_SCORE` (= 0.15) is retained as a nominal AUTO-mode score for backwards compatibility and as the junk-guard reference (`SKILL_JUNK_MIN = SKILL_HINT_MIN_SCORE × 0.25`). It is **not** the hint gate anymore.
 
@@ -1292,7 +1292,7 @@ Each vault keeps an mtime map so `rescan()` rebuilds only changed files and drop
 | `memory_hint_threshold` | `0.0` | Optional floor override — can only RAISE the adaptive floor (make hints rarer). `0` = pure adaptive behavior. |
 | `memory_hint_max_entries` | `3` | Max memory entries listed per hint. |
 | `memory_hint_query_chars` | `1000` | How many leading chars of a turn's text/reasoning form the query. |
-| `memory_hint_cooldown_seconds` | `600` | Cooldown before the same memory/skill may be re-hinted to an instance. |
+| `memory_hint_cooldown_seconds` | `600` | Cooldown before the same memory may be re-hinted to an instance. Skill entries additionally enforce `SKILL_HINT_ENTRY_COOLDOWN_SECONDS` (1800 = 30 min) so a low memory cooldown cannot make skill hints repeat per-turn (BUG_0233). |
 | `memory_hint_skill_suggestions` | `True` | Sub-toggle under `memory_hint_enabled`: independently enable/disable skill suggestions within hints. (Config-only in v1; no dedicated UI checkbox.) |
 | `memory_hint_skill_threshold` | `0.0` | Raise-only override floor for the skill sub-pipeline (BUG_0041). Clamped to [0, 1.0]. `0` = pure adaptive behavior. Deliberately separate from `memory_hint_threshold` (different score measure). |
 

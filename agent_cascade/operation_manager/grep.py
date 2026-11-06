@@ -74,12 +74,67 @@ _GREP_MATCH_MARKER = '>>>'
 # with a match), making it self-explanatory. It never appears on clean greps (no marker ⇒ none).
 _GREP_MARKER_LEGEND = "# note: '>>>' marks matched lines in context mode (unmarked lines are surrounding context)"
 
+# BUG_0236: suffix appended to a rendered content column that exceeded GREP_MAX_LINE_CHARS.
+# The omitted char count is the RAW line length remaining, so the reader can tell a 500-char
+# code line from a 25 KB JSONL record and re-target with read_logs/read_file. The literal is
+# also the detection key for the aggregate summary note, so keep it in exactly one place.
+_GREP_LINE_ABBREVIATED_MARK = ' [\u2026 line abbreviated: +'
+_GREP_LINE_ABBREVIATED_SUFFIX = ' chars]'
+
+
+def _grep_max_line_chars() -> int:
+    """Return the per-line render cap for grep (BUG_0236), or 0 when disabled.
+
+    Read lazily from :mod:`agent_cascade.settings` so tests can patch the constant and so
+    callers that never grep pay nothing. Falls back to the documented default when the
+    settings module cannot be imported (e.g. an isolated unit-test harness).
+    """
+    try:
+        from agent_cascade.settings import GREP_MAX_LINE_CHARS
+        return int(GREP_MAX_LINE_CHARS)
+    except Exception:  # noqa: BLE001 - a settings import hiccup must not break grep
+        return 500
+
+
+def _abbreviate_grep_line(content: str, max_chars: Optional[int] = None) -> str:
+    """Abbreviate one content column to the per-line cap, disclosing the raw remainder.
+
+    BUG_0236: the truncation budget is measured on rendered entries. A single-line JSONL
+    document (or a minified log record) can be hundreds of KB, so a handful of matches used
+    to consume the whole budget and force a multi-MB spillover. Capping here — the one
+    renderer every grep path goes through — bounds both the visible body and the spillover.
+    Lines at or under the cap are returned unchanged (byte-identical output).
+    """
+    if max_chars is None:
+        max_chars = _grep_max_line_chars()
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    omitted = len(content) - max_chars
+    return content[:max_chars] + _GREP_LINE_ABBREVIATED_MARK + f'{omitted}{_GREP_LINE_ABBREVIATED_SUFFIX}'
+
+
+def _abbreviated_line_note(rendered_lines) -> str:
+    """BUG_0236: aggregate note when any rendered line hit the per-line cap.
+
+    One JSONL record per line defeats line-count-based size reporting ("1701 lines" can be
+    one document), so name the real situation and point at the tools that page by range.
+    Returns ``''`` when nothing was abbreviated (clean output stays byte-identical).
+    """
+    n = sum(1 for entry in rendered_lines if _GREP_LINE_ABBREVIATED_MARK in entry)
+    if not n:
+        return ''
+    return (f" [note: {n} rendered line(s) exceeded {_grep_max_line_chars()} chars and were "
+            f"abbreviated — single-line JSONL/log records can each be a whole document; use "
+            f"count_only=true for counts, or read_logs/read_file with a range/offset to "
+            f"inspect one record]")
+
 
 def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str = '') -> str:
     """Render one grep result line as ``<path>:<line>: [<marker>]<content>``.
 
-    BUG_0144: the content column is the RAW file text. It is never indented, padded, or
-    otherwise re-wrapped. Context lines used to be rendered with a 5-space indent
+    BUG_0144: the content column is the RAW file text. It is never indented or padded.
+    (BUG_0236 abbreviates only lines that exceed GREP_MAX_LINE_CHARS, with a visible suffix.)
+    Context lines used to be rendered with a 5-space indent
     (4 prefix spaces + the separator space) to set them apart from matched lines. That
     indent is invisible whitespace, so anyone transcribing a multi-line block out of grep
     output into ``edit_file`` (``match_mode="exact"``) silently injected leading spaces
@@ -90,7 +145,12 @@ def _format_grep_entry(rel_path: str, line_num: int, content: str, marker: str =
 
     Every render path (rg --json, Python fallback, single-file) MUST go through
     here so their byte-level output cannot drift apart.
+
+    BUG_0236: the content column is abbreviated to ``GREP_MAX_LINE_CHARS`` by
+    :func:`_abbreviate_grep_line`, so a single-line JSONL record cannot consume the
+    whole output budget. Short lines are unchanged.
     """
+    content = _abbreviate_grep_line(content)
     return f"{rel_path}:{line_num}: {marker}{content}"
 
 
@@ -879,8 +939,9 @@ class GrepMixin:
         """Fast-path grep using ripgrep via subprocess (the only supported engine).
 
         Returns (results_list, count, was_timed_out, was_truncated, original_output_size,
-                 spillover_rel_path, total_lines_before, shown_lines_after) on success, or
-        (None, 0, False, False, 0, None, 0, 0) on failure.
+                 spillover_rel_path, total_lines_before, shown_lines_after, abbreviation_note)
+        on success, or an 8-tuple starting with None on failure (the optional 9th element is
+        tolerated by :meth:`grep` so legacy callers/tests keep working).
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         import subprocess
@@ -912,22 +973,9 @@ class GrepMixin:
                                       force_no_ignore=is_vcs_search,
                                       exclude_git=not is_vcs_search,
                                       literal=literal)
-            result = subprocess.run(cmd,
-                                    cwd=str(path),
-                                    capture_output=True,
-                                    text=True,
-                                    encoding='utf-8',
-                                    errors='replace',
-                                    # BUG_0063: rg is invoked with `cwd=` and NO path operand, so
-                                    # whenever stdin is not a TTY (CI runners, piped shells, any
-                                    # captured-stdin parent) it falls back to reading stdin and blocks
-                                    # forever — surfacing as a spurious "Search timed out". DEVNULL
-                                    # guarantees rg never consumes the parent's stdin.
-                                    stdin=subprocess.DEVNULL,
-                                    timeout=timeout)
-
-            # Parse ripgrep's --json stdout into (formatted, match_count). Shared by the rc==0
-            # and rc==2 paths so a partial-error search never discards matches that were found.
+            # Parse ripgrep's --json stdout into (formatted, match_count). Shared by the
+            # rc==0/rc==2 paths AND the timeout path (BUG_0236: a killed rg still leaves
+            # partial events on stdout) so a partial search never discards matches found.
             def _parse_rg_json(stdout_text):
                 # BUG_0190: match-event field extraction goes through the shared
                 # _rg_match_fields so the line-mode parser and the count path share one
@@ -970,34 +1018,17 @@ class GrepMixin:
 
                 return formatted, match_count
 
-            # rc==0 (matches found) and rc==2 (matches found but some files errored) both carry
-            # valid match data on stdout — parse and surface them through the SAME truncation path
-            # below so a partial-error search can never produce unbounded output. A genuine usage
-            # error (rc=2 with no parseable matches) is detected inside this block and falls back
-            # to Python before reaching the truncation code.
-            _rg_partial_error = False
-            if result.returncode == 0 or result.returncode == 2:
-                formatted = []
-                formatted, count = _parse_rg_json(result.stdout)
-                # rc==2 with NO parseable matches is a genuine error (e.g. invalid regex or an
-                # unrecognized flag), NOT "matches found but some files skipped". Fall back to
-                # Python so the real error surfaces (Python raises re.error for bad patterns).
-                if result.returncode == 2 and count == 0:
-                    stderr_msg = (result.stderr or '').strip()[:500]
-                    # BUG_0169: when --max-filesize filtered out EVERY candidate, rg exits 2
-                    # with "No files were searched" — that is a normal empty result, not a
-                    # usage error. Reporting it as one made grep() fall back to the Python
-                    # scan instead of taking the over-size header path.
-                    if 'No files were searched' in stderr_msg and _grep_large_file_limits()[0] > 0:
-                        return [], 0, False, False, 0, None, 0, 0
-                    logger.warning(
-                        f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
-                    return None, 0, False, False, 0, None, 0, 0
-                # rc==2 that DID yield matches means some files were skipped (e.g. permission
-                # denied) — warn once so the partial nature is visible without discarding matches.
-                if result.returncode == 2 and count > 0:
-                    _rg_partial_error = True
+            def _finish(formatted, count, *, timed_out=False):
+                """Apply the char budget/spillover truncation and build the result tuple.
 
+                Shared by the normal rc==0/rc==2 path and the BUG_0236 timeout path so a
+                partial search can never bypass the output bound.
+
+                The 9th element is the BUG_0236 abbreviation note computed from the FULL
+                (pre-truncation) entry list: the note must still be reported when the
+                abbreviated JSONL entries themselves fall outside the displayed budget.
+                """
+                _abbrev_note = _abbreviated_line_note(formatted)
                 _was_truncated = False
                 _original_output_size = 0
                 _spill_rel_path = None
@@ -1040,14 +1071,57 @@ class GrepMixin:
                             count = sum(1 for entry in formatted if entry != '---')
                         _was_truncated = True
 
+                return (formatted, count, timed_out, _was_truncated, _original_output_size,
+                        _spill_rel_path, _total_lines_before, _shown_lines_after, _abbrev_note)
+
+            result = subprocess.run(cmd,
+                                    cwd=str(path),
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    # BUG_0063: rg is invoked with `cwd=` and NO path operand, so
+                                    # whenever stdin is not a TTY (CI runners, piped shells, any
+                                    # captured-stdin parent) it falls back to reading stdin and blocks
+                                    # forever — surfacing as a spurious "Search timed out". DEVNULL
+                                    # guarantees rg never consumes the parent's stdin.
+                                    stdin=subprocess.DEVNULL,
+                                    timeout=timeout)
+
+            # rc==0 (matches found) and rc==2 (matches found but some files errored) both carry
+            # valid match data on stdout — parse and surface them through the SAME truncation path
+            # below so a partial-error search can never produce unbounded output. A genuine usage
+            # error (rc=2 with no parseable matches) is detected inside this block and falls back
+            # to Python before reaching the truncation code.
+            _rg_partial_error = False
+            if result.returncode == 0 or result.returncode == 2:
+                formatted, count = _parse_rg_json(result.stdout)
+                # rc==2 with NO parseable matches is a genuine error (e.g. invalid regex or an
+                # unrecognized flag), NOT "matches found but some files skipped". Fall back to
+                # Python so the real error surfaces (Python raises re.error for bad patterns).
+                if result.returncode == 2 and count == 0:
+                    stderr_msg = (result.stderr or '').strip()[:500]
+                    # BUG_0169: when --max-filesize filtered out EVERY candidate, rg exits 2
+                    # with "No files were searched" — that is a normal empty result, not a
+                    # usage error. Reporting it as one made grep() fall back to the Python
+                    # scan instead of taking the over-size header path.
+                    if 'No files were searched' in stderr_msg and _grep_large_file_limits()[0] > 0:
+                        return [], 0, False, False, 0, None, 0, 0
+                    logger.warning(
+                        f"grep subprocess failed with exit code 2 (no matches recovered; falling back to Python): {stderr_msg}")
+                    return None, 0, False, False, 0, None, 0, 0
+                # rc==2 that DID yield matches means some files were skipped (e.g. permission
+                # denied) — warn once so the partial nature is visible without discarding matches.
+                if result.returncode == 2 and count > 0:
+                    _rg_partial_error = True
+
+                finished = _finish(formatted, count)
                 if _rg_partial_error:
                     stderr_msg = (result.stderr or '').strip()[:500]
                     logger.warning(
-                        f"grep subprocess found {count} match(es) but exited with code 2 "
+                        f"grep subprocess found {finished[1]} match(es) but exited with code 2 "
                         f"(partial errors; some files may have been skipped): {stderr_msg}")
-
-                return (formatted, count, False, _was_truncated, _original_output_size, _spill_rel_path,
-                        _total_lines_before, _shown_lines_after)
+                return finished
 
             # Non-zero return code (e.g., grep returns 1 for no matches) — still valid.
             # Note: rc==2 is fully handled in the success path above (matches found → surfaced;
@@ -1061,7 +1135,20 @@ class GrepMixin:
                 f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
             return None, 0, False, False, 0, None, 0, 0
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            # BUG_0236: a killed rg still leaves its already-emitted --json events on stdout.
+            # Parsing them yields the matches found before the deadline, so the caller gets a
+            # bounded partial answer (explicitly marked INCOMPLETE) instead of throwing the
+            # work away and spending a second full timeout re-searching in Python.
+            partial_stdout = e.stdout or ''
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode('utf-8', errors='replace')
+            formatted, partial_count = _parse_rg_json(partial_stdout)
+            if partial_count > 0:
+                logger.warning(
+                    f"grep subprocess timed out after {int(timeout)}s; returning "
+                    f"{partial_count} partial match(es) from its stdout")
+                return _finish(formatted, partial_count, timed_out=True)
             logger.warning(
                 f"grep subprocess timed out after {int(timeout)}s; falling back to Python"
             )
@@ -1466,6 +1553,7 @@ class GrepMixin:
         if context > 0:
             summary += f" (with {context} line(s) of context)"
         output_text = _grep_body_with_legend(results, context, match_count)
+        summary += _abbreviated_line_note(results)
 
         if was_timed_out:
             summary += f" [TIMED OUT after {int(timeout)}s]"
@@ -1572,7 +1660,7 @@ class GrepMixin:
 
             # ── Fast path: try subprocess-based ripgrep ──
             (results, count, was_timed_out, _sub_truncated, _original_output_size, _sub_spill_rel, _sub_total_lines,
-             _sub_shown_lines) = self._try_subprocess_grep(
+             _sub_shown_lines, *_sub_extra) = self._try_subprocess_grep(
                   pattern=pattern,
                   path=resolved,
                   include=include,
@@ -1585,7 +1673,17 @@ class GrepMixin:
                   smart_case=smart_case,
                   literal=literal,
                   spill_file_path=spill_file_path)
-            if was_timed_out:
+            # 9th element (BUG_0236): abbreviation count computed before truncation. Legacy
+            # 8-tuple mocks/callers have no such element, so fall back to inspecting results.
+            _sub_abbrev_note = _sub_extra[0] if _sub_extra else ''
+            if was_timed_out and results:
+                # BUG_0236: the killed rg process still produced matches on stdout. Keep them
+                # (rendered with a partial-coverage note below) instead of discarding the work
+                # and spending another full timeout in the Python fallback.
+                logger.warning(
+                    'grep subprocess timed out after %ss but yielded %s partial match(es); '
+                    'returning partial results', int(timeout), count)
+            elif was_timed_out:
                 # BUG_0169: name the real cause when the scope is dominated by over-size
                 # artifacts. The old message claimed the pattern/scope was "too broad", which
                 # was already false: a single directory + an extension filter is as narrow as
@@ -1638,7 +1736,8 @@ class GrepMixin:
                         _ctx_note = (f"\n\n[context lines not shown — recovery re-runs the probe, "
                                      f"which yields match lines only]" if context > 0 else '')
                         _recovered_out = (f"Found {len(survivors)} matches for '{pattern}'"
-                                         f"{searched_note}:\n\n" + _recovered_body + _ctx_note)
+                                         f"{searched_note}{_abbreviated_line_note(_body_lines)}:"
+                                         f"\n\n" + _recovered_body + _ctx_note)
                         # truncate_with_spillover appends its own spill/truncation notice; the main
                         # line-mode path keeps [TRUNCATED] in the header, so do not double it here.
                         return truncate_with_spillover(
@@ -1669,6 +1768,7 @@ class GrepMixin:
                         if _large['count'] > 0:
                             _head_kb = _head_bytes // 1024
                             _summary = f"Found {_large['count']} matches for '{pattern}'{searched_note}"
+                            _summary += _abbreviated_line_note(_large['formatted'])
                             _partial = ' (scan limit reached)' if _large['partial'] else ''
                             _summary += _incomplete_note(
                                 _large['large_files'], [], _max_mb,
@@ -1689,6 +1789,13 @@ class GrepMixin:
                     summary = f"Found {count} matches for '{pattern}'{searched_note}"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
+                    summary += _sub_abbrev_note or _abbreviated_line_note(results)
+                    if was_timed_out:
+                        # BUG_0236: rg was killed at the deadline but its partial stdout still
+                        # held matches. Render them with an explicit partial-coverage note
+                        # instead of discarding the work and re-searching in Python.
+                        summary += (f" [TIMED OUT after {int(timeout)}s — search INCOMPLETE: "
+                                    f"only matches found before the deadline are shown]")
 
                     if _sub_truncated:
                         # Fast path already line-truncated the body to fit the byte budget and
@@ -1843,6 +1950,7 @@ class GrepMixin:
                 summary += f" (with {context} line(s) of context)"
             summary += _incomplete_note(_large_skipped, _large_skipped_paths, _max_mb,
                                         tail='use read_file for more')
+            summary += _abbreviated_line_note(results)
             output_text = _grep_body_with_legend(results, context, match_count)
 
             if was_timed_out:

@@ -682,7 +682,7 @@ def test_rc2_partial_error_surfaces_matches():
 
         with mock.patch.object(grep_module, '_check_tool_availability', return_value=(True, False)), \
              mock.patch('subprocess.run', side_effect=fake_run):
-            (results, count, was_timed_out, _trunc, _orig, _spill, _total, _shown) = \
+            (results, count, was_timed_out, _trunc, _orig, _spill, _total, _shown, *_extra) = \
                 GrepMixin._try_subprocess_grep(
                     host,
                     pattern='hello',

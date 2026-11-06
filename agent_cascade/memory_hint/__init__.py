@@ -23,6 +23,7 @@ from .manager import (
     SKILL_FLOOR_MIN,
     SKILL_FLOOR_SEED,
     SKILL_HINT_MAX_ENTRIES,
+    SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
     # Nominal AUTO-mode score retained for backwards compatibility — NOT the hint gate.
     SKILL_HINT_MIN_SCORE,
     SKILL_HINT_NOISE_RATIO,
@@ -55,6 +56,7 @@ __all__ = [
     'SKILL_FLOOR_MIN',
     'SKILL_FLOOR_SEED',
     'SKILL_HINT_MAX_ENTRIES',
+    'SKILL_HINT_ENTRY_COOLDOWN_SECONDS',
     'SKILL_HINT_MIN_SCORE',
     'SKILL_HINT_NOISE_RATIO',
     'SKILL_JUNK_MIN',

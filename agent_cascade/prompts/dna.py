@@ -517,7 +517,11 @@ TOOL_METADATA = {
                         'indented or padded. With context>0 the matching line additionally carries a ">>>" marker '
                         'directly before the content. When copying lines into edit_file (exact match), strip the '
                         '"path:LINE: " prefix and any ">>>" marker; never add whitespace that is absent from the '
-                        'content, and prefer read_file when transcribing a large block.'),
+                        'content, and prefer read_file when transcribing a large block. '
+                        'Very long lines (e.g. single-line JSONL log records) are abbreviated with a '
+                        '"[… line abbreviated: +N chars]" suffix so they cannot flood the result; use '
+                        'count_only=true for counts of those files, or read_logs/read_file with a '
+                        'range/offset to inspect one record.'),
         'parameters': {
             'pattern':
                 'Text or regex pattern to search for (Python regex syntax)',
