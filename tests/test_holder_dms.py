@@ -105,6 +105,15 @@ class _MockPool:
 
     def terminate_instance(self, name):
         self.terminated.append(name)
+        # Mirror lifecycle.terminate_instance → inst.terminate() (agent_instance.py:867): a RUNNING
+        # (active) instance transitions to TERMINATED. The root-watchdog idempotency guard (state
+        # != 'RUNNING') depends on a terminated instance NOT being re-collected on a later tick;
+        # without this the fake stays RUNNING and a re-run wrongly re-terminates it. _FakeInst has no
+        # terminate(), so set the state directly. Safe: every existing use of this double is
+        # single-call and never asserts on post-terminate state.
+        inst = self.instances.get(name)
+        if inst is not None and getattr(getattr(inst, 'state', None), 'name', None) == 'RUNNING':
+            inst.state = _State('TERMINATED')
 
 
 def _build(inst, name='H', window=WINDOW, approvals=None, halted=None, om_present=True, paused=False):

@@ -46,6 +46,38 @@ def _blocking_tool_bound(tool_name):
         return float(MAX_SHELL_TIMEOUT)
     return None
 
+
+def _marker_shield_state(inst, now) -> str:
+    """Return 'none' | 'shielded' | 'past' for the instance's ``_in_blocking_tool`` marker.
+
+    Shared arithmetic for BOTH the holder-side DMS (``_evaluate_wedged_holder``) and the
+    root/orchestrator scan (``_is_wedged_root``) so they decide shield/past at the same
+    wall-clock point — ONE deadline computation, no drift, no second timer. The *posture* (what
+    each caller does with each state) stays local: the holder terminates on 'none' (no bounded op
+    in flight → a retry-loop wedge), while the root skips on 'none' (no in-flight tool → not this
+    watchdog's target). A three-state enum — not a bool — is load-bearing precisely because those
+    no-marker fail-safe postures are opposite (skill: shared-predicate-opposite-postures-multistate).
+
+        'none'     — no well-formed marker (absent / non-tuple / too short / ``inst`` is None).
+        'shielded' — well-formed marker and (now - start) < resolved bound.
+        'past'     — well-formed marker at or past its bound. A marker whose resolved bound is
+                     None (legacy 2-tuple with no registry entry) or whose start stamp is missing
+                     maps to 'past' (NO shield) — fail safe toward termination, exactly the old
+                     ``bound is not None and start_mono is not None`` short-circuit.
+    """
+    if inst is None:
+        return 'none'
+    marker = getattr(inst, '_in_blocking_tool', None)
+    if not (isinstance(marker, tuple) and len(marker) >= 2):
+        return 'none'
+    tool_name, start_mono = marker[0], marker[1]
+    carried_bound = marker[2] if len(marker) > 2 else None
+    bound = carried_bound if carried_bound is not None else _blocking_tool_bound(tool_name)
+    if bound is None or start_mono is None:
+        return 'past'  # no resolvable bound → no shield, fail safe toward termination
+    return 'shielded' if (now - start_mono) < bound else 'past'
+
+
 if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
     from .core import AgentPool
 
@@ -231,15 +263,10 @@ class IdleManager:
             logger.debug('[holder_dms] pool paused — skipping DMS this tick.')
             return  # pause disables DMS preemption
 
-        api_router = getattr(self.pool, 'api_router', None)
-        scheduler = getattr(api_router, 'scheduler', None) if api_router else None
-        if scheduler is None:
-            return  # no scheduler → no holder registry to inspect
-
-        pools = getattr(scheduler, '_pools', None)
-        if not pools:
-            return
-
+        # Snapshot the clock once; the unresolvable-approval scan and BOTH passes below share it.
+        # The scheduler-pool registry (api_router → scheduler → _pools) is resolved lazily above the
+        # holder pass and is OPTIONAL: the holder pass needs it, but a wedged ROOT owns no scheduler
+        # slot, so the root pass must run even without a scheduler (BUG_0245). Hence no early return.
         now = time.monotonic()
 
         # ── Approval signal: build the sets ONCE per tick (plan §3.2 MAJOR). ──
@@ -274,28 +301,50 @@ class IdleManager:
                 return
 
         to_terminate = []
-        for slot_key, pool in list(pools.items()):
-            # Scope discipline (plan §4): holders[0] is exact only for capacity==1 (the conc=0 shared
-            # slot). For capacity>1 it is arbitrary → skip and log; never preempt a possibly-wrong holder.
-            capacity = getattr(pool, 'capacity', 1)
-            if capacity != 1:
-                logger.debug(f"[holder_dms] Skipping pool '{slot_key}' capacity={capacity} "
-                             '(out of scope: holder-side DMS targets conc=0 / capacity==1 only)')
-                continue
 
-            # Reuse the shared holder-context helper (single source of the turn-progress age; no
-            # parallel detector). It reads pool._running and inst attrs with NO locks held.
-            ctx = _holder_activity_context(pool, now, resolver=self.pool.get_instance)
-            if not ctx.get('context_available') or ctx.get('holder_name', '?') == '?':
-                continue
+        # ── Holder pass: conc=0 / capacity==1 slot holders resolved from the scheduler's pool
+        # registry. Needs api_router → scheduler → _pools; a missing scheduler merely SKIPS this
+        # pass (a root holds no slot), so it is not an early return of the whole net. ──
+        api_router = getattr(self.pool, 'api_router', None)
+        scheduler = getattr(api_router, 'scheduler', None) if api_router else None
+        pools = getattr(scheduler, '_pools', None) if scheduler else None
+        if pools:
+            for slot_key, pool in list(pools.items()):
+                # Scope discipline (plan §4): holders[0] is exact only for capacity==1 (the conc=0 shared
+                # slot). For capacity>1 it is arbitrary → skip and log; never preempt a possibly-wrong holder.
+                capacity = getattr(pool, 'capacity', 1)
+                if capacity != 1:
+                    logger.debug(f"[holder_dms] Skipping pool '{slot_key}' capacity={capacity} "
+                                 '(out of scope: holder-side DMS targets conc=0 / capacity==1 only)')
+                    continue
 
-            name = self._evaluate_wedged_holder(ctx, now, window, pending_names)
-            if name:
+                # Reuse the shared holder-context helper (single source of the turn-progress age; no
+                # parallel detector). It reads pool._running and inst attrs with NO locks held.
+                ctx = _holder_activity_context(pool, now, resolver=self.pool.get_instance)
+                if not ctx.get('context_available') or ctx.get('holder_name', '?') == '?':
+                    continue
+
+                name = self._evaluate_wedged_holder(ctx, now, window, pending_names)
+                if name:
+                    to_terminate.append(name)
+
+        # ── Root pass (BUG_0245): a root/orchestrator wedged in an in-flight tool is INVISIBLE to
+        # the holder pass — it owns instances and never holds a scheduler slot, so pool._running
+        # never yields it — yet it carries the very same _in_blocking_tool marker the holder pass
+        # shields on. Scan pool.instances (the one registry _checker_loop already walks: NO new
+        # container) and collect wedged roots via the shared shield. Dedup against to_terminate so
+        # a fake holder (which, like every test double, lacks parent_instance and so also looks
+        # root-like here) is collected exactly once; real holders carry parent_instance, so the two
+        # passes are disjoint by _is_wedged_root guard #1. Runs even when scheduler is None. ──
+        for name, inst in list(self.pool.instances.items()):
+            if name in to_terminate:
+                continue
+            if self._is_wedged_root(name, inst, now, window, pending_names):
                 to_terminate.append(name)
 
         # ── Act only after ALL reads are done and NO locks are held (plan §3.3 MAJOR). ──
         for name in to_terminate:
-            logger.warning(f"[holder_dms] Terminating wedged conc=0 holder '{name}': no turn-progress "
+            logger.warning(f"[holder_dms] Terminating wedged instance '{name}': no turn-progress "
                            f"(last_activity) for >= {window:.0f}s while not in a bounded operation.")
             try:
                 self.pool.terminate_instance(name)
@@ -352,23 +401,60 @@ class IdleManager:
             return None  # cannot confirm halt state → fail safe toward NOT killing
 
         # In-bounded-blocking-tool exclusion (Decision D): a holder mid a legitimately-bounded long
-        # tool (e.g. an approved sync shell_cmd within MAX_SHELL_TIMEOUT) is not a wedge.
-        #
-        # Marker shape: (tool_name, start_monotonic[, bound_seconds]). The SINGLE producer is the
-        # dispatch boundary (ToolDispatcher.execute_tool), which writes a well-formed 3-tuple for
-        # every generic sync tool, carrying the tool's dms_bound() or the settings cap (t292). So no
-        # try/except is needed to unpack — a single isinstance+length guard rejects any malformed
-        # marker (non-tuple / too short) and fails safe toward termination. The carried bound (3rd
-        # element) is authoritative when present; the registry fallback (_blocking_tool_bound) is kept
-        # only for defensive/legacy 2-tuple markers and is no longer the primary source.
+        # tool (e.g. an approved sync shell_cmd within MAX_SHELL_TIMEOUT) is not a wedge. The shield
+        # arithmetic lives in the shared _marker_shield_state helper (also used by _is_wedged_root) so
+        # holder and root decide shield/past at the same wall-clock point. The holder posture: 'shielded'
+        # → skip; 'none' (no/malformed marker → no bounded op in flight, i.e. the retry-loop wedge class)
+        # and 'past' (past the carried bound) both fall through to termination. The marker is written by
+        # the single dispatch boundary as a well-formed 3-tuple carrying dms_bound() or the settings cap.
         inst = self.pool.get_instance(holder_name)
-        if inst is not None:
-            marker = getattr(inst, '_in_blocking_tool', None)
-            if isinstance(marker, tuple) and len(marker) >= 2:
-                tool_name, start_mono = marker[0], marker[1]
-                carried_bound = marker[2] if len(marker) > 2 else None
-                bound = carried_bound if carried_bound is not None else _blocking_tool_bound(tool_name)
-                if bound is not None and start_mono is not None and (now - start_mono) < bound:
-                    return None
+        if _marker_shield_state(inst, now) == 'shielded':
+            return None
 
         return holder_name
+
+    def _is_wedged_root(self, name, inst, now, window, pending_names):
+        """Return True if ``inst`` is a wedged root/orchestrator stuck in an in-flight tool.
+
+        BUG_0245 scan-scope extension: the holder pass never sees the root (it owns instances, never
+        holds a scheduler slot, so pool._running never yields it), yet it carries the same
+        ``_in_blocking_tool`` marker the holder pass shields on — so the existing deadline/shield
+        machinery needs only a second pass over pool.instances to reach it. Mirrors the holder
+        predicate's fail-safes (every guard fails safe toward NOT killing; cheap getattr reads first,
+        pool method calls last). The one deliberate divergence is guard #7: the root requires a
+        PAST-bound marker, because (unlike a holder) 'no marker' on a root does not mean a retry-loop
+        wedge — it means nothing in flight, which is not this watchdog's target.
+        """
+        # 1. Roots only. A child/holder (parent_instance set) is the holder pass's job, so the two
+        #    passes are disjoint by construction. The getattr default keeps doubles (no attr) working.
+        if getattr(inst, 'parent_instance', None) is not None:
+            return False
+        # 2. THE idempotency guard. A wedged root's finally at the dispatch boundary never runs, so
+        #    its marker LEAKS — but terminate_instance() transitions state to TERMINATED, so every
+        #    later tick skips it and the abandoned (never-joined) parked thread never re-fires.
+        #    getattr mirrors slot_queue's holder_state read (state.name).
+        if getattr(getattr(inst, 'state', None), 'name', None) != 'RUNNING':
+            return False
+        # 3. An in-flight LLM call is owned by the stream watchdog (180s silence / 900s total), NOT the DMS.
+        if getattr(inst, '_llm_call_active', False):
+            return False
+        # 4. Still making turn-progress. Keyed on inst.last_activity (NOT _last_llm_activity), the
+        #    same signal as the holder turn_progress_age_s; <= 0 means never-stamped → not aged.
+        last_activity = getattr(inst, 'last_activity', 0.0)
+        if last_activity <= 0.0 or (now - last_activity) < window:
+            return False
+        # 5. Mid manual-halt / compression is not a wedge (fail safe if halt state is unknown).
+        try:
+            if self.pool.is_instance_halted(name):
+                return False
+        except Exception:
+            return False
+        # 6. Awaiting user approval → not a wedge.
+        if name in pending_names:
+            return False
+        # 7. Requires a PAST-bound marker: no in-flight tool ('none') or still within the declared
+        #    bound ('shielded') → not disturbed. A legitimately-long root tool (e.g. shell_cmd, carried
+        #    bound = MAX_SHELL_TIMEOUT) is therefore never preempted.
+        if _marker_shield_state(inst, now) != 'past':
+            return False
+        return True

@@ -19,8 +19,6 @@ import inspect
 import os
 import time
 
-import pytest
-
 from agent_cascade import settings as ac_settings
 from agent_cascade.pool.idle_manager import IdleManager
 from agent_cascade.slot_queue import SlotPool
@@ -143,45 +141,44 @@ class TestToolBoundMargin:
 
 
 # ──────────────────────────────────────────────────────────────────────────────────
-# §6.4 / §5 / acceptance #6 — ROOT/orchestrator DMS blind spot (the actual BUG_0244 victim).
+# §6.4 / §5 / acceptance #6 — ROOT/orchestrator DMS blind spot (the BUG_0244 victim), CLOSED.
 #
-# This is a DOCUMENTED GAP, not a fix. The root orchestrator is never in pool._running and is
-# not a slot waiter, so neither DMS can see it. We record the gap two ways:
-#   (1) an xfail(strict) that asserts the PHASE-2 desired behaviour (root rescued) — RED today;
-#   (2) a pin that locks the current scope discriminators so broadening them forces an update.
-# Follow-up ticket: .bug_tracker/BUG_0245_root_orchestrator_invisible_to_all_dms_*.md
+# Phase 1 (this file, BUG_0244) recorded the gap: the root orchestrator is never in pool._running
+# and is not a slot waiter, so the waiter- and holder-side DMS nets could not see it. Phase 2
+# (BUG_0245) extended the holder-DMS scan with a root pass (idle_manager._is_wedged_root) over
+# pool.instances, reusing the existing _in_blocking_tool marker / _marker_shield_state / join-free
+# terminate_instance machinery — no new timer, no new per-instance state, no new settings constant.
+# The former xfail(strict) now passes as a regression test; the scope-discriminator pin below stays
+# green because the root pass additionally requires a PAST-bound marker (guard #7), so the documented
+# holder scope (capacity==1 / holder-registry-only) is unchanged.
+# Closed by: .bug_tracker/BUG_0245_root_orchestrator_invisible_to_all_dms_*.md
 # ──────────────────────────────────────────────────────────────────────────────────
 
 
 class TestRootWatchdogGap:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            'BUG_0245 (phase 2): no watchdog covers the ROOT orchestrator wedged in an in-flight '
-            'sync tool. The holder-DMS inspects only conc=0 holders resolved from pool._running, and '
-            "idle_manager._evaluate_wedged_holder documents that the root 'can never appear as a "
-            "conc=0 slot holder ... the holder registry never yields one'. When a root watchdog "
-            'lands, this XPASSes under strict=True and forces this pin + BUG_0245 to be revisited.'),
-    )
     def test_wedged_root_orchestrator_is_rescued_by_a_dms(self):
-        """DESIREED phase-2 behaviour — RED today, and that failure IS the gap being recorded.
+        """GREEN since BUG_0245 phase-2 — the former xfail(strict) now asserts the rescue holds.
 
         The BUG_0244 victim (Maine, the root orchestrator) wedged in sync tool dispatch for 7m14s
-        and NO safety net observed it: not a slot waiter, not in pool._running. Model that exact
-        position — aged turn-progress, in an un-bounded sync tool, on a capacity==1 pool key (so the
-        DMS does not skip it for capacity reasons), but with the root NEVER granted a slot (the root
-        owns instances; it is not a scheduler slot holder). Then assert the root is rescued. It will
-        not be — strict=True turns the eventual phase-2 XPASS into a forced removal."""
+        and NO safety net observed it: not a slot waiter, not in pool._running. We model that exact
+        position — aged turn-progress, past the cap in an un-bounded sync tool, with the root NEVER
+        granted a slot (it owns instances; it is not a scheduler slot holder), so the HOLDER pass
+        no-ops for it and the ROOT pass in _run_holder_dms collects it via _marker_shield_state ==
+        'past' and abandons it through the same join-free terminate_instance the holder pass uses.
+
+        Gate note: the fail-safe early returns (window<=0 disable, pause guard, unresolvable-approval)
+        sit above the pass split and gate the ROOT pass too — the root pass is not unconditionally
+        always-on (plan §4.1)."""
         inst = _FakeInst('root-orchestrator', last_activity=_old(), llm_activity=_old(), llm_active=False)
         inst._in_blocking_tool = ('grep', time.monotonic() - 1000.0, 900.0)
-        # capacity==1 so the DMS reaches it, but no slot granted → pool._running is empty, exactly
-        # mirroring the root's real out-of-registry position (it is not a conc=0 slot holder).
+        # No slot granted → pool._running is empty → the holder pass cannot see the root; exactly
+        # mirroring the root's real out-of-registry position. Rescue happens via the ROOT pass.
         slot_pool = SlotPool(key='root', capacity=1)
         pool = _MockPool({'root-orchestrator': inst}, {'root': slot_pool}, window=WINDOW)
         im = IdleManager(pool)
         im._run_holder_dms()
         assert 'root-orchestrator' in pool.terminated, (
-            'phase-2 gap: a wedged root orchestrator is not rescued by any existing DMS (BUG_0245).')
+            'BUG_0245: a wedged root orchestrator must be rescued by the root pass in _run_holder_dms.')
 
     def test_holder_dms_scope_discriminators_are_explicit(self):
         """Pin (GREEN today; BREAKS if anyone broadens the holder-DMS scope).
@@ -206,3 +203,45 @@ class TestRootWatchdogGap:
         src_run = inspect.getsource(IdleManager._run_holder_dms)
         assert 'capacity != 1' in src_run, (
             'BUG_0245: the capacity!=1 scope-skip was removed; reconcile against the holder-DMS scope contract.')
+        # NOTE (BUG_0245): _run_holder_dms now ALSO scans pool.instances for wedged ROOTS
+        # (IdleManager._is_wedged_root). That pass is marker-gated (requires a PAST-bound
+        # _in_blocking_tool marker) and root-gated (parent_instance is None), so a capacity>1 aged
+        # holder WITHOUT a marker stays out of scope — the `terminated == []` assertion above holds.
+
+    def test_root_within_declared_bound_is_not_disturbed(self):
+        """Per-bound discriminator (BUG_0245 §6.2): a root whose in-flight tool declares a long
+        bound (carried bound = MAX_SHELL_TIMEOUT=3600 ≫ the 2s test window) is SHIELDED, never
+        preempted — even with aged turn-progress (last_activity). This is the ticket's
+        'shell_cmd timeout=900 must not be disturbed': the root pass honours the declared bound."""
+        inst = _FakeInst('root-orchestrator', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('shell_cmd', time.monotonic(), 3600.0)  # fresh marker, bound ≫ age
+        pool = _MockPool({'root-orchestrator': inst}, {}, window=WINDOW)  # no slot → not a holder
+        IdleManager(pool)._run_holder_dms()
+        assert pool.terminated == [], f"root within declared bound wrongly preempted: {pool.terminated}"
+
+    def test_wedged_root_is_not_re_terminated_after_the_marker_leaks(self):
+        """Idempotency (BUG_0245 §6.5): the wedged thread's finally never runs, so its marker LEAKS
+        after abandon. Guard #2 (state != RUNNING) must stop a later tick re-terminating it — no
+        terminate/re-terminate loop on the abandoned, never-joined parked thread. _MockPool.terminate_instance
+        transitions state to TERMINATED, mirroring lifecycle.terminate_instance."""
+        inst = _FakeInst('root-orchestrator', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('grep', time.monotonic() - 1000.0, 900.0)  # deliberately left leaked
+        pool = _MockPool({'root-orchestrator': inst}, {}, window=WINDOW)
+        im = IdleManager(pool)
+        im._run_holder_dms()
+        assert pool.terminated == ['root-orchestrator'], f"first pass: {pool.terminated}"
+        # Marker NOT cleared (the wedged thread's finally never ran); state is now TERMINATED.
+        im._run_holder_dms()
+        assert pool.terminated == ['root-orchestrator'], (
+            f"leaked marker re-terminated an already-TERMINATED root: {pool.terminated}")
+
+    def test_wedged_root_is_rescued_when_scheduler_is_absent(self):
+        """BUG_0245 §4.1: the root pass must NOT inherit the old `scheduler is None` early return —
+        a wedged root owns no scheduler slot, so it is rescued even with no pool registry present."""
+        inst = _FakeInst('root-orchestrator', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        inst._in_blocking_tool = ('grep', time.monotonic() - 1000.0, 900.0)
+        pool = _MockPool({'root-orchestrator': inst}, {}, window=WINDOW)
+        pool.api_router = None  # no router → scheduler None → holder pass skipped; root pass still runs
+        IdleManager(pool)._run_holder_dms()
+        assert 'root-orchestrator' in pool.terminated, (
+            f"root not rescued with no scheduler: {pool.terminated}")
