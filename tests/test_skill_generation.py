@@ -2431,6 +2431,46 @@ class TestProposeSkillRatingModes:
         result = tool.call(_json.dumps({'name': name, 'rating': 12}))
         assert 'Invalid rating' in result
 
+    def test_rating_only_inactive_and_drift(self, fresh_manager):
+        """BUG_0240: an on-disk-but-registry-less (inactive) skill is still rateable and reports its
+        INSTALLED version. BUG_0234: when installed and registry versions drift, the reply shows BOTH."""
+        import json as _json
+        m = self.manager
+        # (A) BUG_0240: inactive = on-disk SKILL.md NOT in registry -> accepted, reports installed version.
+        name_a = f"test-rate-inactive-{_uid()}"
+        prod_a = m._production_skills_dir / name_a; prod_a.mkdir(parents=True, exist_ok=True)
+        (prod_a / 'SKILL.md').write_text(
+            '---\n' + yaml.dump({'name': name_a, 'description': 'Inactive rating-only target for regression',
+                                 'source': 'auto-generated', 'triggers': ['rate', 'inactive'],
+                                 'version': '2.3.1'}, default_flow_style=False)
+            + '---\n\n## Body\n\nEnough characters to be a real skill body for the parser.\n',
+            encoding='utf-8')
+        assert m.get_skill_metadata(name_a) is None          # not in registry
+        assert m.get_installed_version(name_a) == '2.3.1'    # resolvable on disk
+        tool, _ = self._make_tool(m)
+        ra = tool.call(_json.dumps({'name': name_a, 'rating': 9.5}))
+        assert 'Recorded rating' in ra                        # (A) accepted, not rejected
+        assert '2.3.1' in ra                                  # reports INSTALLED version (load-bearing assert)
+        assert 'v1.0.0' not in ra                             # registry-default-only path not taken
+
+        # (B) BUG_0234: installed vs registry version drift -> reply shows BOTH. Seed the registry
+        # entry directly (idiomatic here, cf. tests poking _skills_registry) with a version that
+        # differs from the installed file. No file-content fragility.
+        name_b = f"test-rate-drift-{_uid()}"
+        prod_b = m._production_skills_dir / name_b; prod_b.mkdir(parents=True, exist_ok=True)
+        (prod_b / 'SKILL.md').write_text(
+            '---\n' + yaml.dump({'name': name_b, 'description': 'Active rating drift regression target',
+                                 'source': 'auto-generated', 'triggers': ['drift', 'rate'],
+                                 'version': '5.5.5'}, default_flow_style=False)
+            + '---\n\n## Body\n\nEnough characters to be a real skill body for the parser.\n',
+            encoding='utf-8')
+        m._skills_registry[name_b] = {'version': '1.0.0'}     # registry version != installed 5.5.5
+        assert m.get_skill_metadata(name_b)['version'] == '1.0.0'
+        assert m.get_installed_version(name_b) == '5.5.5'
+        rb = tool.call(_json.dumps({'name': name_b, 'rating': 8.0}))
+        assert 'installed v5.5.5' in rb and 'registry v1.0.0' in rb   # both shown on drift
+        assert m.get_metrics(name_b)['ratings']['latest'] == 8.0
+
     def test_missing_name_rejected(self, fresh_manager):
         """name is a required argument — missing it fails fast with a clear message."""
         tool, _ = self._make_tool(self.manager)

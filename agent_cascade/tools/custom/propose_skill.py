@@ -396,16 +396,26 @@ class ProposeSkill(BaseTool):
         # not a content change) but means any agent can adjust a skill's recorded rating at any
         # time; ratings are currently advisory-only and feed no gating/scoring decision.
         if not skill_content and rating_value is not None:
+            # Existence = registry OR an installed SKILL.md on disk (production root, dir-name keyed). Inactive
+            # skills are dropped from _skills_registry by discover() but still resolve in scan_skills
+            # (include_inactive=True over on-disk servables); get_installed_version reads that same file. BUG_0240.
             existing_meta = skill_manager.get_skill_metadata(proposed_name)
-            if existing_meta is None:
+            installed_version = skill_manager.get_installed_version(proposed_name)
+            if existing_meta is None and installed_version is None:
                 return f"Cannot rate unknown skill '{proposed_name}'. It is not in the registry."
             rating_float, err = _coerce_rating(rating_value)
             if err:
                 return err
             skill_manager.record_rating(proposed_name, rating_float)
             logger.info('[PROPOSE-SKILL] Rating-only: %s -> %s', proposed_name, rating_value)
-            return (f"Recorded rating {rating_value}/10 for skill '{proposed_name}' "
-                    f"(v{existing_meta.get('version', '1.0.0')}).")
+            # Report the INSTALLED version — authoritative; the registry copy drifts when a SKILL.md is
+            # edited in place. Show both when they disagree. BUG_0234.
+            registry_version = (existing_meta or {}).get('version', '')
+            if installed_version and registry_version and installed_version != registry_version:
+                version_str = f"(installed v{installed_version}; registry v{registry_version})"
+            else:
+                version_str = f"(v{installed_version or registry_version or '1.0.0'})"
+            return f"Recorded rating {rating_value}/10 for skill '{proposed_name}' {version_str}."
 
         if not skill_content:
             return ('No skill content provided. To create/update a skill include full SKILL.md with '
