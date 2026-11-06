@@ -429,7 +429,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         limit = params.get('limit')
 
         # Wild-read truncation uses two distinct values:
-        #   - char_threshold (trip threshold): tool_result_max_chars (~25k) — the high-water mark.
+        #   - char_threshold (trip threshold): tool_result_max_chars (~6k, BUG_0189) — the high-water mark.
         #   - wild_truncation (cut point): wild_read_truncation_chars (~2k).
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         char_threshold = DEFAULT_TOOL_RESULT_MAX_CHARS

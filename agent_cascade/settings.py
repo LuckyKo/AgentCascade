@@ -163,7 +163,10 @@ def _resolve_default_workspace() -> str:
 
 # Settings for tools
 DEFAULT_WORKSPACE: str = _resolve_default_workspace()
-DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_TOOL_RESULT_MAX_CHARS', 25000))
+# BUG_0189: lowered 25000 -> 6000. Only 1/18,983 tool results exceeded 25k, so the
+# trip threshold was inert and large reads bypassed wild-read truncation entirely. At 6k
+# the 2000-char wild-read window + spillover pointer actually fires (~5.8% input-token recovery).
+DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_TOOL_RESULT_MAX_CHARS', 6000))
 # Lower truncation cut for wild reads (no explicit limit) when the trip threshold
 # (tool_result_max_chars) is exceeded. Content beyond this small window is probably useless,
 # so we hand the agent just enough to see what's there rather than a huge block of it.

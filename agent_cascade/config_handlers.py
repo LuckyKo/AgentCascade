@@ -616,7 +616,10 @@ def _handle_wild_read_truncation_chars(ui_cfg: dict, agent_pool: Optional[Any], 
     """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('wild_read_truncation_chars', 2000))
-        upper = agent_pool.llm_cfg.get('tool_result_max_chars', 25000)
+        # Fallback must track DEFAULT_TOOL_RESULT_MAX_CHARS (BUG_0189: 25000 -> 6000) so an
+        # absent-key clamp path keeps the same trip threshold the rest of the code uses.
+        from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
+        upper = agent_pool.llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
         agent_pool.llm_cfg['wild_read_truncation_chars'] = min(max(500, val), upper)
 
 

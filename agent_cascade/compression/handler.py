@@ -523,7 +523,7 @@ class CompressionHandler:
             llm_cfg: Agent LLM config (for vision capability check).
             char_threshold: Trip threshold — truncation only triggers if output exceeds
                         this. Defaults to char_limit (i.e., trigger and target are the same).
-                        Used by wild-read logic where threshold (25k) >> target (2k).
+                        Used by wild-read logic where threshold (6k) >> target (2k).
 
         Returns:
             Assembled tool result — string for text-only, or ContentItem list for vision endpoints.
@@ -612,7 +612,7 @@ class CompressionHandler:
 
         # Step 3: If output exceeds the trip threshold, truncate to char_limit.
         # The threshold (when to trigger) may differ from the target (how much to keep).
-        # e.g., wild read: threshold=25000, target=2000.
+        # e.g., wild read: threshold=6000, target=2000.
         # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't
         # need to track that separately.
         _threshold = char_threshold if char_threshold is not None else char_limit
