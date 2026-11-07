@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Union
 
@@ -456,6 +458,36 @@ def _run_compiler(compiler, path: str):
     return (proc.returncode, output)
 
 
+def _run_node_check(node: str, content: str):
+    """Run ``node --check`` over the given JS *content* via a temporary ``.mjs``
+    file. Writing to ``.mjs`` forces ES-module parsing, which is a superset of
+    CommonJS syntax — so a CJS file (``require``/``module.exports``) and an ESM
+    file (``import``/``export``) both parse cleanly, avoiding the
+    "Cannot use import statement outside a module" false positive that checking
+    the original ``.js`` path (with package.json module-type inference) would
+    produce. Returns ``(exit_code, output)`` or ``None`` on timeout / OS error
+    (the caller treats ``None`` as "node unusable" and falls back to the
+    heuristic)."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mjs', delete=False,
+                                         encoding='utf-8') as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        proc = subprocess.run([node, '--check', tmp_path],
+                              capture_output=True, text=True, timeout=20)
+        output = (proc.stderr or '') + (proc.stdout or '')
+        return (proc.returncode, output)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def _check_cpp(content: str, path: str) -> str:
     """Check C/C++ syntax.
 
@@ -486,6 +518,42 @@ def _check_cpp(content: str, path: str) -> str:
             label = f'heuristic, advisory — compiler present but includes unresolved: {first}'
             return (base, label)
     label = 'heuristic, advisory — no C++ compiler found'
+    return (base, label)
+
+
+def _check_javascript(content: str, path: str) -> str:
+    """Check JavaScript syntax.
+
+    Prefers the authoritative ``node --check`` parse gate when node is on PATH
+    and the file is plain JS (``.js``/``.mjs``/``.cjs``): a clean exit is
+    "Valid", a non-zero exit reports node's diagnostic. The content is checked
+    via a temporary ``.mjs`` file (see _run_node_check) so both CJS and ESM
+    syntax parse cleanly. Falls back to the shared C-family bracket heuristic
+    (advisory) when node is unavailable, or for ``.jsx`` whose JSX syntax
+    ``node --check`` cannot parse.
+
+    Returns a string for the node-authoritative paths, or a
+    ``(result, advisory_label)`` tuple for the heuristic-fallback path.
+    """
+    base = _check_c_family(content, path)
+    ext = os.path.splitext(path)[1].lower()
+    node = shutil.which('node')
+    if node and ext in ('.js', '.mjs', '.cjs'):
+        result = _run_node_check(node, content)
+        if result is not None:
+            exit_code, output = result
+            if exit_code == 0:
+                return 'Valid'  # authoritative
+            lines = [l for l in output.splitlines() if l.strip()][:20]
+            return 'Syntax Issues:\n' + '\n'.join(lines)
+        # node present + plain JS, but the gate was unusable (timeout / OS error)
+        label = 'heuristic, advisory — node --check unavailable, fell back to bracket scan'
+        return (base, label)
+    if not node:
+        label = 'heuristic, advisory — node not available, fell back to bracket scan'
+    else:
+        label = ('heuristic, advisory — JSX not parseable by node --check, '
+                 'fell back to bracket scan')
     return (base, label)
 
 
@@ -550,7 +618,7 @@ _CHECKER_MAP = {
     'cpp': _check_cpp,
     'csharp': _check_c_family,
     'java': _check_c_family,
-    'javascript': _check_c_family,
+    'javascript': _check_javascript,
     'typescript': _check_c_family,
     'go': _check_c_family,
     'rust': _check_c_family,
