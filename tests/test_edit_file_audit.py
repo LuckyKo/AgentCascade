@@ -105,6 +105,65 @@ def test_exact_duplicate_anchor_also_notes():
         assert 'two identical adjacent lines' in res, f"advisory missing: {res!r}"
 
 
+# ── BUG_0262: exact mode must not assert an impossible anchor/range cause ─────
+
+
+def _advisory_line(res):
+    """Pull the single 'two identical adjacent lines' note out of the full result
+    message so tests assert on the advisory itself, not incidental text elsewhere."""
+    notes = [ln for ln in res.splitlines() if 'two identical adjacent lines' in ln]
+    assert notes, f"advisory line missing from: {res!r}"
+    return notes[0]
+
+
+def test_exact_adjacent_seed_advisory_is_neutral():
+    """BUG_0260/0262: an exact-mode edit whose new_content legitimately seeds two
+    adjacent identical lines that are NOT the matched anchor (a repeated test seed).
+    The note is advisory-only (not an error) and must use the neutral wording that
+    does not blame an anchor-repeat or a range boundary — neither can occur here."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = _owned_file(om, d, 'telemetry.py',
+                        'def test_telemetry():\n    placeholder\n')
+        seed = "    classified('instA', fpA, 80)\n"
+        res = om.edit_file(str(f), 'coder',
+                           old_content='    placeholder\n',
+                           new_content=seed + seed,
+                           match_mode='exact')
+        assert res.startswith('OK'), f"must be a success message, not a defect flag: {res!r}"
+        advisory = _advisory_line(res)
+        assert 'verify this is intended' in advisory, \
+            f"exact-mode advisory must use neutral wording: {advisory!r}"
+        for cause in ('anchor', 'range boundary'):
+            assert cause not in advisory, \
+                f"exact-mode advisory must not assert {cause!r} cause: {advisory!r}"
+        # Advisory-only: the intended seed is still written verbatim (no dedup).
+        assert f.read_text(encoding='utf-8').count("classified('instA', fpA, 80)") == 2
+
+
+def test_delete_and_insert_duplicate_keeps_diagnostic_wording():
+    """Scoping the other way: the delete_and_insert path CAN repeat its anchor or
+    leave it at a range boundary, so its advisory must still name those causes."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('# Doc\n'
+                    '\n'
+                    'Report the lattice as a table.\n'
+                    'old line to delete\n'
+                    '\n'
+                    '## Tail\n'
+                    'body\n')
+        f = _owned_file(om, d, 'skill.md', original)
+        res = _d_and_i(om, f, new_content='Report the lattice as a table.\n\nAlso: new\n',
+                       range_param='4:4')
+        assert res.startswith('OK'), res
+        advisory = _advisory_line(res)
+        assert 'anchor' in advisory, \
+            f"delete_and_insert advisory must still name the anchor cause: {advisory!r}"
+        assert 'range boundary' in advisory, \
+            f"delete_and_insert advisory must still name the range-boundary cause: {advisory!r}"
+
+
 # ── _parse_range: negative underflow must never wrap to a negative index ──────
 
 

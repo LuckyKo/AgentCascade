@@ -338,7 +338,8 @@ def _render_with_newlines(text: str, newline: str) -> bytes:
 
 # ─── edit_file post-edit duplicate-line advisory (BUG_0250 family) ───────────
 
-def _adjacent_duplicate_note(old_text: str, new_text: str) -> Optional[str]:
+def _adjacent_duplicate_note(old_text: str, new_text: str,
+                             match_mode: str = 'exact') -> Optional[str]:
     """Return a note when the edit NEWLY creates an adjacent identical-line pair.
 
     BUG_0250: a caller reusing an `exact`-style `new_content` (anchor line repeated)
@@ -347,6 +348,15 @@ def _adjacent_duplicate_note(old_text: str, new_text: str) -> Optional[str]:
     boundary, so this compares the *count* of adjacent identical non-blank line
     pairs before and after the edit instead of reasoning about one mode. A count
     that increased means this edit is what put the duplicates next to each other.
+
+    BUG_0262: the wording is mode-aware. Only `delete_and_insert` (verbatim insert,
+    no anchor concept) can actually repeat its anchor or leave it at a range
+    boundary, so that mode keeps the diagnostic "may repeat the anchor / range
+    boundary" message. Every other mode (exact/heuristic/heuristic_agnostic) most
+    often introduces intended duplicates (a repeated test seed, table row, or
+    assertion), so the note stays neutral and does not assert an anchor-repeat or
+    range-cause that cannot occur there. Detection is unchanged; only the message
+    differs.
 
     Content-keyed counts (not positions) so pre-existing duplicate pairs elsewhere
     in the file never fire, and a pre-existing pair that merely moved is not
@@ -371,11 +381,16 @@ def _adjacent_duplicate_note(old_text: str, new_text: str) -> Optional[str]:
         snippet = content.strip()
         if len(snippet) > 60:
             snippet = snippet[:60] + '…'
+        if match_mode == 'delete_and_insert':
+            return (f'note: the edit left two identical adjacent lines at '
+                    f'{line_no}-{line_no + 1} ("{snippet}") — new_content may repeat the '
+                    f'anchor/matched line it was meant to replace (delete_and_insert inserts '
+                    f'new_content verbatim and has no anchor concept), or the range boundary '
+                    f'left the anchor behind. Re-read the file before relying on this edit.')
         return (f'note: the edit left two identical adjacent lines at '
-                f'{line_no}-{line_no + 1} ("{snippet}") — new_content may repeat the '
-                f'anchor/matched line it was meant to replace (delete_and_insert inserts '
-                f'new_content verbatim and has no anchor concept), or the range boundary '
-                f'left the anchor behind. Re-read the file before relying on this edit.')
+                f'{line_no}-{line_no + 1} ("{snippet}"); new_content introduced lines identical '
+                f'to their neighbours — verify this is intended (e.g. a repeated test seed, '
+                f'table row, or assertion). Re-read the file before relying on this edit.')
     return None
 
 
@@ -2464,7 +2479,7 @@ class FileOpsMixin:
             # BUG_0250: advisory-only check for an adjacent duplicate line that this edit
             # newly introduced (anchor text repeated in new_content, or a boundary that
             # left the anchor behind). Computed before the write; the bytes are untouched.
-            duplicate_note = _adjacent_duplicate_note(file_content, new_file_content)
+            duplicate_note = _adjacent_duplicate_note(file_content, new_file_content, match_mode)
 
             # Generate unified diff before writing (both old and new content available)
             # keepends=False: avoids double-newlines when joined with '\n' below
