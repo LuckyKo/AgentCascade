@@ -159,6 +159,17 @@ class SystemInfo(BaseTool):
                     mode_str = f" top_mode={top_mode}" if top_mode else ''
                     lines.append(f"  {name}: loads={loads}{cls_str}{mode_str}")
 
+            # BUG_0263: "Most-missed hinted skills" — aggregates the per-instance hint
+            # ledger (_skill_hint_counts) against what was actually loaded
+            # (_loaded_skill_names) across every pool instance. Sits below Skill usage
+            # because it answers a different question: hinted-but-never-loaded demand,
+            # i.e. the skill the advisor keeps pointing at but nobody ever loads. Omitted
+            # entirely when no instance has any hint counts, so existing dumps are unchanged.
+            missed = self._render_missed_skills()
+            if missed:
+                lines.append('')
+                lines.append(missed)
+
             lines.append('')
             lines.append('(Raw JSONL export: GET /api/telemetry/export)')
             return '\n'.join(lines)
@@ -166,6 +177,50 @@ class SystemInfo(BaseTool):
         except Exception as e:
             logger.warning(f"system_info telemetry dump failed: {e}")
             return f"system_info telemetry dump unavailable: {e}"
+
+    def _render_missed_skills(self, top_n: int = 5) -> str:
+        """Aggregate "Most-missed hinted skills" across all pool instances (BUG_0263).
+
+        For each skill name seen in any instance's ``_skill_hint_counts`` (the per-session
+        hint ledger incremented by the memory-hint pipeline), sum the hints across instances
+        and count how many of those instances actually carry the skill in
+        ``_loaded_skill_names``. "Missed" = hinted but never loaded. Rows are sorted by
+        missed-first (``hints - loaded_instances`` desc), then raw hints desc, then name
+        asc, so the skill the advisor most persistently flags but nobody loads tops the
+        list. Returns '' (section omitted) when there is nothing to show.
+
+        Never raises — a malformed pool / instance / counter is skipped or the whole section
+        degrades to '', so it can't corrupt the surrounding telemetry dump.
+        """
+        try:
+            # skill_lower -> [display_name, total_hints, loaded_instance_count]
+            agg: dict = {}
+            instances = list(getattr(self.agent_pool, 'instances', {}).values())
+            for inst in instances:
+                counts = getattr(inst, '_skill_hint_counts', None) or {}
+                if not isinstance(counts, dict):
+                    continue
+                loaded = {str(x).lower() for x in (getattr(inst, '_loaded_skill_names', None) or [])
+                          if isinstance(x, str)}
+                for skill, cnt in counts.items():
+                    if not isinstance(cnt, int) or cnt <= 0:
+                        continue
+                    key = str(skill).lower()
+                    rec = agg.setdefault(key, [str(skill), 0, 0])
+                    rec[1] += cnt
+                    if key in loaded:
+                        rec[2] += 1
+            if not agg:
+                return ''
+            rows = list(agg.values())  # each [name, hints, loaded_instances]
+            rows.sort(key=lambda r: (-(r[1] - r[2]), -r[1], str(r[0]).lower()))
+            out = ['Most-missed hinted skills:']
+            for name, hints, loaded in rows[:top_n]:
+                out.append(f"  {name}: hinted={hints} loaded={loaded}")
+            return '\n'.join(out)
+        except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
+            logger.debug(f"system_info missed-skills render failed: {e}")
+            return ''
 
     def _render_help(self, key: str) -> str:
         """Render a help section from the YAML file. Never raises."""

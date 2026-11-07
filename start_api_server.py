@@ -87,6 +87,8 @@ llm_cfg = {
     # llm_cfg-sourced skill/memory settings (persisted to config/pool_settings.json).
     'memory_hint_skill_suggestions': True,
     'memory_hint_skill_threshold': 0.0,
+    'memory_hint_skill_autoload_enabled': True,
+    'memory_hint_skill_autoload_threshold': 3,
     'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
 }
 # NOTE (Fix 4): the Tier-4 visibility log for this cfg is emitted in __main__ AFTER

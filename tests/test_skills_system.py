@@ -2140,6 +2140,12 @@ def _make_load_pool(manager, inst):
         enqueue_message=lambda name, content: enqueued.append((name, content)),
         telemetry=None,  # skip the telemetry branch; we only care about re-enable + injection
     )
+    # Post-BUG_0263 LoadSkill.call delegates each per-skill load to pool.inject_skill — bind
+    # the REAL method (not auto-mocked) so these re-enable / re-inject tests still exercise the
+    # actual load path. The real hermetic manager supplies enable_skill for the disabled-but-
+    # servable case. Local import keeps the top-level import block untouched.
+    from agent_cascade.pool.core import AgentPool
+    pool.inject_skill = lambda agent_name, skill_name: AgentPool.inject_skill(pool, agent_name, skill_name)
     return pool, enqueued
 
 

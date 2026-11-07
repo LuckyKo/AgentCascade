@@ -328,6 +328,20 @@ class ConfigPersistMixin:
                     except (ValueError, TypeError):
                         pass
 
+                # ── Skill auto-load (BUG_0263) — restore 2 keys into llm_cfg ──
+                # Coercion/clamp is byte-identical to the config handlers so the disk-restore
+                # and UI-update paths can never disagree on a value.
+                val = data.pop('memory_hint_skill_autoload_enabled', None)
+                if val is not None:
+                    self.llm_cfg['memory_hint_skill_autoload_enabled'] = bool(val)
+
+                val = data.pop('memory_hint_skill_autoload_threshold', None)
+                if val is not None:
+                    try:
+                        self.llm_cfg['memory_hint_skill_autoload_threshold'] = max(1, int(val))
+                    except (ValueError, TypeError):
+                        pass
+
                 # ── Skill invalidation (adaptive count-cap) — restore 4 keys into llm_cfg ──
                 val = data.pop('skill_auto_invalidate_enabled', None)
                 if val is not None:

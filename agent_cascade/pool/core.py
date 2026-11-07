@@ -744,3 +744,122 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                     '<context_summary>' in content):
                 indices.append(i)
         return indices
+
+    def inject_skill(self, agent_name: str, skill_name: str) -> tuple:
+        """Inject *skill_name*'s full instructions into *agent_name*'s conversation as a
+        USER message — the single source of truth shared by the ``load_skill`` tool and
+        the memory-hint auto-loader (BUG_0263).
+
+        Performs the whole per-skill job: resolve instance + ``skill_manager`` ->
+        ``load_full_instructions`` -> re-activate a previously-disabled skill -> dedup
+        case-insensitively against ``inst._loaded_skill_names`` -> ``enqueue_message``
+        with ``_SKILL_MSG_PREFIX`` -> record the name on the instance (order-preserving
+        dedup) -> telemetry ``record_skills_loaded(..., 'runtime')``.
+
+        Args:
+            agent_name: Target instance name.
+            skill_name: Skill name. Assumed already validated (non-empty, regex-clean) —
+                name validation stays with the ``load_skill`` tool so invalid inputs never
+                reach here.
+
+        Returns:
+            ``(status, re_enabled)`` where ``status`` is ``'loaded'``, ``'already_loaded'``
+            or ``'failed'`` (instance missing / not found / disabled-not-loadable / load
+            error), and ``re_enabled`` is True when a previously-disabled skill was
+            re-activated as a side effect of loading. The skill name is reported verbatim
+            (the tool dedups/displays it).
+
+        Thread-safety: callers must NOT hold ``inst._compression_lock`` — this takes
+        ``_queue_lock`` (via ``enqueue_message``) and ``_telemetry_lock`` (via
+        ``record_skills_loaded``), whose established order relative to the engine-owned
+        compression lock is "outside it" (see memory_hint/manager.py bump_skill_hints).
+        """
+        skill_manager = getattr(self, 'skill_manager', None)
+        if skill_manager is None:
+            logger.warning('[SKILLS] inject_skill: no skills system available')
+            return ('failed', False)
+
+        inst = self.get_instance(agent_name)
+        if inst is None:
+            logger.warning("[SKILLS] inject_skill: could not find instance '%s'", agent_name)
+            return ('failed', False)
+
+        # Load instructions (mirrors load_skill: exact match then case-insensitive fallback).
+        try:
+            body = skill_manager.load_full_instructions(skill_name)
+        except Exception as e:  # noqa: BLE001 — surface as failed, never crash the caller
+            logger.warning("[SKILLS] inject_skill: error loading skill '%s': %s", skill_name, e)
+            return ('failed', False)
+
+        if body is None:
+            # Distinguish a disabled-but-not-servable skill from a plain "not found": a
+            # disabled skill whose file is NOT at a servable one-level location can't be
+            # loaded, so we must NOT flip its status (a status flip alone can't make a
+            # non-servable file servable). Report it distinctly; still counts as failed.
+            if skill_manager.is_skill_disabled(skill_name):
+                logger.info("[SKILLS] inject_skill: '%s' is disabled and not loadable "
+                            '(file not at a servable location)', skill_name)
+            else:
+                logger.warning("[SKILLS] inject_skill: skill '%s' not found", skill_name)
+            return ('failed', False)
+
+        # Re-activate a previously-disabled skill as part of loading, BEFORE the dedup so the
+        # system-level enabled state is corrected even when the body was already injected on
+        # this instance (re-enable is independent of dedup). enable_skill persists status=
+        # active to disk and invalidates the discovery cache. check-then-enable is not atomic
+        # but enable_skill is idempotent, so no lock is needed here.
+        re_enabled = False
+        if skill_manager.is_skill_disabled(skill_name):
+            ok, msg = skill_manager.enable_skill(skill_name)
+            if ok:
+                re_enabled = True
+                logger.info('[SKILLS] inject_skill: re-enabled previously-disabled skill '
+                            "'%s' (%s)", skill_name, msg)
+            else:
+                logger.warning("[SKILLS] inject_skill: could not re-enable '%s': %s", skill_name, msg)
+
+        # Dedup guard: a skill is injected as a USER message at most once per instance.
+        # Compare case-insensitively against inst._loaded_skill_names (which may carry mixed
+        # casing). Because this method updates that list immediately after a successful
+        # enqueue, repeated names within one load_skill call dedup naturally.
+        loaded_lower = {
+            str(x).lower() for x in (getattr(inst, '_loaded_skill_names', None) or []) if isinstance(x, str)
+        }
+        if skill_name.lower() in loaded_lower:
+            logger.info("[SKILLS] inject_skill: skill '%s' already loaded for instance '%s', "
+                        'skipping re-injection', skill_name, agent_name)
+            return ('already_loaded', re_enabled)
+
+        # Sanitize the skill name in the message body (strip newlines / control chars to
+        # prevent message injection), then queue as a USER message via the pool. Enqueuing
+        # after the tool result preserves OpenAI API ordering (A->F->U->A). Imported locally
+        # to avoid a pool<->engine.helpers import cycle at module load.
+        from agent_cascade.engine.helpers import _SKILL_MSG_PREFIX
+        safe_name = ''.join(c for c in skill_name if c.isprintable() and c not in '\x00\x1b')
+        content = (f"{_SKILL_MSG_PREFIX}{safe_name}\n\n{body}\n\n"
+                   'Apply the above guidelines to your current task.')
+        self.enqueue_message(agent_name, content)
+
+        # Record the successfully-loaded name on the instance so the auto-skill reflection
+        # prompt's "Skills loaded this run" list is accurate. Preserve init-time names and
+        # dedupe while keeping order; a record failure must never break injection.
+        try:
+            existing = getattr(inst, '_loaded_skill_names', None) or []
+            inst._loaded_skill_names = list(dict.fromkeys(existing + [skill_name]))
+        except Exception as e:  # noqa: BLE001 — best-effort recording
+            logger.warning('[SKILLS] inject_skill: failed to record _loaded_skill_names for '
+                           "'%s': %s", agent_name, e)
+
+        # Telemetry: capture runtime (mid-task) skill loads. Only successfully-loaded names
+        # are counted; recorded once per skill, equivalent to a single batched call because
+        # record_skills_loaded increments one per (deduped) name.
+        tel = getattr(self, 'telemetry', None)
+        if tel is not None:
+            try:
+                agent_class = getattr(inst, 'agent_class', '') or ''
+                tel.record_skills_loaded(agent_class, [skill_name], 'runtime')
+            except Exception as e:  # noqa: BLE001 — telemetry must never break injection
+                logger.warning("[SKILLS] inject_skill: telemetry record failed for '%s': %s", skill_name, e)
+
+        logger.info("[SKILLS] inject_skill: queued skill '%s' for instance '%s'", skill_name, agent_name)
+        return ('loaded', re_enabled)

@@ -709,6 +709,33 @@ def _handle_memory_hint_skill_threshold(ui_cfg: dict, agent_pool: Optional[Any],
         agent_pool.llm_cfg['memory_hint_skill_threshold'] = min(max(0.0, val), 1.0)
 
 
+@register_config_handler('memory_hint_skill_autoload_enabled')
+def _handle_memory_hint_skill_autoload_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Master toggle for auto-loading a repeatedly-hinted skill (BUG_0263).
+
+    Stored on pool.llm_cfg like the rest of the memory-hint family; the manager reads
+    it live each cycle via _settings() — no other wiring needed.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['memory_hint_skill_autoload_enabled'] = bool(
+            ui_cfg.get('memory_hint_skill_autoload_enabled', True))
+
+
+@register_config_handler('memory_hint_skill_autoload_threshold')
+def _handle_memory_hint_skill_autoload_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Per-session hint count at which a not-yet-loaded hinted skill auto-loads (BUG_0263).
+
+    Clamped to a minimum of 1: a zero/negative value would mean "auto-load on the first
+    hint", which is not what the setting is for.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('memory_hint_skill_autoload_threshold', 3))
+        except (TypeError, ValueError):
+            val = 3
+        agent_pool.llm_cfg['memory_hint_skill_autoload_threshold'] = max(1, val)
+
+
 # ── Skill invalidation handlers (adaptive count-cap, plan §7) ───────────────
 @register_config_handler('skill_auto_invalidate_enabled')
 def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:

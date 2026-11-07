@@ -372,6 +372,16 @@ class MemoryHintManager:
             skill_threshold = float(cfg.get('memory_hint_skill_threshold', 0.0))
         except (TypeError, ValueError):
             skill_threshold = 0.0
+        # BUG_0263: ``skill_autoload_enabled`` is the master toggle for auto-loading a skill
+        # that has been hinted repeatedly; ON by default. ``skill_autoload_threshold`` is the
+        # per-session hint count at which a not-yet-loaded hinted skill is injected as a real
+        # skill load (default 3, tunable down to 2). Int-tolerant — a bad persisted value falls
+        # back to the default instead of crashing the hint path.
+        skill_autoload_enabled = bool(cfg.get('memory_hint_skill_autoload_enabled', True))
+        try:
+            skill_autoload_threshold = int(cfg.get('memory_hint_skill_autoload_threshold', 3))
+        except (TypeError, ValueError):
+            skill_autoload_threshold = 3
         return {
             'enabled': bool(cfg.get('memory_hint_enabled', False)),
             'threshold': threshold,
@@ -380,6 +390,8 @@ class MemoryHintManager:
             'query_chars': query_chars,
             'skill_suggestions': skill_suggestions,
             'skill_threshold': skill_threshold,
+            'skill_autoload_enabled': skill_autoload_enabled,
+            'skill_autoload_threshold': skill_autoload_threshold,
         }
 
     def _current_floor(self, override: float) -> float:
@@ -587,7 +599,44 @@ class MemoryHintManager:
             except Exception as e:  # noqa: BLE001 — best-effort, never break the hint
                 logger.debug('[MEMORY_HINT] %s: hint ledger bump failed: %s', name, e)
 
+        # BUG_0263: auto-load a skill that keeps getting hinted but was never loaded. This is
+        # a NEW side effect alongside the BUG_0225 recurrence marker (the marker is rendered in
+        # the hint_text already and stays unchanged). Best-effort and placed OUTSIDE the
+        # inst._compression_lock block above (inject_skill takes _queue_lock + _telemetry_lock,
+        # whose established order is to run without the engine-owned compression lock held),
+        # and AFTER the counts/loaded snapshot so this delivery reflects prior state. A failure
+        # here must never break the hint path — _maybe_autoload_skills swallows all exceptions.
+        self._maybe_autoload_skills(inst, name, skill_names, skill_counts, loaded, settings)
+
         self._deliver(inst, name, hint_text)
+
+    def _maybe_autoload_skills(self, inst, name: str, skill_names: List[str],
+                              skill_counts: Dict[str, int], loaded: set, settings: dict) -> None:
+        """BUG_0263: auto-load a skill that keeps getting hinted but was never loaded.
+
+        For each skill hinted this turn whose session hint-count has reached
+        ``skill_autoload_threshold`` and which is not already active on the instance,
+        delegate to ``AgentPool.inject_skill`` — the same path a real ``load_skill`` call
+        uses — so the skill actually lands in the conversation instead of only being named
+        in a warning header. The counts / loaded snapshot came from the locked block in
+        ``_process_job``; ``loaded`` is already lower-cased.
+
+        Best-effort by design: the whole thing is gated on ``skill_autoload_enabled`` and
+        every per-skill ``inject_skill`` call is individually guarded so a single bad skill
+        (missing manager, load error, not found) can never break the hint-delivery path.
+        """
+        if not skill_names or not settings.get('skill_autoload_enabled', True):
+            return
+        threshold = settings.get('skill_autoload_threshold', 3)
+        for n in skill_names:
+            if skill_counts.get(n, 0) < threshold or n.lower() in loaded:
+                continue
+            try:
+                status, _re_enabled = self._pool.inject_skill(name, n)
+                logger.info('[MEMORY_HINT] %s: auto-loaded repeatedly-hinted skill %r '
+                            '(status=%s, hints=%d)', name, n, status, skill_counts.get(n, 0))
+            except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
+                logger.warning('[MEMORY_HINT] %s: skill auto-load failed for %r: %s', name, n, e)
 
     def _match_memories(self, job: dict, settings: dict, inst) -> 'tuple[List[str], List[str]]':
         """Memory sub-pipeline: the existing specificity gate over the lesson index.

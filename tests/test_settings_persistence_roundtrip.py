@@ -261,6 +261,36 @@ def test_disabled_tools_and_compression_roundtrip(tmp_path):
     assert 'auto_security' in on_disk
 
 
+# ── skill auto-load (BUG_0263) round-trip ────────────────────────────────────
+
+def test_skill_autoload_keys_roundtrip(tmp_path):
+    """The 2 llm_cfg-sourced skill auto-load keys must survive a restart.
+
+    The save loop is registry-driven (``LLM_CFG_PERSIST_KEYS``) but the restore path
+    enumerates llm_cfg keys by hand, so a key that is saved but not popped comes back as
+    absent — ``PoolSettings.from_dict`` filters the leftover blob silently. Values are
+    driven through the real config-handler path so the test covers the same seam the UI
+    uses, not a hand-populated dict.
+    """
+    from agent_cascade.config_handlers import CONFIG_HANDLERS
+
+    pool = _make_pool(tmp_path)
+    CONFIG_HANDLERS['memory_hint_skill_autoload_enabled'](
+        {'memory_hint_skill_autoload_enabled': False}, pool, [])
+    CONFIG_HANDLERS['memory_hint_skill_autoload_threshold'](
+        {'memory_hint_skill_autoload_threshold': 5}, pool, [])
+    pool._save_pool_settings()
+
+    on_disk = json.loads(pool._pool_settings_path.read_text())
+    assert on_disk['memory_hint_skill_autoload_enabled'] is False
+    assert on_disk['memory_hint_skill_autoload_threshold'] == 5
+
+    pool2 = _make_pool(tmp_path)
+    pool2._load_pool_settings()
+    assert pool2.llm_cfg['memory_hint_skill_autoload_enabled'] is False
+    assert pool2.llm_cfg['memory_hint_skill_autoload_threshold'] == 5
+
+
 # ── loop-recovery toggle round-trip ────────────────────────────────────────
 
 def test_loop_recovery_toggles_roundtrip(tmp_path):

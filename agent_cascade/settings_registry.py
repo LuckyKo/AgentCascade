@@ -74,7 +74,8 @@ _POOL_KEYS: Tuple[str, ...] = (
     'loop_max_chars_enabled', 'loop_min_chars', 'loop_suspicion_threshold', 'loop_two_phase_enabled',
     'max_auto_rollbacks', 'max_images_for_llm', 'max_nesting_depth', 'max_parallel_agents', 'max_turns',
     'max_workers', 'memory_hint_cooldown_seconds', 'memory_hint_enabled', 'memory_hint_max_entries',
-    'memory_hint_query_chars', 'memory_hint_skill_suggestions', 'memory_hint_skill_threshold',
+    'memory_hint_query_chars', 'memory_hint_skill_autoload_enabled',
+    'memory_hint_skill_autoload_threshold', 'memory_hint_skill_suggestions', 'memory_hint_skill_threshold',
     'memory_hint_threshold', 'read_file_max_chars', 'retry_base_delay', 'retry_max_attempts', 'retry_max_delay',
     'safe_mode_auto_ram_floor_mb', 'safe_mode_auto_vram_floor_mb', 'security_check_timeout',
     'shell_char_limit', 'skill_active_max_cap', 'skill_active_min_cap', 'skill_active_target_k',
@@ -131,7 +132,8 @@ _LLM_CFG_SOURCED: FrozenSet[str] = frozenset({
     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit', 'read_file_max_chars', 'max_images_for_llm',
     'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
     'memory_hint_query_chars', 'memory_hint_cooldown_seconds', 'memory_hint_skill_suggestions',
-    'memory_hint_skill_threshold',
+    'memory_hint_skill_threshold', 'memory_hint_skill_autoload_enabled',
+    'memory_hint_skill_autoload_threshold',
     'skill_auto_invalidate_enabled', 'skill_active_target_k', 'skill_active_min_cap',
     'skill_active_max_cap',
     'skill_score_q0', 'skill_score_kq', 'skill_score_nhalf', 'skill_score_ghalf',
@@ -215,6 +217,10 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'memory_hint_cooldown_seconds': 600,
     'memory_hint_skill_suggestions': True,
     'memory_hint_skill_threshold': 0.0,
+    # Auto-load a repeatedly-hinted skill (BUG_0263): master toggle + per-session hint count
+    # at which a not-yet-loaded hinted skill is auto-loaded.
+    'memory_hint_skill_autoload_enabled': True,
+    'memory_hint_skill_autoload_threshold': 3,
     'skill_auto_invalidate_enabled': True,
     'skill_active_target_k': 1.0,
     'skill_active_min_cap': 20,
@@ -522,7 +528,7 @@ def validate_registry() -> None:
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (101 / 3);
+      * the derived compat sets match their historical sizes (103 / 3);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -534,8 +540,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 101:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 101")
+    if len(POOL_SETTINGS_KEYS) != 103:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 103")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 

@@ -2762,8 +2762,12 @@ if __name__ == '__main__':
         'memory_hint_cooldown_seconds': 600,
         # Skill suggestions within memory hints (sub-toggle under memory_hint_enabled).
         'memory_hint_skill_suggestions': True,
-            # Raise-only override floor for the skill sub-pipeline (BUG_0041). 0 = pure adaptive.
-            'memory_hint_skill_threshold': 0.0,
+        # Raise-only override floor for the skill sub-pipeline (BUG_0041). 0 = pure adaptive.
+        'memory_hint_skill_threshold': 0.0,
+        # Auto-load a repeatedly-hinted skill (BUG_0263): master toggle, plus the
+        # per-session hint count at which a not-yet-loaded hinted skill auto-loads.
+        'memory_hint_skill_autoload_enabled': True,
+        'memory_hint_skill_autoload_threshold': 3,
         # Skill invalidation (adaptive count-cap) — the startup rebalance pass runs by default.
         'skill_auto_invalidate_enabled': True,
         'skill_active_target_k': 1.0,

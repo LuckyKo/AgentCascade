@@ -28,6 +28,7 @@ from agent_cascade.engine.helpers import (
     rederive_loaded_skill_names,
 )
 from agent_cascade.llm.schema import Message
+from agent_cascade.pool.core import AgentPool
 from agent_cascade.tools.custom.load_skill import LoadSkill
 
 
@@ -69,6 +70,11 @@ def _make_pool(inst, skill_bodies):
         enqueue_message=lambda name, content: enqueued.append((name, content)),
         telemetry=None,  # skip the telemetry branch; we only care about _loaded_skill_names
     )
+    # Post-BUG_0263 the tool delegates each per-skill load to pool.inject_skill, so the stub
+    # must expose it and it must be the REAL method (not auto-mocked) for these tests to still
+    # prove load/enqueue/record behavior. SimpleNamespace + the pool attrs it needs
+    # (skill_manager/get_instance/enqueue_message/telemetry) satisfy inject_skill's contract.
+    pool.inject_skill = lambda agent_name, skill_name: AgentPool.inject_skill(pool, agent_name, skill_name)
     return pool, enqueued
 
 

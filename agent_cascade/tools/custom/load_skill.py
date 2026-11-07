@@ -10,7 +10,6 @@ import json
 import logging
 import re
 
-from agent_cascade.engine.helpers import _SKILL_MSG_PREFIX
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.utils import parse_tool_params
@@ -99,24 +98,18 @@ class LoadSkill(BaseTool):
         # Validate and normalize skill names
         VALID_SKILL_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 
-        def _sanitize_for_text(raw: str) -> str:
-            """Strip newlines and control chars to prevent message injection."""
-            return ''.join(c for c in raw if c.isprintable() and c not in '\x00\x1b')
-
-        # Load each skill and inject as user message
+        # Load each skill via the shared AgentPool.inject_skill (single source of truth,
+        # BUG_0263). Name validation stays above; injection/dedup/record are the helper's job.
         loaded = []
         failed = []
         already_loaded = []
         re_enabled = []  # NEW: previously-disabled skills re-activated by this load
 
-        # Dedup guard: a skill must be injected as a USER message at most once per
-        # instance. Track the case-normalized name of every skill resolved so far, seeded
-        # from inst._loaded_skill_names so skills already active on this instance
-        # (init-time self-augmentation / AUTO-matched, or prior runtime loads) are not
-        # re-injected. That list may carry mixed casing (it stores the exact name of each
-        # prior load), so we lowercase on both sides and compare case-insensitively.
-        seen = {n.lower() for n in (inst._loaded_skill_names or []) if isinstance(n, str)}
-
+        # The dedup guard now lives inside AgentPool.inject_skill (BUG_0263): it seeds from
+        # inst._loaded_skill_names and updates that list after each successful enqueue, so
+        # skills already active (init-time AUTO-matched / prior runtime loads) and names
+        # repeated within this call all dedup there. Name validation stays here so invalid
+        # inputs never reach the helper.
         for raw_name in skill_names:
             # Validate skill name (Fix #3)
             name = raw_name.strip() if isinstance(raw_name, str) else ''
@@ -131,86 +124,20 @@ class LoadSkill(BaseTool):
                 failed.append(raw_name)
                 continue
 
-            # Load instructions with error handling (Fix #2)
-            try:
-                body = skill_manager.load_full_instructions(name)
-            except Exception as e:
-                logger.warning("[SKILLS] Runtime load: error loading skill '%s': %s", name, e)
-                failed.append(name)
-                continue
-
-            if body is None:
-                # Distinguish a disabled-but-not-servable skill from a plain "not found".
-                # A disabled skill whose file is NOT at a servable one-level location cannot be
-                # loaded, so we must NOT flip its status (a status flip alone can't make a
-                # non-servable file servable). Report it distinctly; still count as failed.
-                if skill_manager.is_skill_disabled(name):
-                    logger.info("[SKILLS] Runtime load: '%s' is disabled and not loadable "
-                                '(file not at a servable location)', name)
-                else:
-                    logger.warning("[SKILLS] Runtime load: skill '%s' not found", name)  # Fix #6
-                failed.append(name)
-                continue
-
-            # NEW (Part 1): re-activate a previously-disabled skill as part of loading. Placed
-            # BEFORE the injection dedup so the system-level enabled state is corrected even when
-            # the body was already injected on this instance (O1: re-enable is independent of the
-            # dedup). Only reached when the body actually resolved, so non-servable INACTIVE/
-            # skills (body None) never flip status. enable_skill persists status=active to disk
-            # and invalidates the discovery cache; on failure we log and continue without breaking.
-            # The check-then-enable is not atomic, but enable_skill is idempotent (enabling an
-            # already-active skill is a no-op), so the tiny window where status could flip between
-            # the check and the call is harmless — no lock needed here.
-            if skill_manager.is_skill_disabled(name):
-                ok, msg = skill_manager.enable_skill(name)
-                if ok:
-                    re_enabled.append(name)
-                    logger.info("[SKILLS] Runtime load: re-enabled previously-disabled skill '%s' (%s)",
-                                name, msg)
-                else:
-                    logger.warning("[SKILLS] Runtime load: could not re-enable '%s': %s", name, msg)
-
-            # Dedup guard: skip skills already active on this instance (or repeated within
-            # this call). The body resolved above corresponds to a canonical registry entry,
-            # so comparing `name.lower()` case-insensitively is robust to LLM casing.
-            # Recorded as "already loaded", NOT failed.
-            if name.lower() in seen:
-                logger.info("[SKILLS] Runtime load: skill '%s' already loaded for instance '%s', skipping re-injection",
-                            name, agent_name)
+            # Single source of truth (shared with the memory-hint auto-loader, BUG_0263):
+            # inject_skill performs load_full_instructions -> re-enable -> dedup -> enqueue
+            # -> record _loaded_skill_names -> telemetry. It returns (status, was_re_enabled);
+            # re-enable is reported independently of the loaded/already_loaded outcome, so a
+            # re-enabled-but-already-loaded skill still shows in the Re-enabled summary line.
+            status, was_re_enabled = self.agent_pool.inject_skill(agent_name, name)
+            if was_re_enabled:
+                re_enabled.append(name)
+            if status == 'loaded':
+                loaded.append(name)
+            elif status == 'already_loaded':
                 already_loaded.append(name)
-                continue
-            seen.add(name.lower())
-
-            # Sanitize skill name in message content (Fix #5)
-            safe_name = _sanitize_for_text(name)
-
-            # Queue skill content as USER message via pool.
-            # This ensures it's injected after the tool result (preserves OpenAI API ordering: A→F→U→A).
-            skill_content = f"{_SKILL_MSG_PREFIX}{safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
-            self.agent_pool.enqueue_message(agent_name, skill_content)
-            loaded.append(name)
-
-            logger.info("[SKILLS] Runtime load: queued skill '%s' for instance '%s'", name, agent_name)
-
-        # Telemetry: capture runtime (mid-task) skill loads. Only successfully-loaded
-        # names are counted; the load_skill TOOL is the primary self-augmentation mechanism.
-        if loaded:
-            _tel = getattr(self.agent_pool, 'telemetry', None)
-            if _tel is not None:
-                _agent_class = getattr(inst, 'agent_class', '') or ''
-                _tel.record_skills_loaded(_agent_class, loaded, 'runtime')
-
-        # Record successfully-loaded names on the instance so the auto-skill reflection
-        # prompt's "Skills loaded this run" list (dna.py) is accurate during extended turns.
-        # Preserve init-time AUTO-matched names and dedupe while keeping order; a failure to
-        # record must never break the tool call. `inst` is guaranteed non-None here (we
-        # returned early above if resolution failed).
-        if loaded:
-            try:
-                existing = inst._loaded_skill_names or []
-                inst._loaded_skill_names = list(dict.fromkeys(existing + loaded))
-            except Exception as e:
-                logger.warning("[SKILLS] Runtime load: failed to record _loaded_skill_names for '%s': %s", agent_name, e)
+            else:  # 'failed' — inject_skill already logged the specific reason
+                failed.append(name)
 
         # Build summary
         lines = []
