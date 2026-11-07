@@ -27,11 +27,9 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('AGENT_CASCADE_MAX_LLM_CALL_PER_RUN', 250))
 DEFAULT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_DEFAULT_MAX_TURNS',
                                        250))  # Default turn limit per agent execution
-# ── Soft turn limit (todo.md:107) ────────────────────────────────────────────
-# When enabled in the UI, a run keeps going past the configured max_turns while
-# still emitting the normal budget warnings plus a wrap-up nudge every
-# SOFT_TURN_LIMIT_WARNING_INTERVAL over-limit turns. This absolute ceiling is the
-# safety net: even a pathological tool-calling loop is hard-stopped here.
+# ── Soft turn limit ──────────────────────────────────────────────────────────
+# When enabled, a run continues past max_turns (with budget warnings + a wrap-up
+# nudge every SOFT_TURN_LIMIT_WARNING_INTERVAL turns); this ceiling is the hard stop.
 SOFT_TURN_LIMIT: bool = False
 SOFT_TURN_LIMIT_WARNING_INTERVAL: int = 5
 SOFT_TURN_LIMIT_ABSOLUTE_MAX: int = int(
@@ -75,7 +73,7 @@ AFK_ADMIN_NUDGE_MAX_CHARS: int = int(
 AFK_ADMIN_MAX_FINDINGS: int = int(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_FINDINGS', 5))  # Max findings in the Admin prompt
 
-# ── Security agent instance reuse (BUG_0029 Phase 3) ───────────────────────────
+# ── Security agent warm reuse ──────────────────────────────────────────────────
 # Reuse a single warm Security instance across security checks so the LLM prompt prefix
 # stays byte-identical and hits the server-side KV cache, instead of spawning a fresh
 # Security_<rid> per check. Default ON; flip AGENT_CASCADE_SECURITY_REUSE=0 to reproduce
@@ -88,10 +86,9 @@ SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPR
 # Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
 # from the approval name: that path holds no lock, so it must not share one warm object.
 SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_skilladvisor')
-# ── Security approval cache (BUG_0180 follow-up) ─────────────────────────
+# ── Security approval cache ───────────────────────────────────────────────────
 # Caches Security-guard verdicts keyed by tool-call signature (tool_name + sha1 of
-# canonical tool_args) so repeated identical guard reviews collapse into one LLM turn
-# (the 12 repeated curl probes / 6x pytest re-reviews from the 2026-10-30 audit).
+# canonical tool_args) so repeated identical guard reviews collapse into one LLM turn.
 # Default ON; flip AGENT_CASCADE_SECURITY_APPROVAL_CACHE=0 to reproduce today's
 # review-every-time behavior exactly (the mandatory env kill-switch).
 SECURITY_APPROVAL_CACHE_ENABLED: bool = os.getenv('AGENT_CASCADE_SECURITY_APPROVAL_CACHE',
@@ -163,27 +160,26 @@ def _resolve_default_workspace() -> str:
 
 # Settings for tools
 DEFAULT_WORKSPACE: str = _resolve_default_workspace()
-# Global tool-result safety net (BUG_0189): any tool result over this TRIGGER is cut to
-# DEFAULT_WILD_READ_TRUNCATION_CHARS (4k) with a spillover pointer + warning. Reverts the
-# BUG_0189(b) 6k net back to 25k (only ~1/18,983 results ever exceeded 25k).
+# Global tool-result safety net: any tool result over this trigger is cut to
+# DEFAULT_WILD_READ_TRUNCATION_CHARS with a spillover pointer + warning. Default 25000 chars.
 DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_TOOL_RESULT_MAX_CHARS', 25000))
 # Truncation CUT for wild reads / over-limit results (when the trip threshold above is
 # exceeded). Content beyond this window is probably useless, so the agent gets just enough
-# to see what's there. Raised 2k -> 4k so a single no-limit read is a more useful window.
+# to see what's there. Default 4000 chars.
 DEFAULT_WILD_READ_TRUNCATION_CHARS: int = int(os.getenv('AGENT_CASCADE_WILD_READ_TRUNCATION_CHARS', 4000))
-DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LINES', 120))  # legacy: NOT used for no-limit reads anymore
+DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_LINES', 120))  # DEPRECATED — not used for no-limit reads
 # read_file default CHAR truncation for a NO-LIMIT read (limit is None): the body is cut to
-# this many rendered chars at a whole-line boundary (last line kept complete, never chopped),
-# replacing the old DEFAULT_READ_FILE_MAX_LINES (120) line-count default. A bounded read
-# (explicit limit/range) is NOT char-truncated — the requested range wins. Reads incrementally
-# to ~this size so memory is O(window), not O(file). UI + env: read_file_max_chars /
-# AGENT_CASCADE_READ_FILE_MAX_CHARS. -1/0 DISABLES (falls back to the 25k global net only).
+# this many rendered chars at a whole-line boundary (last line kept complete, never chopped).
+# A bounded read (explicit limit/range) is NOT char-truncated — the requested range wins.
+# Reads incrementally to ~this size so memory is O(window), not O(file). UI + env:
+# read_file_max_chars / AGENT_CASCADE_READ_FILE_MAX_CHARS. -1/0 DISABLES (falls back to the
+# 25k global net only).
 DEFAULT_READ_FILE_MAX_CHARS: int = int(os.getenv('AGENT_CASCADE_READ_FILE_MAX_CHARS', 4000))
 # Wall-clock ceiling (seconds) for a single grep search before it aborts with a
 # "narrow your search" error. Kept low so a pathological wide search can't hang the
 # agent for tens of seconds; ripgrep searches normally finish well under this.
 DEFAULT_GREP_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_GREP_TIMEOUT', 5.0))
-# BUG_0169: ripgrep is told not to STREAM files larger than this as text. With `--text`
+# ripgrep is told not to STREAM files larger than this as text. With `--text`
 # (required so NUL-byte files are not silently skipped) a multi-GB model artifact is read
 # byte-by-byte, blows the grep timeout and reports a misleading "scope too broad" error.
 # Such files are instead skipped by the streaming search and only their FIRST
@@ -196,7 +192,7 @@ GREP_LARGE_FILE_HEAD_KB: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_HEAD
 GREP_LARGE_FILE_SCAN_LIMIT: int = int(os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_LIMIT', 50))
 GREP_LARGE_FILE_SCAN_BUDGET_S: float = float(
     os.getenv('AGENT_CASCADE_GREP_LARGE_FILE_SCAN_BUDGET_S', 0.75))
-# BUG_0236: one matched line is not necessarily one line of text — a JSONL record (or any
+# One matched line is not necessarily one line of text — a JSONL record (or any
 # minified log) can be 5-500 KB on a single line. The char budget is applied to rendered
 # entries, so without a per-line cap a handful of JSONL matches consume the whole budget and
 # dump megabytes into the spillover file. Each rendered content column is abbreviated to
@@ -238,13 +234,13 @@ DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
     os.getenv('AGENT_CASCADE_DEFAULT_RAG_SEARCHERS',
               "['keyword_search', 'front_page_search']"))  # Sub-searchers for hybrid retrieval
 
-# Settings for compression (Feature 020)
+# Settings for compression
 DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(
     os.getenv('AGENT_CASCADE_DEFAULT_COMPRESSION_COOLDOWN_SECONDS',
               2.0))  # Minimum seconds between forced compressions to prevent thrashing
 DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(
     os.getenv('AGENT_CASCADE_COMPRESSION_MAX_ATTEMPTS',
-              100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
+              100))  # Safety net: max forced compressions before terminating
 COMPRESSION_FORCE_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_FORCE_THRESHOLD',
                                                      96.0))  # Force compress at X% token usage
 COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_WARNING_THRESHOLD',
@@ -265,7 +261,7 @@ COMPRESSION_OVERFLOW_TOLERANCE_PCT: float = float(
 COMPRESSION_RECOUNT_THRESHOLD: float = float(
     os.getenv('AGENT_CASCADE_COMPRESSION_RECOUNT_THRESHOLD',
               0.85))  # Force full recount at X fraction of allocated max when cache invalidated
-# BUG_0029 Phase 2 (D-2a): immutable env-var seed only — used at import time to initialize
+# Immutable env-var seed only — used at import time to initialize
 # runtime_state.state.compression_fraction. The LIVE mutable value lives on the state singleton;
 # this name is NOT a runtime setting and must not be read or mutated by consumers.
 COMPRESSION_DEFAULT_FRACTION_SEED: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_DEFAULT_FRACTION',
@@ -291,7 +287,7 @@ COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv('AGENT_CASCADE_COMPRES
 # Compression agent invocation timeout (5 minutes for large compression/consolidation tasks)
 COMPRESSION_AGENT_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_AGENT_TIMEOUT', 300.0))
 
-# Hard cap on the <last_supervisor_task> block appended to a compression marker (todo.md:143).
+# Hard cap on the <last_supervisor_task> block appended to a compression marker.
 # Bounds marker growth and its tokens_after accounting; tasks over this are truncated with an
 # explicit "[truncated]" suffix so the agent knows the text is partial.
 COMPRESSION_MAX_LAST_TASK_CHARS: int = int(os.getenv('AGENT_CASCADE_COMPRESSION_MAX_LAST_TASK_CHARS', 4000))
@@ -302,19 +298,19 @@ AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_IDLE_TIMEOUT',
 SYSTEM_AGENT_IDLE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT',
                                                     300.0))  # Auto-dismiss Compressor/Security after X seconds inactivity (5 min)
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv('AGENT_CASCADE_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
-# Holder-side dead-man's-switch window (todo #220 follow-up, plan t220_holder_dms_PLAN §3.4).
-# A conc=0 slot holder with NO turn-progress (last_activity) for >= this many seconds while NOT in a
-# legitimately-bounded operation (approval / media-gen / in-bounded blocking tool / in-flight LLM call)
-# is terminated by the idle-checker to free the wedged slot. Default 300s, validated against measured
-# last_activity gaps; must stay >= the largest un-excluded tool bound (see plan bound table).
+# Holder-side dead-man's-switch window: a conc=0 slot holder with NO turn-progress
+# (last_activity) for >= this many seconds while NOT in a legitimately-bounded operation
+# (approval / media-gen / in-bounded blocking tool / in-flight LLM call) is terminated by
+# the idle-checker to free the wedged slot. Default 300s; must stay >= the largest
+# un-excluded tool bound.
 HOLDER_DMS_WINDOW_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_WINDOW_S', 300.0))
 # Fallback DMS bound for a synchronous tool that declares NO finite bound (BaseTool.dms_bound()
 # returns None). The dispatch boundary carries this as the marker bound so an unbounded marker can
-# never shield a holder forever (plan t292 §2). Default 900s == the current media/image fallback
+# never shield a holder forever. Default 900s == the media/image fallback
 # ceiling; must stay >= any legitimate sync tool's max bound or genuine long ops get killed.
 HOLDER_DMS_MAX_BOUND_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_MAX_BOUND_S', 900.0))
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
-# ── Two-tier loop detection (2026-08 redesign; plan: plans/loop_detector_exact_redesign_PLAN.md §5.3) ──
+# ── Two-tier loop detection ──
 # Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.
 LOOP_EXACT_ROLLBACK_ENABLED: bool = os.getenv('AGENT_CASCADE_LOOP_EXACT_ROLLBACK',
                                               '1') == '1'  # Tier 1 runs and rolls back on exact hits
@@ -324,7 +320,7 @@ LOOP_FUZZY_WARNING_ENABLED: bool = os.getenv('AGENT_CASCADE_LOOP_FUZZY_WARNING',
 # Tier 2 escalation: fuzzy loop persisting FUZZY_ESCALATION_TURNS turns after the warning → full rollback. Off by default.
 TOOL_LOOP_FUZZY_ROLLBACK_ENABLED: bool = os.getenv('AGENT_CASCADE_TOOL_LOOP_FUZZY_ROLLBACK',
                                                    '0') == '1'  # Escalation off by default
-# DEPRECATED (2026-08): legacy kill switch only — can DISABLE Tier 2 (LOOP_FUZZY_WARNING_ENABLED AND this flag) but never enable it. Removed in a later cleanup release.
+# DEPRECATED — legacy kill switch: can DISABLE the fuzzy tier (LOOP_FUZZY_WARNING_ENABLED AND this) but never enable it.
 TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv('AGENT_CASCADE_TOOL_LOOP_DETECTION',
                                               '1') == '1'  # Legacy kill switch for the fuzzy tier
 # Tier 2 (fuzzy) similarity floor: minimum difflib SequenceMatcher.ratio() between
@@ -333,11 +329,10 @@ TOOL_LOOP_SIM_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_TOOL_LOOP_SIM_TH
                                                  '0.95'))  # Default 0.85 (unchanged behavior unless opted in)
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv('AGENT_CASCADE_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv('AGENT_CASCADE_MAX_WORKERS', 3))  # ThreadPoolExecutor workers
-# DEPRECATED (2026-08): AGENT_SLEEPING_TIMEOUT is no longer used.
-# Timeout-to-IDLE transition removed; agents stay SLEEPING until woken by messages or completed.
+# DEPRECATED — unused; kept for backward compatibility.
 AGENT_SLEEPING_TIMEOUT: float = float(
     os.getenv('AGENT_CASCADE_SLEEPING_TIMEOUT',
-              300.0))  # DEPRECATED (2026-08): Formerly max seconds before SLEEPING→IDLE transition; now unused.
+              300.0))  # DEPRECATED — unused
 AGENT_SLEEPING_WAKEUP_INTERVAL: float = float(os.getenv('AGENT_CASCADE_SLEEPING_WAKEUP_INTERVAL',
                                                         5.0))  # Wakeup log interval while SLEEPING
 # Conservative estimate used for compression template overhead estimation.
@@ -345,7 +340,7 @@ AGENT_SLEEPING_WAKEUP_INTERVAL: float = float(os.getenv('AGENT_CASCADE_SLEEPING_
 # (more chars per token) yields safer/more conservative estimates.
 CHARS_PER_TOKEN_ESTIMATE: float = float(os.getenv('AGENT_CASCADE_CHARS_PER_TOKEN_ESTIMATE', 5.0))
 
-# Settings for forget_last tool (Feature 021)
+# Settings for forget_last tool
 DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
     'AGENT_CASCADE_FORGET_LAST_TRUNCATE_MAX_CHARS', 100))  # Maximum characters to keep when truncating tool responses
 DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT: int = int(
@@ -360,7 +355,7 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_SLOT_
 # re-enters FIFO at tail (unbounded).
 REACQUIRE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_REACQUIRE_TIMEOUT', 30.0))
 
-# Bounded TAIL re-acquire after a post-yield fast-path miss (plan §3 A4). Deliberately a
+# Bounded TAIL re-acquire after a post-yield fast-path miss. Deliberately a
 # SEPARATE, SHORT, LITERAL bound: this call does NOT pass `pool=`, so the holder-activity
 # resolver is absent and the dead-man's-switch window can never reset here. Without an
 # explicit cap the wait would inherit the user's window and then the derived 6x hard cap —
@@ -390,7 +385,7 @@ TG_SEND_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_R
 TG_SEND_RETRY_BACKOFF_CAP_SEC: float = float(os.getenv('AGENT_CASCADE_TG_SEND_RETRY_BACKOFF_CAP_SEC', 30.0))  # Ceiling for any single 429 retry delay
 TG_MAX_MESSAGE_LEN: int = int(os.getenv('AGENT_CASCADE_TG_MAX_MESSAGE_LEN', 4096))  # Telegram hard limit of chars per message (chunking boundary)
 
-# Outbound media delivery (todo.md:102, plans/tg-outbound-media_PLAN.md §11).
+# Outbound media delivery.
 # TG_OUTBOUND_MEDIA is the master switch: False restores the text-only behaviour exactly.
 # Ship enabled — the feature is invisible otherwise. Names follow the AGENT_CASCADE_
 # prefix convention of the newer knobs above (constant == env name minus the prefix).
@@ -416,7 +411,7 @@ ENDPOINT_COOLDOWN_SECONDS: int = _parse_endpoint_cooldown()  # Seconds to skip a
 ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv('AGENT_CASCADE_ENDPOINT_FAILURE_CLEANUP_HOURS',
                                                     24))  # Remove failure records older than this many hours
 
-# Phase 1: Fix A2 — absolute wall-clock deadline for a single LLM call.
+# Absolute wall-clock deadline for a single LLM call.
 # Caps the total time (all retries included) that _execute_llm_call_with_retry may
 # spend before aborting with a [SYSTEM ERROR]. Prevents unbounded retry churn when
 # backoff is misconfigured or an endpoint never recovers. Set to 0 to disable.
@@ -424,7 +419,7 @@ LLM_CALL_DEADLINE_SECONDS: int = int(
     os.getenv('AGENT_CASCADE_LLM_CALL_DEADLINE_SECONDS',
               2400))  # Wall-clock deadline (seconds) for one LLM call, all retries included
 
-# Phase 1: Fix D — lightweight pre-allocation API sanity probe.
+# Lightweight pre-allocation API sanity probe.
 # Before the router allocates an endpoint to a real call, it checks reachability
 # and auth via a fast GET /models request (no model loading or GPU thrashing).
 # Probes fire once per connection-establishment: an instance that already holds a
@@ -436,10 +431,9 @@ SANITY_PROBE_ENABLED: bool = os.getenv('AGENT_CASCADE_SANITY_PROBE_ENABLED',
 SANITY_PROBE_TIMEOUT_SECONDS: float = float(os.getenv(
     'AGENT_CASCADE_SANITY_PROBE_TIMEOUT_SECONDS', 10.0))  # HTTP READ timeout (seconds) for the lightweight probe GET
     # request. Sized for a BUSY local server (may be mid-stream on another agent's request),
-    # not an idle probe — a 5.0s read timeout false-failed a healthy busy llama.cpp server
-    # mid-stream and triggered a spurious cooldown + model demotion (todo #178, Incident A).
+    # not an idle probe. Default 10.0s.
 
-# Phase 2: Fix B1 — endpoint blacklist for deterministic failures.
+# Endpoint blacklist for deterministic failures.
 # An endpoint that fails ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD consecutive times
 # with a DETERMINISTIC client error (one that will recur on every attempt, e.g. an
 # HTTP 400 "not supported") is blacklisted for ENDPOINT_BLACKLIST_SECONDS — longer
@@ -453,14 +447,11 @@ ENDPOINT_BLACKLIST_SECONDS: int = int(
     os.getenv('AGENT_CASCADE_ENDPOINT_BLACKLIST_SECONDS',
               300))  # Blacklist duration (seconds) for a persistently-failing endpoint
 
-# Phase 3: Fix A1 — cap on SLEEPING duration.
+# Cap on SLEEPING duration.
 # Max seconds an agent may remain in SLEEPING state waiting for background tools
 # (async agent calls / async shells). On expiry the agent is forced to COMPLETING
 # with an error message so a hung background tool can no longer hold it forever.
-# This replaces the deprecated AGENT_SLEEPING_TIMEOUT above for control flow — that
-# constant's timeout-to-IDLE transition was removed in 2026-08 and it is now unused;
-# the deprecated block is left intact for backward compatibility. Set to 0 to disable
-# the cap (legacy unbounded-wait behavior).
+# Set to 0 to disable the cap (unbounded wait).
 AGENT_SLEEPING_MAX_WAIT_SECONDS: int = int(
     os.getenv('AGENT_CASCADE_AGENT_SLEEPING_MAX_WAIT_SECONDS',
               3600))  # Max seconds in SLEEPING before forcing COMPLETING with error
@@ -562,14 +553,12 @@ STREAM_FORCE_FULL_INTERVAL: float = _parse_stream_force_full_interval()
 DISMISS_THREAD_JOIN_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_DISMISS_THREAD_JOIN_TIMEOUT', 2.0))
 
 # HTTP client timeouts (passed to httpx)
-# read is a per-chunk idle backstop. It is silent on BOTH holder-DMS timestamps, so it must sit
-# well under HOLDER_DMS_WINDOW_S (300s) â€” at 300s a wedged non-streaming read parked a conc=0 holder
-# exactly AT the kill edge with zero margin. Lowered 300s -> 120s (BUG_0244 Â§6.2) to restore the
-# documented "every tool bound under the window" invariant and match the house longest tool bound
-# (CODE_EXECUTION_TIMEOUT=120 â†’ 2.5x margin). Streaming is unaffected: the 180s stream-silence
+# read is a per-chunk idle backstop, silent on BOTH holder-DMS timestamps, so it must
+# sit well under HOLDER_DMS_WINDOW_S (300s). Default 120s (the longest tool bound,
+# CODE_EXECUTION_TIMEOUT=120 → 2.5x margin). Streaming is unaffected: the 180s stream-silence
 # watchdog (utils/streaming.py) is authoritative and fires first. Env-overridable as usual.
 HTTP_READ_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_READ_TIMEOUT',
-                                           120.0))  # Idle read backstop; strictly under HOLDER_DMS_WINDOW_S (BUG_0244)
+                                           120.0))  # Idle read backstop; strictly under HOLDER_DMS_WINDOW_S
 HTTP_CONNECT_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_CONNECT_TIMEOUT',
                                               10.0))  # Timeout for establishing TCP connection
 HTTP_WRITE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_HTTP_WRITE_TIMEOUT',
@@ -588,12 +577,12 @@ LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv('AGENT_CASCADE_LM_STUDIO_KE
                                                      3.0))  # Keepalive expiry in seconds
 
 
-# ── Inner-loop detection settings (Feature: loop detection tuning) ─────────────
+# ── Inner-loop detection settings ───────────────────────────────────
 @dataclass
 class InnerLoopSettings:
     """Tunable parameters for the inner-loop repetition detector.
 
-    After Phase 3 cleanup, only char_run and max_chars guards plus the
+    Only the char_run and max_chars guards plus the
     two-phase semantic loop detector remain active. All scoring-based fields
     below are DEPRECATED and kept only for backward compatibility with existing
     code that constructs InnerLoopSettings with explicit values.
@@ -626,7 +615,7 @@ class InnerLoopSettings:
     loop_confirm_required: int = 5  # Exact matches required for confirmation [2-6]
     loop_cooldown_feeds: int = 50  # Feeds to suppress after failed confirmation [10-200]
 
-    # ── Deprecated settings (scoring-based modes removed in Phase 3) ────
+    # ── Deprecated settings (scoring-based modes removed) ────
     # These fields are no longer used by InnerLoopDetector but kept for backward
     # compatibility with code that passes explicit values when constructing settings.
 
@@ -663,7 +652,7 @@ class InnerLoopSettings:
                                                '1') != '0'  # DEPRECATED: entropy detection removed
 
 
-# ── Code interpreter settings (Feature: CI session sharing) ────────────────
+# ── Code interpreter settings ────────────────
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT',
                                           '120'))  # Per-call execution timeout (seconds)
 CI_WATCHDOG_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT',
@@ -674,15 +663,15 @@ CI_MIN_EXECUTION_TIMEOUT: int = 1  # Minimum per-call execution timeout (seconds
 CI_MIN_WATCHDOG_TIMEOUT: int = 30  # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
 
-# ── Cache pool settings (Feature: USE_CACHED_ENTRY_N) ────────────────────────
+# ── Cache pool settings ────────────────────────
 CACHE_POOL_ENABLED: bool = False  # Toggle cache pool on/off (default: disabled)
 CACHE_POOL_SIZE: int = int(os.getenv('AGENT_CASCADE_CACHE_POOL_SIZE', '50'))  # Rolling buffer entries per instance
 CACHE_THRESHOLD_CHARS: int = int(os.getenv('AGENT_CASCADE_CACHE_THRESHOLD_CHARS',
                                            '1000'))  # Min chars for output & granular arg caching
 
-# ── Async shell command settings (Feature: async shell_cmd) ───────────
+# ── Async shell command settings ───────────
 MAX_ASYNC_SHELL_PER_AGENT: int = 5  # Max concurrent async shells per agent
-# DEPRECATED: Async shell truncation now uses shell_char_limit from llm_cfg (default 2048, same as sync mode)
+# DEPRECATED — async shell truncation uses shell_char_limit from llm_cfg (default 2048, same as sync mode)
 ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('AGENT_CASCADE_ASYNC_SHELL_HEARTBEAT_CHARS',
                                                           '800'))  # noqa: F841
 ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600  # Default timeout for async shells (1 hour)
@@ -700,7 +689,7 @@ WAIT_CMD_MAX_TIMEOUT: float = 180.0  # Max seconds __wait will block when heartb
 WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0  # Seconds __wait blocks when no heartbeats are configured (-1)
 WAIT_CMD_POLL_INTERVAL: float = 0.5  # Seconds between state polls inside the __wait loop
 
-# ── Skills system settings (Feature: Skills System Phase 1) ────────────
+# ── Skills system settings ────────────
 LOAD_SKILL_AUTO: str = 'AUTO'  # Auto-match relevant skills from task context
 LOAD_SKILL_NONE: str = 'NONE'  # No skill loading (saves tokens)
 DEFAULT_LOAD_SKILL_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_LOAD_SKILL',
@@ -723,26 +712,23 @@ DEFAULT_SKILL_SELECTOR_MODE: str = os.getenv('AGENT_CASCADE_DEFAULT_SKILL_SELECT
 SKILL_SELECTOR_MODE_KEYWORD: str = 'keyword'
 SKILL_SELECTOR_MODE_API: str = 'api'
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_SKILL_MATCH_THRESHOLD',
-                                                '0.25'))  # Minimum relevance score for AUTO mode skill loading (BUG_0247: 0.15 -> 0.25, shrinks AUTO tail entering the block cap)
+                                                '0.25'))  # Minimum relevance score for AUTO mode skill loading
 MAX_AUTO_SKILLS_PER_CALL: int = 3  # Hard cap on Basic AUTO keyword-matched skills per call (self-augmentation excluded)
-# BUG_0247: the `## Active Skills` block is assembled ONCE at spawn and never rebuilt (idempotency
-# guard in engine/helpers.py), so all pruning happens at assembly time. This env-reversible knob
-# bounds that static block by skill count; set to 0 to disable.
-# SKILL_MATCH_THRESHOLD (above) is the separate AUTO-mode floor that shrinks the tail entering it.
-# Hard ceiling on the number of skills in the per-session block (self-augmentation COUNTED). The
-# only knob covering the uncapped explicit-list and advisor paths that MAX_AUTO_SKILLS_PER_CALL
-# misses. 0 = off. Env-reversible.
+# The `## Active Skills` block is assembled ONCE at spawn and never rebuilt (idempotency guard
+# in engine/helpers.py), so all pruning happens at assembly time. This bounds that static block
+# by skill count; set to 0 to disable. SKILL_MATCH_THRESHOLD (above) is the separate AUTO-mode
+# floor that shrinks the tail entering it. This is a hard ceiling on skills in the per-session
+# block (self-augmentation COUNTED) — the only knob covering the uncapped explicit-list and
+# advisor paths that MAX_AUTO_SKILLS_PER_CALL misses. 0 = off. Env-reversible.
 MAX_ACTIVE_SKILLS_PER_SESSION: int = int(os.getenv('AGENT_CASCADE_MAX_ACTIVE_SKILLS_PER_SESSION', 8))
-# SKILL_HINT_ENTRY_COOLDOWN_SECONDS (BUG_0233): minimum interval before the SAME skill may be
-# hinted again. ``memory_hint_cooldown_seconds`` is a MEMORY-re-read knob and a user may
-# legitimately set it very low (the reporting session had 5 s); reusing it for skills let one
-# skill that sits just above the adaptive floor re-appear on nearly every turn. Skill entries
-# therefore get their own floor, applied as max(memory_hint_cooldown_seconds, this) — a low
-# memory cooldown can never turn skill suggestions into per-turn spam (nor can a high one
-# shorten this guard).
+# Minimum interval before the SAME skill may be hinted again. ``memory_hint_cooldown_seconds``
+# is a separate MEMORY-re-read knob that a user may legitimately set very low; reusing it for
+# skills lets one skill re-appear on nearly every turn, so skill entries get their own floor,
+# applied as max(memory_hint_cooldown_seconds, this) — a low memory cooldown can never turn
+# skill suggestions into per-turn spam (nor can a high one shorten this guard). Default 300s.
 SKILL_HINT_ENTRY_COOLDOWN_SECONDS: float = float(
     os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 300.0))
-# ── BUG_0189 #5: skill-hint SELECTOR-PRECISION lever (memory-hint sub-pipeline only) ──
+# ── Skill-hint selector-precision lever (memory-hint sub-pipeline only) ──
 # A post-Gate-3 ranking layer in memory_hint/manager.py._match_skills_for_hint (Gate 4).
 # It reads the persistent load ledger (agents/global/skills-metrics.json) and DEMOTES a
 # skill that is hinted often but loaded rarely, and hard-drops one hinted many times yet
@@ -762,9 +748,7 @@ SKILL_PRECISION_K: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_K', '1
 SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.35'))
 # SKILL_ZERO_LOAD_SUPPRESS_HINTS (N): hard-drop a skill from hints when its lifetime
 # total_loads == 0 AND lifetime hints >= N. 0 = off. The only hard drop; everything else is
-# demotion only. Calibrated on ~2 months of one deployment's logs: N=50 removes 25.2% of
-# hint traffic while leaving 84.7% of the zero-load set untouched (expose + re-check after a
-# month — the counters are persisted in the ledger, no schema bump was needed).
+# demotion only. Default N=50.
 SKILL_ZERO_LOAD_SUPPRESS_HINTS: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ZERO_LOAD_SUPPRESS_HINTS', '50'))
 
@@ -781,14 +765,14 @@ _SKILLS_DISABLED_RAW: str = os.getenv('AGENT_CASCADE_SKILLS_DISABLED', '')
 SKILLS_DISABLED: List[str] = [s.strip().lower() for s in _SKILLS_DISABLED_RAW.split(',') if s.strip()
                              ] if _SKILLS_DISABLED_RAW else []
 
-# ── Auto-skill generation settings (Feature: Auto-Skill Generation Phase 1) ──
+# ── Auto-skill generation settings ──
 AUTO_SKILL_ENABLED: bool = False  # Toggle auto-skill generation on/off
 AUTO_SKILL_EXTRA_TURNS: int = int(
     os.getenv('AGENT_CASCADE_AUTO_SKILL_EXTRA_TURNS',
               25))  # Fresh turn budget granted at in-loop trigger time (added on top of the exhausted budget)
 AUTO_SKILL_MIN_TURNS: int = int(os.getenv('AGENT_CASCADE_AUTO_SKILL_MIN_TURNS',
                                           20))  # Fire reflection when turns effectuated > N (strictly greater)
-# Activity-clock wall-clock fallback rate (research §15 / D-FALLBACK, open decision OD-1):
+# Activity-clock wall-clock fallback rate:
 # seconds of real time mapped to one "activity turn" when the durable turns counter is
 # unavailable (global_activity_turns == 0). Only used as a bounded fallback; the primary
 # clock is the persisted cumulative user-turn counter. A larger value ages skills SLOWER
@@ -802,10 +786,10 @@ SKILL_ACTIVE_TARGET_K: float = float(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_TARGE
 SKILL_ACTIVE_MIN_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MIN_CAP', '20'))
 SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', '200'))
 
-# ── Skill-scoring constants (research §5/§7/§18 + D-SAFE) ──────────────────
-# Every formula/gate constant in the Phase B/C scoring is a named setting (Refinement 4, §18).
-# Each default mirrors the research values AND the hard-coded fallbacks already read by pool/core.py
-# and skills/manager.py (_SKILL_SCORE_DEFAULTS), so exposing them changes no behavior at defaults.
+# ── Skill-scoring constants ──────────────────
+# Every formula/gate constant in the skill scoring is a named setting here. Each default
+# matches the hard-coded fallbacks read by pool/core.py and skills/manager.py
+# (_SKILL_SCORE_DEFAULTS), so exposing them changes no behavior at defaults.
 SKILL_SCORE_Q0: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_Q0', '5.0'))  # neutral quality baseline (5.0)
 SKILL_SCORE_KQ: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_KQ', '5'))  # shrinkage prior strength
 SKILL_SCORE_NHALF: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_NHALF', '8'))  # usage saturation
@@ -815,7 +799,7 @@ SKILL_SCORE_TAU_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_TAU_TURNS'
 SKILL_SCORE_DQ: float = float(os.getenv('AGENT_CASCADE_SKILL_SCORE_DQ', '0.5'))  # quality margin / neutral-band width
 SKILL_SCORE_NMIN: int = int(os.getenv('AGENT_CASCADE_SKILL_SCORE_NMIN', '5'))  # meaningful-use bar
 SKILL_FAIR_WINDOW_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_FAIR_WINDOW_TURNS', '50'))  # PROTECTED window
-SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # D-SAFE cap
+SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICTIONS_PER_PASS', '25'))  # max evictions per pass
 
 # Meta/process skills that must NEVER be evicted by the rebalance pass, even if their metrics
 # would classify them BAD (BAD normally overrides the fair-window PROTECTED). This is a STRING
@@ -873,11 +857,10 @@ def format_skill_always_protected(value) -> str:
     return ','.join(sorted(parse_skill_always_protected(value)))
 
 
-# ── Single source of truth for the skill-scoring clamp ranges (POLISH dedup) ─
+# ── Single source of truth for the skill-scoring clamp ranges ─
 # Each setting's (default, lo, hi, type) lives HERE exactly once. config_handlers.py,
-# pool/config_persist.py, pool/core.py and api_server.py all derive their clamps from this table
-# via clamp_skill_setting() instead of hardcoding min(max(lo, val), hi) in four places. The per-key
-# "Clamped [lo,hi]" notes that used to sit on the constants above are now consolidated here.
+# pool/config_persist.py, pool/core.py and api_server.py all derive their clamps from this
+# table via clamp_skill_setting() instead of hardcoding min(max(lo, val), hi) in four places.
 SKILL_SCORE_SETTINGS = {
     'skill_score_q0':            {'default': SKILL_SCORE_Q0,             'lo': 0.0,  'hi': 10.0,  'type': float},
     'skill_score_kq':            {'default': SKILL_SCORE_KQ,             'lo': 0,    'hi': 20,    'type': int},
@@ -930,7 +913,7 @@ CANDIDATE_MAX_PENDING_DAYS: float = float(os.getenv(
 AUTO_SKILL_MAX_SIZE_KB: int = 15  # Maximum SKILL.md file size in KB
 MIN_SKILL_BODY_LENGTH: int = 100  # Minimum body char count for skill validation
 MIN_DESCRIPTION_LENGTH: int = 20  # Minimum description length for skill validation
-# BUG_0199: propose_skill's non-fatal unresolved-skill-reference scan (advisory only — it
+# Propose_skill's non-fatal unresolved-skill-reference scan (advisory only — it
 # never blocks registration or candidate promotion).
 SKILL_REF_SCAN_MODE: str = os.getenv('AGENT_CASCADE_SKILL_REF_SCAN_MODE', 'hybrid')  # hybrid | cue | typo | off
 SKILL_REF_SUGGEST_CUTOFF: float = 0.6  # difflib similarity floor for "did you mean" suggestions
