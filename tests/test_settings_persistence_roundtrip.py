@@ -61,6 +61,32 @@ def test_default_llm_cfg_roundtrip(tmp_path):
     assert router2.default_llm_cfg['model'] == 'test-model'
     assert router2.default_llm_cfg['api_key'] == 'sk-secret'
     assert router2.default_llm_cfg['log_api_post'] is True
+    # BUG_0252: pin the field the bug is about — api_base must survive the round-trip.
+    assert router2.default_llm_cfg['api_base'] == 'http://x'
+
+
+def test_pool_settings_broadcasts_api_base_from_default_llm_cfg(tmp_path):
+    """BUG_0252: the boot/stream snapshot must carry default_llm_cfg.api_base so the UI
+    can rehydrate #setting-endpoint after a restart."""
+    from agent_cascade.api_integration_pkg.state_builder import _add_pool_runtime_settings
+
+    class _Router:
+        default_llm_cfg = {'api_base': 'http://general-endpoint', 'model': 'm'}
+    class _Pool:
+        operation_manager = None
+        api_router = _Router()
+        _enable_async_shell_console_window = False
+
+    ps = {}
+    _add_pool_runtime_settings(_Pool(), ps)
+    assert ps['api_base'] == 'http://general-endpoint'   # fails before Fix A (key absent)
+
+    # An empty/missing default must not emit a stale value:
+    class _PoolNoRouter:
+        operation_manager = None; api_router = None; _enable_async_shell_console_window = False
+    ps2 = {}
+    _add_pool_runtime_settings(_PoolNoRouter(), ps2)
+    assert ps2['api_base'] == ''                          # defined-but-empty, never undefined-stomp
 
 
 def test_update_default_llm_cfg_persists(tmp_path):
