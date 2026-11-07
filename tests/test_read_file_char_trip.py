@@ -1,22 +1,33 @@
-"""BUG_0246 regression tests — read_file-specific char trip + lowered line cap.
+"""read_file no-limit char default + global net — regression tests.
 
-The outer 6k safety net (``tool_result_max_chars``, BUG_0189) trims the 2k-6k
-pass-through band ONLY for raw bodies >6000. A read_file whose rendered body sits in
-~3000-6000 was therefore returned FULL. read_file is the single largest per-call input
-driver (~26.9%), so the incremental lever is a read_file-only char trip (default 3000)
-that fires for BOTH wild and bounded reads and cuts to the 2k wild window with a plain
-[TRUNCATED] marker (never the unbound-read warning). Env-only:
-``AGENT_CASCADE_READ_FILE_MAX_CHARS`` (-1/0 disables). Secondary lever:
-``DEFAULT_READ_FILE_MAX_LINES`` 150 -> 120.
+A NO-LIMIT read (no explicit ``limit``) is truncated to ``read_file_max_chars``
+(default ``DEFAULT_READ_FILE_MAX_CHARS`` = 4000) rendered chars at a WHOLE-LINE
+boundary (last line kept complete, never chopped mid-line), with a plain
+[TRUNCATED] marker — never the unbound-read warning. This REPLACES the legacy
+120-line (DEFAULT_READ_FILE_MAX_LINES) default. A BOUNDED read (explicit limit /
+range) keeps its requested range and is NEVER char-truncated. Reads stream only
+to ~the window so memory is O(window), not O(file).
 
-Every "truncates" assertion is paired with a disabled-counterfactual that returns the body
-FULL, so the suite FAILS under the old behavior (no trip / cap 150).
+Global net: any tool result over ``DEFAULT_TOOL_RESULT_MAX_CHARS`` (25000) is cut
+to ``DEFAULT_WILD_READ_TRUNCATION_CHARS`` (4000) with a notice.
+
+Env + llm_cfg key: ``AGENT_CASCADE_READ_FILE_MAX_CHARS`` / ``read_file_max_chars``
+(-1/0 disables the no-limit default).
+
+Every "truncates" assertion is paired with a counterfactual that returns the body
+FULL, so the suite FAILS under the old behavior.
 """
 import re
 import tempfile
 from pathlib import Path
 
+from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.tools.custom.file_ops import ReadFile
+from agent_cascade.settings import (
+    DEFAULT_READ_FILE_MAX_CHARS,
+    DEFAULT_TOOL_RESULT_MAX_CHARS,
+    DEFAULT_WILD_READ_TRUNCATION_CHARS,
+)
 
 
 class _FakeOM:
@@ -25,8 +36,8 @@ class _FakeOM:
 
 
 class _FakePool:
-    """Minimal pool so tmp_path files resolve, and so ``llm_cfg`` can override the
-    ``read_file_max_chars`` trip for the disabled-counterfactual cases."""
+    """Minimal pool so tmp_path files resolve and ``llm_cfg`` can override the
+    ``read_file_max_chars`` default for the disabled-counterfactual cases."""
 
     def __init__(self, llm_cfg=None):
         self.operation_manager = _FakeOM()
@@ -54,87 +65,115 @@ def _shown_count(out):
     return int(m.group(2)) - int(m.group(1)) + 1
 
 
-# Body sizes (formatted ``NNN:\t...``) computed against _read_text_file's rendering:
-_BAND = '\n'.join(f"line {i} " + 'y' * 60 for i in range(1, 53)) + '\n'   # ~3778 (>3000, <6000, 52 lines)
-_SMALL = '\n'.join(f"line {i} " + 'z' * 30 for i in range(1, 61)) + '\n'  # ~2562 (<3000)
-_PROBE_5K = '\n'.join(f"line {i} " + 'q' * 90 for i in range(1, 52)) + '\n'  # ~5235 (>3000)
-_PROBE_8K = '\n'.join(f"line {i} " + 'w' * 150 for i in range(1, 41)) + '\n'  # ~6502 (>6000)
+def _mk(n, ch='y', pad=60):
+    """n rendered lines, each ~70 chars, so 60 lines ≈ 4.2k, 40 lines ≈ 2.8k."""
+    return '\n'.join(f"line {i} " + ch * pad for i in range(1, n + 1)) + '\n'
+
+
+# Bodies sized against _read_text_file's ``NNN:\t`` rendering (~70 chars/line):
+_OVER = _mk(70)   # ~4900 rendered -> exceeds the 4000 no-limit default
+_UNDER = _mk(40)  # ~2800 rendered -> under 4000, stays intact
+_HUGE = _mk(430)  # ~30k rendered -> exceeds the 25k global net / 4000 window
 
 
 class TestReadFileCharTrip:
-    def test_wild_read_trip_truncates_with_plain_marker(self):
-        """A wild read whose body >3000 is cut to ~2k with [TRUNCATED], not the warning."""
-        out = _read(_BAND)  # no limit -> wild
+    def test_no_limit_read_over_default_truncates_whole_line(self):
+        """A no-limit read whose body >4000 is cut to whole lines <4000 + [TRUNCATED],
+        NOT the unbound-read warning, with a continue footer."""
+        full = set(
+            f"{i}:\tline {i} " + 'y' * 60 for i in range(1, 71)
+        )
+        out = _read(_OVER)  # no limit -> no-limit read
         assert out.startswith('OK:'), out
         assert '[TRUNCATED]' in out
-        assert 'Unbound read detected!' not in out, 'read_file trip must not emit the wild warning'
+        assert 'Unbound read detected!' not in out, 'the 4k default must not emit the unbound warning'
         assert '→ continue at start_line=' in out
-        assert len(_body(out)) < 2005, f"body not cut: {len(_body(out))}"
+        body = _body(out)
+        assert len(body) < DEFAULT_READ_FILE_MAX_CHARS, f"body not cut: {len(body)}"
+        # Whole-line boundary: every rendered line shown must exist intact in the source
+        # (a chopped line would not). Proves the cut never splits a line mid-word.
+        for ln in body.split('\n'):
+            if ln:
+                assert ln in full, f"chopped/absent line leaked: {ln!r}"
+        assert 'line 1 ' in _OVER, 'sanity: source has the expected first line'
 
-    def test_bounded_read_trip_truncates(self):
-        """A bounded read (explicit limit) >3000 is ALSO cut — this is the new lever."""
-        out = _read(_BAND, limit=52)  # explicit limit, not wild
+    def test_no_limit_read_under_default_is_intact(self):
+        """A small no-limit read stays fully intact (EOF, no marker, no warning)."""
+        out = _read(_UNDER)  # ~2800 < 4000
         assert out.startswith('OK:'), out
-        assert '[TRUNCATED]' in out
+        assert '[TRUNCATED]' not in out
         assert 'Unbound read detected!' not in out
-        assert '→ continue at start_line=' in out
-        assert len(_body(out)) < 2005, f"bounded body not cut: {len(_body(out))}"
+        assert '(EOF)' in out.split('\n')[0]
+        assert 'line 40' in _body(out)
+        assert len(_body(out)) < DEFAULT_READ_FILE_MAX_CHARS
 
-    def test_trip_disabled_returns_full_body(self):
-        """Counterfactual: with the trip disabled (read_file_max_chars=-1) the same reads
-        return the FULL >3000 body with no marker — the truncation above FAILS without the lever."""
-        for kwargs in ({}, {'limit': 52}):
-            out = _read(_BAND, cfg={'read_file_max_chars': -1}, **kwargs)
+    def test_bounded_read_not_char_truncated(self):
+        """A BOUNDED read (explicit limit) whose body >4000 keeps its whole requested
+        range — no char truncation, no marker. The range wins over the no-limit default."""
+        out = _read(_OVER, limit=200)  # 70 lines, explicit generous limit -> bounded
+        assert out.startswith('OK:'), out
+        assert '[TRUNCATED]' not in out
+        assert 'Unbound read detected!' not in out
+        body = _body(out)
+        assert len(body) > DEFAULT_READ_FILE_MAX_CHARS, f"bounded body should stay intact, got {len(body)}"
+        assert 'line 70' in body, 'requested last line must be present'
+
+    def test_wild_vs_bounded_counterfactual(self):
+        """Same body: the NO-LIMIT read is cut to <4000 while the BOUNDED read is not —
+        proves the is_wild_read gate on the char default is load-bearing."""
+        wild = _read(_OVER)                # no limit -> cut
+        bounded = _read(_OVER, limit=200)   # explicit limit -> intact
+        assert '[TRUNCATED]' in wild and len(_body(wild)) < DEFAULT_READ_FILE_MAX_CHARS, wild
+        assert '[TRUNCATED]' not in bounded and len(_body(bounded)) > DEFAULT_READ_FILE_MAX_CHARS, bounded
+
+    def test_default_disabled_returns_full_body(self):
+        """Counterfactual: with the default disabled (read_file_max_chars=-1) a ~4900
+        body returns FULL (no marker, no warning, since it is under the 25k net)."""
+        for kwargs in ({}, {'limit': 200}):
+            out = _read(_OVER, cfg={'read_file_max_chars': -1}, **kwargs)
             assert out.startswith('OK:'), out
             assert '[TRUNCATED]' not in out
             assert 'Unbound read detected!' not in out
             body = _body(out)
-            assert 3000 < len(body) < 6000, f"expected full 3778 body, got {len(body)}"
-            assert 'line 52' in body, 'last line must be present when trip disabled'
+            assert DEFAULT_READ_FILE_MAX_CHARS < len(body) < DEFAULT_TOOL_RESULT_MAX_CHARS, \
+                f"expected full ~4900 body, got {len(body)}"
+            assert 'line 70' in body, 'last line present when the default is disabled'
 
-    def test_body_below_trip_passes_untouched(self):
-        """The median read (~2.8k) must stay fully intact: no marker, reaches EOF."""
-        out = _read(_SMALL)  # ~2562 < 3000, 60 lines < 120
-        assert out.startswith('OK:'), out
-        assert '[TRUNCATED]' not in out
-        assert 'Unbound read detected!' not in out
-        assert '(EOF)' in out.split('\n')[0]
-        assert 'line 60' in _body(out)
-
-    def test_probe_5kb_cuts_to_window(self):
-        """~5KB read (in the old pass-through band) -> ~2k + [TRUNCATED] under the 3000 trip."""
-        out = _read(_PROBE_5K)
+    def test_huge_file_default_cuts_to_window_not_warning(self):
+        """A ~30k no-limit file under the DEFAULT 4k window is cut to whole lines <4000
+        with [TRUNCATED] — the read_file default fires first, so no unbound warning."""
+        out = _read(_HUGE)
         assert '[TRUNCATED]' in out
         assert 'Unbound read detected!' not in out
-        assert len(_body(out)) < 2005
+        assert len(_body(out)) < DEFAULT_READ_FILE_MAX_CHARS
 
-    def test_probe_8kb_cuts_to_window_monotone_safe(self):
-        """8KB (>6k) read -> ~2k + [TRUNCATED]; the trip fires first, so no double-warn,
-        and the cut is never larger than the outer net's 2k target (monotone-safe)."""
-        out = _read(_PROBE_8K)
-        assert '[TRUNCATED]' in out
-        assert 'Unbound read detected!' not in out
-        assert len(_body(out)) < 2005
+    def test_huge_file_default_disabled_falls_to_net_warning(self):
+        """With the 4k default disabled, a >25k no-limit read reaches the unbound-read
+        WARNING path (HWM) and is cut to wild_truncation (4000)."""
+        out = _read(_HUGE, cfg={'read_file_max_chars': -1})
+        assert 'Unbound read detected!' in out, out
+        assert len(_body(out)) < DEFAULT_WILD_READ_TRUNCATION_CHARS + 1000, len(_body(out))
 
 
-class TestReadFileLineCap:
-    def test_default_cap_shows_120_of_200_lines(self):
-        """Counterfactual vs the old 150: 200 short lines -> exactly 120 shown + [TRUNCATED].
+class TestGlobalNet:
+    def test_global_net_thresholds(self):
+        """Global net constants are 25k trigger / 4k cut (single source of truth: settings)."""
+        assert DEFAULT_TOOL_RESULT_MAX_CHARS == 25000
+        assert DEFAULT_WILD_READ_TRUNCATION_CHARS == 4000
 
-        Lines are short so the body of the 120 shown lines stays under 3000 and the LINE cap,
-        not the char trip, is what bounds the read."""
-        content = '\n'.join(f"L{i}" for i in range(1, 201)) + '\n'
-        out = _read(content)  # wild, default line cap
-        assert '[TRUNCATED]' in out
-        shown = _shown_count(out)
-        assert shown == 120, f"expected 120 shown lines (new cap), got {shown}"
-
-    def test_typical_read_under_cap_is_whole(self):
-        """110 short lines is below the 120 cap -> returned whole, EOF, no marker.
-
-        Proves the cap is not over-cutting the common read (median ~48 lines)."""
-        content = '\n'.join(f"L{i}" for i in range(1, 111)) + '\n'
-        out = _read(content)
-        assert '[TRUNCATED]' not in out
-        assert '(EOF)' in out.split('\n')[0]
-        assert _shown_count(out) == 110
+    def test_global_net_cuts_to_wild_window(self):
+        """The global net's cut keeps ~4k (DEFAULT_WILD_READ_TRUNCATION_CHARS) and appends
+        a notice. (The 25k TRIGGER gate lives in handler._assemble_tool_result, which calls
+        this with char_threshold=25000/char_limit=4000 for any tool result over 25k.)"""
+        text = 'x' * (DEFAULT_TOOL_RESULT_MAX_CHARS + 5000)  # >25k
+        out = truncate_with_spillover(
+            text,
+            DEFAULT_WILD_READ_TRUNCATION_CHARS,
+            instance_name='gn_test',
+            tool_name='test',
+            base_dir=Path(tempfile.mkdtemp()),
+            skip_spillover=True,
+        )
+        assert out.startswith(text[:DEFAULT_WILD_READ_TRUNCATION_CHARS])
+        assert len(out) < len(text), 'a >25k result must be cut'
+        assert len(out) <= DEFAULT_WILD_READ_TRUNCATION_CHARS + 1000, len(out)

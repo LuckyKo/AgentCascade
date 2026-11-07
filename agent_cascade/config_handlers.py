@@ -615,9 +615,9 @@ def _handle_wild_read_truncation_chars(ui_cfg: dict, agent_pool: Optional[Any], 
     Clamped to [500, tool_result_max_chars] — must never exceed the trip threshold.
     """
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
-        val = int(ui_cfg.get('wild_read_truncation_chars', 2000))
-        # Fallback must track DEFAULT_TOOL_RESULT_MAX_CHARS (BUG_0189: 25000 -> 6000) so an
-        # absent-key clamp path keeps the same trip threshold the rest of the code uses.
+        val = int(ui_cfg.get('wild_read_truncation_chars', 4000))
+        # Upper bound tracks DEFAULT_TOOL_RESULT_MAX_CHARS (25k global net) so an absent-key
+        # clamp path keeps the same trip threshold the rest of the code uses.
         from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
         upper = agent_pool.llm_cfg.get('tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS)
         agent_pool.llm_cfg['wild_read_truncation_chars'] = min(max(500, val), upper)
@@ -825,6 +825,14 @@ def _handle_list_dir_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents:
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('list_dir_char_limit', -1))
         agent_pool.llm_cfg['list_dir_char_limit'] = val
+
+
+@register_config_handler('read_file_max_chars')
+def _handle_read_file_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update read_file no-limit char default (4000; -1/0 disables)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('read_file_max_chars', 4000))
+        agent_pool.llm_cfg['read_file_max_chars'] = val
 
 
 @register_config_handler('max_images_for_llm')

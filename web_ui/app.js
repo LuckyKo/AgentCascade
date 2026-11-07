@@ -210,6 +210,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit' },
   { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit' },
   { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit' },
+  { id: '#setting-read-file-max-chars', prop: 'value', key: 'read_file_max_chars' },
   { id: '#setting-wild-read-truncation-chars', prop: 'value', key: 'wild_read_truncation_chars' },
   // Memory-hint feature (plan §7) — underscore keys via getGenerateCfg(), like the tool-char family.
   { id: '#setting-memory-hint-enabled', prop: 'checked', key: 'memory_hint_enabled' },
@@ -6196,6 +6197,7 @@ function getGenerateCfg() {
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value) || -1;
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value) || -1;
   if ($('#setting-list-dir-char-limit')) cfg.list_dir_char_limit = parseInt($('#setting-list-dir-char-limit').value) || -1;
+  if ($('#setting-read-file-max-chars')) cfg.read_file_max_chars = parseInt($('#setting-read-file-max-chars').value) || 4000;
 
   if ($('#setting-max-images-for-llm')) cfg.max_images_for_llm = parseInt($('#setting-max-images-for-llm').value) || 2;
   if (settingImageCaptionMode) cfg.image_caption_mode = settingImageCaptionMode.value || 'auto';

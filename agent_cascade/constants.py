@@ -174,6 +174,7 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'shell_char_limit',
     'code_char_limit',
     'list_dir_char_limit',
+    'read_file_max_chars',
     'max_images_for_llm',
     # Memory-hint feature (plan §7) — propagated to agents so tool-level reads see them.
     'memory_hint_enabled',
@@ -236,6 +237,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'grep_spillover',
     'shell_char_limit',
     'code_char_limit',
+    'read_file_max_chars',
 
     # Image base64 management (read from generate_cfg in _preprocess_messages, not sent to LLM API)
     'max_images_for_llm',

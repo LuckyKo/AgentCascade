@@ -397,24 +397,23 @@ class TestReadFileWildReadHighWaterMark:
             assert 'line 51' in body
 
     def test_wild_read_over_threshold_truncates_to_cut(self):
-        """Regression: content above the high-water mark warns and is cut to ~2000 chars.
+        """Regression: a wild read of content above the high-water mark warns and is cut to the cut target.
 
-        BUG_0189: the trip threshold was lowered 25000 -> 6000, so content that used to sit
-        safely under the old HWM (here ~8KB) now trips. The upper bound on the content length
-        below is what proves the lever is live at 6000, not the legacy 25000.
+        The trip threshold (DEFAULT_TOOL_RESULT_MAX_CHARS, 25000) is exceeded, so the unbound-read
+        HWM path fires: it emits the truncation warning and cuts the body to
+        DEFAULT_WILD_READ_TRUNCATION_CHARS (4000).
         """
         from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
         with tempfile.TemporaryDirectory() as tmp:
-            # ~8KB of multi-line content: > 6000 (new default threshold, so it trips) but
-            # < 25000 (the old default), proving the BUG_0189 lowering is what triggers it.
-            lines = [f"line {i} " + 'q' * 190 for i in range(1, 41)]
+            # Multi-line content that EXCEEDS the 25000-char trip threshold.
+            lines = [f"line {i} " + 'q' * 190 for i in range(1, 141)]
             content = '\n'.join(lines) + '\n'
-            assert DEFAULT_TOOL_RESULT_MAX_CHARS < len(content) < 25000
-            # Default char_threshold (6000, BUG_0189): no explicit threshold passed.
-            # read_char_trip=0 isolates the unbound-warning HWM path (the new default trip would win first, emitting [TRUNCATED]).
+            assert len(content) > DEFAULT_TOOL_RESULT_MAX_CHARS  # exceeds the 25k trip
+            # No explicit threshold passed; read_char_trip=0 isolates the unbound-warning HWM path
+            # (the read_file char trip would otherwise win first and emit [TRUNCATED]).
             out = self._read(Path(tmp), content, is_wild_read=True, wild_truncation=DEFAULT_WILD_READ_TRUNCATION_CHARS, read_char_trip=0)
             assert '[TRUNCATION WARNING: Unbound read detected!]' in out
-            # Content body cut near the low cut point (~2000), not the full ~8KB.
+            # Content body cut near the 4000 cut target, not the full ~26KB.
             body = out.split('```')[1]
             assert len(body) < DEFAULT_WILD_READ_TRUNCATION_CHARS + 500
 
@@ -501,9 +500,8 @@ class TestPoolSettingsBootTimeClamp:
 class TestWildReadTruncationRuntimeHandler:
     """Runtime clamp handler for wild_read_truncation_chars (config_handlers.py).
 
-    BUG_0189 aligned the absent-key upper-bound fallback to DEFAULT_TOOL_RESULT_MAX_CHARS, so
-    a wild_read value with no tool_result_max_chars in llm_cfg now clamps to the current trip
-    threshold (6000) instead of the legacy hardcoded 25000.
+    The absent-key upper-bound fallback is DEFAULT_TOOL_RESULT_MAX_CHARS, so a wild_read value
+    with no tool_result_max_chars in llm_cfg clamps to the current trip threshold (25000).
     """
 
     def _clamp(self, llm_cfg: dict, wild_val):
@@ -516,14 +514,12 @@ class TestWildReadTruncationRuntimeHandler:
         return llm_cfg['wild_read_truncation_chars'], DEFAULT_TOOL_RESULT_MAX_CHARS
 
     def test_absent_threshold_fallback_clamps_to_current_default(self):
-        """With no tool_result_max_chars, the fallback upper bound is DEFAULT_TOOL_RESULT_MAX_CHARS.
+        """With no tool_result_max_chars, the fallback upper bound is DEFAULT_TOOL_RESULT_MAX_CHARS (25000).
 
-        Counterfactual: a value above 6000 clamps to 6000 — this would fail under the old
-        hardcoded 25000 upper bound, so it pins the BUG_0189 fix in place.
-        """
+        A value above the default clamps to the current default (25000)."""
         clamped, default = self._clamp({}, 99999)
         assert clamped == default
-        assert clamped < 25000  # proves the fallback is the lowered default, not legacy 25k
+        assert clamped == 25000  # the current default (post BUG_0248-revert / read-file 4k work)
 
     def test_present_threshold_takes_precedence_over_fallback(self):
         """A present tool_result_max_chars clamps wild_read to it, not to the default."""

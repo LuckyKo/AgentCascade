@@ -75,7 +75,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'max_auto_rollbacks', 'max_images_for_llm', 'max_nesting_depth', 'max_parallel_agents', 'max_turns',
     'max_workers', 'memory_hint_cooldown_seconds', 'memory_hint_enabled', 'memory_hint_max_entries',
     'memory_hint_query_chars', 'memory_hint_skill_suggestions', 'memory_hint_skill_threshold',
-    'memory_hint_threshold', 'retry_base_delay', 'retry_max_attempts', 'retry_max_delay',
+    'memory_hint_threshold', 'read_file_max_chars', 'retry_base_delay', 'retry_max_attempts', 'retry_max_delay',
     'safe_mode_auto_ram_floor_mb', 'safe_mode_auto_vram_floor_mb', 'security_check_timeout',
     'shell_char_limit', 'skill_active_max_cap', 'skill_active_min_cap', 'skill_active_target_k',
     'skill_always_protected', 'skill_auto_invalidate_enabled', 'skill_fair_window_turns',
@@ -128,7 +128,7 @@ _HANDLER_ONLY_KEYS: Tuple[str, ...] = ('mcpServers', 'sleeping_timeout')
 # pool_settings.json; the registry now drives that list instead of a hardcoded one.
 _LLM_CFG_SOURCED: FrozenSet[str] = frozenset({
     'tool_result_max_chars', 'wild_read_truncation_chars', 'grep_char_limit', 'grep_spillover',
-    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit', 'max_images_for_llm',
+    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit', 'read_file_max_chars', 'max_images_for_llm',
     'memory_hint_enabled', 'memory_hint_threshold', 'memory_hint_max_entries',
     'memory_hint_query_chars', 'memory_hint_cooldown_seconds', 'memory_hint_skill_suggestions',
     'memory_hint_skill_threshold',
@@ -206,6 +206,7 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'shell_char_limit': 8000,
     'code_char_limit': 8000,
     'list_dir_char_limit': 8000,
+    'read_file_max_chars': 4000,
     'max_images_for_llm': MAX_IMAGES_FOR_LLM_DEFAULT,
     'memory_hint_enabled': False,
     'memory_hint_threshold': 0.0,
@@ -521,7 +522,7 @@ def validate_registry() -> None:
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (100 / 3);
+      * the derived compat sets match their historical sizes (101 / 3);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -533,8 +534,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 100:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 100")
+    if len(POOL_SETTINGS_KEYS) != 101:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 101")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 

@@ -36,6 +36,27 @@ def test_registry_is_consistent():
     validate_registry()
 
 
+def test_read_file_max_chars_is_plumbed_through_registry():
+    """read_file_max_chars (UI-exposed char limit) must be wired end-to-end through the
+    registry single source of truth: a pool spec sourced from llm_cfg, a default, presence in
+    the derived persist set, a registered config handler, and validate_registry still passes."""
+    from agent_cascade.config_handlers import CONFIG_HANDLERS
+    from agent_cascade.settings_registry import _LLM_CFG_SOURCED, _DEFAULTS
+
+    # Pool spec with llm_cfg value-source (registry drives LLM_CFG_PERSIST_KEYS, not a list).
+    assert 'read_file_max_chars' in SETTING_SPECS
+    assert SETTING_SPECS['read_file_max_chars'].value_source == 'llm_cfg'
+    assert SETTING_SPECS['read_file_max_chars'].default == 4000
+    # Explicit membership in the source sets.
+    assert 'read_file_max_chars' in _LLM_CFG_SOURCED
+    assert _DEFAULTS['read_file_max_chars'] == 4000
+    assert 'read_file_max_chars' in LLM_CFG_PERSIST_KEYS
+    # Bidirectional handler coverage: a registered handler exists for the key.
+    assert SETTING_SPECS['read_file_max_chars'].handler == 'read_file_max_chars'
+    assert 'read_file_max_chars' in CONFIG_HANDLERS
+    validate_registry()  # no count drift / orphan-handler failure
+
+
 def test_every_pool_key_has_a_spec():
     """Every key in POOL_SETTINGS_KEYS must have a registry spec (no drift)."""
     missing = POOL_SETTINGS_KEYS - set(SETTING_SPECS)
@@ -199,6 +220,7 @@ _GOLDEN_CORE = {
     'code_char_limit': 8000,
     'list_dir_char_limit': 8000,
     'shell_char_limit': 8000,
+    'read_file_max_chars': 4000,
     'grep_spillover': True,
     'max_images_for_llm': 2,
     'memory_hint_cooldown_seconds': 600,
@@ -223,7 +245,7 @@ _GOLDEN_CORE = {
     'skill_score_q0': 5.0,
     'skill_score_rflood': 0.5,
     'skill_score_tau_turns': 200,
-    'wild_read_truncation_chars': 2000,
+    'wild_read_truncation_chars': 4000,
 }
 
 

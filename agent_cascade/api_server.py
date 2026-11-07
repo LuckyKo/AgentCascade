@@ -2743,14 +2743,15 @@ if __name__ == '__main__':
         'stop_sequences': '',  # LLM stop-sequences param (NOT the UI Stop button).
         'timeout': 120.0,
         # Tool output char limits (defaults from user config).
-        # tool_result_max_chars must match DEFAULT_TOOL_RESULT_MAX_CHARS (BUG_0189: 25000 -> 6000).
-        'tool_result_max_chars': 6000,
+        # tool_result_max_chars must match DEFAULT_TOOL_RESULT_MAX_CHARS (global net: 25k trigger).
+        'tool_result_max_chars': 25000,
         'wild_read_truncation_chars': DEFAULT_WILD_READ_TRUNCATION_CHARS,
         'grep_char_limit': 12000,
         'grep_spillover': True,
         'shell_char_limit': 8000,
         'code_char_limit': 8000,
         'list_dir_char_limit': 8000,
+        'read_file_max_chars': 4000,
         # Memory-hint feature (plan §7) — OFF by default.
         # memory_hint_threshold is an optional override floor for the adaptive gate;
         # 0 = pure adaptive behavior (the primary gate is self-calibrating).

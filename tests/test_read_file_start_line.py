@@ -16,6 +16,7 @@ paths inside DEFAULT_WORKSPACE.
 """
 import json
 import jsonschema
+import os
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,10 @@ def big_file():
     not the char budget, and must not be truncated by the unrelated new lever.
     """
     lines = [f"LINE_{i:05d} " + 'x' * 45 for i in range(1, 4052)]
-    return _ws_file('bug22_big.py', '\n'.join(lines) + '\n')
+    # Unique per xdist worker process so concurrent workers never clobber each other's
+    # fixture file mid-read (the shared 'bug22_big.py' name was racy under xdist).
+    name = f'bug22_big_{os.getpid()}.py'
+    return _ws_file(name, '\n'.join(lines) + '\n')
 
 
 def test_offset_alias_reads_requested_window(big_file):

@@ -158,17 +158,19 @@ class ReadFile(BaseTool, PathResolutionMixin):
     #  Helper: determine line limit and whether this is a "wild read"     #
     # ------------------------------------------------------------------ #
     def _determine_limits(self, limit: Optional[int]) -> tuple[int, bool]:
-        """Return (line_limit, is_wild_read). Wild reads have no explicit limit
-        set by the caller; they use the default line count and are subject to a
-        post-hoc high-water-mark truncation (see _read_text_file).
+        """Return (line_limit, is_wild_read). A WILD read has no explicit limit set by
+        the caller; it is bounded by the ``read_file_max_chars`` char budget (whole-line
+        truncation, see _read_text_file) instead of the legacy DEFAULT_READ_LINES line cap.
 
-        Priority: explicit limit > -1 (unlimited) > default."""
+        Priority: explicit limit > -1 (unlimited) > default (no-limit)."""
         if limit == -1:
             return MAX_LINE_LIMIT_EXPLICIT, False
         elif limit is not None:
             return min(int(limit), MAX_LINE_LIMIT_EXPLICIT), False
         else:
-            return DEFAULT_READ_LINES, True  # wild read — high-water mark applied post-hoc
+            # No-limit (wild) read: line count is NOT capped; the char budget in
+            # _read_text_file stops the stream at ~read_file_max_chars.
+            return MAX_LINE_LIMIT_EXPLICIT, True
 
     # ------------------------------------------------------------------ #
     #  Helper: memory-hint read tracking (feature: memory_hint)           #
@@ -217,16 +219,15 @@ class ReadFile(BaseTool, PathResolutionMixin):
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
 
-        Two independent char trips run in order, smallest cut first:
-        1. BUG_0246 read_file trip (`read_char_trip`, default ``DEFAULT_READ_FILE_MAX_CHARS``): if the
-           rendered body exceeds it (and `wild_truncation` provides a cut target), content is cut to the
-           line boundary below `wild_truncation` with a plain [TRUNCATED] marker. Runs for BOTH wild and
-           bounded reads and NEVER emits the unbound-read warning. Monotone-safe: the cut (<=2k) is never
-           larger than what a >6k read already gets from the outer 6k net. -1/0 disables.
-        2. Wild read high-water mark (`char_threshold` / `wild_truncation`): for unbound reads that still
-           exceed the trip threshold AFTER the read_file trip, an unbound-read warning is emitted. The two
-           values are distinct: `char_threshold` is when to warn, `wild_truncation` is where to cut.
-           Only reachable when the read_file trip is disabled (a >3000 read is already cut to <=2k above).
+        A no-limit (wild) read is bounded by `read_char_trip` (default ``DEFAULT_READ_FILE_MAX_CHARS``,
+        4k): the stream stops once the rendered body reaches that budget, then the body is cut to a
+        whole-line boundary (last line kept complete, never chopped mid-line) with a plain [TRUNCATED]
+        marker — NEVER the unbound-read warning. A bounded read (explicit ``limit``) is never
+        char-truncated here: the requested range wins. -1/0 disables the char default.
+
+        The wild high-water mark (`char_threshold` / `wild_truncation`) is the outer unbound-read
+        WARNING path: reachable only when the 4k char default is disabled (otherwise a wild result is
+        already cut to <=4k above), so a >char_threshold result is cut to `wild_truncation` and warned.
 
         Returns formatted content string ready for the user.
         """
@@ -234,6 +235,10 @@ class ReadFile(BaseTool, PathResolutionMixin):
         lines_read: list[str] = []
         hit_line_limit = False  # Truncated because we hit the line count limit
         at_eof = False  # read reached end of file
+        # No-limit reads stream at most ~this many RENDERED chars so memory is O(window),
+        # not O(file). 0 = bounded/explicit read, or the char default is disabled (-1/0).
+        wild_char_budget = read_char_trip if (is_wild_read and read_char_trip > 0) else 0
+        running_chars = 0
 
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, raw_line in enumerate(f, 1):
@@ -259,9 +264,22 @@ class ReadFile(BaseTool, PathResolutionMixin):
                     formatted = formatted[:MAX_SINGLE_LINE_CHARS] + ' ... [LINE TRUNCATED]\n'
 
                 lines_read.append(formatted)
+                running_chars += len(formatted)
                 total_lines = line_num
+
+                # No-limit char budget: stop streaming once the window is filled so a huge file
+                # is never fully materialized; whole-line trim happens in the post-pass below.
+                if wild_char_budget and running_chars >= wild_char_budget:
+                    extra = f.readline()
+                    if extra:
+                        hit_line_limit = True  # more lines remain -> pagination footer below
+                        total_lines = line_num + 1 + sum(1 for _ in f)
+                    else:
+                        total_lines = line_num
+                        at_eof = True
+                    break
             else:
-                # File ended before the line limit was reached
+                # File ended before any line limit / char budget was reached.
                 if lines_read:
                     at_eof = True
 
@@ -274,22 +292,27 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         displayed_lines = len(lines_read)
 
-        # BUG_0246 read_file char trip — runs for BOTH wild and bounded reads, BEFORE the wild HWM so a
-        # >3000-char read is cut to the 2k window and can never be re-expanded by (or re-warned under) the
-        # outer 6k net. Cut at the line boundary below wild_truncation (same rule as the HWM below); flag a
-        # plain [TRUNCATED] (rendered in the footer). Disabled when read_char_trip <= 0 or no cut target.
+        # No-limit 4k char default: trim the accumulated window to a whole-line boundary below
+        # read_char_trip so the body ALWAYS ends on a complete line (never a half line). A single
+        # line longer than the budget is kept whole. Fires for no-limit reads ONLY — a bounded read
+        # keeps its requested range. Disabled when read_char_trip <= 0. Flag a plain [TRUNCATED].
         read_char_truncated = False
-        if read_char_trip > 0 and wild_truncation > 0 and len(content) > read_char_trip:
-            cut_pos = content.rfind('\n', 0, wild_truncation)
+        if is_wild_read and read_char_trip > 0 and len(content) > read_char_trip:
+            before_len = len(content)
+            cut_pos = content.rfind('\n', 0, read_char_trip)
             if cut_pos > 0:
                 content = content[:cut_pos]  # exclude the newline -> whole lines only
             else:
-                content = content[:wild_truncation] + ' ...\n'  # single very long line: hard-cut
-            read_char_truncated = True
-            displayed_lines = max(1, content.count('\n') + (0 if content.endswith('\n') else 1))
+                first_nl = content.find('\n')
+                if first_nl > 0:
+                    content = content[:first_nl]  # first line longer than budget: keep it whole
+            if len(content) < before_len:
+                read_char_truncated = True
+                displayed_lines = max(1, content.count('\n') + (0 if content.endswith('\n') else 1))
 
-        # Wild read high-water mark: only reachable when the read_file trip is disabled (a >3000 read is
-        # already cut to <=2k above), so this block now serves the unbound-read WARNING path.
+        # Wild read high-water mark: the unbound-read WARNING path. Only reachable when the 4k char
+        # default is disabled (a >char_threshold read is otherwise already cut to <=4k above), so this
+        # block cuts any remaining >char_threshold (25k) result to wild_truncation and emits the warning.
         wild_truncated = False
         if (is_wild_read and wild_truncation > 0 and char_threshold > 0 and len(content) > char_threshold):
             # Cut at the line boundary closest to (and below) the threshold.
@@ -455,7 +478,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         #   - wild_truncation (cut point): wild_read_truncation_chars (~2k).
         wild_truncation = DEFAULT_WILD_READ_TRUNCATION_CHARS
         char_threshold = DEFAULT_TOOL_RESULT_MAX_CHARS
-        # BUG_0246: read_file-specific char trip (env + per-pool llm_cfg override). -1/0 disables.
+        # read_file no-limit char default (env + per-pool llm_cfg override). -1/0 disables.
         read_char_trip = DEFAULT_READ_FILE_MAX_CHARS
         if self.agent_pool is not None:
             _cfg = getattr(self.agent_pool, 'llm_cfg', {}) or {}
