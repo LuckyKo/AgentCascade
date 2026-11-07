@@ -137,7 +137,7 @@ class TestShellCmdCwdResolution:
         expected_cwd = (base / 'tests').resolve()
 
         result = shell_cmd_tool.call(
-            '{"command": "ls", "cwd": "/workspace/tests", "execution_mode": "async", "justification": "test"}')
+            '{"command": "echo", "cwd": "/workspace/tests", "execution_mode": "async", "justification": "test"}')
 
         assert 'ERROR' not in result
         tracker.launch.assert_called_once()
@@ -153,7 +153,7 @@ class TestShellCmdCwdResolution:
             outside_path = '/etc/passwd'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{outside_path}", "execution_mode": "async", "justification": "test"}}')
+            f'{{"command": "echo", "cwd": "{outside_path}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' in result
         assert 'Invalid working directory' in result
@@ -161,7 +161,7 @@ class TestShellCmdCwdResolution:
     def test_cwd_traversal_escape_returns_error(self, shell_cmd_tool, tool_with_tracker):
         """Cwd with path traversal should return error."""
         result = shell_cmd_tool.call(
-            '{"command": "ls", "cwd": "../../../../../../../../../../../etc/passwd", "execution_mode": "async", "justification": "test"}'
+            '{"command": "echo", "cwd": "../../../../../../../../../../../etc/passwd", "execution_mode": "async", "justification": "test"}'
         )
 
         assert 'ERROR' in result
@@ -177,7 +177,7 @@ class TestShellCmdCwdResolution:
         abs_cwd_str = str(abs_cwd).replace('\\', '/')
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{abs_cwd_str}", "execution_mode": "async", "justification": "test"}}')
+            f'{{"command": "echo", "cwd": "{abs_cwd_str}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' not in result
         tracker.launch.assert_called_once()
@@ -193,7 +193,7 @@ class TestShellCmdCwdResolution:
             bad_cwd = '/etc/shadow'
 
         result = shell_cmd_tool.call(
-            f'{{"command": "ls", "cwd": "{bad_cwd}", "execution_mode": "async", "justification": "test"}}')
+            f'{{"command": "echo", "cwd": "{bad_cwd}", "execution_mode": "async", "justification": "test"}}')
 
         assert 'ERROR' in result
         # Error should reference the path so user knows what was invalid

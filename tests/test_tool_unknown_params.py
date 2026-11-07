@@ -101,7 +101,7 @@ def test_shell_cmd_async_mode_false_maps_to_sync(monkeypatch):
     """async_mode=false must map to execution_mode=sync (blocking), not async."""
     calls = {}
 
-    def fake_sync(self, agent_name, command, justification, cwd, timeout):
+    def fake_sync(self, agent_name, command, justification, cwd, timeout, **kwargs):
         calls['synced'] = True
         return 'SYNCED'
 

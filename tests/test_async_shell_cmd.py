@@ -806,7 +806,7 @@ class TestOptionalJustification:
     def test_regular_command_without_justification_raises(self, shell_cmd_tool, mock_tracker):
         _make_tool_with_tracker(shell_cmd_tool, mock_tracker)
         with pytest.raises(ValueError) as exc_info:
-            shell_cmd_tool.call('{"command": "ls -la"}')
+            shell_cmd_tool.call('{"command": "echo hello"}')
         assert 'justification' in str(exc_info.value).lower()
 
     def test_tool_id_with_non_control_command_sends_as_stdin(self, shell_cmd_tool):
@@ -850,7 +850,7 @@ class TestOptionalJustification:
 
     def test_regular_command_with_justification_works(self, shell_cmd_tool):
         with patch.object(shell_cmd_tool, '_execute_sync', return_value='file1\nfile2\n') as mock_exec:
-            result = shell_cmd_tool.call('{"command": "ls -la", "justification": "listing files"}')
+            result = shell_cmd_tool.call('{"command": "echo hello", "justification": "listing files"}')
             mock_exec.assert_called_once()
             assert 'file1' in result
 
