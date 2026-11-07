@@ -302,6 +302,65 @@ def _new_content_restores_opener(new_content: str, kind: str) -> bool:
     return False
 
 
+# ─── edit_file post-edit duplicate-line advisory (BUG_0250 family) ───────────
+
+def _adjacent_duplicate_note(old_text: str, new_text: str) -> Optional[str]:
+    """Return a note when the edit NEWLY creates an adjacent identical-line pair.
+
+    BUG_0250: a caller reusing an `exact`-style `new_content` (anchor line repeated)
+    for `delete_and_insert` inserts the anchor verbatim, duplicating the surviving
+    line above the insertion point. The same shape can come from any match/range
+    boundary, so this compares the *count* of adjacent identical non-blank line
+    pairs before and after the edit instead of reasoning about one mode. A count
+    that increased means this edit is what put the duplicates next to each other.
+
+    Content-keyed counts (not positions) so pre-existing duplicate pairs elsewhere
+    in the file never fire, and a pre-existing pair that merely moved is not
+    re-reported. Message-only: the written bytes are never changed.
+    """
+    def _counts(text: str) -> dict:
+        lines = text.splitlines()
+        counts = {}
+        for prev, cur in zip(lines, lines[1:]):
+            if prev == cur and prev.strip():
+                counts[cur] = counts.get(cur, 0) + 1
+        return counts
+
+    old_counts = _counts(old_text)
+    new_counts = _counts(new_text)
+    new_lines = new_text.splitlines()
+    for content, count in new_counts.items():
+        if count <= old_counts.get(content, 0):
+            continue
+        line_no = next(i + 1 for i in range(len(new_lines) - 1)
+                       if new_lines[i] == content and new_lines[i + 1] == content)
+        snippet = content.strip()
+        if len(snippet) > 60:
+            snippet = snippet[:60] + '…'
+        return (f'note: the edit left two identical adjacent lines at '
+                f'{line_no}-{line_no + 1} ("{snippet}") — new_content may repeat the '
+                f'anchor/matched line it was meant to replace (delete_and_insert inserts '
+                f'new_content verbatim and has no anchor concept), or the range boundary '
+                f'left the anchor behind. Re-read the file before relying on this edit.')
+    return None
+
+
+def _reproduces_matched_block(new_lines, block_lines) -> bool:
+    """True when *new_lines* starts by reproducing *block_lines*' non-blank lines.
+
+    The heuristic sibling-append path (BUG_0069) assumes ``new_content`` is "the
+    matched block plus appended lines" and slices it by the block's line count. A
+    plain replacement that merely re-indents the block would be sliced to nothing
+    and silently discarded, so only take that path when the prefix really is the
+    matched block (whitespace-insensitive, same convention as heuristic matching).
+    """
+    want = [''.join(l.split()) for l in block_lines if l.strip()]
+    if not want:
+        return False
+    have = [''.join(l.split()) for l in new_lines if l.strip()]
+    return have[:len(want)] == want
+
+
 def _describe_list_filters(
     include: Optional[str],
     exclude: Optional[str],
@@ -1607,8 +1666,8 @@ class FileOpsMixin:
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
 
         # ── Helper: parse range spec for delete_and_insert mode ──────────────
-        def _parse_range(range_str: str, total_lines: int) -> tuple:
-            """Parse old_content as a line range for delete_and_insert mode.
+        def _parse_range(range_str, total_lines: int) -> tuple:
+            """Parse a line-range spec for delete_and_insert mode.
 
             Returns (start_idx, end_idx) as 0-based Python slice indices.
             - start is inclusive, end is exclusive.
@@ -1617,7 +1676,9 @@ class FileOpsMixin:
             - Negative numbers count from end: -1 = last line.
             - 0 means append at end of file.
             """
-            range_str = range_str.strip()
+            # Models often send the range as a JSON number (e.g. 5 or 0); ints are valid
+            # specs, so coerce before parsing instead of failing with AttributeError.
+            range_str = str(range_str).strip()
 
             if ':' in range_str:
                 parts = range_str.split(':')
@@ -1646,9 +1707,12 @@ class FileOpsMixin:
                 if end < 0:
                     end = total_lines + 1 + end  # consistent 1-indexed semantics
 
-                # Clamp to valid bounds
-                start = max(0, min(start, total_lines + 1))
-                end = max(0, min(end, total_lines + 1))
+                # Clamp to valid 1-indexed bounds. The floor is 1, not 0: a negative
+                # input that underflows (e.g. '-100:-100' on 5 lines) must land on the
+                # first line. Clamping to 0 and then returning start-1=-1 would slice
+                # from the END of the file and duplicate content (Python negative index).
+                start = max(1, min(start, total_lines + 1))
+                end = max(1, min(end, total_lines + 1))
 
                 if start > end:
                     raise ValueError(f"Start ({start}) must be <= end ({end})")
@@ -1956,9 +2020,18 @@ class FileOpsMixin:
             # uniform re-anchor (offset>0) over-shifts both. Detect it via a relative-structure
             # mismatch and handle it by keeping the matched block at its real file indent and
             # appending the trailing lines verbatim.
+            #
+            # The sibling path slices new_content by the matched block's line count, so it is
+            # only valid when new_content actually STARTS by reproducing that block. A plain
+            # replacement that merely re-indents would otherwise be sliced to nothing and
+            # silently discarded (or, with empty new_content, turn a deletion into a no-op).
             _new_rels  = sorted(get_indent_width(w) - new_base  for w in _new_ws)
             _file_rels = sorted(get_indent_width(w) - file_base for w in _file_ws)
-            _sibling_append = (new_base < file_base) and (_new_rels != _file_rels)
+            _sibling_append = (bool(new_content.strip())
+                               and new_base < file_base
+                               and _new_rels != _file_rels
+                               and _reproduces_matched_block(new_content.splitlines(),
+                                                             file_block_lines))
 
             def _render_indent(width: int) -> str:
                 """Render an indent of the given space-width using the file's indent char."""
@@ -2107,7 +2180,8 @@ class FileOpsMixin:
             file_lines = file_content.splitlines(keepends=True)
             total_lines = len(file_lines)
 
-            if not range_param:
+            # int 0 is a valid "append at EOF" spec; only None/blank-string mean "missing".
+            if range_param is None or (isinstance(range_param, str) and not range_param.strip()):
                 return "ERROR: delete_and_insert mode requires the 'range' parameter (e.g., '5:10')."
 
             # On empty files, any valid range that resolves to inserting at position 0 is fine;
@@ -2143,7 +2217,9 @@ class FileOpsMixin:
                     base_indent = _leading_whitespace(file_lines[start_idx])
                 if base_indent:
                     for i in range(len(inserted)):
-                        if not _leading_whitespace(inserted[i]):
+                        # Blank lines stay empty: prepending base_indent would turn them
+                        # into whitespace-only lines (trailing-space noise in the file).
+                        if inserted[i].strip() and not _leading_whitespace(inserted[i]):
                             inserted[i] = base_indent + inserted[i]
                 # Preserve line ending style from surrounding context for ALL inserted lines
                 # (runs AFTER the indent step; only rstrips '\r\n' and appends, so it
@@ -2175,19 +2251,39 @@ class FileOpsMixin:
 
             new_file_content = ''.join(file_lines)
 
-            # BUG_0095: a range that deletes N lines and re-inserts the same N lines is byte-
-            # identical to the original (e.g. range '3:3' with new_content '\n'). The old code
-            # reported OK with a +0 net diff, misleading the agent into thinking a fix landed.
-            # Detect the true no-op and say so — no write, no backup. A real edit always changes
-            # bytes, so this only fires on genuine no-ops.
-            if new_file_content == file_content:
-                return (f"WARNING: No-op edit — the result is byte-identical to the current file "
-                        f"({path}); nothing was written and no backup created. A range that deletes "
-                        f"lines and re-inserts identical lines changes nothing. To adjust blank lines "
-                        f"use match_mode='exact' and include surrounding non-blank context in old_content.")
-
         else:
             return f"ERROR: Invalid match_mode '{match_mode}'."
+
+        # Reuse file_content from the first read — no need to re-read.
+        # Compute the post-edit content for every mode BEFORE approval/backup. This is pure
+        # string work, so the shared no-op guard below can return without prompting the user
+        # or leaving a backup artifact.
+        if match_mode == 'delete_and_insert':
+            # new_file_content was already computed above — skip string replace
+            pass
+        elif match_mode == 'exact' and occurrence == -1:
+            # BUG_0059: occurrence=-1 replaces ALL (non-overlapping) occurrences,
+            # matching str.count()/str.replace() semantics.
+            new_file_content = file_content.replace(actual_old_content, new_content)
+        elif match_mode == 'exact' and occurrence is not None:
+            # Replace only the Nth match — match_start_pos points at its start (computed
+            # in the exact branch above). The default path below stays byte-identical.
+            new_file_content = (file_content[:match_start_pos]
+                                + new_content
+                                + file_content[match_start_pos + len(actual_old_content):])
+        else:
+            new_file_content = file_content.replace(actual_old_content, new_content, 1)
+
+        # BUG_0095: a range that deletes N lines and re-inserts the same N lines (or a
+        # replacement that re-renders old_content identically) is byte-identical to the
+        # original. Reporting OK with a +0 diff misleads the agent into thinking a fix
+        # landed. One guard for every mode — no write, no backup.
+        if new_file_content == file_content:
+            return (f"WARNING: No-op edit — the result is byte-identical to the current file "
+                    f"({path}); nothing was written and no backup created. A range that deletes "
+                    f"lines and re-inserts identical lines, or a replacement that renders "
+                    f"old_content unchanged, changes nothing. To adjust blank lines use "
+                    f"match_mode='exact' and include surrounding non-blank context in old_content.")
 
         description = f"Surgical edit to: {path} (mode: {match_mode})"
         if match_mode == 'delete_and_insert':
@@ -2218,22 +2314,10 @@ class FileOpsMixin:
             shutil.copy2(resolved, backup_path)
             backup_path_str = self._backup_path_str(backup_path)
 
-            # Reuse file_content from first read (line 538) — no need to re-read
-            if match_mode == 'delete_and_insert':
-                # new_file_content was already computed above — skip string replace
-                pass
-            elif match_mode == 'exact' and occurrence == -1:
-                # BUG_0059: occurrence=-1 replaces ALL (non-overlapping) occurrences,
-                # matching str.count()/str.replace() semantics.
-                new_file_content = file_content.replace(actual_old_content, new_content)
-            elif match_mode == 'exact' and occurrence is not None:
-                # Replace only the Nth match — match_start_pos points at its start (computed
-                # in the exact branch above). The default path below stays byte-identical.
-                new_file_content = (file_content[:match_start_pos]
-                                    + new_content
-                                    + file_content[match_start_pos + len(actual_old_content):])
-            else:
-                new_file_content = file_content.replace(actual_old_content, new_content, 1)
+            # BUG_0250: advisory-only check for an adjacent duplicate line that this edit
+            # newly introduced (anchor text repeated in new_content, or a boundary that
+            # left the anchor behind). Computed before the write; the bytes are untouched.
+            duplicate_note = _adjacent_duplicate_note(file_content, new_file_content)
 
             # Generate unified diff before writing (both old and new content available)
             # keepends=False: avoids double-newlines when joined with '\n' below
@@ -2306,8 +2390,10 @@ class FileOpsMixin:
                 # Clamp to the real last line so the shown range matches the corrected
                 # deleted count (':' / 'N:' yield end_idx = total+1).
                 d_end = min(end_idx, total_lines)
-                if start_idx == end_idx:
-                    # Insert-only variant
+                if old_lc == 0:
+                    # Insert-only variant. Also covers ranges that reach past EOF (e.g.
+                    # '4:' on a 3-line file), which delete nothing and used to print a
+                    # nonsensical "lines 4-3".
                     res_msg += f" line {d_start} (d&i, INSERT-ONLY, -0 +{new_lc} = {sign}{net_delta}net)"
                 elif new_content:
                     # Normal delete+insert
@@ -2390,6 +2476,9 @@ class FileOpsMixin:
                             f'\n  note: range started on a heading/structural opener '
                             f'("{_fd_snip}") that the replacement does not restore — '
                             f'the section may now be missing its heading.')
+
+            if duplicate_note:
+                res_msg += f'\n  {duplicate_note}'
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
