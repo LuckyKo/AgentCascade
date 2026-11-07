@@ -611,12 +611,9 @@ def _build_skills_block(loaded_skills: list) -> str:
     if not loaded_skills:
         return ''
 
-    from agent_cascade.settings import SKILL_BLOCK_MAX_TOTAL_CHARS
-    max_chars = int(SKILL_BLOCK_MAX_TOTAL_CHARS or 0)  # 0 = char cap disabled
     ordered = _order_self_augmentation_first(loaded_skills)
 
     parts = ['\n\n## Active Skills']
-    running = len(parts[0])  # char count of '\n'.join(parts) so far
     for idx, item in enumerate(ordered, 1):
         if isinstance(item, tuple) and len(item) == 2:
             name, body = item
@@ -624,18 +621,9 @@ def _build_skills_block(loaded_skills: list) -> str:
         else:
             # Backward compat: plain string without a name -> positional label.
             part = f"\n### Skill {idx}\n{item}"
-        # '\n'.join adds one separator per part, so a part's marginal cost is len(part) + 1.
-        # The first skill is always kept (header + first skill is the irreducible floor; with
-        # self-augmentation promoted to front that floor is header + self-augmentation). Beyond
-        # the first, stop on the first part that would push the block past the char budget.
-        if idx > 1 and max_chars and running + len(part) + 1 > max_chars:
-            break
         parts.append(part)
-        running += len(part) + 1
 
-    logger.debug(
-        '[SKILLS] Built skills block: %d/%d skill(s), %d chars (budget %d)', len(parts) - 1, len(ordered), running,
-        max_chars)
+    logger.debug('[SKILLS] Built skills block: %d skill(s)', len(ordered))
     return '\n'.join(parts)
 
 
