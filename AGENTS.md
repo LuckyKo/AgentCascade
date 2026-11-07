@@ -25,8 +25,7 @@ actionable — it is read by agents with limited context.
 - **Never stage the user's uncommitted WIP.** If a file mixes your change with the
   user's, use partial-hunk staging (blob surgery: `git show HEAD:<file>` + your hunk +
   `git hash-object -w` + `git update-index --cacheinfo`).
-- Commit: `type: summary`. The post-commit hook auto-bumps the version (expect a
-  follow-up `chore(version)` commit).
+- Commit: `type: summary`.
 - Resolve short hashes to full via `git rev-parse` before use.
 
 ## Versioning
