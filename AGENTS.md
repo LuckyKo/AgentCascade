@@ -58,6 +58,9 @@ actionable — it is read by agents with limited context.
 - Orchestrator: run the full suite at milestones (not a re-run of the coder's scoped
   files).
 - Isolate flaky failures with a targeted single-file run before blaming a regression.
+- When writing tests, never hardcode magic numbers/strings to match expected values;
+  import and reference the constants from the code under test (single source of truth,
+  keeps tests in sync when the value changes).
 
 ## Do / don't
 - Don't add a cap/limit that double-covers an existing bound (redundant logic).
