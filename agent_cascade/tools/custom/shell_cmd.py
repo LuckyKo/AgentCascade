@@ -575,12 +575,37 @@ class ShellCmd(BaseTool):
         return ShellCmd._HEAD_TAIL_STRIP_NOTE + '\n' if was_stripped else ''
 
     # BUG_0053/0092: POSIX text tools and PowerShell cmdlets unavailable in cmd.exe.
+    # BUG_0264: extended with the Unix file-manipulation commands (mv/cp/rm/cat/ls/…)
+    # that otherwise fall through to raw execution and fail with the bare cmd.exe
+    # "'X' is not recognized" error.
     # head/tail are already handled by _strip_head_tail_pipes (stripped, not rejected).
     # Values are the cmd.exe replacement command, or None when there is no equivalent.
+    # Intentionally conservative: only Unix-only command names are listed — never a valid
+    # cmd.exe builtin (find, more, mkdir, rmdir, type, dir, copy, move, del), which would
+    # turn the guardrail into a false rejection of a working command.
     _WINDOWS_POSIX_TOOLS = {
         'grep': 'findstr',
         'awk': None,
         'sed': None,
+        # BUG_0264: Unix file-manipulation commands with a direct cmd.exe equivalent.
+        'mv': 'move',
+        'cp': 'copy',
+        'rm': 'del',
+        'cat': 'type',
+        'ls': 'dir',
+        'which': 'where',
+        # No cmd.exe equivalent — the error suggests a Python snippet / grep·read_file tools.
+        'wc': None,
+        'chmod': None,
+        'chown': None,
+        'ln': None,
+        'touch': None,
+        'basename': None,
+        'dirname': None,
+        'tee': None,
+        'diff': None,
+        'xargs': None,
+        'less': None,
     }
     _WINDOWS_PS_CMDLETS = {
         'select-string': 'findstr',

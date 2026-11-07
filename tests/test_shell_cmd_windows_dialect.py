@@ -62,6 +62,16 @@ BLOCKED = [
     ('type a.txt | select-string foo', 'Select-String'),
     ('"Select-String" foo', 'Select-String'),          # quoted command token
     ('echo hi | SELECT-STRING hi', 'Select-String'),   # case-insensitive match
+    # BUG_0264: Unix file-manipulation commands now blocked too.
+    ('mv a b', 'mv'),
+    ('cp a b', 'cp'),
+    ('rm f', 'rm'),
+    ('cat f', 'cat'),
+    ('ls', 'ls'),
+    ('which x', 'which'),
+    ('wc -l f', 'wc'),
+    ('chmod 755 f', 'chmod'),
+    ('ln a b', 'ln'),
 ]
 
 
@@ -112,6 +122,20 @@ ALLOWED = [
     'echo "grep is missing on Windows"',   # quoted data containing a tool name
     'python -c "import re; print(re.sub(\'a\', \'b\', \'sed\'))"',  # quoted pipe/args
     'git show-ref --head',                # flag named like a POSIX tool
+    # BUG_0264: valid cmd.exe builtins that must NEVER be flagged, including the
+    # replacement words for the newly-blocked tools (move/copy/del/type/dir/where)
+    # and other builtins sharing no name with a denied tool.
+    'dir /s /b',
+    'type f.txt',
+    'copy a b',
+    'move a b',
+    'del f',
+    'findstr /i x f',
+    'more',
+    'where python',
+    'mkdir out',
+    'rmdir out',
+    'find . -name f',
 ]
 
 
@@ -201,6 +225,44 @@ class TestMessageContent:
         msg = ShellCmd._check_windows_dialect(command)
         assert msg.count('grep/read_file') == 1, f"advice duplicated in: {msg}"
         assert msg.count('Python snippet') == 1, f"advice duplicated in: {msg}"
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 3b. BUG_0264: Unix file-manipulation commands — equivalents named, no-equivalent phrasing
+# ────────────────────────────────────────────────────────────────────────────────
+class TestFileCommandEquivalents:
+    """Each newly-blocked command names its cmd.exe replacement in the hint."""
+
+    @pytest.mark.parametrize('command,alt', [
+        ('mv a b', 'move'),
+        ('cp a b', 'copy'),
+        ('rm f', 'del'),
+        ('cat f', 'type'),
+        ('ls', 'dir'),
+        ('which x', 'where'),
+    ])
+    def test_equivalent_named(self, on_windows, command, alt):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        msg = ShellCmd._check_windows_dialect(command)
+        assert msg is not None, f"expected rejection for {command!r}"
+        assert f"Use '{alt}' instead." in msg, f"expected {alt!r} suggested in: {msg}"
+        assert 'There is no cmd.exe equivalent' not in msg  # this branch HAS an equivalent
+
+
+class TestNoEquivalentFileCommands:
+    """Unix tools with no cmd.exe equivalent must state that honestly."""
+
+    @pytest.mark.parametrize('command', [
+        'wc -l f', 'chmod 755 f', 'chown u:g f', 'ln a b', 'touch f',
+        'basename a/b', 'dirname a/b', 'tee out.txt', 'diff a b',
+        'xargs echo', 'less f',
+    ])
+    def test_no_equivalent_phrasing(self, on_windows, command):
+        from agent_cascade.tools.custom.shell_cmd import ShellCmd
+        msg = ShellCmd._check_windows_dialect(command)
+        assert msg is not None, f"expected rejection for {command!r}"
+        assert 'There is no cmd.exe equivalent' in msg
+        assert "Use '(" not in msg and 'instead. (' not in msg  # no leaked placeholder
 
 
 # ────────────────────────────────────────────────────────────────────────────────
