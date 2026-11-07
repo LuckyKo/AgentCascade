@@ -918,6 +918,19 @@ class FileOpsMixin:
         }
 
     @staticmethod
+    def _mark_empty(entry: dict, resolved: Path) -> None:
+        """Mark an empty directory with ``is_empty`` so readers know it exists.
+
+        Shared by the eager and lazy flat-listing paths. Scan errors are swallowed
+        (leaving ``is_empty`` unset), matching the behavior both call sites had.
+        """
+        try:
+            with os.scandir(str(resolved / entry['name'])) as sub_it:
+                entry['is_empty'] = next(sub_it, None) is None
+        except Exception:
+            pass
+
+    @staticmethod
     def _sort_entries(entries: list, sort_by: str) -> list:
         """Sort entries: directories always before files, then by requested key."""
         dirs = [e for e in entries if e['is_dir']]
@@ -973,6 +986,18 @@ class FileOpsMixin:
         files = []
         raw_entries = 0
 
+        # When the ordering needs no size/mtime (name/type sort) AND no size/date filter
+        # is active, a file's stat is only needed to RENDER it -- never to filter or sort
+        # it. Defer both the stat and the per-directory empty-scan to the entries that
+        # actually survive truncation (H1/H4, O1/O4): collect lightweight (name, is_dir,
+        # entry) records, sort/truncate by name, then stat + scan the <= max_entries
+        # survivors. When a size/date sort or filter is active every candidate is
+        # required, so the eager path below is kept unchanged.
+        lazy = sort_by in ('name', 'type') and not (
+            ctx.min_size is not None or ctx.max_size is not None
+            or ctx.modified_after is not None or ctx.modified_before is not None
+        )
+
         with os.scandir(str(resolved)) as it:
             for entry in it:
                 raw_entries += 1
@@ -982,6 +1007,18 @@ class FileOpsMixin:
                     continue
                 if ctx.dirs_only and not is_dir:
                     continue
+                if lazy:
+                    # No size/date filter, so size/mtime never affect the predicate --
+                    # pass None and defer the stat. Membership matches the eager path
+                    # exactly (dirs pass on name; files pass on name alone).
+                    if not self._matches_filters(entry.name, is_dir, size=None, mtime=None, ctx=ctx):
+                        continue
+                    (dirs if is_dir else files).append(
+                        {'name': entry.name, 'is_dir': is_dir,
+                         'size': None, 'mtime': None, '_entry': entry}
+                    )
+                    continue
+                # Eager path: stat needed to filter and/or order by size/date.
                 # Fetch stat BEFORE filter (needed for size/date checks)
                 try:
                     stat_info = entry.stat()
@@ -999,11 +1036,7 @@ class FileOpsMixin:
                 e = self._make_entry(entry.name, is_dir, stat_info)
                 # Cheaply mark empty directories so readers know they exist.
                 if is_dir:
-                    try:
-                        with os.scandir(str(resolved / entry.name)) as sub_it:
-                            e['is_empty'] = next(sub_it, None) is None
-                    except Exception:
-                        pass
+                    self._mark_empty(e, resolved)
                 (dirs if is_dir else files).append(e)
 
         sorted_dirs = self._sort_entries(dirs, sort_by)
@@ -1017,6 +1050,24 @@ class FileOpsMixin:
             show_files = sorted_files[:remaining]
             overflow_count = (len(sorted_dirs) - len(show_dirs)) + (len(sorted_files) - len(show_files))
             sorted_dirs, sorted_files = show_dirs, show_files
+
+        if lazy:
+            # Materialize survivors only: stat for size/mtime and scan dirs for the empty
+            # marker. Rendered bytes are identical to the eager path -- the only difference
+            # is that entries beyond max_entries were never stat'd or dir-scanned.
+            for e in sorted_dirs + sorted_files:
+                entry = e.pop('_entry')
+                try:
+                    stat_info = entry.stat()
+                except OSError:
+                    stat_info = None
+                # Reuse _make_entry so size/mtime derivation is identical to the
+                # eager path; assign back to preserve the surviving dict's identity.
+                made = self._make_entry(e['name'], e['is_dir'], stat_info)
+                e['size'] = made['size']
+                e['mtime'] = made['mtime']
+                if e['is_dir']:
+                    self._mark_empty(e, resolved)
 
         total_dirs = len(sorted_dirs)
         total_files = len(sorted_files)
@@ -1059,7 +1110,6 @@ class FileOpsMixin:
         remaining = max_entries
         truncated = False
         raw_entries = 0
-        root_depth = len(resolved.parts)
         allowed_roots = self._list_allowed_roots(resolved)
 
         def _collect_walk_error(err: OSError) -> None:
@@ -1068,14 +1118,27 @@ class FileOpsMixin:
         for dirpath, subdirs, filenames in os.walk(
                 str(resolved), topdown=True, onerror=_collect_walk_error):
             current_dir = Path(dirpath)
-            abs_path = current_dir.resolve()
+            # Cycle guard: cheap (st_dev, st_ino) identity key from os.stat -- one
+            # O(1) path-open vs Path.resolve()'s O(depth). os.stat follows junction/
+            # symlink reparse points so an alias shares its target's key (os.lstat
+            # returns the reparse point's own inode and would list the aliased dir
+            # twice); resolve() covers st_ino==0 (FAT/exFAT/network) and dangling links.
+            try:
+                st = os.stat(dirpath)
+                current_key = (st.st_dev, st.st_ino) if st.st_ino else current_dir.resolve()
+            except OSError:
+                current_key = current_dir.resolve()
 
-            if abs_path in visited_dirs:  # symlink cycle guard
+            if current_key in visited_dirs:  # symlink / junction cycle guard
                 subdirs.clear()
                 continue
-            visited_dirs.add(abs_path)
+            visited_dirs.add(current_key)
 
-            current_depth = len(abs_path.parts) - root_depth
+            # Depth without any syscall: count the components below the (already
+            # resolved) walk root. os.walk yields clean descendant paths, so this
+            # reproduces the old parts-based depth arithmetic.
+            rel_path = _safe_relpath(dirpath, str(resolved))
+            current_depth = len(rel_path.split('/')) if rel_path else 0
             # Count before exclude/skip_vcs pruning so an all-pruned tree is not
             # misreported as a genuinely empty directory (BUG_0160).
             raw_entries += len(subdirs) + len(filenames)
@@ -1127,10 +1190,15 @@ class FileOpsMixin:
                 if displayable and remaining <= 0:
                     truncated = True
                     break
-                try:
-                    stat_info = (current_dir / d_name).stat()
-                except OSError:
-                    stat_info = None
+                # A non-displayable dir never renders its [DIR] line (render_dir prints
+                # only for displayed_dirs), so its mtime is never shown -- skip its stat
+                # entirely (O1). The entry is still created so render_dir descends (BUG_0008).
+                stat_info = None
+                if displayable:
+                    try:
+                        stat_info = (current_dir / d_name).stat()
+                    except OSError:
+                        stat_info = None
                 d_entry = self._make_entry(d_name, True, stat_info)
                 d_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
                 dir_entries.append(d_entry)
@@ -1145,20 +1213,35 @@ class FileOpsMixin:
                 # rather than silently pretending the listing is complete.
                 truncated = truncated or bool(filenames)
             else:
+                # Only stat a file when its size/mtime is actually required: for a
+                # size/date filter, to order by size/date, or to render the file line.
+                # Under a pure name filter + name/type sort the survivors are exactly the
+                # entries that render, so we filter on name first (no stat) and stat only
+                # those survivors (H1/O1). With a size/date sort or filter every candidate
+                # is needed, so the eager stat-before-filter order is kept unchanged.
+                needs_stat = (ctx.min_size is not None or ctx.max_size is not None
+                              or ctx.modified_after is not None
+                              or ctx.modified_before is not None
+                              or sort_by in ('size', 'date'))
                 for f_name in sorted(filenames):
-                    try:
-                        stat_info = (current_dir / f_name).stat()
-                    except OSError:
-                        stat_info = None
-                    # Full filter (name + size + date) via context, after stat is available.
                     # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
                     # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
                     rel = _safe_relpath(str(current_dir / f_name), str(resolved))
+                    if needs_stat:
+                        try:
+                            stat_info = (current_dir / f_name).stat()
+                        except OSError:
+                            stat_info = None
+                        size = stat_info.st_size if stat_info else None
+                        mtime = stat_info.st_mtime if stat_info else None
+                    else:
+                        stat_info = None
+                        size = mtime = None
                     if not self._matches_filters(
                             f_name,
                             False,
-                            size=stat_info.st_size if stat_info else None,
-                            mtime=stat_info.st_mtime if stat_info else None,
+                            size=size,
+                            mtime=mtime,
                             ctx=ctx,
                             rel=rel,
                     ):
@@ -1166,6 +1249,12 @@ class FileOpsMixin:
                     if remaining <= 0:
                         truncated = True
                         break
+                    if not needs_stat:
+                        # Survivor that will render: stat now to build its size/mtime line.
+                        try:
+                            stat_info = (current_dir / f_name).stat()
+                        except OSError:
+                            stat_info = None
                     f_entry = self._make_entry(f_name, False, stat_info)
                     f_entry['dirpath'] = dirpath  # parent dir, for relative-path rendering
                     file_entries.append(f_entry)

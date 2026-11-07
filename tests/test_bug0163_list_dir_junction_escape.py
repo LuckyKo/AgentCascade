@@ -115,6 +115,38 @@ def test_junction_within_workspace_is_still_traversed(tmp_path, junction):
     assert 'not traversed' not in out, out
 
 
+def test_in_workspace_junction_alias_renders_target_once(tmp_path, junction):
+    """FIX 1: an in-workspace junction aliasing a walked dir must render the
+    target's files EXACTLY once -- not under both the real path and the link.
+
+    ``test_junction_within_workspace_is_still_traversed`` above only proves the
+    alias renders, so it passes whether or not the target is duplicated. This
+    pins the stronger dedup property: the cycle guard keys visited dirs on
+    (st_dev, st_ino) from ``os.stat``, which follows the junction to the target's
+    inode, so whichever path ``os.walk`` visits second matches the first and is
+    pruned. ``os.lstat`` would have returned the reparse point's OWN inode,
+    giving the alias a distinct key and listing ``inside.txt`` twice -- that is
+    the byte-identity regression this test catches. (os.walk descends into
+    junctions on Windows but not Linux symlinks; the module-level skipif already
+    gates this to Windows.)
+    """
+    base = tmp_path / 'ws'
+    (base / 'real').mkdir(parents=True)
+    (base / 'real' / 'inside.txt').write_text('ok', encoding='utf-8')
+    junction(base / 'junction_in', base / 'real')
+
+    om = OperationManager(base_dir=str(base))
+    out = om.list_directory('.', recursive=True, char_limit=-1)
+
+    # Exactly one rendering of the aliased file, regardless of which path
+    # (real/ or junction_in/) os.walk happened to visit first. Red (== 2) with
+    # the os.lstat key, green (== 1) with os.stat.
+    assert out.count('inside.txt') == 1, (
+        f"junction alias duplicated the target: inside.txt rendered "
+        f"{out.count('inside.txt')} times\n{out}")
+    assert 'not traversed' not in out, out
+
+
 def test_junction_into_allowed_extra_folder_is_traversed(tmp_path, junction):
     base = tmp_path / 'ws'
     base.mkdir()
