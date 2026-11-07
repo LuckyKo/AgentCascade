@@ -158,6 +158,9 @@ class _FakeTelemetry:
             },
             'runs': 3,
             'llm_calls': 7,
+            'cache_hits': 5,
+            'cache_misses': 2,
+            'cache_hit_ratio': 0.714,
             'avg_tps': 42.5,
         }]
 
@@ -199,10 +202,11 @@ class TestSystemInfoTelemetryDump:
         assert 'Prompt cache:' in out
         assert 'hits=6  misses=1  unknown=0' in out
         assert 'hit_ratio=85.7%' in out
-        assert 'measured=100.0%' in out
-        # Config fingerprint A/B
+        assert 'coverage=100.0%' in out
+        # Config fingerprint A/B — per-model cache column (BUG_0260)
         assert 'abc123def456' in out
         assert 'model=qwen3.8-27b' in out
+        assert 'cache=5/2  cache_hit=71.4%' in out
         # Agent class usage (accuracy formatted as %)
         assert 'orchestrator:' in out
         assert '91.7%' in out
@@ -294,7 +298,7 @@ class TestSystemInfoTelemetryDump:
         assert 'Prompt cache:' in out
         assert 'hits=3  misses=1  unknown=0' in out
         assert 'hit_ratio=75.0%' in out
-        assert 'measured=50.0%' in out
+        assert 'coverage=50.0%' in out
 
     def test_prompt_cache_block_absent_when_no_llm_calls(self):
         """total_llm_calls==0 -> block is NOT printed (no noise on fresh sessions)."""
@@ -351,7 +355,7 @@ class TestSystemInfoTelemetryDump:
         out = self._tool_with(_NoneRatio()).call('{"help": "telemetry"}')
         assert 'Prompt cache:' in out
         assert 'hit_ratio=n/a' in out
-        assert 'measured=n/a' in out
+        assert 'coverage=n/a' in out
 
 
 class TestSystemInfoVersion:

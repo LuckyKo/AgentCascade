@@ -98,7 +98,7 @@ class SystemInfo(BaseTool):
                              f"misses={session.get('llm_cache_misses', 0)}  "
                              f"unknown={session.get('llm_cache_unknown', 0)}")
                 lines.append(f"    hit_ratio={_pct(session.get('llm_cache_hit_ratio'))}   "
-                             f"measured={_pct(session.get('llm_cache_classified_ratio'))}")
+                             f"coverage={_pct(session.get('llm_cache_classified_ratio'))}")
 
             # llm_calls_by_model — per-model call counts
             by_model = session.get('llm_calls_by_model') or {}
@@ -121,7 +121,9 @@ class SystemInfo(BaseTool):
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "
-                                 f"avg_tps={avg_tps}")
+                                 f"avg_tps={avg_tps}  "
+                                 f"cache={c.get('cache_hits', 0)}/{c.get('cache_misses', 0)}  "
+                                 f"cache_hit={_pct(c.get('cache_hit_ratio'))}")
 
             # ── Agent class usage ──
             if agent_classes:

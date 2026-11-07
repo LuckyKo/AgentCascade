@@ -6570,7 +6570,7 @@ function updateTelemetryConfigTable(configs) {
   if (!configTbody) return;
 
   if (!configs || configs.length === 0) {
-    configTbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-secondary)">No config data yet</td></tr>';
+    configTbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-secondary)">No config data yet</td></tr>';
     return;
   }
 
@@ -6590,6 +6590,7 @@ function updateTelemetryConfigTable(configs) {
       <td>${formatMs((c.total_llm_latency_sec || 0) * 1000)}</td>
       <td>${formatMs((c.total_duration_sec || 0) * 1000)}</td>
       <td>${c.avg_tps ? c.avg_tps.toFixed(1) : '—'}</td>
+      <td>${(c.cache_hits ?? 0)}/${(c.cache_misses ?? 0)}${c.cache_hit_ratio != null ? ' (' + (c.cache_hit_ratio * 100).toFixed(0) + '%)' : ''}</td>
     </tr>`;
   }).join('');
 }

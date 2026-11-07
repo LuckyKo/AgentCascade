@@ -218,6 +218,8 @@ class TelemetryCollector:
                 'config_description': config_description or {},
                 'runs': 0,
                 'llm_calls': 0,
+                'cache_hits': 0,
+                'cache_misses': 0,
                 'tool_calls': 0,
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
@@ -423,6 +425,13 @@ class TelemetryCollector:
                 'start_time': time.perf_counter(),
                 'input_tokens_est': input_tokens_est,
                 'model': model,
+                # Snapshot the turn's config fingerprint onto the active call so the
+                # cache classifier in record_token_usage can attribute hits/misses to
+                # the right config row (BUG_0260). Captured here, not read at
+                # classification time, because a call can be finalized after its turn
+                # closes (BUG_0128). Empty when no turn is open — such calls move only
+                # the session-global counters.
+                'config_fingerprint': self._active_turns.get(instance_name, {}).get('config_fingerprint', ''),
                 'first_token_time': 0,
                 'completion_tokens': 0,  # Will be updated by record_token_usage callback if available
                 'usage_details': None,
@@ -515,10 +524,23 @@ class TelemetryCollector:
                         # [KV_CACHE_MISS] line reports the value the classifier used,
                         # even if a subsequent multi-callback overwrites input_tokens_est.
                         call['classified_prompt_tokens'] = int(prompt_tokens)
+                        # Attribute this call to its config row via the fingerprint
+                        # snapshotted at call start (BUG_0260). Read once; the per-config
+                        # counters move in lockstep with the session-global counters in
+                        # this same branch, so there is no second classification and the
+                        # per-config totals (for classified calls that carry a fingerprint)
+                        # reconcile to the session totals. Only touched when the
+                        # fingerprint is present and its row exists — a call with no open
+                        # turn has fp='' and counts session-globally only.
+                        fp = call.get('config_fingerprint') or ''
                         if status == 'hit':
                             self._session_stats['llm_cache_hits'] += 1
+                            if fp and fp in self._config_stats:
+                                self._config_stats[fp]['cache_hits'] += 1
                         else:
                             self._session_stats['llm_cache_misses'] += 1
+                            if fp and fp in self._config_stats:
+                                self._config_stats[fp]['cache_misses'] += 1
                             # Retained for the [KV_CACHE_MISS] debug line emitted in
                             # record_llm_call_end (todo.md:105 / BUG_0101 tracking).
                             call['cached_tokens'] = int(cached or 0)
@@ -982,6 +1004,9 @@ class TelemetryCollector:
             'llm_cache_misses': stats.get('llm_cache_misses', 0),
             'llm_cache_unknown': stats.get('llm_cache_unknown', 0),
             'llm_cache_hit_ratio': llm_cache_hit_ratio,
+            # Coverage, NOT a hit rate: fraction of ALL LLM calls that were classifiable
+            # (classified/total). Distinct from llm_cache_hit_ratio above, which is
+            # hits/(hits+misses) over only the classified calls. (BUG_0260)
             'llm_cache_classified_ratio': llm_cache_classified_ratio,
             # ── Raw time totals (BUG_0130) ──────────────────────────────────────
             # Exposed so the session cards/tables can be reconciled without re-adding
@@ -1026,11 +1051,25 @@ class TelemetryCollector:
                         'success_rate': round((count - failures) / count * 100, 1) if count > 0 else 100.0,
                     }
 
+                # Prompt-cache counters + derived hit ratio (BUG_0260). Same formula as
+                # the session-level llm_cache_hit_ratio: hits/(hits+misses), None when
+                # nothing classified. .get(...,0) tolerates rows persisted before the
+                # field existed.
+                _cache_hits = cs.get('cache_hits', 0)
+                _cache_misses = cs.get('cache_misses', 0)
+                _cache_total = _cache_hits + _cache_misses
+
                 result.append({
                     'config_fingerprint': fp,
                     'config_description': dict(cs['config_description']),
                     'runs': cs['runs'],
                     'llm_calls': cs['llm_calls'],
+                    'cache_hits': _cache_hits,
+                    'cache_misses': _cache_misses,
+                    'cache_hit_ratio': (
+                        round(_cache_hits / _cache_total, 3)
+                        if _cache_total > 0 else None
+                    ),
                     'tool_calls': cs['tool_calls'],
                     'input_tokens_est': cs['input_tokens_est'],
                     'output_tokens_est': cs['output_tokens_est'],

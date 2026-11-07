@@ -813,6 +813,64 @@ class TestConfigComparison:
         assert isinstance(row['total_streaming_time_sec'], (int, float))
         assert row['total_streaming_time_sec'] >= 0
 
+    def test_per_endpoint_cache_counters_and_reconciliation(self, collector):
+        """BUG_0260: per-fingerprint cache hit/miss counters are fed by the same
+        guarded classification as the session counters, so they reconcile to the
+        session totals; and the per-model hit ratio uses the identical hits/classified
+        formula as the session hit ratio — distinct from coverage=classified/total."""
+        fpA, fpB = 'fpAAAA111111', 'fpBBBB222222'
+        collector.record_turn_start('instA', config_fingerprint=fpA,
+                                    config_description={'model': 'modelA'})
+        collector.record_turn_start('instB', config_fingerprint=fpB,
+                                    config_description={'model': 'modelB'})
+
+        def classified(inst, fp, cached):
+            collector.record_llm_call_start(
+                inst, model=('modelA' if fp == fpA else 'modelB'))
+            collector.record_token_usage(
+                inst, prompt_tokens=1000, completion_tokens=1,
+                details={'cached_tokens': cached})
+            collector.record_llm_call_end(inst)
+
+        # prompt=1000 -> hit floor is max(1, int(0.05*1000))=50, so >=50 hits.
+        # fpA: 2 hits (80) + 1 miss (49)
+        classified('instA', fpA, 80)
+        classified('instA', fpA, 80)
+        classified('instA', fpA, 49)
+        # fpB: 1 hit (80) + 2 misses (0, 10)
+        classified('instB', fpB, 80)
+        classified('instB', fpB, 0)
+        classified('instB', fpB, 10)
+        # 2 unclassified calls (no usage) so coverage (6/8=0.75) != hit-rate (3/6=0.5).
+        for inst in ('instA', 'instB'):
+            collector.record_llm_call_start(inst, model='modelX')
+            collector.record_llm_call_end(inst)
+
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+
+        # (a) per-model cache_hits / cache_misses and their derived hit ratio.
+        assert cfgs[fpA]['cache_hits'] == 2
+        assert cfgs[fpA]['cache_misses'] == 1
+        assert cfgs[fpA]['cache_hit_ratio'] == round(2 / 3, 3)
+        assert cfgs[fpB]['cache_hits'] == 1
+        assert cfgs[fpB]['cache_misses'] == 2
+        assert cfgs[fpB]['cache_hit_ratio'] == round(1 / 3, 3)
+
+        # (b) session hit-rate = hits/(hits+misses); per-model totals reconcile.
+        s = collector.get_session_summary()
+        assert s['llm_cache_hits'] == 3
+        assert s['llm_cache_misses'] == 3
+        assert s['llm_cache_hit_ratio'] == round(3 / 6, 3)
+        assert cfgs[fpA]['cache_hits'] + cfgs[fpB]['cache_hits'] == s['llm_cache_hits']
+        assert cfgs[fpA]['cache_misses'] + cfgs[fpB]['cache_misses'] == s['llm_cache_misses']
+
+        # (c) coverage = classified/total, provably distinct from hit-rate.
+        classified_calls = s['llm_cache_hits'] + s['llm_cache_misses']
+        assert classified_calls == 6
+        assert s['llm_cache_classified_ratio'] == round(
+            classified_calls / s['total_llm_calls'], 3)
+        assert s['llm_cache_classified_ratio'] != s['llm_cache_hit_ratio']
+
 
 # ---------------------------------------------------------------------------
 # I-bis. Config fingerprint is model-only (no prompt print)
