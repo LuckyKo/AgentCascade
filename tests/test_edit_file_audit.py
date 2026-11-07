@@ -216,14 +216,17 @@ def test_di_range_zero_as_int_appends():
 # ── blank inserted lines must not inherit the range's indent ────────────────
 
 
-def test_di_blank_inserted_line_has_no_inherited_indent():
+def test_di_inserted_unindented_lines_stay_verbatim_blank_zero_width():
+    """d&i inserts new_content VERBATIM (b105b077): unindented content lines land
+    at column 0 (no indent inherited from the replaced line), and a blank
+    inserted line stays zero-width (no trailing whitespace)."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
         f = _owned_file(om, d, 'blank.py', 'def f():\n    pass\n')
         res = _d_and_i(om, f, new_content='x = 1\n\nx = 2\n', range_param='2')
         assert res.startswith('OK'), res
-        assert f.read_text(encoding='utf-8') == 'def f():\n    x = 1\n\n    x = 2\n    pass\n', \
-            f"blank line gained trailing whitespace: {f.read_text(encoding='utf-8')!r}"
+        assert f.read_text(encoding='utf-8') == 'def f():\nx = 1\n\nx = 2\n    pass\n', \
+            f"verbatim contract violated: {f.read_text(encoding='utf-8')!r}"
 
 
 # ── heuristic sibling-append path requires a reproduced block ───────────────
