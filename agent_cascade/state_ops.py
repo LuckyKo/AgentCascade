@@ -12,6 +12,7 @@ from typing import Optional
 import httpx
 
 from agent_cascade.log import _AppLoggerProxy
+from agent_cascade.settings import STATE_HTTP_TIMEOUT
 
 # Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy):
 # a module logger (logging.getLogger(__name__)) never reaches the console/file
@@ -230,7 +231,6 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
         if not api_base or not model:
             logger.debug('Missing api_base/model for state restore on %s', instance.instance_name)
             return False
-
         success = restore_state(api_base, model, restore_label)
         if not success:
             # Restore failed — clear the label to avoid retrying stale state
@@ -287,7 +287,7 @@ def save_state(api_base: str, model: str, instance_name: str,
         # Must exceed the autoloader's own 120 s slot-action budget: the shortest timeout in the
         # chain always wins, and a 30 s ceiling abandoned a multi-GB save that was still writing
         # (leaving an orphan 1.4 GB .tmp, the save killed by the unload that followed it).
-        resp = httpx.post(url, json=body, timeout=180)
+        resp = httpx.post(url, json=body, timeout=STATE_HTTP_TIMEOUT)
 
         if resp.status_code == 200:
             # Cleanup old states for this instance after successful save
@@ -307,12 +307,10 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
     """Restore KV cache state. Returns True if successful."""
     try:
         base = _normalize_api_base(api_base)
-
         url = f"{base}/v1/models/{model}/state/load"
-        # A restore may have to cold-start the model first (autoloader load_state auto-loads
-        # before applying state), so 30 s is structurally too short: cold-starting a multi-GB
-        # model alone can take 30+ s, and the request is then abandoned with no state/load 200.
-        resp = httpx.post(url, json={'label': label}, timeout=180)
+        logger.debug('State restore: POST %s (label=%s, timeout=%.0fs)',
+                       url, label, STATE_HTTP_TIMEOUT)
+        resp = httpx.post(url, json={'label': label}, timeout=STATE_HTTP_TIMEOUT)
         if resp.status_code != 200:
             # WARNING, not DEBUG: the caller reports "State restore failed … cleared label"
             # right after, and that line cannot carry the reason (restore_state returns

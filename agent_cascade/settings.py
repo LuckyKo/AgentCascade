@@ -364,6 +364,12 @@ REACQUIRE_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_REACQUIRE_TIMEOUT', 30
 # coincide and the cap fires first) — a plain fixed wait.
 POST_YIELD_REACQUIRE_TIMEOUT: float = 120.0
 
+
+# HTTP timeout for state save/restore POSTs to the autoloader. A restore may
+# cold-start a multi-GB model first; override with AGENT_CASCADE_STATE_HTTP_TIMEOUT
+# for rigs with slower cold-starts.
+STATE_HTTP_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_STATE_HTTP_TIMEOUT', 120.0))
+
 # Per-endpoint reasoning effort values (UI pulldown → LLM API `reasoning_effort`).
 # "none" means the param is NOT sent (model uses default behavior).
 # "xhigh" maps to "high" at the API level (future-proofing for extended levels).
