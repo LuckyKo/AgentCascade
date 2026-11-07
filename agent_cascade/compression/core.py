@@ -420,15 +420,15 @@ def compress_context(
         fraction: float | None = None,  # Fraction of active history to discard (None → live state value)
         mode: str = 'auto',  # "auto" (LLM generates) or "manual" (summary provided)
         summary_text: str | None = None,  # Required when mode == "manual"
-        force: bool = False,  # Bypass validation guards (forced compression at >80%)
+        force: bool = False,  # Bypass validation guards (forced compression at >95%)
         dry_run: bool = False,  # If True, generate summary but don't mutate pool
         precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
-        trigger: str = 'agent',  # "agent" (guard applies) / "user" (/compress, bypass) / "forced" (>80%, bypass)
+        trigger: str = 'agent',  # "agent" (guard applies) / "user" (/compress, bypass) / "forced" (>95%, bypass)
 ) -> CompressResult:
     """
     Unified compression function. Handles ALL compression triggers:
 
-    - Forced (>80% context usage): orchestrator calls with force=True
+    - Forced (>95% context usage): orchestrator calls with force=True
     - Agent-triggered (agent calls compress_context tool): normal mode
     - Manual (user provides summary text): mode="manual" with summary_text
 
@@ -446,7 +446,7 @@ def compress_context(
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
         trigger: Who initiated compression. "agent" (default) applies the min-context-usage
-            guard; "user" (/compress command) and "forced" (>80% auto) bypass it.
+            guard; "user" (/compress command) and "forced" (>95% auto) bypass it.
 
     Returns:
         CompressResult with success status, summary text, and metadata.
@@ -516,7 +516,7 @@ def compress_context(
     # ── 2b. Guard: agent-triggered min context usage (refuse if below threshold) ──
     # Applies ONLY to genuine agent-initiated calls. Bypassed when:
     #   * trigger != 'agent'  → /compress passes trigger='user' (explicit user action).
-    #   * force               → the >80% forced path (execute_force_compression) sets force=True.
+    #   * force               → the >95% forced path (execute_force_compression) sets force=True.
     #   * dry_run             → the /compress preview/approval path generates a summary for
     #                           user review without mutating the pool; that must never be
     #                           blocked by the usage guard, so dry-run is always allowed.

@@ -247,14 +247,14 @@ DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(
     os.getenv('AGENT_CASCADE_COMPRESSION_MAX_ATTEMPTS',
               100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
 COMPRESSION_FORCE_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_FORCE_THRESHOLD',
-                                                     80.0))  # Force compress at X% token usage
+                                                     96.0))  # Force compress at X% token usage
 COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_WARNING_THRESHOLD',
-                                                       72.0))  # Warn at X% token usage
+                                                       90.0))  # Warn at X% token usage
 COMPRESSION_TIMEOUT: float = float(os.getenv('AGENT_CASCADE_COMPRESSION_TIMEOUT',
                                              120.0))  # Max seconds for compression to complete
 DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD: float = float(
     os.getenv('AGENT_CASCADE_DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD',
-              78.0))  # Proactive compress at X% usage (post-tool, async drain checks)
+              95.0))  # Proactive compress at X% usage (post-tool, async drain checks)
 DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS: int = int(
     os.getenv('AGENT_CASCADE_COMPRESSION_CONTEXT_RESERVE_TOKENS',
               3000))  # Tokens reserved for LLM call overhead (system prompt, function schemas, reasoning)

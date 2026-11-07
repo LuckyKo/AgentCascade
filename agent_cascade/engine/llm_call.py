@@ -1483,7 +1483,7 @@ class LLMCallMixin:
                 # Continue to next round
 
             # After each round, check if we should trigger automatic forced compression
-            # via the normal pre-LLM checks (usage_pct > 80%). The retry loop will
+            # via the normal pre-LLM checks (usage_pct > 95%). The retry loop will
             # naturally hit _pre_llm_checks on the next iteration if needed.
 
         else:
