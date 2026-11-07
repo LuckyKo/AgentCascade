@@ -269,10 +269,11 @@ const POOL_SETTINGS_MAP = [
   // default 900 after refresh and the next saveSettings() stomped the persisted value.
   { id: '#setting-idle-timeout', prop: 'value', key: 'idle_timeout_seconds' },
   { id: '#setting-system-idle-timeout', prop: 'value', key: 'system_agent_idle_timeout_seconds' },
-  // General-tab API Endpoint — server-backed in default_llm_cfg (api_endpoints.json),
-  // broadcast by _add_pool_runtime_settings; previously absent so #setting-endpoint
-  // stayed blank after every restart (BUG_0252).
+  // General-tab API Endpoint + Model — server-backed in default_llm_cfg
+  // (api_endpoints.json), broadcast by _add_pool_runtime_settings; previously absent so
+  // #setting-endpoint/#setting-model stayed blank after every restart (BUG_0252).
   { id: '#setting-endpoint', prop: 'value', key: 'api_base' },
+  { id: '#setting-model', prop: 'value', key: 'model' },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────

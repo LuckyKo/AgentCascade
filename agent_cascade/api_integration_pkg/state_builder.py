@@ -359,12 +359,14 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     # consumes.
     pool_settings['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
-    # General-tab API Endpoint (last-resort LLM fallback) — persisted in
-    # config/api_endpoints.json::default_llm_cfg. Broadcast it so syncPoolSettings()
-    # can rehydrate #setting-endpoint after a restart. Derived from the same single
-    # source (api_router.default_llm_cfg) used by config_persist/core template loading.
+    # General-tab API Endpoint (last-resort LLM fallback) and Model — persisted in
+    # config/api_endpoints.json::default_llm_cfg. Broadcast both so syncPoolSettings()
+    # can rehydrate #setting-endpoint and #setting-model after a restart. Derived from
+    # the same single source (api_router.default_llm_cfg) used by config_persist/core
+    # template loading.
     _default_cfg = getattr(getattr(pool, 'api_router', None), 'default_llm_cfg', None) or {}
     pool_settings['api_base'] = _default_cfg.get('api_base', '') or ''
+    pool_settings['model'] = _default_cfg.get('model', '') or ''
 
 
 def build_pool_settings_snapshot(pool: Any) -> Dict[str, Any]:

@@ -89,6 +89,30 @@ def test_pool_settings_broadcasts_api_base_from_default_llm_cfg(tmp_path):
     assert ps2['api_base'] == ''                          # defined-but-empty, never undefined-stomp
 
 
+def test_pool_settings_broadcasts_model_from_default_llm_cfg(tmp_path):
+    """BUG_0252 family: the boot/stream snapshot must carry default_llm_cfg.model so the UI
+    can rehydrate #setting-model after a restart."""
+    from agent_cascade.api_integration_pkg.state_builder import _add_pool_runtime_settings
+
+    class _Router:
+        default_llm_cfg = {'api_base': 'http://general-endpoint', 'model': 'general-model'}
+    class _Pool:
+        operation_manager = None
+        api_router = _Router()
+        _enable_async_shell_console_window = False
+
+    ps = {}
+    _add_pool_runtime_settings(_Pool(), ps)
+    assert ps['model'] == 'general-model'                  # fails before Fix A (key absent)
+
+    # An empty/missing default must not emit a stale value:
+    class _PoolNoRouter:
+        operation_manager = None; api_router = None; _enable_async_shell_console_window = False
+    ps2 = {}
+    _add_pool_runtime_settings(_PoolNoRouter(), ps2)
+    assert ps2['model'] == ''                              # defined-but-empty, never undefined-stomp
+
+
 def test_update_default_llm_cfg_persists(tmp_path):
     """update_default_llm_cfg() must call _save() so changes survive a restart."""
     from agent_cascade.api_router_pkg.router import APIRouter
