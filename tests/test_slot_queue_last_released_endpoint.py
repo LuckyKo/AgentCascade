@@ -33,6 +33,7 @@ from agent_cascade.lifecycle_manager import AgentLifecycleManager
 from agent_cascade.slot_queue import release_slot_permit
 # Reuse the shared isolated router fixture + helper from conftest (no real endpoints, FAST policy).
 from tests.conftest import _add_endpoint  # noqa: E402
+from agent_cascade.api_router_pkg.router import USE_LAST_ENDPOINT  # reserved 'Use Last Endpoint' sentinel id
 
 # ── Shared base for every enabled endpoint — mirrors config/api_endpoints.json where
 # multiple endpoints share one api_base and differ only by `model`. ──────────────
@@ -186,8 +187,10 @@ class TestChildReleaseLastReleasedEndpoint:
             assert 'bug44-caller' not in router._instance_committed_endpoint, \
                 'BUG_0052 leak: committed marker was not popped for a call_agent child'
 
-        # End-to-end consequence: an unassigned Security check (Tier 1.5) now resolves onto the
+        # End-to-end consequence: a Security check (Tier 1.5) now resolves onto the
         # caller's model A — NOT the stale B that the frozen marker would have handed it.
+        # Since TODO 90, Tier 1.5 is an explicit per-agent opt-in, so Security opts in here.
+        router.set_agent_priorities('Security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('Security', instance_name='Security_guard')
         assert chain, 'expected a non-empty endpoint chain for an unassigned agent'
         assert chain[0].get('model') == A_MODEL, \

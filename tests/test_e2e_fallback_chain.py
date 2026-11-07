@@ -32,6 +32,7 @@ from agent_cascade.settings import ENDPOINT_BLACKLIST_SECONDS  # noqa: F401  (re
 from agent_cascade.settings import ENDPOINT_COOLDOWN_SECONDS
 # Reuse the shared router fixture + helpers from conftest (isolated config dir, FAST policy).
 from tests.conftest import _add_endpoint  # noqa: E402
+from agent_cascade.api_router_pkg.router import USE_LAST_ENDPOINT  # reserved 'Use Last Endpoint' sentinel id
 
 
 @pytest.fixture(autouse=True)
@@ -484,54 +485,58 @@ class TestPriorityDropWarning:
 
 class TestLastActiveEndpointFallback:
 
-    def test_unassigned_agent_with_last_active_endpoint_uses_it_first(self, router):
-        """Unassigned agent + global last-active endpoint → chain = [last-active cfg, Tier-4].
+    def test_unassigned_agent_without_sentinel_falls_to_global_default(self, router):
+        """R1 (TODO 90): unassigned agent + last-active marker, NO sentinel → chain = [Tier-4 only].
 
-        The last-active endpoint is NOT assigned to any agent (so Tier-1 is empty), but some
-        agent just succeeded on it. get_endpoint_chain must prepend that endpoint's cfg ahead
-        of the Tier-4 global default — instead of returning Tier-4 only. No instance_name is
-        required to pick up the global marker (a child spawned via call_agent inherits it).
+        Previously an unassigned agent auto-inherited the global last-active endpoint (T1.5 led).
+        Scope B makes T1.5 an explicit per-agent opt-in: with NO assignment and NO 'Use Last
+        Endpoint' sentinel, a live last-active marker must NOT be offered — the agent resolves
+        straight to the global default (default_llm_cfg / Tier 4). Opting in is covered by
+        test_unassigned_agent_with_sentinel_uses_last_active_first (R2).
         """
         # Endpoint exists and is enabled, but is NOT assigned to 'security' (unassigned agent).
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
 
-        # Simulate a prior success on this endpoint by ANY agent.
+        # Simulate a prior success on this endpoint by ANY agent — but do NOT opt 'security' in.
         # Now stored as endpoint ID (UUID) for O(1) Tier 1.5 lookup.
         with router._lock:
             router._last_active_endpoint = 'ep_c'
 
-        # Works whether or not an instance_name is passed.
         chain = router.get_endpoint_chain('security', instance_name='worker1')
-        assert [c['api_base'] for c in chain] == ['http://c-api', 'http://default-api']
-        assert chain[0]['model'] == 'model-c'
+        # The bare marker is no longer auto-inherited → global default only, not c-api.
+        assert [c['api_base'] for c in chain] == ['http://default-api']
         assert chain[-1]['api_base'] == 'http://default-api'
 
     def test_last_active_key_stale_after_from_dict_degrades_to_tier4(self, router):
-        """Last-active ID stale (endpoint REMOVED by a UI reload) → chain = [Tier-4 only].
+        """Opted-in agent + last-active ID stale (endpoint REMOVED by UI reload) → chain = [Tier-4 only].
 
-        _last_active_endpoint SURVIVES from_dict (it is an in-memory live-connection marker,
-        like _instance_committed_endpoint), so a stale ID can outlive the config change. The
-        last-active tier must NOT offer an endpoint that no longer exists — it degrades
+        'security' opts into last-active via the USE_LAST_ENDPOINT sentinel so Tier 1.5 is genuinely
+        in play before and after the reload. _last_active_endpoint SURVIVES from_dict (in-memory
+        live-connection marker), so a stale ID can outlive the config change. The last-active tier
+        must NOT offer an endpoint that no longer exists — with the sentinel still set it degrades
         gracefully to Tier-4 with a warning log.
 
-        NOTE: With ID-based lookup, renaming a model does NOT make the marker stale (the ID
-        still resolves). Staleness occurs when the endpoint is REMOVED from config entirely.
+        NOTE: The sentinel is carried through the from_dict payload (bulk path preserves it), so the
+        degrade here is caused by STALENESS (endpoint removed), not by losing the opt-in.
         """
         # Endpoint 'c' originally served model-c; some agent just succeeded on it.
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
         with router._lock:
             router._last_active_endpoint = 'ep_c'
+        # Opt 'security' into last-active so T1.5 is active before and after the reload.
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
 
-        # Sanity: before the reload, the last-active tier resolves to the endpoint.
+        # Sanity: before the reload, the (opted-in) last-active tier resolves to the endpoint.
         chain_before = router.get_endpoint_chain('security', instance_name='worker1')
         assert [c['api_base'] for c in chain_before] == ['http://c-api', 'http://default-api']
 
         # User REMOVES the endpoint via a UI config change (from_dict). The last-active ID now
         # points at an endpoint that no longer exists. from_dict does NOT clear
         # _last_active_endpoint, so the stale marker is still present but must not be offered.
+        # Carry the sentinel through so we prove STALENESS (not loss of opt-in) drives the degrade.
         router.from_dict({
             'endpoints': [],  # endpoint 'c' removed entirely
-            'agent_priorities': {},  # 'security' stays unassigned
+            'agent_priorities': {'security': [USE_LAST_ENDPOINT]},  # opt-in preserved through bulk load
         })
 
         # The stale last-active ID must NOT be offered → chain is Tier-4 only.
@@ -544,13 +549,15 @@ class TestLastActiveEndpointFallback:
         Unlike the old per-instance committed tier, Tier 1.5 now reads the GLOBAL
         _last_active_endpoint and needs no instance_name to look it up. Callers that don't pass
         an instance name (get_llm_config, compressor lookups) must still pick up the endpoint
-        most recently used by anyone.
+        most recently used by anyone — as long as the agent has opted in (see the sentinel below,
+        required since TODO 90 made last-active an explicit per-agent opt-in).
         """
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
         # A last-active key is set; we call WITHOUT instance_name.
         with router._lock:
             router._last_active_endpoint = 'ep_c'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security')  # instance_name defaults to None
 
         # Last-active endpoint IS injected even without an instance name.
@@ -605,6 +612,7 @@ class TestCapacityAwareLastActiveFallback:
         # Occupy pool 'a' (capacity 1) → saturated. Pool 'b' stays empty.
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected last-active a kept at head (scheduler queues), got {bases}"
@@ -621,6 +629,7 @@ class TestCapacityAwareLastActiveFallback:
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
         _occupy_pool(router, 'http://b-api', 1, n_holders=1)
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected last-active a kept when all full, got {bases}"
@@ -636,6 +645,7 @@ class TestCapacityAwareLastActiveFallback:
         # Occupy only pool 'b' → last-active 'a' still has room.
         _occupy_pool(router, 'http://b-api', 1, n_holders=1)
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected last-active a at head (not full), got {bases}"
@@ -664,6 +674,7 @@ class TestCapacityAwareLastActiveFallback:
         assert router.scheduler.count_active(base, 0) > 0, \
             'count_active(base,0) must be non-zero (shared pool occupied)'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         # Must KEEP the last-active endpoint (scheduler queues on the shared pool).
@@ -680,6 +691,7 @@ class TestCapacityAwareLastActiveFallback:
         # Even if we occupy the other pool, unlimited last-active is never full.
         _occupy_pool(router, 'http://b-api', 1, n_holders=1)
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected unlimited last-active kept at head, got {bases}"
@@ -697,6 +709,7 @@ class TestCapacityAwareLastActiveFallback:
         # Sanity: the pool truly is absent → count_active reads 0.
         assert router.scheduler.count_active('http://a-api', 1) == 0
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://a-api', f"expected absent-pool last-active kept at head, got {bases}"
@@ -728,6 +741,7 @@ class TestCapacityAwareLastActiveFallback:
         with router._lock:
             router._last_active_endpoint = 'ep_a'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='worker1')
         bases = [c['api_base'] for c in chain]
         assert bases[0] == 'http://d-api'
@@ -763,6 +777,7 @@ class TestCapacityAwareLastActiveFallback:
             agent_name='security', instance_name=own_name, acquisition_id=1,
         )
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name=own_name)
         head = chain[0]
         assert head['api_base'] == base and head['model'] == 'model-a', \
@@ -789,6 +804,7 @@ class TestCapacityAwareLastActiveFallback:
             agent_name='other', instance_name='other-agent', acquisition_id=1,
         )
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='Security_guard')
         head = chain[0]
         # Keep last-active A (scheduler queues on the saturated pool), do NOT first-fit to B.
@@ -813,6 +829,7 @@ class TestCapacityAwareLastActiveFallback:
             agent_name='security', instance_name=own_name, acquisition_id=1,
         )
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name=own_name)
         head = chain[0]
         assert head['api_base'] == base and head['model'] == 'model-a', \
@@ -834,6 +851,7 @@ class TestCapacityAwareLastActiveFallback:
         assert pool.key == '_shared_sequential_slot_'
         assert len(pool._running) == 0
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='Security_guard')
         head = chain[0]
         assert head['api_base'] == base and head['model'] == 'model-a', \
@@ -859,6 +877,7 @@ class TestCapacityAwareLastActiveFallback:
             agent_name='security', instance_name=own_name, acquisition_id=1,
         )
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         slot_info = router.get_effective_slot_info('security', instance_name=own_name)
         chain_head = router.get_endpoint_chain('security', instance_name=own_name)[0]
         assert slot_info['api_base'] == chain_head['api_base'], \
@@ -943,6 +962,7 @@ class TestLastReleasedEndpointPreference:
         assert router._last_released_endpoint == 'ep_a', \
             f"release should have recorded A's ID, got {router._last_released_endpoint}"
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         # Chain head must be A's model, NOT the racy global B.
         assert chain[0]['model'] == 'model-a', \
@@ -968,6 +988,7 @@ class TestLastReleasedEndpointPreference:
         with router._lock:
             router._last_active_endpoint = 'ep_b'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         # Even though both share one pool, the ENDPOINT identity (model-a) must win.
         assert chain[0]['model'] == 'model-a', \
@@ -994,6 +1015,7 @@ class TestLastReleasedEndpointPreference:
         # Saturate A's pool (capacity 1) → last-released endpoint is full.
         _occupy_pool(router, 'http://a-api', 1, n_holders=1)
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         bases = [c['api_base'] for c in chain]
         # Keep the saturated last-released A (scheduler queues), do NOT first-fit to B.
@@ -1011,6 +1033,7 @@ class TestLastReleasedEndpointPreference:
         with router._lock:
             router._last_active_endpoint = 'ep_a'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security', instance_name='sec1')
         bases = [c['api_base'] for c in chain]
         # Global-marker path: head is last-active A.
@@ -1334,18 +1357,20 @@ class TestAssignedAgentLastActiveFallback:
         assert bases == ['http://a-api', 'http://b-api', 'http://default-api'], \
             f"expected no spurious T1.5 when markers absent, got {bases}"
 
-    def test_unassigned_agent_control_still_yields_last_active_first(self, router):
-        """Control (passes pre- AND post-fix): UNASSIGNED agent chain is still [T1.5, default].
+    def test_unassigned_agent_with_sentinel_yields_last_active_first(self, router):
+        """Opted-in (sentinel) agent with no real Tier-1 endpoints → chain = [T1.5, default].
 
-        Confirms the fix did NOT regress the unassigned path — the block still LEADS the chain
-        when Tier-1 is empty.
+        TODO 90 Scope B: the last-active block now LEADS the chain only when the agent has
+        explicitly opted in via USE_LAST_ENDPOINT. With the sentinel set and Tier-1 empty, this
+        reproduces the old unassigned default ([last-active, default]) — now made explicit.
         """
         _add_endpoint(router, 'c', 'http://c-api', model='model-c')
-        # 'security' has no priorities → Tier-1 empty.
+        # 'security' has no real endpoints (sentinel only) → Tier-1 empty, but opted in.
         with router._lock:
             router._last_active_endpoint = 'ep_c'
 
+        router.set_agent_priorities('security', [USE_LAST_ENDPOINT])
         chain = router.get_endpoint_chain('security')
         bases = [cfg['api_base'] for cfg in chain]
         assert bases == ['http://c-api', 'http://default-api'], \
-            f"unassigned path must be unchanged, got {bases}"
+            f"opted-in unassigned path must still yield last-active first, got {bases}"

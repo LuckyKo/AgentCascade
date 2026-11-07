@@ -7086,6 +7086,10 @@ function handleApiEndpointRangeInput(e) {
 }
 
 function renderAgentApiAssignments() {
+  // Reserved pseudo endpoint-ID, must match APIRouter.USE_LAST_ENDPOINT (api_router_pkg/router.py).
+  // Selecting it opts an agent into the global last-active (Tier 1.5) fallback; with NO assignment
+  // the agent now falls to the General Settings API default. Keep the literal in sync.
+  const USE_LAST_ENDPOINT = '__use_last_endpoint__';
   const container = document.getElementById('agent-api-assignments');
   if (!container) return;
 
@@ -7151,23 +7155,38 @@ function renderAgentApiAssignments() {
     const availableEndpoints = endpoints.filter(ep => !assignedIds.includes(ep.id));
     const friendlyName = typeToName[type] || (type.charAt(0).toUpperCase() + type.slice(1));
 
-    let addSelectHtml = '';
-    if (availableEndpoints.length > 0) {
-      addSelectHtml = `
-        <select class="agent-api-add-select">
-          <option value="">+ Add Endpoint</option>
-          ${availableEndpoints.map(ep => `<option value="${escapeHtml(ep.id)}">${escapeHtml(ep.name)}</option>`).join('')}
-        </select>
-      `;
-    }
+    // The sentinel option is always available (independent of availableEndpoints) so a user can
+    // opt into last-active even when every real endpoint is already assigned. It is hidden once
+    // assigned, mirroring real-endpoint dedup to avoid duplicates.
+    // TODO 90 Scope B: the sentinel rides agent_priorities[type] and is honored ONLY by
+    // get_endpoint_chain (Tier 1.5). The Classifier (skill_selector) resolves its endpoints via
+    // skills/selector.py:resolve_endpoints, which drops non-endpoint ids and never calls
+    // get_endpoint_chain — so the sentinel is a no-op there, and it is deliberately NOT offered.
+    const showUseLast = type !== 'skill_selector';
+    const useLastOption = (showUseLast && !assignedIds.includes(USE_LAST_ENDPOINT))
+      ? `<option value="${USE_LAST_ENDPOINT}">Use Last Endpoint</option>`
+      : '';
+    const addSelectHtml = `
+      <select class="agent-api-add-select">
+        <option value="">+ Add Endpoint</option>
+        ${availableEndpoints.map(ep => `<option value="${escapeHtml(ep.id)}">${escapeHtml(ep.name)}</option>`).join('')}
+        ${useLastOption}
+      </select>
+    `;
 
     let listHtml = assignedIds.map((eid, idx) => {
+      const isLastActive = eid === USE_LAST_ENDPOINT;
       const ep = endpoints.find(e => e.id === eid);
-      if (!ep) return '';
+      // Real endpoint removed from the list → hide it; the sentinel is never a real endpoint so it
+      // must render even though endpoints.find misses it — EXCEPT for skill_selector, where the
+      // sentinel is never offered (see showUseLast), so hide any stale persisted one too.
+      if (isLastActive && !showUseLast) return '';
+      if (!isLastActive && !ep) return '';
+      const displayName = isLastActive ? 'Use Last Endpoint' : ep.name;
       return `
         <div class="agent-api-priority-item">
           <span class="priority-num">${idx + 1}.</span>
-          <span class="priority-name" title="${escapeHtml(ep.name)}">${escapeHtml(ep.name)}</span>
+          <span class="priority-name" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span>
           <button class="agent-api-move-up" data-id="${escapeHtml(eid)}" ${idx === 0 ? 'disabled style="opacity:0.2"' : ''}>▲</button>
           <button class="agent-api-move-down" data-id="${escapeHtml(eid)}" ${idx === assignedIds.length - 1 ? 'disabled style="opacity:0.2"' : ''}>▼</button>
           <button class="agent-api-remove" data-id="${escapeHtml(eid)}">✕</button>

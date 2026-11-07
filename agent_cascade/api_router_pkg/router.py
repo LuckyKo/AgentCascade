@@ -97,6 +97,14 @@ _probe_err_class_local = threading.local()
 # also scan the (short) formatted messages for the transient codes.
 _ERRNO_MSG_RE = re.compile(r'\[Errno (\d+)\]')
 
+# Reserved pseudo endpoint-ID that rides agent_priorities[type] to opt an agent into the
+# global last-active (Tier 1.5) fallback ("Use Last Endpoint"). It is NOT a real endpoint,
+# so it never appears in self.endpoints; set_agent_priorities whitelists it explicitly so
+# the live REST/WS save path does not strip it (from_dict already preserves it). The web UI
+# selector emits this same literal. Single source of truth — see web_ui/app.js and
+# tests/test_use_last_endpoint.py which mirror the literal.
+USE_LAST_ENDPOINT = '__use_last_endpoint__'
+
 
 def _iter_probe_error_chain(exc: BaseException):
     """Yield ``exc`` and every nested exception reachable via args / .reason / __cause__ / __context__.
@@ -355,6 +363,11 @@ class APIRouter:
                 if not self.agent_priorities[agent_type]:
                     del self.agent_priorities[agent_type]
                     self._agent_types_with_priorities.discard(agent_type)
+                elif all(eid == USE_LAST_ENDPOINT for eid in self.agent_priorities[agent_type]):
+                    # TODO 90: deleting the last REAL endpoint left a sentinel-only list. Same
+                    # not-Tier-3-eligible rule as set_agent_priorities/_load — applied at this
+                    # mutation site so the invariant holds without waiting for a save/reload.
+                    self._agent_types_with_priorities.discard(agent_type)
             self._dirty_endpoints = True
             self._save()
             return True
@@ -437,13 +450,25 @@ class APIRouter:
                 del self.agent_priorities[agent_type]
                 self._agent_types_with_priorities.discard(agent_type)
 
-            # Validate that all IDs exist
-            valid_ids = [eid for eid in endpoint_ids if eid in self.endpoints]
+            # Validate that all IDs exist — EXCEPT the reserved last-active sentinel, which
+            # is intentionally NOT a real endpoint (see USE_LAST_ENDPOINT). Without this
+            # whitelist the live REST/WS save path strips it while from_dict preserves it, so
+            # "Use Last Endpoint" would survive only via bulk save (save-path asymmetry).
+            valid_ids = [eid for eid in endpoint_ids
+                         if eid in self.endpoints or eid == USE_LAST_ENDPOINT]
             filtered_count = len(endpoint_ids) - len(valid_ids)
 
             if valid_ids:
                 self.agent_priorities[canonical] = valid_ids
-                self._agent_types_with_priorities.add(canonical)  # Track that this agent type was configured
+                # Only track as "configured" (Tier-3 / last-successful eligible) when the list holds at
+                # least one REAL endpoint. A sentinel-only list ("Use Last Endpoint") has no real
+                # endpoint, so adding it here would flip the Tier-3 gate in get_endpoint_chain (~:1233)
+                # and make the agent last-successful eligible — diverging from the confirmed
+                # no-assigned-slot behavior [last-active, default].
+                if any(eid != USE_LAST_ENDPOINT for eid in valid_ids):
+                    self._agent_types_with_priorities.add(canonical)  # Track that this agent type was configured
+                else:
+                    self._agent_types_with_priorities.discard(canonical)  # sentinel-only: not Tier-3 eligible
                 logger.info(f"[APIRouter.set_agent_priorities] {canonical} → {valid_ids} "
                             f"({'filtered ' + str(filtered_count) + ' invalid IDs, ' if filtered_count else ''}"
                             f"canonical key: {canonical})")
@@ -1102,9 +1127,11 @@ class APIRouter:
         skip past endpoints that already failed instead of starting from index 0.
 
         NOTE: There is no caller-inheritance tier. Every agent resolves through its own
-        Tier 1 → Tier 1.5 (last-active) → Tier 3 → Tier 4 chain (single FIFO slot system).
-        An unconfigured agent falls to the global last-active endpoint (if one was recorded),
-        then the last-successful / global default, exactly like any other agent.
+        Tier 1 → Tier 1.5 (last-active) → Tier 4 chain (single FIFO slot system). Per TODO 90
+        (Scope B), an UNCONFIGURED agent uses the global last-active tier ONLY when it has opted in
+        via the USE_LAST_ENDPOINT sentinel; otherwise it falls straight to the global default_llm_cfg
+        (Tier 4). Tier 3 (last-successful) applies only to agent types that ever had a REAL endpoint
+        configured — a sentinel-only "Use Last Endpoint" list does not qualify.
 
         Args:
             agent_type: The type of agent requesting endpoints
@@ -1147,9 +1174,11 @@ class APIRouter:
 
             # Tier 1.5 (L147): Last-active-endpoint fallback — the GLOBAL endpoint most
             # recently used successfully by ANY agent (_last_released_endpoint / _last_active_endpoint).
-            # Fires for ALL agents:
-            #   * UNASSIGNED agents (Tier-1 empty): it LEADS the chain — the agent inherits whatever
-            #     the parent (or anyone) just used. No instance_name is required to look it up.
+            # Fires for:
+            #   * UNASSIGNED agents that OPTED IN via the USE_LAST_ENDPOINT sentinel (TODO 90 Scope B):
+            #     it LEADS the chain — the agent inherits whatever the parent (or anyone) just used. No
+            #     instance_name is required to look it up. An unassigned agent WITHOUT the sentinel
+            #     skips this tier entirely and falls straight to the Tier-4 global default.
             #   * ASSIGNED agents: it is inserted AFTER the agent's own Tier-1 configs and BEFORE the
             #     Tier-4 default, so once the Tier-1 list is exhausted the endpoint that "just worked"
             #     is retried before dropping to the global default.
@@ -1169,8 +1198,17 @@ class APIRouter:
             # endpoint IS the Tier-4 default; _already skips the case where it is one of the agent's
             # own Tier-1 entries (endpoint_configs currently holds only those). Both compare normalized
             # (api_base, model) so the chain never carries a duplicate.
+            #
+            # TODO 90 (Scope B): Tier 1.5 is now an EXPLICIT opt-in for UNASSIGNED agents. An
+            # unassigned agent with NO sentinel falls straight to the global default (Tier 4),
+            # no longer auto-inheriting the last-active marker. Selecting USE_LAST_ENDPOINT in the
+            # per-agent selector restores the old [last-active, default] behavior. ASSIGNED agents
+            # (endpoint_configs non-empty) keep their existing auto-T1.5 insertion. endpoint_configs
+            # above holds only ENABLED Tier-1 endpoints, so an agent whose sole assignment is a
+            # DISABLED real endpoint (and has no sentinel) is treated as unassigned → [default].
+            wants_last_active = USE_LAST_ENDPOINT in self.agent_priorities.get(normalized_agent_type, [])
             _la_id = self._last_released_endpoint or self._last_active_endpoint
-            if _la_id is not None:
+            if _la_id is not None and (wants_last_active or endpoint_configs):
                 _la_ep = self.endpoints.get(_la_id)  # O(1) dict lookup by ID
                 if _la_ep is not None and _la_ep.enabled:
                     # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
@@ -3196,6 +3234,13 @@ class APIRouter:
             # Sync tracking set with actual priorities — remove any stale entries from old configs.
             # Prevents incorrect Tier 3 (last-successful) fallback if config has tracked types without actual priorities.
             self._agent_types_with_priorities &= set(self.agent_priorities.keys())
+            # TODO 90: a sentinel-only entry opts into Tier 1.5 only and has NO real endpoint, so it must
+            # not be Tier-3 (last-successful) eligible — same rule set_agent_priorities applies. Prune such
+            # types so a reload never resurrects the [last-active, last-successful, default] divergence.
+            self._agent_types_with_priorities = {
+                at for at in self._agent_types_with_priorities
+                if any(eid != USE_LAST_ENDPOINT for eid in self.agent_priorities.get(at, []))
+            }
 
             # Restore the persisted General Settings LLM config so a restart recovers the
             # exact model/api_base/api_key/sampling/log_api_post the UI last saved.
