@@ -58,9 +58,10 @@ def test_edit_file_modes():
             new_content='second modified',  # no trailing newline
             match_mode='heuristic')
         assert 'OK:' in res
-        # Should preserve CRLF ending of the matched block on Windows / LF on Unix
-        expected_bytes = b'first\r\nsecond modified\r\nthird\r\n' if os.name == 'nt' else b'first\nsecond modified\nthird\n'
-        assert file_path.read_bytes() == expected_bytes
+        # The file's own CRLF endings must be preserved on every platform: writes are
+        # rendered in the file's dominant style instead of being translated to the
+        # OS native style (which used to rewrite the whole file to CRLF on Windows).
+        assert file_path.read_bytes() == b'first\r\nsecond modified\r\nthird\r\n'
 
         # Test Case 4: Non-unique heuristic matches should fail
         file_path.write_text('dup\ndup\nother\n', encoding='utf-8')
@@ -836,12 +837,13 @@ def test_delete_and_insert_mode():
         assert content == 'appended\n', f"Test 18 assertion: got [{content}]"
 
 
-def test_delete_and_insert_indent_preservation():
-    """BUG_0063: delete_and_insert must preserve new_content indentation.
+def test_delete_and_insert_verbatim_insertion():
+    """delete_and_insert inserts new_content VERBATIM — the caller owns indentation.
 
-    - Unindented replacement inherits the replaced line's indent (not col 0).
-    - Multi-line blocks are never flattened: relatively-indented lines keep
-      their own leading whitespace verbatim.
+    - No indentation is inherited from the replaced line: an unindented new_content
+      line lands at column 0.
+    - Multi-line blocks are inserted exactly as written — each line keeps its own
+      leading whitespace, never flattened or re-indented.
     - Caller-supplied indentation is honored verbatim (never overridden).
     - Append at EOF does not crash and stays at column 0.
     - Tabs are preserved literally (no tab→space conversion).
@@ -866,8 +868,8 @@ def test_delete_and_insert_indent_preservation():
             content = file_path.read_text(encoding='utf-8')
             assert content == expected, f"got [{content!r}]"
 
-        # 1. Single-line indented replace, unindented new_content → inherits the
-        #    replaced line's 8-space indent (the original BUG_0063 repro).
+        # 1. Single-line indented replace, unindented new_content → inserted verbatim at
+        #    column 0 (no indent inherited from the replaced line's 8 spaces).
         run(
             'import shutil\n'
             'def clean(root):\n'
@@ -882,12 +884,12 @@ def test_delete_and_insert_indent_preservation():
             'def clean(root):\n'
             '    try:\n'
             '        work()\n'
-            '        _rmtree_force(root)\n'  # inherited 8-space indent
+            '_rmtree_force(root)\n'          # verbatim: column 0, no inherited indent
             '    finally:\n'
             '        cleanup()\n')
 
-        # 2. Multi-line block — first line inherits base_indent, later lines keep
-        #    their own relative indentation verbatim (no flattening).
+        # 2. Multi-line block — every line inserted verbatim: first line stays at column 0,
+        #    the second keeps its own 8-space indent (no flattening, no re-indenting).
         run(
             'def outer():\n'
             '    old_line()\n'
@@ -895,7 +897,7 @@ def test_delete_and_insert_indent_preservation():
             'if x:\n        y()\n',
             '2:2',
             'def outer():\n'
-            '    if x:\n'       # first line inherited base_indent (4 spaces)
+            'if x:\n'           # verbatim: column 0, no inherited indent
             '        y()\n'     # second line kept its own 8 spaces verbatim
             '    tail()\n')
 
@@ -920,14 +922,15 @@ def test_delete_and_insert_indent_preservation():
             '0',
             'line1\nline2\nfooter\n')
 
-        # 5. Tab-indented replaced line → tabs preserved literally (no tab→space).
+        # 5. Tab-indented replaced line → new_content inserted verbatim at column 0;
+        #    the untouched sibling line's tabs stay literal (no tab→space conversion).
         run(
             'def g():\n'
             '\t\tx()\n'
             '\t\tz()\n',
             'y()\n',
             '2:2',
-            'def g():\n\t\ty()\n\t\tz()\n')
+            'def g():\ny()\n\t\tz()\n')
 
 
 def test_delete_and_insert_append_newline():
@@ -992,9 +995,8 @@ def test_delete_and_insert_append_newline():
         run('hello', 'world\n', '0', 'hello\nworld\n')
 
         # 5. CRLF file without trailing newline — a separating newline is emitted; the
-        #    appended line stays verbatim. read_text normalizes to '\n' internally and
-        #    write_text re-translates to the OS native ending, so the expected bytes are
-        #    platform-dependent (same convention as the existing CRLF tests).
+        #    appended line stays verbatim. The file's own CRLF style is preserved on write,
+        #    so the expected bytes follow the input style chosen above.
         _nl = b'\r\n' if os.name == 'nt' else b'\n'
         run_bytes(b'l1' + _nl + b'l2' + _nl + b'l3', 'footer\n', '0',
                   b'l1' + _nl + b'l2' + _nl + b'l3' + _nl + b'footer' + _nl)

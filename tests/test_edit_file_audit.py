@@ -19,6 +19,13 @@ Covers:
     actually reproduces the matched block; it used to silently discard a plain
     replacement and to turn an indented delete-only edit into a no-op.
   * The BUG_0095 no-op guard now covers every mode (heuristic identity replacement).
+  * Line-ending preservation: writes use the file's own dominant style (no whole-file
+    CRLF rewrite on Windows, no LF→CRLF translation on Unix) and CRLF `new_content`
+    is normalized instead of producing mixed endings.
+  * A concurrent-modification guard aborts an edit when the file's bytes changed
+    between the initial read and the write (e.g. during approval).
+  * Heuristic tail absorption (BUG_0168) now discloses a dropped suffix, and no longer
+    claims absorption when BUG_0186 trailing-line preservation cancels it.
 
 Run: python -m pytest tests/test_edit_file_audit.py -q
 """
@@ -220,3 +227,119 @@ def test_di_past_eof_colon_range_reports_insert_only():
         assert res.startswith('OK'), res
         assert 'INSERT-ONLY' in res, f"zero-line delete must be labelled insert-only: {res!r}"
         assert 'lines 4-3' not in res, f"nonsensical range leaked into the message: {res!r}"
+
+
+# ── line-ending preservation (write in the file's own style) ────────────────
+
+
+def test_lf_file_is_not_rewritten_to_crlf():
+    """An LF file must stay LF even on Windows. read_text()/write_text() used to
+    translate every ending to the OS native style, silently rewriting the whole
+    file to CRLF after a one-line edit."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'lf.txt')
+        f.write_bytes(b'a\nb\nc\n')
+        om._own(f.resolve(), 'coder')
+        res = om.edit_file(str(f), 'coder', old_content='b\n', new_content='B\n',
+                           match_mode='exact')
+        assert res.startswith('OK'), res
+        assert f.read_bytes() == b'a\nB\nc\n', \
+            f"LF file rewritten: {f.read_bytes()!r}"
+
+
+def test_crlf_file_keeps_crlf_on_every_platform():
+    """A CRLF file must stay CRLF on Unix too (the inverse of the Windows bug)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'crlf.txt')
+        f.write_bytes(b'a\r\nb\r\nc\r\n')
+        om._own(f.resolve(), 'coder')
+        res = om.edit_file(str(f), 'coder', old_content='b\n', new_content='B\n',
+                           match_mode='exact')
+        assert res.startswith('OK'), res
+        assert f.read_bytes() == b'a\r\nB\r\nc\r\n', \
+            f"CRLF file was rewritten: {f.read_bytes()!r}"
+
+
+def test_crlf_new_content_is_normalized_into_lf_file():
+    """new_content carrying CRLF (e.g. pasted from a Windows file) must not create
+    mixed endings or '\\r\\r\\n' when the target file is LF."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'mixed.txt')
+        f.write_bytes(b'a\nb\nc\n')
+        om._own(f.resolve(), 'coder')
+        res = om.edit_file(str(f), 'coder', old_content='b\n', new_content='X\r\nY\r\n',
+                           match_mode='exact')
+        assert res.startswith('OK'), res
+        assert f.read_bytes() == b'a\nX\nY\nc\n', \
+            f"CRLF leaked into an LF file: {f.read_bytes()!r}"
+
+
+# ── concurrent-modification guard ───────────────────────────────────────────
+
+
+def test_concurrent_modification_is_rejected(monkeypatch):
+    """Approval can take arbitrary time. If the file changed on disk after the read,
+    the stale edit must be aborted (no write, no backup, external work preserved)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'conc.txt')
+        f.write_text('alpha\nbeta\n', encoding='utf-8')
+        # Not agent-owned → goes through approval; mutate the file while "waiting".
+        def racy_approval(**_kwargs):
+            f.write_text('external work\n', encoding='utf-8')
+            return True, 'approved'
+
+        monkeypatch.setattr(om, 'request_user_approval', racy_approval)
+        res = om.edit_file(str(f), 'coder', old_content='beta\n',
+                           new_content='beta2\n', match_mode='exact')
+        assert res.startswith('ERROR') and 'concurrent' in res.lower(), res
+        assert f.read_text(encoding='utf-8') == 'external work\n', \
+            f"concurrent writer's content was clobbered: {f.read_text(encoding='utf-8')!r}"
+        assert not list(Path(d).rglob('*.bak')), 'no backup should be created on abort'
+
+
+# ── heuristic absorption visibility (BUG_0260) ──────────────────────────────
+
+
+def test_absorbed_suffix_is_reported():
+    """When absorption drops text after the replaced tail, the success message must
+    say so — the file change itself is intentional BUG_0168 behaviour."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = _owned_file(om, d, 'abs.txt',
+                        'line one\nline two\n'
+                        '   from 129 columns. So "micro 512 sits exactly on the floor" ...\n'
+                        'line five\n')
+        res = om.edit_file(str(f), 'coder',
+                           old_content='line one\nline two\n',
+                           new_content='new one\nnew two\nnew three\n   from 129 columns.\n',
+                           match_mode='heuristic')
+        assert res.startswith('OK'), res
+        assert 'absorbed' in res.lower(), res
+        assert 'So "micro 512 sits exactly on the floor"' in res, \
+            f"dropped suffix not disclosed: {res!r}"
+        assert f.read_text(encoding='utf-8') == (
+            'new one\nnew two\nnew three\n   from 129 columns.\nline five\n')
+
+
+def test_cancelled_absorption_is_not_reported():
+    """BUG_0186 preservation can cancel absorption; the message must not claim a
+    line was absorbed when the following line actually survives untouched."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ('line one\nline two\n   from 129 columns.\n'
+                    '   from 129 columns. So "micro 512" ...\n')
+        f = _owned_file(om, d, 'cancel.txt', original)
+        res = om.edit_file(str(f), 'coder',
+                           old_content='line one\nline two\n   from 129 columns.\n',
+                           new_content='new line one\nnew line two\n   from 129 columns.\n',
+                           match_mode='heuristic')
+        assert res.startswith('OK'), res
+        assert 'absorbed' not in res.lower(), \
+            f"message claims an absorption that was cancelled: {res!r}"
+        assert f.read_text(encoding='utf-8') == (
+            'new line one\nnew line two\n   from 129 columns.\n'
+            '   from 129 columns. So "micro 512" ...\n')

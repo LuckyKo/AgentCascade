@@ -302,6 +302,40 @@ def _new_content_restores_opener(new_content: str, kind: str) -> bool:
     return False
 
 
+# ─── edit_file line-ending preservation / concurrent-write guard ─────────────
+
+def _detect_newline_style(raw_text: str) -> str:
+    """Return the file's dominant line ending: '\\r\\n', '\\r', or '\\n'.
+
+    Edit matching works on a newline-normalized view, but the file must be written
+    back with its own endings: ``write_text`` with default newline handling would
+    translate every line to the OS native style and silently rewrite the whole file
+    on Windows. A tie (mixed file) prefers CRLF; a file with no newline defaults to
+    '\\n' so an added line stays portable.
+    """
+    crlf = raw_text.count('\r\n')
+    lf = raw_text.count('\n') - crlf
+    cr = raw_text.count('\r') - crlf
+    if crlf and crlf >= lf and crlf >= cr:
+        return '\r\n'
+    if cr and cr > lf:
+        return '\r'
+    return '\n'
+
+
+def _render_with_newlines(text: str, newline: str) -> bytes:
+    """Encode *text* for writing, using *newline* for every line ending.
+
+    Any CR/CRLF introduced by ``new_content`` is normalized first, so a caller that
+    pastes CRLF text into an LF file (or vice versa) cannot create mixed endings and
+    cannot turn the render into ``\\r\\r\\n``.
+    """
+    normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+    if newline != '\n':
+        normalized = normalized.replace('\n', newline)
+    return normalized.encode('utf-8')
+
+
 # ─── edit_file post-edit duplicate-line advisory (BUG_0250 family) ───────────
 
 def _adjacent_duplicate_note(old_text: str, new_text: str) -> Optional[str]:
@@ -1647,11 +1681,19 @@ class FileOpsMixin:
             return f"File not found for surgical edit: {path}"
 
         try:
-            file_content = resolved.read_text(encoding='utf-8')
-        except UnicodeDecodeError:
-            return f"ERROR: File has invalid UTF-8 encoding: {path}"
+            original_bytes = resolved.read_bytes()
         except Exception as e:
             return f"ERROR: Failed to read file: {str(e)}"
+        try:
+            raw_text = original_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return f"ERROR: File has invalid UTF-8 encoding: {path}"
+        # Preserve the file's own line endings. read_text()/write_text() translate every
+        # ending to the OS native style, which silently rewrites the whole file on Windows
+        # (one-line edit on an LF file → every line becomes CRLF). Match against a
+        # normalized view and re-render in the file's style on write.
+        newline_style = _detect_newline_style(raw_text)
+        file_content = raw_text.replace('\r\n', '\n').replace('\r', '\n')
         actual_old_content = old_content
         match_ratio = 1.0
         # Initialize variables before match-mode dispatch (defensive scoping)
@@ -1662,6 +1704,7 @@ class FileOpsMixin:
         end_idx = None  # d&i mode range indices
         delta_width = 0  # Indent delta for heuristic feedback
         absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
+        absorbed_suffix = ''  # BUG_0260: text after the replacement tail in an absorbed line
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
 
@@ -1958,6 +2001,10 @@ class FileOpsMixin:
                             if not (_junction_char.isalnum() or _junction_char == '_'):
                                 orig_end_idx = _next_orig_idx
                                 absorbed_tail = True
+                                # BUG_0260: the absorbed line continues past the
+                                # replacement tail; that suffix is dropped, so keep it for
+                                # the success message (visibility, not a behavior change).
+                                absorbed_suffix = _next_body[_plen:]
 
             # Store line range for response construction (1-based)
             exact_start_line = orig_start_idx + 1
@@ -2119,6 +2166,12 @@ class FileOpsMixin:
                             # because they are excluded from actual_old_content.
                             actual_old_content = ''.join(file_lines[orig_start_idx:_trailing_start])
                             exact_end_line = _trailing_start
+                            # BUG_0260: if the absorbed line is inside the surviving tail,
+                            # the absorption was cancelled by this preservation path. Clear
+                            # the flag so the message does not claim a line was absorbed.
+                            if absorbed_tail and _trailing_start <= orig_end_idx:
+                                absorbed_tail = False
+                                absorbed_suffix = ''
 
             # Phase 3 — Validation: increment-based indentation anomaly detection
             from collections import Counter
@@ -2208,19 +2261,11 @@ class FileOpsMixin:
 
             if new_content:
                 inserted = new_content.splitlines(keepends=True)
-                # BUG_0063: preserve new_content indentation. Lines with their own
-                # leading whitespace are kept verbatim; unindented lines inherit the
-                # replaced line's indent (base_indent), so a multi-line block is never
-                # flattened and an append at EOF (start_idx out of range) stays col 0.
-                base_indent = ''
-                if start_idx < total_lines:
-                    base_indent = _leading_whitespace(file_lines[start_idx])
-                if base_indent:
-                    for i in range(len(inserted)):
-                        # Blank lines stay empty: prepending base_indent would turn them
-                        # into whitespace-only lines (trailing-space noise in the file).
-                        if inserted[i].strip() and not _leading_whitespace(inserted[i]):
-                            inserted[i] = base_indent + inserted[i]
+                # Insert new_content VERBATIM — the caller owns the block's indentation.
+                # No indent is inferred from the replaced line: a mixed rule (unindented
+                # lines inherit, indented lines stay absolute) silently corrupts naturally
+                # typed nested blocks, and relative vs absolute indentation cannot be
+                # distinguished unambiguously from the text alone.
                 # Preserve line ending style from surrounding context for ALL inserted lines
                 # (runs AFTER the indent step; only rstrips '\r\n' and appends, so it
                 # never disturbs the leading whitespace set above)
@@ -2236,10 +2281,9 @@ class FileOpsMixin:
                     # BUG_0220: append-at-EOF (after is empty) — the `if after:` branch above
                     # never runs, so a pure append used to glue new_content onto the file's
                     # last line when that line has no trailing newline. file_content is read
-                    # with universal newlines (read_text), so internally every line is
-                    # '\n'-terminated; emit a separating '\n' only when the tail is
-                    # unterminated (a terminated tail must not gain a blank line).
-                    # write_text re-translates '\n' to the OS native ending on write. The
+                    # with newlines normalized to '\n'; emit a separating '\n' only when the
+                    # tail is unterminated (a terminated tail must not gain a blank line).
+                    # The write re-renders in the file's own ending style, and the
                     # inserted lines stay verbatim (no forced trailing NL), matching the
                     # pre-existing append behavior.
                     if _detect_line_ending(before[-1]) == '':
@@ -2307,6 +2351,20 @@ class FileOpsMixin:
 
         try:
             resolved = self._resolve_path(path, mode='rw')
+
+            # Concurrent-modification guard: approval can take an arbitrary amount of time,
+            # and another process/agent may have written the file since our read. Writing the
+            # stale result would silently clobber that work. Compare raw bytes (cheap relative
+            # to the edit) and abort without a backup or write if anything changed.
+            try:
+                current_bytes = resolved.read_bytes()
+            except Exception as e:
+                return f"ERROR: Failed to re-read file before writing: {str(e)}"
+            if current_bytes != original_bytes:
+                return (f"ERROR: {path} changed on disk between read and write (concurrent "
+                        f"modification). The edit was NOT applied — re-read the file and retry "
+                        f"with the current content.")
+
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -2335,7 +2393,7 @@ class FileOpsMixin:
                     last_lines = all_diff_lines[-8:]
                     diff_content = '\n'.join(first_lines + ['...'] + last_lines)
 
-            resolved.write_text(new_file_content, encoding='utf-8')
+            resolved.write_bytes(_render_with_newlines(new_file_content, newline_style))
             self._own(resolved, agent_name)
 
             # Line delta computation using splitlines()
@@ -2372,6 +2430,14 @@ class FileOpsMixin:
                 res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
                 if absorbed_tail:
                     res_msg += ' [absorbed overlapping tail line to prevent duplicate]'
+                    if absorbed_suffix:
+                        _suffix_snip = absorbed_suffix.strip()
+                        if len(_suffix_snip) > 60:
+                            _suffix_snip = _suffix_snip[:60] + '…'
+                        res_msg += (f'\n  note: the absorbed line had additional text after '
+                                    f'the replaced tail ("{_suffix_snip}") that this edit '
+                                    f'dropped — re-read the file if you did not intend to '
+                                    f'replace the whole line.')
 
                 # Indent adjustment info (only if non-zero delta detected in heuristic mode)
                 if match_mode == 'heuristic':

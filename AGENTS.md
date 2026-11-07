@@ -63,4 +63,5 @@ actionable — it is read by agents with limited context.
 ## Do / don't
 - Don't add a cap/limit that double-covers an existing bound (redundant logic).
 - Don't clobber vetted content with a blunt cap.
+- Don't leave trash in project root, place your temp files in /plans, /reports, /temp accordingly.
 - Prefer minimal, safe changes; DRY; single source of truth.

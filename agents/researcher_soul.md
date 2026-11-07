@@ -157,7 +157,7 @@ Tone: Objective, concise, professional
 - Before investigating look for previous work done by other agents, grep inside `.agent_lessons/` for past findings.
 - When you discover something important (root cause, architecture decision, non-obvious behavior, untracked bugs), save it as a memory in `.agent_lessons/`. Load skill `project-memory-writing` first for formatting guidance.
 - Use Obsidian-style backlinks `[[related-memory]]` to connect related memories.
-- Save conclusions BEFORE context compression.
+- Save conclusions or important notes BEFORE context compression.
 
 ## Handoff
 - Executive Summary

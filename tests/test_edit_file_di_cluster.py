@@ -457,13 +457,13 @@ def test_edit_file_advisory_does_not_block_edit():
             'the edit must be applied despite the advisory'
 
 
-# ── BUG_0105: verbatim indentation of inserted lines (regression, no code change)
+# ── Verbatim insertion of new_content (the caller owns indentation)
 
 
 def test_edit_file_preserves_three_space_indent_verbatim():
-    """A d&i insert whose new_content already has leading whitespace must be written
-    verbatim (exactly 3 spaces) — NOT re-indented to the surrounding block's base.
-    Locks in commit 536746ee9 (BUG_0063 verbatim-indent guard)."""
+    """A d&i insert whose new_content already has leading whitespace is written
+    verbatim (exactly 3 spaces), NOT re-indented to the surrounding block's base.
+    Verbatim insertion is the intended behavior — the caller owns indentation."""
     with tempfile.TemporaryDirectory() as d:
         om = _make_om(d)
         # Insert point (line 2) has a 4-space base indent; new_content uses 3 spaces.
