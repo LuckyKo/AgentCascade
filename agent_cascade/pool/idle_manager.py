@@ -9,6 +9,10 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from agent_cascade.log import logger
+from agent_cascade.settings import (
+    SECURITY_REUSE_APPROVAL_NAME,
+    SECURITY_REUSE_SKILL_ADVISOR_NAME,
+)
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
 from ..agent_instance import AgentState
@@ -207,6 +211,11 @@ class IdleManager:
 
         # Must NOT be halted (halted agents are intentionally paused, e.g. during compression)
         if self.pool.is_instance_halted(instance_name):
+            return False
+
+        # Warm-reuse instances are reserved for prefix-cache reuse; never reclaim them via
+        # idle-dismissal or every gap > SYSTEM_AGENT_IDLE_TIMEOUT forces a cold re-seed (BUG_0265).
+        if instance_name in (SECURITY_REUSE_APPROVAL_NAME, SECURITY_REUSE_SKILL_ADVISOR_NAME):
             return False
 
         # Must have exceeded the idle timeout threshold
