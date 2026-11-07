@@ -793,6 +793,14 @@
                           <span title="Seconds before the same memory may be re-hinted (clamped 0–86400).">Hint Cooldown (s)</span>
                           <input autocomplete="off" type="number" id="setting-memory-hint-cooldown" min="0" max="86400" step="30" value="600" />
                         </label>
+                        <label class="setting-field toggle-field">
+                          <span title="When enabled (default), a skill is auto-loaded into an agent's context once it has been hinted N times in a session. Disable to turn off hint-triggered auto-loading (opt-out).">Auto-Load Repeatedly-Hinted Skills</span>
+                          <input autocomplete="off" type="checkbox" id="setting-skill-autoload-enabled" checked />
+                        </label>
+                        <label class="setting-field">
+                          <span title="How many times a skill must be hinted in a session before it is auto-loaded into context (when Auto-Load is enabled). Clamped 1–10; lower loads sooner, higher is more conservative.">Auto-Load After N Hints</span>
+                          <input autocomplete="off" type="number" id="setting-skill-autoload-threshold" min="1" max="10" step="1" value="3" />
+                        </label>
                       </div>
                     </details>
 

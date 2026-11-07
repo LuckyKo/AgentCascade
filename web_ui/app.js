@@ -223,6 +223,9 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k' },
   { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap' },
   { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap' },
+  // Skill auto-load (BUG_0263) — underscore keys via getGenerateCfg().
+  { id: '#setting-skill-autoload-enabled', prop: 'checked', key: 'memory_hint_skill_autoload_enabled' },
+  { id: '#setting-skill-autoload-threshold', prop: 'value', key: 'memory_hint_skill_autoload_threshold' },
   // Skill-scoring constants (research §5/§7/§18 + D-SAFE) — underscore keys via getGenerateCfg().
   { id: '#setting-skill-score-q0', prop: 'value', key: 'skill_score_q0' },
   { id: '#setting-skill-score-kq', prop: 'value', key: 'skill_score_kq' },
@@ -1342,6 +1345,9 @@ function saveSettings(sendToServer) {
   if ($('#setting-skill-target-k')) s['skill_active_target_k'] = $('#setting-skill-target-k').value;
   if ($('#setting-skill-min-cap')) s['skill_active_min_cap'] = $('#setting-skill-min-cap').value;
   if ($('#setting-skill-max-cap')) s['skill_active_max_cap'] = $('#setting-skill-max-cap').value;
+  // Skill auto-load (BUG_0263): persist toggle + threshold under underscore keys.
+  if ($('#setting-skill-autoload-enabled')) s['memory_hint_skill_autoload_enabled'] = $('#setting-skill-autoload-enabled').checked;
+  if ($('#setting-skill-autoload-threshold')) s['memory_hint_skill_autoload_threshold'] = $('#setting-skill-autoload-threshold').value;
   // Skill-scoring constants (research §5/§7/§18 + D-SAFE): persist under underscore keys.
   if ($('#setting-skill-score-q0')) s['skill_score_q0'] = $('#setting-skill-score-q0').value;
   if ($('#setting-skill-score-kq')) s['skill_score_kq'] = $('#setting-skill-score-kq').value;
@@ -6190,6 +6196,9 @@ function getGenerateCfg() {
   if ($('#setting-skill-target-k')) { const _stk = parseFloat($('#setting-skill-target-k').value); cfg.skill_active_target_k = Number.isNaN(_stk) ? 1.0 : Math.min(5.0, Math.max(0.1, _stk)); }
   if ($('#setting-skill-min-cap')) { const _smc = parseInt($('#setting-skill-min-cap').value); cfg.skill_active_min_cap = Number.isNaN(_smc) ? 20 : Math.min(200, Math.max(1, _smc)); }
   if ($('#setting-skill-max-cap')) { const _smx = parseInt($('#setting-skill-max-cap').value); const _smin = cfg.skill_active_min_cap ?? 20; cfg.skill_active_max_cap = Number.isNaN(_smx) ? 200 : Math.min(1000, Math.max(_smin, _smx)); }
+  // Skill auto-load (BUG_0263) — clamped 1..10 to match the server-side config handler (max(1, val)).
+  if ($('#setting-skill-autoload-enabled')) cfg.memory_hint_skill_autoload_enabled = $('#setting-skill-autoload-enabled').checked;
+  if ($('#setting-skill-autoload-threshold')) { const _sat = parseInt($('#setting-skill-autoload-threshold').value); cfg.memory_hint_skill_autoload_threshold = Number.isNaN(_sat) ? 3 : Math.min(10, Math.max(1, _sat)); }
   // Skill-scoring constants (research §5/§7/§18 + D-SAFE) — clamps byte-identical to the config handlers.
   if ($('#setting-skill-score-q0')) { const _v = parseFloat($('#setting-skill-score-q0').value); cfg.skill_score_q0 = Number.isNaN(_v) ? 5.0 : Math.min(10.0, Math.max(0.0, _v)); }
   if ($('#setting-skill-score-kq')) { const _v = parseInt($('#setting-skill-score-kq').value); cfg.skill_score_kq = Number.isNaN(_v) ? 5 : Math.min(20, Math.max(0, _v)); }

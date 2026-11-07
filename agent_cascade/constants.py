@@ -184,6 +184,10 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
         'memory_hint_skill_threshold',
+    # Skill auto-load (BUG_0263) — propagated so tool-level reads see the live toggle/threshold.
+    # The manager reads pool.llm_cfg live; added alongside memory_hint_skill_threshold for consistency.
+    'memory_hint_skill_autoload_enabled',
+    'memory_hint_skill_autoload_threshold',
     # Skill invalidation (adaptive count-cap) — propagated so tool-level reads see them.
     'skill_auto_invalidate_enabled',
     'skill_active_target_k',
