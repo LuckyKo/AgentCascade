@@ -731,9 +731,9 @@ MAX_ACTIVE_SKILLS_PER_SESSION: int = int(os.getenv('AGENT_CASCADE_MAX_ACTIVE_SKI
 # is a separate MEMORY-re-read knob that a user may legitimately set very low; reusing it for
 # skills lets one skill re-appear on nearly every turn, so skill entries get their own floor,
 # applied as max(memory_hint_cooldown_seconds, this) — a low memory cooldown can never turn
-# skill suggestions into per-turn spam (nor can a high one shorten this guard). Default 300s.
+# skill suggestions into per-turn spam (nor can a high one shorten this guard). Default 1800s (30 min).
 SKILL_HINT_ENTRY_COOLDOWN_SECONDS: float = float(
-    os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 300.0))
+    os.getenv('AGENT_CASCADE_SKILL_HINT_ENTRY_COOLDOWN_SECONDS', 1800.0))
 # ── Skill-hint selector-precision lever (memory-hint sub-pipeline only) ──
 # A post-Gate-3 ranking layer in memory_hint/manager.py._match_skills_for_hint (Gate 4).
 # It reads the persistent load ledger (agents/global/skills-metrics.json) and DEMOTES a
