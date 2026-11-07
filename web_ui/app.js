@@ -2157,9 +2157,21 @@ function handleServerMessage(data) {
           for (const [key, value] of Object.entries(rawPriorities)) {
             if (!key) continue;
             const keyLower = key.toLowerCase();
+            const incoming = Array.isArray(value) ? value : [];
             if (!seenLower.has(keyLower)) {
-              normalizedPriorities[key] = value;
+              // Store under the LOWERCASE key so lowercase lookups resolve. The render
+              // path builds type via agent_type.toLowerCase() and reads block.dataset.type
+              // (both lowercase), but the server can store PascalCase keys (e.g. 'Generalist').
+              // Copying via slice() keeps this from aliasing the incoming WS payload.
+              normalizedPriorities[keyLower] = incoming.slice();
               seenLower.add(keyLower);
+            } else {
+              // Case-collision (e.g. 'Generalist' + 'generalist'): merge value arrays,
+              // dedup-preserving, so no endpoint assignment is lost.
+              const merged = normalizedPriorities[keyLower];
+              for (const eid of incoming) {
+                if (!merged.includes(eid)) merged.push(eid);
+              }
             }
           }
 
@@ -7231,7 +7243,11 @@ function renderAgentApiAssignments() {
 
       item.querySelector('.agent-api-remove').addEventListener('click', () => {
         priorities[type] = priorities[type].filter(eid => eid !== id);
-        if (priorities[type].length === 0) delete priorities[type];
+        // Do NOT delete the key when the list empties. updatePrioritiesRest() posts the whole
+        // agent_priorities object, so the old `delete` here made the POST omit the key entirely —
+        // the server kept its entry and the assignment reappeared on the next broadcast. Sending
+        // type: [] lets the server clear it; it drops the key on the next broadcast and the
+        // re-sync settles cleanly.
         updatePrioritiesRest();
       });
 
