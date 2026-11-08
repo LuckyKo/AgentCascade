@@ -6550,6 +6550,20 @@ function updateTelemetryPanel(telemetry) {
   set('telem-loops-inner', formatNumber(telemetry.loops_inner));
   set('telem-cache-hit-ratio', telemetry.llm_cache_hit_ratio != null ? (telemetry.llm_cache_hit_ratio * 100).toFixed(1) + '%' : '—');
 
+  // Cache waste (borrow-audit #7): wasted prompt tokens + detected miss count.
+  // The $ segment renders only when the summary carries llm_wasted_cost (i.e. MODEL_PRICING is set).
+  {
+    const wTok = telemetry.llm_wasted_tokens || 0;
+    const wEv = telemetry.llm_waste_count || 0;
+    if (wTok > 0 || wEv > 0) {
+      let wasteStr = formatNumber(wTok) + ' tok · ' + formatNumber(wEv) + ' miss';
+      if (telemetry.llm_wasted_cost != null) wasteStr += ' ($' + telemetry.llm_wasted_cost.toFixed(3) + ')';
+      set('telem-cache-waste', wasteStr);
+    } else {
+      set('telem-cache-waste', '—');
+    }
+  }
+
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');
   if (toolTbody && telemetry.tool_effectiveness) {
