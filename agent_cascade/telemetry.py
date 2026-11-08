@@ -34,8 +34,16 @@ _telemetry_lock = threading.RLock()
 # Truncation limit for error messages in telemetry events to avoid bloating logs
 MAX_ERROR_MESSAGE_LENGTH = 200
 
+# Cache-waste diagnosis thresholds (borrow-audit #7, mirrors pi cache-stats.ts).
+# A detected miss is only counted as waste when the reprocessed prompt exceeds
+# this floor — small deltas are normal prompt variation, not wasted recompute.
+CACHE_MISS_NOISE_FLOOR_TOKENS = 1024
+# An idle gap larger than this between two calls on the same instance is treated
+# as an evicted (cold) KV cache rather than an active-cache miss.
+CACHE_IDLE_TTL_MS = 5 * 60 * 1000
+
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
-from agent_cascade.settings import DEFAULT_RECENT_EVENT_COUNT, MAX_EVENTS_IN_MEMORY
+from agent_cascade.settings import DEFAULT_RECENT_EVENT_COUNT, MAX_EVENTS_IN_MEMORY, MODEL_PRICING
 
 
 class TelemetryCollector:
@@ -67,6 +75,14 @@ class TelemetryCollector:
 
         # Active LLM call tracking (keyed by instance_name)
         self._active_llm_calls: Dict[str, Dict] = {}
+
+        # Cache-waste diagnosis (borrow-audit #7): per-instance snapshot of the
+        # PREVIOUS call, used to detect needlessly reprocessed prompts. Keyed by
+        # instance_name -> {prev_prompt_tokens, prev_ts_ms, prev_model, reported_cache}.
+        # reported_cache is STICKY: once a call on this instance reports cached_tokens > 0
+        # it stays True forever, so a provider that never reports caching (never sets it
+        # True) is never mistaken for a true cache miss (avoids false-positive waste).
+        self._cache_scan_state: Dict[str, Dict] = {}
 
         # Active tool call tracking (keyed by instance_name + tool_name)
         self._active_tool_calls: Dict[str, Dict] = {}
@@ -111,6 +127,14 @@ class TelemetryCollector:
             'llm_cache_hits': 0,
             'llm_cache_misses': 0,
             'llm_cache_unknown': 0,
+            # Cache-waste diagnosis (borrow-audit #7): prompt tokens needlessly
+            # reprocessed because a warm KV cache could not be reused, plus how
+            # many such misses were detected. llm_wasted_cost ($-only) accumulates
+            # only when MODEL_PRICING has the model; token totals are the primary
+            # provider-agnostic metric and are always present.
+            'llm_wasted_tokens': 0,
+            'llm_waste_count': 0,
+            'llm_wasted_cost': 0.0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -220,6 +244,10 @@ class TelemetryCollector:
                 'llm_calls': 0,
                 'cache_hits': 0,
                 'cache_misses': 0,
+                # Cache-waste diagnosis (borrow-audit #7), additive; read with
+                # .get(...,0) so rows persisted before this field still work.
+                'wasted_tokens': 0,
+                'waste_count': 0,
                 'tool_calls': 0,
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
@@ -479,6 +507,55 @@ class TelemetryCollector:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def detect_cache_waste(prev, prompt_tokens, cached_tokens, model, now_ms):
+        """Estimate needlessly reprocessed prompt tokens for a call vs. its predecessor.
+
+        Token-level, provider-agnostic cache-waste detector (borrow-audit #7), mirroring
+        pi's ``cache-stats.ts`` ``detectMiss``. Compares this call against the previous
+        classified call on the same instance (``prev`` = the per-instance snapshot) to
+        decide whether the KV cache that *should* have been reusable was lost, and tag
+        the likely root cause.
+
+        Returns ``None`` when the call is not a meaningful miss:
+          * no prior baseline (first call on the instance), or
+          * no real prompt (``prompt_tokens <= 0``), or
+          * a provider that has never reported caching — sticky ``reported_cache`` guard:
+            ``cached_tokens == 0`` on such a provider means "not reported", not "missed",
+            so counting it would be a false positive, or
+          * reprocessed share at/below ``CACHE_MISS_NOISE_FLOOR_TOKENS`` (normal variation).
+
+        Otherwise returns ``{'missed': int, 'root_cause': str, 'idle_ms': float}`` where
+        ``root_cause`` is one of ``'model_change'`` (different model than prev — the cache
+        key moved), ``'idle_ttl'`` (gap over ``CACHE_IDLE_TTL_MS`` — cache evicted), or
+        ``'other'``. ``missed = min(prev_prompt, cur_prompt) - cached``: the portion of the
+        overlapping prompt that was reprocessed rather than served from cache.
+
+        Pure: mutates nothing and raises nothing on bad input (degrades to ``None``).
+        """
+        try:
+            prompt_tokens = int(prompt_tokens or 0)
+            cached_tokens = int(cached_tokens or 0)
+            if prev is None or prompt_tokens <= 0:
+                return None
+            # Sticky reported_cache guard: a provider that never reports cached_tokens > 0
+            # is never blamed for "missing" a cache it never claims to have.
+            if cached_tokens == 0 and not prev.get('reported_cache', False):
+                return None
+            missed = min(int(prev.get('prev_prompt_tokens') or 0), prompt_tokens) - cached_tokens
+            if missed <= CACHE_MISS_NOISE_FLOOR_TOKENS:
+                return None
+            idle_ms = now_ms - (prev.get('prev_ts_ms') or 0)
+            if model != prev.get('prev_model'):
+                root_cause = 'model_change'
+            elif idle_ms > CACHE_IDLE_TTL_MS:
+                root_cause = 'idle_ttl'
+            else:
+                root_cause = 'other'
+            return {'missed': missed, 'root_cause': root_cause, 'idle_ms': idle_ms}
+        except (TypeError, ValueError):
+            return None
+
     def record_token_usage(
         self,
         instance_name: str,
@@ -595,18 +672,66 @@ class TelemetryCollector:
             latency_ms = (end_time - call['start_time']) * 1000
             ttft_ms = ((call['first_token_time'] - call['start_time']) * 1000) if call['first_token_time'] > 0 else 0
 
+            # ── Cache-waste diagnosis (borrow-audit #7) ──────────────────────────
+            # Compare this call against the previous one on the same instance to
+            # measure needlessly reprocessed prompt tokens and tag the likely root
+            # cause (see detect_cache_waste). Only calls the server actually reported
+            # usage for are measurable: an unclassified call carries only a char-count
+            # prompt estimate and no authoritative cached_tokens, so it must neither be
+            # attributed as waste nor poison the baseline snapshot.
+            scan = None
+            if call.get('cache_classified'):
+                usage = call.get('usage_details') or {}
+                # Authoritative cached_tokens for BOTH hit and miss comes from the usage
+                # details; record_token_usage only copies it onto the call for misses.
+                cached_tokens = int(usage.get('cached_tokens') or call.get('cached_tokens') or 0)
+                prompt_tokens = int(call.get('classified_prompt_tokens') or call.get('input_tokens_est') or 0)
+                model = call.get('model') or ''
+                now_ms = time.time() * 1000
+                prev = self._cache_scan_state.get(instance_name)
+                scan = self.detect_cache_waste(prev, prompt_tokens, cached_tokens, model, now_ms)
+                if scan is not None:
+                    self._session_stats['llm_wasted_tokens'] += scan['missed']
+                    self._session_stats['llm_waste_count'] += 1
+                    # Optional $-cost: only for models with pricing configured. Token
+                    # waste is the primary, provider-agnostic metric regardless.
+                    pricing = MODEL_PRICING.get(model)
+                    if pricing:
+                        delta = max(0.0, pricing.get('input_per_m', 0.0) - pricing.get('cache_read_per_m', 0.0))
+                        self._session_stats['llm_wasted_cost'] += scan['missed'] * delta / 1e6
+                    # Attribute to the config row via the fingerprint snapshotted at call
+                    # start (same source as the cache hit/miss classifier, BUG_0260).
+                    fp = call.get('config_fingerprint') or ''
+                    if fp and fp in self._config_stats:
+                        self._config_stats[fp]['wasted_tokens'] += scan['missed']
+                        self._config_stats[fp]['waste_count'] += 1
+                # Refresh the baseline for the NEXT call. A model switch is NOT a reset
+                # (it is itself a counted waste event above); only a compression clears it.
+                self._cache_scan_state[instance_name] = {
+                    'prev_prompt_tokens': prompt_tokens,
+                    'prev_ts_ms': now_ms,
+                    'prev_model': model,
+                    'reported_cache': (prev.get('reported_cache', False) if prev else False) or (cached_tokens > 0),
+                }
+
             # todo.md:105 / BUG_0101 — one greppable debug line per KV-cache miss so
             # unexpected prompt reprocesses can be tracked from console.log. The server's
             # cached_tokens is authoritative: a miss means the full prompt was reprocessed
-            # (the latency/ttft values show how expensive that was).
+            # (the latency/ttft values show how expensive that was). When the waste
+            # detector also flagged this miss, append the root cause and wasted tokens.
             if call.get('cache_status') == 'miss':
                 pt = int(call.get('classified_prompt_tokens') or 0)
                 ct = int(call.get('cached_tokens') or 0)
+                waste_suffix = ''
+                waste_args = ()
+                if scan is not None:
+                    waste_suffix = ' wasted_tokens=%d idle_ms=%.0f rootCause=%s'
+                    waste_args = (scan['missed'], scan['idle_ms'], scan['root_cause'])
                 _logger.debug(
                     '[KV_CACHE_MISS] %s model=%s prompt_tokens=%d cached_tokens=%d '
-                    'cached_pct=%.1f latency_ms=%.1f ttft_ms=%.1f — prompt reprocessed',
+                    'cached_pct=%.1f latency_ms=%.1f ttft_ms=%.1f — prompt reprocessed' + waste_suffix,
                     instance_name, call.get('model') or '?', pt, ct,
-                    (100.0 * ct / pt) if pt else 0.0, latency_ms, ttft_ms,
+                    (100.0 * ct / pt) if pt else 0.0, latency_ms, ttft_ms, *waste_args,
                 )
 
             # Direct measurement: streaming time = end_time - first_token_time (not indirect subtraction)
@@ -624,6 +749,14 @@ class TelemetryCollector:
                 'tps': round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
                 'timestamp': _now_iso(),
             }
+
+            # Additive cache-waste fields (borrow-audit #7) — present only on calls
+            # the detector flagged as a meaningful miss, so the JSONL event schema
+            # stays backward compatible for existing consumers.
+            if scan is not None:
+                event['wasted_tokens'] = scan['missed']
+                event['waste_root_cause'] = scan['root_cause']
+                event['idle_ms'] = round(scan['idle_ms'], 1)
 
             # Update session stats
             self._session_stats['total_llm_calls'] += 1
@@ -898,6 +1031,13 @@ class TelemetryCollector:
     ):
         """Record a context compression event."""
         with _telemetry_lock:
+            # Reset this instance's cache-waste baseline (borrow-audit #7). A
+            # compression legitimately rewrites/shrinks the prompt, so the previous
+            # call's prompt length is no longer a valid comparison target — without
+            # this reset the first post-compression call (smaller prompt, cached=0)
+            # would be miscounted as waste. Dropping prev makes the next call a fresh
+            # baseline. Done first so the reset holds even if the write below fails.
+            self._cache_scan_state.pop(instance_name, None)
             event = {
                 'type': 'compression',
                 'instance': instance_name,
@@ -1008,6 +1148,14 @@ class TelemetryCollector:
             # (classified/total). Distinct from llm_cache_hit_ratio above, which is
             # hits/(hits+misses) over only the classified calls. (BUG_0260)
             'llm_cache_classified_ratio': llm_cache_classified_ratio,
+            # ── Cache-waste diagnosis (borrow-audit #7) ─────────────────────────
+            # Wasted prompt tokens + how many misses were detected, provider-agnostic.
+            # llm_wasted_cost ($-only) is surfaced ONLY when MODEL_PRICING is configured;
+            # without pricing the key is absent so consumers see no misleading $-value.
+            'llm_wasted_tokens': stats.get('llm_wasted_tokens', 0),
+            'llm_waste_count': stats.get('llm_waste_count', 0),
+            **({'llm_wasted_cost': round(stats.get('llm_wasted_cost', 0.0), 6)}
+               if MODEL_PRICING else {}),
             # ── Raw time totals (BUG_0130) ──────────────────────────────────────
             # Exposed so the session cards/tables can be reconciled without re-adding
             # averages. All are agent-exclusive work sums; with parallel agents they
@@ -1070,6 +1218,10 @@ class TelemetryCollector:
                         round(_cache_hits / _cache_total, 3)
                         if _cache_total > 0 else None
                     ),
+                    # Cache-waste diagnosis (borrow-audit #7). .get(...,0) tolerates
+                    # rows persisted before the field existed.
+                    'wasted_tokens': cs.get('wasted_tokens', 0),
+                    'waste_count': cs.get('waste_count', 0),
                     'tool_calls': cs['tool_calls'],
                     'input_tokens_est': cs['input_tokens_est'],
                     'output_tokens_est': cs['output_tokens_est'],

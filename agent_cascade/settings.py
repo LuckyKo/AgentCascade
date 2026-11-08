@@ -16,7 +16,7 @@ import ast
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal
+from typing import Dict, List, Literal
 
 # Settings for LLMs
 DEFAULT_MAX_INPUT_TOKENS: int = int(
@@ -577,6 +577,13 @@ DEFAULT_RECENT_EVENT_COUNT: int = int(os.getenv('AGENT_CASCADE_DEFAULT_RECENT_EV
                                                 50))  # Default recent events count
 MAX_EVENTS_IN_MEMORY: int = int(os.getenv('AGENT_CASCADE_MAX_EVENTS_IN_MEMORY',
                                           5000))  # Max events in memory before trimming
+
+# Optional $-cost map for cache-waste telemetry (borrow-audit #7). Empty by default:
+# cache waste is always reported in tokens (provider-agnostic). Populate to ALSO
+# surface llm_wasted_cost. Shape: {model_name: {'input_per_m': float, 'cache_read_per_m': float}}
+# Env-overridable (Python dict literal, same pattern as DEFAULT_RAG_SEARCHERS).
+MODEL_PRICING: Dict[str, Dict[str, float]] = ast.literal_eval(
+    os.getenv('AGENT_CASCADE_MODEL_PRICING', '{}'))
 
 # Settings for LM Studio
 LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv('AGENT_CASCADE_LM_STUDIO_KEEPALIVE',
