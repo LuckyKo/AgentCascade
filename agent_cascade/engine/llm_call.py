@@ -647,12 +647,29 @@ class LLMCallMixin:
         if _router is not None and hasattr(_router, 'get_endpoint_pricing'):
             _agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
             _ep_pricing = _router.get_endpoint_pricing(_agent_type, instance_name=inst_name)
+        # Cache attribution (BUG_0273 Option A): cache hits/misses are attributed
+        # to the RESOLVED endpoint, not the configured template model. The real
+        # endpoint is only resolved later inside _do_call, so this start-site value
+        # read from _last_endpoint_config is BEST-EFFORT: exact for a sticky
+        # use_last_endpoint instance (previous call == current endpoint), but for
+        # cursor-rotation / router-fallback it may be the PREVIOUS call's endpoint.
+        # The authoritative key is re-bound to the in-flight call by
+        # record_llm_call_endpoint immediately after _do_call writes
+        # _last_endpoint_config, so classification always uses the endpoint that
+        # actually served this call. Empty (first call) → model-fp fallback.
+        _cache_key = ''
+        _tel = self._telemetry()
+        if _tel is not None:
+            _last_ep = getattr(instance, '_last_endpoint_config', None) or {}
+            _cache_key = _tel.cache_attribution_key(
+                _last_ep.get('api_base', ''), _last_ep.get('model', ''))
         self._record_telemetry_event(
             inst_name,
             'start',
             input_tokens_est=input_tokens_est,
             model=getattr(template.llm, 'model', '') or '',
             pricing=_ep_pricing,
+            cache_key=_cache_key,
         )
 
         # Streaming UI Content Update: Track partial LLM content
@@ -1752,6 +1769,16 @@ class LLMCallMixin:
                         'model': model,
                         'state_save_enabled': llm_cfg.get('state_save_enabled', False)
                     }
+                # Re-bind the authoritative cache-attribution key now that the
+                # resolved endpoint is known (BUG_0273). Supersedes the best-effort
+                # start snapshot so cursor-rotation / router-fallback calls classify
+                # against the endpoint that actually served THIS call.
+                _tel = self._telemetry()
+                if _tel is not None:
+                    _tel.record_llm_call_endpoint(
+                        instance.instance_name,
+                        _tel.cache_attribution_key(api_base, model),
+                    )
                 # Store allocated max_input_tokens in instance for compression
                 # check (ground-truth tracking)
                 self._store_allocated_max_input_tokens(instance, merged_cfg)
@@ -1806,6 +1833,15 @@ class LLMCallMixin:
                     'model': model,
                     'state_save_enabled': False  # Direct call mode doesn't support state save config from router
                 }
+            # Re-bind the authoritative cache-attribution key now that the resolved
+            # endpoint is known (BUG_0273); direct call uses the template's
+            # api_base/model, still the endpoint that actually serves the call.
+            _tel = self._telemetry()
+            if _tel is not None:
+                _tel.record_llm_call_endpoint(
+                    instance.instance_name,
+                    _tel.cache_attribution_key(api_base, model),
+                )
 
             # Store allocated max_input_tokens in instance for compression
             # check (ground-truth tracking)

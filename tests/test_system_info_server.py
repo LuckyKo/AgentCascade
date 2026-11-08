@@ -235,6 +235,22 @@ class _FakeTelemetry:
             'avg_tps': 42.5,
         }]
 
+    def get_cache_attribution(self):
+        # BUG_0273 Option A: cache is keyed by the RESOLVED endpoint, so the
+        # last-active reusable instance Security hits reports its own (cold) hits/
+        # misses instead of inflating the model row.
+        return [{
+            'cache_key': 'http://127.0.0.1:1234/v1|qwen3.8-27b',
+            'cache_hits': 5,
+            'cache_misses': 1,
+            'cache_hit_ratio': 0.833,
+        }, {
+            'cache_key': 'http://127.0.0.1:8080/v1|gemma-4-31b-it',
+            'cache_hits': 1,
+            'cache_misses': 1,
+            'cache_hit_ratio': 0.5,
+        }]
+
     def get_agent_class_summary(self):
         return [{
             'agent_class': 'orchestrator',
@@ -278,7 +294,15 @@ class TestSystemInfoTelemetryDump:
         # Config fingerprint A/B — per-model cache column (BUG_0260)
         assert 'abc123def456' in out
         assert 'model=qwen3.8-27b' in out
-        assert 'cache=5/2  cache_hit=71.4%' in out
+        # BUG_0273: per-model cache/cache_hit columns were dropped (they showed a
+        # misleading fallback-only number for real routed calls). Assert they are
+        # gone; cache is reported only by the per-endpoint table below.
+        assert 'cache=5/2' not in out
+        assert 'cache_hit=71.4%' not in out
+        # Per-endpoint cache attribution (BUG_0273 Option A): authoritative
+        # cache view keyed by the resolved endpoint, not the model-only row.
+        assert 'Cache by endpoint (resolved):' in out
+        assert 'http://127.0.0.1:1234/v1|qwen3.8-27b  hits=5  misses=1  cache_hit=83.3%' in out
         # Agent class usage (accuracy formatted as %)
         assert 'orchestrator:' in out
         assert '91.7%' in out

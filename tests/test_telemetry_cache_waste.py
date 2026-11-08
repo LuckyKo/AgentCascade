@@ -147,6 +147,29 @@ class TestCacheWasteDetection:
         assert cfgs[fp]['cache_hits'] == 1
         assert cfgs[fp]['cache_misses'] == 2
 
+    # 10b. BUG_0273 Option A: cache counters follow the resolved endpoint.
+    def test_cache_counters_follow_endpoint_not_model_fp(self, collector):
+        """With a resolved endpoint threaded, cache hits/misses move to the
+        endpoint key while the model-only fp row keeps zero cache counters."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start('inst', config_fingerprint=fp,
+                                    config_description={'model': 'm'})
+        ck = TelemetryCollector.cache_attribution_key('http://last/v1', 'm')
+        for cached in (10000, 0):  # 1 hit + 1 miss, both resolved to the endpoint
+            collector.record_llm_call_start('inst', model='m', cache_key=ck)
+            collector.record_token_usage('inst', prompt_tokens=10000,
+                                         completion_tokens=1,
+                                         details={'cached_tokens': cached})
+            collector.record_llm_call_end('inst')
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
+        # The model row shows no cache (moved to the resolved endpoint).
+        assert cfgs[fp]['cache_hits'] == 0
+        assert cfgs[fp]['cache_misses'] == 0
+        # The resolved endpoint's own bucket carries the split.
+        assert attrib[ck]['cache_hits'] == 1
+        assert attrib[ck]['cache_misses'] == 1
+
     # 11. optional cost: with pricing dict → computed; without → absent.
     def test_optional_cost_gated_on_pricing(self, collector, monkeypatch):
         monkeypatch.setattr(

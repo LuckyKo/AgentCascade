@@ -873,6 +873,118 @@ class TestConfigComparison:
 
 
 # ---------------------------------------------------------------------------
+# I-bis-bis. Cache attribution is keyed by the RESOLVED endpoint (BUG_0273)
+# ---------------------------------------------------------------------------
+
+
+class TestCacheAttribution:
+    """BUG_0273 Option A: cache hits/misses are attributed to the RESOLVED
+    endpoint (``cache_attribution_key``), not the model-only A/B fingerprint.
+    The model-only fingerprint itself is unchanged (see TestFingerprintModelOnly)."""
+
+    def test_cache_attribution_key_normalization(self):
+        # api_base lowercased + trailing slash stripped; model verbatim (case-sensitive).
+        k = TelemetryCollector.cache_attribution_key(
+            api_base='http://127.0.0.1:1234/V1/', model='Swift-27B')
+        assert k == 'http://127.0.0.1:1234/v1|Swift-27B'
+        assert k == TelemetryCollector.cache_attribution_key(
+            'HTTP://127.0.0.1:1234/v1', 'Swift-27B')
+        assert TelemetryCollector.cache_attribution_key('', '') == ''
+        # BUG_0273 follow-up: an endpoint key REQUIRES a host — a model-only value
+        # must NOT form a truthy '|model' key (would bypass the model-fp fallback).
+        assert TelemetryCollector.cache_attribution_key('', 'Foo') == ''
+        assert TelemetryCollector.cache_attribution_key('   ', 'Foo') == ''
+
+    def test_resolved_endpoint_diverges_from_model_row(self, collector):
+        """The headline regression: a use_last_endpoint agent's call whose
+        resolved endpoint differs from its configured (global model) fingerprint
+        books its cache MISS to the resolved-endpoint key, NOT the model row."""
+        fp = TelemetryCollector.fingerprint_config(model='Global-Model')
+        # Turn carries the GLOBAL model fingerprint — this is the NVFP4 row that
+        # was being deflated by Security's cold reusable-instance misses.
+        collector.record_turn_start('sec', config_fingerprint=fp,
+                                    config_description={'model': 'Global-Model'})
+        # ...but the call was actually routed to a different (last-active) endpoint.
+        cache_key = TelemetryCollector.cache_attribution_key(
+            api_base='http://127.0.0.1:8080/v1', model='Reuse-Model')
+        collector.record_llm_call_start('sec', model='Global-Model', cache_key=cache_key)
+        collector.record_token_usage('sec', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 0})  # -> miss
+        collector.record_llm_call_end('sec')
+        collector.record_turn_end('sec')
+
+        # (1) The model row shows NO miss — no longer deflated by the cold endpoint.
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_misses'] == 0
+        assert cfgs[fp]['cache_hits'] == 0
+        assert cfgs[fp]['cache_hit_ratio'] is None
+        # (2) The miss is booked to the resolved endpoint instead.
+        attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
+        assert cache_key in attrib
+        assert attrib[cache_key]['cache_misses'] == 1
+        assert attrib[cache_key]['cache_hit_ratio'] == 0.0
+        # (3) Session-global un-keyed totals still move.
+        assert collector.get_session_summary()['llm_cache_misses'] == 1
+
+    def test_endpoint_rebinder_supersedes_stale_start_key(self, collector):
+        """BUG_0273 review: the start-site key is best-effort and stale for
+        non-sticky / cursor-rotated routing. Once the engine resolves the endpoint
+        it rebinds via record_llm_call_endpoint; the cache outcome must book to the
+        CORRECTED key, not the stale start snapshot nor the model row."""
+        fp = TelemetryCollector.fingerprint_config(model='Global-Model')
+        collector.record_turn_start('rot', config_fingerprint=fp,
+                                    config_description={'model': 'Global-Model'})
+        stale = TelemetryCollector.cache_attribution_key(
+            api_base='http://127.0.0.1:1234/v1', model='Prev-Model')  # previous call
+        collector.record_llm_call_start('rot', model='Global-Model', cache_key=stale)
+        # Engine resolves THIS call's endpoint (cursor rotated) and rebinds:
+        correct = TelemetryCollector.cache_attribution_key(
+            api_base='http://127.0.0.1:8080/v1', model='This-Model')
+        collector.record_llm_call_endpoint('rot', correct)
+        collector.record_token_usage('rot', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 0})  # -> miss
+        collector.record_llm_call_end('rot')
+        collector.record_turn_end('rot')
+
+        attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
+        # The miss lands on the corrected endpoint, NOT the stale start snapshot.
+        assert correct in attrib
+        assert attrib[correct]['cache_misses'] == 1
+        assert stale not in attrib
+        # And not on the model row either.
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_misses'] == 0
+
+    def test_endpoint_rebinder_noop_on_empty_key(self, collector):
+        """An empty rebind leaves the key untouched, preserving the model-fp fallback
+        (so a resolved-but-hostless endpoint still classifies against the model row)."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start('i', config_fingerprint=fp)
+        collector.record_llm_call_start('i', model='m')  # no key -> empty
+        collector.record_llm_call_endpoint('i', '')      # empty -> no-op
+        collector.record_token_usage('i', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 80})  # -> hit
+        collector.record_llm_call_end('i')
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_hits'] == 1
+        assert collector.get_cache_attribution() == []
+
+    def test_fallback_to_model_fp_when_no_cache_key(self, collector):
+        """Without a resolved-endpoint key, attribution still lands on the
+        model-only fingerprint (legacy fallback) — so the existing per-config
+        cache-counter behavior is preserved for callers that don't thread a key."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start('inst', config_fingerprint=fp)
+        collector.record_llm_call_start('inst', model='m')  # no cache_key
+        collector.record_token_usage('inst', prompt_tokens=1000, completion_tokens=1,
+                                     details={'cached_tokens': 80})  # -> hit
+        collector.record_llm_call_end('inst')
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_hits'] == 1
+        assert collector.get_cache_attribution() == []
+
+
+# ---------------------------------------------------------------------------
 # I-bis. Config fingerprint is model-only (no prompt print)
 # ---------------------------------------------------------------------------
 

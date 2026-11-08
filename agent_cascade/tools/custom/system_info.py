@@ -124,6 +124,10 @@ class SystemInfo(BaseTool):
             configs = telem.get_config_comparison() or []
             agent_classes = telem.get_agent_class_summary() or []
             skills = telem.get_skill_usage_summary() or []
+            cache_attribution = (
+                telem.get_cache_attribution() or []
+                if hasattr(telem, 'get_cache_attribution') else []
+            )
 
             lines = ['--- AC Telemetry Dump (live) ---']
 
@@ -176,8 +180,26 @@ class SystemInfo(BaseTool):
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "
-                                 f"avg_tps={avg_tps}  "
-                                 f"cache={c.get('cache_hits', 0)}/{c.get('cache_misses', 0)}  "
+                                 f"avg_tps={avg_tps}")
+                    # No cache columns here (BUG_0273): per-model cache counters are
+                    # now fallback-only — 0 for any real routed call that had a
+                    # resolved endpoint — so showing them would recreate the "wrong
+                    # model row" trap this fix removes. Cache is reported by endpoint
+                    # in the table below.
+
+            # ── Cache by endpoint (resolved) ── (BUG_0273 Option A)
+            # Authoritative cache view. The prompt KV cache belongs to the endpoint
+            # that actually served the call, so hits/misses are attributed by the
+            # resolved endpoint's key (api_base|model) — not the model-only A/B row.
+            # A use_last_endpoint agent's fresh-instance misses now appear under its
+            # own endpoint instead of inflating the configured model's miss count.
+            if cache_attribution:
+                lines.append('')
+                lines.append('Cache by endpoint (resolved):')
+                for c in cache_attribution:
+                    lines.append(f"  {c.get('cache_key', '?')}  "
+                                 f"hits={c.get('cache_hits', 0)}  "
+                                 f"misses={c.get('cache_misses', 0)}  "
                                  f"cache_hit={_pct(c.get('cache_hit_ratio'))}")
 
             # ── Agent class usage ──

@@ -145,6 +145,15 @@ class TelemetryCollector:
         # Per-config aggregates for A/B comparison
         self._config_stats: Dict[str, Dict] = {}
 
+        # Per-ENDPOINT cache attribution (BUG_0273 Option A). The model-only
+        # config_fingerprint groups A/B rows by model and cannot represent the
+        # endpoint that actually served a call, so a use_last_endpoint agent's
+        # fresh-reusable-instance cache misses were booked to the wrong model
+        # row. Cache hits/misses are instead attributed here, keyed by the
+        # resolved endpoint's normalized ``api_base|model`` (cache_attribution_key).
+        # Additive: session-global llm_cache_hits/misses are unchanged.
+        self._cache_stats: Dict[str, Dict] = {}
+
         # Per-instance TOTAL-token accumulator (cost/token-budget Slice 2).
         # Session-lifetime, keyed by instance name; updated at the single
         # record_llm_call_end choke point (under _telemetry_lock). Backs the
@@ -220,6 +229,32 @@ class TelemetryCollector:
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     @staticmethod
+    def cache_attribution_key(api_base: str = '', model: str = '') -> str:
+        """Build the cache-attribution key from a RESOLVED endpoint.
+
+        Distinct from ``fingerprint_config`` (model-only, one row per model for
+        A/B token/cost grouping). The prompt KV cache belongs to the endpoint
+        that actually served the call, not the configured model, so cache
+        hits/misses are attributed to this key instead of the model-only
+        fingerprint (BUG_0273). Derived from ``instance._last_endpoint_config``
+        (engine/llm_call.py), the ground-truth endpoint that ran the call
+        regardless of router fallbacks / ``use_last_endpoint``.
+
+        Normalization is deliberately light so the key stays a faithful, readable
+        label: ``api_base`` is lowercased and its trailing slash stripped (scheme
+        and host are case-insensitive), the model is kept verbatim (model names
+        are case-sensitive to the server). Returns ``''`` when the ``api_base``
+        host is unknown — an endpoint key requires a host, so a model-only value
+        (or a hostless/blank api_base) must fall back to the model-only
+        fingerprint rather than form a ``|model`` key that would bypass fallback.
+        """
+        base = (api_base or '').strip().rstrip('/').lower()
+        mdl = (model or '').strip()
+        if not base:
+            return ''
+        return f'{base}|{mdl}'
+
+    @staticmethod
     def describe_config(
         model: str = '',
         generate_cfg: Optional[Dict] = None,
@@ -285,6 +320,22 @@ class TelemetryCollector:
                 'tool_calls_by_name': defaultdict(int),
                 'tool_failures_by_name': defaultdict(int),
             }
+
+    def _ensure_cache_stats(self, cache_key: str):
+        """Ensure the per-endpoint cache-attribution bucket exists for *cache_key*.
+
+        ``cache_key`` is built by ``cache_attribution_key`` from the resolved
+        endpoint. Unlike ``_ensure_config_stats`` this row carries ONLY cache
+        counters — token/cost/latency/A-B stay on the model-only ``_config_stats``
+        row (BUG_0273 Option A). Returns the (created or existing) bucket so callers
+        can subscript it directly. Caller must hold ``_telemetry_lock``.
+        """
+        if cache_key and cache_key not in self._cache_stats:
+            self._cache_stats[cache_key] = {
+                'cache_hits': 0,
+                'cache_misses': 0,
+            }
+        return self._cache_stats.get(cache_key)
 
     # ── Event Recording (all thread-safe via _telemetry_lock) ──────────────
 
@@ -453,7 +504,8 @@ class TelemetryCollector:
         return self._agent_class_stats[agent_class]
 
     def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0,
-                              model: str = '', pricing: Optional[Dict] = None):
+                              model: str = '', pricing: Optional[Dict] = None,
+                              cache_key: str = ''):
         """Mark the start of an LLM API call.
 
         If a call for ``instance_name`` is already in flight, the previous attempt
@@ -482,6 +534,14 @@ class TelemetryCollector:
                 # closes (BUG_0128). Empty when no turn is open — such calls move only
                 # the session-global counters.
                 'config_fingerprint': self._active_turns.get(instance_name, {}).get('config_fingerprint', ''),
+                # Cache-attribution key from the RESOLVED endpoint (BUG_0273),
+                # snapshotted here parallel to the model-only fingerprint above.
+                # Best-effort at start: the endpoint is only resolved later inside
+                # _do_call, so the engine re-binds the authoritative key via
+                # record_llm_call_endpoint once known. Empty here (first call, or a
+                # hostless/blank api_base) means the classifier falls back to the
+                # model-only fingerprint.
+                'cache_key': cache_key,
                 'first_token_time': 0,
                 'completion_tokens': 0,  # Will be updated by record_token_usage callback if available
                 'usage_details': None,
@@ -497,6 +557,26 @@ class TelemetryCollector:
             call = self._active_llm_calls.get(instance_name)
             if call and call['first_token_time'] == 0:
                 call['first_token_time'] = time.perf_counter()
+
+    def record_llm_call_endpoint(self, instance_name: str, cache_key: str):
+        """Bind the RESOLVED endpoint's cache-attribution key to the in-flight call.
+
+        ``record_llm_call_start`` may carry only a best-effort (possibly stale, or
+        empty on a first call) key because the endpoint is not resolved until
+        inside the engine's ``_do_call``. Once ``_last_endpoint_config`` is written,
+        the engine calls this with the authoritative ``cache_attribution_key`` so
+        ``record_token_usage`` classifies against the endpoint that ACTUALLY served
+        this call — not the previous call's endpoint under cursor rotation / router
+        fallback (BUG_0273). A no-op when ``cache_key`` is empty, preserving the
+        model-fingerprint fallback. Caller must have already called
+        ``record_llm_call_start`` for ``instance_name``.
+        """
+        if not cache_key:
+            return
+        with _telemetry_lock:
+            call = self._active_llm_calls.get(instance_name)
+            if call is not None:
+                call['cache_key'] = cache_key
 
     @staticmethod
     def classify_cache_hit(cached_tokens, prompt_tokens):
@@ -627,22 +707,32 @@ class TelemetryCollector:
                         # [KV_CACHE_MISS] line reports the value the classifier used,
                         # even if a subsequent multi-callback overwrites input_tokens_est.
                         call['classified_prompt_tokens'] = int(prompt_tokens)
-                        # Attribute this call to its config row via the fingerprint
-                        # snapshotted at call start (BUG_0260). Read once; the per-config
-                        # counters move in lockstep with the session-global counters in
-                        # this same branch, so there is no second classification and the
-                        # per-config totals (for classified calls that carry a fingerprint)
-                        # reconcile to the session totals. Only touched when the
-                        # fingerprint is present and its row exists — a call with no open
-                        # turn has fp='' and counts session-globally only.
+                        # Prompt-cache attribution (BUG_0260 + BUG_0273 Option A).
+                        # Prefer the cache key derived from the RESOLVED endpoint
+                        # (threaded by record_llm_call_start); fall back to the
+                        # model-only fingerprint only when no resolved endpoint is
+                        # known. The resolved endpoint — not the turn-start config
+                        # — owns the prompt KV cache, so its hits/misses must land
+                        # on its own bucket, not the global model row (a
+                        # use_last_endpoint agent's fresh-instance misses were
+                        # inflating the configured model's miss count). Read once;
+                        # the per-bucket counters move in lockstep with the
+                        # session-global counters in this same branch, so there is
+                        # no second classification. Session-global totals always
+                        # move and stay the un-keyed source of truth.
+                        cache_key = call.get('cache_key') or ''
                         fp = call.get('config_fingerprint') or ''
                         if status == 'hit':
                             self._session_stats['llm_cache_hits'] += 1
-                            if fp and fp in self._config_stats:
+                            if cache_key:
+                                self._ensure_cache_stats(cache_key)['cache_hits'] += 1
+                            elif fp and fp in self._config_stats:
                                 self._config_stats[fp]['cache_hits'] += 1
                         else:
                             self._session_stats['llm_cache_misses'] += 1
-                            if fp and fp in self._config_stats:
+                            if cache_key:
+                                self._ensure_cache_stats(cache_key)['cache_misses'] += 1
+                            elif fp and fp in self._config_stats:
                                 self._config_stats[fp]['cache_misses'] += 1
                             # Retained for the [KV_CACHE_MISS] debug line emitted in
                             # record_llm_call_end (todo.md:105 / BUG_0101 tracking).
@@ -1317,10 +1407,15 @@ class TelemetryCollector:
                         'success_rate': round((count - failures) / count * 100, 1) if count > 0 else 100.0,
                     }
 
-                # Prompt-cache counters + derived hit ratio (BUG_0260). Same formula as
-                # the session-level llm_cache_hit_ratio: hits/(hits+misses), None when
-                # nothing classified. .get(...,0) tolerates rows persisted before the
-                # field existed.
+                # Prompt-cache counters + derived hit ratio (BUG_0260). Same formula
+                # as the session-level llm_cache_hit_ratio: hits/(hits+misses), None
+                # when nothing classified. .get(...,0) tolerates rows persisted before
+                # the field existed. NOTE (BUG_0273): since cache is now attributed to
+                # the RESOLVED endpoint via get_cache_attribution(), these per-model
+                # fields carry only the fallback bucket — classified calls whose
+                # resolved endpoint was unknown. Treat get_cache_attribution() as the
+                # authoritative cache view; a model row's hit ratio no longer
+                # describes that model's endpoints' cache behavior.
                 _cache_hits = cs.get('cache_hits', 0)
                 _cache_misses = cs.get('cache_misses', 0)
                 _cache_total = _cache_hits + _cache_misses
@@ -1360,6 +1455,39 @@ class TelemetryCollector:
                     'tool_effectiveness': tool_rates,
                 })
 
+        return result
+
+    def get_cache_attribution(self) -> List[Dict]:
+        """Per-ENDPOINT cache hit/miss attribution (BUG_0273 Option A).
+
+        The model-only ``config_fingerprint`` groups A/B rows by model and cannot
+        distinguish the endpoint that actually served a call, so attributing
+        cache counters to it let ``use_last_endpoint`` agents' fresh-reusable
+        instance misses inflate a global model row's miss count and deflate its
+        hit ratio. This view is keyed by the resolved endpoint (see
+        ``cache_attribution_key``), so each endpoint's own cache behavior is
+        reported honestly.
+
+        Sorted by classified-call count desc then key asc. ``cache_hit_ratio``
+        is ``hits/(hits+misses)`` — identical formula to the session-level
+        ratio — ``None`` when nothing was classified. Each entry:
+        ``{cache_key, cache_hits, cache_misses, cache_hit_ratio}``.
+        """
+        with _telemetry_lock:
+            result = []
+            for cache_key, cs in self._cache_stats.items():
+                hits = cs['cache_hits']
+                misses = cs['cache_misses']
+                total = hits + misses
+                result.append({
+                    'cache_key': cache_key,
+                    'cache_hits': hits,
+                    'cache_misses': misses,
+                    'cache_hit_ratio': (
+                        round(hits / total, 3) if total > 0 else None
+                    ),
+                })
+        result.sort(key=lambda r: (-(r['cache_hits'] + r['cache_misses']), r['cache_key']))
         return result
 
     def get_agent_class_summary(self) -> List[Dict]:
@@ -1486,6 +1614,11 @@ class TelemetryCollector:
             # the config comparison was written.
             agent_class_comparison = self.get_agent_class_summary()
             skill_usage = self.get_skill_usage_summary()
+            # Per-endpoint cache attribution (BUG_0273 Option A), persisted so
+            # historical hits/misses can be re-keyed offline to confirm the global
+            # model row's hit ratio recovers once last-endpoint misses are booked
+            # to their own resolved endpoint.
+            cache_attribution = self.get_cache_attribution()
 
         event = {
             'type': 'session_end',
@@ -1493,6 +1626,7 @@ class TelemetryCollector:
             'timestamp': _now_iso(),
             'summary': summary,
             'config_comparison': config_comparison,
+            'cache_attribution': cache_attribution,
             'agent_class_comparison': agent_class_comparison,
             'skill_usage': skill_usage,
         }
