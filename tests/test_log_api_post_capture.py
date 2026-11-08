@@ -45,10 +45,21 @@ class _FakePool:
 
 
 class _FakeInstance:
+    """Mirrors AgentInstance: the pool back-reference is ``_pool_ref`` (not ``_pool``)."""
+
     def __init__(self, pool=None, override=None):
-        self._pool = pool
+        self._pool_ref = pool
         self.agent_class = 'coder'
         self._generate_cfg_override = override
+
+
+class _LegacyPoolInstance:
+    """Instance with only the legacy ``_pool`` attribute (no ``_pool_ref``)."""
+
+    def __init__(self, pool):
+        self._pool = pool
+        self.agent_class = 'coder'
+        self._generate_cfg_override = None
 
 
 def _merge(llm=None, pool=None):
@@ -58,8 +69,15 @@ def _merge(llm=None, pool=None):
 class TestLogApiPostMerge:
     def test_lifted_from_router_default_llm_cfg(self):
         # The real source of truth: the flag lives in default_llm_cfg, NOT pool.llm_cfg.
+        # Also guards the pool back-reference: real instances expose `_pool_ref`, and an
+        # `_pool`-only lookup silently yields None (the BUG_0270 live no-op).
         pool = _FakePool(default_llm_cfg={'log_api_post': True})
         assert _merge(pool=pool).get('log_api_post') is True
+
+    def test_legacy_pool_attribute_still_resolves(self):
+        pool = _FakePool(default_llm_cfg={'log_api_post': True})
+        merged = LLMCallMixin._build_merged_cfg(_FakeLLM(), _LegacyPoolInstance(pool))
+        assert merged.get('log_api_post') is True
 
     def test_pool_llm_cfg_fallback_when_router_absent(self):
         pool = _FakePool(llm_cfg={'log_api_post': True})

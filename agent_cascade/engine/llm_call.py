@@ -1584,7 +1584,11 @@ class LLMCallMixin:
         # Inject pool-level settings that are read by LLM preprocessing but not sent to API.
         # These live in pool.llm_cfg (set via config handlers) and must be available in
         # generate_cfg for _preprocess_messages to consume them.
-        pool = getattr(instance, '_pool', None) or getattr(instance, 'pool', None)
+        # AgentInstance carries the back-reference as `_pool_ref` (set by
+        # pool/lifecycle.py, lifecycle_manager.py and session restore). `_pool`/`pool`
+        # are kept as legacy fallbacks; neither is set on modern instances.
+        pool = (getattr(instance, '_pool_ref', None) or getattr(instance, '_pool', None)
+                or getattr(instance, 'pool', None))
         live_llm_cfgs = []
         if pool:
             # Persisted General Settings LLM config (api_endpoints.json::default_llm_cfg).
