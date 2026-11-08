@@ -54,6 +54,7 @@ def _value(value_node: ast.AST) -> object:
     """Evaluate a value node that is a literal or a known settings name ref."""
     ns = {
         'SKILL_ALWAYS_PROTECTED_DEFAULT': _settings.SKILL_ALWAYS_PROTECTED_DEFAULT,
+        'format_skill_always_protected': _settings.format_skill_always_protected,
         'DEFAULT_WILD_READ_TRUNCATION_CHARS': _settings.DEFAULT_WILD_READ_TRUNCATION_CHARS,
         'SKILL_SCORE_SETTINGS': _settings.SKILL_SCORE_SETTINGS,
     }

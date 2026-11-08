@@ -182,12 +182,16 @@ class TestExistingSavePathsUnchanged:
 class TestProductionCallersUseSharedHelper:
 
     def test_security_handler_routes_save_through_helper(self):
-        """security_handler passes ``save_fn=engine.save_before_slot_yield`` into the
-        shared yield_caller_slot, so the single Path-3 fix covers its save."""
+        """security_handler routes its Path-3 save (engine.save_before_slot_yield) into the
+        shared yield_caller_slot via the save_fn= kwarg, so the single Path-3 fix covers its
+        save. (BUG_0265 batch-skip-save computes the save as ``_save_fn`` — None on a batch
+        skip — so the kwarg is now ``save_fn=_save_fn`` rather than a direct
+        ``save_fn=engine.save_before_slot_yield``; the coverage intent is unchanged.)"""
         from agent_cascade import security_handler
         src = inspect.getsource(security_handler)
         assert 'yield_caller_slot(' in src, 'security_handler must use the shared helper'
-        assert 'save_fn=engine.save_before_slot_yield' in src
+        assert 'engine.save_before_slot_yield' in src, 'security_handler must reference the Path-3 save'
+        assert 'save_fn=' in src, 'security_handler must route the save through the helper'
 
     def test_compression_invoker_routes_save_through_helper(self):
         """compression/agent_invoker passes ``save_fn=engine.save_before_slot_yield``

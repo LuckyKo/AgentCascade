@@ -72,7 +72,7 @@ ensure_workspace(WORKSPACE_DIR)
 #     endpoints of its own. It is intentionally NOT filtered by cooldown/blacklist.
 #   - Values are deliberately left as-is (do not "fix" them); they are only documented +
 #     logged at startup so the source of this fallback is visible in the logs.
-from agent_cascade.settings import SKILL_ALWAYS_PROTECTED_DEFAULT
+from agent_cascade.settings import SKILL_ALWAYS_PROTECTED_DEFAULT, format_skill_always_protected
 
 llm_cfg = {
     'model': 'whatever_is_on',
@@ -89,7 +89,7 @@ llm_cfg = {
     'memory_hint_skill_threshold': 0.0,
     'memory_hint_skill_autoload_enabled': True,
     'memory_hint_skill_autoload_threshold': 3,
-    'skill_always_protected': SKILL_ALWAYS_PROTECTED_DEFAULT,
+    'skill_always_protected': format_skill_always_protected(SKILL_ALWAYS_PROTECTED_DEFAULT),
 }
 # NOTE (Fix 4): the Tier-4 visibility log for this cfg is emitted in __main__ AFTER
 # init_logging() — logging a bare logger at module-import time would be dropped because

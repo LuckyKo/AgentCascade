@@ -3511,24 +3511,26 @@ class TestProposeSkillOverlapGate:
 
         base = _uid()
         # A second, overlapping incumbent so the notice is non-empty (self-exclusion is observable).
+        # The two descriptions share the SAME keyword cluster (redis/caching/eviction/strategies/
+        # memory/management/connection/pooling) in DIFFERENT word order. That decouples the two
+        # gates: shared terms push the SOFT keyword-overlap score up (>= SKILL_MATCH_THRESHOLD),
+        # while the word-order difference keeps the character-level difflib < SKILL_DUP_SIM_THRESHOLD
+        # (0.8), so the re-proposal still passes the HARD duplicate gate. (A naive "append distinct
+        # tokens" design fails: the distinct tokens carry higher IDF in a 2-skill corpus, which
+        # dilutes the keyword score below the floor while simultaneously pushing difflib up.)
         other_name = f"overlap-other-{base}"
         other_content = _make_skill_content(
             name=other_name,
-            description='Shared topic about redis caching and eviction strategies',
-            triggers=['redis', 'cache'],
+            description='redis caching eviction strategies memory management connection pooling',
+            triggers=['redis', 'cache', 'eviction'],
             generated_from_task='redis cache')
         assert m.register_skill_from_content(other_content, task_text='redis cache')[0]
 
-        # The incumbent being updated. Its description carries extra distinct tokens ("and session
-        # storage plus persistence tuning") so the re-proposal passes the HARD gate
-        # (< SKILL_DUP_SIM_THRESHOLD, 0.8) against BOTH its own name and the other incumbent, while
-        # the shared cluster keeps the soft overlap score >= floor (verified: difflib ~0.77 vs other,
-        # match-score ~0.60).
         name = f"overlap-self-{base}"
         content = _make_skill_content(
             name=name,
-            description='Shared topic about redis caching and eviction strategies and session storage plus persistence tuning',
-            triggers=['redis', 'cache'],
+            description='connection pooling memory management eviction strategies redis caching',
+            triggers=['redis', 'cache', 'eviction'],
             generated_from_task='redis cache')
         assert m.register_skill_from_content(content, task_text='redis cache')[0]
 

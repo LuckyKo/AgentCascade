@@ -889,6 +889,11 @@ def _make_integration_pool():
     pool.operation_manager.extra_work_folders_rw = []
     pool.operation_manager.enable_timeout = True
     pool.operation_manager.approval_timeout_seconds = 180
+    # This fake pool does not expose the KV-batch hints accessor; force it absent so
+    # security_handler takes the "no accessor -> full save/restore" path (both hints False),
+    # matching today's behavior. (A bare MagicMock auto-exposes it as a callable, which the
+    # production 2-tuple unpack then rejects with "not enough values to unpack".)
+    pool.operation_manager._get_approval_kv_batch_hints = None
     pool.instance_state = {}
     pool._execution = MagicMock()
     pool._execution._state_lock = threading.Lock()

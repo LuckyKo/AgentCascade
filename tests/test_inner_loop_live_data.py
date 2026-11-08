@@ -15,6 +15,7 @@ Run with: pytest tests/test_inner_loop_live_data.py -v
 
 import json
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -157,29 +158,35 @@ def feed_repeated_block(block: str, repetitions: int = 20):
 class TestFalsePositiveRate:
     """Ensure the detector doesn't fire too often on normal agent output."""
 
+    # The live log dir can hold tens of thousands of messages; feeding ALL of them through the
+    # streaming detector is O(N) and exceeds the test timeout on large corpora (measured 50k msgs).
+    # Draw a bounded, reproducible random sample (>= the minimum the assertion requires) so the FP
+    # rate stays statistically meaningful while the runtime stays bounded.
+    _FP_SAMPLE_SIZE = 2000
+
     @pytest.mark.skipif(LOG_DIR is None, reason='No log directory found')
     def test_fp_rate_below_5_percent(self):
         texts = extract_assistant_texts(LOG_DIR)
         assert len(texts) >= 1000, (f"Need ≥ 1000 assistant messages for a meaningful FP rate; "
                                     f"got {len(texts)} from {LOG_DIR}")
-
-        fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
-        rate = fp_count / len(texts) * 100
+        sample = random.Random(0).sample(texts, min(self._FP_SAMPLE_SIZE, len(texts)))
+        fp_count = sum(1 for t in sample if feed_chunks(t) is not None)
+        rate = fp_count / len(sample) * 100
 
         assert rate < 5.0, (f"False positive rate too high: {rate:.1f}% "
-                            f"({fp_count}/{len(texts)} messages triggered)")
+                            f"({fp_count}/{len(sample)} messages triggered)")
 
     @pytest.mark.skipif(LOG_DIR is None, reason='No log directory found')
     def test_fp_rate_below_1_percent_default(self):
         """Default params should keep FP < 1 %."""
         texts = extract_assistant_texts(LOG_DIR)
         assert len(texts) >= 500
-
-        fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
-        rate = fp_count / len(texts) * 100
+        sample = random.Random(1).sample(texts, min(self._FP_SAMPLE_SIZE, len(texts)))
+        fp_count = sum(1 for t in sample if feed_chunks(t) is not None)
+        rate = fp_count / len(sample) * 100
 
         assert rate < 3.0, (f"Default FP rate too high: {rate:.2f}% "
-                            f"({fp_count}/{len(texts)} messages)")
+                            f"({fp_count}/{len(sample)} messages)")
 
 
 # ===================================================================
