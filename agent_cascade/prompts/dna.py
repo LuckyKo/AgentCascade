@@ -629,7 +629,8 @@ TOOL_METADATA = {
     'system_info': {
         'description': (
             'Retrieves the current system information: operating system, current time and date, '
-            'work directories with their Docker container mount paths, Python version, and basic session stats. '
+            'work directories with their Docker container mount paths, Python version, the enabled MCP servers, '
+            'and basic session stats. '
             'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'),
         'parameters': {
             'help':

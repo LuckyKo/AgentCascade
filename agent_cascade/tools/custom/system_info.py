@@ -23,6 +23,14 @@ def _help_file_path() -> Path:
     return Path(__file__).resolve().parents[3] / 'config' / 'ac_system_help.yaml'
 
 
+def _mcp_servers_path() -> Path:
+    """Return the resolved path to the MCP servers config (config/mcp_servers.json).
+
+    Exposed at module level so tests can monkeypatch it.
+    """
+    return Path(__file__).resolve().parents[3] / 'config' / 'mcp_servers.json'
+
+
 def _pct(v) -> str:
     """Format a 0..1 ratio as a percentage string; 'n/a' for non-numeric/None."""
     return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else 'n/a'
@@ -316,6 +324,33 @@ class SystemInfo(BaseTool):
                 path_str = '<unknown>'
             return f"system_info help unavailable: {e}\n(Help file: {path_str})"
 
+    def _render_mcp_servers(self) -> str:
+        """Render the list of enabled MCP servers (name + description if present).
+
+        Reads config/mcp_servers.json; a server counts as enabled when its
+        ``enabled`` flag is True or absent (absent defaults to enabled, matching
+        the MCP config validator). Never raises; degrades to a clear message if
+        the config is missing, empty, or unreadable.
+        """
+        path = _mcp_servers_path()
+        if not path.exists():
+            return '  (no MCP servers configured)'
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception as e:
+            return f'  (MCP config unreadable: {e})'
+        if not isinstance(cfg, dict) or not cfg:
+            return '  (no MCP servers configured)'
+        lines = []
+        for name, spec in cfg.items():
+            if not isinstance(spec, dict) or not spec.get('enabled', True):
+                continue
+            desc = spec.get('description')
+            desc = desc.strip() if isinstance(desc, str) else ''
+            lines.append(f"  - {name} — {desc}" if desc else f"  - {name}")
+        return '\n'.join(lines) if lines else '  (no MCP servers enabled)'
+
     def call(self, params: str, **kwargs) -> str:
         # Optional help mode — return an editable reference section instead of system info.
         try:
@@ -553,6 +588,8 @@ class SystemInfo(BaseTool):
                 f"\n--- AgentCascade Server ---\n"
                 f"AgentCascade Version: {AC_VERSION}\n"
                 f"Server Address: {ac_server_str}\n"
+                f"\n--- MCP Servers ---\n"
+                f"{self._render_mcp_servers()}\n"
                 f"\n--- Workspace & Permissions ---\n"
                 f"{folders_info}"
                 f"\n--- Session Stats ---\n"

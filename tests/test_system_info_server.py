@@ -9,6 +9,7 @@ constructor `agent_pool` parameter, which is stored as self.agent_pool.
 No real server is started.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -77,6 +78,74 @@ class TestSystemInfoServer:
         tool = SystemInfo(agent_pool=None, agent_name='orchestrator')
         out = tool.call('')
         assert 'http://0.0.0.0:8765' in out
+
+
+class TestSystemInfoMcpServers:
+    """Tests for the enabled-MCP-servers section (name + description; disabled excluded)."""
+
+    def _tool(self):
+        return SystemInfo(agent_pool=None)
+
+    def test_enabled_listed_disabled_excluded_description_shown(self, monkeypatch, tmp_path):
+        """Enabled servers appear (with description if present); disabled ones are omitted."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text(json.dumps({
+            'chrome-devtools': {'command': 'npx', 'args': ['-y', 'x'], 'enabled': True,
+                               'description': 'Chrome DevTools MCP'},
+            'blender': {'command': 'uvx', 'args': [], 'enabled': False},
+            'no-flag': {'command': 'node', 'args': []},  # enabled absent -> defaults to enabled
+        }), encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        out = self._tool()._render_mcp_servers()
+        assert 'chrome-devtools — Chrome DevTools MCP' in out
+        assert 'no-flag' in out
+        assert 'blender' not in out
+
+    def test_missing_config_reports_none(self, monkeypatch, tmp_path):
+        """A missing config file degrades to a clear message, does not raise."""
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: tmp_path / 'nope.json')
+        assert 'no MCP servers configured' in self._tool()._render_mcp_servers()
+
+    def test_all_disabled_reports_none(self, monkeypatch, tmp_path):
+        """All servers disabled -> 'no MCP servers enabled'."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text(json.dumps({'x': {'command': 'npx', 'enabled': False}}), encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        assert 'no MCP servers enabled' in self._tool()._render_mcp_servers()
+
+    def test_mcp_section_in_full_output(self, monkeypatch, tmp_path):
+        """The --- MCP Servers --- section appears in the normal call() output."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text(json.dumps({'chrome-devtools': {'command': 'npx', 'enabled': True}}),
+                       encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        out = self._tool().call('')
+        assert '--- MCP Servers ---' in out
+        assert 'chrome-devtools' in out
+
+    def test_non_string_description_does_not_crash(self, monkeypatch, tmp_path):
+        """A non-string description (e.g. a number) is coerced to '' — no crash."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text(json.dumps({'x': {'command': 'npx', 'enabled': True, 'description': 123}}),
+                       encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        out = self._tool()._render_mcp_servers()
+        assert 'x' in out
+        assert '123' not in out  # the numeric description is dropped, not rendered
+
+    def test_corrupt_config_reports_unreadable(self, monkeypatch, tmp_path):
+        """A corrupt/truncated config file degrades to a clear message, does not raise."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text('{ not json', encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        assert 'MCP config unreadable' in self._tool()._render_mcp_servers()
+
+    def test_non_dict_server_entry_skipped(self, monkeypatch, tmp_path):
+        """A non-dict server entry is skipped gracefully (no crash)."""
+        cfg = tmp_path / 'mcp_servers.json'
+        cfg.write_text(json.dumps({'x': 'notadict'}), encoding='utf-8')
+        monkeypatch.setattr(system_info_module, '_mcp_servers_path', lambda: cfg)
+        assert 'no MCP servers enabled' in self._tool()._render_mcp_servers()
 
 
 class TestSystemInfoHelp:
