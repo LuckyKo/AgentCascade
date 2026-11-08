@@ -145,6 +145,22 @@ class TelemetryCollector:
         # Per-config aggregates for A/B comparison
         self._config_stats: Dict[str, Dict] = {}
 
+        # Per-instance TOTAL-token accumulator (cost/token-budget Slice 2).
+        # Session-lifetime, keyed by instance name; updated at the single
+        # record_llm_call_end choke point (under _telemetry_lock). Backs the
+        # tokens-mode budget warnings (run_loop) and the per-instance "budget
+        # consumed" reads that Slices 3 & 4 use. TOTAL (prompt+completion) —
+        # distinct from the per-class `tokens_generated` counter, which is
+        # completion-only. Each value tracks:
+        #   total_tokens : prompt+completion consumed, summed session-lifetime
+        #                  over every call (prompt is the server ground-truth
+        #                  once classified, else the char estimate)
+        #   cost         : Σ tokens_to_cost over CACHE-CLASSIFIED priced calls,
+        #                  accumulated with the identical usage tuple + gate as
+        #                  session_cost, so get_instance_cost ties out with it
+        #   priced       : True once any cache-classified priced call was seen
+        self._instance_usage: Dict[str, Dict[str, float]] = {}
+
         # Per-agent-class aggregates for the "Agent Class Usage" table.
         # Keyed by agent_class (one model can serve multiple classes now that the
         # fingerprint is model-only), so this is a separate accumulator from _config_stats.
@@ -743,6 +759,15 @@ class TelemetryCollector:
                     )
                     if _call_cost:
                         self._session_stats['session_cost'] += _call_cost
+                    # Attribute the SAME authoritative cost to the per-instance
+                    # accumulator here (not in the broad token block below): reusing
+                    # this _call_cost under the same cache-classified + priced gate
+                    # guarantees get_instance_cost ties out with session_cost — no
+                    # second, conflicting $ figure.
+                    _iu = self._ensure_instance_usage(instance_name)
+                    _iu['priced'] = True
+                    if _call_cost:
+                        _iu['cost'] += _call_cost
 
             # todo.md:105 / BUG_0101 — one greppable debug line per KV-cache miss so
             # unexpected prompt reprocesses can be tracked from console.log. The server's
@@ -806,6 +831,15 @@ class TelemetryCollector:
             if not call.get('cache_classified'):
                 self._session_stats['llm_cache_unknown'] += 1
 
+            # ── Per-instance TOTAL-token accumulator (Slice 2) ───────────────────
+            # "Budget consumed" for tokens-mode = prompt+completion summed session-
+            # lifetime over EVERY call, so the budget still advances on calls the
+            # server never classified. The $ cost is NOT accumulated here — it is
+            # attributed in the cache-waste block above, so it matches session_cost
+            # exactly. Read via get_instance_total_tokens() / get_instance_cost().
+            _iu = self._ensure_instance_usage(instance_name)
+            _iu['total_tokens'] = _iu['total_tokens'] + int(call['input_tokens_est'] or 0) + int(actual_output or 0)
+
             # Update active turn and per-config latency stats
             turn = self._active_turns.get(instance_name)
             if turn:
@@ -843,6 +877,55 @@ class TelemetryCollector:
                     self._ensure_agent_class_stats(ac)['tokens_generated'] += actual_output
 
         self._write_event(event)
+
+    def _resolve_instance_key(self, instance) -> str:
+        """Accept an instance name (str) or an object exposing `.instance_name`."""
+        if isinstance(instance, str):
+            return instance
+        return getattr(instance, 'instance_name', '') or ''
+
+    def _ensure_instance_usage(self, instance_name: str) -> Dict[str, float]:
+        """Return (creating if needed) this instance's accumulator row.
+
+        Caller must hold ``_telemetry_lock``. ``total_tokens`` accumulates over
+        every call; ``cost``/``priced`` are set only by the cache-classified cost
+        path, so per-instance cost stays in lockstep with ``session_cost``.
+        """
+        rec = self._instance_usage.get(instance_name)
+        if rec is None:
+            rec = self._instance_usage[instance_name] = {'total_tokens': 0, 'cost': 0.0, 'priced': False}
+        return rec
+
+    def get_instance_total_tokens(self, instance) -> int:
+        """Total tokens (prompt+completion, Σ over calls) consumed by one instance.
+
+        Read-only view of the session-lifetime per-instance accumulator — the
+        "budget consumed" signal used by tokens-mode warnings (run_loop) and
+        Slices 3 & 4. Named TOTAL to avoid colliding with the per-class
+        ``tokens_generated`` counter, which is completion-only. Returns 0 unknown.
+        """
+        with _telemetry_lock:
+            rec = self._instance_usage.get(self._resolve_instance_key(instance))
+            return int(rec['total_tokens']) if rec else 0
+
+    def get_instance_cost(self, instance) -> Optional[float]:
+        """Cost ($) for one instance, or None when the instance was never priced.
+
+        Accumulated from cache-classified priced calls with the identical usage
+        tuple as ``session_cost``, so the per-instance costs sum to the session
+        total. The ``None`` return mirrors ``cost.is_priced`` semantics so
+        consumers never render a misleading ``$0`` for an unpriced endpoint.
+        """
+        with _telemetry_lock:
+            rec = self._instance_usage.get(self._resolve_instance_key(instance))
+            if not rec or not rec.get('priced'):
+                return None
+            return float(rec['cost'])
+
+    def reset_instance_total_tokens(self, instance) -> None:
+        """Clear the per-instance accumulator (Slice 4 may re-baseline a run)."""
+        with _telemetry_lock:
+            self._instance_usage.pop(self._resolve_instance_key(instance), None)
 
     def record_tool_call_start(self, instance_name: str, tool_name: str):
         """Mark the start of a tool execution."""

@@ -144,6 +144,10 @@ def _make_engine(fresh_manager, tmp_path, max_turns=5, min_turns=2, extra_turns=
     pool.settings.auto_skill_min_turns = min_turns
     pool.settings.default_load_skill_mode = 'AUTO'
     pool.settings.tail_sync_check_enabled = False
+    # token_budget is a new default-OFF pool setting read via _get_pool_setting; a bare
+    # MagicMock auto-creates a truthy child → the token path would silently run. Pin to
+    # the production default (DEFAULT_TOKEN_BUDGET=0) so turns-mode stays byte-identical.
+    pool.settings.token_budget = 0
     pool.get_template.return_value = template
     pool.is_instance_terminated.return_value = False
     pool.has_pending.return_value = False

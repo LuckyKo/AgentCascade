@@ -540,6 +540,14 @@ def _handle_soft_turn_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
         agent_pool.settings.soft_turn_limit = bool(ui_cfg.get('soft_turn_limit', False))
 
 
+@register_config_handler('token_budget')
+def _handle_token_budget(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the pool-default token budget (generated tokens). 0 = disabled (default OFF)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('token_budget', 0))
+        agent_pool.settings.token_budget = max(0, val)
+
+
 @register_config_handler('max_auto_rollbacks')
 def _handle_max_auto_rollbacks(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update maximum automatic rollback attempts on detected loops.

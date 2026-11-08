@@ -46,6 +46,10 @@ def _make_engine(collector):
     pool.has_messages.return_value = False
     pool._compression_halted = set()
     pool.telemetry = collector
+    # token_budget is a new default-OFF pool setting read via _get_pool_setting; a bare
+    # MagicMock auto-creates a truthy child → the token path would silently run. Pin to
+    # the production default (DEFAULT_TOKEN_BUDGET=0) so turns-mode stays byte-identical.
+    pool.settings.token_budget = 0
     # A concrete template keeps record_turn_start's fingerprint/description
     # computation on the real code path (MagicMock attributes are not oracle
     # enough for hashlib).

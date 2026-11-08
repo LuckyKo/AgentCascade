@@ -87,6 +87,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'system_agent_idle_timeout_seconds', 'tail_sync_check_enabled', 'telegram_bridge_enabled',
     'tool_loop_detection_enabled', 'tool_loop_fuzzy_rollback_enabled', 'tool_result_max_chars',
     'user_message_log_enabled', 'wild_read_truncation_chars', 'work_access_folders_ro', 'work_access_folders_rw',
+    'token_budget',
 )
 
 # Top-level extra keys persisted to config/pool_settings.json (historical
@@ -528,7 +529,7 @@ def validate_registry() -> None:
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (103 / 3);
+      * the derived compat sets match their historical sizes (104 / 3);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -540,8 +541,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 103:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 103")
+    if len(POOL_SETTINGS_KEYS) != 104:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 104")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 

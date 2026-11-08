@@ -69,6 +69,44 @@ class SystemInfo(BaseTool):
                 continue
         return False
 
+    def _render_budget_block(self, inst) -> str:
+        """Compact self-scoped Budget/Cost block (Slice 4).
+
+        Returns '' when nothing is configured, so the block is ABSENT from the
+        default (no-``help``) output by default — no placeholder. Shown only when
+        this instance carries a ``token_budget`` OR its endpoint is priced.
+
+        ``consumed`` is this instance's OWN session-lifetime spend
+        (``get_instance_total_tokens``) — the descendant-inclusive subtree total
+        belongs to the ``call_agent`` completion message (Slice 3), not here.
+        ``$`` is rendered only when ``get_instance_cost`` returns a value; ``None``
+        (unpriced) never renders a misleading ``$0``.
+        """
+        telem = getattr(self.agent_pool, 'telemetry', None)
+        if telem is None:
+            return ''
+        try:
+            cost = telem.get_instance_cost(inst)
+        except Exception:
+            cost = None
+        token_budget = int(getattr(inst, 'token_budget', 0) or 0)
+        # Default-off gate: no token budget and unpriced → omit the whole block.
+        if token_budget <= 0 and cost is None:
+            return ''
+        try:
+            consumed = int(telem.get_instance_total_tokens(inst))
+        except Exception:
+            consumed = 0
+        lines = ['Budget / Cost:']
+        lines.append(f"  consumed: {consumed:,} tokens")
+        if token_budget > 0:
+            unit = getattr(inst, 'budget_unit', 'tokens') or 'tokens'
+            lines.append(f"  budget: {token_budget:,} tokens (budget_unit={unit})")
+            lines.append(f"  remaining: {max(0, token_budget - consumed):,} tokens")
+        if cost is not None:
+            lines.append(f"  cost: ${cost:.6f}")
+        return '\n'.join(lines)
+
     def _render_telemetry_dump(self) -> str:
         """Render a live, human-readable dump of the current session telemetry.
 
@@ -441,6 +479,10 @@ class SystemInfo(BaseTool):
             if inst is not None:
                 effective_max = getattr(inst, 'max_turns', None) or DEFAULT_MAX_TURNS
                 stats_str += f"\nCurrent Turn: {inst._current_turn} / {effective_max}"
+                # Slice 4: self-scoped budget/cost — present only when configured.
+                budget_block = self._render_budget_block(inst)
+                if budget_block:
+                    stats_str += '\n' + budget_block
         else:
             stats_str = 'Agent Pool not connected.\n' + stats_str
 

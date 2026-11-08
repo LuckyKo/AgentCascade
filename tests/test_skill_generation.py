@@ -1364,6 +1364,10 @@ class TestInLoopTrigger:
         pool.settings.auto_skill_extra_turns = extra_turns
         pool.settings.default_load_skill_mode = load_mode
         pool.settings.tail_sync_check_enabled = False
+        # token_budget is a new default-OFF pool setting read via _get_pool_setting; a
+        # bare MagicMock auto-creates a truthy child → the token path would silently run.
+        # Pin to the production default (DEFAULT_TOKEN_BUDGET=0) so turns-mode is unchanged.
+        pool.settings.token_budget = 0
         # BUG_0141 follow-up: soft_turn_limit must be set explicitly. A bare MagicMock
         # auto-creates a TRUTHY child mock, which the engine reads as soft-mode ON and
         # runs the turn loop to the absolute cap (1000) instead of hard-stopping —

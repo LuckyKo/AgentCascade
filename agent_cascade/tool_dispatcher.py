@@ -811,6 +811,14 @@ class ToolDispatcher:
                                instance_name)
                 return instance_name, agent_class, 'Error: call_agent requires agent_class.'
 
+        # token_budget (cost/token-budget Slice 2): optional, must be a positive int
+        # when present. Enforced here so an invalid value never reaches instance wiring.
+        if 'token_budget' in args and args['token_budget'] is not None:
+            requested_tok = args['token_budget']
+            if not isinstance(requested_tok, int) or isinstance(requested_tok, bool) or requested_tok < 1:
+                logger.warning('call_agent early exit - %s invalid token_budget=%r', caller_name, requested_tok)
+                return instance_name, agent_class, 'Error: call_agent token_budget must be a positive integer.'
+
         return instance_name, agent_class, None
 
     def _existing_instance_class_in_pool(self, instance_name: str) -> str:

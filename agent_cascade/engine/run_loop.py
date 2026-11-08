@@ -21,8 +21,9 @@ from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected
                                       MaxTokenExceeded)
 from agent_cascade.llm.schema import ASSISTANT, Message
 from agent_cascade.log import logger
-from agent_cascade.settings import (DEFAULT_MAX_TURNS, SOFT_TURN_LIMIT, SOFT_TURN_LIMIT_ABSOLUTE_MAX,
-                                    SOFT_TURN_LIMIT_WARNING_INTERVAL)
+from agent_cascade.budget_words import budget_allocation_notice, budget_limit_notice, budget_message
+from agent_cascade.settings import (DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, SOFT_TURN_LIMIT,
+                                    SOFT_TURN_LIMIT_ABSOLUTE_MAX, SOFT_TURN_LIMIT_WARNING_INTERVAL)
 from agent_cascade.tool_utils import clear_truncation_state
 from agent_cascade.utils.utils import msg_field
 
@@ -92,6 +93,23 @@ class RunLoopMixin:
             # Start False; set True during the auto-skill reflection extension (Phase 5) to
             # suppress the 50%/90% budget warnings for the fresh reflection turns (reset block below).
             _suppress_budget_warnings = False
+            # ── Tokens mode (cost/token-budget Slice 2) ─────────────────────────
+            # Additive second budget: when a token_budget is set (per-instance or
+            # pool setting), budget warnings are driven by the cumulative generated-token
+            # accumulator instead of the turn count. 0/None = disabled → these instance
+            # attributes are NEVER set and the turns path below stays byte-identical.
+            # The hard-cut toggle is REUSED from soft_turn_limit; no new toggle.
+            _token_budget = int(getattr(instance, 'token_budget', 0) or self._get_pool_setting('token_budget', DEFAULT_TOKEN_BUDGET) or 0)
+            if _token_budget > 0:
+                _tel = self._telemetry()
+                # Per-run baseline: this run's budget is measured from its own start,
+                # not the whole session (the accumulator is session-lifetime).
+                instance._token_budget = _token_budget
+                instance._token_baseline = _tel.get_instance_total_tokens(inst_name) if _tel is not None else 0
+                instance._token_warned_50 = False
+                instance._token_warned_90 = False
+                instance._token_final_fired = False
+                instance._token_last_warn_past = 0
 
             while turns_available > 0 or (soft_turn_limit and
                                           max_turns - turns_available < soft_limit_absolute_cap):
@@ -135,7 +153,8 @@ class RunLoopMixin:
                 final_turn_tools_disabled, _soft_limit_last_warn_past = self._run_budget_warnings(
                     instance, llm_messages, turns_available, max_turns, initial_turns_available,
                     soft_turn_limit, turns_50pct, turns_90pct, _suppress_budget_warnings,
-                    _soft_limit_last_warn_past)
+                    _soft_limit_last_warn_past,
+                    token_mode=bool(getattr(instance, '_token_budget', 0) > 0))
 
                 # Change 2 gate signal (todo149): True exactly when turns_available was 1 at the
                 # top of this iteration (i.e. this is the last turn of the ORIGINAL budget).
@@ -301,14 +320,88 @@ class RunLoopMixin:
                     suppress_budget_warnings)
         return _RunAction.PROCEED, max_turns, turns_available, suppress_budget_warnings
 
+    def _run_token_budget_warnings(self, instance: AgentInstance, llm_messages: List[Message],
+                                   soft_turn_limit: bool) -> Tuple[bool, int]:
+        """Tokens-mode budget warnings, driven by the total-token accumulator.
+
+        Mirrors ``_run_budget_warnings`` (50%/90%/final/soft-overage, same hard-cut
+        toggle via ``soft_turn_limit``) but counts TOTAL tokens (prompt+completion)
+        for this run (accumulator minus per-run baseline) instead of turns. Wording
+        comes from ``budget_message`` with ``unit='tokens'``; the ``$`` overlay is
+        shown only when the instance's endpoint is priced (``get_instance_cost``
+        returns it). Only reached when ``token_budget`` is set, so the turns path
+        is untouched.
+        """
+        final_turn_tools_disabled = False
+        last_warn_past = getattr(instance, '_token_last_warn_past', 0)
+        budget = int(getattr(instance, '_token_budget', 0) or 0)
+        if budget <= 0:
+            return final_turn_tools_disabled, last_warn_past
+
+        tel = self._telemetry()
+        name = instance.instance_name
+        consumed = (tel.get_instance_total_tokens(name) if tel is not None else 0) - int(getattr(instance, '_token_baseline', 0) or 0)
+        remaining = budget - consumed
+        cost = tel.get_instance_cost(name) if tel is not None else None
+        tok_50 = int(budget * 0.5)
+        tok_90 = int(budget * 0.1)
+
+        # 50% then 90% — each once. Both may fire on the same iteration if a single
+        # turn's generation jumps past both thresholds (same as turns-mode behaviour).
+        if not getattr(instance, '_token_warned_50', False) and remaining <= tok_50:
+            instance._token_warned_50 = True
+            warn_msg = budget_message('halfway', 'tokens', remaining=max(remaining, 0), total=budget, cost=cost)
+            self._append_and_log_to_llm(instance, self._make_user_message(warn_msg), llm_messages)
+        if not getattr(instance, '_token_warned_90', False) and remaining <= tok_90:
+            instance._token_warned_90 = True
+            warn_msg = budget_message('approaching', 'tokens', remaining=max(remaining, 0), total=budget, cost=cost)
+            self._append_and_log_to_llm(instance, self._make_user_message(warn_msg), llm_messages)
+
+        # Budget exhausted: warn once, and (hard mode) disable all tools exactly as
+        # the turns path does on its final turn.
+        if remaining <= 0 and not getattr(instance, '_token_final_fired', False):
+            instance._token_final_fired = True
+            kind = 'final_soft' if soft_turn_limit else 'final_hard'
+            final_msg = self._make_user_message(budget_message(kind, 'tokens'))
+            self._append_and_log_to_llm(instance, final_msg, llm_messages)
+            # No auto-skill / final-turn deferral here, unlike turns-mode's
+            # `if not _auto_skill_will_extend` guard: a reflection extension grants
+            # extra TURNS (and would only consume MORE tokens), so in tokens mode
+            # there is no pending fresh-budget signal to defer to — once the token
+            # budget is spent the cut is immediate (hard mode only).
+            if not soft_turn_limit:
+                template = self.pool.get_template(instance.agent_class)
+                if template and hasattr(template, 'function_map'):
+                    all_tools = list(template.function_map.keys())
+                    if all_tools:
+                        if not hasattr(instance, '_generate_cfg_override') or instance._generate_cfg_override is None:
+                            instance._generate_cfg_override = {}
+                        instance._generate_cfg_override['disabled_tools'] = all_tools
+                        final_turn_tools_disabled = True
+
+        # Soft mode: keep nudging every interval past the token budget.
+        if soft_turn_limit and remaining < 0:
+            past = -remaining
+            if past - last_warn_past >= SOFT_TURN_LIMIT_WARNING_INTERVAL:
+                over_msg = self._make_user_message(
+                    budget_message('over_limit', 'tokens', past=past, total=budget, cost=cost))
+                self._append_and_log_to_llm(instance, over_msg, llm_messages)
+                instance._token_last_warn_past = past
+                last_warn_past = past
+        return final_turn_tools_disabled, last_warn_past
+
     def _run_budget_warnings(self, instance: AgentInstance, llm_messages: List[Message], turns_available: int,
                              max_turns: int, initial_turns_available: int, soft_turn_limit: bool,
                              turns_50pct: int, turns_90pct: int, suppress_budget_warnings: bool,
-                             soft_limit_last_warn_past: int) -> Tuple[bool, int]:
+                             soft_limit_last_warn_past: int, token_mode: bool = False) -> Tuple[bool, int]:
         """Emit 50%/90%/final/soft-overage warnings for the current turn.
 
         Returns ``(final_turn_tools_disabled, soft_limit_last_warn_past)``.
         """
+        # Tokens mode drives the counter from the token accumulator instead of turns.
+        # Only taken when token_budget is set; the turns path below is byte-identical.
+        if token_mode:
+            return self._run_token_budget_warnings(instance, llm_messages, soft_turn_limit)
         final_turn_tools_disabled = False
         # Turn limit warnings (50%, 90%, final) — one-time only, emitted as SEPARATE USER messages.
         # Checked BEFORE decrement so max_turns=1 agents still get the final warning.
@@ -320,15 +413,11 @@ class RunLoopMixin:
         # that omits them — same as the final-turn warning. Bounded (<=2 messages) and does
         # not affect LLM context, which uses llm_messages.
         if not suppress_budget_warnings and turns_available == turns_50pct:
-            warn_msg = (f"[SYSTEM WARNING: Halfway through your turn budget. "
-                        f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
-                        f"Assess your progress and plan remaining steps.]")
+            warn_msg = budget_message('halfway', 'turns', remaining=turns_available, total=max_turns)
             warn_user = self._make_user_message(warn_msg)
             self._append_and_log_to_llm(instance, warn_user, llm_messages)
         if not suppress_budget_warnings and turns_available == turns_90pct:
-            warn_msg = (f"[SYSTEM WARNING: Turn limit approaching. "
-                        f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
-                        f"Plan your remaining steps carefully.]")
+            warn_msg = budget_message('approaching', 'turns', remaining=turns_available, total=max_turns)
             warn_user = self._make_user_message(warn_msg)
             self._append_and_log_to_llm(instance, warn_user, llm_messages)
         if turns_available == 1:
@@ -363,14 +452,9 @@ class RunLoopMixin:
             # the '[SYSTEM WARNING: Final turn' prefix).
             if initial_turns_available > 1:
                 if soft_turn_limit:
-                    final_msg = self._make_user_message(
-                        '[SYSTEM WARNING: Final turn. You have 1 turn left before the '
-                        'soft turn limit; tools stay enabled and the run will continue '
-                        'past the limit. Wrap up and deliver your results now.]')
+                    final_msg = self._make_user_message(budget_message('final_soft', 'turns'))
                 else:
-                    final_msg = self._make_user_message(
-                        f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task and tools have been disabled. "
-                        f"Wrap up and deliver your results now.]")
+                    final_msg = self._make_user_message(budget_message('final_hard', 'turns'))
                 self._append_and_log_to_llm(instance, final_msg, llm_messages)
 
             # Disable ALL tools on the last turn so agent is forced to
@@ -397,8 +481,7 @@ class RunLoopMixin:
             turns_past_limit = 1 - turns_available
             if turns_past_limit - soft_limit_last_warn_past >= SOFT_TURN_LIMIT_WARNING_INTERVAL:
                 over_msg = self._make_user_message(
-                    f"[SYSTEM WARNING: You are over the turn limit, please wrap up. "
-                    f"{turns_past_limit} turn(s) past the {max_turns}-turn limit.]")
+                    budget_message('over_limit', 'turns', past=turns_past_limit, total=max_turns))
                 self._append_and_log_to_llm(instance, over_msg, llm_messages)
                 soft_limit_last_warn_past = turns_past_limit
         elif turns_available > 0:
@@ -717,7 +800,8 @@ class RunLoopMixin:
             # extract_instance_output()
             # (which reads messages[-1]) returns the agent's actual output
             # with the warning.
-            turn_notice = '\n\n[Turn limit reached — results may be incomplete. Continue if needed.]'
+            turn_notice = budget_limit_notice(
+                'tokens' if getattr(instance, '_token_budget', 0) > 0 else 'turns')
             notice_appended = False
             if instance.conversation:
                 # Find the last assistant message with text content and

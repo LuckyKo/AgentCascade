@@ -769,6 +769,14 @@ TOOL_METADATA = {
                 'description':
                     'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
             },
+            'token_budget': {
+                'type':
+                    'integer',
+                'minimum':
+                    1,
+                'description':
+                    'Optional token budget (generated tokens) for sub-agent execution. Additive to max_turns; only honored when agent budgeting is enabled. If omitted, defaults to caller\'s budget. The sub-agent runs in tokens mode and is warned at 50%/90% and at the cap.'
+            },
             'load_skill': {
                 'oneOf': [{
                     'type':

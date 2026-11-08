@@ -17,7 +17,8 @@ from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_MAX_TURNS
+from agent_cascade.settings import DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET
+from agent_cascade.budget_words import budget_allocation_notice
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
@@ -364,8 +365,12 @@ class AgentLifecycleManager:
         # with a custom turn budget
         # This lets the sub-agent know its allocated turn limit upfront
         max_turns_info = ''
-        if 'max_turns' in args and isinstance(args['max_turns'], int) and args['max_turns'] > 0:
-            max_turns_info = f"\n\nYour turn budget for this task: {args['max_turns']} turns."
+        # Tokens mode takes precedence when a token_budget was requested; otherwise
+        # the turn-budget notice stays byte-identical (turns-mode unchanged).
+        if 'token_budget' in args and isinstance(args['token_budget'], int) and args['token_budget'] > 0:
+            max_turns_info = budget_allocation_notice(args['token_budget'], 'tokens')
+        elif 'max_turns' in args and isinstance(args['max_turns'], int) and args['max_turns'] > 0:
+            max_turns_info = budget_allocation_notice(args['max_turns'], 'turns')
 
         # Match main AC branch formatting behavior
         caller_prefix = f"This is a message from {caller}."
@@ -663,6 +668,28 @@ class AgentLifecycleManager:
                     instance.max_turns = min(requested_max, caller_max_turns)
             else:
                 instance.max_turns = caller_max_turns
+
+            # ── Tokens-mode budget (cost/token-budget Slice 2) ──────────────────
+            # Additive parallel to max_turns: instance.token_budget (0 = disabled).
+            # Gated on enable_agent_budgeting (default OFF); caller's token_budget is
+            # the hard cap. token_budget is in NON_LLM_KEYS so it must not leak to the
+            # LLM API (never written into _generate_cfg_override).
+            caller_token_budget = (
+                getattr(caller_inst, 'token_budget', 0) or getattr(
+                    self.pool.settings, 'token_budget', DEFAULT_TOKEN_BUDGET)
+                if hasattr(self.pool, 'settings') else getattr(caller_inst, 'token_budget', 0)
+            )
+            if call_agent_args and 'token_budget' in call_agent_args and enable_agent_budgeting:
+                requested_tok = call_agent_args['token_budget']
+                if not isinstance(requested_tok, int) or requested_tok < 1:
+                    logger.debug(f"Invalid token_budget={requested_tok} for {instance.instance_name}, using caller's")
+                    instance.token_budget = caller_token_budget
+                else:
+                    instance.token_budget = min(requested_tok, caller_token_budget) if caller_token_budget else requested_tok
+                instance.budget_unit = 'tokens'
+            else:
+                instance.token_budget = caller_token_budget
+                instance.budget_unit = getattr(caller_inst, 'budget_unit', 'turns')
 
             target_template = self.pool.get_template(agent_class)
             if not target_template or not getattr(target_template, 'llm', None):

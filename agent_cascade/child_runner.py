@@ -5,6 +5,8 @@ Unifies the duplicated execution paths from tool_dispatcher.py, agent_pool.py,
 and api_integration.py (root agent recovery). See DESIGN_REWRITE.md §4.3.
 """
 
+import time
+
 from agent_cascade.compression.helpers import extract_instance_output
 from agent_cascade.log import logger
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
@@ -20,20 +22,78 @@ class ChildAgentFailedError(Exception):
 # ── Helper functions ────────────────────────────────────────────────────────
 
 
+def _format_elapsed(elapsed_s: float) -> str:
+    """Format elapsed seconds as 'Xm Ys' (>= 60s) or 'Ys' (< 60s)."""
+    total = int(round(float(elapsed_s)))
+    if total < 60:
+        return f"{total}s"
+    minutes, seconds = divmod(total, 60)
+    return f"{minutes}m {seconds}s"
+
+
+def _sum_subtree_tokens(pool, inst) -> int:
+    """Sum get_instance_total_tokens over *inst* + every descendant.
+
+    Walks the per-instance ``_child_instances`` tree (names) resolved via the pool,
+    cycle-safe (``seen`` guard). Totals are exact when no descendant is dismissed
+    during the run: dismissal prunes the child's name from every parent's
+    ``_child_instances`` (pool/lifecycle.py), so a mid-run-dismissed descendant — and
+    its whole subtree — is never reached and drops out of the sum. The walk can
+    therefore only ever UNDER-count, never inflate, a total. Returns 0 when telemetry
+    is unavailable.
+    """
+    telem = getattr(pool, 'telemetry', None) if pool is not None else None
+    if telem is None:
+        return 0
+    root = getattr(inst, 'instance_name', '') or ''
+    if not root:
+        return 0
+    total = 0
+    seen = set()
+    frontier = [root]
+    while frontier:
+        name = frontier.pop()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            total += int(telem.get_instance_total_tokens(name))
+        except Exception:
+            pass  # telemetry must never break result formatting
+        child_inst = pool.get_instance(name) if pool is not None else None
+        if child_inst is not None:
+            for c in list(getattr(child_inst, '_child_instances', []) or []):
+                if c not in seen:
+                    frontier.append(c)
+    return total
+
+
 def _format_result(
     instance_name: str,
     result: str,
     was_terminated: bool = False,
     was_stopped: bool = False,
     prefix: str = 'Agent',
+    elapsed_s: float = None,
+    total_tokens: int = None,
 ) -> str:
-    """Format child agent result string with explicit prefix."""
+    """Format child agent result string with explicit prefix.
+
+    When both ``elapsed_s`` and ``total_tokens`` are supplied (the Completed branch of
+    ``run_child_core``), the completion tag is enriched to
+    ``[Agent 'X' Completed in 3m 12s, tokens: 42,190]:`` — tokens is the child's total
+    INCLUDING all its sub-agents. Omitting them keeps the legacy bare
+    ``Completed]:`` shape for any other caller.
+    """
     if was_stopped:
         return f"[{prefix} '{instance_name}' Stopped]: Execution was stopped by user.\n{result}"
     elif was_terminated:
         return f"[{prefix} '{instance_name}' Terminated]:\n{result}"
     else:
-        return f"[{prefix} '{instance_name}' Completed]:\n{result}"
+        suffix = ''
+        if elapsed_s is not None and total_tokens is not None:
+            suffix = f" in {_format_elapsed(elapsed_s)}, tokens: {total_tokens:,}"
+        return f"[{prefix} '{instance_name}' Completed{suffix}]:\n{result}"
 
 
 def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
@@ -259,6 +319,7 @@ def run_child_core(
     if not force_fresh:
         force_fresh = _determine_force_fresh(agent_class)
 
+    _child_start = time.monotonic()  # Slice 3: elapsed for the completion message
     try:
         inst, conv = engine._create_and_run_agent(
             agent_class,
@@ -312,10 +373,16 @@ def run_child_core(
         detail = _failure_detail(pool, instance_name, inst, conv, reason=reason)
         raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.\n{detail}")
 
+    # Slice 3: enrich the completion tag with elapsed time and the child's total
+    # tokens INCLUDING all sub-agents (walked recursively via _child_instances).
+    total_tokens = _sum_subtree_tokens(pool, inst)
+    elapsed_s = time.monotonic() - _child_start
     return _format_result(
         instance_name=instance_name,
         result=result,
         was_terminated=was_terminated,
         was_stopped=was_stopped,
         prefix=prefix,
+        elapsed_s=elapsed_s,
+        total_tokens=total_tokens,
     )

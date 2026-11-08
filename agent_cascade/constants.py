@@ -224,6 +224,8 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'completion_classifier_enabled',
     'max_turns',
     'soft_turn_limit',
+    'token_budget',  # Cost/token-budget Slice 2: execution control, must NOT leak to LLM API
+    'budget_unit',   # Cost/token-budget Slice 2: 'turns'|'tokens' mode marker, execution control only
     'enable_agent_budgeting',
     'allow_parallel_agents',
     'state_kv_save_enabled',

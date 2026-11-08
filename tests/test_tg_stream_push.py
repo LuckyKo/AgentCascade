@@ -146,6 +146,10 @@ def _make_engine(fresh_manager, tmp_path, *, max_turns=3, min_turns=99, extra_tu
     pool.settings.auto_skill_extra_turns = extra_turns  # pin to int (MagicMock auto-attr would poison turns_available)
     pool.settings.default_load_skill_mode = 'AUTO'
     pool.settings.tail_sync_check_enabled = False
+    # token_budget is a new default-OFF pool setting read via _get_pool_setting; a bare
+    # MagicMock auto-creates a truthy child → the token path would silently run. Pin to
+    # the production default (DEFAULT_TOKEN_BUDGET=0) so turns-mode stays byte-identical.
+    pool.settings.token_budget = 0
     # _is_terminal_stop reads these off the pool: stopped=False and a stable generation
     # keep the run alive (the stop-mid-run test drives its own terminal-stop mock).
     pool.stopped = False

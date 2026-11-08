@@ -26,7 +26,7 @@ from agent_cascade.settings import (
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
-    DEFAULT_MAX_TURNS, DISMISS_THREAD_JOIN_TIMEOUT, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
+    DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, DISMISS_THREAD_JOIN_TIMEOUT, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
     LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, TOOL_LOOP_FUZZY_ROLLBACK_ENABLED)
 
@@ -271,6 +271,20 @@ class AgentInstance:
     is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)
     restricted_shell: bool = False  # Set True in _create_system_agent; shell_cmd hard-rejects non-read-only commands (no user approval for system agents)
     max_turns: Optional[int] = None  # Per-instance turn limit (None = use default 50)
+    # Cost/token-budget Slice 2: additive per-instance budget on TOTAL (prompt+
+    # completion) tokens. 0 = disabled (default OFF) so turns-mode is unchanged. Set by
+    # call_agent (gated on enable_agent_budgeting) and read by run_loop tokens mode.
+    token_budget: int = 0
+    budget_unit: str = 'turns'  # 'turns' | 'tokens'; carried for child budget mode display/intent
+    # Cost/token-budget Slice 2 runtime state: set by run_loop only when token_budget > 0.
+    # Declared as fields so AgentInstance's __slots__ accepts them (slotted dataclass);
+    # default OFF → turns-mode path is byte-identical when token_budget == 0.
+    _token_budget: int = 0  # Effective token budget for the current run (resolved value)
+    _token_baseline: int = 0  # Session token accumulator at run start (per-run baseline)
+    _token_warned_50: bool = False  # 50% token warning already emitted this run
+    _token_warned_90: bool = False  # 90% token warning already emitted this run
+    _token_final_fired: bool = False  # Final token-budget cut already fired this run
+    _token_last_warn_past: int = 0  # Last logged token "past" count (debounce for warnings)
     _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
     _turn_consumed: bool = field(
         default=False
@@ -940,6 +954,11 @@ class PoolSettings:
     # Soft turn limit: allow the run to continue past max_turns (with periodic wrap-up
     # warnings) up to settings.SOFT_TURN_LIMIT_ABSOLUTE_MAX. Default OFF = hard stop.
     soft_turn_limit: bool = SOFT_TURN_LIMIT
+    # Cost/token-budget Slice 2: pool-default token budget (generated tokens), a
+    # SECOND budget alongside the turn limit. 0 = disabled (default OFF) so the
+    # turns path stays byte-identical. Per-instance token_budget (call_agent) takes
+    # precedence; this is the fallback for instances that carry no per-instance value.
+    token_budget: int = DEFAULT_TOKEN_BUDGET
     auto_rollback_on_loop: bool = True  # Auto-rollback on detected loops (loop recovery toggle)
 
     # Two-tier loop detection (2026-08 redesign).
