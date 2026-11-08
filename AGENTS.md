@@ -3,6 +3,12 @@
 Conventions for AI agents (and humans) working in this repo. Keep this file short and
 actionable — it is read by agents with limited context.
 
+## Official documentation
+- `docs/SYSTEM_DOCS.md` is the authoritative system reference (architecture, components,
+  data flow, key mechanisms). **When you add a subsystem or change a key mechanism, update
+  the matching section (and the TOC) in the same commit.** A stale SYSTEM_DOCS misleads the
+  next agent.
+
 ## Build / test
 - Scoped tests: `python -m pytest tests/<file> -q`. Full suite only at milestones.
 - Pre-commit hooks auto-fix line endings / whitespace / quotes. Expect **1 retry** on

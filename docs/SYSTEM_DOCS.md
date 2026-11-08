@@ -17,6 +17,7 @@
 7. [Agent Templates & DNA](#7-agent-templates--dna)
 8. [WebUI Architecture](#8-webui-architecture)
 9. [Memory-Hint System](#9-memory-hint-system)
+10. [Tool System & MCP Discovery](#10-tool-system--mcp-discovery)
 
 ---
 
@@ -1304,6 +1305,39 @@ The gate internals (`GAP`, `FLOOR_*`, `EWMA_ALPHA`, `MAX_HINTS_PER_TURN`, `SKILL
 - **E2E:** `tests/memory_hint/test_memory_hint_e2e.py` (submit → worker → tool-warning drain path).
 
 Run the full `tests/memory_hint/` suite serially (per lesson `pytest-docker-subprocess-hang`, host `shell_cmd` is reliable for pytest; avoid code_interpreter subprocesses).
+
+---
+
+## 10. Tool System & MCP Discovery
+
+Agent Cascade offers two classes of tools to the LLM:
+
+- **Core tools** (file ops, `shell_cmd`, web, `call_agent`, `tool_search`, …) — always present in the offered `functions=` set.
+- **MCP tools** (from connected Model Context Protocol servers, e.g. `chrome-devtools`, `blender`) — *deferred*: they are **not** in the offered set until an agent discovers them.
+
+### 10.1 Why MCP Tools Are Deferred
+
+Offering every MCP tool on every call bloats the `functions=` payload (each tool definition is ~200–500 tokens). With dozens of MCP tools that is thousands of tokens per call for tools the agent rarely uses. Deferral keeps the offered set small (core tools only) and lets the agent pull MCP tools in on demand.
+
+### 10.2 `tool_search` — On-Demand Discovery
+
+`tool_search` is the discovery mechanism:
+
+- **Search mode** (`query` non-empty): ranks the not-yet-unlocked MCP tools by BM25 relevance to the query and **unlocks** the top matches for the next call. Unlocked names are appended to the instance's discovered set, so they appear in the offered `functions=` set from the following turn.
+- **Catalog mode** (`query` empty): a read-only listing of all *enabled* MCP tools (grouped by server, one-line description each), for orienting without unlocking anything.
+
+Unlocks are **append-only** on the instance's discovered set; a tool, once discovered, stays offered for the rest of the session. The result carries a trailing JSON envelope (`{"tool_search": {"loaded": [...]}}`) that `session_io` re-derives on load, so a reloaded session offers the same tools.
+
+### 10.3 The Cache-Bust Cost (Important)
+
+The `functions=` array is serialized into the prompt **right after the system prompt** — i.e. inside the KV-cache prefix. Because the cache is strictly prefix-based:
+
+- **Any change to the offered tool set** (unlocking a new MCP tool) **invalidates the entire prefix** → a full prefill of the whole conversation at ~0% cache hit.
+- This is a **one-time cost per array change**: the first call after an unlock pays the full prefill; subsequent calls with the same tool set are back to ~97–99% cache hits.
+
+**Trade-off:** deferral saves tokens on *every* call, but each unlock pays a full prefill. That is acceptable when unlocks are rare (a few per session) and not when an agent drip-unlocks tools one at a time — prefer a single `tool_search` that grabs everything the task will need.
+
+> **Note:** an earlier plan claimed the "append-only discovered tail preserves the prefix." That is **false** for a prefix-based KV cache — appending to the serialized tool array changes the prefix, so *every* unlock is a full prefill. The deferral win is token savings, not cache preservation.
 
 ---
 
