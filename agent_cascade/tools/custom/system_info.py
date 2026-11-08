@@ -107,6 +107,11 @@ class SystemInfo(BaseTool):
                              f"unknown={session.get('llm_cache_unknown', 0)}")
                 lines.append(f"    hit_ratio={_pct(session.get('llm_cache_hit_ratio'))}   "
                              f"coverage={_pct(session.get('llm_cache_classified_ratio'))}")
+                waste_line = (f"    wasted_tokens={session.get('llm_wasted_tokens', 0)}  "
+                              f"waste_events={session.get('llm_waste_count', 0)}")
+                if 'llm_wasted_cost' in session:
+                    waste_line += f"  wasted_cost=${session['llm_wasted_cost']:.6f}"
+                lines.append(waste_line)
 
             # llm_calls_by_model — per-model call counts
             by_model = session.get('llm_calls_by_model') or {}

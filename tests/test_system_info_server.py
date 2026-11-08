@@ -216,6 +216,8 @@ class _FakeTelemetry:
             'llm_cache_unknown': 0,
             'llm_cache_hit_ratio': 0.857,
             'llm_cache_classified_ratio': 1.0,
+            'llm_wasted_tokens': 12345,
+            'llm_waste_count': 2,
         }
 
     def get_config_comparison(self):
@@ -272,6 +274,7 @@ class TestSystemInfoTelemetryDump:
         assert 'hits=6  misses=1  unknown=0' in out
         assert 'hit_ratio=85.7%' in out
         assert 'coverage=100.0%' in out
+        assert 'wasted_tokens=12345  waste_events=2' in out
         # Config fingerprint A/B — per-model cache column (BUG_0260)
         assert 'abc123def456' in out
         assert 'model=qwen3.8-27b' in out
@@ -286,6 +289,19 @@ class TestSystemInfoTelemetryDump:
         assert 'top_mode=auto' in out
         # Export pointer
         assert '/api/telemetry/export' in out
+
+    def test_waste_cost_shown_only_when_priced(self):
+        """wasted_cost=$ renders only when the session summary carries the key (MODEL_PRICING set)."""
+        class _Priced(_FakeTelemetry):
+            def get_session_summary(self):
+                d = super().get_session_summary()
+                d['llm_wasted_cost'] = 0.0123
+                return d
+        out = self._tool_with(_Priced()).call('{"help": "telemetry"}')
+        assert 'wasted_cost=$0.012300' in out
+        # Unpriced default: the base _FakeTelemetry has no llm_wasted_cost key.
+        out_unpriced = self._tool_with(_FakeTelemetry()).call('{"help": "telemetry"}')
+        assert 'wasted_cost=' not in out_unpriced
 
     def test_case_insensitive(self):
         out = self._tool_with(_FakeTelemetry()).call('{"help": "TELEMETRY"}')
