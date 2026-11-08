@@ -12,12 +12,58 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from agent_cascade.llm.schema import ROLE, SYSTEM, USER, Message
+from agent_cascade.llm.schema import ROLE, SYSTEM, USER, FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from ..agent_instance import AgentInstance
+
+
+def _rederive_discovered_mcp_tools(messages) -> list:
+    """Re-derive ``_discovered_mcp_tools`` from a session log's message history.
+
+    Session reload restores a fresh AgentInstance with no discovered-MCP tail; without
+    re-derivation, tools unlocked before the reload would silently drop out of the offered
+    set. The ONLY stable parse target is the trailing JSON envelope that ``tool_search``
+    emits (F2) — never free text. Scans ``role==FUNCTION`` results named ``tool_search``
+    and, per message, walks lines from the END to the first that json-loads to a dict
+    containing the ``TOOL_SEARCH_ENVELOPE_KEY`` envelope, reading its ``DISCOVERED_KEY``
+    list. Names are collected in first-seen order, deduped. Any parse failure degrades to
+    skipping that message (never raises into load).
+    """
+    from agent_cascade.tools.search_tools.tool_search import TOOL_SEARCH_ENVELOPE_KEY, DISCOVERED_KEY
+
+    # ``tool_search``'s registered name == its envelope key by design (the envelope is keyed
+    # by the tool's own name); imported rather than hardcoded so the two never drift.
+    discovered: list = []
+    seen = set()
+    for msg in messages:
+        try:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get(ROLE) != FUNCTION or msg.get('name') != TOOL_SEARCH_ENVELOPE_KEY:
+                continue
+            content = msg.get('content')
+            if not isinstance(content, str):
+                continue
+            for line in reversed(content.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict) and TOOL_SEARCH_ENVELOPE_KEY in parsed:
+                    for name in (parsed[TOOL_SEARCH_ENVELOPE_KEY].get(DISCOVERED_KEY) or []):
+                        if name not in seen:
+                            seen.add(name)
+                            discovered.append(name)
+                    break
+        except Exception as e:  # defensive: a malformed history must never abort a load
+            logger.debug(f'_rederive_discovered_mcp_tools: skipping message due to parse error: {e}')
+    return discovered
 
 
 class SessionIOMixin:
@@ -647,6 +693,15 @@ class SessionIOMixin:
             # and find_or_create_instance(), which set it on `self` (the AgentPool); done inside the
             # same state lock that installs the instance.
             new_inst._pool_ref = self
+            # Re-derive the deferred-MCP discovery tail from the FULL prior history (``cleaned``)
+            # so a resumed instance offers the tools it had already unlocked, without needing to
+            # re-search. Read from ``cleaned`` (the full loaded dict list), not the in-memory
+            # working set. Set even when empty so the attribute is always a plain list.
+            try:
+                new_inst._discovered_mcp_tools = _rederive_discovered_mcp_tools(cleaned)
+            except Exception as e:  # defensive: discovery restore must never abort a load
+                logger.debug(f'[DISCOVERY] re-derive _discovered_mcp_tools failed for {instance_name}: {e}')
+                new_inst._discovered_mcp_tools = []
             self._instances_version += 1
 
             # FIX (todo.md:155): On RESTART the root agent is restored here, NOT via

@@ -84,6 +84,70 @@ class SleepAction(Enum):
     BREAK_LOOP = auto()  # Transitioned to COMPLETING/TERMINATED, exit while loop
 
 
+# Fraction of the deferred (MCP) set that, once exceeded by an instance's discovered tail,
+# is worth a warning (0.5 = half). The deferred-tool token win erodes as more deferred
+# tools are unlocked; off-state: an empty deferred set skips the check entirely.
+_MCP_DISCOVERY_WARN_FRACTION = 0.5
+
+
+def order_offered_tool_names(func_map: dict, disabled: set, instance=None) -> list:
+    """Order the tool NAMES this agent should be offered, with MCP tools deferred.
+
+    Three-part deterministic assembly — the single source of truth for the offered set:
+      1. ``core`` — non-deferred names not disabled, SORTED by name. Deferred membership is
+         ``MCPManager.is_mcp_tool`` (no per-tool flag). Unchanged core ordering keeps the
+         prompt prefix byte-stable across turns (helpers sort-for-KV-cache invariant).
+      2. ``discovered`` tail — deferred names this ``instance`` has unlocked, in the
+         instance's append order (NEVER re-sorted), each still present in ``func_map`` and
+         not hard-disabled. Read-only wrt the instance list: the dispatcher thread is the
+         sole writer (tool_search appends), the main loop reads (F5 — no lock).
+      3. Undiscovered deferred names are omitted entirely (the token win).
+
+    Hard-disable precedence holds for both parts: a discovered name later hard-disabled (a
+    per-tool UI toggle or the ``__all_mcp_tools__`` sentinel) is dropped — discovery never
+    overrides a hard disable. The ``__all_mcp_tools__`` sentinel is EXPANDED here (not by the
+    callers): when present it disables every deferred (MCP) tool in ``func_map``. Doing the
+    fold in the single source of truth means no caller (``agent._get_active_functions``,
+    ``_get_active_functions_from_template``, ReAct Seam D) can silently skip it. When
+    ``instance`` is None (class/template-level UI builders) there is no discovered tail — only
+    core is offered, which is exactly the per-agent tool-toggle view.
+    """
+    from agent_cascade.tools.mcp_manager import MCPManager
+
+    deferred = {name for name in func_map if MCPManager.is_mcp_tool(name)}
+    # Expand the __all_mcp_tools__ sentinel to its members (the deferred names present in
+    # func_map). Deferred membership == MCPManager._registered_tool_names, so this matches the
+    # member set the old per-caller fold used. ``disabled`` is rebinding, not in-place, so the
+    # caller's set is never mutated.
+    if '__all_mcp_tools__' in disabled:
+        disabled = disabled | deferred
+
+    offered = [name for name in sorted(func_map) if name not in deferred and name not in disabled]
+
+    if instance is not None:
+        discovered = getattr(instance, '_discovered_mcp_tools', None) or []
+        seen = set(offered)
+        unlocked = 0
+        for name in discovered:
+            # ``in func_map`` prunes tools whose server disconnected since discovery.
+            if name in deferred and name in func_map and name not in disabled and name not in seen:
+                offered.append(name)
+                seen.add(name)
+                unlocked += 1
+        if deferred and unlocked > _MCP_DISCOVERY_WARN_FRACTION * len(deferred):
+            logger.warning(
+                f"[{getattr(instance, 'instance_name', 'UNKNOWN')}] discovered MCP tail "
+                f"({unlocked}/{len(deferred)}) exceeds {_MCP_DISCOVERY_WARN_FRACTION:.0%} of the deferred "
+                f"set — the deferred-tool token win is largely eroded for this instance.")
+
+    return offered
+
+
+def order_offered_tool_functions(func_map: dict, disabled: set, instance=None) -> list:
+    """Function schemas for the names in ``order_offered_tool_names`` (see that function)."""
+    return [func_map[name].function for name in order_offered_tool_names(func_map, disabled, instance)]
+
+
 def _get_active_functions_from_template(template, instance=None, pool=None) -> list:
     """
     Build the list of active function schemas from a template's function_map,
@@ -150,15 +214,12 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
         logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
 
-    # Sort by name to ensure deterministic output across retries (KV cache prefix)
-    # Handle MCP tools sentinel: if __all_mcp_tools__ is in disabled, block all registered MCP tools
-    disable_all_mcp = '__all_mcp_tools__' in disabled
-    if disable_all_mcp:
-        from agent_cascade.tools.mcp_manager import MCPManager
-        registered_names = MCPManager._registered_tool_names.copy()
-        disabled |= {name for name in func_map.keys() if name in registered_names}
-
-    return [func.function for name, func in sorted(func_map.items()) if name not in disabled]
+    # Deferral-aware assembly (single source of truth for the offered set): sorted core
+    # first (unchanged -> stable prefix) + this instance's discovered MCP tail in discovery
+    # order, minus hard-disabled. The __all_mcp_tools__ sentinel is expanded INSIDE
+    # order_offered_tool_names, so it is not repeated here (DRY + no caller can skip it).
+    # Undiscovered deferred tools are omitted. See order_offered_tool_names().
+    return order_offered_tool_functions(func_map, disabled, instance)
 
 
 def estimate_instance_tool_schema_tokens(instance, pool=None) -> int:

@@ -1478,7 +1478,13 @@ def _build_agents_list(pool: AgentPool) -> list:
             continue
         try:
             agent_type = getattr(template, 'agent_type', 'orchestrator').lower()
-            tools_list = list(getattr(template, 'function_map', {}).keys())
+            # Deferral-aware: build the toggleable universe via the single-source-of-truth
+            # assembler so individual deferred MCP tools do NOT leak as per-agent checkboxes
+            # (MCP discovery is dynamic via tool_search, not a per-agent toggle). disabled=set()
+            # keeps currently-disabled core tools in the list (still toggleable); instance=None
+            # -> no discovered tail. See engine/helpers.order_offered_tool_names.
+            from agent_cascade.engine.helpers import order_offered_tool_names
+            tools_list = order_offered_tool_names(getattr(template, 'function_map', {}), set())
             default_tools = getattr(template, 'default_tools', tools_list)
             agents_list.append({
                 'name': getattr(template, 'name', f'Agent-{idx}'),

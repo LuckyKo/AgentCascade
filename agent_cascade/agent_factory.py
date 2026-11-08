@@ -145,6 +145,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         elif tool_name == 'load_skill':
             t = LoadSkill(agent_pool=agent_pool)
             tools_to_register[tool_name] = (t, False, False)
+        elif tool_name == 'tool_search':
+            from agent_cascade.tools.search_tools.tool_search import ToolSearch
+            tools_to_register[tool_name] = (ToolSearch(), False, False)
         else:
             logger.debug("Unknown tool '%s' in AVAILABLE_TOOLS — skipping", tool_name)
 

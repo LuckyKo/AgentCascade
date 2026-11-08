@@ -71,8 +71,22 @@ class ReActChat(FnCallAgent):
         )
 
     def _run(self, messages: List[Message], lang: Literal['en', 'zh'] = 'en', **kwargs) -> Iterator[List[Message]]:
-        disabled_tools = self._get_disabled_tool_names()
-        text_messages = self._prepend_react_prompt(messages, lang=lang, disabled_tools=disabled_tools)
+        # F1/Seam D: the offered set must be deferral-aware (core + this instance's discovered
+        # MCP tail), resolved by the same Seam A resolver as every other path. instance/pool are
+        # not engine-supplied for ReAct (it is never engine-driven), so they arrive via kwargs by
+        # contract; both default to None -> core-only offered set, which is the correct fallback.
+        #
+        # KNOWN LIMITATION (MCP-deferral, intentional): ReAct is UNSUPPORTED for deferred MCP
+        # discovery. Its tool dispatch calls self._call_tool(...) which passes agent_obj=self
+        # (a ReActChat, which has no .pool), so tool_search._resolve_context returns
+        # (None, None) and never unlocks anything. A ReAct agent therefore gets CORE-ONLY tools
+        # under MCP-deferral — zero MCP access, forever. The resolver is wired here only so the
+        # offered-set path matches the other engines (core selection + __all_mcp_tools__ parity),
+        # NOT to enable ReAct discovery. Follow-up ticket: thread a real pool into ReAct's
+        # dispatch (or drop ReAct) if MCP-under-ReAct is ever required.
+        instance = kwargs.get('instance')
+        pool = kwargs.get('pool')
+        text_messages = self._prepend_react_prompt(messages, lang=lang, instance=instance, pool=pool)
 
         num_llm_calls_available = MAX_LLM_CALL_PER_RUN
         response: str = 'Thought: '
@@ -112,10 +126,16 @@ class ReActChat(FnCallAgent):
                 action_input = '\n' + action_input
             text_messages[-1].content += thought + f'\nAction: {action}\nAction Input: {action_input}' + observation
 
-    def _prepend_react_prompt(self, messages: List[Message], lang: Literal['en', 'zh'], disabled_tools: List[str] = None) -> List[Message]:
-        disabled_tools = disabled_tools or []
+    def _prepend_react_prompt(self, messages: List[Message], lang: Literal['en', 'zh'],
+                              instance=None, pool=None) -> List[Message]:
+        # Deferral-aware offered set (same single source of truth as every other path): select
+        # names via _get_active_functions_from_template (sorted core + this instance's discovered
+        # MCP tail, minus hard-disables including __all_mcp_tools__), then map back to tool
+        # objects. Undiscovered deferred MCP tools are omitted -> no token leak into the ReAct prompt.
+        from agent_cascade.engine.helpers import _get_active_functions_from_template
+        names = [f['name'] for f in _get_active_functions_from_template(self, instance, pool)]
+        active_tools = [self.function_map[n] for n in names if n in self.function_map]
         tool_descs = []
-        active_tools = [tool for name, tool in self.function_map.items() if name not in disabled_tools]
         for f in active_tools:
             function = f.function
             name = function.get('name', None)

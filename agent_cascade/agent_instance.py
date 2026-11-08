@@ -280,6 +280,13 @@ class AgentInstance:
     _child_instances: List[str] = field(
         default_factory=list
     )  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
+    # Deferred (MCP) tools this instance unlocked via tool_search, in discovery order. MUST be a
+    # declared field: this dataclass is slots=True, and the write sites (tool_search appends in
+    # place; session_io re-derives on load_session_from_log) assign to it directly — an undeclared
+    # attribute would raise AttributeError on the first unlock and hard-crash every session reload.
+    _discovered_mcp_tools: List[str] = field(
+        default_factory=list
+    )  # Unlocked deferred (MCP) tool names this instance may be offered, in discovery order
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(
         default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__

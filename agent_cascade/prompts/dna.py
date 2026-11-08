@@ -47,6 +47,7 @@ AVAILABLE_TOOLS: List[str] = [
     'calculate',  # Evaluate mathematical expressions
     'syntax_check',  # Check file syntax without execution
     'scan_skills',  # Scan registered skills and return matching skills with relevance scores
+    'tool_search',  # Search + unlock deferred MCP (dynamic) tools on demand
     'propose_skill',  # Propose a new reusable skill for future tasks
     'load_skill',  # Load registered skill instructions into current context at runtime
 
@@ -855,6 +856,28 @@ TOOL_METADATA = {
         'parameters': {
             'expression': 'The mathematical expression to evaluate (e.g., "sin(pi/2) + randint(1, 10)").'
         }
+    },
+    'tool_search': {
+        'description': ('Search the deferred MCP (dynamic) tools by name/description and unlock the best '
+                        'matches so they become callable on your NEXT call. Use this when a capability you '
+                        'need is not currently in your tool list — MCP tools are deferred until discovered. '
+                        'Returns the unlocked tool names.'),
+        # Assigned directly to ToolSearch.parameters (validated by BaseTool._verify_json_format_args via
+        # jsonschema), so it is full OpenAI JSON-Schema form — unlike the simple {param: desc} mappings.
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'string',
+                    'description': 'Keywords describing the capability/tool you need (tool name or what it does).',
+                },
+                'limit': {
+                    'type': 'integer',
+                    'description': 'Optional maximum number of tools to unlock. Default: 5.',
+                },
+            },
+            'required': ['query'],
+        },
     },
     'code_map': {
         'description':

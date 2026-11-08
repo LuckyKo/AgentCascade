@@ -217,7 +217,11 @@ class Agent(ABC):
             agent_type=getattr(self, 'agent_type', '') or '',
         )
 
-        return [func.function for name, func in self.function_map.items() if name not in disabled]
+        # Deferral-aware: reuse the Seam A assembler so MCP tools are not offered on the
+        # class/template view (UI toggle list, legacy fncall path). instance=None -> core
+        # + core-registered tools only (includes tool_search), undiscovered MCP excluded.
+        from agent_cascade.engine.helpers import order_offered_tool_functions
+        return order_offered_tool_functions(self.function_map, disabled)
 
     def _get_disabled_tool_names(self, pool=None) -> set:
         """Return the set of currently disabled tool names for this agent.
