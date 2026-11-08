@@ -35,7 +35,7 @@ import json
 import math
 import re
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -48,6 +48,20 @@ from agent_cascade.tools.base import BaseTool, register_tool
 # source of truth — import them (do not hardcode) in tests and in session re-derivation.
 TOOL_SEARCH_ENVELOPE_KEY = 'tool_search'
 DISCOVERED_KEY = 'loaded'
+
+# ── Catalog mode (empty query → read-only listing of ALL deferred MCP tools) ──
+# The catalog is a bounded tool RESULT (conversation text), NOT part of the ``functions``
+# array, so the deferral feature's KV-cache prefix stability is fully preserved. These keys
+# extend the envelope alongside DISCOVERED_KEY (which stays present in EVERY mode); session
+# re-derivation reads only DISCOVERED_KEY, so it remains compatible. Names are the single
+# source of truth — import (do not hardcode) them in tests.
+CATALOG_KEY = 'catalog'
+COUNT_KEY = 'count'
+TRUNCATED_KEY = 'truncated'
+# Total tools shown in a catalog listing before it is marked truncated.
+_CATALOG_MAX = 50
+# Max chars of each tool's one-line (first-line) description in the catalog listing.
+_CATALOG_DESC_LEN = 120
 
 # ── BM25 parameters (port of pi durable/src/search.ts) ──
 _K1 = 1.2
@@ -218,6 +232,52 @@ class ToolSearch(BaseTool):
             docs.append({'name': name, 'text': ' '.join(parts)})
         return docs
 
+    def _catalog(self, func_map: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Build ``{'name','server','desc'}`` entries for ALL MCP tools in ``func_map`` —
+        discovered or not — so the agent sees the full landscape. Membership predicate is
+        ``MCPManager.is_mcp_tool`` (same single source of truth as ``_candidate_docs``).
+
+        ``server`` is the segment before the first ``-`` (AC MCP naming is ``server-tool``;
+        a name with no ``-`` yields the whole name). ``desc`` is the description's first line
+        truncated to ``_CATALOG_DESC_LEN`` chars (``…`` appended when cut); empty desc → empty
+        string, and the message formatter omits the ``: desc`` suffix."""
+        from agent_cascade.tools.mcp_manager import MCPManager
+        entries = []
+        for name, tool in func_map.items():
+            if not MCPManager.is_mcp_tool(name):
+                continue
+            function = getattr(tool, 'function', None) or {}
+            description = function.get('description', '') or ''
+            first_line = description.splitlines()[0].strip() if description else ''
+            desc = (first_line if len(first_line) <= _CATALOG_DESC_LEN
+                    else first_line[:_CATALOG_DESC_LEN] + '…')
+            entries.append({'name': name, 'server': name.split(_NAME_SEP)[0], 'desc': desc})
+        return entries
+
+    def _catalog_message(self, entries: List[Dict[str, str]], total_count: int,
+                         truncated: bool) -> str:
+        """Render the grouped, human-facing catalog text. ``entries`` is the (capped) entry
+        list; ``total_count`` is the FULL tool count (so the header reflects what was found,
+        not merely what fits). Grouping preserves first-seen server order and, within a
+        server, ``function_map`` order — ``dict`` insertion order carries both for free."""
+        if not entries:
+            return 'No MCP tools are currently enabled.'
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        for entry in entries:
+            grouped.setdefault(entry['server'], []).append(entry)
+        lines = [f'Available MCP tools ({total_count} across {len(grouped)} server(s)):']
+        for server, tools in grouped.items():
+            lines.append(f'  {server}:')
+            for tool in tools:
+                name = tool['name']
+                desc = tool['desc']
+                suffix = f': {desc}' if desc else ''
+                lines.append(f'    - {name}{suffix}')
+        if truncated:
+            lines.append(f'[+{total_count - _CATALOG_MAX} more not shown — use a targeted '
+                         'tool_search query to unlock specific tools]')
+        return '\n'.join(lines)
+
     def call(self, params: Any, **kwargs) -> str:
         """Search the deferred MCP tools' metadata and unlock the matches for this instance.
 
@@ -240,6 +300,19 @@ class ToolSearch(BaseTool):
             return self._format_result([], 'No MCP discovery context available for this call.')
 
         func_map = getattr(template, 'function_map', None) or {}
+
+        if not query.strip():
+            # Catalog mode: read-only listing of ALL MCP tools. Do NOT touch
+            # instance._discovered_mcp_tools (unlocks nothing); loaded stays [].
+            entries = self._catalog(func_map)
+            capped = entries[:_CATALOG_MAX]
+            truncated = len(entries) > _CATALOG_MAX
+            message = self._catalog_message(capped, len(entries), truncated)
+            return self._format_result([], message, catalog=[e['name'] for e in capped],
+                                       count=len(entries), truncated=truncated)
+
+        # ``discovered`` is needed only by the search/unlock path; read it here so a
+        # catalog request does no pointless per-call list copy.
         discovered = list(getattr(instance, '_discovered_mcp_tools', None) or [])
         docs = self._candidate_docs(func_map, discovered)
         ranked = rank_deferred_tools(query, docs, limit)
@@ -262,7 +335,22 @@ class ToolSearch(BaseTool):
 
         return self._format_result(ranked, message)
 
-    def _format_result(self, loaded: List[str], message: str) -> str:
-        """Human text plus the trailing JSON envelope line (the re-derivation parse target)."""
-        envelope = json.dumps({TOOL_SEARCH_ENVELOPE_KEY: {DISCOVERED_KEY: loaded}}, ensure_ascii=False)
+    def _format_result(self, loaded: List[str], message: str,
+                       catalog: Optional[List[str]] = None, count: Optional[int] = None,
+                       truncated: Optional[bool] = None) -> str:
+        """Human text plus the trailing JSON envelope line (the re-derivation parse target).
+
+        ``loaded`` (DISCOVERED_KEY) is present in EVERY envelope — populated in search mode,
+        ``[]`` in catalog mode — so ``session_io`` re-derivation stays stable. When a catalog
+        listing is requested, ``catalog``/``count``/``truncated`` are additionally emitted.
+        ``catalog is None`` means "catalog not requested" (search mode) and omits the keys;
+        an empty catalog ``[]`` is a DISTINCT shape — requested, zero tools — and still emits
+        them. Gate on identity (``is not None``), never truthiness, or ``[]`` would be dropped.
+        """
+        inner = {DISCOVERED_KEY: loaded}
+        if catalog is not None:
+            inner[CATALOG_KEY] = catalog
+            inner[COUNT_KEY] = count
+            inner[TRUNCATED_KEY] = truncated
+        envelope = json.dumps({TOOL_SEARCH_ENVELOPE_KEY: inner}, ensure_ascii=False)
         return f'{message}\n{envelope}'

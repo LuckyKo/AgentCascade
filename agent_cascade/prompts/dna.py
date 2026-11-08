@@ -861,7 +861,8 @@ TOOL_METADATA = {
         'description': ('Search the deferred MCP (dynamic) tools by name/description and unlock the best '
                         'matches so they become callable on your NEXT call. Use this when a capability you '
                         'need is not currently in your tool list — MCP tools are deferred until discovered. '
-                        'Returns the unlocked tool names.'),
+                        'Returns the unlocked tool names. Pass an empty query to list all available MCP tools '
+                        '(grouped by server) without unlocking any.'),
         # Assigned directly to ToolSearch.parameters (validated by BaseTool._verify_json_format_args via
         # jsonschema), so it is full OpenAI JSON-Schema form — unlike the simple {param: desc} mappings.
         'parameters': {
