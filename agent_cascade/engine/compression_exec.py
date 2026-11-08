@@ -280,7 +280,7 @@ class CompressionExecMixin:
         warning = (
             f"[SYSTEM WARNING: Context window at {usage_pct:.1f}% capacity "
             f"({current_tokens}/{max_tokens} tokens). "
-            f"Consider using compress_context to free space.]"
+            f"Consider saving your progress notes before forced compression kicks in.]"
         )
         self._append_system_notification(llm_messages, '[SYSTEM WARNING: Context', warning)
 

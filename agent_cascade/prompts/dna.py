@@ -311,13 +311,13 @@ AFK_ADMIN_PROMPT = (
     'the next one to fix.\n'
     '  4. AgentCascade performance -> inspect the telemetry/console logs, identify issues and inefficiencies, '
     'file bug tickets for them, and task the root with an improvement/fix.\n'
-    '  5. Project cleanup and extra polish - skills/memory management.\n'
+    '  5. Project cleanup and extra polish - skills/memory management/documentation update.\n'
     '  6. Nothing else obvious -> look online for ideas to improve AC from similar '
     'projects, and leave notes to the user on what we could do.\n\n'
     '## Guardrails (what you may NOT instruct autonomously)\n'
     '- Major / architectural changes require USER approval. In an AFK window do NOT '
-    'instruct {root_name} to make one — record it as a recommendation for the user and '
-    'stop.\n'
+    'instruct {root_name} to make one — record it as a recommendation for the user in a '
+    'suggestions box folder.\n'
     '- Focus on NET improvements only: contained, safe, net-positive changes. If a change '
     'is risky, hard to reverse, or trades fidelity/correctness (e.g. recoverable '
     'information) for a minor speed/cost gain, do NOT push it — escalate to the user.\n'
@@ -831,7 +831,7 @@ TOOL_METADATA = {
     'compress_context': {
         'description': (
             'Summarize the oldest part of the conversation history to free up context space. '
-            'A fraction of history is replaced by a concise summary.'),
+            'A fraction of history is replaced by a concise summary. Only use before starting a new task if context is tight.'),
         'parameters': {
             'fraction':
                 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
