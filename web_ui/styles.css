@@ -550,12 +550,12 @@ body {
 /* State-based colors for the pulse indicator */
 .main-tab.state-running .sub-tab-pulse {
   background: #58a6ff;         /* Blue for RUNNING - currently processing/calling LLM */
-  box-shadow: 0 0 4px #58a6ff;
+  box-shadow: none;            /* BUG_0212: no per-frame shadow re-raster on the scaled animated dot; glow is on the parent (drop-shadow, ~L574) */
 }
 
 .main-tab.state-sleeping .sub-tab-pulse {
   background: #d29922;         /* Orange for SLEEPING - waiting for async tools to complete */
-  box-shadow: 0 0 4px #d29922;
+  box-shadow: none;            /* BUG_0212: same — keeps the pulse a cheap composited opacity+scale, no re-raster */
 }
 
 .main-tab.state-idle .sub-tab-pulse,
