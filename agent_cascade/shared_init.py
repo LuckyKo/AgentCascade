@@ -7,6 +7,7 @@ AgentPool) into reusable functions to eliminate duplicated code across both entr
 Issue: C2 - Extract shared initialization code
 """
 
+import json
 import os
 import signal as _signal_mod  # internal alias — avoids polluting module namespace with bare 'signal'
 from pathlib import Path
@@ -321,6 +322,55 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     configure_and_start_pool(agent_pool, idle_timeout, system_agent_idle_timeout, idle_check_interval)
 
     return operation_mgr, agent_pool
+
+
+def initialize_mcp_servers(agent_pool, project_root) -> None:
+    """Connect enabled MCP servers from ``<project_root>/config/mcp_servers.json`` at startup.
+
+    This is the single shared implementation of the MCP-at-startup step (BUG_0269). It
+    mirrors the block that previously lived only inline in ``api_server.py::main`` so the
+    active boot path (``start_api_server.py`` / ``start_multi_agent.py`` via
+    ``shared_init``) also connects MCP servers after a restart — they used to stay
+    disconnected until a UI config push.
+
+    Must run AFTER the pool + templates exist: the ``mcpServers`` handler registers each
+    tool into every template's ``function_map``. The whole body is wrapped in try/except so
+    a single failing server can never abort boot; guard cases (missing/empty config, no
+    handler) log a warning and return cleanly.
+    """
+    from agent_cascade.config_handlers import CONFIG_HANDLERS
+
+    try:
+        mcp_config_path = Path(project_root) / 'config' / 'mcp_servers.json'
+        if not mcp_config_path.exists():
+            logger.warning('[INIT] No MCP config file found (skipping MCP startup): %s', mcp_config_path)
+            return
+
+        mcp_servers = json.loads(mcp_config_path.read_text(encoding='utf-8'))
+        if not mcp_servers:
+            logger.warning('[INIT] MCP config is empty (skipping MCP startup): %s', mcp_config_path)
+            return
+
+        mcp_handler = CONFIG_HANDLERS.get('mcpServers')
+        if not mcp_handler:
+            logger.warning('[INIT] No handler registered for "mcpServers" (skipping MCP startup)')
+            return
+
+        # Templates (Assistant/FnCallAgent) carry function_map; AgentInstance does not.
+        # Registering into instances instead would raise AttributeError (see memory).
+        all_templates = list(agent_pool.templates.values())
+        mcp_handler({'mcpServers': mcp_servers}, agent_pool, all_templates)
+
+        from agent_cascade.tools.mcp_manager import MCPManager
+        mcp_mgr = MCPManager()
+        if mcp_mgr._connected_servers:
+            logger.info('[INIT] MCP servers initialized: %s', list(mcp_mgr._connected_servers.keys()))
+        else:
+            logger.warning('[INIT] MCP handler ran but no servers connected (config: %s)', list(mcp_servers.keys()))
+    except Exception as e:
+        # Best-effort: a failing MCP server must not abort boot. Log with traceback so a
+        # silent no-op stays diagnosable rather than looking like "MCP is disabled".
+        logger.warning('[INIT] MCP server initialization failed: %s', e, exc_info=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

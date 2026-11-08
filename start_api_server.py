@@ -140,9 +140,15 @@ def initialize_agents():
     logger.info('=' * 50)
 
     # ── Infrastructure initialization (delegated to shared module) ────────────
-    from agent_cascade.shared_init import build_all_agents_list, initialize_infrastructure, load_orchestrator
+    from agent_cascade.shared_init import (
+        build_all_agents_list, initialize_infrastructure, load_orchestrator, initialize_mcp_servers,
+    )
 
     operation_mgr, agent_pool = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
+
+    # Connect enabled MCP servers now that templates (and their function_map) exist.
+    # Best-effort: never aborts boot. See shared_init.initialize_mcp_servers (BUG_0269).
+    initialize_mcp_servers(agent_pool, PROJECT_ROOT)
 
     # Tools are already registered by register_standard_tools() during agent loading
     # (via AgentPool._discover_agents → load_agent_template → load_agent).

@@ -2850,25 +2850,11 @@ if __name__ == '__main__':
         raise SystemExit(1)
 
     # Initialize MCP servers from config/mcp_servers.json at startup (dedicated local file,
-    # not sourced from browser/pool_settings). Deferred from _load_pool_settings
-    # because templates' function_map needs to exist before tool registration.
-    try:
-        _mcp_config_path = PROJECT_ROOT / 'config' / 'mcp_servers.json'
-        if _mcp_config_path.exists():
-            _mcp_servers = json.loads(_mcp_config_path.read_text(encoding='utf-8'))
-            if _mcp_servers:
-                _mcp_handler = CONFIG_HANDLERS.get('mcpServers')
-                if _mcp_handler:
-                    _all_templates = list(agent_pool.templates.values())
-                    _mcp_handler({'mcpServers': _mcp_servers}, agent_pool, _all_templates)
-                    from agent_cascade.tools.mcp_manager import MCPManager
-                    _mcp_mgr = MCPManager()
-                    if _mcp_mgr._connected_servers:
-                        logger.info(f"[INIT] MCP servers initialized: {list(_mcp_mgr._connected_servers.keys())}")
-                    else:
-                        logger.warning(f"[INIT] MCP handler ran but no servers connected (config: {list(_mcp_servers.keys())})")
-    except Exception as e:
-        logger.warning(f"[INIT] MCP server initialization failed: {e}", exc_info=True)
+    # not sourced from browser/pool_settings). Deferred here because templates' function_map
+    # must exist before tool registration. Deduplicated (BUG_0269) to shared_init so the
+    # active boot path and this monolithic path share one implementation.
+    from agent_cascade.shared_init import initialize_mcp_servers as _init_mcp_servers
+    _init_mcp_servers(agent_pool, PROJECT_ROOT)
 
     # Start background services (idle checker thread, etc.)
     try:
