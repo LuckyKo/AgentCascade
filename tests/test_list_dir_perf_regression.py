@@ -181,6 +181,37 @@ def test_recursive_default_stats_bounded_files(many_files_tree, monkeypatch):
     assert 'output limited to' in out, out[-400:]
 
 
+def test_recursive_default_renders_real_sizes_and_total(tmp_path):
+    """Default recursive listing (needs_stat=False) renders REAL file sizes/mtime
+    and a non-zero 'Listed size' summary.
+
+    The deferred-stat path stats each survivor to build its file line
+    (file_operations.py, the `if not needs_stat:` stat block). This is an
+    intentional behavior change vs the pre-opt code, which rendered the default
+    recursive listing as 'name (?, modified: ?)' with 'Listed size: 0 B' (flat
+    mode always showed real sizes, so the '?' was a latent inconsistency). Pins
+    that survivors get real sizes and the summary total is non-zero.
+    """
+    (tmp_path / 'a.txt').write_bytes(b'x' * 100)
+    sub = tmp_path / 'sub'
+    sub.mkdir()
+    (sub / 'b.txt').write_bytes(b'y' * 500)
+    om = OperationManager(base_dir=str(tmp_path))
+
+    out = om.list_directory('.', recursive=True, show_summary=True, char_limit=-1)
+
+    # File lines carry a real size token (not '?'), proving survivors were stat'd.
+    # Nested files render with their relative path (root-level 'a.txt', nested 'sub/b.txt').
+    names = _rendered_file_names(out)
+    assert 'a.txt' in names, names
+    assert 'sub/b.txt' in names, names
+
+    # The summary's 'Listed size' is non-zero (100 + 500 = 600 bytes).
+    m = re.search(r'Listed size:\s*(.+)', out)
+    assert m, out[-300:]
+    assert m.group(1).strip() != '0 B', out[-300:]
+
+
 def test_recursive_name_filter_stats_only_survivors(many_files_tree, monkeypatch):
     """A name filter must not pay a stat per rejected file.
 
@@ -306,13 +337,17 @@ def test_flat_size_filter_disables_lazy_gate(monkeypatch):
 # ─── Phase 3 (O2): deep tree returns; ino identity key blocks deep junction ──
 
 def _fake_deep_walk(depth: int):
-    """Synthetic os.walk yielding a `d/d/d/...` chain of the given depth."""
-    def walk(root, topdown=True, onerror=None, followlinks=False):
+    """Synthetic walk yielding a `d/d/d/...` chain of the given depth."""
+    class _NotJunction:
+        def is_junction(self):
+            return False
+
+    def walk(root, onerror=None):
         current = Path(root)
         for _ in range(depth):
-            yield (str(current), ['d'], [])
+            yield (str(current), ['d'], [], {'d': _NotJunction()})
             current = current / 'd'
-        yield (str(current), [], ['deep.txt'])
+        yield (str(current), [], ['deep.txt'], {})
     return walk
 
 
@@ -347,7 +382,7 @@ def test_deep_chain_returns_under_ino_key(tmp_path, monkeypatch):
     proves no RecursionError. Pairs with BUG_0168.
     """
     monkeypatch.setattr(
-        'agent_cascade.operation_manager.file_operations.os.walk',
+        'agent_cascade.operation_manager.file_operations._walk_with_entries',
         _fake_deep_walk(1000))
 
     real_stat = os.stat

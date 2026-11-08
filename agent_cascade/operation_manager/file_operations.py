@@ -137,15 +137,59 @@ def _parse_patterns(patterns_str: Optional[str]) -> Tuple[str, ...]:
 
 
 def _build_pattern_fn_from_patterns(patterns: Tuple[str, ...]) -> Optional[Callable]:
-    """Build a name-matching callable from an already-parsed pattern tuple."""
+    """Build a name-matching callable from an already-parsed pattern tuple.
+
+    All patterns are compiled into ONE anchored alternation and every candidate is
+    normcased once per call, instead of running one ``fnmatch`` (which normcases the
+    candidate again) per pattern. Semantics are unchanged: ``fnmatch.fnmatch`` is
+    ``fnmatchcase(normcase(name), normcase(pattern))`` and the per-branch ``\\Z``
+    keeps each alternative fully anchored. This removed ~3x the regex work in
+    recursive listings, where every file is tested against every pattern.
+    """
     if not patterns:
         return None
-    return lambda name: any(fnmatch.fnmatch(name, p) for p in patterns)
+    combined = re.compile('|'.join(
+        fnmatch.translate(os.path.normcase(p)) for p in patterns))
+    normcase = os.path.normcase
+
+    def _match(name: str) -> bool:
+        return combined.match(normcase(name)) is not None
+
+    return _match
 
 
 def _build_pattern_fn(patterns_str: Optional[str]) -> Optional[Callable]:
     """Build a name-matching callable from a comma-separated glob string."""
     return _build_pattern_fn_from_patterns(_parse_patterns(patterns_str))
+
+
+# DEFAULT_IGNORED_DIRS pre-split for the per-subdir prune check: literal names are
+# O(1) set lookups, only real glob entries ('*.egg-info') need the regex engine.
+# Both halves are normcased once so the Windows case-insensitivity of
+# fnmatch.fnmatch is preserved.
+_IGNORED_DIR_NAMES = frozenset(
+    os.path.normcase(d) for d in DEFAULT_IGNORED_DIRS
+    if not any(c in d for c in '*?['))
+_IGNORED_DIR_GLOBS = tuple(
+    os.path.normcase(d) for d in DEFAULT_IGNORED_DIRS
+    if any(c in d for c in '*?['))
+
+
+def _is_ignored_dir_name(name: str) -> bool:
+    """True when *name* is pruned by grep's DEFAULT_IGNORED_DIRS (fnmatch semantics)."""
+    norm = os.path.normcase(name)
+    if norm in _IGNORED_DIR_NAMES:
+        return True
+    return any(fnmatch.fnmatchcase(norm, pat) for pat in _IGNORED_DIR_GLOBS)
+
+
+def _pattern_names_ignored_dir(pattern: str) -> bool:
+    """True when *pattern* explicitly names a DEFAULT_IGNORED_DIRS category.
+
+    Mirrors the original ``any(fnmatch(p.rstrip('/*'), d) for d in DEFAULTS)`` check
+    ('.git' and '.git/*' both name '.git') without looping every default.
+    """
+    return _is_ignored_dir_name(pattern.rstrip('/*'))
 
 
 def _safe_relpath(path: str, root: str) -> str:
@@ -170,6 +214,31 @@ def _safe_relpath(path: str, root: str) -> str:
         return p.relative_to(r).as_posix()
     except ValueError:  # different drive, or not a descendant
         return p.name
+
+
+def _walk_relpath(path: str, root: str) -> str:
+    """Fast relative path (forward slashes, '' when equal) for ``os.walk`` output.
+
+    ``os.walk`` builds every yielded directory as ``root + os.sep + components``
+    verbatim, so for those paths the relative part is pure string slicing. This
+    matters for recursive listings: the old hot path went through
+    ``Path.relative_to`` (pathlib part reloading, ``drive``, ``__str__``) for
+    every file and directory and dominated runtime (BUG list_dir perf).
+
+    Falls back to :func:`_safe_relpath` when the textual prefix does not hold
+    (non-descendant path, or a root written with a different separator), keeping
+    the same semantics including reserved device names (BUG_0162).
+    """
+    if path == root:
+        return ''
+    prefix = root if root.endswith(('/', '\\')) else root + os.sep
+    if path.startswith(prefix):
+        return path[len(prefix):].replace(os.sep, '/')
+    # Windows paths are case-insensitive; os.walk preserves the case of the root
+    # it was given, so this only helps callers passing an independently-cased root.
+    if os.name == 'nt' and path[:len(prefix)].lower() == prefix.lower():
+        return path[len(prefix):].replace(os.sep, '/')
+    return _safe_relpath(path, root)
 
 
 # Windows FILE_ATTRIBUTE_REPARSE_POINT: set on junctions, mount points and symlinks.
@@ -213,6 +282,79 @@ def _is_within_roots(path, roots: List[Path]) -> bool:
         if target == root or root in target.parents:
             return True
     return False
+
+
+def _walk_with_entries(root: str, onerror=None):
+    """``os.walk(topdown=True, followlinks=False)`` that also yields DirEntry objects.
+
+    Yields ``(dirpath, subdirs, filenames, subdir_entries)`` where *subdir_entries*
+    maps a subdir name to its ``os.DirEntry``. For the prune/reorder consumer (the
+    only one: it removes/reorders ``subdirs`` entries, never adds or renames) this
+    matches ``os.walk``: pre-order DFS, directory symlinks are listed but not
+    descended, scandir errors go to *onerror*, and mutating ``subdirs`` in place
+    prunes the descent. Two deliberate simplifications vs ``os.walk`` (benign for
+    that consumer): the descent symlink check reads the cached ``DirEntry
+    .is_symlink()`` rather than re-checking the fresh path (os.walk re-checks per
+    bpo-23605 in case the caller mutated entries), and an ``is_symlink()`` OSError
+    skips the descent where os.walk would descend.
+
+    The point of the extra tuple is that ``DirEntry.is_junction()`` /
+    ``is_symlink()`` read attributes already fetched by the parent directory scan,
+    whereas ``os.walk``'s own ``islink()`` plus a per-subdir ``lstat`` junction
+    check cost one syscall each (seconds on slow/network volumes for big trees).
+    """
+    stack = [root]
+    while stack:
+        dirpath = stack.pop()
+        try:
+            with os.scandir(dirpath) as it:
+                entries = list(it)
+        except OSError as err:
+            if onerror is not None:
+                onerror(err)
+            continue
+
+        subdirs: List[str] = []
+        filenames: List[str] = []
+        subdir_entries: dict = {}
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()  # follows symlinks, like os.walk
+            except OSError:
+                is_dir = False
+            if is_dir:
+                subdirs.append(entry.name)
+                subdir_entries[entry.name] = entry
+            else:
+                filenames.append(entry.name)
+
+        yield dirpath, subdirs, filenames, subdir_entries
+
+        # The consumer may have pruned `subdirs` in place. Push the survivors in
+        # reverse so the LIFO stack yields them in scan order (pre-order DFS).
+        descend = []
+        for name in subdirs:
+            entry = subdir_entries.get(name)
+            if entry is None:
+                continue
+            try:
+                if entry.is_symlink():  # followlinks=False
+                    continue
+            except OSError:
+                continue
+            descend.append(os.path.join(dirpath, name))
+        stack.extend(reversed(descend))
+
+
+def _entry_is_junction(entry) -> bool:
+    """Junction check from a scandir ``DirEntry`` (no extra syscall on Python 3.12+)."""
+    is_junction = getattr(entry, 'is_junction', None)
+    if is_junction is not None:
+        try:
+            return bool(is_junction())
+        except OSError:
+            return False
+    return _is_junction_dir(entry.path)
 
 
 # ─── edit_file delete_and_insert residue heuristic (BUG_0213) ─────────────────
@@ -876,38 +1018,34 @@ class FileOpsMixin:
         a prefix match. When ctx.skip_vcs is set, also prunes any dir whose name is in
         grep's DEFAULT_IGNORED_DIRS.
         """
-        if ctx.skip_vcs and any(fnmatch.fnmatch(d_name, pat) for pat in DEFAULT_IGNORED_DIRS):
+        if ctx.skip_vcs and _is_ignored_dir_name(d_name):
             # BUG_0221: an explicit include naming a VCS category re-admits it over
             # skip_vcs, unless an explicit exclude also names this dir (exclude wins).
             # Only specific patterns (not catch-alls like '*') can trigger re-admission:
             # a pattern "names a VCS category" iff its rstripped form matches a
             # DEFAULT_IGNORED_DIRS entry (e.g. '.git' → '.git', '.git/*' → '.git').
-            if ctx.include_patterns:
-                vcs_named = any(
-                    any(fnmatch.fnmatch(p.rstrip('/*'), d) for d in DEFAULT_IGNORED_DIRS)
+            if ctx.include_patterns and any(
+                    _pattern_names_ignored_dir(p) for p in ctx.include_patterns):
+                rel = _walk_relpath(os.path.join(str(current_dir), d_name), str(root))
+                include_matches = any(
+                    fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
+                    or p.rstrip('/*') == rel
                     for p in ctx.include_patterns
                 )
-                if vcs_named:
-                    rel = _safe_relpath(str(current_dir / d_name), str(root))
-                    include_matches = any(
-                        fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
-                        or p.rstrip('/*') == rel
-                        for p in ctx.include_patterns
-                    )
-                    exclude_matches = any(
-                        fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
-                        or p.rstrip('/*') == rel
-                        for p in ctx.exclude_patterns
-                    ) if ctx.exclude_patterns else False
-                    if include_matches and not exclude_matches:
-                        return False  # include re-admits, exclude does not override
+                exclude_matches = any(
+                    fnmatch.fnmatch(d_name, p) or fnmatch.fnmatch(rel, p)
+                    or p.rstrip('/*') == rel
+                    for p in ctx.exclude_patterns
+                ) if ctx.exclude_patterns else False
+                if include_matches and not exclude_matches:
+                    return False  # include re-admits, exclude does not override
             ctx.vcs_pruned += 1
             return True
         if ctx.exclude_fn is None:
             return False
         if ctx.exclude_fn(d_name):  # bare name: ".git", "__pycache__"
             return True
-        rel = _safe_relpath(str(current_dir / d_name), str(root))
+        rel = _walk_relpath(os.path.join(str(current_dir), d_name), str(root))
         for pat in ctx.exclude_patterns:
             # fnmatch(rel, pat): the dir's own relative path matches the pattern
             #   (e.g. 'sub/deep' prunes the 'deep' dir at the right depth).
@@ -1105,7 +1243,7 @@ class FileOpsMixin:
 
     def _list_recursive(self, path: str, resolved: Path, ctx: 'FilterContext', sort_by: str, max_depth: int,
                         max_entries: int) -> Tuple[str, int, int, int, int, List[str]]:
-        """Recursive directory listing via os.walk.
+        """Recursive directory listing via an os.walk-equivalent scandir traversal.
 
         Returns (output_str, dirs, files, size, raw_entries, notes) where *raw_entries*
         is the number of files+subdirs seen while walking, BEFORE name/size/date
@@ -1126,12 +1264,15 @@ class FileOpsMixin:
         truncated = False
         raw_entries = 0
         allowed_roots = self._list_allowed_roots(resolved)
+        # Computed once: every walk path is a textual descendant of this string,
+        # so relative paths are string slices instead of Path.relative_to calls.
+        root_str = str(resolved)
 
         def _collect_walk_error(err: OSError) -> None:
             walk_errors.append(err)
 
-        for dirpath, subdirs, filenames in os.walk(
-                str(resolved), topdown=True, onerror=_collect_walk_error):
+        for dirpath, subdirs, filenames, subdir_entries in _walk_with_entries(
+                root_str, onerror=_collect_walk_error):
             current_dir = Path(dirpath)
             # Cycle guard: cheap (st_dev, st_ino) identity key from os.stat -- one
             # O(1) path-open vs Path.resolve()'s O(depth). os.stat follows junction/
@@ -1152,7 +1293,7 @@ class FileOpsMixin:
             # Depth without any syscall: count the components below the (already
             # resolved) walk root. os.walk yields clean descendant paths, so this
             # reproduces the old parts-based depth arithmetic.
-            rel_path = _safe_relpath(dirpath, str(resolved))
+            rel_path = _walk_relpath(dirpath, root_str)
             current_depth = len(rel_path.split('/')) if rel_path else 0
             # Count before exclude/skip_vcs pruning so an all-pruned tree is not
             # misreported as a genuinely empty directory (BUG_0160).
@@ -1181,15 +1322,17 @@ class FileOpsMixin:
             # .git subtree instead of only its header.
             subdirs[:] = [d for d in subdirs if not self._dir_is_excluded(current_dir, d, resolved, ctx)]
 
-            # Junction guard (BUG_0163): os.walk(followlinks=False) does not follow
-            # symlinks, but a Windows junction is not reported as a symlink, so the
-            # walk DOES descend into it. A junction inside the workspace can therefore
-            # expose a directory outside every allowed root (base_dir / extra work
-            # folders). Record such entries so they stay visible but are not traversed;
-            # render_dir marks them "(not traversed: ...)".
+            # Junction guard (BUG_0163): the os.walk-equivalent traversal does not
+            # follow symlinks, but a Windows junction is not reported as a symlink,
+            # so the walk DOES descend into it. A junction inside the workspace can
+            # therefore expose a directory outside every allowed root (base_dir /
+            # extra work folders). Record such entries so they stay visible but are
+            # not traversed; render_dir marks them "(not traversed: ...)".
             for d_name in subdirs:
                 full = current_dir / d_name
-                if _is_junction_dir(full) and not _is_within_roots(full, allowed_roots):
+                entry = subdir_entries.get(d_name)
+                is_junction = _entry_is_junction(entry) if entry is not None else _is_junction_dir(full)
+                if is_junction and not _is_within_roots(full, allowed_roots):
                     blocked_dirs[str(full)] = 'target is outside the workspace'
 
             dir_entries = []
@@ -1238,29 +1381,43 @@ class FileOpsMixin:
                               or ctx.modified_after is not None
                               or ctx.modified_before is not None
                               or sort_by in ('size', 'date'))
-                for f_name in sorted(filenames):
-                    # Pass the path RELATIVE to the listed root so slash-bearing include/exclude
-                    # patterns ('sub/*.gguf', '.git/*') can match; basename is still tried first.
-                    rel = _safe_relpath(str(current_dir / f_name), str(resolved))
+                if needs_stat:
+                    candidates = sorted(filenames)
+                else:
+                    # Name-only filter: drop non-matching names BEFORE sorting so a
+                    # huge directory only sorts the survivors. Output order is
+                    # unchanged -- sorting a subset preserves the relative order of
+                    # the full sort, and the budget still selects the same first N.
+                    survivors = []
+                    for f_name in filenames:
+                        rel = f'{rel_path}/{f_name}' if rel_path else f_name
+                        if self._matches_filters(f_name, False, size=None, mtime=None,
+                                                 ctx=ctx, rel=rel):
+                            survivors.append(f_name)
+                    candidates = sorted(survivors)
+                for f_name in candidates:
                     if needs_stat:
+                        # Pass the path RELATIVE to the listed root so slash-bearing
+                        # include/exclude patterns ('sub/*.gguf', '.git/*') can match;
+                        # basename is still tried first.
+                        rel = f'{rel_path}/{f_name}' if rel_path else f_name
                         try:
                             stat_info = (current_dir / f_name).stat()
                         except OSError:
                             stat_info = None
                         size = stat_info.st_size if stat_info else None
                         mtime = stat_info.st_mtime if stat_info else None
+                        if not self._matches_filters(
+                                f_name,
+                                False,
+                                size=size,
+                                mtime=mtime,
+                                ctx=ctx,
+                                rel=rel,
+                        ):
+                            continue
                     else:
-                        stat_info = None
-                        size = mtime = None
-                    if not self._matches_filters(
-                            f_name,
-                            False,
-                            size=size,
-                            mtime=mtime,
-                            ctx=ctx,
-                            rel=rel,
-                    ):
-                        continue
+                        stat_info = None  # filtered on name above; stat only if it renders
                     if remaining <= 0:
                         truncated = True
                         break
@@ -1312,7 +1469,6 @@ class FileOpsMixin:
         # promotion branch inert), and returned True for the root WITHOUT adding it to
         # displayed_dirs. A single O(n) pass over entries_by_dir reproduces both --
         # the old recursion rescanned all of entries_by_dir per directory -> O(n^2).
-        root_str = str(resolved)
         displayed_dirs = set()
         for dirpath, entries in entries_by_dir.items():
             if dirpath == root_str:
@@ -1354,7 +1510,7 @@ class FileOpsMixin:
         # Root-level entries render as just their own name (empty relative dir).
         def rel_of(dirpath: str) -> str:
             """Relative path of *dirpath* with respect to the listed root ('' for root)."""
-            return _safe_relpath(dirpath, root_str)
+            return _walk_relpath(dirpath, root_str)
 
         # Descent set for files_only. Under files_only no [DIR] entries are created
         # (L584 skips them), so render_dir's "if e['is_dir']" branch never fires and

@@ -9,24 +9,23 @@ Fix: collect walk errors and append a warning naming each unreadable directory a
 reason. A completely unreadable root no longer claims "(directory contains no entries)".
 """
 
-import os
-
 from agent_cascade.operation_manager import OperationManager
+from agent_cascade.operation_manager.file_operations import _walk_with_entries
 
 
 def _patch_walk(monkeypatch, errors, real=True):
-    """Patch file_operations.os.walk to report *errors* and optionally walk for real."""
-    real_walk = os.walk
+    """Patch file_operations._walk_with_entries to report *errors* (and optionally walk)."""
+    real_walk = _walk_with_entries
 
-    def fake_walk(root, topdown=True, onerror=None, followlinks=False):
+    def fake_walk(root, onerror=None):
         for err in errors:
             if onerror is not None:
                 onerror(err)
-        if not real:
-            return iter([])
-        return real_walk(root, topdown=topdown, onerror=onerror, followlinks=followlinks)
+        if real:
+            yield from real_walk(root, onerror=onerror)
 
-    monkeypatch.setattr('agent_cascade.operation_manager.file_operations.os.walk', fake_walk)
+    monkeypatch.setattr(
+        'agent_cascade.operation_manager.file_operations._walk_with_entries', fake_walk)
 
 
 def test_unreadable_subdirectory_is_reported(tmp_path, monkeypatch):

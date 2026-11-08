@@ -20,13 +20,20 @@ from agent_cascade.operation_manager import OperationManager
 DEPTH = 600  # > the temporarily lowered recursion limit below
 
 
+class _FakeDirEntry:
+    """DirEntry stand-in for the synthetic chain: never touches the filesystem."""
+
+    def is_junction(self):
+        return False
+
+
 def _fake_deep_walk(depth: int):
-    def walk(root, topdown=True, onerror=None, followlinks=False):
+    def walk(root, onerror=None):
         current = Path(root)
         for _ in range(depth):
-            yield (str(current), ['d'], [])
+            yield (str(current), ['d'], [], {'d': _FakeDirEntry()})
             current = current / 'd'
-        yield (str(current), [], ['deep.txt'])
+        yield (str(current), [], ['deep.txt'], {})
     return walk
 
 
@@ -42,7 +49,7 @@ def _run_with_low_recursion_limit(fn):
 
 def test_deep_tree_renders_without_recursion_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        'agent_cascade.operation_manager.file_operations.os.walk', _fake_deep_walk(DEPTH))
+        'agent_cascade.operation_manager.file_operations._walk_with_entries', _fake_deep_walk(DEPTH))
     om = OperationManager(base_dir=str(tmp_path))
 
     out = _run_with_low_recursion_limit(
@@ -55,7 +62,7 @@ def test_deep_tree_renders_without_recursion_error(tmp_path, monkeypatch):
 
 def test_deep_files_only_tree_renders_without_recursion_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        'agent_cascade.operation_manager.file_operations.os.walk', _fake_deep_walk(DEPTH))
+        'agent_cascade.operation_manager.file_operations._walk_with_entries', _fake_deep_walk(DEPTH))
     om = OperationManager(base_dir=str(tmp_path))
 
     out = _run_with_low_recursion_limit(
@@ -82,7 +89,7 @@ def test_iterative_render_preserves_depth_first_order(tmp_path):
 @pytest.mark.parametrize('depth', [1, 2, 10])
 def test_shallow_trees_still_render(tmp_path, monkeypatch, depth):
     monkeypatch.setattr(
-        'agent_cascade.operation_manager.file_operations.os.walk', _fake_deep_walk(depth))
+        'agent_cascade.operation_manager.file_operations._walk_with_entries', _fake_deep_walk(depth))
     om = OperationManager(base_dir=str(tmp_path))
 
     out = om.list_directory('.', recursive=True, char_limit=-1)
