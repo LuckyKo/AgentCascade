@@ -304,7 +304,7 @@ AFK_ADMIN_PROMPT = (
     'Instruct {root_name} on the single HIGHEST-priority item that is actually actionable. '
     'Walk the ladder top-down and stop at the first tier with something real to do; '
     'skip empty tiers.\n'
-    '  1. Task not complete or not polished -> finish and polish it. (top priority)\n'
+    '  1. Agent did not follow procedure / task not complete or not polished -> finish and polish it. (top priority)\n'
     '  2. Recent bugs the agent or its sub-agents discovered -> deal with them (the root '
     'already has the context).\n'
     '  3. Known AgentCascade bugs -> check the bug-tracker tickets, triage, and task the root with '
