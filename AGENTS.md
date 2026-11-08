@@ -53,6 +53,16 @@ actionable — it is read by agents with limited context.
   net-negative. Do not reduce per-call input tokens as an objective.
 - Compress only at meaningful thresholds; tiny compressions have no value.
 
+## Memory loss / recoverability (important)
+- **Minimal memory loss.** Never trade recoverable information for a minor
+  performance/cost gain. A cap that can silently drop content the agent may
+  later need is a regression, not an optimization.
+- **Everything must be recoverable.** Any truncation / cap / lossy op must leave
+  the omitted content reachable — point at the source (file path + offset, the
+  full log) so the agent can re-read the missing part on demand. A blunt
+  head+tail drop with no pointer is not allowed. (AC already truncates this
+  way: the agent re-reads the source for the elided middle.)
+
 ## Test discipline
 - Coder: run scoped tests for the files touched.
 - Orchestrator: run the full suite at milestones (not a re-run of the coder's scoped
@@ -65,5 +75,7 @@ actionable — it is read by agents with limited context.
 ## Do / don't
 - Don't add a cap/limit that double-covers an existing bound (redundant logic).
 - Don't clobber vetted content with a blunt cap.
+- Don't shrink a prompt/input to save tokens/latency if it can drop information
+  the agent may need — make it recoverable (point at the source) instead.
 - Don't leave trash in project root, place your temp files in /plans, /reports, /temp accordingly.
 - Prefer minimal, safe changes; DRY; single source of truth.
