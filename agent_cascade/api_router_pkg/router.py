@@ -30,6 +30,7 @@ from agent_cascade.api_router_pkg.helpers import (_interruptible_sleep,
                                                  _should_abort_lockfree)
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
+from agent_cascade.cost import is_priced
 from agent_cascade.error_reporting import TB_DEDUP, format_endpoint_error
 from agent_cascade.exceptions import AgentTerminatedError, ContextWindowExceeded, ServerBusyError
 from agent_cascade.retry_policy import POLICY_DEFAULT, RetryPolicy, calculate_backoff, is_deterministic_client_error
@@ -1594,6 +1595,48 @@ class APIRouter:
                 limit = chain[0].get('max_input_tokens')
                 if isinstance(limit, int) and limit > 0:
                     return limit
+        except Exception:
+            pass
+        return None
+
+    def get_endpoint_pricing(self, agent_type: str,
+                             instance_name: Optional[str] = None) -> Optional[dict]:
+        """Return the per-1M-token $ pricing of the endpoint about to be called.
+
+        Pricing is per-endpoint, so it must be read from the endpoint OBJECT
+        that the chain resolves to — never from the model-only telemetry
+        fingerprint, which cannot distinguish two endpoints serving the same
+        model at different rates. Mirrors get_assigned_max_tokens: resolves the
+        chain head (post-instance-cursor-rotation) and matches it back to the
+        endpoint by normalized (api_base, model). Read-only.
+
+        Returns a pricing dict with the four ``*_per_m`` keys when the endpoint
+        has any non-zero rate, or ``None`` when unpriced / unresolvable so the
+        feature stays off (no cost reported).
+        """
+        try:
+            chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
+            if not chain:
+                return None
+            head = chain[0]
+            head_base = normalize_api_base(head.get('api_base') or head.get('model_server', ''))
+            head_model = head.get('model', '')
+            with self._lock:
+                # Match by routing key (api_base, model). Two enabled endpoints
+                # sharing that key but differing pricing resolve to the first
+                # (dict order) — the router itself cannot distinguish them.
+                for ep in self.endpoints.values():
+                    if (ep.enabled and normalize_api_base(ep.api_base) == head_base
+                            and ep.model == head_model):
+                        pricing = {
+                            'input_per_m': ep.input_per_m,
+                            'output_per_m': ep.output_per_m,
+                            'cache_read_per_m': ep.cache_read_per_m,
+                            'cache_write_per_m': ep.cache_write_per_m,
+                        }
+                        if is_priced(pricing):
+                            return pricing
+                        return None  # matched endpoint is unpriced
         except Exception:
             pass
         return None

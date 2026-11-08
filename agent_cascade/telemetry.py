@@ -18,6 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from agent_cascade.cost import tokens_to_cost
 from agent_cascade.log import _AppLoggerProxy
 
 # Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy).
@@ -135,6 +136,10 @@ class TelemetryCollector:
             'llm_wasted_tokens': 0,
             'llm_waste_count': 0,
             'llm_wasted_cost': 0.0,
+            # Session spend ($) across all priced calls (per-endpoint pricing).
+            # Accumulated only when an endpoint carries pricing; surfaced in the
+            # summary ONLY when > 0 so unpriced installs see no cost key.
+            'session_cost': 0.0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -431,7 +436,8 @@ class TelemetryCollector:
             }
         return self._agent_class_stats[agent_class]
 
-    def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0, model: str = ''):
+    def record_llm_call_start(self, instance_name: str, input_tokens_est: int = 0,
+                              model: str = '', pricing: Optional[Dict] = None):
         """Mark the start of an LLM API call.
 
         If a call for ``instance_name`` is already in flight, the previous attempt
@@ -463,6 +469,10 @@ class TelemetryCollector:
                 'first_token_time': 0,
                 'completion_tokens': 0,  # Will be updated by record_token_usage callback if available
                 'usage_details': None,
+                # Per-endpoint pricing snapshotted per-call (not looked up by the
+                # model-only fingerprint afterward — G1). Used to compute this
+                # call's cost in record_llm_call_end. None = unpriced.
+                'pricing': pricing,
             }
 
     def record_llm_first_token(self, instance_name: str):
@@ -713,6 +723,26 @@ class TelemetryCollector:
                     'prev_model': model,
                     'reported_cache': (prev.get('reported_cache', False) if prev else False) or (cached_tokens > 0),
                 }
+
+                # Session spend ($): accumulate this call's cost using the
+                # authoritative server-usage tokens (this block runs only for
+                # calls the server reported usage for — never a char estimate).
+                # Per-endpoint pricing is snapshotted at call start (model-only
+                # fingerprint cannot look it up). cost.py returns None when the
+                # endpoint is unpriced, so default-off installs stay at $0 → no
+                # session_cost key in the summary.
+                endpoint_pricing = call.get('pricing')
+                if endpoint_pricing:
+                    _call_cost = tokens_to_cost(
+                        {
+                            'prompt_tokens': prompt_tokens,
+                            'completion_tokens': int(call.get('completion_tokens') or 0),
+                            'cached_tokens': cached_tokens,
+                        },
+                        endpoint_pricing,
+                    )
+                    if _call_cost:
+                        self._session_stats['session_cost'] += _call_cost
 
             # todo.md:105 / BUG_0101 — one greppable debug line per KV-cache miss so
             # unexpected prompt reprocesses can be tracked from console.log. The server's
@@ -1156,6 +1186,11 @@ class TelemetryCollector:
             'llm_waste_count': stats.get('llm_waste_count', 0),
             **({'llm_wasted_cost': round(stats.get('llm_wasted_cost', 0.0), 6)}
                if MODEL_PRICING else {}),
+            # Session spend ($) across priced calls. Present ONLY when > 0, so a
+            # default-off / unpriced install (no priced endpoint) emits no key
+            # and consumers never render a misleading "$0".
+            **({'session_cost': round(stats.get('session_cost', 0.0), 6)}
+               if stats.get('session_cost', 0.0) > 0 else {}),
             # ── Raw time totals (BUG_0130) ──────────────────────────────────────
             # Exposed so the session cards/tables can be reconciled without re-adding
             # averages. All are agent-exclusive work sums; with parallel agents they

@@ -99,6 +99,10 @@ class SystemInfo(BaseTool):
                 if k in session:
                     lines.append(f"  {k}: {session[k]}")
 
+            # Session spend ($) — present only when an endpoint carries pricing.
+            if 'session_cost' in session:
+                lines.append(f"  session_cost: ${session['session_cost']:.6f}")
+
             # Prompt cache (RFC 9211) hit/miss stats — only when LLM calls exist.
             if session.get('total_llm_calls', 0) > 0:
                 lines.append('  Prompt cache:')

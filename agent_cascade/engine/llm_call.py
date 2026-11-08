@@ -638,12 +638,21 @@ class LLMCallMixin:
         Required and does NOT own the outer while-break; the guard exceptions propagate
         to the caller.
         """
-        # Telemetry: record LLM call start (non-blocking)
+        # Telemetry: record LLM call start (non-blocking). Resolve the chain-head
+        # endpoint's per-1M-token pricing and pass it through so telemetry can
+        # snapshot it per-call (the model-only fingerprint can't look it up
+        # later). None when unpriced/unresolvable → cost accounting stays off.
+        _ep_pricing = None
+        _router = getattr(self.pool, 'api_router', None)
+        if _router is not None and hasattr(_router, 'get_endpoint_pricing'):
+            _agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
+            _ep_pricing = _router.get_endpoint_pricing(_agent_type, instance_name=inst_name)
         self._record_telemetry_event(
             inst_name,
             'start',
             input_tokens_est=input_tokens_est,
             model=getattr(template.llm, 'model', '') or '',
+            pricing=_ep_pricing,
         )
 
         # Streaming UI Content Update: Track partial LLM content

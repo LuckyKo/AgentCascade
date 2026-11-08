@@ -116,6 +116,16 @@ class APIEndpoint:
     # support `reasoning_effort` (e.g., OpenAI o1/o3); others ignore it or 400.
     reasoning_effort: str = 'none'
 
+    # ── Cost / pricing (accounting-only, per 1M tokens in USD) ─────────────
+    # Used ONLY to compute session spend for the telemetry cost line; never sent
+    # to the provider. All 0.0 = unpriced (feature is off for this endpoint and
+    # no cost is reported). ``cache_write_per_m`` is inert on OpenAI-compatible
+    # backends (they report no separate cache-creation tokens).
+    input_per_m: float = 0.0             # non-cached input $/1M tokens
+    output_per_m: float = 0.0            # completion output $/1M tokens
+    cache_read_per_m: float = 0.0        # cached-prompt (cache read) $/1M tokens
+    cache_write_per_m: float = 0.0       # cache-creation $/1M tokens (OpenAI-compat: 0)
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())

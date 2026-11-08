@@ -6564,6 +6564,10 @@ function updateTelemetryPanel(telemetry) {
     }
   }
 
+  // Session spend ($): renders only when the summary carries session_cost
+  // (i.e. at least one priced endpoint served a measured call); — otherwise.
+  set('telem-session-cost', telemetry.session_cost != null ? '$' + telemetry.session_cost.toFixed(3) : '—');
+
   // Tool effectiveness table
   const toolTbody = document.getElementById('telem-tool-tbody');
   if (toolTbody && telemetry.tool_effectiveness) {
@@ -6804,6 +6808,24 @@ function renderApiEndpoints() {
                <label class="setting-field" style="flex:1;">
                  <span>Rate Limit (rpm)</span>
                  <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm ?? 0}" title="Requests per minute. 0 = unlimited">
+               </label>
+             </div>
+             <div style="display:flex;gap:8px;margin-top:6px;">
+               <label class="setting-field" style="flex:1;">
+                 <span>Input $/1M</span>
+                 <input type="number" min="0" step="0.01" class="ep-input-cost-input" value="${ep.input_per_m ?? 0}" title="Non-cached input price per 1M tokens (USD). 0 = unpriced (no cost tracked).">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Output $/1M</span>
+                 <input type="number" min="0" step="0.01" class="ep-input-cost-output" value="${ep.output_per_m ?? 0}" title="Output price per 1M tokens (USD). 0 = unpriced.">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Cache Read $/1M</span>
+                 <input type="number" min="0" step="0.01" class="ep-input-cost-cache-read" value="${ep.cache_read_per_m ?? 0}" title="Cached-prompt (cache read) price per 1M tokens (USD). 0 = unpriced.">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Cache Write $/1M</span>
+                 <input type="number" min="0" step="0.01" class="ep-input-cost-cache-write" value="${ep.cache_write_per_m ?? 0}" title="Cache-creation price per 1M tokens (USD). 0 = unpriced. Inert on OpenAI-compatible backends (no cache-creation tokens reported).">
                </label>
              </div>
 
@@ -7080,6 +7102,13 @@ function handleApiEndpointBlur(e) {
 
   _epSet(ep, card, 'rate_limit_rpm', '.ep-input-rate-limit', parseInt);
 
+  // Per-endpoint cost pricing (per-1M-token USD). parseFloat → blank keeps the
+  // stored value (BUG_0060); a parsed 0 means "unpriced".
+  _epSet(ep, card, 'input_per_m', '.ep-input-cost-input', parseFloat);
+  _epSet(ep, card, 'output_per_m', '.ep-input-cost-output', parseFloat);
+  _epSet(ep, card, 'cache_read_per_m', '.ep-input-cost-cache-read', parseFloat);
+  _epSet(ep, card, 'cache_write_per_m', '.ep-input-cost-cache-write', parseFloat);
+
   // Checkbox toggles (optional elements)
   const visionCb = card.querySelector('.ep-input-vision');
   if (visionCb) ep.vision_enabled = visionCb.checked;
@@ -7105,7 +7134,7 @@ function handleApiEndpointBlur(e) {
 
 function handleApiEndpointKeydown(e) {
   if (e.key !== 'Enter') return;
-  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens, input.ep-input-base-delay, input.ep-input-max-delay, input.ep-input-rate-limit, input.ep-input-top-k, input.ep-input-min-p, input.ep-input-repeat-penalty, input.ep-input-presence-penalty, input.ep-input-frequency-penalty, input.ep-input-max-tokens');
+  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens, input.ep-input-base-delay, input.ep-input-max-delay, input.ep-input-rate-limit, input.ep-input-cost-input, input.ep-input-cost-output, input.ep-input-cost-cache-read, input.ep-input-cost-cache-write, input.ep-input-top-k, input.ep-input-min-p, input.ep-input-repeat-penalty, input.ep-input-presence-penalty, input.ep-input-frequency-penalty, input.ep-input-max-tokens');
   if (input) input.blur();
 }
 
