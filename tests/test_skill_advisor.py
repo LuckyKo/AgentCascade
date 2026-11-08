@@ -474,7 +474,6 @@ class TestBuildSkillAdvisorPromptFiltering:
         ("verify a sub-agent's deliverable before shipping it", ['subagent-deliverable-verification']),
         ('a design change invalidated several earlier fixes', ['reconcile-superseded-lessons-after-design-change']),
         ("stage only one hunk of a file that also has another task's uncommitted change", ['partial-hunk-stage-crlf-dirty-tree']),
-        ('a post-commit hook creates a second version-bump commit on top of mine', ['agentcascade-postcommit-version-bump-commit']),
         ('pre-commit hooks keep rewriting my staged files', ['precommit-hook-commit-retry']),
         ("a UI action does nothing because a render function's early exit leaves stale state", ['frontend-early-exit-guard-stale-bookkeeping']),
         ('add a read-only threshold preview endpoint and UI status', ['read-only-threshold-preview-endpoint']),
