@@ -1585,10 +1585,18 @@ class LLMCallMixin:
         # These live in pool.llm_cfg (set via config handlers) and must be available in
         # generate_cfg for _preprocess_messages to consume them.
         pool = getattr(instance, '_pool', None) or getattr(instance, 'pool', None)
-        if pool and hasattr(pool, 'llm_cfg'):
-            for key in ('max_images_for_llm',):
-                if key in pool.llm_cfg:
-                    merged[key] = pool.llm_cfg[key]
+        live_llm_cfgs = []
+        if pool:
+            # Persisted General Settings LLM config (api_endpoints.json::default_llm_cfg).
+            router_cfg = getattr(getattr(pool, 'api_router', None), 'default_llm_cfg', None)
+            if isinstance(router_cfg, dict):
+                live_llm_cfgs.append(router_cfg)
+            pool_cfg = getattr(pool, 'llm_cfg', None)
+            if isinstance(pool_cfg, dict):
+                live_llm_cfgs.append(pool_cfg)
+                for key in ('max_images_for_llm',):
+                    if key in pool_cfg:
+                        merged[key] = pool_cfg[key]
 
         if endpoint_cfg:
             # Strip stale params when custom sampling disabled
@@ -1596,6 +1604,20 @@ class LLMCallMixin:
             if not use_custom:
                 merged = {k: v for k, v in merged.items() if k not in SAMPLING_AND_LIMIT_KEYS}
             merged.update(endpoint_cfg)  # Layer 3: endpoint config (sampler params win)
+
+        # Debug raw-POST capture (`log_api_post`) is a top-level General Settings LLM key
+        # persisted to api_router.default_llm_cfg — it is NOT copied into pool.llm_cfg, so
+        # the max_images_for_llm loop above never sees it. Lift the live value here so
+        # llm/oai.py can pop it (never sent to the model) and dump the request body.
+        # Only backends implementing the capture receive it: SDK-based backends pass
+        # **generate_cfg verbatim and would reject the unknown kwarg.
+        if getattr(llm, 'support_log_api_post', False):
+            for source in live_llm_cfgs:
+                if 'log_api_post' in source:
+                    merged['log_api_post'] = bool(source['log_api_post'])
+                    break
+        else:
+            merged.pop('log_api_post', None)
 
         return merged
 

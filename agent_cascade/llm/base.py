@@ -163,6 +163,16 @@ class BaseChatModel(ABC):
     def support_audio_input(self) -> bool:
         return False
 
+    @property
+    def support_log_api_post(self) -> bool:
+        """Whether this backend implements the ``log_api_post`` debug capture.
+
+        Only such backends receive the flag in ``generate_cfg``; SDK-based backends
+        forward ``**generate_cfg`` verbatim and would reject the unknown kwarg.
+        Implemented by :class:`agent_cascade.llm.oai.TextChatAtOAI`.
+        """
+        return False
+
     def __init__(self, cfg: Optional[Dict] = None):
         cfg = cfg or {}
         self.cfg = cfg

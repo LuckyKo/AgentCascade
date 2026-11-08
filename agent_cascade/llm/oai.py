@@ -389,6 +389,11 @@ def _breaker_blocks_base(api_base: Optional[str]) -> bool:
 @register_llm('oai')
 class TextChatAtOAI(BaseFnCallModel):
 
+    @property
+    def support_log_api_post(self) -> bool:
+        # This backend implements the raw-POST dump (see chat()/raw_chat()).
+        return True
+
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
         self.model = self.model or 'local-model'
