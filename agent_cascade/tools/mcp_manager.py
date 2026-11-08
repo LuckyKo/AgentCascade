@@ -171,6 +171,12 @@ class MCPManager:
         mcp_servers = config['mcpServers']
         for server_name in mcp_servers:
             server = mcp_servers[server_name]
+            # Skip disabled servers — the 'enabled' flag is a UI concern persisted to
+            # config/mcp_servers.json; it defaults to True when absent. This is the single
+            # connection entry point, so the check also guards any future initConfig caller.
+            if not (isinstance(server, dict) and server.get('enabled', True)):
+                logger.debug(f"MCP server '{server_name}' is disabled — skipping.")
+                continue
             # Strip 'enabled' — it is a UI concern, not a connection parameter.
             # The fingerprint must match what connect_server computes so toggles
             # do not produce duplicate connections.
