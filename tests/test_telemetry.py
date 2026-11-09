@@ -239,8 +239,11 @@ class TestCompression:
         collector.record_turn_start('inst', config_fingerprint=fp)
         collector.record_compression('inst', 0.5, tokens_before=100, tokens_after=50)
         collector.record_turn_end('inst')
-        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
-        assert fp in cfgs
+        # The compression EVENT itself is asserted in the sibling test; here we confirm
+        # the per-config stat row persists even though get_config_comparison now filters
+        # zero-llm-call rows from its view (BUG_0273). The compression is reflected in
+        # the turn/event, not as a per-config counter.
+        assert fp in collector._config_stats
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +787,10 @@ class TestConfigComparison:
     def test_fingerprint_appears_with_turns(self, collector):
         fp = 'fp_abc123'
         collector.record_turn_start('inst', config_fingerprint=fp)
+        # A turn with no LLM call is now filtered from the A/B view (BUG_0273), so to
+        # assert the fingerprint "appears" in the comparison it must have served a call.
+        collector.record_llm_call_start('inst', model='m')
+        collector.record_llm_call_end('inst')
         collector.record_turn_end('inst')
         cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
         assert fp in cfgs
@@ -1083,13 +1090,99 @@ class TestResolvedEndpointDisplayIdentity:
         attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
         assert resolved_key in attrib
         assert attrib[resolved_key]['cache_misses'] == 1
-        # ...and the global model row is not deflated by this resolved endpoint's miss.
+        # ...and the never-served global template row appears nowhere: its call was
+        # re-keyed to the resolved endpoint, so it carries 0 llm_calls and get_config_comparison
+        # now filters it out entirely (even stronger than "not deflated").
         cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
-        assert cfgs[fp]['cache_misses'] == 0
+        assert fp not in cfgs
 
 
 # ---------------------------------------------------------------------------
-# I-bis. Config fingerprint is model-only (no prompt print)
+# I-bis. A/B config-fingerprint row re-keyed to the RESOLVED model (BUG_0273)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigStatsResolvedModelRekey:
+    """BUG_0273 follow-up: the A/B (config-fingerprint) row is keyed to the model
+    that ACTUALLY served the call. A ``use_last_endpoint`` agent's configured
+    template model (Swift-1.5) ends up with zero ``llm_calls`` and is dropped from
+    the A/B table, while the resolved endpoint (dflash2) carries the traffic.
+    Non-``use_last_endpoint`` agents (resolved == configured) are unchanged."""
+
+    def test_use_last_endpoint_rekeys_ab_row_to_resolved_model(self, collector):
+        """Configured Swift-1.5, resolved dflash2: the call is credited to dflash2's
+        fingerprint; the Swift-1.5 row carries no llm_calls and is filtered out of
+        get_config_comparison itself, so API, web UI and dump all agree it is gone."""
+        swift_fp = TelemetryCollector.fingerprint_config(model='Swift-1.5')
+        collector.record_turn_start('use_last', config_fingerprint=swift_fp,
+                                    config_description={'model': 'Swift-1.5'})
+        cache_key = TelemetryCollector.cache_attribution_key(
+            'http://127.0.0.1:8080/v1', 'dflash2')
+        collector.record_llm_call_start('use_last', model='Swift-1.5', cache_key=cache_key)
+        # The authoritative serving endpoint is dflash2, NOT the configured template.
+        collector.record_llm_call_endpoint('use_last', cache_key, model='dflash2')
+        collector.record_token_usage('use_last', prompt_tokens=100, completion_tokens=5,
+                                     details={'cached_tokens': 0})
+        collector.record_llm_call_end('use_last')
+        collector.record_turn_end('use_last')
+
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        dflash_fp = TelemetryCollector.fingerprint_config(model='dflash2')
+
+        # (1) The resolved endpoint carries the call, labelled with its own model.
+        assert dflash_fp in cfgs
+        assert cfgs[dflash_fp]['llm_calls'] == 1
+        assert cfgs[dflash_fp]['config_description']['model'] == 'dflash2'
+
+        # (1b) The run was counted at turn start on the CONFIGURED fp, so the resolved
+        # row has runs==0 and its per-turn averages are explicitly None (not 0) — the
+        # "not computable" signal. Falsifies reverting Requirement 2.
+        assert cfgs[dflash_fp]['runs'] == 0
+        assert cfgs[dflash_fp]['avg_turn_duration_ms'] is None
+        assert cfgs[dflash_fp]['avg_tokens_per_turn'] is None
+
+        # (2) The configured template model served nothing: it is now filtered at the
+        # source (get_config_comparison, Requirement 1), so it has NO row on any
+        # surface (API, web UI, dump) — not just dropped by the dump renderer.
+        assert swift_fp not in cfgs
+
+        # (3) The raw stats still track the configured row (turn_end EVENT keeps its
+        # fp for reconciliation, and its run was counted there), but the wall-clock
+        # was re-keyed to the resolved row. Assert RAW ms: a sub-ms test turn rounds
+        # total_duration_sec to 0.0, which would not falsify reverting edit #3.
+        raw = collector._config_stats
+        assert raw[swift_fp]['runs'] >= 1
+        assert raw[swift_fp]['total_duration_ms'] == 0
+        assert raw[dflash_fp]['total_duration_ms'] > 0
+
+    def test_non_sentinel_agent_ab_row_is_unchanged(self, collector):
+        """When the resolved model == the configured model (no use_last_endpoint),
+        the re-key is a no-op: exactly one row, on the configured fingerprint,
+        carrying the call — never split across a resolved and configured row."""
+        normal_fp = TelemetryCollector.fingerprint_config(model='Normal-1.5')
+        collector.record_turn_start('normal', config_fingerprint=normal_fp,
+                                    config_description={'model': 'Normal-1.5'})
+        # Same model, different endpoint (api_base) — fingerprint is model-only,
+        # so resolved_fp == normal_fp and no new row is created.
+        cache_key = TelemetryCollector.cache_attribution_key(
+            'http://127.0.0.1:1234/v1', 'Normal-1.5')
+        collector.record_llm_call_start('normal', model='Normal-1.5', cache_key=cache_key)
+        collector.record_llm_call_endpoint('normal', cache_key, model='Normal-1.5')
+        collector.record_token_usage('normal', prompt_tokens=100, completion_tokens=5,
+                                     details={'cached_tokens': 50})
+        collector.record_llm_call_end('normal')
+        collector.record_turn_end('normal')
+
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        # No split: a single unchanged row on the configured fingerprint.
+        assert len(cfgs) == 1
+        assert normal_fp in cfgs
+        assert cfgs[normal_fp]['llm_calls'] == 1
+        assert cfgs[normal_fp]['config_description']['model'] == 'Normal-1.5'
+
+
+# ---------------------------------------------------------------------------
+# I-ter. Config fingerprint is model-only (no prompt print)
 # ---------------------------------------------------------------------------
 
 
@@ -1142,11 +1235,14 @@ class TestFingerprintModelOnly:
             config_description={'model': 'm', 'temperature': 0.9})
         collector.record_turn_end('inst')
 
-        rows = collector.get_config_comparison()
-        assert len(rows) == 1
-        assert rows[0]['runs'] == 2
+        # Model-only GROUPING + first-seen description are properties of the underlying
+        # per-config stats; a turn with no LLM call is now filtered from
+        # get_config_comparison's view (BUG_0273), so assert on the stats directly.
+        stats = collector._config_stats
+        assert list(stats) == [fp]      # one row: temperature is not a grouping key
+        assert stats[fp]['runs'] == 2
         # Documented first-seen behaviour; the UI must not advertise it as T=.
-        assert rows[0]['config_description']['temperature'] == 0.1
+        assert stats[fp]['config_description']['temperature'] == 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1419,10 @@ class TestLivePerConfigClassAggregation:
     def test_runs_live_before_turn_end(self, collector):
         """runs is incremented at turn_start — visible before any turn_end."""
         collector.record_turn_start('inst', config_fingerprint=self.FP, agent_class='coder')
+        # get_config_comparison now filters zero-llm-call rows (BUG_0273); serve one
+        # call so the row is visible, still asserted BEFORE turn_end.
+        collector.record_llm_call_start('inst', model='m')
+        collector.record_llm_call_end('inst')
         # BEFORE turn_end:
         assert self._cfg(collector)['runs'] == 1
         assert self._cls(collector)['runs'] == 1
@@ -1344,6 +1444,10 @@ class TestLivePerConfigClassAggregation:
     def test_tool_calls_and_failures_live_before_turn_end(self, collector):
         """A failing tool updates per-config per-name counts and class accuracy live."""
         collector.record_turn_start('inst', config_fingerprint=self.FP, agent_class='coder')
+        # get_config_comparison now filters zero-llm-call rows (BUG_0273); serve one
+        # call so the row is visible, still asserted BEFORE turn_end.
+        collector.record_llm_call_start('inst', model='m')
+        collector.record_llm_call_end('inst')
         # one success + one failure for "write_file"
         collector.record_tool_call_start('inst', 'write_file')
         collector.record_tool_call_end('inst', 'write_file', success=True)
@@ -1362,6 +1466,10 @@ class TestLivePerConfigClassAggregation:
     def test_loops_and_retries_live_before_turn_end(self, collector):
         """record_loop_detected(auto_rolled_back=True) updates config loops + retries live."""
         collector.record_turn_start('inst', config_fingerprint=self.FP, agent_class='coder')
+        # get_config_comparison now filters zero-llm-call rows (BUG_0273); serve one
+        # call so the row is visible, still asserted BEFORE turn_end.
+        collector.record_llm_call_start('inst', model='m')
+        collector.record_llm_call_end('inst')
         collector.record_loop_detected('inst', 'stuck', auto_rolled_back=True)
 
         # BEFORE turn_end:

@@ -461,8 +461,21 @@ class TelemetryCollector:
             # methods as events happen, so they must NOT be re-flushed here or they
             # would double-count.
             if fp:
-                self._ensure_config_stats(fp, turn.get('config_description'))
-                cs = self._config_stats[fp]
+                # Credit the turn's wall-clock to the RESOLVED model's row when the
+                # turn resolved an endpoint (BUG_0273 follow-up), so the serving
+                # endpoint (dflash2) carries the turn time while the configured-model
+                # row (Swift-1.5) stays duration- and call-free and is dropped from the
+                # A/B dump. The turn_end EVENT below keeps the configured ``fp`` (what
+                # the user configured) for JSONL reconciliation. For a normal agent
+                # resolved == configured, so the credit target is unchanged.
+                credit_fp = turn.get('resolved_config_fingerprint') or fp
+                # Only the configured row needs its description ensured here; the
+                # resolved row is always created earlier (record_llm_call_endpoint),
+                # and passing the configured description under the resolved fingerprint
+                # would relabel it with the wrong model's sampling parameters.
+                if credit_fp == fp:
+                    self._ensure_config_stats(credit_fp, turn.get('config_description'))
+                cs = self._config_stats[credit_fp]
                 cs['total_duration_ms'] += duration_ms
 
             # Update per-agent-class stats — same live-accumulation rule as above;
@@ -576,6 +589,12 @@ class TelemetryCollector:
         fallback. ``model`` is re-bound only when non-empty, so a caller that has no
         resolved model leaves the start snapshot untouched. Caller must have already
         called ``record_llm_call_start`` for ``instance_name``.
+
+        When ``model`` is non-empty it also re-keys the A/B (config-fingerprint)
+        attribution: ``resolved_config_fingerprint`` is recorded on the open turn so
+        ``record_llm_call_end``/``record_turn_end`` book ``llm_calls``/latency/duration
+        to the model that ACTUALLY served the call, not the turn's configured template
+        model (BUG_0273 follow-up). See the inline block below for the full rationale.
         """
         if not cache_key:
             return
@@ -585,6 +604,40 @@ class TelemetryCollector:
                 call['cache_key'] = cache_key
                 if model:
                     call['model'] = model
+                    # Re-key the A/B attribution to the RESOLVED model (BUG_0273
+                    # follow-up). The turn's configured fingerprint is the wrong row
+                    # for a ``use_last_endpoint`` agent (e.g. configured Swift-1.5 but
+                    # actually served by dflash2): it would carry an ``llm_calls`` it
+                    # never served. Record the resolved model's fingerprint on the open
+                    # turn so ``record_llm_call_end`` and ``record_turn_end`` credit
+                    # llm_calls/latency/duration to the endpoint that actually served
+                    # it. LAST resolution wins — this mirrors the last-wins rebind of
+                    # ``call['model']``/``call['cache_key']`` just above. On a router
+                    # failover (endpoint A fails its first-chunk pull, B completes the
+                    # stream) ``_do_call`` re-invokes this per endpoint, so the last
+                    # call names B — the one that actually served it, not A. For a
+                    # normal agent the resolved model == the configured model, so
+                    # ``resolved_config_fingerprint`` equals ``config_fingerprint`` and
+                    # its A/B row is unchanged (a sticky use_last_endpoint agent always
+                    # resolves to the same model, so last-wins == first-wins for it).
+                    # This only swaps WHICH model string is hashed, never the hash
+                    # function, so ``TestFingerprintModelOnly`` stays green.
+                    resolved_fp = TelemetryCollector.fingerprint_config(model=model)
+                    turn = self._active_turns.get(instance_name)
+                    if turn is not None and resolved_fp:
+                        # Create the resolved-model row up front so the per-call
+                        # metrics have a target when record_llm_call_end reads this fp.
+                        # First-sight description carries the resolved model; sampling
+                        # values are a sample only (BUG_0131), matching the
+                        # ``_ensure_config_stats`` contract.
+                        self._ensure_config_stats(
+                            resolved_fp,
+                            TelemetryCollector.describe_config(model=model),
+                        )
+                        # Last-wins (see rationale above): a router failover re-invokes
+                        # this per endpoint, so the final assignment names the endpoint
+                        # that completed the stream, matching the call-level rebind.
+                        turn['resolved_config_fingerprint'] = resolved_fp
 
     @staticmethod
     def classify_cache_hit(cached_tokens, prompt_tokens):
@@ -958,8 +1011,15 @@ class TelemetryCollector:
                     acs['total_streaming_time_ms'] += streaming_time_ms
                 turn['input_tokens_est'] += call['input_tokens_est']
                 turn['output_tokens_est'] += actual_output
-                # Update per-config latency fields (BUG 5 fix)
-                fp = turn.get('config_fingerprint', '')
+                # Update per-config latency fields (BUG 5 fix). Attribute to the
+                # RESOLVED model when this call's endpoint was resolved (BUG_0273
+                # follow-up): a use_last_endpoint call's llm_calls + latency land on
+                # the endpoint that actually served it (dflash2), NOT its configured
+                # template model (Swift-1.5). Falls back to the configured fp when no
+                # endpoint was resolved; for a normal agent resolved == configured so
+                # the row is identical to before (no regression).
+                fp = (turn.get('resolved_config_fingerprint')
+                      or turn.get('config_fingerprint', ''))
                 if fp and fp in self._config_stats:
                     cs = self._config_stats[fp]
                     cs['total_llm_latency_ms'] += latency_ms
@@ -1392,14 +1452,39 @@ class TelemetryCollector:
         }
 
     def get_config_comparison(self) -> List[Dict]:
-        """Get per-config stats for A/B comparison."""
+        """Get per-config stats for A/B comparison.
+
+        Rows with ``llm_calls == 0`` are filtered out here — the single source of
+        truth for EVERY surface (API, web UI via app.js, and the system_info dump) —
+        so a never-served CONFIGURED template row (e.g. Swift-1.5) is never a ghost.
+        The raw JSONL turn_end event still records the configured fp for reconciliation;
+        only this comparison VIEW hides it.
+
+        Null contract: ``avg_turn_duration_ms`` and ``avg_tokens_per_turn`` are ``None``
+        when ``runs == 0`` — true for a resolved-keyed row that carried calls but whose
+        turn-start run stayed on the configured fingerprint. A consumer must NOT divide
+        on these fields without a null check; treat ``None`` as "not computable", not 0.
+        """
         with _telemetry_lock:
             result = []
             for fp, cs in self._config_stats.items():
+                # Filter rows that served no LLM call so EVERY surface agrees (API,
+                # web UI via app.js, and the system_info dump) — BUG_0273 follow-up.
+                # A ``use_last_endpoint`` agent's CONFIGURED template row (e.g.
+                # Swift-1.5) served nothing: its call was re-keyed to the resolved
+                # endpoint, so this row carries 0 llm_calls and must not appear as a
+                # ghost. The raw JSONL turn_end event still records the configured fp
+                # for reconciliation; only the comparison VIEW hides it.
+                if cs['llm_calls'] == 0:
+                    continue
                 total_tokens = cs['input_tokens_est'] + cs['output_tokens_est']
                 total_time_sec = cs['total_duration_ms'] / 1000 if cs['total_duration_ms'] > 0 else 0
-                avg_turn_time = cs['total_duration_ms'] / cs['runs'] if cs['runs'] > 0 else 0
-                avg_tokens_per_turn = total_tokens / cs['runs'] if cs['runs'] > 0 else 0
+                # Per-turn averages are NOT computable when runs==0 — true for a
+                # resolved-keyed row whose run was counted at turn start on the
+                # configured fingerprint (BUG_0273). Emit None ("not computable")
+                # rather than 0, which would falsely read as "instant / no tokens".
+                avg_turn_time = cs['total_duration_ms'] / cs['runs'] if cs['runs'] > 0 else None
+                avg_tokens_per_turn = total_tokens / cs['runs'] if cs['runs'] > 0 else None
 
                 # Streaming time and TPS for this config
                 config_streaming_sec = cs['total_streaming_time_ms'] / 1000 if cs['total_streaming_time_ms'] > 0 else 0
@@ -1448,8 +1533,8 @@ class TelemetryCollector:
                     'output_tokens_est': cs['output_tokens_est'],
                     'total_tokens': total_tokens,
                     'total_duration_sec': round(total_time_sec, 1),
-                    'avg_turn_duration_ms': round(avg_turn_time, 1),
-                    'avg_tokens_per_turn': round(avg_tokens_per_turn),
+                    'avg_turn_duration_ms': round(avg_turn_time, 1) if avg_turn_time is not None else None,
+                    'avg_tokens_per_turn': round(avg_tokens_per_turn) if avg_tokens_per_turn is not None else None,
                     # ── Time breakdown (comparable with get_agent_class_summary) ──
                     # total_duration_sec is turn wall-clock (same measure as the
                     # agent-class total_time_sec); total_llm_latency_sec and

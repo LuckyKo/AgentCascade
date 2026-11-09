@@ -279,6 +279,51 @@ class TestSystemInfoTelemetryDump:
         pool.telemetry = telemetry
         return SystemInfo(agent_pool=pool)
 
+    def test_ab_table_is_resolved_keyed_and_omits_runs_column(self):
+        """BUG_0273 re-key at the VIEW: get_config_comparison is the single filter
+        source (zero-call rows already removed), so the A/B dump renders the resolved
+        row labelled 'by resolved model' with the turn-start runs column omitted. The
+        ghost-row drop is verified at the getter in test_telemetry.py; this proves the
+        dump faithfully renders the getter-supplied resolved rows."""
+        class _ResolvedKeyingTelemetry(_FakeTelemetry):
+            def get_config_comparison(self):
+                # Getter already dropped the zero-call Swift-1.5 row; the dump now
+                # renders whatever the getter returns, with no second filter.
+                return [
+                    # Resolved endpoint that actually served 2 calls.
+                    {'config_fingerprint': 'dflashfp0001',
+                     'config_description': {'model': 'dflash2'},
+                     'runs': 0, 'llm_calls': 2,
+                     'total_llm_latency_sec': 1.2, 'total_duration_sec': 3.0,
+                     'avg_tps': 40.0},
+                ]
+
+        out = self._tool_with(_ResolvedKeyingTelemetry()).call('{"help": "telemetry"}')
+        # Header reflects the resolved key.
+        assert 'Config fingerprints (A/B, by resolved model):' in out
+        # Resolved row present; model→llm_calls adjacency proves the runs column
+        # was removed (old format had 'runs=' between them).
+        assert 'config_model=dflash2  llm_calls=2' in out
+
+    def test_ab_dump_does_not_refilter(self):
+        """Defense against a second copy of the llm_calls==0 predicate drifting back
+        into the dump: a getter that (hypothetically) returns a zero-call row would
+        now be RENDERED, because the getter is the single source of truth."""
+        class _GhostTelemetry(_FakeTelemetry):
+            def get_config_comparison(self):
+                return [
+                    {'config_fingerprint': 'swiftfp00001',
+                     'config_description': {'model': 'Swift-1.5'},
+                     'runs': 1, 'llm_calls': 0,
+                     'total_llm_latency_sec': 0.0, 'total_duration_sec': 0.0,
+                     'avg_tps': 0.0},
+                ]
+
+        out = self._tool_with(_GhostTelemetry()).call('{"help": "telemetry"}')
+        # The dump no longer filters: the ghost would render if the getter let it
+        # through — which it does not in production (see test_telemetry.py).
+        assert 'config_model=Swift-1.5  llm_calls=0' in out
+
     def test_populated_dump_renders_all_sections(self):
         out = self._tool_with(_FakeTelemetry()).call('{"help": "telemetry"}')
         assert 'AC Telemetry Dump' in out

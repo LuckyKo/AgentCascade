@@ -169,14 +169,18 @@ class SystemInfo(BaseTool):
             # ── Config fingerprint (A/B) comparison ──
             if configs:
                 lines.append('')
-                lines.append('Config fingerprints (A/B, by configured model):')
+                lines.append('Config fingerprints (A/B, by resolved model):')
                 for c in configs:
+                    llm_calls = c.get('llm_calls', 0)
+                    # No llm_calls==0 skip here: get_config_comparison is the single
+                    # source of truth and already filters zero-call rows (BUG_0273),
+                    # so this table lists only models that served a resolved call.
                     fp = c.get('config_fingerprint', '?')
                     model = (c.get('config_description') or {}).get('model', '?')
-                    llm_calls = c.get('llm_calls', '')
-                    runs = c.get('runs', '')
                     avg_tps = c.get('avg_tps', '')
-                    lines.append(f"  {fp}  config_model={model}  runs={runs} "
+                    # runs is a turn-start count with no single resolved-model home
+                    # under this re-key, so it is intentionally omitted from the line.
+                    lines.append(f"  {fp}  config_model={model}  "
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "
