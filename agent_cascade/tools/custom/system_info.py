@@ -458,20 +458,21 @@ class SystemInfo(BaseTool):
     def _render_active_instances(self) -> str:
         """Render live per-instance sessions appended to the agent-class list.
 
-        Mirrors the ``active_instances`` field of ``/api/status``: only non-idle
-        (``ACTIVE_STATES``) instances appear, and the context-token figure reuses the
-        same helpers the endpoint uses — ``get_history_stats`` (message tokens) plus
-        ``estimate_instance_tool_schema_tokens`` (the serialized tool schemas sent with
-        every call, BUG_0136) — so the number matches what is actually in context.
-        Single source of truth is the pool's ``instances`` dict (no re-derivation).
+        Shows ALL instances in the pool, in every state (active, idle, parked,
+        …) — not just the active ones — so parked/idle sessions stay visible. The
+        context-token figure reuses the same helpers ``/api/status`` uses —
+        ``get_history_stats`` (message tokens) plus
+        ``estimate_instance_tool_schema_tokens`` (the serialized tool schemas sent
+        with every call, BUG_0136) — so the number matches what is actually in
+        context. Single source of truth is the pool's ``instances`` dict.
         Never raises: degrades to a short note on any pool/instance error.
         """
-        lines = ['', '--- Active Instances (live) ---']
+        lines = ['', '--- Instances (live) ---']
         pool = getattr(self, 'agent_pool', None)
         if not pool:
-            return '\n'.join(lines + ['(no active instances)'])
+            return '\n'.join(lines + ['(no instances)'])
         try:
-            from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
+            from agent_cascade.agent_instance import AgentState
             from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
 
             snapshot = list(getattr(pool, 'instances', {}).items())  # name -> AgentInstance
@@ -483,8 +484,6 @@ class SystemInfo(BaseTool):
         rows = []
         for name, inst in snapshot:
             try:
-                if getattr(inst, 'state', None) not in ACTIVE_STATES:
-                    continue
                 agent_class = getattr(inst, 'agent_class', '') or 'unknown'
                 state = (getattr(inst, 'state', None) or AgentState.IDLE).name
                 turn = int(getattr(inst, '_current_turn', 0) or 0)
@@ -503,7 +502,7 @@ class SystemInfo(BaseTool):
             except Exception as e:
                 rows.append(f"  - {name}  (details unavailable: {e})")
 
-        lines.extend(rows or ['(no active instances)'])
+        lines.extend(rows or ['(no instances)'])
         return '\n'.join(lines)
 
     @staticmethod

@@ -677,32 +677,32 @@ class TestSystemInfoAgentsSection:
         out = SystemInfo(agent_pool=_FakeAgentsPool([])).call('{"help": "agents"}')
         assert 'no agent templates loaded' in out
 
-    def test_active_instances_section_lists_active_instance(self):
-        """A known non-idle instance is listed in the Active Instances section."""
+    def test_instances_section_lists_instance(self):
+        """A non-idle instance is listed in the Instances section."""
         pool = _FakeAgentsPool(self._AGENTS, instances={'worker1': _inst('coder', AgentState.RUNNING)})
         out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
-        assert '--- Active Instances (live) ---' in out
+        assert '--- Instances (live) ---' in out
         assert 'worker1' in out          # name
         assert '(coder)' in out          # agent_class
         assert '[RUNNING]' in out        # state
 
-    def test_active_instances_filters_out_idle(self):
-        """Idle instances are omitted, mirroring /api/status's ACTIVE_STATES filter."""
+    def test_instances_section_lists_idle_instance(self):
+        """Idle instances are now listed too (all states shown, not just active)."""
         pool = _FakeAgentsPool(self._AGENTS, instances={'idleguy': _inst('writer', AgentState.IDLE)})
         out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
-        assert '--- Active Instances (live) ---' in out
-        assert 'idleguy' not in out
-        assert '(no active instances)' in out
+        assert '--- Instances (live) ---' in out
+        assert 'idleguy' in out
+        assert '[IDLE]' in out
 
-    def test_active_instances_degrades_gracefully_when_none(self):
-        """No live sessions -> placeholder, section still present and no crash."""
+    def test_instances_section_degrades_gracefully_when_none(self):
+        """No instances -> placeholder, section still present and no crash."""
         out = SystemInfo(agent_pool=_FakeAgentsPool(self._AGENTS)).call('{"help": "agents"}')
-        assert '--- Active Instances (live) ---' in out
-        assert '(no active instances)' in out
+        assert '--- Instances (live) ---' in out
+        assert '(no instances)' in out
 
-    def test_active_instances_survives_broken_instance(self):
+    def test_instances_section_survives_broken_instance(self):
         """A malformed instance does not crash the section nor suppress valid ones."""
-        boom = object()  # no .state attr -> skipped by the ACTIVE_STATES filter, not an error
+        boom = object()  # no .state attr -> falls back to IDLE, not an error
         pool = _FakeAgentsPool(self._AGENTS, instances={'good': _inst('coder', AgentState.RUNNING), 'bad': boom})
         out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
         assert 'good' in out and '(coder)' in out
