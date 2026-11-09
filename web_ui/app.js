@@ -6790,16 +6790,16 @@ function renderApiEndpoints() {
                <span>Model</span>
                <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
              </label>
-             <div style="display:flex;gap:8px;">
-               <label class="setting-field" style="flex:1;">
+             <div style="display:flex;gap:8px;flex-wrap:wrap;">
+               <label class="setting-field" style="flex:1 1 120px;min-width:0;">
                  <span>Retries</span>
                  <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries ?? 2}">
                </label>
-               <label class="setting-field" style="flex:1;">
+               <label class="setting-field" style="flex:1 1 120px;min-width:0;">
                  <span>Concurrency</span>
                  <input type="number" min="-1" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit ?? -1}" title="-1 = Unlimited. Set to 1 for local servers like LM Studio.">
                </label>
-               <label class="setting-field" style="flex:1;">
+               <label class="setting-field" style="flex:1 1 120px;min-width:0;">
                  <span>Token Limit</span>
                  <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens ?? 0}" title="0 = Use General Settings. Caps context for this endpoint.">
                </label>
@@ -6810,20 +6810,20 @@ function renderApiEndpoints() {
                  <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm ?? 0}" title="Requests per minute. 0 = unlimited">
                </label>
              </div>
-             <div style="display:flex;gap:8px;margin-top:6px;">
-               <label class="setting-field" style="flex:1;">
+             <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
+               <label class="setting-field" style="flex:1 1 140px;min-width:0;">
                  <span>Input $/1M</span>
                  <input type="number" min="0" step="0.01" class="ep-input-cost-input" value="${ep.input_per_m ?? 0}" title="Non-cached input price per 1M tokens (USD). 0 = unpriced (no cost tracked).">
                </label>
-               <label class="setting-field" style="flex:1;">
+               <label class="setting-field" style="flex:1 1 140px;min-width:0;">
                  <span>Output $/1M</span>
                  <input type="number" min="0" step="0.01" class="ep-input-cost-output" value="${ep.output_per_m ?? 0}" title="Output price per 1M tokens (USD). 0 = unpriced.">
                </label>
-               <label class="setting-field" style="flex:1;">
+               <label class="setting-field" style="flex:1 1 140px;min-width:0;">
                  <span>Cache Read $/1M</span>
                  <input type="number" min="0" step="0.01" class="ep-input-cost-cache-read" value="${ep.cache_read_per_m ?? 0}" title="Cached-prompt (cache read) price per 1M tokens (USD). 0 = unpriced.">
                </label>
-               <label class="setting-field" style="flex:1;">
+               <label class="setting-field" style="flex:1 1 140px;min-width:0;">
                  <span>Cache Write $/1M</span>
                  <input type="number" min="0" step="0.01" class="ep-input-cost-cache-write" value="${ep.cache_write_per_m ?? 0}" title="Cache-creation price per 1M tokens (USD). 0 = unpriced. Inert on OpenAI-compatible backends (no cache-creation tokens reported).">
                </label>
