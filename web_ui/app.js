@@ -5673,8 +5673,14 @@ function formatMultimodalContent(text) {
   const visionEnabled = settingVisionEnabled ? settingVisionEnabled.checked : false;
   if (visionEnabled) return text;
 
-  // Strip image data, leave placeholder if vision is disabled
-  const imageRegex = /!\[(.*?)\]\((data:image\/[^;]+;base64,[a-zA-Z0-9+/=]+)\)/g;
+  // Vision disabled: strip image base64 (the model can't see them), leaving a
+  // text placeholder. This regex is intentionally image-ONLY: audio/video have no
+  // client-side toggle, so they are always passed through for the backend to save
+  // and feed to audio/video-capable adapters. Stripping them here would silently
+  // drop audio/video input for models that DO support it.
+  // The alt group is [^\]]* (not lazy .*) so a match can never cross a ']' and
+  // swallow an adjacent audio/video reference that precedes an image in the text.
+  const imageRegex = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[a-zA-Z0-9+/=]+)\)/g;
   return text.replace(imageRegex, "[Image: $1]");
 }
 
@@ -5682,8 +5688,18 @@ function formatMultimodalContent(text) {
 
 // ── Image Handling ───────────────────────────────────────────────────────────
 
-function insertImageMarkdown(base64Data, filename) {
-  const markdown = `![${filename}](${base64Data})`;
+// Insert a media markdown reference (caret-aware). `type` is the modality
+// ('image' | 'audio' | 'video'); `dataUri` already carries the matching
+// `data:<type>/<subtype>;base64,<b64>` prefix (see processMediaFile). The emitted
+// markdown matches the backend _MEDIA_DATA_RE shape: ![filename](data:<type>/...;base64,...)
+// `[`/`]` in the filename are neutralised to '_' so the alt text never breaks the
+// `![...](...)` delimiter. The backend's alt group is `[^\]]*`, so unescaped `]`
+// (e.g. Windows duplicate names like "photo[1].png") would otherwise make BOTH the
+// client vision-off strip and the backend parser miss the reference and leak the raw
+// base64. No-op for normal filenames, so image output is byte-identical.
+function insertMediaMarkdown(type, dataUri, filename) {
+  const safeName = String(filename).replace(/[[\]]/g, '_');
+  const markdown = `![${safeName}](${dataUri})`;
   const startPos = chatInput.selectionStart;
   const endPos = chatInput.selectionEnd;
   const text = chatInput.value;
@@ -5696,9 +5712,56 @@ function insertImageMarkdown(base64Data, filename) {
   chatInput.focus();
 }
 
-function processImageFile(file) {
-  if (!file || !file.type.startsWith('image/')) return;
+// Single source of truth for the media extension/MIME vocabulary on the client.
+// Mirrors agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY verbatim.
+// Used to (1) choose the data-URI MIME subtype from a file's own extension and
+// (2) reject attachments whose extension is outside the backend's accepted set.
+const MEDIA_EXTS_BY_MODALITY = {
+  audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'],
+  video: ['mp4', 'webm', 'mkv', 'mov', 'avi'],
+};
 
+// Classify a File by MIME prefix into 'image' | 'audio' | 'video', or null.
+function mediaModalityFromFile(file) {
+  if (!file || typeof file.type !== 'string') return null;
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.startsWith('audio/')) return 'audio';
+  if (file.type.startsWith('video/')) return 'video';
+  return null;
+}
+
+// Rewrite the MIME subtype of a media data-URI to the file's own extension when
+// that extension is a recognised <modality> type. The backend's
+// save_*_from_data_uri() uses the subtype as an extension hint, so this makes the
+// saved file carry the exact extension the omni adapter needs to derive
+// format/codec downstream. Unrecognised extensions keep the browser-supplied
+// subtype (best-effort; backend falls back to its per-type default extension).
+function buildMediaDataUri(dataUri, modality, filename) {
+  const ext = (filename || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  const allowed = MEDIA_EXTS_BY_MODALITY[modality] || [];
+  if (ext && allowed.includes(ext[1])) {
+    return dataUri.replace(/^data:(?:audio|video)\/[^;]+(?=;base64,)/, `data:${modality}/${ext[1]}`);
+  }
+  return dataUri;
+}
+
+function processMediaFile(file) {
+  const modality = mediaModalityFromFile(file);
+  if (!modality) return;
+
+  if (modality !== 'image') {
+    // Audio/video: base64-encode the raw file (no resize). Large videos yield a
+    // large base64 blob in the textarea — accepted v1 limitation (no server upload).
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUri = buildMediaDataUri(e.target.result, modality, file.name);
+      insertMediaMarkdown(modality, dataUri, file.name || modality);
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
+
+  // Image path — unchanged behaviour (resize + re-encode, then insert).
   const maxSize = settingMaxImageSize ? parseInt(settingMaxImageSize.value) : 1024;
   const reader = new FileReader();
 
@@ -5726,7 +5789,7 @@ function processImageFile(file) {
 
       const mimeType = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
       const dataUrl = canvas.toDataURL(mimeType, 0.9);
-      insertImageMarkdown(dataUrl, file.name || 'image');
+      insertMediaMarkdown('image', dataUrl, file.name || 'image');
     };
     img.src = e.target.result;
   };
@@ -5779,7 +5842,7 @@ if (insertImageBtn && imageInput) {
   insertImageBtn.addEventListener('click', () => imageInput.click());
   imageInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      processImageFile(e.target.files[0]);
+      processMediaFile(e.target.files[0]);
     }
     e.target.value = ''; // Reset input
   });
@@ -5855,10 +5918,11 @@ chatInput.addEventListener('paste', (e) => {
   if (e.clipboardData && e.clipboardData.items) {
     const items = e.clipboardData.items;
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.indexOf('image') !== -1) {
+      const file = items[i].getAsFile();
+      // Accept image/audio/video pasted content; text/plain yields getAsFile()==null.
+      if (mediaModalityFromFile(file)) {
         e.preventDefault();
-        const file = items[i].getAsFile();
-        processImageFile(file);
+        processMediaFile(file);
       }
     }
   }
@@ -5870,46 +5934,71 @@ chatInput.addEventListener('paste', (e) => {
 // Parse textarea content for ![name](data:image/...base64) patterns and show thumbnails.
 const imagePreviewContainer = document.getElementById('imagePreviewContainer');
 
-// Regex to match markdown image syntax with base64 data URIs
-const IMAGE_MARKDOWN_RE = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[a-zA-Z0-9+/=]+\))/g;
+// Regex to match markdown media syntax with image/audio/video base64 data URIs.
+// Mirrors the data-URI branch of agent_cascade/utils/thinking_block.py::_MEDIA_DATA_RE
+// (data:image|audio|video/<subtype>;base64,<b64>), so the preview strip never renders
+// a media reference the backend would not also parse.
+const MEDIA_MARKDOWN_RE = /!\[([^\]]*)\]\((data:(?:image|audio|video)\/[^;)]+;base64,[a-zA-Z0-9+/=]+)\)/g;
 
 // Debounce timer for image preview updates (avoids lag with large base64 strings)
 let previewUpdateTimer = null;
 
-/** Update the image preview thumbnails based on current textarea content. */
+/** Update the media preview thumbnails (image/audio/video) from textarea content. */
 function updateImagePreviews() {
   if (!imagePreviewContainer) return;
   const text = chatInput.value;
-  const matches = [...text.matchAll(IMAGE_MARKDOWN_RE)];
+  const matches = [...text.matchAll(MEDIA_MARKDOWN_RE)];
 
   // Clear existing previews
   imagePreviewContainer.innerHTML = '';
 
   for (const match of matches) {
     const [, name, dataUri] = match;
+    const modality = dataUri.startsWith('data:audio/') ? 'audio'
+      : dataUri.startsWith('data:video/') ? 'video' : 'image';
 
     const wrapper = document.createElement('div');
     wrapper.className = 'image-preview-thumbnail';
-    wrapper.title = name || 'Image attachment';
+    wrapper.title = name || `${modality[0].toUpperCase()}${modality.slice(1)} attachment`;
 
-    const img = document.createElement('img');
-    img.src = dataUri;
-    img.alt = name || 'preview';
-    img.loading = 'eager'; // Show immediately, these are already in memory
+    let child;
+    if (modality === 'image') {
+      child = document.createElement('img');
+      child.src = dataUri;
+      child.alt = name || 'preview';
+      child.loading = 'eager'; // Show immediately, these are already in memory
+    } else {
+      // Audio/video render as native players. styles.css is out of scope for M4,
+      // so tile sizing is applied inline (wider than the 72px image tile so the
+      // controls stay usable). Codecs the browser can't decode (e.g. .mov/.avi)
+      // show a non-playing control — cosmetic only; the markdown is still valid.
+      wrapper.style.width = modality === 'video' ? '160px' : '170px';
+      wrapper.style.height = modality === 'video' ? '90px' : '44px';
+      child = document.createElement(modality); // <audio> / <video>
+      child.src = dataUri;
+      child.controls = true;
+      child.setAttribute('preload', 'metadata');
+      if (modality === 'video') {
+        child.playsinline = true;
+        child.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;background:#000;';
+      } else {
+        child.style.width = '100%';
+      }
+    }
 
     // Remove button — strips the corresponding markdown from textarea
     const removeBtn = document.createElement('button');
     removeBtn.className = 'image-preview-remove';
     removeBtn.textContent = '×';
-    removeBtn.title = 'Remove image';
-    const imageMarkdown = match[0]; // Capture before closure
+    removeBtn.title = `Remove ${modality}`;
+    const mediaMarkdown = match[0]; // Capture before closure
     removeBtn.addEventListener('click', () => {
-      chatInput.value = chatInput.value.replace(imageMarkdown, '').replace(/\n{2,}/g, '\n').trim();
+      chatInput.value = chatInput.value.replace(mediaMarkdown, '').replace(/\n{2,}/g, '\n').trim();
       autoResize(chatInput);
       updateImagePreviews();
     });
 
-    wrapper.appendChild(img);
+    wrapper.appendChild(child);
     wrapper.appendChild(removeBtn);
     imagePreviewContainer.appendChild(wrapper);
   }
@@ -5940,7 +6029,7 @@ chatInput.addEventListener('keydown', (e) => {
 // Clicking buttons, toggles, or empty space should not steal focus from #chatInput.
 // We defer focus to the task queue (setTimeout 0) so it runs AFTER all synchronous
 // click handlers have finished, including any that call chatInput.focus() themselves
-// (e.g., insertImageMarkdown, insertAtCursor). This preserves button functionality
+// (e.g., insertMediaMarkdown, insertAtCursor). This preserves button functionality
 // while ensuring focus returns to the textarea for immediate typing.
 const inputArea = document.querySelector('.input-area');
 if (inputArea) {
