@@ -526,6 +526,103 @@ class SystemInfo(BaseTool):
             lines.append(f"  - {name} — {desc}" if desc else f"  - {name}")
         return '\n'.join(lines) if lines else '  (no MCP servers enabled)'
 
+    def _query_nvidia_gpus(self) -> list:
+        """Query per-GPU status via nvidia-smi.
+
+        Returns a list of dicts keyed index/name/total_mb/used_mb/free_mb/util
+        (memory in MB, util as integer percent). An empty list is the single
+        "unavailable" signal the renderer relies on — it covers both "no
+        NVIDIA GPU" and "nvidia-smi missing/failed/timed out", which render
+        identically. Never raises.
+        """
+        import shutil
+        import subprocess
+        try:
+            exe = shutil.which('nvidia-smi')
+            if not exe:
+                return []
+            cmd = [
+                exe,
+                '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu',
+                '--format=csv,noheader,nounits',
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+            if result.returncode != 0:
+                return []
+            gpus = []
+            for line in result.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) != 6:
+                    continue  # malformed line
+                try:
+                    gpus.append({
+                        'index': parts[0],
+                        'name': parts[1],
+                        'total_mb': int(parts[2]),
+                        'used_mb': int(parts[3]),
+                        'free_mb': int(parts[4]),
+                        'util': int(parts[5]),
+                    })
+                except (ValueError, IndexError):
+                    continue
+            return gpus
+        except Exception as e:
+            logger.debug(f"nvidia-smi GPU query failed: {e}")
+            return []
+
+    def _render_system_resources(self) -> str:
+        """Render a host system-resources summary (CPU, RAM, GPU/VRAM).
+
+        Each source is isolated in its own try/except so a missing source
+        (no psutil, no nvidia-smi) never suppresses the others and never
+        crashes the tool. psutil and nvidia-smi are imported lazily to avoid
+        a hard module-level dependency. Returns a short note only when no
+        source yields anything.
+        """
+        lines = []
+
+        # CPU: model + core count (+ live load when psutil is importable).
+        try:
+            model = platform.processor() or platform.machine() or 'unknown'
+            cores = os.cpu_count()
+            cores_part = f"{cores} cores" if cores else 'n/a cores'
+            try:
+                import psutil
+                load_part = f", {psutil.cpu_percent(interval=0.1):.0f}% load"
+            except Exception:
+                load_part = ''
+            lines.append(f"  CPU: {model} ({cores_part}{load_part})")
+        except Exception as e:
+            logger.debug(f"CPU info unavailable: {e}")
+
+        # RAM: used / total in GB with used percent.
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            lines.append(
+                f"  RAM: {vm.used / 1024**3:.1f} / {vm.total / 1024**3:.1f} GB ({vm.percent:.0f}%)"
+            )
+        except Exception as e:
+            logger.debug(f"RAM info unavailable: {e}")
+
+        # GPU/VRAM: one line per GPU; an empty query result renders the single
+        # "no info" line. _query_nvidia_gpus never raises, but the outer guard
+        # keeps a future change from breaking the whole section.
+        try:
+            gpus = self._query_nvidia_gpus()
+            if gpus:
+                for g in gpus:
+                    lines.append(
+                        f"  GPU {g['index']}: {g['name']}  "
+                        f"VRAM {g['used_mb']} / {g['total_mb']} MB ({g['util']}% util)"
+                    )
+            else:
+                lines.append('  GPU: (no NVIDIA GPU info available)')
+        except Exception as e:
+            logger.debug(f"GPU info unavailable: {e}")
+
+        return '\n'.join(lines) if lines else '  (system resources unavailable)'
+
     def call(self, params: str, **kwargs) -> str:
         # Optional help mode — return an editable reference section instead of system info.
         try:
@@ -768,6 +865,8 @@ class SystemInfo(BaseTool):
                 f"Python Version: {py_version}\n"
                 f"API Endpoint: {api_base}\n"
                 f"Model Used: {model}\n"
+                f"\n--- System Resources ---\n"
+                f"{self._render_system_resources()}\n"
                 f"\n--- AgentCascade Server ---\n"
                 f"AgentCascade Version: {AC_VERSION}\n"
                 f"Server Address: {ac_server_str}\n"

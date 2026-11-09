@@ -732,3 +732,144 @@ class TestListAgentsDeprecationStub:
         assert 'list_agents' not in offered  # hidden from the model
         assert 'call_agent' in offered and 'read_file' in offered  # others unaffected
         assert 'list_agents' in func_map  # remains callable
+
+
+class TestSystemInfoResourcesSection:
+    """Tests for the --- System Resources --- section (CPU, RAM, GPU/VRAM).
+
+    All hardware sources are mocked so results are deterministic and never
+    depend on the host's real CPU/RAM/GPU: psutil is injected via sys.modules,
+    nvidia-smi via patched shutil.which + subprocess.run.
+    """
+
+    def _tool(self):
+        return SystemInfo(agent_pool=None)
+
+    # Two realistic nvidia-smi CSV lines (noheader,nounits) for the 2x RTX 5060 Ti host.
+    _TWO_GPU_CSV = (
+        '0, NVIDIA GeForce RTX 5060 Ti, 16311, 13947, 2364, 0\n'
+        '1, NVIDIA GeForce RTX 5060 Ti, 16311, 15254, 1057, 3\n'
+    )
+
+    def _mock_psutil(self, monkeypatch, used_gb=12, total_gb=32, percent=75.0, load=42.0):
+        """Inject a fake psutil module exposing the two helpers the renderer uses."""
+        import sys
+        from types import SimpleNamespace
+        fake = SimpleNamespace(
+            cpu_percent=lambda interval=0.1: load,
+            virtual_memory=lambda: SimpleNamespace(
+                used=int(used_gb * 1024**3),
+                total=int(total_gb * 1024**3),
+                percent=percent,
+            ),
+        )
+        monkeypatch.setitem(sys.modules, 'psutil', fake)
+
+    def _mock_nvidia(self, monkeypatch, csv=None, found=True, returncode=0):
+        """Patch shutil.which / subprocess.run so nvidia-smi output is deterministic."""
+        import shutil
+        import subprocess
+        from types import SimpleNamespace
+        monkeypatch.setattr(
+            shutil, 'which',
+            lambda name: r'C:\Windows\system32\nvidia-smi.EXE' if found else None)
+        monkeypatch.setattr(
+            subprocess, 'run',
+            lambda *a, **k: SimpleNamespace(
+                returncode=returncode, stdout=csv if csv is not None else '', stderr=''))
+
+    def test_basic_call_includes_section_with_cpu_ram_gpu(self, monkeypatch):
+        """Basic (no-help) call renders the section with CPU, RAM and per-GPU lines."""
+        import os
+        import platform
+        self._mock_psutil(monkeypatch)
+        monkeypatch.setattr(platform, 'processor', lambda: 'Intel64 Mock CPU Model')
+        monkeypatch.setattr(os, 'cpu_count', lambda: 16)
+        self._mock_nvidia(monkeypatch, csv=self._TWO_GPU_CSV)
+
+        out = self._tool().call('')
+        assert '--- System Resources ---' in out
+        assert 'CPU: Intel64 Mock CPU Model (16 cores, 42% load)' in out
+        assert 'RAM: 12.0 / 32.0 GB (75%)' in out
+        assert 'GPU 0: NVIDIA GeForce RTX 5060 Ti  VRAM 13947 / 16311 MB (0% util)' in out
+        assert 'GPU 1: NVIDIA GeForce RTX 5060 Ti  VRAM 15254 / 16311 MB (3% util)' in out
+
+    def test_section_after_system_information_before_server(self, monkeypatch):
+        """The section is placed immediately after System Information and before the server block."""
+        import sys
+        self._mock_psutil(monkeypatch)
+        monkeypatch.setitem(sys.modules, 'psutil', None)  # drop CPU-load dependency
+        self._mock_nvidia(monkeypatch, csv=self._TWO_GPU_CSV)
+        out = self._tool().call('')
+        assert 'Model Used:' in out
+        si = out.index('--- System Information ---')
+        sr = out.index('--- System Resources ---')
+        srv = out.index('--- AgentCascade Server ---')
+        assert si < sr < srv
+
+    def test_no_nvidia_smi_renders_no_gpu_line_no_crash(self, monkeypatch):
+        """When nvidia-smi is absent, the GPU line degrades to the no-info note."""
+        self._mock_psutil(monkeypatch)
+        self._mock_nvidia(monkeypatch, found=False)
+        out = self._tool()._render_system_resources()
+        assert 'GPU: (no NVIDIA GPU info available)' in out
+        # Other sources are unaffected.
+        assert 'RAM: 12.0 / 32.0 GB (75%)' in out
+
+    def test_no_psutil_degrades_ram_and_cpu_load_only(self, monkeypatch):
+        """When psutil import fails, RAM and the CPU load drop out but the section renders."""
+        import os
+        import platform
+        import sys
+        monkeypatch.setitem(sys.modules, 'psutil', None)  # import psutil -> ImportError
+        monkeypatch.setattr(platform, 'processor', lambda: 'AMD Ryzen 7 Mock')
+        monkeypatch.setattr(os, 'cpu_count', lambda: 8)
+        self._mock_nvidia(monkeypatch, csv='0, NVIDIA GeForce RTX 5060 Ti, 16311, 100, 16211, 1\n')
+        out = self._tool()._render_system_resources()
+        assert 'CPU: AMD Ryzen 7 Mock (8 cores)' in out  # no live load suffix
+        assert '% load' not in out
+        assert 'RAM:' not in out
+        assert 'GPU 0: NVIDIA GeForce RTX 5060 Ti  VRAM 100 / 16311 MB (1% util)' in out
+
+    def test_all_sources_fail_returns_unavailable_note(self, monkeypatch):
+        """If every source fails, the renderer returns the short unavailable note."""
+        import os
+        import platform
+        import sys
+        monkeypatch.setitem(sys.modules, 'psutil', None)
+
+        def boom():
+            raise OSError('info unavailable')
+        monkeypatch.setattr(platform, 'processor', boom)
+        monkeypatch.setattr(os, 'cpu_count', boom)
+
+        tool = self._tool()
+
+        def query_boom():
+            raise RuntimeError('query failed')
+        monkeypatch.setattr(tool, '_query_nvidia_gpus', query_boom)
+
+        out = tool._render_system_resources()
+        assert '(system resources unavailable)' in out
+
+    def test_query_parses_all_fields_and_skips_malformed(self, monkeypatch):
+        """_query_nvidia_gpus parses every field to the right type and skips bad lines."""
+        self._mock_nvidia(
+            monkeypatch,
+            csv='0, GPU A, 8192, 2048, 6144, 40\n'
+                'garbage line\n'
+                '1, GPU B, 8192, 100, 8092, 5\n')
+        gpus = self._tool()._query_nvidia_gpus()
+        assert len(gpus) == 2
+        assert gpus[0] == {
+            'index': '0', 'name': 'GPU A', 'total_mb': 8192,
+            'used_mb': 2048, 'free_mb': 6144, 'util': 40,
+        }
+        assert gpus[1]['index'] == '1'
+        assert isinstance(gpus[1]['total_mb'], int)
+        assert isinstance(gpus[1]['free_mb'], int)
+
+    def test_query_nonzero_returncode_returns_empty(self, monkeypatch):
+        """A failing nvidia-smi invocation returns [], the sole unavailable signal."""
+        self._mock_nvidia(monkeypatch, csv='', found=True, returncode=1)
+        assert self._tool()._query_nvidia_gpus() == []
