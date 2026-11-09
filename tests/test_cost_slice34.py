@@ -38,9 +38,10 @@ class _FakeTelemetry:
     (missing names are unpriced -> None), mirroring get_instance_cost's None semantics.
     """
 
-    def __init__(self, totals=None, cost=None):
+    def __init__(self, totals=None, cost=None, generated=None):
         self._totals = totals or {}
         self._cost = cost
+        self._generated = generated
 
     @staticmethod
     def _key(inst):
@@ -50,8 +51,11 @@ class _FakeTelemetry:
         return self._totals.get(self._key(inst), 0)
 
     def get_instance_generated_tokens(self, inst):
-        # Slice-3 walker reads the completion-only view; the fake serves it from the
-        # same _totals dict (total == generated for test purposes).
+        # Slice-3 walker reads the completion-only view. Served from a dedicated
+        # ``generated`` dict when provided (so a test can make generated < total),
+        # else falls back to _totals (total == generated for the simple cases).
+        if self._generated is not None:
+            return self._generated.get(self._key(inst), 0)
         return self._totals.get(self._key(inst), 0)
 
     def get_instance_cost(self, inst):
@@ -152,6 +156,26 @@ def test_sum_subtree_tokens_and_cost_sums_priced_descendants():
     )
     # 0.05 + 0.05 == 0.1 exactly in float; generated 10+20 = 30.
     assert _sum_subtree_tokens_and_cost(pool, root) == (30, 0.1)
+
+
+def test_sum_subtree_uses_generated_not_total():
+    # generated < total proves the walker reads the completion-only view (a silent
+    # revert to total_tokens would yield 3000, not 300).
+    root = _FakeInst('root', children=['a'])
+    a = _FakeInst('a', children=[])
+    pool = _FakePool(
+        {'root': root, 'a': a},
+        _FakeTelemetry(totals={'root': 1000, 'a': 2000},
+                       generated={'root': 100, 'a': 200}),
+    )
+    assert _sum_subtree_tokens_and_cost(pool, root) == (300, 0.0)
+
+
+def test_format_result_omits_cost_when_below_display_precision():
+    # A priced-but-tiny cost (0.00004) would render "$0" -> omitted, not a misleading zero.
+    out = _format_result('code_worker', 'done', elapsed_s=192.3,
+                         generated_tokens=42190, total_cost=0.00004)
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
 
 
 def test_sum_subtree_tokens_cycle_safe():

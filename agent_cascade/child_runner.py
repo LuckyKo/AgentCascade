@@ -31,7 +31,7 @@ def _format_elapsed(elapsed_s: float) -> str:
     return f"{minutes}m {seconds}s"
 
 
-def _sum_subtree_tokens_and_cost(pool, inst) -> tuple:
+def _sum_subtree_tokens_and_cost(pool, inst) -> tuple[int, float]:
     """Sum generated (completion-only) tokens + cost over *inst* + every descendant.
 
     Returns ``(generated_tokens, total_cost)``. Walks the per-instance
@@ -105,7 +105,10 @@ def _format_result(
             suffix = f" in {_format_elapsed(elapsed_s)}, generated: {generated_tokens:,}"
             if total_cost and total_cost > 0:
                 cost_str = f"${total_cost:,.4f}".rstrip('0').rstrip('.')
-                suffix += f", cost: {cost_str}"
+                # A sub-display-precision cost (e.g. $0.00004) would render "$0" —
+                # omit it rather than show a misleading zero (repo "no $0" intent).
+                if cost_str != '$0':
+                    suffix += f", cost: {cost_str}"
         return f"[{prefix} '{instance_name}' Completed{suffix}]:\n{result}"
 
 
