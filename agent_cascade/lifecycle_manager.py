@@ -9,8 +9,9 @@ See DESIGN_REWRITE.md §4.1 for design rationale.
 
 import copy
 import datetime
+import re
 import time
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
 from agent_cascade.agent_instance import AgentInstance, AgentState, SystemPromptFrozenError
 from agent_cascade.constants import NON_LLM_KEYS
@@ -19,10 +20,99 @@ from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET
 from agent_cascade.budget_words import budget_allocation_notice
+from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
     from agent_cascade.execution_engine import ExecutionEngine
+
+
+# ── L1 prefix-stability lint (BUG_0278) ──────────────────────────────────────
+# llama.cpp's KV prefix cache only hits while the leading prompt prefix —
+# conversation[0] — is byte-identical between runs. For "stable" system-agent
+# classes (STABLE_SYSTEM_PROMPT_CLASSES) the RUNTIME gate in
+# engine/helpers._build_session_metadata keeps the per-run identity fields
+# (Supervisor name + log filename, own log path) out of conversation[0]. Nothing,
+# however, asserted that a future edit cannot smuggle one back in.
+#
+# This is that guard. The patterns below are where the lint DEFINES the volatile
+# fields; the producer that emits them (helpers._build_session_metadata) necessarily
+# holds its own copies, so the two must stay in sync — the regression test asserts the
+# literal labels, so a producer rename surfaces there rather than silently.
+_VOLATILE_PREFIX_PATTERNS = (
+    re.compile(r'Supervisor:'),           # caller identity + its timestamped log filename
+    re.compile(r'Your log Path:'),        # per-run timestamped log path (…_%Y%m%d_%H%M%S.jsonl)
+    re.compile(r'\d{4}-\d{2}-\d{2}'),     # wall-clock date (see _STABLE_PREFIX_CONSTANT_LINE)
+)
+# Line the runtime intentionally keeps in the stable block whose value is a PER-INSTANCE
+# CONSTANT (captured once in AgentInstance.__post_init__, frozen with the prompt) — not
+# per-run volatile: `- System: AgentCascade v… — YYYY-MM-DD HH:MM`. It matches the
+# wall-clock pattern above but must not trip the guard. Stability is decided at the VALUE
+# level (where the field is assigned), not the LINE level (it only looks like a timestamp).
+_STABLE_PREFIX_CONSTANT_LINE = re.compile(r'^\s*-\s*System:\s*AgentCascade\b')
+
+
+class PrefixStabilityError(RuntimeError):
+    """Raised by _lint_stable_prefix when a volatile field renders into a stable-class
+    conversation[0] Session Metadata section.
+
+    Such a field busts the llama.cpp KV prefix cache on every run (the prefix stops
+    matching from the first volatile token onward). The check itself raises hard so the
+    build/CI regression test turns drift into a build failure; the runtime caller logs it
+    non-fatally, because a cache miss is a perf regression that must not crash a live agent.
+    """
+
+
+def _extract_stable_metadata_lines(prefix_block: str) -> list:
+    """Return the contiguous `- ` bullet lines of the `## Session Metadata` section.
+
+    The volatile per-run fields are emitted by _build_session_metadata ONLY as
+    `- Label: value` bullets, so the guard scans exactly those lines and nothing else.
+    It stops at the first non-bullet line (the block trailer / the soul body), so static
+    soul or skill prose is never scanned — no matter what a future soul edit contains.
+    (An earlier heading-to-heading extraction did absorb soul prose and could false-positive
+    on a date there, which would have hard-raised on a live stable-agent turn.)
+    """
+    lines = prefix_block.split('\n')
+    start = next((i for i, line in enumerate(lines) if line.startswith('## Session Metadata')), None)
+    if start is None:
+        return []
+    out = []
+    for line in lines[start + 1:]:
+        if not line.startswith('- '):
+            break
+        out.append(line)
+    return out
+
+
+def _lint_stable_prefix(prefix_block: str, *, tool_names: Optional[Sequence[str]] = None) -> None:
+    """Guard: assert a stable-class conversation[0] Session Metadata carries no volatile field.
+
+    Callers gate this to STABLE_SYSTEM_PROMPT_CLASSES. Two independent checks:
+      1. The `## Session Metadata` bullet run must contain no pattern from
+         _VOLATILE_PREFIX_PATTERNS, except the per-instance-constant System line.
+      2. If `tool_names` is supplied, they must be in canonical (sorted) order — a
+         reordering of the tool schema is itself a KV prefix bust (the same bust class as
+         a changed token; cf. the OpenAI prompt-cache bust table). The schema is assembled
+         outside lifecycle_manager, so this check is a SPEC-GUARD for a future production
+         wiring (canonical sorted-order check): no production caller supplies `tool_names`
+         yet, and it is exercised only by synthetic lists in the regression test. Not wired
+         to a caller now (YAGNI).
+
+    Raises PrefixStabilityError on the first violation; otherwise returns None.
+    """
+    for line in _extract_stable_metadata_lines(prefix_block):
+        if _STABLE_PREFIX_CONSTANT_LINE.match(line):
+            continue
+        for pattern in _VOLATILE_PREFIX_PATTERNS:
+            if pattern.search(line):
+                raise PrefixStabilityError(
+                    f'stable-class conversation[0] Session Metadata contains a volatile '
+                    f'field matching {pattern.pattern!r}: {line!r} — this busts the KV prefix cache')
+    if tool_names is not None and list(tool_names) != sorted(tool_names):
+        raise PrefixStabilityError(
+            f'stable-class tool schema is not in canonical (sorted) order — a reordering '
+            f'busts the KV prefix cache: {list(tool_names)!r}')
 
 
 def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance: AgentInstance) -> None:
@@ -421,6 +511,21 @@ class AgentLifecycleManager:
         # only updates an already-present block and never first-injects — so do NOT remove this
         # call assuming _setup_turn covers persistence.
         _inject_metadata_into_message(sys_msg, self.pool, instance)
+
+        # L1 (BUG_0278) prefix-stability guard. Stable system-agent classes reuse their KV
+        # prefix, so conversation[0] must not carry a per-run volatile field.
+        # _build_session_metadata gates them at runtime; this asserts the rendered block
+        # came out clean so drift is surfaced. A volatile field is a cache MISS (perf), not
+        # a correctness fault — so log it LOUDLY but do not abort a live agent turn. The
+        # build/CI regression test (test_stable_prefix_byte_identity.py) renders the real
+        # templates and fails the build on the same condition, catching drift before ship.
+        # No-op for non-stable classes.
+        if instance.agent_class.lower() in STABLE_SYSTEM_PROMPT_CLASSES:
+            try:
+                _lint_stable_prefix(sys_msg.content)
+            except PrefixStabilityError as exc:
+                logger.error('[PREFIX_STABILITY] stable-class %s conversation[0] drift: %s',
+                             instance.instance_name, exc)
 
         # FIX (todo.md:117): Ensure logger metadata reflects actual supervisor.
         # AgentInstanceLogger defaults to "System" — correct it to the real parent.
