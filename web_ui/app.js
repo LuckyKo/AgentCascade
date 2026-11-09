@@ -5729,6 +5729,32 @@ const MEDIA_EXTS_BY_MODALITY = {
 // so they are never capped.
 const MAX_INLINE_MEDIA_BYTES = 6 * 1024 * 1024;
 
+// Server's hard ceiling on a SINGLE chat WS text frame. The per-file cap above
+// bounds ONE attachment; a message with multiple audio/video attachments is still
+// inlined into ONE frame, so >=3 large-but-individually-valid files together
+// exceed this and trip the server's ws_max_size -> protocol 1009, which closes
+// the whole session. Kept in sync with agent_cascade/api_server.py::ws_max_size
+// (16 MiB); bump BOTH together if the server limit ever changes. Enforced as an
+// aggregate running total in processMediaFile via existingInlinedMediaBytes().
+const WS_MAX_INLINE_BYTES = 16 * 1024 * 1024;
+
+// Sum of the base64 payload lengths of all AUDIO/VIDEO data-URIs already present
+// in `text` (the chat input). Images are EXCLUDED — they are resized/re-encoded
+// server-side and bounded, so they never contribute to the inline-media frame
+// size. Pure + DOM-free: reads only the string, so the aggregate cap is always
+// derived from the textarea's actual content (correct across ×-button removals,
+// with no counter to drift).
+function existingInlinedMediaBytes(text) {
+  if (!text) return 0;
+  let total = 0;
+  // Base64 alphabet is [A-Za-z0-9+/=]; it never contains ')', so the match stops
+  // at the markdown ')'. Only audio/video match; image data-URIs are excluded.
+  for (const m of text.matchAll(/data:(?:audio|video)\/[^;]+;base64,([A-Za-z0-9+/=]+)/g)) {
+    total += m[1].length;
+  }
+  return total;
+}
+
 // Classify a File by MIME prefix into 'image' | 'audio' | 'video', or null.
 function mediaModalityFromFile(file) {
   if (!file || typeof file.type !== 'string') return null;
@@ -5778,6 +5804,19 @@ function processMediaFile(file) {
     // in-flight work — much worse than dropping just this attachment.
     if (file.size > MAX_INLINE_MEDIA_BYTES) {
       showInSystemToastBar(`⚠️ ${modality === 'video' ? 'Video' : 'Audio'} too large to attach inline (max ~${Math.round(MAX_INLINE_MEDIA_BYTES / (1024 * 1024))} MB): "${file.name}".`);
+      return;
+    }
+    // Aggregate per-frame cap. The per-file check above bounds ONE attachment, but
+    // a single message can hold MULTIPLE audio/video files and they all inline into
+    // ONE WS frame — three individually-valid <6 MiB files can together exceed the
+    // server's 16 MiB ws_max_size and still trigger the session-killing 1009. So
+    // also bound the running total already inlined (recomputed from the real
+    // textarea, hence correct across ×-button removals, no counter to drift) plus
+    // this file's base64-inflated size (~4/3). Reject before encoding.
+    const inflated = Math.ceil(file.size * 4 / 3);
+    const existing = existingInlinedMediaBytes(chatInput.value);
+    if (existing + inflated > WS_MAX_INLINE_BYTES) {
+      showInSystemToastBar('Too much media in this message (max ~' + Math.round(WS_MAX_INLINE_BYTES / (1024 * 1024)) + ' MB inlined total). Remove some before adding more.');
       return;
     }
     // Audio/video: base64-encode the raw file (no resize).
