@@ -558,18 +558,24 @@ class TelemetryCollector:
             if call and call['first_token_time'] == 0:
                 call['first_token_time'] = time.perf_counter()
 
-    def record_llm_call_endpoint(self, instance_name: str, cache_key: str):
-        """Bind the RESOLVED endpoint's cache-attribution key to the in-flight call.
+    def record_llm_call_endpoint(self, instance_name: str, cache_key: str, model: str = ''):
+        """Bind the RESOLVED endpoint's identity to the in-flight call.
 
         ``record_llm_call_start`` may carry only a best-effort (possibly stale, or
-        empty on a first call) key because the endpoint is not resolved until
-        inside the engine's ``_do_call``. Once ``_last_endpoint_config`` is written,
-        the engine calls this with the authoritative ``cache_attribution_key`` so
-        ``record_token_usage`` classifies against the endpoint that ACTUALLY served
-        this call — not the previous call's endpoint under cursor rotation / router
-        fallback (BUG_0273). A no-op when ``cache_key`` is empty, preserving the
-        model-fingerprint fallback. Caller must have already called
-        ``record_llm_call_start`` for ``instance_name``.
+        empty on a first call) key, and a ``model`` snapshotted from the agent's
+        configured template, because the endpoint is not resolved until inside the
+        engine's ``_do_call``. Once ``_last_endpoint_config`` is written, the engine
+        calls this with the authoritative ``cache_attribution_key`` (and the resolved
+        ``model``) so ``record_token_usage`` classifies against the endpoint that
+        ACTUALLY served this call — not the previous call's endpoint under cursor
+        rotation / router fallback — and the per-call cache surfaces (the
+        ``[KV_CACHE_MISS]`` debug line and the persisted ``llm_call`` event's ``model``)
+        label the endpoint that served it, not the configured template model.
+
+        A no-op when ``cache_key`` is empty, preserving the model-fingerprint
+        fallback. ``model`` is re-bound only when non-empty, so a caller that has no
+        resolved model leaves the start snapshot untouched. Caller must have already
+        called ``record_llm_call_start`` for ``instance_name``.
         """
         if not cache_key:
             return
@@ -577,6 +583,8 @@ class TelemetryCollector:
             call = self._active_llm_calls.get(instance_name)
             if call is not None:
                 call['cache_key'] = cache_key
+                if model:
+                    call['model'] = model
 
     @staticmethod
     def classify_cache_hit(cached_tokens, prompt_tokens):

@@ -985,6 +985,110 @@ class TestCacheAttribution:
 
 
 # ---------------------------------------------------------------------------
+# I-bis-bis. Resolved-endpoint DISPLAY identity (router -> _do_call -> rebind)
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedEndpointDisplayIdentity:
+    """Integration guard for the BUG_0273 display-field gap.
+
+    The ``TestCacheAttribution`` unit tests above feed a pre-computed ``cache_key``
+    straight into ``record_llm_call_start`` / ``record_llm_call_endpoint``. That
+    proves the attribution BUCKET is correct but never runs the engine code that
+    DERIVES the resolved ``model``, so they could not catch that the resolved model
+    was dropped: a ``use_last_endpoint`` call whose endpoint resolves to something
+    other than the agent's configured template still showed the GLOBAL template
+    model in both the ``[KV_CACHE_MISS]`` debug line and the persisted ``llm_call``
+    event's ``model`` (the model identity the user actually reads).
+
+    This test drives the real ``_execute_llm_call`` / ``_do_call`` closure against a
+    real collector with a router that resolves a DIFFERENT endpoint, then asserts
+    the resolved endpoint's model lands on BOTH user-visible surfaces and the bucket.
+    """
+
+    def test_resolved_endpoint_rebinds_display_model(self, collector):
+        from unittest.mock import MagicMock
+
+        from agent_cascade.llm.schema import Message
+        from tests.phase8_stream_helpers import end_events, make_stream_engine
+
+        global_model = 'Global-Template-Model'      # template.llm.model (start snapshot)
+        resolved_model = 'Served-Endpoint-Model'    # model the router actually picked
+        resolved_base = 'http://127.0.0.1:1234/v1'  # api_base of the served endpoint
+
+        engine, instance = make_stream_engine(collector)
+        inst_name = instance.instance_name
+
+        # Template whose configured model is the GLOBAL one; the endpoint resolution
+        # (below) will disagree with it. llm.chat is the streaming backend.
+        template = MagicMock()
+        template.llm_cfg = {'model': global_model}
+        template.function_map = {}
+        template.llm.generate_cfg = {}
+        template.llm.model = global_model
+        template.llm.chat = lambda **kw: iter([
+            [Message(role='assistant', content='ok')]])
+
+        # Router resolves THIS call to an endpoint whose model != template model,
+        # then hands the resolved cfg to _do_call exactly as call_with_fallback does.
+        resolved_cfg = {'api_base': resolved_base, 'model': resolved_model}
+        engine.pool.api_router.call_with_fallback = (
+            lambda agent_type, do_call, **kw: do_call(resolved_cfg))
+
+        # Mirror the engine start-site (llm_call.py: model = template.llm.model,
+        # i.e. the GLOBAL template model) so we are proving the rebind corrects it.
+        fp = TelemetryCollector.fingerprint_config(model=global_model)
+        collector.record_turn_start(inst_name, config_fingerprint=fp)
+        collector.record_llm_call_start(inst_name, model=global_model)
+
+        # Run the real _do_call closure: this is where record_llm_call_endpoint
+        # re-binds both the cache bucket AND (with the fix) call['model'].
+        list(engine._execute_llm_call(
+            instance, template, [Message(role='user', content='hi')], []))
+
+        # Finish the call; capture the debug sink so we can read the model= tag.
+        sink = log_mod.logger
+        handler = _ListHandler()
+        handler.setLevel(logging.DEBUG)
+        prev_level = sink.level
+        sink.addHandler(handler)
+        sink.setLevel(logging.DEBUG)
+        try:
+            collector.record_token_usage(
+                inst_name, prompt_tokens=1000, completion_tokens=5,
+                details={'cached_tokens': 0})  # -> miss
+            collector.record_llm_call_end(inst_name)
+        finally:
+            sink.setLevel(prev_level)
+            sink.removeHandler(handler)
+        msgs = [r.getMessage() for r in handler.records]
+
+        # (1) The persisted llm_call event's model is the RESOLVED endpoint, not the
+        #     global template — the BUG_0273 display gap that left this stale.
+        events = end_events(collector)
+        assert len(events) == 1
+        assert events[0]['model'] == resolved_model
+        assert events[0]['model'] != global_model
+
+        # (2) The [KV_CACHE_MISS] debug line (telemetry.py read of call['model'])
+        #     agrees with the bucket rather than tagging the never-served global.
+        hits = [m for m in msgs if '[KV_CACHE_MISS]' in m]
+        assert len(hits) == 1, f'expected exactly one miss line, got {msgs!r}'
+        assert f'model={resolved_model}' in hits[0]
+        assert f'model={global_model}' not in hits[0]
+
+        # (3) The cache bucket already pointed at the resolved endpoint (the Option-A
+        #     fix that was correct); confirm it still does, unchanged by this fix.
+        resolved_key = TelemetryCollector.cache_attribution_key(resolved_base, resolved_model)
+        attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
+        assert resolved_key in attrib
+        assert attrib[resolved_key]['cache_misses'] == 1
+        # ...and the global model row is not deflated by this resolved endpoint's miss.
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_misses'] == 0
+
+
+# ---------------------------------------------------------------------------
 # I-bis. Config fingerprint is model-only (no prompt print)
 # ---------------------------------------------------------------------------
 

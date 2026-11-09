@@ -1769,15 +1769,16 @@ class LLMCallMixin:
                         'model': model,
                         'state_save_enabled': llm_cfg.get('state_save_enabled', False)
                     }
-                # Re-bind the authoritative cache-attribution key now that the
-                # resolved endpoint is known (BUG_0273). Supersedes the best-effort
-                # start snapshot so cursor-rotation / router-fallback calls classify
-                # against the endpoint that actually served THIS call.
+                # Re-bind the authoritative endpoint identity now that the resolved
+                # endpoint is known (BUG_0273). Supersedes the best-effort start
+                # snapshot so cursor-rotation / router-fallback calls classify AND
+                # display against the endpoint that actually served THIS call.
                 _tel = self._telemetry()
                 if _tel is not None:
                     _tel.record_llm_call_endpoint(
                         instance.instance_name,
                         _tel.cache_attribution_key(api_base, model),
+                        model,
                     )
                 # Store allocated max_input_tokens in instance for compression
                 # check (ground-truth tracking)
@@ -1833,7 +1834,7 @@ class LLMCallMixin:
                     'model': model,
                     'state_save_enabled': False  # Direct call mode doesn't support state save config from router
                 }
-            # Re-bind the authoritative cache-attribution key now that the resolved
+            # Re-bind the authoritative endpoint identity now that the resolved
             # endpoint is known (BUG_0273); direct call uses the template's
             # api_base/model, still the endpoint that actually serves the call.
             _tel = self._telemetry()
@@ -1841,6 +1842,7 @@ class LLMCallMixin:
                 _tel.record_llm_call_endpoint(
                     instance.instance_name,
                     _tel.cache_attribution_key(api_base, model),
+                    model,
                 )
 
             # Store allocated max_input_tokens in instance for compression
