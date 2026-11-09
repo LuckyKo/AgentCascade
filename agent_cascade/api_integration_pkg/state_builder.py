@@ -359,14 +359,24 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     # consumes.
     pool_settings['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
-    # General-tab API Endpoint (last-resort LLM fallback) and Model — persisted in
-    # config/api_endpoints.json::default_llm_cfg. Broadcast both so syncPoolSettings()
-    # can rehydrate #setting-endpoint and #setting-model after a restart. Derived from
-    # the same single source (api_router.default_llm_cfg) used by config_persist/core
-    # template loading.
+    # General-tab LLM config — persisted in
+    # config/api_endpoints.json::default_llm_cfg. Broadcast it so syncPoolSettings()
+    # can rehydrate the matching controls after a restart: api_base/model fall back to
+    # '' (so a cleared endpoint is rehydrated as blank); every other non-sensitive
+    # registry LLM key is emitted only when present in the stored config. The key set is
+    # derived from the registry (LLM_CFG_KEYS) so a future LLM key cannot silently fall
+    # out of the snapshot again — a missing key makes the UI keep its HTML default and
+    # the next save re-sends that default over the persisted value. api_key is sensitive
+    # and never broadcast.
+    from agent_cascade.settings_registry import LLM_CFG_KEYS, SENSITIVE_KEYS
     _default_cfg = getattr(getattr(pool, 'api_router', None), 'default_llm_cfg', None) or {}
     pool_settings['api_base'] = _default_cfg.get('api_base', '') or ''
     pool_settings['model'] = _default_cfg.get('model', '') or ''
+    for _key in LLM_CFG_KEYS - SENSITIVE_KEYS:
+        if _key in ('api_base', 'model'):
+            continue
+        if _key in _default_cfg:
+            pool_settings[_key] = _default_cfg[_key]
 
 
 def build_pool_settings_snapshot(pool: Any) -> Dict[str, Any]:

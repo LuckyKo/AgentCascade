@@ -392,6 +392,30 @@ Pool State Changes (any agent turn, compression, new instance)
 └───────────────────┘
 ```
 
+#### 4.3.1 Settings Snapshot (backend-authoritative)
+
+Every user setting is described once in `agent_cascade/settings_registry.py` (`SettingSpec`:
+kind, type, default, persist bucket, handler, broadcast flag, sensitivity). The same table
+drives validation of incoming deltas, the `pool_settings` snapshot emitted in `state` /
+`stream_update` frames, and `GET /api/settings`.
+
+- **Buckets.** `pool`/`extra` keys persist to `config/pool_settings.json`; `llm` keys
+  (`LLM_CFG_KEYS`) persist to `config/api_endpoints.json::default_llm_cfg`; `session` keys
+  persist to `config/session_state.json`.
+- **Broadcast.** `build_pool_settings_snapshot()` emits every `broadcast=True` registry key,
+  plus the LLM bucket: `_add_pool_runtime_settings()` emits `api_base`/`model` (falling back
+  to `''`) and every other non-sensitive `LLM_CFG_KEYS` entry present in `default_llm_cfg`.
+  `api_key` is `sensitive` and never leaves the server. The key set is derived from the
+  registry, so a new LLM key cannot silently fall out of the snapshot.
+- **Hydration.** The WebUI's `POOL_SETTINGS_MAP` maps each server key to its DOM control;
+  `syncPoolSettings()` applies the snapshot on every frame (skipping only the focused
+  control). A key missing from the map stays on its HTML default, which the next save would
+  then re-send over the persisted value — add the map entry in the same change as the key.
+- **Writes.** The UI sends only changed keys as `update_settings {base_revision, changes}`
+  deltas, never a full `update_config` push. `queueSettingChange()` drops changes before the
+  first authoritative snapshot has arrived and no-ops values that already match it, so the
+  UI cannot stomp persisted settings with un-hydrated defaults.
+
 ### 4.4 Session Persistence Flow
 
 ```

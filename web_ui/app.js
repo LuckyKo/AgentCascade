@@ -277,12 +277,28 @@ const POOL_SETTINGS_MAP = [
   // #setting-endpoint/#setting-model stayed blank after every restart (BUG_0252).
   { id: '#setting-endpoint', prop: 'value', key: 'api_base' },
   { id: '#setting-model', prop: 'value', key: 'model' },
+  // Remaining General-tab LLM config (sampling, token limits) plus the Agent & Tools
+  // debug-POST toggle — same default_llm_cfg bucket, broadcast by
+  // _add_pool_runtime_settings. Previously absent from this map, so after a refresh the
+  // controls kept their HTML defaults and the next saveSettings() re-sent those defaults,
+  // overwriting the persisted values. `output` names the range-readout element:
+  // assigning .value programmatically does not fire the 'input' handler that updates it.
+  { id: '#setting-temperature', prop: 'value', key: 'temperature', output: '#val-temperature' },
+  { id: '#setting-top-p', prop: 'value', key: 'top_p', output: '#val-top-p' },
+  { id: '#setting-top-k', prop: 'value', key: 'top_k', output: '#val-top-k' },
+  { id: '#setting-min-p', prop: 'value', key: 'min_p', output: '#val-min-p' },
+  { id: '#setting-repeat-penalty', prop: 'value', key: 'repeat_penalty', output: '#val-repeat-penalty' },
+  { id: '#setting-presence-penalty', prop: 'value', key: 'presence_penalty', output: '#val-presence-penalty' },
+  { id: '#setting-frequency-penalty', prop: 'value', key: 'frequency_penalty', output: '#val-frequency-penalty' },
+  { id: '#setting-max-tokens', prop: 'value', key: 'max_tokens' },
+  { id: '#setting-max-context', prop: 'value', key: 'max_input_tokens' },
+  { id: '#setting-log-api-post', prop: 'checked', key: 'log_api_post' },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
 // Presentation-only state that stays in the browser. Never sent to the server.
-// `vision-enabled` is a behaviour gate (decides what the browser sends to the model),
-// NOT class D — it is hydrated from the server snapshot like any other server key.
+// `vision-enabled` is a behaviour gate (decides what the browser sends to the model), so
+// it does not belong in this presentation-only store; it is not server-backed yet.
 const UI_PREFS_KEY = 'agent-cascade-ui-prefs';
 const UI_PREFS_ALLOWLIST = new Set([
   'setting-lines-enabled', 'setting-msg-meta',
@@ -325,7 +341,7 @@ function saveUiPrefs(prefs) {
 		function syncPoolSettings(ps) {
 		  if (!ps) return;
 
-		  for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
+		  for (const { id, prop, key, transform, output } of POOL_SETTINGS_MAP) {
 	    const el = $(id);
 	    if (el && ps[key] !== undefined) {
 	      // Server value always wins for server-backed controls (Batch B): no local-preference guard.
@@ -336,6 +352,16 @@ function saveUiPrefs(prefs) {
 	      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
 	      else { if (String(el[prop]) === String(newVal)) continue; }
 	      el[prop] = newVal;
+	      // Range readouts (e.g. "Temperature 0.8") only refresh from the 'input' handler;
+	      // a programmatic hydration must update them too or they keep the stale HTML default.
+	      if (output && prop === 'value') {
+	        const outEl = $(output);
+	        const n = parseFloat(el.value);
+	        if (outEl && Number.isFinite(n)) {
+	          const step = el.step || '';
+	          outEl.textContent = step.includes('.') ? n.toFixed(step.split('.')[1].length) : String(n);
+	        }
+	      }
 	    }
 	  }
 
@@ -382,7 +408,11 @@ let _settingFlushTimer = null;
 
 /** Record a user change to a server-backed setting; coalesced into a debounced delta send. */
 function queueSettingChange(key, value) {
-  if (pendingSettings && pendingSettings[key] === value) return; // no effective change
+  // No delta before the first authoritative snapshot: until then the controls still hold
+  // their HTML defaults, so sending them would overwrite persisted values the UI has not
+  // been hydrated with yet.
+  if (!pendingSettings) return;
+  if (pendingSettings[key] === value) return; // no effective change
   _pendingSettingChanges[key] = value;
   if (_settingFlushTimer) clearTimeout(_settingFlushTimer);
   _settingFlushTimer = setTimeout(_flushSettingChanges, 250);
@@ -1399,7 +1429,9 @@ function saveSettings(sendToServer) {
   if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
   if ($('#setting-compression-fraction')) s['compression-fraction'] = Math.min(90, Math.max(10, parseInt($('#setting-compression-fraction').value) || 70));
 
-  // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
+  // Legacy hyphenated mirror of the `log_api_post` toggle; the server-backed key is the
+  // underscore form (getGenerateCfg + POOL_SETTINGS_MAP). This hyphenated copy is dropped
+  // by the ui-prefs allowlist, so it never reaches localStorage.
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
 
   // Grep settings saved via getGenerateCfg() as grep_char_limit / grep_spillover — no duplicate hyphenated keys needed here.

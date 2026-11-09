@@ -113,6 +113,45 @@ def test_pool_settings_broadcasts_model_from_default_llm_cfg(tmp_path):
     assert ps2['model'] == ''                              # defined-but-empty, never undefined-stomp
 
 
+def test_pool_settings_broadcasts_llm_config_from_default_llm_cfg():
+    """BUG_0274: every non-sensitive registry LLM key present in default_llm_cfg must be
+    broadcast, so the UI can hydrate its control after a refresh. A missing key leaves the
+    control on its HTML default, which the next save re-sends over the persisted value."""
+    from agent_cascade.api_integration_pkg.state_builder import _add_pool_runtime_settings
+    from agent_cascade.settings_registry import LLM_CFG_KEYS, SENSITIVE_KEYS
+
+    stored = {
+        'api_base': 'http://general-endpoint',
+        'model': 'general-model',
+        'api_key': 'sk-secret',
+        'temperature': 1.3, 'top_p': 0.5, 'top_k': 80, 'min_p': 0.1,
+        'repeat_penalty': 1.2, 'presence_penalty': 0.5, 'frequency_penalty': 0.3,
+        'max_tokens': 16384, 'max_input_tokens': 131072,
+        'stop_sequences': '###', 'timeout': 90.0, 'model_type': 'chat',
+        'log_api_post': True,
+    }
+
+    class _Router:
+        default_llm_cfg = stored
+    class _Pool:
+        operation_manager = None
+        api_router = _Router()
+        _enable_async_shell_console_window = False
+
+    ps = {}
+    _add_pool_runtime_settings(_Pool(), ps)
+
+    for key, value in stored.items():
+        if key in SENSITIVE_KEYS:
+            assert key not in ps, f'sensitive key {key!r} must never be broadcast'
+            continue
+        assert ps[key] == value, f'{key!r} not broadcast from default_llm_cfg'
+
+    # Exactly the stored non-sensitive registry LLM keys are emitted: nothing missing
+    # (the BUG_0274 hydration gap) and nothing invented (no stale HTML defaults).
+    assert (set(ps) & set(LLM_CFG_KEYS)) == (set(stored) - SENSITIVE_KEYS)
+
+
 def test_update_default_llm_cfg_persists(tmp_path):
     """update_default_llm_cfg() must call _save() so changes survive a restart."""
     from agent_cascade.api_router_pkg.router import APIRouter
