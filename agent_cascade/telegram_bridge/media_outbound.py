@@ -31,15 +31,18 @@ from agent_cascade.log import logger
 # different module (see [[agentcascade-extra-paths-canonical-source]]). Reusing the
 # /api/file policy keeps "what the phone can be sent" == "what the browser can be shown".
 from agent_cascade.path_security import _is_path_allowed
+from agent_cascade.utils.media_utils import _MEDIA_EXTS_BY_MODALITY
 
 # ── extension / MIME source of truth ───────────────────────────────────────────
-# Keep in sync with web_ui/app.js:5646-5647 (the browser's own lists, which carry the
-# matching "single source of truth … keep in sync" note). The JS side has no image
-# list because the browser renders images through generic markdown <img>, so _IMAGE_EXTS
-# is defined here (plan §1.4) and is the one to mirror into app.js if it ever needs one.
+# AUDIO/VIDEO come from the pipeline-wide single source,
+# media_utils._MEDIA_EXTS_BY_MODALITY (the vocabulary the backend adapter,
+# content_parse and the JS UI all agree on) — no hardcoded copy to drift. The
+# browser renders images through generic markdown <img> and the backend has no
+# image list, so _IMAGE_EXTS has no counterpart to derive from and stays local
+# (plan §1.4); it is the one to mirror into app.js if it ever needs one.
 _IMAGE_EXTS = frozenset({'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif'})
-_AUDIO_EXTS = frozenset({'mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'})   # == app.js:5647
-_VIDEO_EXTS = frozenset({'mp4', 'webm', 'mov', 'mkv', 'ogv'})           # == app.js:5646
+_AUDIO_EXTS = frozenset(_MEDIA_EXTS_BY_MODALITY['audio'])
+_VIDEO_EXTS = frozenset(_MEDIA_EXTS_BY_MODALITY['video'])
 
 # The bare-path detector's extension alternation is DERIVED from these frozensets —
 # one source of truth, never a second hand-maintained list. Sorted longest-first so

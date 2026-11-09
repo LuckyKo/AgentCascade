@@ -1087,13 +1087,21 @@ def encode_audio_as_base64(path: str) -> str:
         return base64.b64encode(audio_file.read()).decode('utf-8')
 
 
+# Default MIME for an untagged or unknown video extension. Shared with
+# qwenvl_oai._tag_video_data_uri so the untagged-data-URI fallback labels the
+# same container as the local-encode path.
+_DEFAULT_VIDEO_MIME = 'video/mp4'
+
 # Video container extension -> MIME type for the data-URI prefix. Unknown or
-# missing extensions fall back to video/mp4 (the shape the probe confirmed).
+# missing extensions fall back to _DEFAULT_VIDEO_MIME (the shape the probe
+# confirmed). Keys track media_utils._MEDIA_EXTS_BY_MODALITY['video'].
 _VIDEO_MIME_BY_EXT = {
     'mp4': 'video/mp4',
     'webm': 'video/webm',
     'mov': 'video/quicktime',
     'm4v': 'video/x-m4v',
+    'mkv': 'video/x-matroska',
+    'avi': 'video/x-msvideo',
 }
 
 
@@ -1104,7 +1112,7 @@ def encode_video_as_base64(path: str) -> str:
     from the file extension via :data:`_VIDEO_MIME_BY_EXT`.
     """
     ext = os.path.splitext(path)[1].lower().lstrip('.')
-    mime = _VIDEO_MIME_BY_EXT.get(ext, 'video/mp4')
+    mime = _VIDEO_MIME_BY_EXT.get(ext, _DEFAULT_VIDEO_MIME)
     with open(path, 'rb') as video_file:
         return f'data:{mime};base64,' + base64.b64encode(video_file.read()).decode('utf-8')
 

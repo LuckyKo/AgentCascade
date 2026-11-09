@@ -2925,7 +2925,14 @@ if __name__ == '__main__':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
     try:
-        uvicorn.run(app, host=args.host, port=port)
+        # Inlined base64 media (image/audio/video) rides inside a single WS text frame,
+        # so uvicorn/websockets enforces the inbound frame ceiling BEFORE the message
+        # handler runs: an oversized frame closes the whole session (1009) and loses
+        # in-flight work. Set it explicitly rather than rely on the version-dependent
+        # default. The client caps each non-image attachment at 6 MiB raw (app.js
+        # MAX_INLINE_MEDIA_BYTES); base64 inflates ~4/3 -> ~8 MiB inline, leaving ~2x
+        # headroom against this 16 MiB frame limit. Keep the two values consistent.
+        uvicorn.run(app, host=args.host, port=port, ws_max_size=16 * 1024 * 1024)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
             logger.error('[FATAL] Port %d is already in use. Use --port to specify a different port.', port)

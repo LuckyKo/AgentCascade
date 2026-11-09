@@ -65,87 +65,87 @@ _VIDEO_EXTS = tuple('.' + ext for ext in _MEDIA_EXTS_BY_MODALITY['video'])
 
 
 def _media_modality(url):
-	"""Classify a markdown media URL into 'image'/'audio'/'video', or None.
+    """Classify a markdown media URL into 'image'/'audio'/'video', or None.
 
-	Recognizes data:image/*, data:audio/*, data:video/* data-URIs and local
-	file/drive paths (by audio/video extension). Returns None for anything that
-	does not match, so the caller can degrade to a text path-reference rather
-	than crash.
-	"""
-	low = url.lower()
-	if low.startswith('data:image/'):
-		return 'image'
-	if low.startswith('data:audio/'):
-		return 'audio'
-	if low.startswith('data:video/'):
-		return 'video'
-	if low.startswith('file://'):
-		low = low[len('file://'):]
-	if low.endswith(_AUDIO_EXTS):
-		return 'audio'
-	if low.endswith(_VIDEO_EXTS):
-		return 'video'
-	return None
+    Recognizes data:image/*, data:audio/*, data:video/* data-URIs and local
+    file/drive paths (by audio/video extension). Returns None for anything that
+    does not match, so the caller can degrade to a text path-reference rather
+    than crash.
+    """
+    low = url.lower()
+    if low.startswith('data:image/'):
+        return 'image'
+    if low.startswith('data:audio/'):
+        return 'audio'
+    if low.startswith('data:video/'):
+        return 'video'
+    if low.startswith('file://'):
+        low = low[len('file://'):]
+    if low.endswith(_AUDIO_EXTS):
+        return 'audio'
+    if low.endswith(_VIDEO_EXTS):
+        return 'video'
+    return None
 
 
 def _parse_multimodal_content(text):
-	"""
-	Parse markdown media ![alt](url) and return a list of content items.
+    """
+    Parse markdown media ![alt](url) and return a list of content items.
 
-	Supports image/audio/video base64 data-URIs and local file/drive paths for
-	audio/video. If no media is found, returns the original text unchanged.
+    Supports image/audio/video base64 data-URIs and local file/drive paths for
+    audio/video. If no media is found, returns the original text unchanged.
 
-	Data URIs are saved to media storage as paths (emitting a '[NOTE: Saved as
-	…]' text part); falls back to inline base64 if media storage fails. A local
-	path is emitted as-is (already a reference). An unrecognised/unsupported
-	media type degrades to a literal text path-reference (never crashes).
-	"""
-	from agent_cascade.log import logger
+    Data URIs are saved to media storage as paths (emitting a '[NOTE: Saved as
+    …]' text part); falls back to inline base64 if media storage fails. A local
+    path is emitted as-is (already a reference). An unrecognised/unsupported
+    media type degrades to a literal text path-reference (never crashes).
+    """
+    from agent_cascade.log import logger
 
-	# todo.md:160 — rewrite /goal into the supervisor-task prefix so the new
-	# goal is preserved verbatim in compression markers (logic already exists
-	# in compression/helpers.py). Must run before any other content processing.
-	text = _rewrite_goal_command(text)
+    # todo.md:160 — rewrite /goal into the supervisor-task prefix so the new
+    # goal is preserved verbatim in compression markers (logic already exists
+    # in compression/helpers.py). Must run before any other content processing.
+    text = _rewrite_goal_command(text)
 
-	parts = []
-	last_end = 0
-	for match in _MEDIA_DATA_PATTERN.finditer(text):
-		start, end = match.span()
-		if start > last_end:
-			parts.append({'text': text[last_end:start]})
-		url = match.group(2)
-		modality = _media_modality(url)
-		if modality is None:
-			# Defensive: _MEDIA_DATA_PATTERN only matches image/audio/video, so
-			# this is unreachable while the regex and this helper stay in sync.
-			# Degrade to a literal text path-reference rather than crash on drift.
-			parts.append({'text': match.group(0)})
-			last_end = end
-			continue
-		if url.startswith('data:'):
-			try:
-				if modality == 'image':
-					media_path = save_image_from_data_uri(url)
-				elif modality == 'audio':
-					media_path = save_audio_from_data_uri(url)
-				else:
-					media_path = save_video_from_data_uri(url)
-				parts.append({modality: media_path})  # Path instead of base64
-				parts.append({'text': f"[NOTE: Saved as {media_path}]"})
-			except MediaStorageError as e:
-				# Fallback to inline base64 if media storage fails
-				logger.warning(f"Media storage failed for user {modality}, keeping inline base64: {e}")
-				parts.append({modality: url})
-		else:
-			# Local file/drive path: already a reference, nothing to save.
-			parts.append({modality: url})
-		last_end = end
+    parts = []
+    last_end = 0
+    for match in _MEDIA_DATA_PATTERN.finditer(text):
+        start, end = match.span()
+        if start > last_end:
+            parts.append({'text': text[last_end:start]})
+        url = match.group(2)
+        modality = _media_modality(url)
+        if modality is None:
+            # Defensive: _MEDIA_DATA_PATTERN only matches image/audio/video, so
+            # this is unreachable while the regex and this helper stay in sync.
+            # Degrade to a literal text path-reference rather than crash on drift.
+            parts.append({'text': match.group(0)})
+            last_end = end
+            continue
+        if url.startswith('data:'):
+            try:
+                if modality == 'image':
+                    media_path = save_image_from_data_uri(url)
+                elif modality == 'audio':
+                    media_path = save_audio_from_data_uri(url)
+                else:
+                    media_path = save_video_from_data_uri(url)
+                parts.append({modality: media_path})  # Path instead of base64
+                parts.append({'text': f"[NOTE: Saved as {media_path}]"})
+            except MediaStorageError as e:
+                # Fallback to inline base64 if media storage fails
+                logger.warning(f"Media storage failed for user {modality}, keeping inline base64: {e}")
+                parts.append({modality: url})
+        else:
+            # Local file/drive path: already a reference, nothing to save.
+            parts.append({modality: url})
+        last_end = end
 
-	if last_end < len(text):
-		parts.append({'text': text[last_end:]})
+    if last_end < len(text):
+        parts.append({'text': text[last_end:]})
 
-	if not parts:
-		return text
-	if len(parts) == 1 and 'text' in parts[0]:
-		return parts[0]['text']
-	return parts
+    if not parts:
+        return text
+    if len(parts) == 1 and 'text' in parts[0]:
+        return parts[0]['text']
+    return parts

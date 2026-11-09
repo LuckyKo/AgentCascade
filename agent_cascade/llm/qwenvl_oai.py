@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
-import logging
 import os
 import re
 from typing import List, Optional, Tuple
@@ -24,8 +22,8 @@ from agent_cascade.llm.oai import TextChatAtOAI
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import IMAGE_MAX_SHORT_SIDE
-from agent_cascade.utils.utils import (encode_audio_as_base64, encode_image_as_base64, encode_video_as_base64,
-                                       sanitize_chrome_file_path)
+from agent_cascade.utils.utils import (_DEFAULT_VIDEO_MIME, encode_audio_as_base64, encode_image_as_base64,
+                                       encode_video_as_base64, sanitize_chrome_file_path)
 
 # Matches a base64 data-URI: ``data:<mime>;base64,<b64>``, where <mime> may be
 # empty (the untagged ``data:;base64,...`` produced by the inline MediaStorageError
@@ -83,11 +81,13 @@ class QwenVLChatAtOAI(TextChatAtOAI):
     def _audio_format_from_path(path) -> Optional[str]:
         """Derive the ``input_audio`` 'format' from a local audio path's extension.
 
-        Returns the extension lowercased with no dot (``.wav`` -> ``wav``); a
-        local path with no extension returns None, so the part keeps the no-
-        'format' shape rather than asserting an unverified ``wav``. A non-local
-        ``http``/``data`` URL is left unchanged by ``conv_multimodel_value`` and
-        returns None here, so the part keeps today's no-'format' shape.
+        Returns the extension lowercased with no dot (``.wav`` -> ``wav``), verbatim
+        — NOT restricted to OpenAI's ``wav|mp3`` whitelist; llama.cpp omni servers
+        accept the file's own container format. A local path with no extension
+        returns None, so the part keeps the no-'format' shape rather than asserting
+        an unverified ``wav``. A non-local ``http``/``data`` URL is left unchanged by
+        ``conv_multimodel_value`` and returns None here, so the part keeps today's
+        no-'format' shape.
         """
         if not isinstance(path, str) or path.startswith(('http://', 'https://', 'data:')):
             return None
@@ -100,8 +100,10 @@ class QwenVLChatAtOAI(TextChatAtOAI):
 
         ``content_parse``'s ``MediaStorageError`` fallback hands the converter a raw
         ``data:<mime>;base64,<b64>`` string instead of a local path, but the
-        ``input_audio`` part expects PURE base64 in ``data`` plus a ``format``
-        (the OpenAI-compatible shape, same as a locally-encoded file). Strip the
+        ``input_audio`` part expects PURE base64 in ``data`` plus a ``format`` —
+        the backend-verbatim container format, same as the locally-encoded path
+        produces, NOT restricted to OpenAI's ``wav|mp3`` whitelist (llama.cpp omni
+        servers accept the container format). Strip the
         prefix here and derive ``format`` from the MIME subtype (``audio/wav`` ->
         ``wav``). An untagged ``data:;base64,...`` carries no MIME, so no format
         is emitted. A string that isn't a base64 data-URI is returned unchanged
@@ -126,7 +128,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
         verbatim.
         """
         if url.startswith('data:;base64,'):
-            return 'data:video/mp4;base64,' + url[len('data:;base64,'):]
+            return f'data:{_DEFAULT_VIDEO_MIME};base64,' + url[len('data:;base64,'):]
         return url
 
     def convert_messages_to_dicts(self,
@@ -160,7 +162,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                         new_content.append({'type': 'text', 'text': f'[Video file: {v}]'})
                         continue
                     try:
-                        orig_v = v  # original path/URL, kept for the audio 'format' (conv_* rewrites v)
+                        orig_v = v  # pre-conv snapshot: set for all media, consumed only in the audio branch's 'format' (conv_* rewrites v)
                         if isinstance(v, str):
                             v = conv_multimodel_value(t, v)
                         if isinstance(v, list):
@@ -218,34 +220,6 @@ class QwenVLChatAtOAI(TextChatAtOAI):
             new_msg['content'] = new_content
             new_messages.append(new_msg)
         new_messages = self._conv_agent_cascade_messages_to_oai(new_messages)
-
-        # Log vision payload summary for debugging
-        image_count = 0
-        for msg in new_messages:
-            content = msg.get('content')
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get('type') == 'image_url':
-                        image_count += 1
-                        # logger.debug(f'Vision payload: role={msg.get("role")}, image_url starts with data:={has_base64}, url_prefix={url[:50]}...')
-        if image_count > 0 and logger.isEnabledFor(logging.DEBUG):
-            lite_messages = copy.deepcopy(new_messages)
-            for msg in lite_messages:
-                content = msg.get('content')
-                if content is None:
-                    continue
-                # Only process content if it's a list (not a string)
-                if isinstance(content, list):
-                    for item in content:
-                        # Skip items that aren't dicts (e.g., if content was a string)
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get('image_url', {}).get('url', '').startswith('data:'):
-                            item['image_url']['url'] = item['image_url']['url'][:64] + '...'
-                        if item.get('video_url', {}).get('url', '').startswith('data:'):
-                            item['video_url']['url'] = item['video_url']['url'][:64] + '...'
-                        if item.get('input_audio', {}).get('data', '').startswith('data:'):
-                            item['input_audio']['data'] = item['input_audio']['data'][:64] + '...'
 
         return new_messages
 

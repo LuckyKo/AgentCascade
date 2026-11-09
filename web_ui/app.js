@@ -5721,6 +5721,14 @@ const MEDIA_EXTS_BY_MODALITY = {
   video: ['mp4', 'webm', 'mkv', 'mov', 'avi'],
 };
 
+// Max raw bytes for a single inline (non-image) attachment. Audio/video are
+// base64-encoded into ONE chat WS text frame, and base64 expands ~4/3, so a 6 MiB
+// file becomes ~8 MiB inline — comfortably under the server's explicit 16 MiB
+// ws_max_size (api_server.py), leaving ~2x headroom for the frame's JSON overhead.
+// Enforced in processMediaFile (see Group note there); images are resized/re-encoded
+// so they are never capped.
+const MAX_INLINE_MEDIA_BYTES = 6 * 1024 * 1024;
+
 // Classify a File by MIME prefix into 'image' | 'audio' | 'video', or null.
 function mediaModalityFromFile(file) {
   if (!file || typeof file.type !== 'string') return null;
@@ -5749,9 +5757,30 @@ function processMediaFile(file) {
   const modality = mediaModalityFromFile(file);
   if (!modality) return;
 
+  // Reject out-of-vocabulary extensions (advertised behavior). mediaModalityFromFile
+  // classifies by MIME prefix only, so an audio/video attachment whose extension the
+  // backend does not accept would silently degrade to a text path-reference server-side.
+  // Images render through a generic <img> and have no entry in MEDIA_EXTS_BY_MODALITY,
+  // so only modalities present in the map (audio/video) are checked here.
+  const allowedExts = MEDIA_EXTS_BY_MODALITY[modality];
+  if (allowedExts) {
+    const extMatch = (file.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+    if (!extMatch || !allowedExts.includes(extMatch[1])) {
+      showInSystemToastBar(`⚠️ Unsupported ${modality} extension for "${file.name}". Allowed: ${allowedExts.join(', ')}.`);
+      return;
+    }
+  }
+
   if (modality !== 'image') {
-    // Audio/video: base64-encode the raw file (no resize). Large videos yield a
-    // large base64 blob in the textarea — accepted v1 limitation (no server upload).
+    // Audio/video are base64-inlined into ONE chat WS text frame, so their size is
+    // bounded by the server's ws_max_size (see api_server.py). Reject oversize files
+    // BEFORE encoding: an oversized frame closes the whole session (1009), losing any
+    // in-flight work — much worse than dropping just this attachment.
+    if (file.size > MAX_INLINE_MEDIA_BYTES) {
+      showInSystemToastBar(`⚠️ ${modality === 'video' ? 'Video' : 'Audio'} too large to attach inline (max ~${Math.round(MAX_INLINE_MEDIA_BYTES / (1024 * 1024))} MB): "${file.name}".`);
+      return;
+    }
+    // Audio/video: base64-encode the raw file (no resize).
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUri = buildMediaDataUri(e.target.result, modality, file.name);
@@ -6047,10 +6076,13 @@ if (inputArea) {
  * Handles: file:// URIs, Windows absolute paths (N:/...), POSIX absolute paths (/workspace/...).
  * Preserves URLs starting with http://, https://, data:, and already-proxied /api/* paths.
  */
-// Single source of truth for media file extensions (used by proxyLocalMediaPaths
-// routing AND the renderToolResult wrapper detection — keep in sync via these consts).
-const _MEDIA_VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'ogv'];
-const _MEDIA_AUDIO_EXTS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'];
+// Output-side media extensions (used by proxyLocalMediaPaths routing AND the
+// renderToolResult wrapper detection). DERIVED from MEDIA_EXTS_BY_MODALITY above —
+// one JS vocabulary drives both input attach and the output player, so the render
+// set can never drift from what the backend accepts (video mp4/webm/mkv/mov/avi,
+// audio mp3/wav/ogg/m4a/flac/opus — matches media_utils._MEDIA_EXTS_BY_MODALITY).
+const _MEDIA_VIDEO_EXTS = MEDIA_EXTS_BY_MODALITY.video;
+const _MEDIA_AUDIO_EXTS = MEDIA_EXTS_BY_MODALITY.audio;
 const _VIDEO_EXT_RE = new RegExp(`\\.(${_MEDIA_VIDEO_EXTS.join('|')})(?:[?#].*)?$`, 'i');
 const _AUDIO_EXT_RE = new RegExp(`\\.(${_MEDIA_AUDIO_EXTS.join('|')})(?:[?#].*)?$`, 'i');
 // Combined detector for markdown media links (renderToolResult wrapper condition).

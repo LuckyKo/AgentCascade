@@ -108,9 +108,10 @@ class APIEndpoint:
 
     vision_enabled: bool = True        # Whether this endpoint supports vision
     # Per-modality capability flags. audio/video default False so every existing
-    # endpoint/config behaves exactly as today. Forward-looking for the Phase-2
-    # media-input path; in Phase 1 their consumers are: to_llm_cfg emission, the UI
-    # endpoint-editor toggles (web_ui/app.js), and the caption-endpoint selector
+    # endpoint/config behaves exactly as today. Consumed at runtime by
+    # QwenVLChatAtOAI._audio_input_enabled / _video_input_enabled via the merged
+    # generate_cfg. Other consumers: to_llm_cfg emission, the UI endpoint-editor
+    # toggles (web_ui/app.js), and the caption-endpoint selector
     # (router._get_caption_endpoint_cfg, which currently keys off vision_enabled).
     audio_enabled: bool = False        # Whether this endpoint accepts audio input
     video_enabled: bool = False        # Whether this endpoint accepts video input
@@ -153,8 +154,8 @@ class APIEndpoint:
             # NOTE: max_retries intentionally excluded — endpoint retry config controls L2 (API router) only.
             # L1 retries are disabled (see llm/base.py). Including this here was the source of coupling.
             'vision_enabled': self.vision_enabled,  # Vision capability flag for routing decisions
-            'audio_enabled': self.audio_enabled,    # Audio capability flag (Phase-2 media path)
-            'video_enabled': self.video_enabled,    # Video capability flag (Phase-2 media path)
+            'audio_enabled': self.audio_enabled,    # consumed at runtime by QwenVLChatAtOAI._audio_input_enabled
+            'video_enabled': self.video_enabled,    # consumed at runtime by QwenVLChatAtOAI._video_input_enabled
             'state_save_enabled': self.state_save_enabled,  # KV cache state save/restore toggle (autoloader only)
         }
 
