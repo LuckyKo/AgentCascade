@@ -174,6 +174,15 @@ class TestSystemInfoHelp:
         assert 'AC Help:' not in out
         assert 'System Information' in out
 
+    def test_basic_output_lists_help_topics(self):
+        """The basic (no-help) output surfaces the available help topics so they're
+        discoverable without triggering the unknown-section error. The special-cased
+        topics are always present, even if the YAML help file is absent."""
+        out = self._make_tool().call('')
+        assert 'Help Topics:' in out
+        assert 'agents' in out
+        assert 'telemetry' in out
+
     def test_missing_file_graceful_error(self, monkeypatch, tmp_path):
         """Pointing to a nonexistent file returns an error string, does not raise."""
         fake_path = tmp_path / 'nonexistent_help.yaml'

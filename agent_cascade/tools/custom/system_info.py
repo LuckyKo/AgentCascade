@@ -570,6 +570,28 @@ class SystemInfo(BaseTool):
             logger.debug(f"nvidia-smi GPU query failed: {e}")
             return []
 
+    def _available_help_topics(self) -> list:
+        """Return the full list of valid system_info(help=...) topics.
+
+        The special-cased topics (agents, telemetry) plus the YAML-defined
+        reference sections. Never raises; degrades to the special-cased set
+        if the help file is unavailable.
+        """
+        topics = ['agents', 'telemetry']
+        try:
+            import yaml
+            path = _help_file_path()
+            if path.is_file():
+                data = yaml.safe_load(path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    for k in data:
+                        s = str(k)
+                        if not s.startswith('_') and s not in topics:
+                            topics.append(s)
+        except Exception as e:
+            logger.debug(f"help topics unavailable: {e}")
+        return topics
+
     def _render_system_resources(self) -> str:
         """Render a host system-resources summary (CPU, RAM, GPU/VRAM).
 
@@ -870,6 +892,7 @@ class SystemInfo(BaseTool):
                 f"\n--- AgentCascade Server ---\n"
                 f"AgentCascade Version: {AC_VERSION}\n"
                 f"Server Address: {ac_server_str}\n"
+                f"Help Topics: {', '.join(self._available_help_topics())}\n"
                 f"\n--- MCP Servers ---\n"
                 f"{self._render_mcp_servers()}\n"
                 f"\n--- Workspace & Permissions ---\n"
