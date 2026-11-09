@@ -684,26 +684,46 @@ class TelemetryCollector:
         decide whether the KV cache that *should* have been reusable was lost, and tag
         the likely root cause.
 
-        Returns ``None`` when the call is not a meaningful miss:
-          * no prior baseline (first call on the instance), or
+        Returns ``None`` when the call is not a meaningful waste:
           * no real prompt (``prompt_tokens <= 0``), or
-          * a provider that has never reported caching — sticky ``reported_cache`` guard:
-            ``cached_tokens == 0`` on such a provider means "not reported", not "missed",
-            so counting it would be a false positive, or
+          * a provider that has never reported caching — sticky ``reported_cache`` guard
+            (differential path only): ``cached_tokens == 0`` on such a provider means
+            "not reported", not "missed", so counting it would be a false positive, or
           * reprocessed share at/below ``CACHE_MISS_NOISE_FLOOR_TOKENS`` (normal variation).
 
+        A first call on the instance (``prev is None``) has no prior baseline, so it is
+        not a *differential* miss — but its uncached share is a full re-prefill (a cold
+        start), which is costly and must count toward waste for cost estimation
+        (BUG_0281). It is tagged ``root_cause='cold_start'``.
+
         Otherwise returns ``{'missed': int, 'root_cause': str, 'idle_ms': float}`` where
-        ``root_cause`` is one of ``'model_change'`` (different model than prev — the cache
-        key moved), ``'idle_ttl'`` (gap over ``CACHE_IDLE_TTL_MS`` — cache evicted), or
-        ``'other'``. ``missed = min(prev_prompt, cur_prompt) - cached``: the portion of the
-        overlapping prompt that was reprocessed rather than served from cache.
+        ``root_cause`` is one of ``'cold_start'`` (first call, no baseline),
+        ``'model_change'`` (different model than prev — the cache key moved),
+        ``'idle_ttl'`` (gap over ``CACHE_IDLE_TTL_MS`` — cache evicted), or ``'other'``.
+        For the differential case ``missed = min(prev_prompt, cur_prompt) - cached``; for a
+        cold start ``missed = prompt_tokens - cached`` (the full uncached re-prefill).
 
         Pure: mutates nothing and raises nothing on bad input (degrades to ``None``).
         """
         try:
             prompt_tokens = int(prompt_tokens or 0)
             cached_tokens = int(cached_tokens or 0)
-            if prev is None or prompt_tokens <= 0:
+            if prompt_tokens <= 0:
+                return None
+            if prev is None:
+                # Cold start: first call on this instance, no prior baseline to compare.
+                # Its uncached share is a full re-prefill (a necessary first prefill) —
+                # count it so post-restart / new-instance prefills are visible in cost
+                # estimation (BUG_0281). A provider that reports cached_tokens>0 here is
+                # not a true cold start, so only the uncached remainder counts.
+                missed = prompt_tokens - cached_tokens
+                if missed <= CACHE_MISS_NOISE_FLOOR_TOKENS:
+                    return None
+                return {'missed': missed, 'root_cause': 'cold_start', 'idle_ms': 0.0}
+            # Post-compression fresh baseline: the prompt legitimately shrank, so this
+            # call's re-prefill is a necessary consequence of the compression, not waste
+            # (BUG_0281).
+            if prev.get('post_compression'):
                 return None
             # Sticky reported_cache guard: a provider that never reports cached_tokens > 0
             # is never blamed for "missing" a cache it never claims to have.
@@ -1319,9 +1339,16 @@ class TelemetryCollector:
             # compression legitimately rewrites/shrinks the prompt, so the previous
             # call's prompt length is no longer a valid comparison target — without
             # this reset the first post-compression call (smaller prompt, cached=0)
-            # would be miscounted as waste. Dropping prev makes the next call a fresh
-            # baseline. Done first so the reset holds even if the write below fails.
-            self._cache_scan_state.pop(instance_name, None)
+            # would be miscounted as waste. Set a post-compression marker so the next
+            # call starts a fresh baseline AND is not counted as a cold-start waste
+            # (its re-prefill is a necessary consequence of the compression, BUG_0281).
+            self._cache_scan_state[instance_name] = {
+                'prev_prompt_tokens': 0,
+                'prev_ts_ms': int(time.time() * 1000),
+                'prev_model': '',
+                'reported_cache': False,
+                'post_compression': True,
+            }
             event = {
                 'type': 'compression',
                 'instance': instance_name,

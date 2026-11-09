@@ -40,13 +40,16 @@ def _wasted_events(collector):
 
 class TestCacheWasteDetection:
 
-    # 1. no prev → no waste.
-    def test_first_call_on_instance_is_never_waste(self, collector):
+    # 1. first call (no prev) → cold_start waste (the full uncached re-prefill).
+    def test_first_call_is_cold_start_waste(self, collector):
         _classify(collector, 'inst', prompt=5000, cached=0)
         s = collector.get_session_summary()
-        assert s['llm_wasted_tokens'] == 0
-        assert s['llm_waste_count'] == 0
-        assert _wasted_events(collector) == []
+        assert s['llm_wasted_tokens'] == 5000
+        assert s['llm_waste_count'] == 1
+        evs = _wasted_events(collector)
+        assert len(evs) == 1
+        assert evs[0]['waste_root_cause'] == 'cold_start'
+        assert evs[0]['wasted_tokens'] == 5000
 
     # 2. hit (high cached) → low missed (below noise floor, not counted).
     def test_high_cache_hit_is_below_noise_floor(self, collector):
@@ -67,15 +70,17 @@ class TestCacheWasteDetection:
         assert len(evs) == 1
         assert evs[0]['wasted_tokens'] == 5000
 
-    # 4. provider never reports (prev cached=0, cur cached=0) → NOT counted.
+    # 4. provider never reports (prev cached=0, cur cached=0) → differential NOT counted.
     #    Sticky reported_cache rule: a backend that omits cached_tokens entirely
-    #    must never be blamed for "wasting" its (never-claimed) cache.
-    def test_never_reporting_provider_is_not_counted(self, collector):
-        _classify(collector, 'inst', prompt=5000, cached=0)  # prev reported_cache stays False
-        _classify(collector, 'inst', prompt=5000, cached=0)  # sticky guard excludes → no waste
+    #    must never be blamed for "wasting" its (never-claimed) cache on a
+    #    differential miss. (The first call is still a counted cold_start — a
+    #    genuine first prefill — so expect exactly 1 event here, BUG_0281.)
+    def test_never_reporting_provider_differential_is_not_counted(self, collector):
+        _classify(collector, 'inst', prompt=5000, cached=0)  # cold_start → counted (5000)
+        _classify(collector, 'inst', prompt=5000, cached=0)  # sticky guard excludes → no 2nd waste
         s = collector.get_session_summary()
-        assert s['llm_waste_count'] == 0
-        assert s['llm_wasted_tokens'] == 0
+        assert s['llm_waste_count'] == 1  # only the cold_start
+        assert s['llm_wasted_tokens'] == 5000
 
     # 5. missed <= noise floor → not counted (boundary is strictly >).
     def test_miss_at_noise_floor_is_not_counted(self, collector):
@@ -197,9 +202,18 @@ class TestCacheWasteDetection:
 class TestDetectCacheWastePure:
     """The detector is pure and total — verify it in isolation."""
 
-    def test_none_when_no_prev(self):
-        assert TelemetryCollector.detect_cache_waste(
-            None, 5000, 0, 'm', 1000.0) is None
+    def test_cold_start_when_no_prev(self):
+        # A first call (no baseline) is a cold start — the full uncached re-prefill
+        # is counted (BUG_0281).
+        r = TelemetryCollector.detect_cache_waste(None, 5000, 0, 'm', 1000.0)
+        assert r == {'missed': 5000, 'root_cause': 'cold_start', 'idle_ms': 0.0}
+
+    def test_post_compression_marker_is_not_waste(self):
+        # A post-compression fresh baseline is NOT waste (the re-prefill is a
+        # necessary consequence of the compression, BUG_0281).
+        prev = {'prev_prompt_tokens': 0, 'prev_ts_ms': 0, 'prev_model': '',
+                'reported_cache': False, 'post_compression': True}
+        assert TelemetryCollector.detect_cache_waste(prev, 3000, 0, 'm', 1000.0) is None
 
     def test_none_when_no_prompt(self):
         prev = {'prev_prompt_tokens': 5000, 'prev_ts_ms': 0, 'prev_model': 'm',
