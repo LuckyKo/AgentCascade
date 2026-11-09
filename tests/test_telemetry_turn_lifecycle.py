@@ -79,12 +79,20 @@ def test_terminated_run_records_turn_end(tmp_path):
     assert summary['total_runs'] == 1
     assert len(_turn_events(collector)) == 1
 
-    # Time and attribution made it into both tables, not just the session total.
-    configs = collector.get_config_comparison()
+    # A terminated run serves 0 LLM calls, so its config row (runs=1, llm_calls=0) is
+    # intentionally hidden from the config-comparison VIEW (BUG_0273 ghost-row filter:
+    # rows with llm_calls==0 are dropped so a never-served configured template is not
+    # a ghost) but retained in the raw _config_stats for reconciliation. The agent-
+    # class view does NOT filter, so the 'coder' row (runs=1) is still present.
     classes = collector.get_agent_class_summary()
-    assert configs and configs[0]['runs'] == 1
-    assert collector._config_stats[configs[0]['config_fingerprint']]['total_duration_ms'] > 0
+    assert collector.get_config_comparison() == []   # 0-llm-call row filtered from the view
+    assert len(collector._config_stats) == 1         # ...but retained in the raw stats
+    fp = next(iter(collector._config_stats))
+    assert collector._config_stats[fp]['runs'] == 1
+    assert collector._config_stats[fp]['llm_calls'] == 0
+    assert collector._config_stats[fp]['total_duration_ms'] > 0
     assert classes and classes[0]['agent_class'] == 'coder'
+    assert classes[0]['runs'] == 1
     assert collector._agent_class_stats['coder']['total_time_ms'] > 0
 
 
