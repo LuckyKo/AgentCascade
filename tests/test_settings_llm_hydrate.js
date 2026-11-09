@@ -73,6 +73,7 @@ const LLM_CONTROLS = [
   { id: '#setting-max-tokens', key: 'max_tokens', prop: 'value' },
   { id: '#setting-max-context', key: 'max_input_tokens', prop: 'value' },
   { id: '#setting-log-api-post', key: 'log_api_post', prop: 'checked' },
+  { id: '#setting-vision-enabled', key: 'vision_enabled', prop: 'checked' },
 ];
 
 function makeDom(ids, steps = {}) {
@@ -165,12 +166,14 @@ test('syncPoolSettings hydrates every General-tab LLM control from the snapshot'
   dom.elements['#setting-max-tokens'].value = '8192';
   dom.elements['#setting-max-context'].value = '65536';
   dom.elements['#setting-log-api-post'].checked = false;
+  dom.elements['#setting-vision-enabled'].checked = true;
   dom.elements['#val-temperature'].textContent = '0.8';
 
   const snapshot = {
     temperature: 1.3, top_p: 0.5, top_k: 80, min_p: 0.1,
     repeat_penalty: 1.2, presence_penalty: 0.5, frequency_penalty: 0.3,
     max_tokens: 16384, max_input_tokens: 131072, log_api_post: true,
+    vision_enabled: false,
   };
   ctx.snapshot = snapshot;
   vm.runInContext('syncPoolSettings(snapshot)', ctx);

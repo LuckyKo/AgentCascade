@@ -112,6 +112,7 @@ _LLM_KEYS: Tuple[str, ...] = (
     'presence_penalty', 'frequency_penalty',
     'max_tokens', 'max_input_tokens', 'max_output_tokens',
     'stop_sequences', 'timeout', 'model_type', 'log_api_post',
+    'vision_enabled',
 )
 
 # Server-wide session identity, persisted to config/session_state.json (Phase 1).
@@ -247,6 +248,9 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'timeout': 120.0,
     'model_type': 'chat',
     'log_api_post': False,
+    # Global default endpoint capability: when False, images are captioned to text before
+    # the call (llm/base.py: effective_vision). Absent = True, matching the old behaviour.
+    'vision_enabled': True,
     # Session identity.
     'session_name': DEFAULT_SESSION_NAME,
     # Extra top-level pool_settings.json keys.

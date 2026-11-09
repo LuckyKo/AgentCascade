@@ -32,17 +32,20 @@ from agent_cascade.llm.schema import USER, ContentItem, Message
 # router (same pattern as tests/test_fallback_compression.py) and restore it afterwards.
 
 
-def _make_router(pool):
+def _make_router(pool, default_cfg=None):
     """Build a lightweight APIRouter with its own isolated config dir + a mocked pool."""
     d = tempfile.mkdtemp(prefix='imgcap_mode_')
     orig = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
     os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = d
+    cfg = {
+        'model': 'default-model',
+        'api_base': 'http://localhost:1234/v1',
+    }
+    if default_cfg:
+        cfg.update(default_cfg)
     try:
         router = APIRouter(
-            default_llm_cfg={
-                'model': 'default-model',
-                'api_base': 'http://localhost:1234/v1'
-            },
+            default_llm_cfg=cfg,
             config_dir=d,
         )
     finally:
@@ -205,22 +208,31 @@ class TestCaptionModeGating:
 
 
 class TestIsActiveEndpointVision:
-    """Unit tests for the _is_active_endpoint_vision() helper's conservative posture."""
+    """Unit tests for the _is_active_endpoint_vision() helper's chain-head resolution.
 
-    def test_returns_false_for_missing_instance(self):
+    A missing instance or a missing ``_last_endpoint_config`` resolves the chain head via
+    ``get_endpoint_chain``; with no agent priorities that head is the Tier-4 global default
+    (not any merely-registered endpoint). An absent ``vision_enabled`` on that default is
+    vision-capable (True), matching ``_SEED_DEFAULTS`` and ``_get_any_vision_endpoint``;
+    explicit flags are honoured.
+    """
+
+    def test_missing_instance_chain_head_default_absent_flag_is_vision_capable(self):
+        # No agent priorities → chain head is the bare Tier-4 default (no vision_enabled),
+        # not the merely-registered vision endpoint. An absent flag there is vision-capable.
         pool = _make_pool(mode='auto', instance=None)
         router = _make_router(pool)
         _vision_endpoint(router)
-        assert router._is_active_endpoint_vision('inst1') is False
+        assert router._is_active_endpoint_vision('inst1') is True
 
-    def test_returns_false_for_missing_last_endpoint_config(self):
+    def test_missing_last_endpoint_config_chain_head_default_absent_flag_is_vision_capable(self):
+        # No last endpoint and no agent priorities → chain head is the bare Tier-4 default.
         inst = MagicMock()
         inst._last_endpoint_config = None
         pool = _make_pool(mode='auto', instance=inst)
         router = _make_router(pool)
         _vision_endpoint(router)
-        # Bare Tier-4 default cfg has no explicit vision flag → conservative (caption).
-        assert router._is_active_endpoint_vision('inst1') is False
+        assert router._is_active_endpoint_vision('inst1') is True
 
     def test_returns_true_for_chain_head_vision_when_no_last_endpoint(self):
         """No allocated endpoint yet → resolve the chain head (todo.md:107)."""
@@ -282,6 +294,131 @@ class TestIsActiveEndpointVision:
         router.add_endpoint(
             APIEndpoint(name='text', api_base='http://t:8080/v1', model='text-model', vision_enabled=False))
         assert router._is_active_endpoint_vision('inst1') is False
+
+
+# ── 1b. Global default endpoint vision flag (General Settings) ────────────────
+
+
+class TestGlobalDefaultVision:
+    """The Tier-4 global default must honour its explicit ``vision_enabled`` flag.
+
+    A call served by the global default (no matching registered endpoint) is attributed
+    to ``default_llm_cfg`` via ``_matches_global_default``. An explicit ``True`` skips
+    captioning; an explicit ``False`` forces captions/placeholders; an absent flag defaults
+    to vision-capable, matching ``_SEED_DEFAULTS['vision_enabled']`` and
+    ``_get_any_vision_endpoint``.
+    """
+
+    DEFAULT_BASE = 'http://localhost:1234/v1'
+    DEFAULT_MODEL = 'default-model'
+
+    def test_matches_global_default_helper(self):
+        pool = _make_pool(mode='auto', instance=None)
+        router = _make_router(pool)
+        assert router._matches_global_default(
+            {'api_base': self.DEFAULT_BASE, 'model': self.DEFAULT_MODEL}) is True
+        assert router._matches_global_default(
+            {'api_base': 'http://elsewhere:9999/v1', 'model': self.DEFAULT_MODEL}) is False
+        assert router._matches_global_default(None) is False
+
+    def test_last_endpoint_matching_global_default_vision_true(self):
+        inst = _instance_with_endpoint(self.DEFAULT_BASE, self.DEFAULT_MODEL)
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': True})
+        assert router._is_active_endpoint_vision('inst1') is True
+
+    def test_last_endpoint_matching_global_default_vision_false(self):
+        inst = _instance_with_endpoint(self.DEFAULT_BASE, self.DEFAULT_MODEL)
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': False})
+        assert router._is_active_endpoint_vision('inst1') is False
+
+    def test_last_endpoint_matching_global_default_absent_flag_is_vision_capable(self):
+        inst = _instance_with_endpoint(self.DEFAULT_BASE, self.DEFAULT_MODEL)
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool)  # no explicit vision_enabled → legacy default (True)
+        assert router._is_active_endpoint_vision('inst1') is True
+
+    def test_auto_skips_captioning_when_global_default_is_vision(self):
+        inst = _instance_with_endpoint(self.DEFAULT_BASE, self.DEFAULT_MODEL)
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': True})
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            router.caption_images(messages, agent_type='generalist', instance_name='inst1')
+
+        assert not mock_gcm.called, 'auto must not caption when the global default has vision'
+        assert getattr(messages[0].content[0], 'caption', None) is None
+
+    def test_auto_captions_when_global_default_is_text_only(self):
+        """No vision endpoint exists — uncaptioned images become '[Image]' placeholders."""
+        inst = _instance_with_endpoint(self.DEFAULT_BASE, self.DEFAULT_MODEL)
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': False})
+
+        msg_a = Message(role=USER, content=[ContentItem(image='media/a.png')])
+        msg_b = Message(role=USER, content=[ContentItem(image='media/b.png', caption='[Image]')])
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            router.caption_images([msg_a, msg_b], agent_type='generalist', instance_name='inst1')
+
+        assert not mock_gcm.called, 'text-only global default must not be used for captioning'
+        assert getattr(msg_a.content[0], 'caption', None) == '[Image]'
+        assert getattr(msg_b.content[0], 'caption', None) == '[Image]'
+
+    def test_chain_head_global_default_vision_when_no_last_endpoint(self):
+        """Fresh/restored instance resolves the Tier-4 chain head's explicit flag."""
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': True})
+        assert router._is_active_endpoint_vision('inst1') is True
+
+    def test_chain_head_global_default_text_only_when_no_last_endpoint(self):
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool, {'vision_enabled': False})
+        assert router._is_active_endpoint_vision('inst1') is False
+
+    def test_chain_head_global_default_absent_flag_is_vision_capable_when_no_last_endpoint(self):
+        inst = MagicMock()
+        inst._last_endpoint_config = None
+        inst.agent_class = 'generalist'
+        pool = _make_pool(mode='auto', instance=inst)
+        router = _make_router(pool)  # no explicit vision_enabled → legacy default (True)
+        assert router._is_active_endpoint_vision('inst1') is True
+
+    def test_get_any_vision_endpoint_returns_global_default_when_vision(self):
+        pool = _make_pool(mode='auto', instance=None)
+        router = _make_router(pool, {'vision_enabled': True})
+        cfg = router._get_any_vision_endpoint()
+        assert cfg is not None
+        assert cfg['vision_enabled'] is True
+        assert cfg['model'] == self.DEFAULT_MODEL
+
+    def test_get_any_vision_endpoint_absent_flag_defaults_to_vision(self):
+        pool = _make_pool(mode='auto', instance=None)
+        router = _make_router(pool)
+        cfg = router._get_any_vision_endpoint()
+        assert cfg is not None and cfg['vision_enabled'] is True
+
+    def test_get_any_vision_endpoint_returns_none_for_text_only_global_default(self):
+        pool = _make_pool(mode='auto', instance=None)
+        router = _make_router(pool, {'vision_enabled': False})
+        assert router._get_any_vision_endpoint() is None
+
+    def test_tier4_chain_carries_vision_flag(self):
+        pool = _make_pool(mode='auto', instance=None)
+        router = _make_router(pool, {'vision_enabled': False})
+        chain = router.get_endpoint_chain('generalist')
+        assert chain and chain[-1]['vision_enabled'] is False
+
+        router_vision = _make_router(_make_pool(mode='auto', instance=None), {'vision_enabled': True})
+        chain_vision = router_vision.get_endpoint_chain('generalist')
+        assert chain_vision and chain_vision[-1]['vision_enabled'] is True
 
 
 # ── 2. Token estimation for structured image items ────────────────────────────

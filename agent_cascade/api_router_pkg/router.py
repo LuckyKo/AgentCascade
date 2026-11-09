@@ -2759,6 +2759,23 @@ class APIRouter:
             return mode
         return 'auto'
 
+    def _matches_global_default(self, cfg: dict) -> bool:
+        """True when *cfg* resolves to the Tier-4 global default (same normalized base+model).
+
+        The per-instance ``_last_endpoint_config`` records only ``api_base``/``model``, so a
+        call served by the global default cannot be matched against ``self.endpoints``. This
+        helper lets capability decisions (notably ``vision_enabled``) attribute that call to
+        ``default_llm_cfg`` instead of treating it as unknown/text-only.
+        """
+        if not isinstance(cfg, dict):
+            return False
+        defaults = self.default_llm_cfg or {}
+        if not defaults:
+            return False
+        cfg_base = normalize_api_base(cfg.get('api_base') or cfg.get('model_server', ''))
+        def_base = normalize_api_base(defaults.get('api_base') or defaults.get('model_server', ''))
+        return cfg_base == def_base and cfg.get('model', '') == defaults.get('model', '')
+
     def _is_active_endpoint_vision(self, instance_name: Optional[str], agent_type: str = '') -> bool:
         """Return True if the instance's CURRENTLY-allocated endpoint is vision-capable.
 
@@ -2773,9 +2790,11 @@ class APIRouter:
         session's first turn captioned every image even though its assigned endpoint was
         vision-capable (todo.md:107).
 
-        Conservative (returns False → caption) when: the instance is unknown, there is no
-        resolvable chain, the recorded endpoint no longer matches a live enabled endpoint, or
-        the chain head's capability is not explicitly known (e.g. a bare Tier-4 default cfg).
+        Conservative (returns False → caption) when: ``instance_name``/pool are absent, there
+        is no resolvable endpoint chain, or a recorded endpoint matches neither a live enabled
+        endpoint nor the explicitly configured global default. An absent ``vision_enabled`` on
+        the global default or the chain head defaults to vision-capable (True), matching
+        ``_get_any_vision_endpoint`` and the legacy seed default.
         """
         if not instance_name or self._pool is None:
             return False
@@ -2790,14 +2809,22 @@ class APIRouter:
                         continue
                     if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
                         return bool(getattr(ep, 'vision_enabled', False))
-            # No matching enabled endpoint → treat as text-only (conservative).
+            # No matching registered endpoint → the call was served by the Tier-4 global
+            # default. Honour its vision_enabled (set from General Settings); an absent flag
+            # is treated as vision-capable, matching the legacy _SEED_DEFAULTS['vision_enabled']
+            # default and the sibling _get_any_vision_endpoint (aligning the two absent-paths).
+            if self._matches_global_default(cur_cfg):
+                defaults = self.default_llm_cfg or {}
+                return bool(defaults.get('vision_enabled', True))
             return False
 
         # ── No endpoint allocated yet (session restore / fresh instance) ──────
         # The next call_with_fallback() starts at the head of this instance's chain,
-        # so that is the effective "active" endpoint for the caption decision. Only
-        # trust an EXPLICIT flag: a bare Tier-4 default cfg has no capability info,
-        # and captioning is the safe fallback there.
+        # so that is the effective "active" endpoint for the caption decision. A registered
+        # endpoint's cfg always carries vision_enabled (to_llm_cfg); a bare Tier-4 default
+        # cfg may omit it — in that case treat it as vision-capable, matching
+        # _get_any_vision_endpoint and the legacy seed default. An empty/unresolvable chain
+        # still falls back to captioning.
         # Use the caller's agent_type (same as caption_images / _get_vision_endpoint_for_agent)
         # to keep the chain resolution consistent with the actual captioning endpoint choice.
         if not agent_type:
@@ -2807,18 +2834,23 @@ class APIRouter:
         except ValueError as e:
             logger.debug(f"[APIRouter] Vision check: no endpoint chain for '{instance_name}': {e}")
             return False
-        if not chain or 'vision_enabled' not in chain[0]:
+        if not chain:
             return False
-        return bool(chain[0].get('vision_enabled'))
+        return bool(chain[0].get('vision_enabled', True))
 
     def _get_any_vision_endpoint(self) -> Optional[dict]:
-        """Return the config of any enabled vision-capable endpoint."""
+        """Return the config of any enabled vision-capable endpoint.
+
+        The global default is only a valid caption endpoint when it is not explicitly
+        marked text-only (`vision_enabled=False` from General Settings); returning it
+        otherwise would route images to an endpoint that cannot read them.
+        """
         with self._lock:
             for ep in self.endpoints.values():
                 if ep.enabled and getattr(ep, 'vision_enabled', True):
                     return ep.to_llm_cfg()
-            # Fallback: default config (assume vision by default)
-            if self.default_llm_cfg:
+            # Fallback: default config (absent flag = vision-capable, legacy default)
+            if self.default_llm_cfg and self.default_llm_cfg.get('vision_enabled', True):
                 cfg = copy.deepcopy(self.default_llm_cfg)
                 cfg.setdefault('vision_enabled', True)
                 return cfg

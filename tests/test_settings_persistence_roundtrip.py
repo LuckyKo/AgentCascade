@@ -128,7 +128,7 @@ def test_pool_settings_broadcasts_llm_config_from_default_llm_cfg():
         'repeat_penalty': 1.2, 'presence_penalty': 0.5, 'frequency_penalty': 0.3,
         'max_tokens': 16384, 'max_input_tokens': 131072,
         'stop_sequences': '###', 'timeout': 90.0, 'model_type': 'chat',
-        'log_api_post': True,
+        'log_api_post': True, 'vision_enabled': False,
     }
 
     class _Router:

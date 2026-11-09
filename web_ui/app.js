@@ -293,12 +293,15 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-max-tokens', prop: 'value', key: 'max_tokens' },
   { id: '#setting-max-context', prop: 'value', key: 'max_input_tokens' },
   { id: '#setting-log-api-post', prop: 'checked', key: 'log_api_post' },
+  // Global default endpoint capability: False makes llm/base.py caption images to text
+  // before the call instead of sending them inline.
+  { id: '#setting-vision-enabled', prop: 'checked', key: 'vision_enabled' },
 ];
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
 // Presentation-only state that stays in the browser. Never sent to the server.
-// `vision-enabled` is a behaviour gate (decides what the browser sends to the model), so
-// it does not belong in this presentation-only store; it is not server-backed yet.
+// `vision_enabled` is a behaviour gate (decides what the browser sends to the model), so
+// it is server-backed via POOL_SETTINGS_MAP, not stored here.
 const UI_PREFS_KEY = 'agent-cascade-ui-prefs';
 const UI_PREFS_ALLOWLIST = new Set([
   'setting-lines-enabled', 'setting-msg-meta',
@@ -975,7 +978,6 @@ const workAccessFoldersRW = $('#workAccessFoldersRW');
 const workAccessFoldersRO = $('#workAccessFoldersRO');
 const defaultWorkspace = $('#defaultWorkspace');
 
-const settingVisionEnabled = $('#setting-vision-enabled');
 const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
 const settingMaxImagesForLlm = $('#setting-max-images-for-llm');
@@ -1389,7 +1391,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-skill-score-nmin')) s['skill_score_nmin'] = $('#setting-skill-score-nmin').value;
   if ($('#setting-skill-fair-window-turns')) s['skill_fair_window_turns'] = $('#setting-skill-fair-window-turns').value;
   if ($('#setting-skill-max-evictions-per-pass')) s['skill_max_evictions_per_pass'] = $('#setting-skill-max-evictions-per-pass').value;
-  if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
+  // `vision_enabled` is server-backed (getGenerateCfg + POOL_SETTINGS_MAP) — no local write.
   // AFK is server-backed now — the server state (pool_settings afk_enabled/afk_message) is the
   // single source of truth; localStorage no longer holds afk-enabled/afk-message.
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
@@ -6210,6 +6212,8 @@ function getGenerateCfg() {
   if ($('#setting-loop-confirm-required')) cfg.loop_confirm_required = parseInt($('#setting-loop-confirm-required').value) || 3;
   if ($('#setting-loop-cooldown-feeds')) cfg.loop_cooldown_feeds = parseInt($('#setting-loop-cooldown-feeds').value) || 50;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
+  // Global default endpoint vision capability (consumed by llm/base.py via generate_cfg).
+  if ($('#setting-vision-enabled')) cfg.vision_enabled = $('#setting-vision-enabled').checked;
   // Empty input → NaN; fall back to the HTML default (3). Use an explicit NaN check (NOT `|| 3`)
   // so a legitimate `0` (no rollbacks) is preserved — `0 || 3` would wrongly coerce it to 3. `-1` (unlimited) also survives.
   if ($('#setting-max-rollbacks')) { const _mar = parseInt($('#setting-max-rollbacks').value); cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar; }
