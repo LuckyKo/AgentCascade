@@ -6754,6 +6754,8 @@ function renderApiEndpoints() {
       const epVision = ep.vision_enabled !== false;       // default True
       const epCustomSampling = !!ep.use_custom_sampling;  // default False
       const epStateSave = !!ep.state_save_enabled;        // default False
+      const epAudio = !!ep.audio_enabled;                 // default False (Phase-1 flag)
+      const epVideo = !!ep.video_enabled;                 // default False (Phase-1 flag)
 
       return `
          <div class="api-endpoint-card ${ep.enabled ? '' : 'disabled'}" data-id="${escapeHtml(ep.id)}">
@@ -6841,6 +6843,14 @@ function renderApiEndpoints() {
              <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Enable KV cache state save/restore for this endpoint (autoloader only)">
                <span>💾 State Save</span>
                <input type="checkbox" class="ep-input-state-save" ${epStateSave ? 'checked' : ''}>
+             </label>
+             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Whether this endpoint accepts audio input">
+               <span>🎧 Audio Enabled</span>
+               <input type="checkbox" class="ep-input-audio" ${epAudio ? 'checked' : ''}>
+             </label>
+             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Whether this endpoint accepts video input">
+               <span>🎬 Video Enabled</span>
+               <input type="checkbox" class="ep-input-video" ${epVideo ? 'checked' : ''}>
              </label>
               <!-- Per-endpoint reasoning effort pulldown -->
               <div style="display:flex;gap:8px;margin-top:6px;">
@@ -7034,6 +7044,31 @@ function handleApiEndpointToggle(e) {
     }
   }
 
+  // Audio toggle — user click is the only writer, so the key stays absent on
+  // endpoints the user never touched (absence-preserving).
+  const audioToggle = e.target.closest('.ep-input-audio');
+  if (audioToggle) {
+    const card = audioToggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.audio_enabled = e.target.checked;
+      updateEndpointRest(ep);
+    }
+  }
+
+  // Video toggle — user click is the only writer (see audio toggle note).
+  const videoToggle = e.target.closest('.ep-input-video');
+  if (videoToggle) {
+    const card = videoToggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.video_enabled = e.target.checked;
+      updateEndpointRest(ep);
+    }
+  }
+
   // Reasoning effort pulldown — save state immediately on change
   const reasoningEffortSel = e.target.closest('.ep-input-reasoning-effort');
   if (reasoningEffortSel) {
@@ -7116,6 +7151,14 @@ function handleApiEndpointBlur(e) {
   if (customSamplingCb) ep.use_custom_sampling = customSamplingCb.checked;
   const stateSaveCb = card.querySelector('.ep-input-state-save');
   if (stateSaveCb) ep.state_save_enabled = stateSaveCb.checked;
+  // Absence-preserving readback: only re-sync audio/video when the key is already
+  // present on the endpoint, so committing an unrelated text field never stamps a
+  // False onto an endpoint whose key was never set. (Toggling on/off goes through
+  // the change handler, which is the sole writer that first creates the key.)
+  const audioCb = card.querySelector('.ep-input-audio');
+  if (audioCb && ('audio_enabled' in ep)) ep.audio_enabled = audioCb.checked;
+  const videoCb = card.querySelector('.ep-input-video');
+  if (videoCb && ('video_enabled' in ep)) ep.video_enabled = videoCb.checked;
   const reasoningEffortSel = card.querySelector('.ep-input-reasoning-effort');
   if (reasoningEffortSel) ep.reasoning_effort = reasoningEffortSel.value || 'none';
 
@@ -7207,6 +7250,14 @@ function renderAgentApiAssignments() {
     agentTypes.push('skill_selector');
     typeToName['skill_selector'] = 'Classifier';
   }
+  // Reserved pseudo-type: the captioner's endpoint fallback list, stored under
+  // agent_priorities['caption'] and resolved by router._get_caption_endpoint_cfg.
+  // Like skill_selector it is a direct fallback list (NOT get_endpoint_chain), so
+  // the __use_last_endpoint__ sentinel is a no-op and is hidden (see showUseLast).
+  if (!agentTypes.includes('caption')) {
+    agentTypes.push('caption');
+    typeToName['caption'] = 'Captioner';
+  }
 
   if (endpoints.length === 0) {
     container.innerHTML = `
@@ -7228,7 +7279,7 @@ function renderAgentApiAssignments() {
     // get_endpoint_chain (Tier 1.5). The Classifier (skill_selector) resolves its endpoints via
     // skills/selector.py:resolve_endpoints, which drops non-endpoint ids and never calls
     // get_endpoint_chain — so the sentinel is a no-op there, and it is deliberately NOT offered.
-    const showUseLast = type !== 'skill_selector';
+    const showUseLast = type !== 'skill_selector' && type !== 'caption';
     const useLastOption = (showUseLast && !assignedIds.includes(USE_LAST_ENDPOINT))
       ? `<option value="${USE_LAST_ENDPOINT}">Use Last Endpoint</option>`
       : '';
@@ -7746,6 +7797,8 @@ if (btnAddEndpoint) {
         vision_enabled: true,
         use_custom_sampling: false,
         state_save_enabled: false,
+        audio_enabled: false,
+        video_enabled: false,
         reasoning_effort: 'none'
       });
 

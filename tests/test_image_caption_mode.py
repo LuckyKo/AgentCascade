@@ -451,3 +451,179 @@ class TestSettingsPlumbing:
         assert self._run_handler('bogus') == 'auto'
         assert self._run_handler(None) == 'auto'
         assert self._run_handler(123) == 'auto'
+
+
+# ── 4. Caption endpoint list (M2) ──────────────────────────────────────────────
+
+
+class TestCaptionEndpointList:
+    """agent_priorities['caption'] picks the caption endpoint; graceful fallback.
+
+    All cases run mode='always' so the caption call fires regardless of the
+    active endpoint's vision, isolating endpoint SELECTION from mode gating.
+    """
+
+    def test_caption_list_hit_selects_configured_endpoint(self):
+        """A non-empty caption list overrides any-vision selection."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        router.add_endpoint(
+            APIEndpoint(name='vision-A', api_base='http://a:8080/v1', model='vision-A', vision_enabled=True))
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.set_agent_priorities('caption', [ep_b.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        used = mock_gcm.call_args[0][0]
+        assert used['model'] == 'caption-B', 'caption list must select the configured endpoint'
+        assert used['api_base'] == 'http://b:8080/v1'
+
+    def test_caption_list_empty_falls_back_to_any_vision(self):
+        """No caption key == today's any-vision behaviour (byte-for-byte)."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model')
+
+        # Reference: what today's any-vision path resolves to (unchanged fallback).
+        expected = router._get_vision_endpoint_for_agent('generalist', instance_name=None)
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.called, 'empty caption list must fall back to any-vision'
+        assert mock_gcm.call_args[0][0]['model'] == expected['model'], \
+            "empty caption list must use today's any-vision endpoint"
+
+    def test_caption_list_all_stale_ids_falls_back(self):
+        """A caption list whose ids all resolve to nothing degrades to any-vision."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        _vision_endpoint(router, api_base='http://v:8080/v1', model='vision-model')
+        # Seed directly to bypass set_agent_priorities validation (stale ids dropped there).
+        router.agent_priorities['caption'] = ['gone-1', 'gone-2']
+
+        expected = router._get_vision_endpoint_for_agent('generalist', instance_name=None)
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.call_args[0][0]['model'] == expected['model'], \
+            'all-stale caption list must fall back to any-vision'
+
+    def test_caption_list_drops_stale_id_keeps_valid(self):
+        """Stale ids are dropped; the first resolvable entry is used (order honoured)."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        router.add_endpoint(
+            APIEndpoint(name='vision-A', api_base='http://a:8080/v1', model='vision-A', vision_enabled=True))
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.agent_priorities['caption'] = ['gone-id', ep_b.id]
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.call_args[0][0]['model'] == 'caption-B', \
+            'stale id dropped, valid entry still selected'
+
+    def test_caption_list_drops_disabled_endpoint(self):
+        """A disabled endpoint in the caption list is skipped; the next valid entry is used."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        ep_off = APIEndpoint(name='off', api_base='http://off:8080/v1', model='off',
+                             vision_enabled=True, enabled=False)
+        router.add_endpoint(ep_off)
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.set_agent_priorities('caption', [ep_off.id, ep_b.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.call_args[0][0]['model'] == 'caption-B', \
+            'disabled head must be dropped, next valid entry selected'
+
+    def test_caption_list_drops_empty_api_base_endpoint(self):
+        """An endpoint with an empty api_base is unresolvable and is skipped."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        ep_nobase = APIEndpoint(name='no-base', api_base='', model='no-base', vision_enabled=True)
+        router.add_endpoint(ep_nobase)
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.set_agent_priorities('caption', [ep_nobase.id, ep_b.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.call_args[0][0]['model'] == 'caption-B', \
+            'empty-api_base head must be dropped, next valid entry selected'
+
+    def test_caption_list_drops_non_vision_endpoint(self):
+        """A non-vision endpoint in the caption list cannot caption and is skipped."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        ep_text = APIEndpoint(name='text-only', api_base='http://t:8080/v1', model='text-only',
+                              vision_enabled=False)
+        router.add_endpoint(ep_text)
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.set_agent_priorities('caption', [ep_text.id, ep_b.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm:
+            mock_gcm.return_value.chat.return_value = iter([[{'role': 'assistant', 'content': 'a cat'}]])
+            router.caption_images(messages, agent_type='generalist')
+
+        assert mock_gcm.call_args[0][0]['model'] == 'caption-B', \
+            'non-vision head must be dropped, next valid entry selected'
+
+    def test_breaker_open_on_list_head_degrades_to_image(self):
+        """A breaker-open caption endpoint falls through to the '[Image]' placeholder."""
+        pool = _make_pool(mode='always')
+        router = _make_router(pool)
+        ep_b = APIEndpoint(name='caption-B', api_base='http://b:8080/v1', model='caption-B', vision_enabled=True)
+        router.add_endpoint(ep_b)
+        router.set_agent_priorities('caption', [ep_b.id])
+
+        messages = [_msg_with_image()]
+        with patch('agent_cascade.llm.get_chat_model') as mock_gcm, \
+                patch.object(router, '_breaker_is_open', return_value=True):
+            router.caption_images(messages, agent_type='generalist')
+
+        assert not mock_gcm.called, 'breaker-open endpoint must not be called'
+        assert getattr(messages[0].content[0], 'caption', None) == '[Image]'
+
+
+class TestCaptionKeyPersistence:
+    """The 'caption' pseudo-key persists/normalizes like 'skill_selector' (no backend change)."""
+
+    def test_caption_key_survives_live_save_path(self):
+        pool = _make_pool(mode='auto')
+        router = _make_router(pool)
+        ep = _vision_endpoint(router)
+        router.set_agent_priorities('caption', [ep.id])
+        # Key passes through as 'caption' (unknown to CANONICAL_AGENT_TYPES), same as skill_selector.
+        assert router.get_agent_priorities('caption') == [ep.id]
+
+    def test_caption_key_survives_from_dict(self):
+        pool = _make_pool(mode='auto')
+        router = _make_router(pool)
+        ep = _vision_endpoint(router)
+        router.from_dict({
+            'endpoints': [ep.to_dict()],
+            'agent_priorities': {'caption': [ep.id]},
+        })
+        assert router.get_agent_priorities('caption') == [ep.id]

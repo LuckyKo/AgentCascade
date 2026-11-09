@@ -2824,6 +2824,42 @@ class APIRouter:
                 return cfg
         return None
 
+    def _get_caption_endpoint_cfg(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
+        """Return a caption endpoint config from ``agent_priorities['caption']``.
+
+        Mirrors ``_get_vision_endpoint_for_agent``'s role at the captioning
+        endpoint-selection step, but resolves the reserved pseudo-key
+        ``agent_priorities['caption']`` (an ordered ``List[endpoint_id]``, exactly
+        like the ``skill_selector`` pseudo-key) instead of the agent chain.
+
+        A caption list is a direct fallback list, NOT a rotated agent chain, so it
+        is iterated in order and the FIRST entry that resolves to an enabled,
+        vision/caption-capable endpoint wins. Stale/removed ids and entries with an
+        empty ``api_base`` are dropped, mirroring the empty-api_base drop in
+        ``skills.selector.resolve_endpoints`` and the id-validation in
+        ``set_agent_priorities``. A breaker-open head is deliberately NOT skipped
+        here -- the existing per-image breaker gate in ``caption_images`` degrades
+        it to ``'[Image]'`` like any other caption failure.
+
+        Returns that endpoint's ``to_llm_cfg()``, or ``None`` when the caption list
+        is empty/absent or nothing resolves -- callers then fall back to the existing
+        ``_get_vision_endpoint_for_agent`` (any-vision, then ``[Image]``), so an
+        empty caption list is byte-for-byte today's behaviour.
+
+        ``agent_type``/``instance_name`` are accepted for call-site parity only; a
+        caption list is an explicit endpoint order, not an agent-chain rotation, so
+        they are not consulted.
+        """
+        for eid in list(self.agent_priorities.get('caption') or []):
+            with self._lock:
+                ep = self.endpoints.get(eid)
+                if ep is None or not ep.enabled or not ep.api_base \
+                        or not getattr(ep, 'vision_enabled', True):
+                    continue  # stale/removed id, disabled, un-routable, or non-vision -> drop
+                cfg = ep.to_llm_cfg()
+            return cfg
+        return None
+
     def _get_vision_endpoint_for_agent(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
         """Return a vision-capable endpoint for captioning.
 
@@ -2929,7 +2965,11 @@ class APIRouter:
             return messages
 
         from agent_cascade.llm.schema import ContentItem, Message
-        vision_cfg = self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
+        # Prefer an explicit caption-endpoint list (agent_priorities['caption']);
+        # fall back to the existing any-vision resolution when it is empty/absent,
+        # so an unconfigured caption list is byte-for-byte today's behaviour.
+        vision_cfg = self._get_caption_endpoint_cfg(agent_type, instance_name=instance_name) \
+            or self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
         if not vision_cfg:
             # Replace uncaptioned images with placeholder text to ensure safe fallback
             logger.warning(
