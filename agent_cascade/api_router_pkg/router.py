@@ -1208,8 +1208,59 @@ class APIRouter:
             # above holds only ENABLED Tier-1 endpoints, so an agent whose sole assignment is a
             # DISABLED real endpoint (and has no sentinel) is treated as unassigned → [default].
             wants_last_active = USE_LAST_ENDPOINT in self.agent_priorities.get(normalized_agent_type, [])
+            # ── BUG_0277: per-instance STICKY endpoint for pure-sentinel agents ───────────
+            # A pure-sentinel agent (no enabled Tier-1 endpoints, opted into USE_LAST_ENDPOINT)
+            # otherwise inherits the GLOBAL last-active endpoint. As other agents alternate
+            # between models that marker flaps, so the sentinel's resolved model flaps on every
+            # call — each flap moves the KV-cache key and forces a full re-prefill (the entire
+            # model_change waste class). Pin to THIS instance's committed endpoint (set in
+            # call_with_fallback when a real call succeeds → self._instance_committed_endpoint)
+            # instead of the flapping global. Falls back to the global last-active only for a
+            # brand-new instance (no committed marker) or when the committed endpoint has been
+            # disabled/removed, so a legitimate re-resolve is never defeated. Key shape matches
+            # the committed-live probe fast path (normalize_api_base(api_base), model) —
+            # content-based, so it survives a benign config reload and is dropped by a disable
+            # (the enabled check below). Runs under the already-held self._lock (threading.Lock
+            # is non-reentrant → never re-acquire). endpoint_configs is empty here, so no Tier-1 dedup is needed.
+            _sticky_pinned = False
+            if not endpoint_configs and wants_last_active and instance_name:
+                _committed = self._instance_committed_endpoint.get(instance_name)
+                if _committed is not None:
+                    _sticky_default_cfg = self.default_llm_cfg or {}
+                    _sticky_default_key = (normalize_api_base(
+                        _sticky_default_cfg.get('api_base') or _sticky_default_cfg.get('model_server', '')),
+                        _sticky_default_cfg.get('model'))
+                    if _committed == _sticky_default_key:
+                        # Committed endpoint IS the stable Tier-4 default: pin by suppressing the
+                        # flapping global. The default is appended below as Tier 4, so do not add
+                        # it here (that would duplicate) — [default] is the correct result.
+                        # This [default] guarantee depends on the sentinel-only Tier-3 exclusion
+                        # (_agent_types_with_priorities.discard in set_agent_priorities): a pure
+                        # sentinel is NOT Tier-3 eligible, so the equally-flapping global
+                        # _last_successful_endpoint_cfg cannot sneak a flapper back in here.
+                        _sticky_pinned = True
+                    else:
+                        _sticky_ep = next(
+                            (ep for ep in self.endpoints.values()
+                             if ep.enabled and normalize_api_base(ep.api_base) == _committed[0]
+                             and ep.model == _committed[1]),
+                            None,
+                        )
+                        if _sticky_ep is not None:
+                            _sticky_pinned = True
+                            cfg = copy.deepcopy(_sticky_ep.to_llm_cfg())
+                            ep_limit = _sticky_ep.max_input_tokens
+                            if ep_limit <= 0 and general_limit > 0:
+                                cfg['max_input_tokens'] = general_limit
+                            # max_input_tokens kept as the endpoint's TRUE limit (see Tier-1 note).
+                            endpoint_configs.append(cfg)
+                            logger.debug(
+                                f"[APIRouter] Tier 1.5 STICKY: '{agent_type}'/{instance_name} pinned "
+                                f"to committed endpoint '{_sticky_ep.model}' @ {_sticky_ep.api_base} "
+                                f"(suppressing global last-active flap)"
+                            )
             _la_id = self._last_released_endpoint or self._last_active_endpoint
-            if _la_id is not None and (wants_last_active or endpoint_configs):
+            if not _sticky_pinned and _la_id is not None and (wants_last_active or endpoint_configs):
                 _la_ep = self.endpoints.get(_la_id)  # O(1) dict lookup by ID
                 if _la_ep is not None and _la_ep.enabled:
                     # Skip if the last-active endpoint IS the Tier-4 default (same base+model):
