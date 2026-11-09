@@ -611,11 +611,14 @@ class _FakeAgentsPool:
     effects.
     """
 
-    def __init__(self, agents, instances=None):
+    def __init__(self, agents, instances=None, api_router=None):
         # agents: list of dicts with name / tagline / tools.
         self._agents = agents
         # instances: dict of name -> AgentInstance-shaped SimpleNamespace (or {}).
         self.instances = instances or {}
+        # api_router: object exposing get_endpoint_chain + endpoints; the Primary
+        # Endpoint block reads it. None (default) -> that section is omitted.
+        self.api_router = api_router
 
     def list_agents(self):
         return [a['name'] for a in self._agents]
@@ -882,3 +885,135 @@ class TestSystemInfoResourcesSection:
         """A failing nvidia-smi invocation returns [], the sole unavailable signal."""
         self._mock_nvidia(monkeypatch, csv='', found=True, returncode=1)
         assert self._tool()._query_nvidia_gpus() == []
+
+
+class TestSystemInfoContentIndentation:
+    """Task A: every section CONTENT line is 2-space indented under a flush-left
+    ``--- Section ---`` header, with sub-structures nested 2 spaces deeper."""
+
+    def test_system_information_content_indented_headers_flush(self):
+        """System Information + Server + Workspace + Session Stats content is 2-space;
+        section headers stay flush-left."""
+        out = SystemInfo(agent_pool=None).call('')
+        # First header is flush-left (start of the output).
+        assert out.startswith('--- System Information ---')
+        # System Information content uniformly indented by 2.
+        for line in ('  OS:', '  Current Time:', '  Host Timezone:',
+                     '  Python Version:', '  API Endpoint:', '  Model Used:'):
+            assert f'\n{line}' in out
+        # AgentCascade Server block: content indented, header flush-left.
+        assert '\n--- AgentCascade Server ---' in out
+        for line in ('  AgentCascade Version:', '  Server Address:', '  Help Topics:'):
+            assert f'\n{line}' in out
+        # Workspace + Session Stats content indented (pool-absent path).
+        assert '\n--- Workspace & Permissions ---' in out
+        assert '\n  Default Workspace (RW):' in out
+        assert '\n--- Session Stats ---' in out
+        assert '\n  Agent Pool not connected.' in out
+
+    def test_rendered_helpers_not_double_indented(self, monkeypatch):
+        """Render helpers that already emit 2-space content (resources, MCP) are shown
+        as-is and must NOT be re-indented to 4 spaces by the consistency pass."""
+        tool = SystemInfo(agent_pool=None)
+        monkeypatch.setattr(tool, '_render_system_resources', lambda: '  CPU: mock\n  RAM: mock')
+        monkeypatch.setattr(tool, '_render_mcp_servers', lambda: '  - srv — desc')
+        out = tool.call('')
+        assert '\n  CPU: mock\n  RAM: mock\n' in out
+        assert '    CPU: mock' not in out
+        assert '\n  - srv — desc\n' in out
+
+    def test_indent_block_nests_substructures_deeper(self):
+        """_indent_block shifts every content line by the prefix, preserving blank
+        lines and relative nesting (so budget sub-items land 2 deeper than parent)."""
+        block = 'Budget / Cost:\n  consumed: 10 tokens\n  cost: $0.001\n\nnext'
+        assert SystemInfo._indent_block(block) == (
+            '  Budget / Cost:\n    consumed: 10 tokens\n    cost: $0.001\n\n  next')
+
+
+class _FakeRouter:
+    """Stub APIRouter exposing only what _render_primary_endpoint reads.
+
+    get_endpoint_chain returns a single-item chain (list of cfg dicts); endpoints is
+    the id -> APIEndpoint map. Deliberately has no _lock so the lock-optional read
+    path is exercised. raise_on_chain simulates a router error.
+    """
+
+    def __init__(self, endpoints, head=None, raise_on_chain=False):
+        self.endpoints = endpoints
+        self._head = head
+        self._raise = raise_on_chain
+
+    def get_endpoint_chain(self, agent_type, instance_name=None):
+        if self._raise:
+            raise RuntimeError('router unavailable')
+        return [self._head] if self._head is not None else []
+
+
+def _endpoint(**kw):
+    """Real APIEndpoint instance (exact production field names) for matching."""
+    from agent_cascade.api_router_pkg.endpoints import APIEndpoint
+    return APIEndpoint(**kw)
+
+
+class TestSystemInfoPrimaryEndpoint:
+    """Task B: the Primary Endpoint block appended to help='agents'."""
+
+    _AGENTS = [{'name': 'orchestrator', 'tagline': 'Technical lead', 'tools': ['call_agent']}]
+
+    def _agents_out(self, pool):
+        return SystemInfo(agent_pool=pool).call('{"help": "agents"}')
+
+    def test_priced_endpoint_shows_model_base_pricing_and_limits(self):
+        """Non-zero pricing renders the Pricing line; limits render with the cap."""
+        ep = _endpoint(id='1', api_base='http://localhost:1234/v1', model='glm-4',
+                       output_per_m=3.0, cache_read_per_m=0.5,
+                       max_input_tokens=125000, rate_limit_rpm=0, concurrency_limit=-1)
+        head = {'api_base': 'http://localhost:1234/v1', 'model': 'glm-4'}
+        pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
+        out = self._agents_out(pool)
+        assert '--- Primary Endpoint ---' in out
+        assert 'Model: glm-4' in out
+        assert 'API Base: http://localhost:1234/v1' in out
+        assert 'Pricing: $3/M out, $0.5/M cache-read' in out
+        assert 'Limits: max input 125000 tok; rate unlimited; concurrency unlimited' in out
+
+    def test_unpriced_endpoint_omits_pricing_keeps_limits(self):
+        """All-zero rates -> no Pricing line, but the Limits line still shows."""
+        ep = _endpoint(id='1', api_base='http://localhost:1234/v1', model='m',
+                       max_input_tokens=125000)  # all *_per_m default to 0
+        head = {'api_base': 'http://localhost:1234/v1', 'model': 'm'}
+        pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
+        out = self._agents_out(pool)
+        assert '--- Primary Endpoint ---' in out
+        assert 'Pricing:' not in out
+        assert 'Limits: max input 125000 tok; rate unlimited; concurrency unlimited' in out
+
+    def test_no_router_omits_section_without_raising(self):
+        """api_router None -> Primary Endpoint omitted, rest of agents view intact."""
+        pool = _FakeAgentsPool(self._AGENTS, api_router=None)
+        out = self._agents_out(pool)
+        assert 'Primary Endpoint' not in out
+        assert 'AC Agent Classes' in out
+
+    def test_empty_chain_omits_section(self):
+        """Resolved router but empty endpoint chain -> block omitted (graceful)."""
+        pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({}, head=None))
+        out = self._agents_out(pool)
+        assert 'Primary Endpoint' not in out
+
+    def test_router_error_omits_section(self):
+        """get_endpoint_chain raising degrades gracefully (no crash, block omitted)."""
+        pool = _FakeAgentsPool(self._AGENTS,
+                               api_router=_FakeRouter({}, head=None, raise_on_chain=True))
+        out = self._agents_out(pool)
+        assert 'Primary Endpoint' not in out
+
+    def test_matches_endpoint_by_normalized_api_base(self):
+        """A chain head using a localhost alias still matches an endpoint stored as
+        127.0.0.1 (mirrors get_endpoint_pricing's normalize_api_base matching)."""
+        ep = _endpoint(id='1', api_base='http://127.0.0.1:1234/v1', model='m',
+                       max_input_tokens=200000)
+        head = {'api_base': 'http://localhost:1234/v1', 'model': 'm'}
+        pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
+        out = self._agents_out(pool)
+        assert 'Limits: max input 200000 tok' in out

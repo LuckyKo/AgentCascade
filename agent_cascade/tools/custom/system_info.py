@@ -446,6 +446,13 @@ class SystemInfo(BaseTool):
 
         # Live per-instance sessions (the runtime view the old list_agents tool showed).
         lines.append(self._render_active_instances())
+
+        # Primary Endpoint: the LLM endpoint these agents run on (omitted when no
+        # router / empty chain). Placed last so the per-instance list reads first.
+        primary_ep = self._render_primary_endpoint()
+        if primary_ep:
+            lines.append(primary_ep)
+
         return '\n'.join(lines)
 
     def _render_active_instances(self) -> str:
@@ -498,6 +505,128 @@ class SystemInfo(BaseTool):
 
         lines.extend(rows or ['(no active instances)'])
         return '\n'.join(lines)
+
+    @staticmethod
+    def _indent_block(text: str, prefix: str = '  ') -> str:
+        """Prefix every non-empty line of ``text`` with ``prefix``.
+
+        Used by ``call`` to render section CONTENT at a uniform 2-space indent
+        under flush-left ``--- Section ---`` headers (consistency pass), without
+        touching wording or the data shown. Blank lines and the trailing newline
+        are preserved, and multi-line sub-structures nested by the renderer (e.g.
+        the ``  - ...`` folder items, or the ``  consumed:`` budget sub-items)
+        shift to ``prefix``+existing indent — i.e. 2 spaces deeper than their
+        parent line, exactly as intended.
+        """
+        return '\n'.join(prefix + ln if ln.strip() else ln for ln in text.split('\n'))
+
+    @staticmethod
+    def _fmt_per_m(v: float) -> str:
+        """Compact $/1M display with enough precision for sub-cent rates.
+
+        Uses general ('g') formatting so a small real rate (e.g. 0.00142) never
+        rounds down to a misleading "$0" — only genuinely-zero rates would, and
+        those are filtered out before this is called.
+        """
+        return f"{v:g}"
+
+    def _render_primary_endpoint(self) -> str:
+        """Render the ``Primary Endpoint`` block appended to the agents view.
+
+        Shows the LLM endpoint the agents actually run on. ``model`` / ``api_base``
+        come from the routing chain head; pricing and limits are read from the
+        matched ``APIEndpoint`` OBJECT — the single source of truth — matched back
+        to the head by the normalized ``(api_base, model)`` routing key, mirroring
+        ``router.get_endpoint_pricing`` exactly. The ``Pricing:`` line is shown only
+        when the endpoint carries a non-zero rate; ``Limits`` always shows
+        ``max_input_tokens`` and renders rate/concurrency as ``unlimited`` when no
+        explicit cap is set. Returns ``''`` (whole block omitted) when there is no
+        router, the chain is empty, or on any error, so the agents list never
+        breaks or shows a half-built block.
+        """
+        pool = getattr(self, 'agent_pool', None)
+        router = getattr(pool, 'api_router', None) if pool is not None else None
+        if router is None:
+            return ''
+        try:
+            from agent_cascade.api_router_pkg.normalization import normalize_api_base
+
+            # Resolve the agent class to look up: the current instance's class when
+            # known, else orchestrator (mirrors the get_instance fallback used
+            # elsewhere in this tool).
+            agent_class = 'orchestrator'
+            get_inst = getattr(pool, 'get_instance', None)
+            if callable(get_inst):
+                try:
+                    inst = get_inst(getattr(self, 'agent_name', None) or 'orchestrator')
+                    if inst is not None:
+                        agent_class = getattr(inst, 'agent_class', None) or 'orchestrator'
+                except Exception:
+                    pass
+
+            chain = router.get_endpoint_chain(agent_class)
+            if not chain:
+                return ''
+            head = chain[0]
+            head_base_raw = head.get('api_base') or head.get('model_server', '')
+            head_base = normalize_api_base(head_base_raw)
+            head_model = head.get('model', '')
+
+            # Match head back to its endpoint object by normalized (api_base,
+            # model) — the same routing key get_endpoint_pricing uses. Two enabled
+            # endpoints sharing that key resolve to the first (dict order).
+            def _match():
+                for ep in getattr(router, 'endpoints', {}).values():
+                    if (getattr(ep, 'enabled', True)
+                            and normalize_api_base(getattr(ep, 'api_base', '')) == head_base
+                            and getattr(ep, 'model', '') == head_model):
+                        return ep
+                return None
+
+            lock = getattr(router, '_lock', None)
+            if lock is not None:
+                with lock:
+                    ep = _match()
+            else:
+                ep = _match()
+
+            lines = ['  --- Primary Endpoint ---',
+                     f'    Model: {head_model}',
+                     f'    API Base: {head_base_raw}']
+
+            if ep is not None:
+                # Pricing: present only when the endpoint carries any non-zero rate.
+                rate_parts = []
+                for key, label in (('input_per_m', 'in'), ('output_per_m', 'out'),
+                                   ('cache_read_per_m', 'cache-read'),
+                                   ('cache_write_per_m', 'cache-write')):
+                    v = getattr(ep, key, 0) or 0
+                    if v > 0:
+                        rate_parts.append(f'${self._fmt_per_m(v)}/M {label}')
+                if rate_parts:
+                    lines.append(f'    Pricing: {', '.join(rate_parts)}')
+
+                # Limits: max input always shown; rate/concurrency render their
+                # value when an explicit cap is set, else "unlimited" (a
+                # non-positive value means no cap). max_tokens is shown only when
+                # set (>0) since 0 means "use global default", not unlimited.
+                max_input = int(getattr(ep, 'max_input_tokens', 0) or 0)
+                rate_rpm = int(getattr(ep, 'rate_limit_rpm', 0) or 0)
+                conc = int(getattr(ep, 'concurrency_limit', 0) or 0)
+                max_out = int(getattr(ep, 'max_tokens', 0) or 0)
+                limit_parts = [
+                    f'max input {max_input} tok',
+                    f'rate {rate_rpm} rpm' if rate_rpm > 0 else 'rate unlimited',
+                    f'concurrency {conc}' if conc > 0 else 'concurrency unlimited',
+                ]
+                if max_out > 0:
+                    limit_parts.append(f'max output {max_out} tok')
+                lines.append(f'    Limits: {'; '.join(limit_parts)}')
+
+            return '\n'.join(lines)
+        except Exception as e:  # noqa: BLE001 — agents view must never break here
+            logger.debug(f"system_info primary endpoint render failed: {e}")
+            return ''
 
     def _render_mcp_servers(self) -> str:
         """Render the list of enabled MCP servers (name + description if present).
@@ -878,26 +1007,26 @@ class SystemInfo(BaseTool):
         # with host-local log timestamps. The code_interpreter container always runs UTC.
         host_tz = now.astimezone().tzname() or 'UTC'
         host_offset_h = now.astimezone().utcoffset().total_seconds() / 3600 if now.astimezone().utcoffset() else 0
-        tz_line = f"Host Timezone: {host_tz} (UTC{host_offset_h:+.0f})\n" if host_offset_h != 0 else f"Host Timezone: {host_tz} (UTC)\n"
+        tz_line = f"  Host Timezone: {host_tz} (UTC{host_offset_h:+.0f})\n" if host_offset_h != 0 else f"  Host Timezone: {host_tz} (UTC)\n"
 
         info = (f"--- System Information ---\n"
-                f"OS: {os_info}\n"
-                f"Current Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"  OS: {os_info}\n"
+                f"  Current Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"{tz_line}"
-                f"Python Version: {py_version}\n"
-                f"API Endpoint: {api_base}\n"
-                f"Model Used: {model}\n"
+                f"  Python Version: {py_version}\n"
+                f"  API Endpoint: {api_base}\n"
+                f"  Model Used: {model}\n"
                 f"\n--- System Resources ---\n"
                 f"{self._render_system_resources()}\n"
                 f"\n--- AgentCascade Server ---\n"
-                f"AgentCascade Version: {AC_VERSION}\n"
-                f"Server Address: {ac_server_str}\n"
-                f"Help Topics: {', '.join(self._available_help_topics())}\n"
+                f"  AgentCascade Version: {AC_VERSION}\n"
+                f"  Server Address: {ac_server_str}\n"
+                f"  Help Topics: {', '.join(self._available_help_topics())}\n"
                 f"\n--- MCP Servers ---\n"
                 f"{self._render_mcp_servers()}\n"
                 f"\n--- Workspace & Permissions ---\n"
-                f"{folders_info}"
+                f"{self._indent_block(folders_info)}"
                 f"\n--- Session Stats ---\n"
-                f"{stats_str}\n"
+                f"{self._indent_block(stats_str)}\n"
                 f"\n--- Cache Pool State ---{cache_state}")
         return info
