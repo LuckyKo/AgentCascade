@@ -647,7 +647,7 @@ TOOL_METADATA = {
                 'AgentCascade system. Valid values: "agents" (agent classes, taglines, active tools, '
                 'and live active instances), "telemetry" (a live dump of current session telemetry), '
                 'and the protocol/config references "rest_api", "websocket", "parallel_instances", '
-                '"settings_env", "agent_classes". Omit or leave empty for the basic live summary.'
+                '"settings_env". Omit or leave empty for the basic live summary.'
         }
     },
     'read_logs': {
