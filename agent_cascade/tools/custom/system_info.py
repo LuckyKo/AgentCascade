@@ -169,14 +169,14 @@ class SystemInfo(BaseTool):
             # ── Config fingerprint (A/B) comparison ──
             if configs:
                 lines.append('')
-                lines.append('Config fingerprints (A/B):')
+                lines.append('Config fingerprints (A/B, by configured model):')
                 for c in configs:
                     fp = c.get('config_fingerprint', '?')
                     model = (c.get('config_description') or {}).get('model', '?')
                     llm_calls = c.get('llm_calls', '')
                     runs = c.get('runs', '')
                     avg_tps = c.get('avg_tps', '')
-                    lines.append(f"  {fp}  model={model}  runs={runs} "
+                    lines.append(f"  {fp}  config_model={model}  runs={runs} "
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "
