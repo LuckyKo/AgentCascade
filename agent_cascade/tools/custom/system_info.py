@@ -590,9 +590,9 @@ class SystemInfo(BaseTool):
             else:
                 ep = _match()
 
-            lines = ['  --- Primary Endpoint ---',
-                     f'    Model: {head_model}',
-                     f'    API Base: {head_base_raw}']
+            lines = ['--- Primary Endpoint ---',
+                     f'  Model: {head_model}',
+                     f'  API Base: {head_base_raw}']
 
             if ep is not None:
                 # Pricing: present only when the endpoint carries any non-zero rate.
@@ -604,7 +604,7 @@ class SystemInfo(BaseTool):
                     if v > 0:
                         rate_parts.append(f'${self._fmt_per_m(v)}/M {label}')
                 if rate_parts:
-                    lines.append(f'    Pricing: {', '.join(rate_parts)}')
+                    lines.append(f'  Pricing: {', '.join(rate_parts)}')
 
                 # Limits: max input always shown; rate/concurrency render their
                 # value when an explicit cap is set, else "unlimited" (a
@@ -621,7 +621,7 @@ class SystemInfo(BaseTool):
                 ]
                 if max_out > 0:
                     limit_parts.append(f'max output {max_out} tok')
-                lines.append(f'    Limits: {'; '.join(limit_parts)}')
+                lines.append(f'  Limits: {'; '.join(limit_parts)}')
 
             return '\n'.join(lines)
         except Exception as e:  # noqa: BLE001 — agents view must never break here
