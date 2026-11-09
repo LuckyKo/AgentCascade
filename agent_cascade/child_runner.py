@@ -31,24 +31,26 @@ def _format_elapsed(elapsed_s: float) -> str:
     return f"{minutes}m {seconds}s"
 
 
-def _sum_subtree_tokens(pool, inst) -> int:
-    """Sum get_instance_total_tokens over *inst* + every descendant.
+def _sum_subtree_tokens_and_cost(pool, inst) -> tuple:
+    """Sum generated (completion-only) tokens + cost over *inst* + every descendant.
 
-    Walks the per-instance ``_child_instances`` tree (names) resolved via the pool,
-    cycle-safe (``seen`` guard). Totals are exact when no descendant is dismissed
-    during the run: dismissal prunes the child's name from every parent's
-    ``_child_instances`` (pool/lifecycle.py), so a mid-run-dismissed descendant — and
-    its whole subtree — is never reached and drops out of the sum. The walk can
-    therefore only ever UNDER-count, never inflate, a total. Returns 0 when telemetry
-    is unavailable.
+    Returns ``(generated_tokens, total_cost)``. Walks the per-instance
+    ``_child_instances`` tree (names) resolved via the pool, cycle-safe (``seen``
+    guard). Exact when no descendant is dismissed mid-run: dismissal prunes the
+    child's name from every parent's ``_child_instances`` (pool/lifecycle.py), so a
+    dismissed descendant — and its whole subtree — is never reached and drops out of
+    the sum. The walk can therefore only ever UNDER-count, never inflate. Cost sums
+    priced instances only (``None`` = unpriced → 0.0), so an all-unpriced subtree
+    yields 0.0. Returns ``(0, 0.0)`` when telemetry is unavailable.
     """
     telem = getattr(pool, 'telemetry', None) if pool is not None else None
     if telem is None:
-        return 0
+        return (0, 0.0)
     root = getattr(inst, 'instance_name', '') or ''
     if not root:
-        return 0
-    total = 0
+        return (0, 0.0)
+    generated = 0
+    cost = 0.0
     seen = set()
     frontier = [root]
     while frontier:
@@ -57,15 +59,21 @@ def _sum_subtree_tokens(pool, inst) -> int:
             continue
         seen.add(name)
         try:
-            total += int(telem.get_instance_total_tokens(name))
+            generated += int(telem.get_instance_generated_tokens(name))
         except Exception:
             pass  # telemetry must never break result formatting
+        try:
+            c = telem.get_instance_cost(name)
+            if c:
+                cost += c
+        except Exception:
+            pass
         child_inst = pool.get_instance(name) if pool is not None else None
         if child_inst is not None:
-            for c in list(getattr(child_inst, '_child_instances', []) or []):
-                if c not in seen:
-                    frontier.append(c)
-    return total
+            for c2 in list(getattr(child_inst, '_child_instances', []) or []):
+                if c2 not in seen:
+                    frontier.append(c2)
+    return (generated, cost)
 
 
 def _format_result(
@@ -75,15 +83,17 @@ def _format_result(
     was_stopped: bool = False,
     prefix: str = 'Agent',
     elapsed_s: float = None,
-    total_tokens: int = None,
+    generated_tokens: int = None,
+    total_cost: float = None,
 ) -> str:
     """Format child agent result string with explicit prefix.
 
-    When both ``elapsed_s`` and ``total_tokens`` are supplied (the Completed branch of
+    When both ``elapsed_s`` and ``generated_tokens`` are supplied (the Completed branch of
     ``run_child_core``), the completion tag is enriched to
-    ``[Agent 'X' Completed in 3m 12s, tokens: 42,190]:`` — tokens is the child's total
-    INCLUDING all its sub-agents. Omitting them keeps the legacy bare
-    ``Completed]:`` shape for any other caller.
+    ``[Agent 'X' Completed in 3m 12s, generated: 4,210, cost: $0.0042]:`` — generated is
+    the child's completion-only token total INCLUDING all its sub-agents; cost is the
+    summed per-instance cost (omitted when nothing in the subtree was priced). Omitting
+    them keeps the legacy bare ``Completed]:`` shape for any other caller.
     """
     if was_stopped:
         return f"[{prefix} '{instance_name}' Stopped]: Execution was stopped by user.\n{result}"
@@ -91,8 +101,11 @@ def _format_result(
         return f"[{prefix} '{instance_name}' Terminated]:\n{result}"
     else:
         suffix = ''
-        if elapsed_s is not None and total_tokens is not None:
-            suffix = f" in {_format_elapsed(elapsed_s)}, tokens: {total_tokens:,}"
+        if elapsed_s is not None and generated_tokens is not None:
+            suffix = f" in {_format_elapsed(elapsed_s)}, generated: {generated_tokens:,}"
+            if total_cost and total_cost > 0:
+                cost_str = f"${total_cost:,.4f}".rstrip('0').rstrip('.')
+                suffix += f", cost: {cost_str}"
         return f"[{prefix} '{instance_name}' Completed{suffix}]:\n{result}"
 
 
@@ -373,9 +386,10 @@ def run_child_core(
         detail = _failure_detail(pool, instance_name, inst, conv, reason=reason)
         raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.\n{detail}")
 
-    # Slice 3: enrich the completion tag with elapsed time and the child's total
-    # tokens INCLUDING all sub-agents (walked recursively via _child_instances).
-    total_tokens = _sum_subtree_tokens(pool, inst)
+    # Slice 3: enrich the completion tag with elapsed time, the child's generated
+    # (completion-only) tokens and total cost — INCLUDING all sub-agents (walked
+    # recursively via _child_instances).
+    generated_tokens, total_cost = _sum_subtree_tokens_and_cost(pool, inst)
     elapsed_s = time.monotonic() - _child_start
     return _format_result(
         instance_name=instance_name,
@@ -384,5 +398,6 @@ def run_child_core(
         was_stopped=was_stopped,
         prefix=prefix,
         elapsed_s=elapsed_s,
-        total_tokens=total_tokens,
+        generated_tokens=generated_tokens,
+        total_cost=total_cost,
     )

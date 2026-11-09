@@ -1,7 +1,8 @@
 """Focused tests for the cost/token-budget feature — Slices 3 & 4.
 
-Slice 3: the ``call_agent`` completion message is enriched with elapsed time and the
-child's total tokens INCLUDING all its sub-agents (walked via ``_child_instances``).
+Slice 3: the ``call_agent`` completion message is enriched with elapsed time, the child's
+generated (completion-only) tokens and total cost — INCLUDING all its sub-agents (walked
+via ``_child_instances``).
 
 Slice 4: ``system_info`` surfaces a compact self-scoped Budget/Cost block — present only
 when this instance carries a ``token_budget`` or its endpoint is priced, absent otherwise.
@@ -14,7 +15,7 @@ asserts the block header is gone while a sibling line still renders.
 import re
 
 from agent_cascade import child_runner as child_runner_mod
-from agent_cascade.child_runner import _format_elapsed, _format_result, _sum_subtree_tokens, run_child_core
+from agent_cascade.child_runner import _format_elapsed, _format_result, _sum_subtree_tokens_and_cost, run_child_core
 from agent_cascade.tools.custom.system_info import SystemInfo
 
 
@@ -46,6 +47,11 @@ class _FakeTelemetry:
         return inst if isinstance(inst, str) else getattr(inst, 'instance_name', '')
 
     def get_instance_total_tokens(self, inst):
+        return self._totals.get(self._key(inst), 0)
+
+    def get_instance_generated_tokens(self, inst):
+        # Slice-3 walker reads the completion-only view; the fake serves it from the
+        # same _totals dict (total == generated for test purposes).
         return self._totals.get(self._key(inst), 0)
 
     def get_instance_cost(self, inst):
@@ -97,8 +103,21 @@ def test_format_elapsed_minutes():
 
 
 def test_format_result_completed_enriched():
-    out = _format_result('code_worker', 'done', elapsed_s=192.3, total_tokens=42190)
-    assert out == "[Agent 'code_worker' Completed in 3m 12s, tokens: 42,190]:\ndone"
+    out = _format_result('code_worker', 'done', elapsed_s=192.3, generated_tokens=42190)
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
+
+
+def test_format_result_completed_enriched_with_cost():
+    out = _format_result('code_worker', 'done', elapsed_s=192.3,
+                         generated_tokens=42190, total_cost=0.0123)
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190, cost: $0.0123]:\ndone"
+
+
+def test_format_result_cost_omitted_when_unpriced():
+    # total_cost 0.0 (nothing priced) -> no cost segment, even with generated tokens.
+    out = _format_result('code_worker', 'done', elapsed_s=192.3,
+                         generated_tokens=42190, total_cost=0.0)
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
 
 
 def test_format_result_legacy_shape_without_metrics():
@@ -120,7 +139,19 @@ def test_sum_subtree_tokens_includes_descendants():
         {'root': root, 'a': a, 'b': b, 'c': c},
         _FakeTelemetry(totals={'root': 10, 'a': 20, 'b': 30, 'c': 40}),
     )
-    assert _sum_subtree_tokens(pool, root) == 100
+    # No cost configured -> 0.0; generated is the 10+20+30+40 subtree sum.
+    assert _sum_subtree_tokens_and_cost(pool, root) == (100, 0.0)
+
+
+def test_sum_subtree_tokens_and_cost_sums_priced_descendants():
+    root = _FakeInst('root', children=['a'])
+    a = _FakeInst('a', children=[])
+    pool = _FakePool(
+        {'root': root, 'a': a},
+        _FakeTelemetry(totals={'root': 10, 'a': 20}, cost={'root': 0.05, 'a': 0.05}),
+    )
+    # 0.05 + 0.05 == 0.1 exactly in float; generated 10+20 = 30.
+    assert _sum_subtree_tokens_and_cost(pool, root) == (30, 0.1)
 
 
 def test_sum_subtree_tokens_cycle_safe():
@@ -128,12 +159,12 @@ def test_sum_subtree_tokens_cycle_safe():
     root = _FakeInst('root', children=['root', 'a'])
     a = _FakeInst('a', children=['root'])
     pool = _FakePool({'root': root, 'a': a}, _FakeTelemetry(totals={'root': 10, 'a': 20}))
-    assert _sum_subtree_tokens(pool, root) == 30
+    assert _sum_subtree_tokens_and_cost(pool, root) == (30, 0.0)
 
 
 def test_sum_subtree_tokens_none_when_no_telemetry():
     pool = _FakePool({'root': _FakeInst('root')}, telemetry=None)
-    assert _sum_subtree_tokens(pool, _FakeInst('root')) == 0
+    assert _sum_subtree_tokens_and_cost(pool, _FakeInst('root')) == (0, 0.0)
 
 
 def test_run_child_core_includes_subagent_tokens(monkeypatch):
@@ -152,8 +183,8 @@ def test_run_child_core_includes_subagent_tokens(monkeypatch):
     out = run_child_core(engine, pool, 'coder', 'code_worker', {}, 'Main', 1)
 
     assert out.startswith("[Agent 'code_worker' Completed in ")
-    # 1000 + 2190 + 0 (sub2) = 3190, thousands-separated.
-    assert re.search(r'Completed in (\d+s|\d+m \d+s), tokens: 3,190\]:\ndone$', out), out
+    # 1000 + 2190 + 0 (sub2) = 3190 generated, thousands-separated.
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 3,190\]:\ndone$', out), out
 
 
 # ── Slice 4 — system_info Budget/Cost self-info ─────────────────────────────

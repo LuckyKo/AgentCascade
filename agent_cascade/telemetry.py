@@ -990,6 +990,7 @@ class TelemetryCollector:
             # exactly. Read via get_instance_total_tokens() / get_instance_cost().
             _iu = self._ensure_instance_usage(instance_name)
             _iu['total_tokens'] = _iu['total_tokens'] + int(call['input_tokens_est'] or 0) + int(actual_output or 0)
+            _iu['generated_tokens'] = _iu['generated_tokens'] + int(actual_output or 0)
 
             # Update active turn and per-config latency stats
             turn = self._active_turns.get(instance_name)
@@ -1051,7 +1052,7 @@ class TelemetryCollector:
         """
         rec = self._instance_usage.get(instance_name)
         if rec is None:
-            rec = self._instance_usage[instance_name] = {'total_tokens': 0, 'cost': 0.0, 'priced': False}
+            rec = self._instance_usage[instance_name] = {'total_tokens': 0, 'generated_tokens': 0, 'cost': 0.0, 'priced': False}
         return rec
 
     def get_instance_total_tokens(self, instance) -> int:
@@ -1065,6 +1066,18 @@ class TelemetryCollector:
         with _telemetry_lock:
             rec = self._instance_usage.get(self._resolve_instance_key(instance))
             return int(rec['total_tokens']) if rec else 0
+
+    def get_instance_generated_tokens(self, instance) -> int:
+        """Completion-only (generated) tokens, Σ over calls, for one instance.
+
+        Read-only view of the per-instance ``generated_tokens`` accumulator — the
+        "what this agent actually produced" signal, as opposed to
+        ``total_tokens`` (which includes the prompt input context). Returns 0
+        unknown.
+        """
+        with _telemetry_lock:
+            rec = self._instance_usage.get(self._resolve_instance_key(instance))
+            return int(rec['generated_tokens']) if rec else 0
 
     def get_instance_cost(self, instance) -> Optional[float]:
         """Cost ($) for one instance, or None when the instance was never priced.
