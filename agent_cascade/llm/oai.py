@@ -630,7 +630,7 @@ class TextChatAtOAI(BaseFnCallModel):
         delta_stream: bool,
         generate_cfg: dict,
     ) -> Iterator[List[Message]]:
-        messages = self.convert_messages_to_dicts(messages)
+        messages = self.convert_messages_to_dicts(messages, generate_cfg=generate_cfg)
         # logger.debug(f'LLM Input generate_cfg: \n{generate_cfg}')
         local_model = generate_cfg.pop('model', None)
         if local_model is None:
@@ -953,7 +953,7 @@ class TextChatAtOAI(BaseFnCallModel):
         messages: List[Message],
         generate_cfg: dict,
     ) -> List[Message]:
-        messages = self.convert_messages_to_dicts(messages)
+        messages = self.convert_messages_to_dicts(messages, generate_cfg=generate_cfg)
         local_model = generate_cfg.pop('model', None)
         if local_model is None:
             local_model = self.original_model if self.dynamic_model else self.model
@@ -1088,7 +1088,9 @@ class TextChatAtOAI(BaseFnCallModel):
         """Flush the shared client cache. Closes all cached httpx connections cleanly."""
         flush_client_cache()
 
-    def convert_messages_to_dicts(self, messages: List[Message]) -> List[dict]:
+    def convert_messages_to_dicts(self,
+                                  messages: List[Message],
+                                  generate_cfg: Optional[dict] = None) -> List[dict]:
         # TODO: Change when the VLLM deployed model needs to pass reasoning_complete.
         #  At this time, in order to be compatible with lower versions of vLLM,
         #  and reasoning content is currently not useful

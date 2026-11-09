@@ -1077,13 +1077,36 @@ def encode_image_as_base64(path: str, max_short_side_length: int = -1) -> str:
 
 
 def encode_audio_as_base64(path: str) -> str:
+    """Encode an audio file as PURE base64 (no data-URI prefix).
+
+    The OpenAI-compatible ``input_audio`` part expects ``{'data': <pure b64>,
+    'format': <ext>}``; the ``format`` is derived from the original path's
+    extension by the caller (qwenvl_oai) before this rewrite drops the path.
+    """
     with open(path, 'rb') as audio_file:
-        return 'data:;base64,' + base64.b64encode(audio_file.read()).decode('utf-8')
+        return base64.b64encode(audio_file.read()).decode('utf-8')
+
+
+# Video container extension -> MIME type for the data-URI prefix. Unknown or
+# missing extensions fall back to video/mp4 (the shape the probe confirmed).
+_VIDEO_MIME_BY_EXT = {
+    'mp4': 'video/mp4',
+    'webm': 'video/webm',
+    'mov': 'video/quicktime',
+    'm4v': 'video/x-m4v',
+}
 
 
 def encode_video_as_base64(path: str) -> str:
+    """Encode a video file as a MIME-tagged data-URI (``data:video/<mime>;base64,<b64>``).
+
+    The ``video_url`` part expects a MIME-tagged data-URI; the MIME is derived
+    from the file extension via :data:`_VIDEO_MIME_BY_EXT`.
+    """
+    ext = os.path.splitext(path)[1].lower().lstrip('.')
+    mime = _VIDEO_MIME_BY_EXT.get(ext, 'video/mp4')
     with open(path, 'rb') as video_file:
-        return 'data:;base64,' + base64.b64encode(video_file.read()).decode('utf-8')
+        return f'data:{mime};base64,' + base64.b64encode(video_file.read()).decode('utf-8')
 
 
 def load_image_from_base64(image_base64: Union[bytes, str]):

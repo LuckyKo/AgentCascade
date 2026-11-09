@@ -215,14 +215,22 @@ def save_image_from_data_uri(data_uri: str) -> str:
     return save_image_to_media(image_source=image_bytes, source_name='data_uri')
 
 
+# SINGLE SOURCE OF TRUTH for recognised media file extensions (no leading dot),
+# grouped by modality so a caller can both classify a path by type (content_parse)
+# and build the markdown media-link matcher's extension alternation
+# (thinking_block._MEDIA_DATA_RE) from one list — the one vocabulary the whole
+# media pipeline must agree on. Keep in sync with the JS dropdown lists in
+# web_ui/app.js and telegram_bridge/media_outbound.py.
+_MEDIA_EXTS_BY_MODALITY = {
+    'audio': ('mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'),
+    'video': ('mp4', 'webm', 'mkv', 'mov', 'avi'),
+}
+
 # Accepted extensions for a generated media file. A backend-detected extension hint
 # is only honoured when it is in this set; anything else (or empty) falls back to the
 # per-type default below, so a malformed hint can never yield an arbitrary or
-# extensionless filename.
-_ALLOWED_MEDIA_EXTS = frozenset({
-    'mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus',   # audio
-    'mp4', 'webm', 'mkv', 'mov', 'avi',           # video
-})
+# extensionless filename. Flattened from the modality map above.
+_ALLOWED_MEDIA_EXTS = frozenset(ext for exts in _MEDIA_EXTS_BY_MODALITY.values() for ext in exts)
 
 
 def save_media_to_media(
@@ -304,6 +312,80 @@ def save_media_to_media(
             except OSError:
                 pass
         raise MediaStorageError(f"Failed to save {media_type} media: {e}") from e
+
+
+def _save_media_from_data_uri(data_uri: str, media_type: str) -> str:
+    """Decode a base64 data URI and save it via :func:`save_media_to_media`.
+
+    Shared implementation for :func:`save_audio_from_data_uri` and
+    :func:`save_video_from_data_uri`. The MIME subtype (e.g. ``wav`` in
+    ``data:audio/wav;base64,...``) is passed as an extension hint; an
+    unrecognised subtype falls back to the per-type default inside
+    ``save_media_to_media``, so a malformed hint can never yield an
+    extensionless filename.
+
+    Args:
+        data_uri: A data URI string like 'data:audio/wav;base64,<b64>'.
+        media_type: 'audio' or 'video'.
+
+    Returns:
+        Absolute path with forward slashes.
+
+    Raises:
+        MediaStorageError: If the data URI is invalid or saving fails.
+    """
+    if not isinstance(data_uri, str) or not data_uri.startswith('data:'):
+        raise MediaStorageError("Invalid data URI: does not start with 'data:'")
+
+    match = re.match(r'data:([^;]+);base64,(.+)', data_uri, re.IGNORECASE)
+    if not match:
+        raise MediaStorageError("Invalid data URI format: expected 'data:<type>;base64,<data>'")
+
+    # MIME subtype is a best-effort extension hint; save_media_to_media honours
+    # only recognised extensions and otherwise falls back to the default (mp3/mp4).
+    mime = match.group(1)
+    ext = mime.rsplit('/', 1)[-1] if '/' in mime else ''
+
+    try:
+        raw = base64.b64decode(match.group(2))
+    except Exception as e:
+        raise MediaStorageError(f"Failed to decode base64 from data URI: {e}") from e
+
+    return save_media_to_media(source=raw, media_type=media_type, source_name='data_uri', ext=ext)
+
+
+def save_audio_from_data_uri(data_uri: str) -> str:
+    """Decode a base64 audio data URI and save it to media storage.
+
+    Mirrors :func:`save_image_from_data_uri`.
+
+    Args:
+        data_uri: A data URI string like 'data:audio/wav;base64,<b64>'.
+
+    Returns:
+        Absolute path to the saved audio file with forward slashes.
+
+    Raises:
+        MediaStorageError: If the data URI is invalid or saving fails.
+    """
+    return _save_media_from_data_uri(data_uri, media_type='audio')
+
+
+def save_video_from_data_uri(data_uri: str) -> str:
+    """Decode a base64 video data URI and save it to media storage.
+
+    Mirrors :func:`save_image_from_data_uri`.
+
+    Args:
+        data_uri: A data URI string like 'data:video/mp4;base64,<b64>'.
+
+    Returns:
+        Absolute path to the saved video file with forward slashes.
+
+    Raises:
+        MediaStorageError: If the data URI is invalid or saving fails.
+    """
+    return _save_media_from_data_uri(data_uri, media_type='video')
 
 
 def cleanup_old_media(max_age_days: int = 30) -> dict:

@@ -1,6 +1,8 @@
 import re
 from typing import Any
 
+from agent_cascade.utils.media_utils import _MEDIA_EXTS_BY_MODALITY
+
 # Pre-compiled regexes for performance
 # These are shared across multiple modules to avoid redundancy and maintenance issues.
 
@@ -38,6 +40,32 @@ _JUSTIFICATION_PREFIX_RE = re.compile(r'^(Reason|Justification|Verdict|Tips)[:\s
 
 # Matches markdown images with base64 data
 _IMAGE_DATA_RE = re.compile(r'!\[([^\]]*)\]\((data:image/[^;]+;base64,[a-zA-Z0-9+/=]+)\)')
+
+# Matches markdown MEDIA links: ![alt](url) where url is an image/audio/video
+# base64 data-URI, or a local file/drive path whose extension is a known
+# audio/video type. Used by the user-input pipeline (content_parse) to turn a
+# user-inserted media reference into an audio/video/image ContentItem.
+# Kept SEPARATE from _IMAGE_DATA_RE on purpose: _IMAGE_DATA_RE is image-only
+# and is reused by token estimation (utils/utils.py IMAGE_REGEX), which must
+# NOT start matching audio/video. The image data-URI branch below is
+# functionally equivalent to _IMAGE_DATA_RE for valid image data-URIs
+# (only the MIME-subtype char class differs), so existing image parsing is unchanged.
+# Extension alternation for _MEDIA_DATA_RE, derived from the single source of truth
+# in media_utils._MEDIA_EXTS_BY_MODALITY so all media-ext vocabularies stay in
+# lock-step. Sorted (frozenset/dict iteration order is not guaranteed) for a
+# deterministic, reproducible compiled pattern.
+_MEDIA_EXT_ALT = '|'.join(sorted(ext for exts in _MEDIA_EXTS_BY_MODALITY.values() for ext in exts))
+
+_MEDIA_DATA_RE = re.compile(
+    r'!\[([^\]]*)\]\('
+    r'('
+        r'data:(?:image|audio|video)/[^;)]+;base64,[A-Za-z0-9+/=]+'
+        r'|'
+        r'(?:file://|[A-Za-z]:[\\/]|\\\\|/)[^\s)]+\.'
+        r'(?:' + _MEDIA_EXT_ALT + r')'
+    r')\)',
+    re.IGNORECASE,  # Local paths carry mixed-case extensions (N:\Music\Track.WAV).
+)
 
 # Matches markdown code blocks
 _MARKDOWN_CODE_RE = re.compile(r'```(?:[a-zA-Z0-9]*\n)?(.*?)```', re.DOTALL)
