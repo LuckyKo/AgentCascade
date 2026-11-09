@@ -218,7 +218,7 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
 
 # Default value for max_images_for_llm when not explicitly configured.
 # -1 = keep all images, N >= 0 = keep only last N with base64 data.
-MAX_IMAGES_FOR_LLM_DEFAULT: int = 2
+MAX_IMAGES_FOR_LLM_DEFAULT: int = -1
 
 # Config keys that should NOT be passed to the LLM API.
 # These are operational settings used by the execution engine, not model parameters.

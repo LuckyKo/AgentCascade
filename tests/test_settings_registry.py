@@ -222,7 +222,7 @@ _GOLDEN_CORE = {
     'shell_char_limit': 8000,
     'read_file_max_chars': 4000,
     'grep_spillover': True,
-    'max_images_for_llm': 2,
+    'max_images_for_llm': -1,
     'memory_hint_cooldown_seconds': 600,
     'memory_hint_max_entries': 3,
     'memory_hint_query_chars': 1000,
