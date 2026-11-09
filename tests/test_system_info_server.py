@@ -589,3 +589,95 @@ class TestRestApiHelpDrift:
         assert self._norm('/api/endpoints/{id}') == self._norm('/api/endpoints/{endpoint_id}')
         assert self._norm('/api/approve/{request_id}') == '/api/approve/{_}'
         assert self._norm('/{path:path}') == self._norm('/{proxy_path:path}') == '/{_}'
+
+
+class _FakeAgentsPool:
+    """Pool stand-in exposing only what _render_agents reads: list_agents + get_agent_info."""
+
+    def __init__(self, agents):
+        # agents: list of dicts with name / tagline / tools.
+        self._agents = agents
+
+    def list_agents(self):
+        return [a['name'] for a in self._agents]
+
+    def get_agent_info(self, name):
+        for a in self._agents:
+            if a['name'] == name:
+                return {'name': a['name'], 'tagline': a['tagline'], 'tools': list(a['tools'])}
+        return None
+
+
+class TestSystemInfoAgentsSection:
+    """Tests for the dynamic help='agents' section (built from the running pool)."""
+
+    _AGENTS = [
+        {'name': 'coder', 'tagline': 'Pragmatic senior software engineer', 'tools': ['read_file', 'edit_file']},
+        {'name': 'orchestrator', 'tagline': 'Technical lead', 'tools': ['call_agent', 'system_info']},
+    ]
+
+    def test_lists_name_tagline_and_active_tools(self):
+        out = SystemInfo(agent_pool=_FakeAgentsPool(self._AGENTS)).call('{"help": "agents"}')
+        assert 'AC Agent Classes' in out
+        for name, tagline, tool in [
+            ('coder', 'Pragmatic senior software engineer', 'edit_file'),
+            ('orchestrator', 'Technical lead', 'call_agent'),
+        ]:
+            assert f'### {name}' in out
+            assert tagline in out
+            assert tool in out
+
+    def test_uses_pool_as_single_source_of_truth(self):
+        """Tool lists are not re-derived: whatever get_agent_info returns is rendered verbatim."""
+        out = SystemInfo(agent_pool=_FakeAgentsPool(
+            [{'name': 'writer', 'tagline': 'Writer', 'tools': ['web_search']}])).call('{"help": "agents"}')
+        assert '### writer' in out
+        assert 'web_search' in out
+        # A tool the pool does not report must never appear (proves no hardcoded re-derivation).
+        assert 'shell_cmd' not in out
+
+    def test_without_pool_degrades_gracefully(self):
+        out = SystemInfo(agent_pool=None).call('{"help": "agents"}')
+        assert 'agents list unavailable' in out
+
+    def test_empty_pool_does_not_raise(self):
+        out = SystemInfo(agent_pool=_FakeAgentsPool([])).call('{"help": "agents"}')
+        assert 'no agent templates loaded' in out
+
+
+class TestListAgentsDeprecationStub:
+    """Soft-deprecation: the registered list_agents tool now returns a redirect notice."""
+
+    def test_stub_returns_deprecation_notice(self):
+        from agent_cascade.tools.custom.manager_ops import ListAgents
+
+        out = ListAgents().call('')
+        assert 'DEPRECATED' in out
+        assert 'system_info' in out and 'agents' in out
+
+    def test_list_agents_removed_from_available_tools(self):
+        """Soft-deprecate part 1: list_agents is no longer in the canonical AVAILABLE_TOOLS
+        enabled-tool list (records deprecation intent; keeps hard removal to one line).
+        It is also excluded from the model's offered set via HIDDEN_OFFERED_TOOLS (see
+        test_hidden_from_offered_set_but_still_callable), yet stays registered/callable
+        in function_map so stale calls resolve to the redirect notice (see
+        test_stub_returns_deprecation_notice)."""
+        from agent_cascade.prompts.dna import AVAILABLE_TOOLS
+
+        assert 'list_agents' not in AVAILABLE_TOOLS
+
+    def test_hidden_from_offered_set_but_still_callable(self):
+        """Offer path (the real gate): order_offered_tool_names subtracts
+        HIDDEN_OFFERED_TOOLS, so the registered stub is never advertised to the model
+        even though it remains in function_map (callable)."""
+        from agent_cascade.engine.helpers import order_offered_tool_names
+
+        func_map = {
+            'list_agents': object(),  # still registered -> callable stub
+            'call_agent': object(),
+            'read_file': object(),
+        }
+        offered = order_offered_tool_names(func_map, set())
+        assert 'list_agents' not in offered  # hidden from the model
+        assert 'call_agent' in offered and 'read_file' in offered  # others unaffected
+        assert 'list_agents' in func_map  # remains callable

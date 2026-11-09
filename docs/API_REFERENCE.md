@@ -443,7 +443,7 @@ When a new agent soul file (`*_soul.md`) is discovered during refresh, it starts
 - All MCP tools (via `__all_mcp_tools__` sentinel)
 
 **Tools enabled by default:**
-- `call_agent`, `dismiss_agent`, `list_agents` — Sub-agent coordination
+- `call_agent`, `dismiss_agent` — Sub-agent coordination (`list_agents` is deprecated; use `system_info(help="agents")`)
 - `read_file`, `view_image`, `list_dir`, `grep` — Read-only file operations
 - `compress_context`, `forget_last` — Context management
 - `system_info`, `read_logs`, `code_map`, `calculate`, `syntax_check` — Information utilities

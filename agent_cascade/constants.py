@@ -132,7 +132,8 @@ DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
 })
 
 # Tools kept ENABLED by default for dynamically loaded agents:
-# - call_agent, dismiss_agent, list_agents — essential for agent coordination
+# - call_agent, dismiss_agent — essential for agent coordination
+#   (list_agents is deprecated in favor of system_info help="agents")
 # - read_file, view_image, list_dir, grep — safe read-only file operations
 # - compress_context, forget_last — context management (not security risks)
 # - system_info, read_logs, code_map, calculate, syntax_check — info utilities
@@ -145,6 +146,12 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
     'dismiss_agent',
     'list_agents',
     '__all_mcp_tools__',  # Sentinel value for MCP tool blocking (not a real tool)
+})
+
+# Tools kept registered/callable (in function_map) but never offered to the model
+# (deprecated → use the named replacement). Subtracted in order_offered_tool_names().
+HIDDEN_OFFERED_TOOLS: frozenset[str] = frozenset({
+    'list_agents',  # deprecated → use system_info(help="agents")
 })
 
 # ────────────────────────────────────────────────────────────────────────────

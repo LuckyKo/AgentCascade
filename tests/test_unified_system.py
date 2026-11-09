@@ -366,7 +366,8 @@ class TestToolRegistration:
         orchestrator = load_orchestrator_agent(pool, pool.llm_cfg)
 
         core_tools = [
-            'call_agent', 'dismiss_agent', 'list_agents',
+            'call_agent', 'dismiss_agent',
+            'list_agents',  # soft-deprecated redirect stub (still registered in function_map); dropped from this list at hard removal (Step 3)
             'read_file', 'write_file', 'edit_file', 'delete_file',
             'copy_file', 'list_dir', 'grep',
             'compress_context',

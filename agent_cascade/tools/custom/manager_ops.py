@@ -1,35 +1,16 @@
-from typing import Tuple
-
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 
-def _format_agent_status(state_name: str, is_halted: bool) -> Tuple[str, str]:
-    """Map AgentState + halted overlay to display emoji and text.
-
-    Args:
-        state_name: The agent's state name (e.g., "RUNNING", "IDLE").
-        is_halted: Whether the instance is halted (overrides normal state).
-
-    Returns:
-        Tuple[str, str]: (emoji, status_text) for display.
-    """
-    base = {
-        'IDLE': ('⚪', 'Idle'),
-        'RUNNING': ('🟢', 'Running'),
-        'SLEEPING': ('🟡', 'Sleeping'),
-        'COMPLETING': ('🔵', 'Completing'),
-        'TERMINATED': ('🔴', 'Terminated'),
-    }.get(state_name, ('⚫', state_name))
-
-    if is_halted and state_name not in ('TERMINATED',):
-        return ('🟣', f"{base[1]} (Halted)")
-    return base
-
-
 @register_tool('list_agents', allow_overwrite=True)
 class ListAgents(BaseTool):
-    """Tool to list all available agent classes and their active instances."""
+    """Soft-deprecated redirect stub for the removed ``list_agents`` tool.
+
+    The class stays registered so stale calls from older prompts or soul files
+    resolve gracefully instead of erroring. Agent classes, descriptions, and
+    default active tools are now served by ``system_info(help="agents")``;
+    live per-instance metrics are available at ``/api/status``.
+    """
 
     name = 'list_agents'
     description = TOOL_METADATA['list_agents']['description']
@@ -40,103 +21,10 @@ class ListAgents(BaseTool):
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)
+        # Retained for call-site compatibility; the redirect stub uses neither.
         self.agent_pool = agent_pool
 
     def call(self, params: str, **kwargs) -> str:
-        if not self.agent_pool:
-            return 'Error: No agent pool available.'
-
-        from agent_cascade.utils.utils import get_history_stats
-        from agent_cascade.api_integration_pkg.tokens import _get_max_tokens_for_instance
-        import datetime
-
-        lines = ['# Agent Management Inventory\n']
-        lines.append('Use this list to monitor context usage and status of your workers. '
-                     'To delegate a new task, use `call_agent`. To free up resources, use `dismiss_agent`.\n')
-
-        # 1. Available Agent Templates
-        lines.append('## 1. Agent Templates (Available Classes)')
-        for agent_name in self.agent_pool.list_agents():
-            info = self.agent_pool.get_agent_info(agent_name)
-            tagline = (info.get('tagline') or 'No tagline available.') if info else 'No template info available.'
-            lines.append(f"- **{agent_name}**: {tagline}")
-        lines.append('')
-
-        # 2. Active & Persistent Instances
-        lines.append('## 2. Active Instances (Sessions)')
-
-        # Get all known instances from classes or conversations
-        all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) |
-                                    set(self.agent_pool.instance_conversations.keys())))
-
-        if not all_instances:
-            lines.append('- No active or persistent instances.')
-        else:
-            for inst_name in all_instances:
-                cls_name = self.agent_pool.instance_classes.get(inst_name, 'Unknown')
-                inst_obj = self.agent_pool.instances.get(inst_name)
-                state_name = inst_obj.get_state_name() if inst_obj else 'UNKNOWN'
-                is_halted = self.agent_pool.is_instance_halted(inst_name) if self.agent_pool else False
-
-                status_emoji, status_text = _format_agent_status(state_name, is_halted)
-
-                # Context Metrics
-                msgs = self.agent_pool.get_conversation(inst_name)
-                # We slice history to show exactly what the LLM is currently working with
-                active_msgs = self.agent_pool.slice_history_for_llm(msgs) if self.agent_pool else msgs
-                stats = get_history_stats(active_msgs)
-
-                # Context usage must include the serialized tool schemas (BUG_0136).
-                schema_tokens = 0
-                try:
-                    from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
-                    schema_tokens = estimate_instance_tool_schema_tokens(inst_obj, self.agent_pool)
-                except Exception:
-                    schema_tokens = 0
-                total_tokens = stats['tokens'] + int(schema_tokens)
-
-                # Resolve the effective context-window limit (the "total") so usage can be
-                # shown as used/total with a percentage — an absolute token count alone is not
-                # informative (an agent at 90k could be at 40% or 100% of its window).
-                max_tokens = None
-                try:
-                    if inst_obj is not None:
-                        max_tokens = _get_max_tokens_for_instance(self.agent_pool, inst_obj)
-                except Exception:
-                    max_tokens = None
-
-                # Metadata & Traceability
-                logger_inst = self.agent_pool.instance_loggers.get(inst_name)
-                log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else 'N/A'
-
-                last_active = 'Unknown'
-                if logger_inst and hasattr(logger_inst, 'data'):
-                    ts_str = logger_inst.data['metadata'].get('last_update')
-                    if ts_str:
-                        try:
-                            dt = datetime.datetime.fromisoformat(ts_str)
-                            last_active = dt.strftime('%Y-%m-%d %H:%M:%S')
-                        except:
-                            last_active = ts_str
-
-                summary = self.agent_pool.instance_summaries.get(inst_name, 'None')
-                if len(summary) > 150:
-                    summary = summary[:147] + '...'
-
-                # Format context usage as used/total with a percentage when the effective
-                # limit is known; fall back to the bare token count when it cannot be resolved.
-                if max_tokens and max_tokens > 0:
-                    pct = (total_tokens / max_tokens) * 100
-                    ctx_display = f"{total_tokens} / {max_tokens} tokens ({pct:.0f}%)"
-                else:
-                    ctx_display = f"{total_tokens} tokens"
-
-                lines.append(f"### {status_emoji} Instance: `{inst_name}`")
-                lines.append(f"  - **Status**: {status_text} | **Class**: {cls_name}")
-                lines.append(f"  - **Context Usage**: {ctx_display} / {stats['words']} words")
-                lines.append(f"  - **Last Activity**: {last_active}")
-                lines.append(f"  - **Summary**: {summary}")
-                lines.append(f"  - **Log Path**: `{log_path}`")
-                lines.append('')
-
-        return '\n'.join(lines)
+        return ('DEPRECATED: use system_info(help="agents") for agent '
+                'classes/descriptions/default tools; /api/status for live '
+                'per-instance metrics.')

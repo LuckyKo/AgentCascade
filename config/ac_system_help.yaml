@@ -125,6 +125,13 @@ settings_env:
 agent_classes:
   description: "The built-in agent classes available to call_agent."
   notes:
-    - "The exact list for THIS instance is shown by the 'Available Tools' / agent listing in normal system_info output and by list_agents."
+    - "The exact list for THIS instance is shown live by system_info(help=\"agents\") (classes, taglines, and active tools)."
     - "Typical built-ins: orchestrator (technical lead / coordinator), coder, researcher, reviewer, writer, security, generalist, compressor, ponytail."
     - "When call_agent rejects an unknown class, the error lists the valid classes for this instance — use that as the source of truth."
+
+# ---------------------------------------------------------------------------
+# 'agents' is rendered live by system_info (see _render_agents), NOT from this
+# file. This stub key exists only so 'agents' appears in the "Available
+# sections" list; help="agents" is intercepted before this text is ever read.
+agents:
+  description: "Live per-class agent info (name, tagline, active tools) — generated dynamically from the running pool, not from this file."

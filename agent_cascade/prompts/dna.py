@@ -13,7 +13,6 @@ AVAILABLE_TOOLS: List[str] = [
     # Sub-agent management
     'call_agent',  # Delegate tasks to specialized agent instances
     'dismiss_agent',  # End sub-agent sessions and clear context
-    'list_agents',  # List available agent classes and active instances
     'send_message',  # Send async messages to running agents or user
 
     # Read-only file ops
@@ -642,7 +641,7 @@ TOOL_METADATA = {
             'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'),
         'parameters': {
             'help':
-                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
+                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'agents' for a live list of agent classes with their taglines and active tools (replaces the deprecated list_agents tool). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
         }
     },
     'read_logs': {
@@ -827,8 +826,8 @@ TOOL_METADATA = {
     },
     'list_agents': {
         'description': (
-            'List all available agent classes with their descriptions, '
-            'plus any active instances currently running or previously used. Use this to find out how to call a specific agent or instance'
+            'DEPRECATED — use system_info(help="agents") for agent classes/descriptions/active tools, '
+            'and /api/status for live per-instance metrics. This tool now only returns a redirect notice.'
         ),
         'parameters': {}
     },

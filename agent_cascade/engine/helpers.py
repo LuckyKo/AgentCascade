@@ -113,6 +113,7 @@ def order_offered_tool_names(func_map: dict, disabled: set, instance=None) -> li
     core is offered, which is exactly the per-agent tool-toggle view.
     """
     from agent_cascade.tools.mcp_manager import MCPManager
+    from agent_cascade.constants import HIDDEN_OFFERED_TOOLS
 
     deferred = {name for name in func_map if MCPManager.is_mcp_tool(name)}
     # Expand the __all_mcp_tools__ sentinel to its members (the deferred names present in
@@ -122,7 +123,13 @@ def order_offered_tool_names(func_map: dict, disabled: set, instance=None) -> li
     if '__all_mcp_tools__' in disabled:
         disabled = disabled | deferred
 
-    offered = [name for name in sorted(func_map) if name not in deferred and name not in disabled]
+    # HIDDEN_OFFERED_TOOLS are registered/callable but never advertised to the model
+    # (deprecated shims). The discovered-MCP tail below only appends deferred names, so
+    # subtracting here is the single chokepoint.
+    offered = [
+        name for name in sorted(func_map)
+        if name not in deferred and name not in disabled and name not in HIDDEN_OFFERED_TOOLS
+    ]
 
     if instance is not None:
         discovered = getattr(instance, '_discovered_mcp_tools', None) or []

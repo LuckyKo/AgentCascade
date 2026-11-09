@@ -48,8 +48,6 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     for tool_name in AVAILABLE_TOOLS:
         if tool_name == 'call_agent':
             tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
-        elif tool_name == 'list_agents':
-            tools_to_register[tool_name] = (ListAgents(agent_pool=agent_pool), False, False)
         elif tool_name == 'send_message':
             from agent_cascade.tools.custom.send_message import SendMessage
             tools_to_register[tool_name] = (SendMessage(agent_pool=agent_pool), False, False)
@@ -150,6 +148,15 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             tools_to_register[tool_name] = (ToolSearch(), False, False)
         else:
             logger.debug("Unknown tool '%s' in AVAILABLE_TOOLS — skipping", tool_name)
+
+    # Soft-deprecated redirect stub. 'list_agents' is registered here (NOT via
+    # AVAILABLE_TOOLS) so it stays in function_map and callable — stale calls from
+    # older prompts/soul files resolve to the redirect notice and
+    # test_unified_system.test_orchestrator_has_core_tools keeps passing. It is kept
+    # OUT of the model's offered set via constants.HIDDEN_OFFERED_TOOLS (subtracted in
+    # engine.helpers.order_offered_tool_names). Delete this line together with the
+    # ListAgents class at hard removal (Step 3).
+    tools_to_register['list_agents'] = (ListAgents(agent_pool=agent_pool), False, False)
 
     # Wire up all registered tools into the agent's function_map
     for name, (instance, needs_pool, needs_name) in tools_to_register.items():
@@ -276,7 +283,7 @@ Available sub-agents:
 Tools:
 - call_agent: Delegate tasks to a specialized sub-agent
 - dismiss_agent: Clear a sub-agent's conversation context
-- list_agents: Show available sub-agents
+- system_info(help="agents"): List agent classes with their taglines and active tools
 
 Example of delegating a task:
 {"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}

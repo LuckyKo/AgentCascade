@@ -397,6 +397,55 @@ class SystemInfo(BaseTool):
                 path_str = '<unknown>'
             return f"system_info help unavailable: {e}\n(Help file: {path_str})"
 
+    def _render_agents(self) -> str:
+        """Render a live list of agent classes: name, tagline, and active tools.
+
+        Computed from ``self.agent_pool`` (``list_agents()`` + ``get_agent_info()``)
+        — the same accessors the ``/api/agents`` endpoint uses, so each tool list is
+        already filtered by the instance's disabled_tools config. Never raises;
+        degrades to a clear message if no agent pool is attached. Replaces the
+        deprecated ``list_agents`` tool (which also showed per-instance runtime
+        metrics — those live at ``/api/status`` instead).
+        """
+        pool = getattr(self, 'agent_pool', None)
+        if not pool:
+            return 'system_info agents list unavailable: no agent pool attached to this tool.'
+        try:
+            names = list(pool.list_agents())
+        except Exception as e:
+            return f'system_info agents list unavailable: {e}'
+
+        lines = ['--- AC Agent Classes (live) ---']
+        if not names:
+            lines.append('(no agent templates loaded)')
+            return '\n'.join(lines)
+
+        for name in sorted(names):
+            try:
+                info = pool.get_agent_info(name) or {}
+            except Exception as e:
+                lines.append('')
+                lines.append(f"### {name}")
+                lines.append(f"  (info unavailable: {e})")
+                continue
+            tagline = (info.get('tagline') or '').strip() or 'No tagline.'
+            tools = info.get('tools') or []
+            lines.append('')
+            lines.append(f"### {name}")
+            lines.append(f"  {tagline}")
+            if tools:
+                lines.append(f"  Active tools ({len(tools)}): {', '.join(tools)}")
+            else:
+                lines.append('  Active tools: (none)')
+
+        lines.append('')
+        lines.append('Active tools are derived per class from its disabled_tools config (the same set '
+                     'the model sees in its prompt). The six core classes (orchestrator, security, '
+                     'compressor, generalist, reviewer, writer) carry seeded defaults; coder, designer, '
+                     'ponytail, researcher, and Admin fall back to the safe baseline when unconfigured. '
+                     'For live per-instance runtime metrics use /api/status.')
+        return '\n'.join(lines)
+
     def _render_mcp_servers(self) -> str:
         """Render the list of enabled MCP servers (name + description if present).
 
@@ -438,6 +487,10 @@ class SystemInfo(BaseTool):
             # Live telemetry dump is computed from the running pool, not static YAML.
             if help_key.lower() == 'telemetry':
                 return self._render_telemetry_dump()
+            # Live agent-class list (name + tagline + active tools), computed from the
+            # pool — same accessors as /api/agents, not static YAML.
+            if help_key.lower() == 'agents':
+                return self._render_agents()
             return self._render_help(help_key)
 
         # Just return the information as a string
