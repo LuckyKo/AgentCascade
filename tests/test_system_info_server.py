@@ -1015,3 +1015,17 @@ class TestSystemInfoClassEndpoint:
         pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
         out = self._agents_out(pool)
         assert 'Limits: max input 200000 tok' in out
+
+    def test_use_last_endpoint_class_labeled_dynamic(self):
+        """A class configured with the USE_LAST_ENDPOINT sentinel is labeled dynamic."""
+        from agent_cascade.api_router_pkg.router import USE_LAST_ENDPOINT
+        ep = _endpoint(id='1', api_base='http://localhost:1234/v1', model='glm-4',
+                       output_per_m=3.0)
+        head = {'api_base': 'http://localhost:1234/v1', 'model': 'glm-4'}
+        router = _FakeRouter({'1': ep}, head)
+        router.agent_priorities = {'orchestrator': [USE_LAST_ENDPOINT]}
+        router._normalize_agent_type = lambda t: t
+        pool = _FakeAgentsPool(self._AGENTS, api_router=router)
+        out = self._agents_out(pool)
+        assert 'Use Last Endpoint (dynamic' in out
+        assert 'glm-4' in out  # the currently-resolved endpoint is still shown

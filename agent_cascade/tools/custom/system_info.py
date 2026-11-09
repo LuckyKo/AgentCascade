@@ -437,7 +437,10 @@ class SystemInfo(BaseTool):
                     lines.append('  Active tools: (none)')
                 ep = self._resolve_endpoint(name)
                 if ep:
-                    lines.append(f"  Endpoint: {ep['model']} @ {ep['api_base']}")
+                    if ep.get('use_last'):
+                        lines.append(f"  Endpoint: Use Last Endpoint (dynamic; now: {ep['model']} @ {ep['api_base']})")
+                    else:
+                        lines.append(f"  Endpoint: {ep['model']} @ {ep['api_base']}")
                     if ep['pricing']:
                         lines.append(f"    Cost: {', '.join(ep['pricing'])}")
                     if ep['limits']:
@@ -602,8 +605,21 @@ class SystemInfo(BaseTool):
                 if max_out > 0:
                     limits.append(f'max output {max_out} tok')
 
+            # Detect the "Use Last Endpoint" sentinel for this class: such a class
+            # rides on whatever endpoint was most recently used (dynamic), so the
+            # caller labels it distinctly instead of implying a fixed assignment.
+            use_last = False
+            try:
+                from agent_cascade.api_router_pkg.router import USE_LAST_ENDPOINT
+                norm = (router._normalize_agent_type(agent_class)
+                        if hasattr(router, '_normalize_agent_type') else agent_class)
+                use_last = USE_LAST_ENDPOINT in (
+                    (getattr(router, 'agent_priorities', None) or {}).get(norm, []))
+            except Exception:
+                use_last = False
+
             return {'model': head_model, 'api_base': head_base_raw,
-                    'pricing': pricing, 'limits': limits}
+                    'pricing': pricing, 'limits': limits, 'use_last': use_last}
         except Exception as e:  # noqa: BLE001 — agents view must never break here
             logger.debug(f"system_info endpoint resolve failed for {agent_class}: {e}")
             return None
