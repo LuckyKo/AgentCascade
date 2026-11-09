@@ -435,6 +435,13 @@ class SystemInfo(BaseTool):
                     lines.append(f"  Active tools ({len(tools)}): {', '.join(tools)}")
                 else:
                     lines.append('  Active tools: (none)')
+                ep = self._resolve_endpoint(name)
+                if ep:
+                    lines.append(f"  Endpoint: {ep['model']} @ {ep['api_base']}")
+                    if ep['pricing']:
+                        lines.append(f"    Cost: {', '.join(ep['pricing'])}")
+                    if ep['limits']:
+                        lines.append(f"    Limits: {'; '.join(ep['limits'])}")
 
             lines.append('')
             lines.append('Active tools are derived per class from its disabled_tools config (the same set '
@@ -446,12 +453,6 @@ class SystemInfo(BaseTool):
 
         # Live per-instance sessions (the runtime view the old list_agents tool showed).
         lines.append(self._render_active_instances())
-
-        # Primary Endpoint: the LLM endpoint these agents run on (omitted when no
-        # router / empty chain). Placed last so the per-instance list reads first.
-        primary_ep = self._render_primary_endpoint()
-        if primary_ep:
-            lines.append(primary_ep)
 
         return '\n'.join(lines)
 
@@ -529,49 +530,34 @@ class SystemInfo(BaseTool):
         """
         return f"{v:g}"
 
-    def _render_primary_endpoint(self) -> str:
-        """Render the ``Primary Endpoint`` block appended to the agents view.
+    def _resolve_endpoint(self, agent_class: str):
+        """Resolve the routing-chain-head endpoint + pricing/limits for an agent class.
 
-        Shows the LLM endpoint the agents actually run on. ``model`` / ``api_base``
-        come from the routing chain head; pricing and limits are read from the
-        matched ``APIEndpoint`` OBJECT — the single source of truth — matched back
-        to the head by the normalized ``(api_base, model)`` routing key, mirroring
-        ``router.get_endpoint_pricing`` exactly. The ``Pricing:`` line is shown only
-        when the endpoint carries a non-zero rate; ``Limits`` always shows
-        ``max_input_tokens`` and renders rate/concurrency as ``unlimited`` when no
-        explicit cap is set. Returns ``''`` (whole block omitted) when there is no
-        router, the chain is empty, or on any error, so the agents list never
-        breaks or shows a half-built block.
+        Returns a dict ``{'model', 'api_base', 'pricing', 'limits'}`` where
+        ``pricing``/``limits`` are lists of display strings (empty when the
+        endpoint is unpriced / uncapped), or ``None`` when there is no router, the
+        chain is empty, or on any error — never raises, so the per-class agents
+        list never breaks. ``model`` / ``api_base`` come from the routing chain
+        head; pricing and limits are read from the matched ``APIEndpoint`` OBJECT
+        (single source of truth), matched back by the normalized ``(api_base,
+        model)`` routing key, mirroring ``router.get_endpoint_pricing`` exactly.
         """
         pool = getattr(self, 'agent_pool', None)
         router = getattr(pool, 'api_router', None) if pool is not None else None
         if router is None:
-            return ''
+            return None
         try:
             from agent_cascade.api_router_pkg.normalization import normalize_api_base
 
-            # Resolve the agent class to look up: the current instance's class when
-            # known, else orchestrator (mirrors the get_instance fallback used
-            # elsewhere in this tool).
-            agent_class = 'orchestrator'
-            get_inst = getattr(pool, 'get_instance', None)
-            if callable(get_inst):
-                try:
-                    inst = get_inst(getattr(self, 'agent_name', None) or 'orchestrator')
-                    if inst is not None:
-                        agent_class = getattr(inst, 'agent_class', None) or 'orchestrator'
-                except Exception:
-                    pass
-
             chain = router.get_endpoint_chain(agent_class)
             if not chain:
-                return ''
+                return None
             head = chain[0]
             head_base_raw = head.get('api_base') or head.get('model_server', '')
             head_base = normalize_api_base(head_base_raw)
             head_model = head.get('model', '')
 
-            # Match head back to its endpoint object by normalized (api_base,
+            # Match the head back to its endpoint object by normalized (api_base,
             # model) — the same routing key get_endpoint_pricing uses. Two enabled
             # endpoints sharing that key resolve to the first (dict order).
             def _match():
@@ -589,21 +575,16 @@ class SystemInfo(BaseTool):
             else:
                 ep = _match()
 
-            lines = ['--- Primary Endpoint ---',
-                     f'  Model: {head_model}',
-                     f'  API Base: {head_base_raw}']
-
+            pricing = []
+            limits = []
             if ep is not None:
                 # Pricing: present only when the endpoint carries any non-zero rate.
-                rate_parts = []
                 for key, label in (('input_per_m', 'in'), ('output_per_m', 'out'),
                                    ('cache_read_per_m', 'cache-read'),
                                    ('cache_write_per_m', 'cache-write')):
                     v = getattr(ep, key, 0) or 0
                     if v > 0:
-                        rate_parts.append(f'${self._fmt_per_m(v)}/M {label}')
-                if rate_parts:
-                    lines.append(f'  Pricing: {', '.join(rate_parts)}')
+                        pricing.append(f'${self._fmt_per_m(v)}/M {label}')
 
                 # Limits: max input always shown; rate/concurrency render their
                 # value when an explicit cap is set, else "unlimited" (a
@@ -613,19 +594,19 @@ class SystemInfo(BaseTool):
                 rate_rpm = int(getattr(ep, 'rate_limit_rpm', 0) or 0)
                 conc = int(getattr(ep, 'concurrency_limit', 0) or 0)
                 max_out = int(getattr(ep, 'max_tokens', 0) or 0)
-                limit_parts = [
+                limits = [
                     f'max input {max_input} tok',
                     f'rate {rate_rpm} rpm' if rate_rpm > 0 else 'rate unlimited',
                     f'concurrency {conc}' if conc > 0 else 'concurrency unlimited',
                 ]
                 if max_out > 0:
-                    limit_parts.append(f'max output {max_out} tok')
-                lines.append(f'  Limits: {'; '.join(limit_parts)}')
+                    limits.append(f'max output {max_out} tok')
 
-            return '\n'.join(lines)
+            return {'model': head_model, 'api_base': head_base_raw,
+                    'pricing': pricing, 'limits': limits}
         except Exception as e:  # noqa: BLE001 — agents view must never break here
-            logger.debug(f"system_info primary endpoint render failed: {e}")
-            return ''
+            logger.debug(f"system_info endpoint resolve failed for {agent_class}: {e}")
+            return None
 
     def _render_mcp_servers(self) -> str:
         """Render the list of enabled MCP servers (name + description if present).

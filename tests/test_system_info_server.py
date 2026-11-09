@@ -616,8 +616,8 @@ class _FakeAgentsPool:
         self._agents = agents
         # instances: dict of name -> AgentInstance-shaped SimpleNamespace (or {}).
         self.instances = instances or {}
-        # api_router: object exposing get_endpoint_chain + endpoints; the Primary
-        # Endpoint block reads it. None (default) -> that section is omitted.
+        # api_router: object exposing get_endpoint_chain + endpoints; the per-class
+        # Endpoint/Cost/Limits lines read it. None (default) -> those are omitted.
         self.api_router = api_router
 
     def list_agents(self):
@@ -931,7 +931,7 @@ class TestSystemInfoContentIndentation:
 
 
 class _FakeRouter:
-    """Stub APIRouter exposing only what _render_primary_endpoint reads.
+    """Stub APIRouter exposing only what _resolve_endpoint reads.
 
     get_endpoint_chain returns a single-item chain (list of cfg dicts); endpoints is
     the id -> APIEndpoint map. Deliberately has no _lock so the lock-optional read
@@ -955,58 +955,56 @@ def _endpoint(**kw):
     return APIEndpoint(**kw)
 
 
-class TestSystemInfoPrimaryEndpoint:
-    """Task B: the Primary Endpoint block appended to help='agents'."""
+class TestSystemInfoClassEndpoint:
+    """Per-class Endpoint/Cost/Limits lines under each agent class in help='agents'."""
 
     _AGENTS = [{'name': 'orchestrator', 'tagline': 'Technical lead', 'tools': ['call_agent']}]
 
     def _agents_out(self, pool):
         return SystemInfo(agent_pool=pool).call('{"help": "agents"}')
 
-    def test_priced_endpoint_shows_model_base_pricing_and_limits(self):
-        """Non-zero pricing renders the Pricing line; limits render with the cap."""
+    def test_priced_endpoint_shows_model_base_cost_and_limits(self):
+        """Non-zero pricing renders the Cost line; limits render with the cap."""
         ep = _endpoint(id='1', api_base='http://localhost:1234/v1', model='glm-4',
                        output_per_m=3.0, cache_read_per_m=0.5,
                        max_input_tokens=125000, rate_limit_rpm=0, concurrency_limit=-1)
         head = {'api_base': 'http://localhost:1234/v1', 'model': 'glm-4'}
         pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
         out = self._agents_out(pool)
-        assert '--- Primary Endpoint ---' in out
-        assert 'Model: glm-4' in out
-        assert 'API Base: http://localhost:1234/v1' in out
-        assert 'Pricing: $3/M out, $0.5/M cache-read' in out
+        assert 'Endpoint: glm-4 @ http://localhost:1234/v1' in out
+        assert 'Cost: $3/M out, $0.5/M cache-read' in out
         assert 'Limits: max input 125000 tok; rate unlimited; concurrency unlimited' in out
 
-    def test_unpriced_endpoint_omits_pricing_keeps_limits(self):
-        """All-zero rates -> no Pricing line, but the Limits line still shows."""
+    def test_unpriced_endpoint_omits_cost_keeps_limits(self):
+        """All-zero rates -> no Cost line, but the Limits line still shows."""
         ep = _endpoint(id='1', api_base='http://localhost:1234/v1', model='m',
                        max_input_tokens=125000)  # all *_per_m default to 0
         head = {'api_base': 'http://localhost:1234/v1', 'model': 'm'}
         pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({'1': ep}, head))
         out = self._agents_out(pool)
-        assert '--- Primary Endpoint ---' in out
-        assert 'Pricing:' not in out
+        assert 'Endpoint: m @ http://localhost:1234/v1' in out
+        assert 'Cost:' not in out
         assert 'Limits: max input 125000 tok; rate unlimited; concurrency unlimited' in out
 
-    def test_no_router_omits_section_without_raising(self):
-        """api_router None -> Primary Endpoint omitted, rest of agents view intact."""
+    def test_no_router_omits_endpoint_without_raising(self):
+        """api_router None -> per-class Endpoint lines omitted, rest of view intact."""
         pool = _FakeAgentsPool(self._AGENTS, api_router=None)
         out = self._agents_out(pool)
-        assert 'Primary Endpoint' not in out
+        assert 'Endpoint:' not in out
         assert 'AC Agent Classes' in out
 
-    def test_empty_chain_omits_section(self):
-        """Resolved router but empty endpoint chain -> block omitted (graceful)."""
+    def test_empty_chain_omits_endpoint(self):
+        """Resolved router but empty endpoint chain -> Endpoint lines omitted (graceful)."""
         pool = _FakeAgentsPool(self._AGENTS, api_router=_FakeRouter({}, head=None))
         out = self._agents_out(pool)
-        assert 'Primary Endpoint' not in out
+        assert 'Endpoint:' not in out
 
-    def test_router_error_omits_section(self):
-        """get_endpoint_chain raising degrades gracefully (no crash, block omitted)."""
+    def test_router_error_omits_endpoint(self):
+        """get_endpoint_chain raising degrades gracefully (no crash, lines omitted)."""
         pool = _FakeAgentsPool(self._AGENTS,
                                api_router=_FakeRouter({}, head=None, raise_on_chain=True))
         out = self._agents_out(pool)
-        assert 'Primary Endpoint' not in out
+        assert 'Endpoint:' not in out
 
     def test_matches_endpoint_by_normalized_api_base(self):
         """A chain head using a localhost alias still matches an endpoint stored as
