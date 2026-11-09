@@ -398,14 +398,15 @@ class SystemInfo(BaseTool):
             return f"system_info help unavailable: {e}\n(Help file: {path_str})"
 
     def _render_agents(self) -> str:
-        """Render a live list of agent classes: name, tagline, and active tools.
+        """Render agent classes (name, tagline, active tools) plus live instances.
 
-        Computed from ``self.agent_pool`` (``list_agents()`` + ``get_agent_info()``)
-        — the same accessors the ``/api/agents`` endpoint uses, so each tool list is
-        already filtered by the instance's disabled_tools config. Never raises;
-        degrades to a clear message if no agent pool is attached. Replaces the
-        deprecated ``list_agents`` tool (which also showed per-instance runtime
-        metrics — those live at ``/api/status`` instead).
+        Classes are computed from ``self.agent_pool`` (``list_agents()`` +
+        ``get_agent_info()``) — the same accessors the ``/api/agents`` endpoint uses,
+        so each tool list is already filtered by the instance's disabled_tools config.
+        An ``Active Instances (live)`` section is appended (see
+        ``_render_active_instances``), restoring the per-instance runtime view of the
+        deprecated ``list_agents`` tool; full context-% remains at ``/api/status``.
+        Never raises; degrades to a clear message if no agent pool is attached.
         """
         pool = getattr(self, 'agent_pool', None)
         if not pool:
@@ -416,34 +417,86 @@ class SystemInfo(BaseTool):
             return f'system_info agents list unavailable: {e}'
 
         lines = ['--- AC Agent Classes (live) ---']
-        if not names:
-            lines.append('(no agent templates loaded)')
-            return '\n'.join(lines)
-
-        for name in sorted(names):
-            try:
-                info = pool.get_agent_info(name) or {}
-            except Exception as e:
+        if names:
+            for name in sorted(names):
+                try:
+                    info = pool.get_agent_info(name) or {}
+                except Exception as e:
+                    lines.append('')
+                    lines.append(f"### {name}")
+                    lines.append(f"  (info unavailable: {e})")
+                    continue
+                tagline = (info.get('tagline') or '').strip() or 'No tagline.'
+                tools = info.get('tools') or []
                 lines.append('')
                 lines.append(f"### {name}")
-                lines.append(f"  (info unavailable: {e})")
-                continue
-            tagline = (info.get('tagline') or '').strip() or 'No tagline.'
-            tools = info.get('tools') or []
-            lines.append('')
-            lines.append(f"### {name}")
-            lines.append(f"  {tagline}")
-            if tools:
-                lines.append(f"  Active tools ({len(tools)}): {', '.join(tools)}")
-            else:
-                lines.append('  Active tools: (none)')
+                lines.append(f"  {tagline}")
+                if tools:
+                    lines.append(f"  Active tools ({len(tools)}): {', '.join(tools)}")
+                else:
+                    lines.append('  Active tools: (none)')
 
-        lines.append('')
-        lines.append('Active tools are derived per class from its disabled_tools config (the same set '
-                     'the model sees in its prompt). The six core classes (orchestrator, security, '
-                     'compressor, generalist, reviewer, writer) carry seeded defaults; coder, designer, '
-                     'ponytail, researcher, and Admin fall back to the safe baseline when unconfigured. '
-                     'For live per-instance runtime metrics use /api/status.')
+            lines.append('')
+            lines.append('Active tools are derived per class from its disabled_tools config (the same set '
+                         'the model sees in its prompt). The six core classes (orchestrator, security, '
+                         'compressor, generalist, reviewer, writer) carry seeded defaults; coder, designer, '
+                         'ponytail, researcher, and Admin fall back to the safe baseline when unconfigured.')
+        else:
+            lines.append('(no agent templates loaded)')
+
+        # Live per-instance sessions (the runtime view the old list_agents tool showed).
+        lines.append(self._render_active_instances())
+        return '\n'.join(lines)
+
+    def _render_active_instances(self) -> str:
+        """Render live per-instance sessions appended to the agent-class list.
+
+        Mirrors the ``active_instances`` field of ``/api/status``: only non-idle
+        (``ACTIVE_STATES``) instances appear, and the context-token figure reuses the
+        same helpers the endpoint uses — ``get_history_stats`` (message tokens) plus
+        ``estimate_instance_tool_schema_tokens`` (the serialized tool schemas sent with
+        every call, BUG_0136) — so the number matches what is actually in context.
+        Single source of truth is the pool's ``instances`` dict (no re-derivation).
+        Never raises: degrades to a short note on any pool/instance error.
+        """
+        lines = ['', '--- Active Instances (live) ---']
+        pool = getattr(self, 'agent_pool', None)
+        if not pool:
+            return '\n'.join(lines + ['(no active instances)'])
+        try:
+            from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
+            from agent_cascade.engine.helpers import estimate_instance_tool_schema_tokens
+
+            snapshot = list(getattr(pool, 'instances', {}).items())  # name -> AgentInstance
+        except RuntimeError:
+            snapshot = []  # dict resized mid-copy (same guard as /api/status)
+        except Exception as e:
+            return '\n'.join(lines + [f'(instance snapshot unavailable: {e})'])
+
+        rows = []
+        for name, inst in snapshot:
+            try:
+                if getattr(inst, 'state', None) not in ACTIVE_STATES:
+                    continue
+                agent_class = getattr(inst, 'agent_class', '') or 'unknown'
+                state = (getattr(inst, 'state', None) or AgentState.IDLE).name
+                turn = int(getattr(inst, '_current_turn', 0) or 0)
+                max_turns = getattr(inst, 'max_turns', None) or DEFAULT_MAX_TURNS
+                try:
+                    stats = get_history_stats(list(getattr(inst, 'conversation', []) or []))
+                except Exception:
+                    stats = {'tokens': 0}
+                try:
+                    schema = estimate_instance_tool_schema_tokens(inst, pool)
+                except Exception:
+                    schema = 0
+                tokens = int(stats.get('tokens', 0)) + int(schema)
+                rows.append(f"  - {name} ({agent_class}) [{state}]  "
+                            f"turn {turn}/{max_turns}  context {tokens:,} tok")
+            except Exception as e:
+                rows.append(f"  - {name}  (details unavailable: {e})")
+
+        lines.extend(rows or ['(no active instances)'])
         return '\n'.join(lines)
 
     def _render_mcp_servers(self) -> str:

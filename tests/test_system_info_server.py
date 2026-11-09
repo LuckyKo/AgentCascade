@@ -12,9 +12,11 @@ No real server is started.
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
+from agent_cascade.agent_instance import AgentState
 from agent_cascade.tools.custom import system_info as system_info_module
 from agent_cascade.tools.custom.system_info import SystemInfo
 
@@ -592,11 +594,19 @@ class TestRestApiHelpDrift:
 
 
 class _FakeAgentsPool:
-    """Pool stand-in exposing only what _render_agents reads: list_agents + get_agent_info."""
+    """Pool stand-in exposing only what _render_agents reads.
 
-    def __init__(self, agents):
+    list_agents + get_agent_info drive the class list; `instances` (name -> object)
+    drives the live Active Instances section. Instances are SimpleNamespace objects
+    (not MagicMock) so the real read path is exercised without auto-attribute side
+    effects.
+    """
+
+    def __init__(self, agents, instances=None):
         # agents: list of dicts with name / tagline / tools.
         self._agents = agents
+        # instances: dict of name -> AgentInstance-shaped SimpleNamespace (or {}).
+        self.instances = instances or {}
 
     def list_agents(self):
         return [a['name'] for a in self._agents]
@@ -606,6 +616,17 @@ class _FakeAgentsPool:
             if a['name'] == name:
                 return {'name': a['name'], 'tagline': a['tagline'], 'tools': list(a['tools'])}
         return None
+
+
+def _inst(agent_class, state, turn=2, max_turns=10):
+    """AgentInstance-shaped stand-in for the Active Instances section."""
+    return SimpleNamespace(
+        agent_class=agent_class,
+        state=state,
+        _current_turn=turn,
+        max_turns=max_turns,
+        conversation=[],
+    )
 
 
 class TestSystemInfoAgentsSection:
@@ -643,6 +664,36 @@ class TestSystemInfoAgentsSection:
     def test_empty_pool_does_not_raise(self):
         out = SystemInfo(agent_pool=_FakeAgentsPool([])).call('{"help": "agents"}')
         assert 'no agent templates loaded' in out
+
+    def test_active_instances_section_lists_active_instance(self):
+        """A known non-idle instance is listed in the Active Instances section."""
+        pool = _FakeAgentsPool(self._AGENTS, instances={'worker1': _inst('coder', AgentState.RUNNING)})
+        out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
+        assert '--- Active Instances (live) ---' in out
+        assert 'worker1' in out          # name
+        assert '(coder)' in out          # agent_class
+        assert '[RUNNING]' in out        # state
+
+    def test_active_instances_filters_out_idle(self):
+        """Idle instances are omitted, mirroring /api/status's ACTIVE_STATES filter."""
+        pool = _FakeAgentsPool(self._AGENTS, instances={'idleguy': _inst('writer', AgentState.IDLE)})
+        out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
+        assert '--- Active Instances (live) ---' in out
+        assert 'idleguy' not in out
+        assert '(no active instances)' in out
+
+    def test_active_instances_degrades_gracefully_when_none(self):
+        """No live sessions -> placeholder, section still present and no crash."""
+        out = SystemInfo(agent_pool=_FakeAgentsPool(self._AGENTS)).call('{"help": "agents"}')
+        assert '--- Active Instances (live) ---' in out
+        assert '(no active instances)' in out
+
+    def test_active_instances_survives_broken_instance(self):
+        """A malformed instance does not crash the section nor suppress valid ones."""
+        boom = object()  # no .state attr -> skipped by the ACTIVE_STATES filter, not an error
+        pool = _FakeAgentsPool(self._AGENTS, instances={'good': _inst('coder', AgentState.RUNNING), 'bad': boom})
+        out = SystemInfo(agent_pool=pool).call('{"help": "agents"}')
+        assert 'good' in out and '(coder)' in out
 
 
 class TestListAgentsDeprecationStub:
