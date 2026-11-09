@@ -588,6 +588,10 @@ class CompressionHandler:
                             parts.append(f"![image]({item.image})\nCaption: {cap}")
                         else:
                             parts.append(f"![image]({item.image})")
+                    elif item.audio:
+                        parts.append(f"[Audio file: {item.audio}]")
+                    elif item.video:
+                        parts.append(f"[Video file: {item.video}]")
                     elif item.text:
                         parts.append(item.text)
                 elif isinstance(item, str):

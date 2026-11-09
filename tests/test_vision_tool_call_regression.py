@@ -102,6 +102,88 @@ class TestVisionToolCallAssembleResult:
         assert '![' in result or 'file://' in result, \
             'Non-vision agent result should contain markdown image link'
 
+    def test_non_vision_agent_preserves_audio_video_markers(self):
+        """Regression: audio/video ContentItems must NOT be silently dropped by the non-vision
+        text-flatten path in compression/handler.py.
+
+        Bug class: a ContentItem carrying only `audio` (or `video`) matched
+        `isinstance(item, ContentItem)` but matched neither the original `if item.image` nor
+        `elif item.text`, so NOTHING was appended and the media vanished from the agent's
+        memory after compression. The fix emits text markers consistent with the input parser's
+        gate-off fallback (qwenvl_oai.py: `[Audio file: ...]` / `[Video file: ...]`).
+
+        Mutation sensitivity: those marker strings are produced ONLY by the new
+        `elif item.audio:` / `elif item.video:` branches. Deleting those two `elif` lines makes
+        this test fail (markers absent). See also
+        test_assemble_source_has_audio_video_branches, which pins the branches/marker strings
+        directly in the source so a future removal fails the suite even if the functional case
+        is deselected.
+        """
+        from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.compression.handler import CompressionHandler
+
+        mock_instance = MagicMock()
+        mock_instance._pending_notifications = []
+        mock_instance._cache_notifications = []
+        mock_instance._tool_warnings = []
+
+        audio_path = 'file:///N:/work/WD/AgentWorkspace/clip.wav'
+        video_path = 'file:///N:/work/WD/AgentWorkspace/clip.mp4'
+        tool_result = [
+            ContentItem(audio=audio_path),
+            ContentItem(video=video_path),
+            ContentItem(text='Generated media: clip.wav + clip.mp4'),
+        ]
+
+        handler = CompressionHandler(MagicMock())  # pool is required by __init__
+        llm_cfg = {
+            'model_service_type': 'oai',
+            'max_input_tokens': 8192,
+        }  # NOT vision-capable -> exercises the flatten loop
+
+        result = handler._assemble_tool_result(
+            instance=mock_instance,
+            raw_tool_result=tool_result,
+            char_limit=10000,
+            instance_name='Maine',
+            tool_name='media_gen',
+            base_dir=Path('.'),
+            llm_cfg=llm_cfg,
+        )
+
+        assert isinstance(result, str), \
+            f"Expected flattened markdown string for non-vision agent, got {type(result).__name__}"
+        assert f"[Audio file: {audio_path}]" in result, \
+            "Audio ContentItem was dropped during flatten — expected '[Audio file: ...]' marker"
+        assert f"[Video file: {video_path}]" in result, \
+            "Video ContentItem was dropped during flatten — expected '[Video file: ...]' marker"
+        assert 'Generated media: clip.wav + clip.mp4' in result, \
+            'Text ContentItem should still be preserved alongside the media markers'
+
+    def test_assemble_source_has_audio_video_branches(self):
+        """Source-pinned mutation guard for the audio/video flatten fix.
+
+        Reads the actual source of CompressionHandler._assemble_tool_result and asserts the
+        audio/video branches and their exact marker strings are present. If someone removes the
+        two `elif` lines (re-introducing the silent-drop bug), this test fails on its own —
+        independent of the functional case — proving the functional test's markers come from
+        these specific branches and nothing else. Marker text is pinned to the qwenvl_oai.py
+        gate-off fallback format.
+        """
+        import inspect
+
+        from agent_cascade.compression.handler import CompressionHandler
+
+        src = inspect.getsource(CompressionHandler._assemble_tool_result)
+        assert 'elif item.audio:' in src, \
+            'audio branch removed from the flatten loop (silent-drop regression)'
+        assert 'elif item.video:' in src, \
+            'video branch removed from the flatten loop (silent-drop regression)'
+        assert 'f"[Audio file: {item.audio}]"' in src, \
+            'audio marker must match the qwenvl_oai.py gate-off fallback format'
+        assert 'f"[Video file: {item.video}]"' in src, \
+            'video marker must match the qwenvl_oai.py gate-off fallback format'
+
 
 class TestVisionToolCallMessageConversion:
     """Test qwenvl_oai.convert_messages_to_dicts converts images to base64."""
