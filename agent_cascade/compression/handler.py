@@ -592,6 +592,8 @@ class CompressionHandler:
                         parts.append(f"[Audio file: {item.audio}]")
                     elif item.video:
                         parts.append(f"[Video file: {item.video}]")
+                    elif item.file:
+                        parts.append(f"[File: {item.file}]")
                     elif item.text:
                         parts.append(item.text)
                 elif isinstance(item, str):

@@ -85,7 +85,7 @@ class DialogueRetrievalAgent(Assistant):
         new_content = [ContentItem(text=query), ContentItem(file=file_path)]
         if isinstance(messages[-1].content, list):
             for item in messages[-1].content:
-                if item.file or item.image or item.audio:
+                if item.file or item.image or item.audio or item.video:
                     new_content.append(item)
         new_messages.append(Message(role=USER, content=new_content))
 

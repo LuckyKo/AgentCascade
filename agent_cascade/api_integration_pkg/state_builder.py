@@ -924,6 +924,8 @@ def serialize_message(
                 parts.append(f"![audio]({item.audio})")
             elif hasattr(item, 'video') and item.video:
                 parts.append(f"![video]({item.video})")
+            elif hasattr(item, 'file') and item.file:
+                parts.append(f"[File: {item.file}]")
         content = '\n'.join(parts)
 
     # Keep content intact — frontend handles truncation via renderToolResult()

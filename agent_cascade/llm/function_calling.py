@@ -228,9 +228,13 @@ def validate_num_fncall_results(messages: List[Message], support_multimodal_inpu
         fn_results = [messages[i].name] + fn_results
         content = messages[i].content
         if isinstance(content, list):
-            for item in content:
+            for idx, item in enumerate(content):
                 if item.file:
-                    raise ValueError('Tool call results with content type="file" are not supported.')
+                    # File items are not a native tool-result content type for any backend:
+                    # preserve them as a [File: ...] text marker (consistent with the
+                    # [Audio/Video file: ...] flatten markers) instead of raising.
+                    content[idx] = ContentItem(text=f'[File: {item.file}]')
+                    continue
                 if item.image and (not support_multimodal_input):
                     raise ValueError('The current model service does not accept images as tool results.')
         i -= 1
