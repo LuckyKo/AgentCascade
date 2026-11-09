@@ -635,13 +635,19 @@ TOOL_METADATA = {
     },
     'system_info': {
         'description': (
-            'Retrieves the current system information: operating system, current time and date, '
-            'work directories with their Docker container mount paths, Python version, the enabled MCP servers, '
-            'and basic session stats. '
-            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'),
+            'Returns a live summary of the host and AgentCascade: OS / time / timezone, '
+            'host resources (CPU, RAM, per-GPU VRAM), the AC server version + address, '
+            'the LLM endpoint + model, enabled MCP servers, workspace mount paths '
+            '(host → Docker), and per-session stats (context usage, turn, budget/cost, cache pool). '
+            'Use it when a path works on the host but fails inside a Docker container — '
+            'the output shows exactly where each folder is mounted.'),
         'parameters': {
             'help':
-                "Optional. Fetch a help section about the AgentCascade system instead of normal system info. Valid sections are listed in the error you get if you pass an unknown value (e.g. 'rest_api', 'websocket', 'parallel_instances'). Use 'agents' for a live list of agent classes with their taglines and active tools (replaces the deprecated list_agents tool). Use 'telemetry' for a live dump of current session telemetry. Leave empty/omit for normal system information."
+                'Optional. Instead of the live summary, return a reference section about the '
+                'AgentCascade system. Valid values: "agents" (agent classes, taglines, active tools, '
+                'and live active instances), "telemetry" (a live dump of current session telemetry), '
+                'and the protocol/config references "rest_api", "websocket", "parallel_instances", '
+                '"settings_env", "agent_classes". Omit or leave empty for the basic live summary.'
         }
     },
     'read_logs': {
