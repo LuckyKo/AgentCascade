@@ -12,6 +12,8 @@ generated_by: orchestrator
 generated_from_task: "Auto-skill in-loop trigger commit blocked for ~15 attempts by isort/yapf infinite rewrite loop on agent_instance.py"
 ---
 
+Related: [[survive-precommit-autofix-aborting-commit]]
+
 ## Goal
 
 Unblock commits when two pre-commit formatters fight over the same file and can never agree.

@@ -153,6 +153,7 @@ CONSOLIDATION_PROMPT = (
     'CRITICAL RULES:\n'
     '- Output ONLY the consolidated summary — no intro/outro, no meta-commentary.\n'
     '- Maintain chronological order implicitly (earliest events first).\n'
+    '- If it already starts with a pre-existing L2 summary, compact the follow up summaries into it.\n'
     '- If conflicting information appears across summaries, prefer the most recent version.\n\n'
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
     'Present the consolidated summary below.{end_instruction}')

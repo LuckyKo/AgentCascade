@@ -14,6 +14,8 @@ generated_by: coder
 generated_from_task: "Commit regression fixes in AgentCascade; post-commit hook auto-bumped version creating a second commit on top, and mixed-line-ending hook failed the first attempt."
 ---
 
+Related: [[survive-precommit-autofix-aborting-commit]]
+
 ## Goal
 Commit cleanly in `N:\work\WD\AgentCascade` and report the CORRECT commit hash — accounting for (a) a `post-commit` hook that auto-creates a `chore(version): bump to X.Y.Z` commit on top of yours, and (b) the `mixed-line-ending` pre-commit hook that fails CRLF working copies.
 
