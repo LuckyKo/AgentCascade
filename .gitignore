@@ -85,6 +85,9 @@ config/secrets.json
 # Pool settings (runtime-generated, user-specific)
 config/pool_settings*.json
 
+# MCP server config (user-local: per-machine enabled servers)
+config/mcp_servers.json
+
 # Session state (runtime-generated, user-specific)
 config/session_state.json
 config/session_state.json.bak
