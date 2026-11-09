@@ -78,6 +78,11 @@ actionable — it is read by agents with limited context.
   import and reference the constants from the code under test (single source of truth,
   keeps tests in sync when the value changes).
 
+## Operations
+- **Restarting the server:** committed changes and module-level constants are inert
+  until a restart. **If the full regression suite passes, you may restart freely
+  (no user gate).** Run the full suite first; restart only on green.
+
 ## Do / don't
 - Don't add a cap/limit that double-covers an existing bound (redundant logic).
 - Don't clobber vetted content with a blunt cap.
