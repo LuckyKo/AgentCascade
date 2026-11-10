@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import binascii
 import os
 import re
 from typing import List, Optional, Tuple
@@ -23,7 +25,7 @@ from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import IMAGE_MAX_SHORT_SIDE
 from agent_cascade.utils.utils import (_DEFAULT_VIDEO_MIME, encode_audio_as_base64, encode_image_as_base64,
-                                       encode_video_as_base64, sanitize_chrome_file_path)
+                                       encode_video_as_base64, normalize_audio_to_mp3, sanitize_chrome_file_path)
 
 # Matches a base64 data-URI: ``data:<mime>;base64,<b64>``, where <mime> may be
 # empty (the untagged ``data:;base64,...`` produced by the inline MediaStorageError
@@ -196,6 +198,13 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                                     data, fmt = self._split_audio_data_uri(v)
                                 else:
                                     data, fmt = v, self._audio_format_from_path(orig_v)
+                                # Both sub-cases converge on (pure base64, fmt). The omni
+                                # server (MiniAudio) only decodes wav/mp3/flac and sniffs the
+                                # bytes, so normalize any undecodable container (ogg/m4a/opus)
+                                # to mono MP3 here; a ModelServiceError from an unavailable or
+                                # failed ffmpeg falls through to the [System Error] except branch
+                                # below instead of forwarding bytes the server cannot decode.
+                                data, fmt = normalize_audio_to_mp3(base64.b64decode(data), fmt)
                                 part = {'data': data}
                                 if fmt:
                                     part['format'] = fmt
@@ -204,7 +213,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                                 new_content.append({'type': 'input_audio', 'input_audio': v})
                             else:
                                 raise TypeError
-                    except (ModelServiceError, TypeError) as e:
+                    except (ModelServiceError, TypeError, binascii.Error) as e:
                         err_msg = str(e)
                         logger.warning(f'Multimodal item error: {err_msg}')
                         # Provide feedback to the agent about the missing file

@@ -21,7 +21,9 @@ import re
 import shutil
 import signal
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -1085,6 +1087,105 @@ def encode_audio_as_base64(path: str) -> str:
     """
     with open(path, 'rb') as audio_file:
         return base64.b64encode(audio_file.read()).decode('utf-8')
+
+
+# Containers llama.cpp's MiniAudio audio decoder supports in the omni build
+# (wav/mp3/flac; Vorbis/ogg, M4A/AAC and OPUS are NOT decodable). The omni server
+# IGNORES the input_audio 'format' field and sniffs the raw bytes, so audio we
+# forward must actually BE one of these containers. Single source of truth for the
+# accept/transcode decision and the byte-magic sniff below.
+_DECODABLE_AUDIO_EXTS = frozenset({'wav', 'mp3', 'flac'})
+
+
+def _sniff_audio_container(raw: bytes) -> Optional[str]:
+    """Sniff raw audio bytes for a MiniAudio-decodable container, or None.
+
+    Only the pass-through (already-decodable) containers are recognised — a hit lets
+    a file whose declared ``format`` is missing or wrong still be forwarded verbatim
+    (the server sniffs the bytes). Non-decodable containers deliberately return None:
+    they are normalised by :func:`normalize_audio_to_mp3` via ffmpeg, not sniffed.
+    """
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WAVE':
+        return 'wav'
+    if raw[:3] == b'ID3':
+        return 'mp3'
+    # MPEG frame sync: 11 set bits (0xFF + top 3 bits of the next byte set).
+    if len(raw) >= 2 and raw[0] == 0xFF and (raw[1] & 0xE0) == 0xE0:
+        return 'mp3'
+    if raw[:4] == b'fLaC':
+        return 'flac'
+    return None
+
+
+def normalize_audio_to_mp3(raw: bytes, fmt: Optional[str]) -> Tuple[str, str]:
+    """Normalise an audio payload to a container the omni server can decode.
+
+    The LFM3-Omni / llama.cpp omni server decodes audio via MiniAudio, which supports
+    ONLY wav/mp3/flac in this build and IGNORES the ``input_audio`` ``format`` field —
+    it sniffs the raw bytes. AC's accepted audio vocabulary also contains ogg/m4a/opus,
+    whose bytes the server cannot decode, so the model silently receives no usable
+    audio. Decodable containers (declared in :data:`_DECODABLE_AUDIO_EXTS`, or sniffed
+    from the bytes) are returned unchanged to avoid a lossy re-encode. Anything else
+    that carries a *known* container name is transcoded to 16 kHz mono MP3 via system
+    ``ffmpeg``. When no container can be identified at all (no format and no decodable
+    byte magic) the bytes are forwarded unchanged — the best-effort shape today's
+    untagged callers rely on; ffmpeg cannot safely transcode unidentified data.
+
+    Args:
+        raw: The decoded audio bytes.
+        fmt: The declared container extension (from a path extension or MIME subtype),
+             may be None/empty for an untagged data-URI or extensionless local path.
+
+    Returns:
+        ``(pure_base64, fmt_out)`` where ``pure_base64`` is the (possibly re-encoded)
+        container's base64 with no ``data:`` prefix, and ``fmt_out`` is the resulting
+        container extension ('mp3' after a transcode; may be None when unidentifiable).
+
+    Raises:
+        ModelServiceError: A transcode is required but ``ffmpeg`` is unavailable or the
+            ffmpeg process fails / times out / produces no output, so the caller's
+            existing except-branch degrades to a text error instead of forwarding
+            undecodable bytes.
+    """
+    norm_fmt = (fmt or '').strip().lower().lstrip('.')
+    if norm_fmt in _DECODABLE_AUDIO_EXTS:
+        return base64.b64encode(raw).decode('utf-8'), norm_fmt
+    sniffed = _sniff_audio_container(raw)
+    if sniffed in _DECODABLE_AUDIO_EXTS:
+        return base64.b64encode(raw).decode('utf-8'), sniffed
+    if not norm_fmt:
+        # No container identity at all -> forward verbatim (preserves the untagged /
+        # extensionless shape; we cannot safely pick a transcode for unknown bytes).
+        logger.debug('Audio payload has no container identity (no extension and no decodable '
+                     'byte magic); forwarding verbatim — cannot transcode unidentified bytes.')
+        return base64.b64encode(raw).decode('utf-8'), fmt or None
+
+    # Imported lazily: utils.py is imported by the llm package, so a top-level import
+    # of the exception would create a circular import.
+    from agent_cascade.llm.base import ModelServiceError
+    err_msg = (f"audio container '{fmt or 'unknown'}' cannot be normalized to a "
+               'decodable format (ffmpeg unavailable or transcode failed)')
+    if shutil.which('ffmpeg') is None:
+        raise ModelServiceError(err_msg)
+
+    tmp_dir = tempfile.mkdtemp(prefix='ac_audio_')
+    in_path = os.path.join(tmp_dir, f'input.{norm_fmt or 'bin'}')
+    out_path = os.path.join(tmp_dir, 'output.mp3')
+    try:
+        with open(in_path, 'wb') as in_file:
+            in_file.write(raw)
+        cmd = ['ffmpeg', '-y', '-i', in_path, '-ar', '16000', '-ac', '1', '-c:a', 'libmp3lame', out_path]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired as e:
+            raise ModelServiceError(err_msg) from e
+        if (result.returncode != 0 or not os.path.exists(out_path) or not os.path.getsize(out_path)):
+            raise ModelServiceError(err_msg)
+        with open(out_path, 'rb') as out_file:
+            mp3 = out_file.read()
+        return base64.b64encode(mp3).decode('utf-8'), 'mp3'
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # Default MIME for an untagged or unknown video extension. Shared with

@@ -146,3 +146,24 @@ class TestMediaSaveHelpers:
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+    def test_save_audio_aliases_mime_subtype_to_canonical_ext(self):
+        """The _AUDIO_MIME_SUBTYPE_TO_EXT alias table fixes the .mp3 fallback:
+        audio/x-wav & audio/vnd.wave save as .wav (not the old .mp3), audio/mpeg -> .mp3,
+        audio/x-m4a -> .m4a.
+        """
+        from agent_cascade.utils.media_utils import save_audio_from_data_uri
+        cases = {
+            'data:audio/vnd.wave;base64,AAAA': '.wav',
+            'data:audio/x-wav;base64,AAAA': '.wav',
+            'data:audio/mpeg;base64,AAAA': '.mp3',
+            'data:audio/x-m4a;base64,AAAA': '.m4a',
+        }
+        for uri, expected_ext in cases.items():
+            path = save_audio_from_data_uri(uri)
+            try:
+                assert path.endswith(expected_ext), (uri, path)
+                assert os.path.exists(path)
+            finally:
+                if os.path.exists(path):
+                    os.remove(path)

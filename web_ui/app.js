@@ -5717,6 +5717,10 @@ function insertMediaMarkdown(type, dataUri, filename) {
 // Mirrors agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY verbatim.
 // Used to (1) choose the data-URI MIME subtype from a file's own extension and
 // (2) reject attachments whose extension is outside the backend's accepted set.
+// NOTE (accepted != decodable): the omni server (llama.cpp MiniAudio) only DECODES
+// wav/mp3/flac; audio/video entries like ogg/m4a/opus are ACCEPTED here and transcoded
+// to mono MP3 at the backend encode boundary (utils.utils::normalize_audio_to_mp3),
+// so the server still receives a container it can decode. Do not narrow this list.
 const MEDIA_EXTS_BY_MODALITY = {
   audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'],
   video: ['mp4', 'webm', 'mkv', 'mov', 'avi'],

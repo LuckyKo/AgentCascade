@@ -15,7 +15,17 @@ Covers:
 All tests are self-contained (no LLM / HTTP / network).
 """
 
+import base64
+import shutil
+
+import pytest
+
 from agent_cascade.api_router_pkg.endpoints import APIEndpoint
+
+# Transcode tests need the system ffmpeg the omni-audio normalizer shells; the
+# pass-through tests never do. Skip the transcode tests on ffmpeg-less boxes so the
+# suite stays green there (ffmpeg IS present on the omni-audio box and runs them).
+_HAS_FFMPEG = shutil.which('ffmpeg') is not None
 
 
 class TestModalityFlags:
@@ -299,3 +309,139 @@ class TestInlineMediaDataURI:
         audio = self._audio(str(path), {'audio_enabled': True})
         assert not audio['data'].startswith('data:')  # encoded to pure base64
         assert 'format' not in audio
+
+
+class TestAudioContainerNormalization:
+    """Omni audio-input container normalization.
+
+    The LFM3-Omni / llama.cpp omni server decodes audio via MiniAudio, which only
+    understands wav/mp3/flac (and sniffs the bytes, ignoring 'format'). AC accepts
+    ogg/m4a/opus too, so those must be transcoded to mono MP3 at the encode boundary
+    or the model silently receives no usable audio. Pass-through (decodable) tests run
+    everywhere; transcode tests are ffmpeg-gated so the suite stays green on boxes
+    without ffmpeg (they run on the omni-audio box, which has ffmpeg v8.0 on PATH).
+    """
+
+    @staticmethod
+    def _adapter():
+        from agent_cascade.llm import get_chat_model
+        return get_chat_model({
+            'model': 'x',
+            'api_base': 'http://localhost:9/v1',
+            'model_server': 'http://localhost:9/v1',
+            'api_key': 'EMPTY',
+            'model_type': 'qwenvl_oai',
+        })
+
+    def _emit_audio(self, value, cfg=None):
+        """Convert a single audio ContentItem and return the emitted input_audio part.
+
+        The omni gate is opened via generate_cfg only (the qwenvl_oai class capability
+        is False), exactly mirroring the runtime-merged cfg path.
+        """
+        from agent_cascade.llm.schema import ContentItem, Message
+        parts = self._adapter().convert_messages_to_dicts(
+            [Message(role='user', content=[ContentItem(audio=value)])],
+            generate_cfg={'audio_enabled': True} if cfg is None else cfg,
+        )[0]['content']
+        audio = [p for p in parts if p['type'] == 'input_audio']
+        assert audio, parts
+        return audio[0]['input_audio']
+
+    @staticmethod
+    def _is_mp3_bytes(b: bytes) -> bool:
+        """True if ``b`` starts with an MP3 magic (ID3v2 tag or MPEG frame sync)."""
+        return b[:3] == b'ID3' or (len(b) >= 2 and b[0] == 0xFF and (b[1] & 0xE0) == 0xE0)
+
+    @staticmethod
+    def _write_wav(path) -> None:
+        """Write a small valid 16 kHz mono WAV so ffmpeg has a decodable source."""
+        import math
+        import struct
+        import wave
+        with wave.open(str(path), 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            for i in range(16000 * 3):  # 0.3 s of a 440 Hz tone
+                w.writeframesraw(struct.pack('<h', int(2000 * math.sin(2 * math.pi * 440 * i / 16000))))
+
+    def _real_container(self, tmp_path, ext: str):
+        """Produce a real non-decodable container (ogg/m4a) from a generated WAV via ffmpeg."""
+        import subprocess
+        src = tmp_path / 'src.wav'
+        self._write_wav(src)
+        out = tmp_path / f'audio.{ext}'
+        codec = 'libvorbis' if ext == 'ogg' else 'aac'
+        subprocess.run(['ffmpeg', '-y', '-i', str(src), '-c:a', codec, str(out)],
+                       check=True, capture_output=True)
+        return out
+
+    # --- Pass-through: decodable containers are forwarded byte-for-byte (no ffmpeg). ---
+    def test_audio_local_mp3_passes_through(self, tmp_path):
+        mp3 = tmp_path / 'track.mp3'
+        raw = b'ID3\x03\x00\x00' + b'\x00' * 64  # ID3 magic, never decoded (pass-through)
+        mp3.write_bytes(raw)
+        part = self._emit_audio(str(mp3))
+        assert part['format'] == 'mp3'
+        assert base64.b64decode(part['data']) == raw  # unchanged, no re-encode
+
+    def test_audio_local_wav_and_flac_pass_through(self, tmp_path):
+        wav = tmp_path / 'a.wav'
+        wav_raw = b'RIFF\x00\x00\x00WAVEfake'
+        wav.write_bytes(wav_raw)
+        part = self._emit_audio(str(wav))
+        assert part['format'] == 'wav'
+        assert base64.b64decode(part['data']) == wav_raw
+
+        flac = tmp_path / 'b.flac'
+        flac_raw = b'fLaC' + b'\x00' * 32
+        flac.write_bytes(flac_raw)
+        part = self._emit_audio(str(flac))
+        assert part['format'] == 'flac'
+        assert base64.b64decode(part['data']) == flac_raw
+
+    # --- Transcode to mono MP3 (ffmpeg-gated). ---
+    @pytest.mark.skipif(not _HAS_FFMPEG, reason='ffmpeg required to transcode m4a')
+    def test_audio_m4a_normalizes_to_mp3(self, tmp_path):
+        m4a = self._real_container(tmp_path, 'm4a')
+        part = self._emit_audio(str(m4a))
+        assert part['format'] == 'mp3'
+        assert self._is_mp3_bytes(base64.b64decode(part['data']))
+
+    @pytest.mark.skipif(not _HAS_FFMPEG, reason='ffmpeg required to transcode ogg')
+    def test_audio_ogg_normalizes_to_mp3(self, tmp_path):
+        ogg = self._real_container(tmp_path, 'ogg')
+        part = self._emit_audio(str(ogg))
+        assert part['format'] == 'mp3'
+        assert self._is_mp3_bytes(base64.b64decode(part['data']))
+
+    # --- Graceful degradation: no ffmpeg -> text error, no malformed input_audio. ---
+    def test_audio_transcode_unavailable_degrades_gracefully(self, tmp_path, monkeypatch):
+        import agent_cascade.utils.utils as _acutils
+        from agent_cascade.llm.schema import ContentItem, Message
+        # .ogg names a known non-decodable container -> transcode attempt; fake bytes
+        # so no real decoding is required before the ffmpeg lookup fails.
+        ogg = tmp_path / 'fake.ogg'
+        ogg.write_bytes(b'OggSfakeogg')
+        monkeypatch.setattr(_acutils.shutil, 'which', lambda _name: None)
+        parts = self._adapter().convert_messages_to_dicts(
+            [Message(role='user', content=[ContentItem(audio=str(ogg))])],
+            generate_cfg={'audio_enabled': True},
+        )[0]['content']
+        assert [p for p in parts if p['type'] == 'input_audio'] == []
+        texts = [p.get('text', '') for p in parts if p['type'] == 'text']
+        assert any('System Error' in t for t in texts), parts
+
+    def test_audio_malformed_data_uri_degrades_gracefully(self):
+        # A malformed inline data-URI reaches base64.b64decode and raises binascii.Error
+        # (a ValueError subclass); the widened except must degrade to [System Error],
+        # not crash convert_messages_to_dicts.
+        from agent_cascade.llm.schema import ContentItem, Message
+        parts = self._adapter().convert_messages_to_dicts(
+            [Message(role='user', content=[ContentItem(audio='data:audio/m4a;base64,A')])],
+            generate_cfg={'audio_enabled': True},
+        )[0]['content']
+        assert [p for p in parts if p['type'] == 'input_audio'] == []
+        texts = [p.get('text', '') for p in parts if p['type'] == 'text']
+        assert any('System Error' in t for t in texts), parts

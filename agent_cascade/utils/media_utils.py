@@ -232,6 +232,26 @@ _MEDIA_EXTS_BY_MODALITY = {
 # extensionless filename. Flattened from the modality map above.
 _ALLOWED_MEDIA_EXTS = frozenset(ext for exts in _MEDIA_EXTS_BY_MODALITY.values() for ext in exts)
 
+# AUDIO MIME subtype -> canonical extension. A data-URI's subtype is a best-effort
+# extension hint; these aliases map the common audio subtype spellings to their
+# canonical file extension so a WAV saved from 'audio/x-wav'/'audio/vnd.wave' does
+# NOT fall through to the .mp3 default. Single source of truth; applied only for
+# audio media_type in _save_media_from_data_uri, then validated against
+# _ALLOWED_MEDIA_EXTS (a canonical ext that is not accepted still falls back).
+_AUDIO_MIME_SUBTYPE_TO_EXT = {
+    'x-wav': 'wav',
+    'vnd.wave': 'wav',
+    'wave': 'wav',
+    'mpeg': 'mp3',
+    'mpga': 'mp3',
+    'x-m4a': 'm4a',
+    'mp4a': 'm4a',
+    'x-flac': 'flac',
+    'ogg': 'ogg',
+    'vorbis': 'ogg',
+}
+
+
 
 def save_media_to_media(
     source: Union[str, Path, bytes, io.BytesIO],
@@ -345,6 +365,10 @@ def _save_media_from_data_uri(data_uri: str, media_type: str) -> str:
     # only recognised extensions and otherwise falls back to the default (mp3/mp4).
     mime = match.group(1)
     ext = mime.rsplit('/', 1)[-1] if '/' in mime else ''
+    # Canonicalise common audio subtypes (audio/x-wav -> wav, audio/mpeg -> mp3, ...)
+    # so a known container keeps its real extension instead of the .mp3 fallback.
+    if media_type in ('audio', 'music') and ext:
+        ext = _AUDIO_MIME_SUBTYPE_TO_EXT.get(ext.lower(), ext)
 
     try:
         raw = base64.b64decode(match.group(2))
