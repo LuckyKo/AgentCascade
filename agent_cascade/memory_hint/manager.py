@@ -31,7 +31,7 @@ from agent_cascade.log import logger
 from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
                                     SKILL_PRECISION_WEIGHT, SKILL_PRECISION_K,
-                                    SKILL_PRECISION_FLOOR, SKILL_ZERO_LOAD_SUPPRESS_HINTS)
+                                    SKILL_PRECISION_FLOOR)
 
 from .matcher import MemoryMatcher
 from .skill_gate import describe_dropped, filter_stopword_only_names
@@ -754,9 +754,9 @@ class MemoryHintManager:
         SKILL_HINT_ENTRY_COOLDOWN_SECONDS)`` so skill repeats are never per-turn —
         BUG_0233), then a **relative noise gate** evaluated on the post-dedup survivors,
         then a **content gate** that drops candidates carried only by function/boilerplate
-        words (BUG_0226), then a **precision re-rank + 0-load suppression** (Gate 4,
-        BUG_0189 #5 — ranking-only, gated on ``SKILL_PRECISION_WEIGHT`` /
-        ``SKILL_ZERO_LOAD_SUPPRESS_HINTS``; a no-op when both are off), then the entry cap.
+        words (BUG_0226), then a **precision re-rank** (Gate 4, BUG_0189 #5 —
+        ranking-only, gated on ``SKILL_PRECISION_WEIGHT``; a no-op when it is off),
+        then the entry cap.
         There is *no* specificity-gap requirement —
         multiple relevant skills are legitimate. All floor state is independent of the
         memory pipeline (different measure, different lock). A failure here can never
@@ -886,21 +886,20 @@ class MemoryHintManager:
             logger.debug('[MEMORY_HINT] %s: content gate left no skill hint', name)
             return []
 
-        # ── Gate 4: PRECISION re-rank + 0-load suppression (BUG_0189 #5) ─────────
+        # ── Gate 4: PRECISION re-rank (BUG_0189 #5) ──────────────────────────────
         # RANKING ONLY — the junk guard, adaptive floor, EWMA feed, noise denominator
         # and content gate above are byte-identical to the pre-fix behaviour (mirrors
         # BUG_0226's "scorer untouched" precedent). Placed AFTER the content gate (so
         # it sees only names that will actually render) and BEFORE the cap (so the
         # survivors compete for the N slots on precision, not raw topicality):
         #   w(s) = max(FLOOR, min(1.0, (loads+K)/(hints+K)))   # demote-only multiplier
-        #   if ZERO_LOAD_SUPPRESS > 0: drop s when loads==0 AND hints >= N
         #   sort to_hint by (score * w(s)) desc                # stable; ties keep order
         # loads/hints come from the SAME durable store (agents/global/skills-metrics.json)
         # via get_metrics(); missing fields read as 0, so a fresh store, an unavailable
         # ledger, or a MagicMock pool yields w==1.0 and no suppression ⇒ byte-identical
-        # to the pre-fix score-descending order. Both knobs off ⇒ to_hint untouched by
+        # to the pre-fix score-descending order. Precision off ⇒ to_hint untouched by
         # construction (see settings.py). A demoted skill is never buried below FLOOR.
-        if SKILL_PRECISION_WEIGHT or SKILL_ZERO_LOAD_SUPPRESS_HINTS > 0:
+        if SKILL_PRECISION_WEIGHT:
             try:
                 metrics = sm.get_metrics()
             except Exception as e:                         # plan §D6 — never break the memory path
@@ -917,32 +916,15 @@ class MemoryHintManager:
                 except (TypeError, ValueError):            # malformed field → neutral (0, 0)
                     return 0, 0
 
-            if SKILL_ZERO_LOAD_SUPPRESS_HINTS > 0:
-                survivors, suppressed = [], []
-                for nm in to_hint:
-                    loads, hints = _loads_hints(nm)
-                    if loads == 0 and hints >= SKILL_ZERO_LOAD_SUPPRESS_HINTS:
-                        suppressed.append(f'{nm}(hints={hints})')
-                    else:
-                        survivors.append(nm)
-                if suppressed:
-                    logger.debug('[MEMORY_HINT] %s: 0-load suppress %s (N=%d)',
-                                 name, ', '.join(suppressed), SKILL_ZERO_LOAD_SUPPRESS_HINTS)
-                to_hint = survivors
-                if not to_hint:
-                    logger.debug('[MEMORY_HINT] %s: 0-load suppression left no skill hint', name)
-                    return []
+            K = SKILL_PRECISION_K
+            floor_w = SKILL_PRECISION_FLOOR
 
-            if SKILL_PRECISION_WEIGHT:
-                K = SKILL_PRECISION_K
-                floor_w = SKILL_PRECISION_FLOOR
-
-                def _effective(nm):                        # score × demote weight (stable ties)
-                    loads, hints = _loads_hints(nm)
-                    den = hints + K
-                    w = max(floor_w, min(1.0, (loads + K) / den)) if den > 0 else 1.0
-                    return scores.get(nm, 0.0) * w
-                to_hint = sorted(to_hint, key=_effective, reverse=True)
+            def _effective(nm):                        # score × demote weight (stable ties)
+                loads, hints = _loads_hints(nm)
+                den = hints + K
+                w = max(floor_w, min(1.0, (loads + K) / den)) if den > 0 else 1.0
+                return scores.get(nm, 0.0) * w
+            to_hint = sorted(to_hint, key=_effective, reverse=True)
 
         max_entries = SKILL_HINT_MAX_ENTRIES            # plan §D3 cap (after dedup/cooldown)
         if max_entries > 0:

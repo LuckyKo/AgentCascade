@@ -2,11 +2,10 @@
 
 The memory-hint skill sub-pipeline used to list skills purely by match SCORE, so a
 skill that is topical-but-never-loaded outranked a slightly-less-topical skill that is
-actually loaded. Gate 4 adds a demote-only re-rank and a hard 0-load suppression, both
-driven by the durable load ledger (``agents/global/skills-metrics.json``):
+actually loaded. Gate 4 adds a demote-only re-rank driven by the durable load ledger
+(``agents/global/skills-metrics.json``):
 
     w(s) = max(FLOOR, min(1.0, (loads+K)/(hints+K)))          # demote-only multiplier
-    if ZERO_LOAD_SUPPRESS > 0: drop s when loads==0 AND hints >= N
     sort to_hint by (score * w(s)) desc                        # stable; ties keep order
 
 These tests isolate Gate 4: the adaptive floor / EWMA feed and the content gate are
@@ -30,8 +29,6 @@ from agent_cascade.memory_hint.manager import MemoryHintManager
 LOADED = 'skill-really-gets-loaded'
 NEVER = 'skill-topical-but-never-loaded'
 DROP = 'skill-zero-load-over-suppressed'
-KEEP = 'skill-just-under-suppression'
-LOADED_BUT_HEAVY = 'skill-loaded-but-many-hints'
 
 LESSONS = [
     ('precision-test.md', 'Precision Test',
@@ -142,7 +139,6 @@ def gate4_off(monkeypatch):
     monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_WEIGHT', 1)
     monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_K', 1.0)
     monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_FLOOR', 0.35)
-    monkeypatch.setattr(manager_mod, 'SKILL_ZERO_LOAD_SUPPRESS_HINTS', 50)
 
 
 def _neutralize_gates(mgr, monkeypatch):
@@ -178,30 +174,6 @@ def test_precision_demotes_never_loaded_skill_below_a_loaded_one(tmp_path, monke
     assert out != [NEVER, LOADED]
 
 
-def test_zero_load_suppression_at_the_N_boundary(tmp_path, monkeypatch):
-    """Hard drop ONLY when loads==0 AND hints>=N; boundary must be exact.
-
-    N is lowered to 5. DROP(hints=5) is suppressed, KEEP(hints=4) survives, and
-    LOADED_BUT_HEAVY(loads=1, hints=5) survives because loads>0. Precision re-rank is
-    disabled here so the ONLY change is the hard drop."""
-    monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_WEIGHT', 0)
-    monkeypatch.setattr(manager_mod, 'SKILL_ZERO_LOAD_SUPPRESS_HINTS', 5)
-    sm = _StubSkillManager(
-        matches=[(DROP, 0.70), (KEEP, 0.65), (LOADED_BUT_HEAVY, 0.60)],
-        metrics={DROP: {'total_loads': 0, 'hints': 5},          # == N → drop
-                 KEEP: {'total_loads': 0, 'hints': 4},          # == N-1 → keep
-                 LOADED_BUT_HEAVY: {'total_loads': 1, 'hints': 5}},  # loads>0 → keep
-    )
-    mgr, inst, _ = _make_mgr(tmp_path, sm)
-    _neutralize_gates(mgr, monkeypatch)
-
-    out = mgr._match_skills_for_hint(_job(), _settings(), inst)
-    assert DROP not in out, 'a 0-load skill at hints==N must be suppressed'
-    assert KEEP in out, 'a 0-load skill at hints==N-1 must NOT be suppressed'
-    assert LOADED_BUT_HEAVY in out, 'suppression must require loads==0, not just high hints'
-    assert out == [KEEP, LOADED_BUT_HEAVY], 'survivors keep their score-descending order'
-
-
 def test_missing_hints_field_is_neutral_not_dropped(tmp_path, monkeypatch, gate4_off):
     """A metrics entry with no 'hints' key (a legacy ledger record) must read as hints=0,
     NOT crash and NOT suppress — it gets full weight and is listed normally."""
@@ -219,7 +191,6 @@ def test_gate4_is_byte_identical_no_op_when_both_knobs_off(tmp_path, monkeypatch
     """With WEIGHT=0 and SUPPRESS=0 the gate must not touch the order or drop anything,
     even when a skill is loaded-0 and hinted heavily (the exact profile it would demote)."""
     monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_WEIGHT', 0)
-    monkeypatch.setattr(manager_mod, 'SKILL_ZERO_LOAD_SUPPRESS_HINTS', 0)
     sm = _StubSkillManager(
         matches=[(NEVER, 0.55), (LOADED, 0.45), (DROP, 0.40)],
         metrics={NEVER: {'total_loads': 0, 'hints': 9999},

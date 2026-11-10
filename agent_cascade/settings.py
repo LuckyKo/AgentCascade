@@ -768,13 +768,6 @@ SKILL_PRECISION_K: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_K', '1
 # but never buried below FLOOR × score — other skills stay promotable (the guardrail for
 # rare-but-correct skills that are rarely topical and so never accumulate enough hints).
 SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.35'))
-# SKILL_ZERO_LOAD_SUPPRESS_HINTS (N): hard-drop a skill from hints when its lifetime
-# total_loads == 0 AND lifetime hints >= N. 0 = off. The only hard drop; everything else is
-# demotion only. Default N=4: sits just above the auto-load threshold (3), so the hard-drop
-# engages for the observed 0-load, heavily-hinted cohort while a near-auto-load skill
-# (hints 1-3) is demoted only, never suppressed; suppress and auto-load never race.
-SKILL_ZERO_LOAD_SUPPRESS_HINTS: int = int(
-    os.getenv('AGENT_CASCADE_SKILL_ZERO_LOAD_SUPPRESS_HINTS', '4'))
 
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
