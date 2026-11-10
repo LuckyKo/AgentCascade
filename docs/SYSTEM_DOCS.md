@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 0.3.117 (keep in sync with `agent_cascade.__version__`)
-**Last Updated:** 2026-10-24
+**Version:** 0.14.35 (keep in sync with `agent_cascade.__version__`)
+**Last Updated:** 2026-11-10
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -17,7 +17,8 @@
 7. [Agent Templates & DNA](#7-agent-templates--dna)
 8. [WebUI Architecture](#8-webui-architecture)
 9. [Memory-Hint System](#9-memory-hint-system)
-10. [Tool System & MCP Discovery](#10-tool-system--mcp-discovery)
+10. [Skill System](#10-skill-system)
+11. [Tool System & MCP Discovery](#11-tool-system--mcp-discovery)
 
 ---
 
@@ -40,10 +41,11 @@ Agent Cascade eliminates this duality entirely. Every agent — including the or
 | **Multi-Agent Delegation** | Agents call other agents via `call_agent`, which creates new instances in the pool — either synchronously (blocking) or in parallel (non-blocking, with notification on completion) |
 | **Memory Persistence** | All agent conversations are written to append-only JSONL log files. Sessions can be restored from disk after a crash or restart using a marker stacking reload algorithm |
 | **Context Compression** | When an agent's conversation approaches token limits, the system automatically compresses older messages into summary markers, keeping the working set within budget while preserving context through cumulative summaries |
-| **Loop Detection & Recovery** | The system detects when agents enter repetitive behavior patterns and automatically rolls back to a prior state with a corrective hint, retrying up to three times before escalating |
+| **Loop Detection & Recovery** | The system detects when agents enter repetitive behavior patterns and automatically rolls back to a prior state with a corrective hint, retrying up to `max_auto_rollbacks` (default 5) before escalating |
 | **Parallel Execution** | Multiple sub-agents can run concurrently in a thread pool, each with its own execution loop, while the caller waits for notifications via message queues |
 | **Halt/Resume/Terminate** | Any agent instance can be paused or resumed at any time from the UI. Agents also auto-dismiss after a configurable idle period to keep the pool clean |
 | **Security Review** | Sensitive tool calls (shell commands, file writes) trigger a Security Advisor agent that analyzes the request and approves or rejects it before execution proceeds |
+| **Skill System** | Reusable cross-project procedures (`SKILL.md`) are discovered, auto-loaded into context, evolved via `propose_skill`, and **automatically invalidated/rebalanced** — low-quality or stale skills are auto-retired, so an agent never accumulates dead expertise. See §10 |
 
 ---
 
@@ -1332,18 +1334,123 @@ Run the full `tests/memory_hint/` suite serially (per lesson `pytest-docker-subp
 
 ---
 
-## 10. Tool System & MCP Discovery
+## 10. Skill System
+
+The **Skill System** is the lifecycle manager for reusable, cross-project *procedures* ("how to do X"). A skill is discovered on demand, optionally auto-loaded into an agent's context, evolved by agents via proposals, and — critically — **automatically invalidated and rebalanced**: skills that prove useless, bad, or stale are auto-retired to `INACTIVE` without any manual cleanup.
+
+> **Why this section matters:** the skill system already owns skill lifecycle and invalidation. A reader checking whether "skills need a load/usage gate" or "we need to suppress useless skills somewhere" should see that this is handled here — in the durable-metrics scoring + rebalance pass — and NOT somewhere ad-hoc (e.g. in the hint pipeline). The hint gate only *suggests*; **invalidation lives entirely in this section's rebalance pass.**
+
+The hint pipeline (§9) *suggests* skills but never decides which remain eligible to be suggested — that is this section. §9.5 explains *how* a skill is suggested; this section explains *whether a skill still exists to be suggested at all*.
+
+Module map: `agent_cascade/skills/` (manager, scoring, matcher, advisor, parser) + `agent_cascade/memory_hint/manager.py` (auto-load + the precision re-rank) + knobs in `agent_cascade/settings.py`.
+
+### 10.1 What a Skill Is
+
+A skill is a single **`SKILL.md`** file: YAML frontmatter (`name`, `description`, `version`, `triggers`) followed by a markdown body of the procedure. The frontmatter `description`/`triggers` are what scoring and `scan_skills` match against; the body is the expertise injected into context.
+
+- **Location:** discovered from `agents/global/skills/` (the global root), with per-agent (`agents/*/skills/`) and user (`workspace/skills/`) roots that override on name collision; a pending upgrade candidate under `agents/global/candidates/` is *strictly highest* priority while it exists (`skills/manager.py:72-79`).
+- **Skill vs memory:** a skill is a **cross-project procedure** ("how to do X"); a `.agent_lessons/*.md` memory is a **project-specific fact** ("what happened with Y"). They live in separate trees and are surfaced by separate subsystems (this section vs §9's memory path).
+
+### 10.2 Discovery & Loading
+
+| Mechanism | Entry point | What it does |
+|-----------|-------------|--------------|
+| **Discover/rank** | `scan_skills` tool (`tools/custom/scan_skills.py:32`) | Relevance-scored listing of registered skills for a query; `preview="<name>"` returns a skill's raw text. Read-only. |
+| **Explicit load** | `load_skill` tool (`tools/custom/load_skill.py:21`) | Injects the selected skills' full instructions into the *calling* agent's context this turn. |
+| **Auto-load (count)** | `_maybe_autoload_skills` (`memory_hint/manager.py:613`) | If a skill has been *hinted* `memory_hint_skill_autoload_threshold` times (default **3**) and was never loaded, it is auto-injected via the same `inject_skill` path an explicit `load_skill` uses (BUG_0263). Best-effort; never breaks the hint path. |
+
+Auto-load is gated by `skill_autoload_enabled` (ON by default) and read live from the pool config each cycle (`memory_hint/manager.py:380-394`).
+
+### 10.3 Evolution (`propose_skill`)
+
+`propose_skill` (`tools/custom/propose_skill.py:338`) creates a new skill **or** updates an existing one. There is no manual review step — a rating-based decision gate finalizes both paths:
+
+- **New skill** — created **unrated** (no usage/ratings yet) and served immediately. Once validated it is auto-promoted into `agents/global/skills/` (`AUTO_SKILL_AUTO_PROMOTE=True`, `settings.py:920`). Being unrated means scoring treats it as neutral quality (`q̂ = q0` at `n=0`) and it enters the PROTECTED/fair-window so a brand-new skill is never instantly evicted.
+- **Update** — written as a **live-serving candidate** under `agents/global/candidates/<name>/SKILL.md`. A candidate always wins the serving race while it exists, so the new version serves right away (`_PRIORITY_CANDIDATE=4`, `manager.py:74-79`). It is later **promoted** or **discarded** by `evaluate_candidates` (the rating-based decision gate, `manager.py:2496`): once the candidate accumulates `CANDIDATE_MIN_RATINGS` (5) ratings it is compared to the incumbent (2-decimal averages) — candidate ≥ incumbent → promote, else the incumbent is restored. A candidate short of the bar after `CANDIDATE_MAX_PENDING_DAYS` (14) is promoted anyway (it has been serving since registration, so the swap is a no-op; prevents a hanging unrated candidate). Triggered on startup, at each registration, and on a 30 s safety timer.
+
+### 10.4 Invalidation & Rebalance (the lifecycle gate — the key behavior)
+
+`rebalance_active_skills` (`manager.py:755`) is a one-shot pass that classifies every active skill and evicts the losers. It runs in a background thread at startup (`pool/core.py:318-347`), gated by the master switch `skill_auto_invalidate_enabled` (ON by default). It never raises — a failure logs and can never break startup.
+
+**Scoring** (`skills/scoring.py`, pure — no I/O). Each skill's score is a bounded product of usage, quality, load-waste, and recency factors:
+
+`score = u(n) · [ q̂(n,avg) / 10 ] · w(L,n) · r(A)`
+
+where `u` = saturating usage (`n`=loads), `q̂` = shrinkage quality vs the neutral baseline `q0=5.0`, `w` = load-waste penalty (`L` loads vs `n` actually used — penalizes skills loaded but never used), and `r` = bounded activity-recency tiebreaker over `A` = user-turns since the skill last had a chance to be used.
+
+**Classification** (`skill_classify`, `scoring.py:59`; precedence BAD > PROTECTED > {USEFUL, USELESS} > UNPROVEN, keyed off `q̂`, `n`, and `A` — *not* the raw score). Defaults: `q0=5.0`, `δq=0.5`, `n_min=5`, `fair_window_turns=50`.
+
+| Class | Trigger | Eviction behavior |
+|-------|---------|-------------------|
+| **BAD** | `q̂ ≤ q0−δq` **and** `n ≥ n_min` (demonstrably harmful, confident) | Evicted by the absolute gate **even if young** |
+| **PROTECTED** | `A < fair_window` (~50 turns) unless BAD | **Immune** to both gates while the fair window is open (a new/just-used skill can't be instantly retired) |
+| **USEFUL** | `q̂ ≥ q0+δq` **and** `n ≥ n_min` | Kept; lowest eviction priority |
+| **USELESS** | `|q̂−q0| ≤ δq` (neutral quality, not earning its keep) | Evicted by the absolute gate **once past the fair window** (while young it is PROTECTED) |
+| **UNPROVEN** | otherwise (below/above baseline but `n < n_min`) | Monitor / keep (exploration) — only cap-eligible |
+
+**Eviction is OR-composed** (`manager.py:776-872`): a skill is removed if **either** the absolute gate catches it (`_ABSOLUTE_GATE_CLASSES = {BAD, USELESS}`, `manager.py:67`) **or** the count-cap budget selects it. PROTECTED skills are excluded from the candidate set entirely. The eviction set is ordered by `eviction_rank_key` (`scoring.py:79`) so `BAD < USELESS < UNPROVEN < USEFUL` evicts first, and bounded by `max_evictions_per_pass` so a bad config can't nuke the corpus. The count target is `raw = round(K × N_qualified)` clamped to `[SKILL_ACTIVE_MIN_CAP=20, SKILL_ACTIVE_MAX_CAP=200]` with `SKILL_ACTIVE_TARGET_K=1.0` (`settings.py:802-804`); `min_cap` is a **lower bound on eviction**, never a force-enable mandate.
+
+**An evicted skill is set `status='inactive'`** and added to `_disabled_names`, then dropped from the discovery cache + registry (`manager.py:883-897`) → it is **no longer servable and no longer hintable**. A later rebalance can re-enable it if its ranking recovers (bounded by the servable corpus).
+
+**`prune_stale_metrics`** (`manager.py:351`) then removes the metrics entry for skills that leave the live set entirely (file gone everywhere). Disabled, platform-incompatible, `INACTIVE/`-subfolder, and candidate skills are **kept** (their on-disk artifact still exists). A scan error on an existing root aborts the prune — a partial scan never triggers deletion.
+
+### 10.5 Durable Metrics Store (`agents/global/skills-metrics.json`)
+
+A **durable, cross-restart per-skill clock** — not a per-session counter (`manager.py:239`, schema 1.3, `_default_metrics_entry` at `manager.py:116`). This persistence is what makes invalidation correct: usage/recency survives restarts and session boundaries, so a skill loaded once across many sessions isn't mistaken for fresh.
+
+| Field | Meaning |
+|-------|---------|
+| `total_loads` | Cumulative loads (drives the usage + load-waste factors) |
+| `hints` | Cumulative hint credits (feeds the precision re-rank, §10.6) |
+| `status` | `active` \| `inactive` — the live eligibility flag |
+| `last_activity_turn` | Global-turn value at the skill's last activity (for the recency age `A`) |
+| `by_version` | Per-version rating history (avg rating + `last_used`), schema 1.2 |
+| *(top-level)* `global_activity_turns` | Cumulative user-turn clock bumped once per user turn; drives `A` for every skill |
+
+### 10.6 Precision Demotion (in the hint gate)
+
+Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` triggers a **re-rank, not a hard drop** (`memory_hint/manager.py:900-927`, knobs `settings.py:762-770`). A skill's effective order is `score × w` where `w = max(SKILL_PRECISION_FLOOR, min(1, (loads+K)/(hints+K)))` with `K=SKILL_PRECISION_K=1.0` (Laplace smoothing) and `SKILL_PRECISION_FLOOR=0.35`. A heavy-hinted but rarely-loaded skill is softly demoted (surfaced lower) — but never buried below `FLOOR × score`, so a rare-but-correct skill stays promotable. When `SKILL_PRECISION_WEIGHT=0` the layer is a no-op and order stays score-descending.
+
+### 10.7 Settings (knobs)
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `skill_auto_invalidate_enabled` | `True` | Master switch for the whole rebalance/invalidate pass (`pool/core.py:319`). |
+| `memory_hint_skill_autoload_threshold` | `3` | Hint-count threshold before auto-loading a repeatedly-hinted skill (`memory_hint/manager.py:382`). |
+| `memory_hint_skill_autoload_enabled` | `True` | On/off for the auto-load above. |
+| `SKILL_ACTIVE_TARGET_K` | `1.0` | Active target = `round(K × N_qualified)` (`settings.py:802`). |
+| `SKILL_ACTIVE_MIN_CAP` / `SKILL_ACTIVE_MAX_CAP` | `20` / `200` | Clamp on the active count (`settings.py:803-804`). |
+| `SKILL_PRECISION_WEIGHT` | `1` | Enable the hint re-rank (§10.6); `0` = off (`settings.py:762`). |
+| `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.35` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:766,770`). |
+| `CANDIDATE_MIN_RATINGS` / `CANDIDATE_MAX_PENDING_DAYS` | `5` / `14` | Decision-gate bar for promoting/discarding an update candidate (`settings.py:921-928`). |
+
+Scoring internals (`q0`, `kq`, `n_half`, `g_half`, `r_floor`, `tau_turns`, `δq`, `n_min`, `fair_window_turns`) are module constants in `skills/scoring.py` / `manager.py`, not user settings.
+
+### 10.8 API
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/skills` | List registered skills (`api_server.py:1611`). |
+| `GET /api/skills/threshold` | Read the active skill threshold setting (`api_server.py:1619`). |
+| `POST /api/skills/toggle` | Enable/disable a single skill (`api_server.py:1726`). |
+| `POST /api/skills/migrate` | One-time metrics-store migration (`api_server.py:1740`). |
+
+> **Not present here, by design:** there is no separate "zero-load suppression" gate in the hint pipeline. Suppression of never-used skills is handled here (the load-waste factor `w`, the `USELESS`/`BAD` classification, and the rebalance eviction), so the hint gate does not duplicate it.
+
+---
+
+## 11. Tool System & MCP Discovery
 
 Agent Cascade offers two classes of tools to the LLM:
 
 - **Core tools** (file ops, `shell_cmd`, web, `call_agent`, `tool_search`, …) — always present in the offered `functions=` set.
 - **MCP tools** (from connected Model Context Protocol servers, e.g. `chrome-devtools`, `blender`) — *deferred*: they are **not** in the offered set until an agent discovers them.
 
-### 10.1 Why MCP Tools Are Deferred
+### 11.1 Why MCP Tools Are Deferred
 
 Offering every MCP tool on every call bloats the `functions=` payload (each tool definition is ~200–500 tokens). With dozens of MCP tools that is thousands of tokens per call for tools the agent rarely uses. Deferral keeps the offered set small (core tools only) and lets the agent pull MCP tools in on demand.
 
-### 10.2 `tool_search` — On-Demand Discovery
+### 11.2 `tool_search` — On-Demand Discovery
 
 `tool_search` is the discovery mechanism:
 
@@ -1352,7 +1459,7 @@ Offering every MCP tool on every call bloats the `functions=` payload (each tool
 
 Unlocks are **append-only** on the instance's discovered set; a tool, once discovered, stays offered for the rest of the session. The result carries a trailing JSON envelope (`{"tool_search": {"loaded": [...]}}`) that `session_io` re-derives on load, so a reloaded session offers the same tools.
 
-### 10.3 The Cache-Bust Cost (Important)
+### 11.3 The Cache-Bust Cost (Important)
 
 The `functions=` array is serialized into the prompt **right after the system prompt** — i.e. inside the KV-cache prefix. Because the cache is strictly prefix-based:
 
@@ -1411,6 +1518,7 @@ Active Execution ──→ Phases 1-5 repeat until completion
 | MCP Server Config | `config/mcp_servers.json` (raw servers-map; `enabled` defaults true when absent) — served by `api_server.py` MCP routes (see §3.4) |
 | Compression | `compression/core.py`, `compression/agent_invoker.py` (also `handler.py`, `helpers.py`) |
 | Memory-Hint System | `memory_hint/manager.py`, `memory_hint/matcher.py`, `memory_hint/vault.py`, `memory_hint/stats.py` (see §9) |
+| Skill System | `skills/manager.py`, `skills/scoring.py`, `skills/matcher.py`, `skills/advisor.py`, `skills/parser.py`; tools `tools/custom/{scan_skills,load_skill,propose_skill}.py`; durable store `agents/global/skills-metrics.json` (see §10) |
 | Agent Base Classes | `agent_cascade/agent.py`, `agent_cascade/agent_instance.py`, `agent_cascade/agents/fncall_agent.py`, `agent_cascade/agents/assistant.py` |
 | Tools | `tools/*.py` |
 
