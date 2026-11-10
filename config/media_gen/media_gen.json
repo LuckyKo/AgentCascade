@@ -71,13 +71,25 @@
     }
   },
   "voice_to_text": {
-    "engine": "audio_cpp",
-    "binary": "N:/work/WD/audio.cpp/build/windows-cuda-release/bin/audiocpp_cli.exe",
+    "binary": "n:\\work\\stuff\\Beta\\llama-autoloader\\backends\\audiocpp-v0.9.4-cuda13.3\\audiocpp_cli.exe",
     "models_dir": "N:/work/stuff/Beta/audio",
     "family": "qwen3_asr",
-    "model": "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+    "model": "n:\\work\\stuff\\Beta\\audio\\Qwen3-ASR-1.7B-GGUF\\qwen3-asr-1.7b-q8_0.gguf",
     "timeout": 300,
-    "release_model_around_call": true
+    "release_model_around_call": true,
+    "engine": "audio_cpp"
+  },
+  "audiocpp_tts": {
+    "binary": "n:\\work\\stuff\\Beta\\llama-autoloader\\backends\\audiocpp-v0.9.4-cuda13.3\\audiocpp_cli.exe",
+    "models_dir": "N:/work/stuff/Beta/audio",
+    "family": "omnivoice",
+    "model": "omnivoice-q8_0.gguf",
+    "device": 1,
+    "voices_dir": "N:/work/WD/Chatterbox-TTS-Server/voices",
+    "default_voice": "af_Bella.wav",
+    "reference_text": "That is the germ of my great discovery. But you are wrong to say that we cannot move about in time. For instance, if I am recalling an incident very vividly, I go back to the instant of its occurrence. I become absent-minded, as you say. I jump back for a moment.",
+    "timeout": 300,
+    "release_model_around_call": false
   },
   "svg2png": {
     "release_model_around_call": false

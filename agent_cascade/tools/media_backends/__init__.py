@@ -23,10 +23,11 @@ from .comfyui import ComfyUIBackend
 from .kobold_tts import KoboldTTSBackend  # STUB backend: capabilities + config ownership only
 from .chatterbox import ChatterboxBackend  # one-shot CLI TTS (MP3 to stdout)
 from .voice_to_text import VoiceToTextBackend  # one-shot CLI ASR (audio → text, output_kind='text')
+from .audiocpp_tts import AudiocppTTSBackend  # one-shot CLI TTS + zero-shot voice cloning (WAV)
 from .svg2png import Svg2PngBackend  # in-process cairosvg render (SVG in prompt → PNG, no VRAM/server)
 
 _BACKEND_CLASSES = (SdcppBackend, ComfyUIBackend, KoboldTTSBackend, ChatterboxBackend,
-                    VoiceToTextBackend, Svg2PngBackend)
+                    VoiceToTextBackend, AudiocppTTSBackend, Svg2PngBackend)
 
 BACKENDS: dict = {}  # id -> backend instance
 
