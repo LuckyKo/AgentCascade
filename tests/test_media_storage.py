@@ -745,6 +745,64 @@ class TestParseMultimodalContent:
         assert note_idx == img_idx + 1, \
             f"'[NOTE: Saved as ...]' notice must immediately follow the image; got image@{img_idx}, note@{note_idx}: {result}"
 
+    def test_bare_image_path_yields_image_contentitem(self):
+        """The critical gate: ![name](<local image path>) -> {'image': <path>}.
+
+        Previously images worked ONLY via data:image/*; a bare path was dropped to
+        text because neither _MEDIA_EXT_ALT nor _media_modality recognised image
+        extensions. This pins that upload-then-reference image paths parse.
+        """
+        from agent_cascade.api_server import _parse_multimodal_content
+        import agent_cascade.content_parse as content_parse
+
+        # save_image_from_data_uri must NEVER run for a bare path — patch it to raise
+        # so any accidental compat-path invocation fails the test loudly.
+        def _boom(uri):
+            raise AssertionError('save_image_from_data_uri must not be called for a bare path')
+
+        original_func = content_parse.save_image_from_data_uri
+        try:
+            content_parse.save_image_from_data_uri = _boom
+
+            fake_path = 'N:/work/WD/AgentWorkspace/logs/media/images/img_test.jpg'
+            result = _parse_multimodal_content(f'text ![a]({fake_path}) text')
+
+            assert isinstance(result, list), f'Expected list, got {type(result)}: {result}'
+            image_items = [item for item in result if 'image' in item]
+            assert len(image_items) == 1, f'Expected 1 image item, got {result}'
+            assert image_items[0]['image'] == fake_path
+            assert not image_items[0]['image'].startswith('data:')
+
+            # Second vocab member (.png) also classifies as image.
+            png_path = 'N:/work/WD/AgentWorkspace/logs/media/images/img_test.png'
+            result = _parse_multimodal_content(f'![a]({png_path})')
+            image_items = [item for item in result if 'image' in item]
+            assert len(image_items) == 1 and image_items[0]['image'] == png_path, result
+        finally:
+            content_parse.save_image_from_data_uri = original_func
+
+    def test_bare_audio_path_yields_audio_contentitem(self):
+        """Regression: bare audio path -> {'audio': <path>} (modality-generic else-branch)."""
+        from agent_cascade.api_server import _parse_multimodal_content
+
+        fake_path = 'N:/work/WD/AgentWorkspace/logs/media/audio/aud_test.mp3'
+        result = _parse_multimodal_content(f'![a]({fake_path})')
+        assert isinstance(result, list), f'Expected list, got {type(result)}: {result}'
+        audio_items = [item for item in result if 'audio' in item]
+        assert len(audio_items) == 1, f'Expected 1 audio item, got {result}'
+        assert audio_items[0]['audio'] == fake_path
+
+    def test_bare_video_path_yields_video_contentitem(self):
+        """Regression: bare video path -> {'video': <path>} (modality-generic else-branch)."""
+        from agent_cascade.api_server import _parse_multimodal_content
+
+        fake_path = 'N:/work/WD/AgentWorkspace/logs/media/video/vid_test.mp4'
+        result = _parse_multimodal_content(f'![a]({fake_path})')
+        assert isinstance(result, list), f'Expected list, got {type(result)}: {result}'
+        video_items = [item for item in result if 'video' in item]
+        assert len(video_items) == 1, f'Expected 1 video item, got {result}'
+        assert video_items[0]['video'] == fake_path
+
 
 class TestViewImageIntegration:
     """Integration test for view_image tool returning path-based ContentItems."""

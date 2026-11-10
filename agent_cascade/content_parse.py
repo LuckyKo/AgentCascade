@@ -60,6 +60,7 @@ def _rewrite_goal_command(text):
     return f'{_TASK_PREFIX} User:\n{rest}'
 
 
+_IMAGE_EXTS = tuple('.' + ext for ext in _MEDIA_EXTS_BY_MODALITY['image'])
 _AUDIO_EXTS = tuple('.' + ext for ext in _MEDIA_EXTS_BY_MODALITY['audio'])
 _VIDEO_EXTS = tuple('.' + ext for ext in _MEDIA_EXTS_BY_MODALITY['video'])
 
@@ -68,8 +69,8 @@ def _media_modality(url):
     """Classify a markdown media URL into 'image'/'audio'/'video', or None.
 
     Recognizes data:image/*, data:audio/*, data:video/* data-URIs and local
-    file/drive paths (by audio/video extension). Returns None for anything that
-    does not match, so the caller can degrade to a text path-reference rather
+    file/drive paths (by image/audio/video extension). Returns None for anything
+    that does not match, so the caller can degrade to a text path-reference rather
     than crash.
     """
     low = url.lower()
@@ -81,6 +82,8 @@ def _media_modality(url):
         return 'video'
     if low.startswith('file://'):
         low = low[len('file://'):]
+    if low.endswith(_IMAGE_EXTS):
+        return 'image'
     if low.endswith(_AUDIO_EXTS):
         return 'audio'
     if low.endswith(_VIDEO_EXTS):

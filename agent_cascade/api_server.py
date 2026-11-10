@@ -81,6 +81,13 @@ session_lock = threading.Lock()
 # client. On timeout the offending connection is closed and discarded.
 WS_SEND_TIMEOUT = 5.0
 
+# ── Media upload endpoint ────────────────────────────────────────────────────
+# Generous server-side ceiling for a single media upload (transfer only). The
+# per-modality save layer enforces the storage bound that actually matters
+# (save_image_to_media rejects >10 MB post-encode); 100 MB just caps what the
+# browser may push in one multipart request. Single source of truth.
+MAX_MEDIA_UPLOAD_BYTES = 100 * 1024 * 1024
+
 # ── Idle status heartbeat (BUG_0142) ─────────────────────────────────────────
 # The frontend's `state.generating` is a one-way latch: it goes true on every
 # stream_update and is only lowered by a full `state`/`done` frame or an `error`
@@ -2693,6 +2700,73 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return {'text': text, 'filename': file.filename}
         except Exception as e:
             logger.error(f"Failed to parse document: {e}")
+            return JSONResponse(status_code=500, content={'message': str(e)})
+
+    def _classify_upload(file: UploadFile):
+        """Resolve ``(modality, ext_hint)`` for an uploaded media file.
+
+        Modality comes from the MIME prefix (``image/*`` / ``audio/*`` /
+        ``video/*``), else the filename extension against the single-source
+        ``_MEDIA_EXTS_BY_MODALITY``. Images are MIME-gated (the server re-encodes
+        to JPEG regardless of input format, so the input extension only needs to
+        be PIL-openable — do NOT hard-gate images on a specific extension).
+        Audio/video keep their extension as the save hint because the downstream
+        decode path depends on the container.
+
+        Raises:
+            MediaStorageError: for anything that is not recognised media
+            (surfaced to the client as a 400).
+        """
+        from agent_cascade.utils.media_utils import _MEDIA_EXTS_BY_MODALITY, MediaStorageError
+
+        name = file.filename or ''
+        ext = name.rsplit('.', 1)[1].lower() if '.' in name else ''
+        ctype = (file.content_type or '').lower()
+
+        if ctype.startswith('image/'):
+            return 'image', ext
+        if ctype.startswith('audio/'):
+            return 'audio', ext
+        if ctype.startswith('video/'):
+            return 'video', ext
+        # No usable MIME prefix: classify by extension (the user filename is only
+        # ever a hint — save_media_to_media generates the stored name).
+        for modality, exts in _MEDIA_EXTS_BY_MODALITY.items():
+            if ext in exts:
+                return modality, ext
+        raise MediaStorageError(
+            f"Unsupported media type for '{name}' (mime={file.content_type!r})."
+        )
+
+    @app.post('/api/media/upload')
+    async def upload_media(file: UploadFile = File(...)):
+        """Save an uploaded image/audio/video and return a path reference.
+
+        Implements the media-as-links principle: the browser uploads the raw file
+        over multipart HTTP (sidestepping the chat WS frame size cap) and receives
+        ``{'path': <abs fwd-slash path>}`` to insert as ``![name](<path>)``. Raw
+        base64 is produced only later, at the adapter boundary.
+        """
+        from agent_cascade.utils.media_utils import save_media_to_media, MediaStorageError
+        try:
+            data = await file.read()
+            if len(data) > MAX_MEDIA_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={'message': 'Media too large (max 100 MB).'},
+                )
+            modality, ext_hint = _classify_upload(file)
+            # Server-generated, traversal-safe filename (user filename is a hint
+            # only) — do NOT mirror /api/parse's raw-filename write.
+            path = save_media_to_media(
+                source=data, media_type=modality,
+                source_name='user_upload', ext=ext_hint,
+            )
+            return {'path': path}
+        except MediaStorageError as e:
+            return JSONResponse(status_code=400, content={'message': str(e)})
+        except Exception as e:
+            logger.error(f"Media upload failed: {e}")
             return JSONResponse(status_code=500, content={'message': str(e)})
 
     # Start media cleanup scheduler (non-critical)

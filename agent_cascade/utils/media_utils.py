@@ -222,6 +222,7 @@ def save_image_from_data_uri(data_uri: str) -> str:
 # media pipeline must agree on. Keep in sync with the JS dropdown lists in
 # web_ui/app.js and telegram_bridge/media_outbound.py.
 _MEDIA_EXTS_BY_MODALITY = {
+    'image': ('jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'),
     'audio': ('mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'),
     'video': ('mp4', 'webm', 'mkv', 'mov', 'avi'),
 }

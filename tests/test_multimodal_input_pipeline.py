@@ -55,10 +55,13 @@ class TestModalityClassification:
         assert _media_modality('N:\\music\\track.mp3') == 'audio'
         assert _media_modality('N:/video/clip.mp4') == 'video'
         assert _media_modality('file:///tmp/x.webm') == 'video'
+        # Bare image paths are now recognized (upload-then-reference parser gate).
+        assert _media_modality('N:/imgs/photo.jpg') == 'image'
+        assert _media_modality('/tmp/photo.PNG') == 'image'
 
     def test_non_media_returns_none(self):
         assert _media_modality('notmedia.txt') is None
-        assert _media_modality('foo.png') is None  # extension alone (not a data-URI) is not matched
+        assert _media_modality('archive.zip') is None  # non-media extension, no data-URI
 
 
 class TestParseMultimodalContent:
@@ -167,3 +170,72 @@ class TestMediaSaveHelpers:
             finally:
                 if os.path.exists(path):
                     os.remove(path)
+
+
+class TestAdapterPathResolution:
+    """Adapter boundary: conv_multimodel_value turns a local path into base64.
+
+    The upload-then-reference pipeline delivers bare media paths to the adapter;
+    conv_multimodel_value is the single place raw base64 is produced. These pin
+    that the three modalities resolve and that an over-sized image is downscaled
+    to IMAGE_MAX_SHORT_SIDE at the adapter (the server may already have done it).
+    """
+
+    def test_image_path_resolves_and_resizes(self):
+        import base64
+        import io
+        import tempfile
+
+        from PIL import Image
+
+        from agent_cascade.llm.qwenvl_oai import conv_multimodel_value
+        from agent_cascade.settings import IMAGE_MAX_SHORT_SIDE
+
+        fd, path = tempfile.mkstemp(suffix='.jpg')
+        os.close(fd)
+        try:
+            # Short side well over the cap so resize must engage.
+            Image.new('RGB', (4000, 3000), 'blue').save(path, format='JPEG')
+            url = conv_multimodel_value('image', path)
+            assert isinstance(url, str) and url.startswith('data:image/'), url[:50]
+            decoded = Image.open(io.BytesIO(base64.b64decode(url.split('base64,', 1)[1])))
+            assert min(decoded.size) <= IMAGE_MAX_SHORT_SIDE, (decoded.size, IMAGE_MAX_SHORT_SIDE)
+        finally:
+            os.remove(path)
+
+    def test_audio_path_resolves_to_base64(self):
+        """A local audio path resolves to a non-empty base64 payload (format/normalize
+        happen later in message conversion, pinned by test_endpoint_modality_flags.py)."""
+        import base64
+        import tempfile
+
+        from agent_cascade.llm.qwenvl_oai import conv_multimodel_value
+
+        fd, path = tempfile.mkstemp(suffix='.wav')
+        try:
+            os.write(fd, b'RIFF\x00\x00\x00\x00WAVEfmt ')
+            os.close(fd)
+            enc = conv_multimodel_value('audio', path)
+            assert isinstance(enc, str) and len(enc) > 0
+            # Must be pure base64 (no data: prefix) for the audio branch to pair with a format.
+            assert not enc.startswith('data:')
+            base64.b64decode(enc)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_video_path_resolves(self):
+        """A local video path resolves to a non-empty string at the adapter."""
+        import tempfile
+
+        from agent_cascade.llm.qwenvl_oai import conv_multimodel_value
+
+        fd, path = tempfile.mkstemp(suffix='.mp4')
+        try:
+            os.write(fd, b'\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom')
+            os.close(fd)
+            enc = conv_multimodel_value('video', path)
+            assert isinstance(enc, str) and len(enc) > 0
+        finally:
+            if os.path.exists(path):
+                os.remove(path)

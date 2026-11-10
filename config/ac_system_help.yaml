@@ -89,6 +89,7 @@ rest_api:
     - {method: GET,    path: /api/media_gen/tts_configs, summary: "List TTS voice-config stems (kokoro_default, outetts_default, ...)."}
     - {method: POST,   path: /api/find_file,            summary: "Recursively find a filename within the workspace; returns matching paths."}
     - {method: POST,   path: /api/parse,                summary: "Upload a document and return extracted text (multipart file)."}
+    - {method: POST,   path: /api/media/upload,           summary: "Upload a media file (image/audio/video); returns its saved local path (multipart; 100 MB cap)."}
 
 # ---------------------------------------------------------------------------
 websocket:

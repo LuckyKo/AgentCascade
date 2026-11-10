@@ -656,6 +656,111 @@ class TestSessionsInstanceAwareLogDir:
         assert 'generating' in state
 
 
+class TestMediaUploadEndpoint:
+    """POST /api/media/upload — upload-then-reference for image/audio/video.
+
+    Every case deletes its saved file in teardown so the shared media dir stays
+    clean. The 100 MB cap is exercised via a monkeypatched small limit (the branch
+    is identical; allocating a real 100 MB buffer would only slow the suite).
+    """
+
+    def _cleanup(self, path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def _tiny_png(self):
+        import io
+
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new('RGB', (16, 16), 'red').save(buf, format='PNG')
+        return buf.getvalue()
+
+    def _tiny_wav(self):
+        import io
+        import struct
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b'\x00\x00' * 80)
+        return buf.getvalue()
+
+    def test_media_upload_max_bytes_is_100mb(self):
+        """The single-source upload cap is 100 MB."""
+        from agent_cascade import api_server
+        assert api_server.MAX_MEDIA_UPLOAD_BYTES == 100 * 1024 * 1024
+
+    def test_upload_image_returns_saved_jpg_path(self, client):
+        """A small PNG uploads, is re-encoded to a server-generated .jpg, ≤10 MB."""
+        files = {'file': ('photo.png', self._tiny_png(), 'image/png')}
+        resp = client.post('/api/media/upload', files=files)
+        assert resp.status_code == 200, resp.text
+        path = resp.json()['path']
+        try:
+            assert os.path.isfile(path), f'path missing: {path}'
+            name = os.path.basename(path)
+            assert name.startswith('img_'), f'bad prefix: {name}'
+            assert name.endswith('.jpg'), f'expected .jpg re-encode, got {name}'
+            assert os.path.getsize(path) <= 10 * 1024 * 1024
+        finally:
+            self._cleanup(path)
+
+    def test_upload_audio_and_video_return_paths(self, client):
+        """audio → aud_*.wav, video → vid_*.mp4, both stored under the media root."""
+        from agent_cascade.utils.media_utils import _get_media_root
+        media_root = os.path.realpath(str(_get_media_root()))
+
+        for name, mime, prefix, expected_ext in (
+            ('track.wav', 'audio/wav', 'aud_', '.wav'),
+            ('clip.mp4', 'video/mp4', 'vid_', '.mp4'),
+        ):
+            files = {'file': (name, self._tiny_wav() if mime.startswith('audio') else b'\x00\x00\x00\x18ftypmp42', mime)}
+            resp = client.post('/api/media/upload', files=files)
+            assert resp.status_code == 200, f'{name}: {resp.text}'
+            path = resp.json()['path']
+            try:
+                assert os.path.isfile(path), f'path missing: {path}'
+                saved = os.path.basename(path)
+                assert saved.startswith(prefix), f'{name}: bad prefix {saved}'
+                assert saved.endswith(expected_ext), f'{name}: bad ext {saved}'
+                assert os.path.realpath(path).startswith(media_root), f'{name}: outside media root'
+            finally:
+                self._cleanup(path)
+
+    def test_upload_too_large_rejected_413(self, client, monkeypatch):
+        """Bytes over the cap return 413 (cap lowered for a fast, faithful test)."""
+        from agent_cascade import api_server
+        monkeypatch.setattr(api_server, 'MAX_MEDIA_UPLOAD_BYTES', 16)
+        files = {'file': ('big.mp3', b'\x00' * 17, 'audio/mpeg')}
+        resp = client.post('/api/media/upload', files=files)
+        assert resp.status_code == 413, resp.text
+
+    def test_upload_non_media_rejected_400(self, client):
+        """A non-media file (no media MIME, ext not in the vocab) returns 400."""
+        files = {'file': ('archive.zip', b'PK\x03\x04garbage', 'application/octet-stream')}
+        resp = client.post('/api/media/upload', files=files)
+        assert resp.status_code == 400, resp.text
+
+    def test_upload_sanitizes_traversal_filename(self, client):
+        """A traversal-style filename yields a generated name inside the media root."""
+        from agent_cascade.utils.media_utils import _get_media_root
+        media_root = os.path.realpath(str(_get_media_root()))
+        files = {'file': ('../../evil.mp3', b'RIFF\x00\x00\x00\x00WAVEfmt ', 'audio/mpeg')}
+        resp = client.post('/api/media/upload', files=files)
+        assert resp.status_code == 200, resp.text
+        path = resp.json()['path']
+        try:
+            assert os.path.basename(path) != 'evil.mp3', 'user filename leaked into stored name'
+            assert os.path.realpath(path).startswith(media_root), 'stored outside media root'
+        finally:
+            self._cleanup(path)
+
+
 class _ExtraRootsOm:
     """Minimal operation_manager double exposing the extra work folder lists.
 

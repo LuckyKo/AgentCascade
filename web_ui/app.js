@@ -5690,17 +5690,18 @@ function formatMultimodalContent(text) {
 // ── Image Handling ───────────────────────────────────────────────────────────
 
 // Insert a media markdown reference (caret-aware). `type` is the modality
-// ('image' | 'audio' | 'video'); `dataUri` already carries the matching
-// `data:<type>/<subtype>;base64,<b64>` prefix (see processMediaFile). The emitted
-// markdown matches the backend _MEDIA_DATA_RE shape: ![filename](data:<type>/...;base64,...)
+// ('image' | 'audio' | 'video'); `ref` is the media target — for user-attached
+// media this is a local file path returned by /api/media/upload (upload-then-
+// reference); other producers may still pass a data-URI. The emitted markdown
+// matches the backend _MEDIA_DATA_RE shape: ![filename](<ref>).
 // `[`/`]` in the filename are neutralised to '_' so the alt text never breaks the
 // `![...](...)` delimiter. The backend's alt group is `[^\]]*`, so unescaped `]`
 // (e.g. Windows duplicate names like "photo[1].png") would otherwise make BOTH the
-// client vision-off strip and the backend parser miss the reference and leak the raw
-// base64. No-op for normal filenames, so image output is byte-identical.
-function insertMediaMarkdown(type, dataUri, filename) {
+// client vision-off strip and the backend parser miss the reference and leak the
+// raw reference. No-op for normal filenames, so output is byte-identical for them.
+function insertMediaMarkdown(type, ref, filename) {
   const safeName = String(filename).replace(/[[\]]/g, '_');
-  const markdown = `![${safeName}](${dataUri})`;
+  const markdown = `![${safeName}](${ref})`;
   const startPos = chatInput.selectionStart;
   const endPos = chatInput.selectionEnd;
   const text = chatInput.value;
@@ -5713,10 +5714,12 @@ function insertMediaMarkdown(type, dataUri, filename) {
   chatInput.focus();
 }
 
-// Single source of truth for the media extension/MIME vocabulary on the client.
-// Mirrors agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY verbatim.
-// Used to (1) choose the data-URI MIME subtype from a file's own extension and
-// (2) reject attachments whose extension is outside the backend's accepted set.
+// Single source of truth for the AUDIO/VIDEO extension vocabulary on the client.
+// audio/video keys mirror agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY;
+// images are intentionally NOT listed here — they are MIME-gated (mediaModalityFromFile)
+// and re-encoded server-side, so images take no extension allowlist on the client.
+// Used to reject audio/video attachments whose extension is outside the backend's
+// accepted set (the decode path depends on the container).
 // NOTE (accepted != decodable): the omni server (llama.cpp MiniAudio) only DECODES
 // wav/mp3/flac; audio/video entries like ogg/m4a/opus are ACCEPTED here and transcoded
 // to mono MP3 at the backend encode boundary (utils.utils::normalize_audio_to_mp3),
@@ -5725,40 +5728,6 @@ const MEDIA_EXTS_BY_MODALITY = {
   audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'opus'],
   video: ['mp4', 'webm', 'mkv', 'mov', 'avi'],
 };
-
-// Max raw bytes for a single inline (non-image) attachment. Audio/video are
-// base64-encoded into ONE chat WS text frame, and base64 expands ~4/3, so a 6 MiB
-// file becomes ~8 MiB inline — comfortably under the server's explicit 16 MiB
-// ws_max_size (api_server.py), leaving ~2x headroom for the frame's JSON overhead.
-// Enforced in processMediaFile (see Group note there); images are resized/re-encoded
-// so they are never capped.
-const MAX_INLINE_MEDIA_BYTES = 6 * 1024 * 1024;
-
-// Server's hard ceiling on a SINGLE chat WS text frame. The per-file cap above
-// bounds ONE attachment; a message with multiple audio/video attachments is still
-// inlined into ONE frame, so >=3 large-but-individually-valid files together
-// exceed this and trip the server's ws_max_size -> protocol 1009, which closes
-// the whole session. Kept in sync with agent_cascade/api_server.py::ws_max_size
-// (16 MiB); bump BOTH together if the server limit ever changes. Enforced as an
-// aggregate running total in processMediaFile via existingInlinedMediaBytes().
-const WS_MAX_INLINE_BYTES = 16 * 1024 * 1024;
-
-// Sum of the base64 payload lengths of all AUDIO/VIDEO data-URIs already present
-// in `text` (the chat input). Images are EXCLUDED — they are resized/re-encoded
-// server-side and bounded, so they never contribute to the inline-media frame
-// size. Pure + DOM-free: reads only the string, so the aggregate cap is always
-// derived from the textarea's actual content (correct across ×-button removals,
-// with no counter to drift).
-function existingInlinedMediaBytes(text) {
-  if (!text) return 0;
-  let total = 0;
-  // Base64 alphabet is [A-Za-z0-9+/=]; it never contains ')', so the match stops
-  // at the markdown ')'. Only audio/video match; image data-URIs are excluded.
-  for (const m of text.matchAll(/data:(?:audio|video)\/[^;]+;base64,([A-Za-z0-9+/=]+)/g)) {
-    total += m[1].length;
-  }
-  return total;
-}
 
 // Classify a File by MIME prefix into 'image' | 'audio' | 'video', or null.
 function mediaModalityFromFile(file) {
@@ -5769,104 +5738,47 @@ function mediaModalityFromFile(file) {
   return null;
 }
 
-// Rewrite the MIME subtype of a media data-URI to the file's own extension when
-// that extension is a recognised <modality> type. The backend's
-// save_*_from_data_uri() uses the subtype as an extension hint, so this makes the
-// saved file carry the exact extension the omni adapter needs to derive
-// format/codec downstream. Unrecognised extensions keep the browser-supplied
-// subtype (best-effort; backend falls back to its per-type default extension).
-function buildMediaDataUri(dataUri, modality, filename) {
-  const ext = (filename || '').toLowerCase().match(/\.([a-z0-9]+)$/);
-  const allowed = MEDIA_EXTS_BY_MODALITY[modality] || [];
-  if (ext && allowed.includes(ext[1])) {
-    return dataUri.replace(/^data:(?:audio|video)\/[^;]+(?=;base64,)/, `data:${modality}/${ext[1]}`);
-  }
-  return dataUri;
-}
-
 function processMediaFile(file) {
   const modality = mediaModalityFromFile(file);
   if (!modality) return;
 
-  // Reject out-of-vocabulary extensions (advertised behavior). mediaModalityFromFile
-  // classifies by MIME prefix only, so an audio/video attachment whose extension the
-  // backend does not accept would silently degrade to a text path-reference server-side.
-  // Images render through a generic <img> and have no entry in MEDIA_EXTS_BY_MODALITY,
-  // so only modalities present in the map (audio/video) are checked here.
-  const allowedExts = MEDIA_EXTS_BY_MODALITY[modality];
-  if (allowedExts) {
-    const extMatch = (file.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
-    if (!extMatch || !allowedExts.includes(extMatch[1])) {
-      showInSystemToastBar(`⚠️ Unsupported ${modality} extension for "${file.name}". Allowed: ${allowedExts.join(', ')}.`);
-      return;
-    }
-  }
-
+  // audio/video: keep the advertised extension allowlist check (the decode path
+  // depends on the container). Images are MIME-gated (mediaModalityFromFile) and
+  // re-encoded server-side, so do NOT apply an extension allowlist to images —
+  // any PIL-openable format is accepted.
   if (modality !== 'image') {
-    // Audio/video are base64-inlined into ONE chat WS text frame, so their size is
-    // bounded by the server's ws_max_size (see api_server.py). Reject oversize files
-    // BEFORE encoding: an oversized frame closes the whole session (1009), losing any
-    // in-flight work — much worse than dropping just this attachment.
-    if (file.size > MAX_INLINE_MEDIA_BYTES) {
-      showInSystemToastBar(`⚠️ ${modality === 'video' ? 'Video' : 'Audio'} too large to attach inline (max ~${Math.round(MAX_INLINE_MEDIA_BYTES / (1024 * 1024))} MB): "${file.name}".`);
-      return;
+    const allowedExts = MEDIA_EXTS_BY_MODALITY[modality];
+    if (allowedExts) {
+      const extMatch = (file.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+      if (!extMatch || !allowedExts.includes(extMatch[1])) {
+        showInSystemToastBar(`⚠️ Unsupported ${modality} extension for "${file.name}". Allowed: ${allowedExts.join(', ')}.`);
+        return;
+      }
     }
-    // Aggregate per-frame cap. The per-file check above bounds ONE attachment, but
-    // a single message can hold MULTIPLE audio/video files and they all inline into
-    // ONE WS frame — three individually-valid <6 MiB files can together exceed the
-    // server's 16 MiB ws_max_size and still trigger the session-killing 1009. So
-    // also bound the running total already inlined (recomputed from the real
-    // textarea, hence correct across ×-button removals, no counter to drift) plus
-    // this file's base64-inflated size (~4/3). Reject before encoding.
-    const inflated = Math.ceil(file.size * 4 / 3);
-    const existing = existingInlinedMediaBytes(chatInput.value);
-    if (existing + inflated > WS_MAX_INLINE_BYTES) {
-      showInSystemToastBar('Too much media in this message (max ~' + Math.round(WS_MAX_INLINE_BYTES / (1024 * 1024)) + ' MB inlined total). Remove some before adding more.');
-      return;
-    }
-    // Audio/video: base64-encode the raw file (no resize).
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUri = buildMediaDataUri(e.target.result, modality, file.name);
-      insertMediaMarkdown(modality, dataUri, file.name || modality);
-    };
-    reader.readAsDataURL(file);
-    return;
   }
 
-  // Image path — unchanged behaviour (resize + re-encode, then insert).
-  const maxSize = settingMaxImageSize ? parseInt(settingMaxImageSize.value) : 1024;
-  const reader = new FileReader();
+  const statusText = document.getElementById('statusText');
+  if (statusText) statusText.textContent = `Uploading ${modality} ${file.name}...`;
 
-  reader.onload = (e) => {
-    const img = new Image();
-    img.onload = () => {
-      let width = img.width;
-      let height = img.height;
+  const formData = new FormData();
+  formData.append('file', file);
 
-      if (width > maxSize || height > maxSize) {
-        if (width > height) {
-          height = Math.round((height * maxSize) / width);
-          width = maxSize;
-        } else {
-          width = Math.round((width * maxSize) / height);
-          height = maxSize;
-        }
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, width, height);
-
-      const mimeType = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-      const dataUrl = canvas.toDataURL(mimeType, 0.9);
-      insertMediaMarkdown('image', dataUrl, file.name || 'image');
-    };
-    img.src = e.target.result;
-  };
-  reader.readAsDataURL(file);
+  // Upload-then-reference: the server saves the file and returns a local path;
+  // we insert a path reference (NOT base64). Raw base64 is produced only at the
+  // adapter boundary. This sidesteps the chat WS frame size cap for all media.
+  fetch('/api/media/upload', { method: 'POST', body: formData })
+    .then(resp => {
+      if (!resp.ok) return resp.json().then(j => { throw new Error(j.message || resp.statusText); });
+      return resp.json();
+    })
+    .then(data => {
+      if (!data.path) throw new Error('No path returned');
+      insertMediaMarkdown(modality, data.path, file.name || modality);
+    })
+    .catch(err => {
+      showInSystemToastBar(`⚠️ ${modality} upload failed: ${err.message}`);
+    })
+    .finally(() => { if (statusText) statusText.textContent = ''; });
 }
 
 function processDocFile(file) {
