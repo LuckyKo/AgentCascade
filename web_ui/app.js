@@ -983,10 +983,8 @@ const settingMaxImageSize = $('#setting-max-image-size');
 const settingMaxImagesForLlm = $('#setting-max-images-for-llm');
 const settingImageCaptionMode = $('#setting-image-caption-mode');
 const settingVisionEnabled = $('#setting-vision-enabled');
-const insertImageBtn = $('#insertImageBtn');
-const imageInput = $('#imageInput');
-const insertDocBtn = $('#insertDocBtn');
-const docInput = $('#docInput');
+const attachBtn = $('#attachBtn');
+const attachInput = $('#attachInput');
 
 const afkToggle = $('#afkToggle');
 const autoSecurityToggle = $('#autoSecurityToggle');
@@ -5716,8 +5714,8 @@ function insertMediaMarkdown(type, ref, filename) {
 
 // Single source of truth for the AUDIO/VIDEO extension vocabulary on the client.
 // audio/video keys mirror agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY;
-// images are intentionally NOT listed here — they are MIME-gated (mediaModalityFromFile)
-// and re-encoded server-side, so images take no extension allowlist on the client.
+// images are intentionally NOT listed here — mediaModality gates them by MIME (image/*),
+// or the separate ATTACH_IMAGE_EXTS when MIME is absent; they are re-encoded server-side.
 // Used to reject audio/video attachments whose extension is outside the backend's
 // accepted set (the decode path depends on the container).
 // NOTE (accepted != decodable): the omni server (llama.cpp MiniAudio) only DECODES
@@ -5729,33 +5727,67 @@ const MEDIA_EXTS_BY_MODALITY = {
   video: ['mp4', 'webm', 'mkv', 'mov', 'avi'],
 };
 
-// Classify a File by MIME prefix into 'image' | 'audio' | 'video', or null.
-function mediaModalityFromFile(file) {
-  if (!file || typeof file.type !== 'string') return null;
-  if (file.type.startsWith('image/')) return 'image';
-  if (file.type.startsWith('audio/')) return 'audio';
-  if (file.type.startsWith('video/')) return 'video';
+// SINGLE SOURCE for the file -> insert-mode decision on the client.
+// ATTACH_DOC_EXTS mirrors agent_cascade/tools/simple_doc_parser.py::PARSER_SUPPORTED_FILE_TYPES.
+// ATTACH_IMAGE_EXTS mirrors agent_cascade/utils/media_utils.py::_MEDIA_EXTS_BY_MODALITY['image'].
+// audio/video reuse MEDIA_EXTS_BY_MODALITY above. Keep all four in sync with the backend.
+const ATTACH_DOC_EXTS = ['pdf', 'docx', 'pptx', 'md', 'txt', 'html', 'csv', 'tsv', 'xlsx', 'xls'];
+const ATTACH_IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'];
+// ATTACH_CODE_EXTS is a CLIENT-SIDE text-read allowlist (mode 'code' reads file.text() and
+// inserts it directly); it is NOT the backend /api/parse doc-parser list, so it legitimately
+// diverges from ATTACH_DOC_EXTS. Checked last so real docs/media always win.
+const ATTACH_CODE_EXTS = [
+  'py', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'yaml', 'yml', 'toml',
+  'sh', 'bash', 'zsh', 'bat', 'cmd', 'ps1',
+  'c', 'h', 'cpp', 'cc', 'cs', 'java', 'go', 'rs', 'rb', 'php', 'swift', 'scala',
+  'sql', 'r', 'lua', 'css', 'scss', 'xml', 'ini', 'cfg', 'conf', 'env', 'properties',
+  'proto', 'graphql', 'vue', 'svelte', 'make', 'dockerfile',
+];
+
+// Single source of truth for media modality: MIME prefix first (authoritative), then
+// extension fallback for MIME browsers may omit. Mirrors the server's _classify_upload
+// (api_server.py) priority. Used by BOTH classifyAttachFile (router) and processMediaFile
+// (executor), so the two can never disagree on a file's modality.
+function mediaModality(file) {
+  if (!file) return null;
+  const type = typeof file.type === 'string' ? file.type : '';
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('audio/')) return 'audio';
+  if (type.startsWith('video/')) return 'video';
+  const ext = (typeof file.name === 'string' ? file.name : '')
+    .match(/\.([a-z0-9]+)$/i);
+  if (!ext) return null;
+  const e = ext[1].toLowerCase();
+  if (ATTACH_IMAGE_EXTS.includes(e)) return 'image';
+  if (MEDIA_EXTS_BY_MODALITY.audio.includes(e)) return 'audio';
+  if (MEDIA_EXTS_BY_MODALITY.video.includes(e)) return 'video';
   return null;
 }
 
+// Pure router: returns { mode: 'media'|'doc'|'code'|'unknown', modality }. No DOM.
+// Priority mirrors the server's _classify_upload (MIME first, then extension), and
+// checks media -> doc -> code -> unknown so real media and docs always beat 'code'.
+function classifyAttachFile(file) {
+  if (!file || typeof file.name !== 'string') return { mode: 'unknown', modality: null };
+  const ext = (file.name.match(/\.([a-z0-9]+)$/i) || [, ''])[1].toLowerCase();
+  // 1. Media (MIME-first then ext fallback) via the shared mediaModality source.
+  const m = mediaModality(file);
+  if (m) return { mode: 'media', modality: m };
+  // 2. Documents (backend /api/parse).
+  if (ATTACH_DOC_EXTS.includes(ext)) return { mode: 'doc', modality: 'doc' };
+  // 3. Known text/code files — read as plain text on the client (never sent to /api/parse).
+  if (ATTACH_CODE_EXTS.includes(ext)) return { mode: 'code', modality: 'code' };
+  return { mode: 'unknown', modality: null };
+}
+
 function processMediaFile(file) {
-  const modality = mediaModalityFromFile(file);
+  const modality = mediaModality(file);
   if (!modality) return;
 
-  // audio/video: keep the advertised extension allowlist check (the decode path
-  // depends on the container). Images are MIME-gated (mediaModalityFromFile) and
-  // re-encoded server-side, so do NOT apply an extension allowlist to images —
-  // any PIL-openable format is accepted.
-  if (modality !== 'image') {
-    const allowedExts = MEDIA_EXTS_BY_MODALITY[modality];
-    if (allowedExts) {
-      const extMatch = (file.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
-      if (!extMatch || !allowedExts.includes(extMatch[1])) {
-        showInSystemToastBar(`⚠️ Unsupported ${modality} extension for "${file.name}". Allowed: ${allowedExts.join(', ')}.`);
-        return;
-      }
-    }
-  }
+  // mediaModality() already gates media by MIME prefix then the extension allowlists,
+  // mirroring the server's _classify_upload — so images are accepted via any image/* MIME
+  // (re-encoded server-side, any PIL-openable format) or a recognized image extension, and
+  // audio/video only via their container allowlists. No redundant re-check here.
 
   const statusText = document.getElementById('statusText');
   if (statusText) statusText.textContent = `Uploading ${modality} ${file.name}...`;
@@ -5800,19 +5832,7 @@ function processDocFile(file) {
   })
   .then(data => {
     if (data.text) {
-      const header = `--- DOCUMENT: ${file.name} ---`;
-      const footer = `--- END DOCUMENT ---`;
-      const fullText = `\n${header}\n${data.text}\n${footer}\n`;
-
-      const start = chatInput.selectionStart;
-      const end = chatInput.selectionEnd;
-      const oldVal = chatInput.value;
-      chatInput.value = oldVal.substring(0, start) + fullText + oldVal.substring(end);
-
-      // Resize first, then set selection — setting height='auto' can shift layout
-      autoResize(chatInput);
-      chatInput.selectionStart = chatInput.selectionEnd = start + fullText.length;
-      chatInput.focus();
+      insertTextBlock(file.name, data.text);
     }
     if (statusText) statusText.textContent = '';
   })
@@ -5823,22 +5843,52 @@ function processDocFile(file) {
   });
 }
 
-if (insertImageBtn && imageInput) {
-  insertImageBtn.addEventListener('click', () => imageInput.click());
-  imageInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processMediaFile(e.target.files[0]);
-    }
-    e.target.value = ''; // Reset input
-  });
+// Shared single-source writer for the "--- DOCUMENT: name --- ... --- END DOCUMENT ---"
+// block at the caret. Used by processDocFile (parsed docs) and handleUniversalFile
+// (client-read code files) so both produce the exact same wrapper.
+function insertTextBlock(name, text) {
+  const header = `--- DOCUMENT: ${name} ---`;
+  const footer = `--- END DOCUMENT ---`;
+  const fullText = `\n${header}\n${text}\n${footer}\n`;
+
+  const start = chatInput.selectionStart;
+  const end = chatInput.selectionEnd;
+  const oldVal = chatInput.value;
+  chatInput.value = oldVal.substring(0, start) + fullText + oldVal.substring(end);
+
+  // Resize first, then set selection — setting height='auto' can shift layout
+  autoResize(chatInput);
+  chatInput.selectionStart = chatInput.selectionEnd = start + fullText.length;
+  chatInput.focus();
 }
 
-if (insertDocBtn && docInput) {
-  insertDocBtn.addEventListener('click', () => docInput.click());
-  docInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processDocFile(e.target.files[0]);
+// Universal attach router — the single entry point for click, paste and drag-drop files.
+// mode 'media' -> upload + path link; 'doc' -> /api/parse + text block; 'code' ->
+// client file.text() + text block; anything else -> toast, insert nothing.
+async function handleUniversalFile(file) {
+  const { mode } = classifyAttachFile(file);
+  if (mode === 'media') return processMediaFile(file);
+  if (mode === 'doc') return processDocFile(file);
+  if (mode === 'code') {
+    const statusText = document.getElementById('statusText');
+    if (statusText) statusText.textContent = `Reading ${file.name}...`;
+    try {
+      insertTextBlock(file.name, await file.text());
+      if (statusText) statusText.textContent = '';
+    } catch (err) {
+      if (statusText) statusText.textContent = `Error: ${err.message}`;
+      showInSystemToastBar(`⚠️ Failed to read file "${file.name}": ${err.message}`);
     }
+    return;
+  }
+  showInSystemToastBar(`⚠️ Unsupported file type for "${file.name}". Attach images, audio, video, documents, or code files.`);
+}
+
+if (attachBtn && attachInput) {
+  attachBtn.addEventListener('click', () => attachInput.click());
+  attachInput.addEventListener('change', (e) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach(handleUniversalFile); // multi-file: each routes independently
     e.target.value = ''; // Reset input
   });
 }
@@ -5856,34 +5906,9 @@ chatInput.addEventListener('drop', (e) => {
   e.preventDefault();
   chatInput.classList.remove('drag-over');
   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-    Array.from(e.dataTransfer.files).forEach(file => {
-      if (file.path) {
-        insertAtCursor(`"${file.path}" `);
-      } else {
-        // Fallback: search backend for the file by name to get absolute path
-        fetch('/api/find_file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name })
-        })
-        .then(res => res.json())
-        .then(data => {
-          if (data.matches && data.matches.length === 1) {
-            insertAtCursor(`"${data.matches[0]}" `);
-          } else if (data.matches && data.matches.length > 1) {
-            insertAtCursor(`"${data.matches[0]}" /* Warning: multiple matches found for ${file.name} */ `);
-          } else {
-            insertAtCursor(`"${file.name}" `);
-          }
-        })
-        .catch(err => {
-          console.error(err);
-          insertAtCursor(`"${file.name}" `);
-        });
-      }
-    });
+    Array.from(e.dataTransfer.files).forEach(handleUniversalFile); // media/doc/code/unknown
   } else if (e.dataTransfer.getData('text')) {
-    insertAtCursor(e.dataTransfer.getData('text'));
+    insertAtCursor(e.dataTransfer.getData('text')); // text drag unchanged
   }
 });
 
@@ -5900,16 +5925,13 @@ function insertAtCursor(text) {
 }
 
 chatInput.addEventListener('paste', (e) => {
-  if (e.clipboardData && e.clipboardData.items) {
-    const items = e.clipboardData.items;
-    for (let i = 0; i < items.length; i++) {
-      const file = items[i].getAsFile();
-      // Accept image/audio/video pasted content; text/plain yields getAsFile()==null.
-      if (mediaModalityFromFile(file)) {
-        e.preventDefault();
-        processMediaFile(file);
-      }
-    }
+  if (!e.clipboardData || !e.clipboardData.items) return;
+  const items = e.clipboardData.items;
+  for (let i = 0; i < items.length; i++) {
+    const file = items[i].getAsFile();
+    if (!file) continue;                 // text/plain yields null -> default paste inserts text
+    e.preventDefault();                  // we handle a file: block the browser's filename insert
+    handleUniversalFile(file);           // media -> upload+link, doc -> parse, code -> read, else toast
   }
 });
 

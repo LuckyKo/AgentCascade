@@ -619,6 +619,22 @@ class TestSessionsInstanceAwareLogDir:
         resp = client.post('/api/parse', files=files)
         assert resp.status_code == 200
 
+    def test_post_parse_content_sniffs_arbitrary_extension(self, client):
+        """POST /api/parse parses any readable upload — it does NOT reject by extension.
+
+        get_file_type (utils.py:421) only special-cases pdf/docx/pptx/csv/tsv/xlsx/xls/md
+        by suffix; every other extension is content-sniffed and defaults to 'txt', so the
+        backend doc path returns 200 for e.g. an uploaded .zip. This means the plan's
+        'unsupported ext -> 500' reject premise is FALSE: /api/parse's only error path is
+        a genuine parser exception (corrupt media/OOM/timeout), not a bad extension.
+        handleUniversalFile routes by client-side classifyAttachFile instead, so unknown
+        extensions never reach /api/parse anyway.
+        """
+        files = {'file': ('unsupported_payload.zip', b'plain readable text bytes', 'application/octet-stream')}
+        resp = client.post('/api/parse', files=files)
+        assert resp.status_code == 200
+        assert 'text' in resp.json()
+
     def test_get_endpoints_returns_config(self, client):
         """GET /api/endpoints returns endpoints configuration."""
         resp = client.get('/api/endpoints')
