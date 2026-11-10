@@ -13,6 +13,7 @@ from typing import Any, List, Tuple
 from agent_cascade.agent_instance import AgentState
 # Import shared broadcast helper (replaces duplicated inline broadcast loops)
 from agent_cascade.api_integration import broadcast_stream_update
+from agent_cascade.compression.helpers import format_marker_timestamp
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.prompts.dna import COMPRESSION_END_MARKER, COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
@@ -746,10 +747,44 @@ def invoke_compression_agent(
             logger.error(f"Compression cleanup failed for '{comp_state_key}': {cleanup_err}", exc_info=True)
 
 
+def _format_summaries_with_spans(
+    marker_summaries: List[str],
+    marker_time_ranges: List[Tuple[float | None, float | None]] | None = None,
+) -> str:
+    """Render the L2 consolidation dataset, annotating each summary with its start time.
+
+    A consolidated narrative that lost all dates is useless across a multi-day session, so
+    every summary is labelled with the START of the window it covers. The L2 marker's own
+    first/last span is computed in code (``get_marker_time_range``), not by the LLM — these
+    labels are context for ordering and for preserving meaningful date references.
+
+    Args:
+        marker_summaries: Summary bodies extracted from the consolidated markers.
+        marker_time_ranges: Parallel list of ``(start_ts, end_ts)`` per summary, or None.
+            Entries may be None/partial; those summaries fall back to an unlabelled header.
+
+    Returns:
+        The numbered ``SUMMARY n ...`` block for CONSOLIDATION_PROMPT's ``{summaries_text}``.
+    """
+    parts = []
+    for i, summary in enumerate(marker_summaries, 1):
+        start_label = None
+        if marker_time_ranges is not None and i - 1 < len(marker_time_ranges):
+            span = marker_time_ranges[i - 1]
+            if span:
+                start_label = format_marker_timestamp(span[0])
+        if start_label:
+            parts.append(f"SUMMARY {i} (starts {start_label}):\n{summary}")
+        else:
+            parts.append(f"SUMMARY {i}:\n{summary}")
+    return '\n\n'.join(parts)
+
+
 def invoke_consolidation_agent(
     agent_pool: Any,
     marker_summaries: List[str],
     caller_name: str | None = None,
+    marker_time_ranges: List[Tuple[float | None, float | None]] | None = None,
 ) -> Tuple[str, str]:
     """Invoke Compressor to consolidate multiple existing summaries into one.
 
@@ -761,6 +796,8 @@ def invoke_consolidation_agent(
         marker_summaries: List of summary texts extracted from compression markers to consolidate.
         caller_name: Optional caller instance name for slot management. If not provided,
                      reads agent_pool.session_name (falls back to 'Orchestrator').
+        marker_time_ranges: Optional parallel list of ``(start_ts, end_ts)`` covered by each
+                     summary. When provided, each entry is labelled with its start timestamp.
 
     Returns:
         A 2-tuple ``(summary, caption)`` — same contract as invoke_compression_agent().
@@ -775,10 +812,8 @@ def invoke_consolidation_agent(
 
     comp_state_key = _generate_compressor_instance_name()
 
-    # Format input as numbered summaries
-    summaries_text = ''
-    for i, s in enumerate(marker_summaries, 1):
-        summaries_text += f"SUMMARY {i}:\n{s}\n\n"
+    # Format input as numbered summaries, annotated with each window's start timestamp.
+    summaries_text = _format_summaries_with_spans(marker_summaries, marker_time_ranges)
 
     from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
     end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction

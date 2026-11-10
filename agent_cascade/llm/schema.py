@@ -176,6 +176,13 @@ class Message(BaseModelCompatibleDict):
     # UI-only completion timestamp (unix seconds). exclude=True guarantees it is
     # NEVER emitted by model_dump()/model_dump_json(), so no LLM backend can leak it.
     ts: Optional[float] = Field(default=None, exclude=True)
+    # Wall-clock span COVERED by a compression marker's summary (unix seconds), i.e. the
+    # first/last message of the window it replaced. Set on markers only (L1 and L2), where
+    # the start can precede .ts by days — .ts is the marker's COMPLETION time, so it must
+    # never stand in for the start. Excluded from dumps like .ts: never sent to a provider;
+    # the human-readable copy in the marker header is the JSONL-reload fallback.
+    summary_start_ts: Optional[float] = Field(default=None, exclude=True)
+    summary_end_ts: Optional[float] = Field(default=None, exclude=True)
 
     def __init__(self,
                  role: str,

@@ -568,8 +568,10 @@ After consolidation:
 **Pool mutation (authoritative):**
 1. Extract summary text from each of the N-1 markers being consolidated (parsing `<context_summary>` tags). If no valid summaries are extracted, consolidation aborts entirely (no partial writes).
 2. Token-size guard: if total summary tokens exceed `COMPRESSION_MAX_CONSOLIDATION_TOKENS` (default **100,000**, env: `AGENT_CASCADE_COMPRESSION_MAX_CONSOLIDATION_TOKENS`), abort to prevent compressor failure.
-3. Invoke the Compressor agent with a consolidation-specific prompt (summarize summaries, not raw messages; keep chronological/important events, drop details).
-4. Build new L2 marker via `build_consolidation_marker_message()` — header reads `"L2, N summaries consolidated"`.
+3. Invoke the Compressor agent with a consolidation-specific prompt (summarize summaries, not raw messages; keep chronological/important events, drop details). Each summary in that input is labelled with the **start timestamp** of the window it covers, so multi-day sessions keep their date anchors in the consolidated narrative.
+4. Build new L2 marker via `build_consolidation_marker_message()` — header reads `"L2, <first start> → <last end>, N summaries consolidated"` when ranges are known.
+   - **Time range:** the span is positional — the **first** consolidated marker's covered-window start → the **last** consolidated marker's covered-window end. It is read via `get_marker_time_range()`, which prefers the marker's explicit `summary_start_ts`/`summary_end_ts` fields, then the header interval (JSONL-reload fallback), and only falls back to `msg.ts` as a degenerate point for legacy markers. `msg.ts` is the marker's **creation/completion** time (the window's END) and must never stand in for the start; doing so collapses a multi-day span on every consolidation hop.
+   - The L2 marker itself stores the resulting `summary_start_ts`/`summary_end_ts`, so a later L2→L2 hop preserves the original start (these fields, like `ts`, are excluded from dumps and never sent to a provider).
 5. Under `_compression_lock`: re-read pool state (defensive against concurrent changes), re-verify threshold still met, then rebuild conversation:
    - Replace the **first** consolidated marker's position with the new L2 marker.
    - Remove all **intermediate** markers (positions 1..N-2 of the consolidation set).

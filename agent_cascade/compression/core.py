@@ -4,11 +4,12 @@ import threading
 import time
 
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
-from agent_cascade.compression.helpers import (_parse_marker_timestamps, _refine_tool_call_boundary,
-                                                build_consolidation_marker_message, build_marker_message,
-                                                compute_discard_count, extract_last_supervisor_task,
-                                                extract_last_task_from_marker, extract_summary_from_marker, get_message_role,
-                                                select_markers_for_consolidation)
+from agent_cascade.compression.helpers import (_refine_tool_call_boundary,
+                                               build_consolidation_marker_message, build_marker_message,
+                                               compute_discard_count, extract_last_supervisor_task,
+                                               extract_last_task_from_marker, extract_summary_from_marker,
+                                               get_marker_time_range, get_message_role,
+                                               select_markers_for_consolidation)
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.engine.helpers import _get_active_functions_from_template
 from agent_cascade.llm.schema import FUNCTION, USER, Message
@@ -227,6 +228,7 @@ def _consolidate_markers(
         history = None
         marker_indices = []
         summaries_to_consolidate = []
+        summary_spans = []
         consolidate_indices = []
 
         with target_inst._compression_lock:
@@ -251,6 +253,9 @@ def _consolidate_markers(
                 summary_text = extract_summary_from_marker(history[idx])
                 if summary_text:
                     summaries_to_consolidate.append(summary_text)
+                    # Carry each summary's covered window into the consolidation dataset so
+                    # the Compressor can anchor events to real dates (sessions span days).
+                    summary_spans.append(get_marker_time_range(history[idx]))
                 else:
                     logger.warning(f"Could not extract valid summary from marker at index {idx} — skipping")
 
@@ -277,6 +282,7 @@ def _consolidate_markers(
             consolidated_summary, _consolidation_caption = invoke_consolidation_agent(
                 agent_pool=agent_pool,
                 marker_summaries=summaries_to_consolidate,
+                marker_time_ranges=summary_spans,
                 caller_name=target_agent_name,
             )
         except RuntimeError as e:
@@ -308,32 +314,19 @@ def _consolidate_markers(
 
             # Build the L2 marker here so its timestamp span reflects exactly the markers
             # being consolidated in this (re-read) snapshot. The span is POSITIONAL, not a
-            # min/max over all markers: first_ts comes from the FIRST marker's start and
-            # last_ts from the LAST marker's end — that's the time sequence actually covered
-            # by this consolidation. Markers are chronological by position (each L1 stacks
-            # behind the previous one), so positional endpoints equal min/max in the normal
-            # case; they differ only if a header is unparseable or out of order, where the
-            # positional choice stays anchored to the true sequence boundaries. Non-fatal:
-            # parse failures simply yield a plain "L2, N summaries consolidated" header with
-            # no time range.
-            # Consult each marker's own .ts float (full precision, stamped at creation)
-            # before falling back to re-parsing its minute-granularity header text. The
-            # .ts is the authoritative source when present; the header parse is only a
-            # fallback for markers loaded from JSONL without a backfilled ts.
-            def _marker_ts_or_header(msg):
-                """Return (start, end) preferring msg.ts over the parsed header."""
-                mt = msg.get('ts') if isinstance(msg, dict) else getattr(msg, 'ts', None)
-                if mt is not None:
-                    try:
-                        return float(mt), float(mt)
-                    except Exception:
-                        pass
-                return _parse_marker_timestamps(msg)
-
-            l2_first_ts, _ = _marker_ts_or_header(current_history[current_first_idx])
+            # min/max over all markers: first_ts comes from the FIRST marker's covered-window
+            # START and last_ts from the LAST marker's covered-window END — that's the time
+            # sequence actually covered by this consolidation.
+            # get_marker_time_range() reads the marker's explicit summary_start_ts/end_ts first,
+            # then the header interval (JSONL reload), and only falls back to .ts as a point for
+            # legacy markers. .ts is the marker's creation time (the window END), so using it as
+            # the start — as the previous .ts-first logic did — collapsed multi-day spans on
+            # every consolidation hop. Non-fatal: missing ranges simply yield a marker with no
+            # (or a partial) time header.
+            l2_first_ts, _ = get_marker_time_range(current_history[current_first_idx])
             l2_last_ts = None
             for idx in reversed(current_consolidate_indices):
-                _s, e = _marker_ts_or_header(current_history[idx])
+                _s, e = get_marker_time_range(current_history[idx])
                 if e is not None:
                     l2_last_ts = e
                     break

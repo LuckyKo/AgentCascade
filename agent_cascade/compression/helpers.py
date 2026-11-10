@@ -493,8 +493,8 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
     ``"{n_messages} messages summarized"`` header so the marker still renders.
 
     Args:
-        start_ts: Earliest completion timestamp (unix seconds) in the window.
-        end_ts: Latest completion timestamp (unix seconds) in the window.
+        start_ts: Start of the covered window (unix seconds).
+        end_ts: End of the covered window (unix seconds).
         n_messages: Number of compressed messages (used only for the fallback).
 
     Returns:
@@ -503,10 +503,9 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
     if start_ts is None or end_ts is None:
         return f"{n_messages} messages summarized"
 
-    try:
-        start_str = datetime.fromtimestamp(float(start_ts)).strftime('%Y-%m-%d %H:%M')
-        end_str = datetime.fromtimestamp(float(end_ts)).strftime('%Y-%m-%d %H:%M')
-    except (ValueError, OverflowError, OSError):
+    start_str = format_marker_timestamp(start_ts)
+    end_str = format_marker_timestamp(end_ts)
+    if start_str is None or end_str is None:
         return f"{n_messages} messages summarized"
 
     duration = int(round(max(0.0, float(end_ts) - float(start_ts))))
@@ -526,6 +525,56 @@ def _format_timestamp_interval(start_ts, end_ts, n_messages=0):
         dur_str = f"{days}d {hours}h {minutes}m"
 
     return f"{start_str} → {end_str}, {dur_str}"
+
+
+def format_marker_timestamp(ts) -> str | None:
+    """Render a unix timestamp as the local ``YYYY-MM-DD HH:MM`` used in marker headers.
+
+    Shared by the header formatter and the consolidation input ("SUMMARY i (starts …)").
+    The naive string is rendered in LOCAL time, matching ``_parse_marker_timestamps``'s
+    ``strptime(...).timestamp()`` round-trip.
+
+    Args:
+        ts: Unix seconds, or None.
+
+    Returns:
+        The formatted local datetime, or None when *ts* is missing/unrepresentable.
+    """
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime('%Y-%m-%d %H:%M')
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+
+
+def _stamp_summary_span(msg: Message, first_ts, last_ts) -> Message:
+    """Record a marker's covered window in its ``summary_start_ts``/``summary_end_ts``.
+
+    These fields are the authoritative span for later L1/L2 compaction: the marker's
+    ``.ts`` is its CREATION time (the END of the window), so using it as a start — or
+    re-parsing the minute-granularity header — drifts or collapses multi-day spans.
+    Rendered header text remains the JSONL-reload fallback.
+
+    Args:
+        msg: The marker message to annotate (mutated in place).
+        first_ts: First covered timestamp (unix seconds), or None.
+        last_ts: Last covered timestamp (unix seconds), or None.
+
+    Returns:
+        The same message, for call-site convenience.
+    """
+    if first_ts is not None:
+        try:
+            msg.summary_start_ts = float(first_ts)
+        except (TypeError, ValueError):
+            pass
+    if last_ts is not None:
+        try:
+            msg.summary_end_ts = float(last_ts)
+        except (TypeError, ValueError):
+            pass
+    return msg
 
 
 def _append_last_task_section(content: str, last_task: str | None) -> str:
@@ -555,8 +604,8 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
 
     Args:
         summary_text: The raw summary text (before template wrapping).
-        first_ts: Earliest completion timestamp (unix seconds) in the compressed window.
-        last_ts: Latest completion timestamp (unix seconds) in the compressed window.
+        first_ts: Start timestamp (unix seconds) of the COVERED window's first message.
+        last_ts: End timestamp (unix seconds) of the COVERED window's last message.
         n_messages: Number of messages compressed (used for the no-timestamp fallback).
         last_task: Verbatim text of the last genuine supervisor task found in the DISCARDED
             window (todo.md:143), or None. When truthy, a <last_supervisor_task> block is
@@ -579,7 +628,7 @@ def build_marker_message(summary_text, first_ts=None, last_ts=None, n_messages=0
         summary=summary_text,
     )
     content = _append_last_task_section(content, last_task)
-    return Message(role=USER, content=str(content))
+    return _stamp_summary_span(Message(role=USER, content=str(content)), first_ts, last_ts)
 
 
 def build_consolidation_marker_message(
@@ -599,8 +648,8 @@ def build_consolidation_marker_message(
     Args:
         summary_text: The raw consolidated summary text (before template wrapping).
         num_summaries_consolidated: Number of lower-level summaries merged into this one.
-        first_ts: Earliest timestamp (unix seconds) across the consolidated markers, if known.
-        last_ts: Latest timestamp (unix seconds) across the consolidated markers, if known.
+        first_ts: Start timestamp (unix seconds) of the first consolidated marker's window.
+        last_ts: End timestamp (unix seconds) of the last consolidated marker's window.
         last_task: Verbatim text of the newest preserved supervisor task carried forward from
             the markers being consolidated (todo.md:143), or None. Appended AFTER
             </context_summary> exactly as in build_marker_message; extract_summary_from_marker
@@ -620,7 +669,7 @@ def build_consolidation_marker_message(
         summary=summary_text,
     )
     content = _append_last_task_section(content, last_task)
-    return Message(role=USER, content=str(content))
+    return _stamp_summary_span(Message(role=USER, content=str(content)), first_ts, last_ts)
 
 
 def _parse_marker_timestamps(msg: Any) -> Tuple[float | None, float | None]:
@@ -654,6 +703,51 @@ def _parse_marker_timestamps(msg: Any) -> Tuple[float | None, float | None]:
     except Exception as e:
         logger.debug(f"Marker timestamp parse failed (non-fatal): {e}")
         return (None, None)
+
+
+def get_marker_time_range(msg: Any) -> Tuple[float | None, float | None]:
+    """Return the wall-clock window a compression marker's summary COVERS.
+
+    Precedence (per end, so a half-known marker still yields what it has):
+      1. ``summary_start_ts`` / ``summary_end_ts`` — explicit fields stamped by
+         ``build_marker_message`` / ``build_consolidation_marker_message`` (full precision,
+         authoritative across L1→L2 hops).
+      2. The arrow interval in the marker header (minute precision). This is what survives
+         a JSONL reload, because the explicit fields are excluded from dumps.
+      3. ``msg.ts`` as a degenerate point — LAST RESORT for legacy markers with no range.
+         ``.ts`` is the marker's CREATION/completion time (the window's END), so it must
+         never be treated as the start: doing so collapses a multi-day span to its final
+         instant on every consolidation hop.
+
+    Args:
+        msg: A Message object or dict that is a compression marker.
+
+    Returns:
+        (start_ts, end_ts) in unix seconds; either may be None when unknown. Both are None
+        only when the marker carries no timestamp information at all.
+    """
+    def _field_float(name):
+        val = msg.get(name) if isinstance(msg, dict) else getattr(msg, name, None)
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    start = _field_float('summary_start_ts')
+    end = _field_float('summary_end_ts')
+    if start is None or end is None:
+        h_start, h_end = _parse_marker_timestamps(msg)
+        if start is None:
+            start = h_start
+        if end is None:
+            end = h_end
+    if start is None and end is None:
+        ts = _field_float('ts')
+        if ts is not None:
+            return (ts, ts)
+    return (start, end)
 
 
 def rebuild_working_set(
