@@ -321,7 +321,7 @@ AFK_ADMIN_PROMPT = (
     '  5. Project cleanup and extra polish - skills/memory management/documentation update.\n'
     '  6. Technical-debt refactors: inspect large code files and quick triage for targeted debt and sub-optimal code. '
     'Ask for POLISH review of top suspicious file and follow-up fix if deemed necessary. '
-    'Functionality must note change unless obvious bugs have been identified and fixed.\n'
+    'Functionality must note change unless obvious bugs have been identified.\n'
     '  7. (floor - always available) Nothing else obvious -> bounded free research: look '
     'online for ideas to improve AC from similar projects, and leave notes to the user on '
     'what we could do (build on / do not duplicate prior research notes). This tier is '
@@ -448,13 +448,12 @@ TOOL_METADATA = {
         }
     },
     'view_media': {
-        'description': ('View an image, audio, or video file with optional crop / slice / extract. '
-                        'Image behaviour mirrors view_image (including crop_region and screen/window capture '
-                        'directives). Adds audio/video support: "time_range" trims an audio or video file to a '
-                        '[start,end] slice (via ffmpeg), "frame_at" extracts a single video frame as an image, '
-                        'and "audio_track" extracts a video\'s audio track as WAV. A plain view works without '
-                        'ffmpeg; the slice/frame/track operations require ffmpeg on PATH. Returns the media for '
-                        'the model to see.'),
+        'description': ('View an image, audio, or video file so the model can perceive it. '
+                        'Optional transforms: "crop_region" crops a pixel region of an image; '
+                        '"time_range" trims an audio/video file to a [start,end] slice; '
+                        '"frame_at" extracts one video frame as an image; '
+                        '"audio_track" extracts a video\'s audio track as a 16 kHz mono WAV. '
+                        'A plain view needs no ffmpeg; the slice/frame/track operations require ffmpeg on PATH.'),
         'parameters': {
             'path':
                 'Media file path, absolute or relative to the workspace root, an http(s) media URL, or a capture directive. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID (images only).',
