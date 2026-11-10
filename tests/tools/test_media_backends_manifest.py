@@ -60,7 +60,8 @@ class TestBackendManifest:
     def test_timeout_limits_match_per_backend_expectations(self):
         expected = {'comfyui': (30, 1800, 5), 'sdcpp': (30, 1800, 30),
                     'kobold_tts': (60, 3600, 30), 'chatterbox': (60, 3600, 30),
-                    'voice_to_text': (30, 3600, 30), 'svg2png': (5, 120, 5)}
+                    'voice_to_text': (30, 3600, 30), 'audiocpp_tts': (30, 3600, 30),
+                    'svg2png': (5, 120, 5)}
         for bid, entry in BACKEND_MANIFEST.items():
             tf = [s for s in entry['advanced_fields'] if s['key'] == 'timeout']
             assert len(tf) == 1
