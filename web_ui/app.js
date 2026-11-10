@@ -982,6 +982,7 @@ const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
 const settingMaxImagesForLlm = $('#setting-max-images-for-llm');
 const settingImageCaptionMode = $('#setting-image-caption-mode');
+const settingVisionEnabled = $('#setting-vision-enabled');
 const insertImageBtn = $('#insertImageBtn');
 const imageInput = $('#imageInput');
 const insertDocBtn = $('#insertDocBtn');
