@@ -7029,17 +7029,17 @@ function renderApiEndpoints() {
              </div>
 
              <!-- Per-endpoint feature toggles -->
-             <label class="setting-field toggle-field" style="margin:8px 0 0 0;font-size:12px;cursor:pointer;">
-               <span>👁 Vision Enabled</span>
-               <input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
-             </label>
-             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
+             <label class="setting-field toggle-field" style="margin:8px 0 0 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
                <span>🎲 Custom Sampling</span>
                <input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
              </label>
              <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Enable KV cache state save/restore for this endpoint (autoloader only)">
                <span>💾 State Save</span>
                <input type="checkbox" class="ep-input-state-save" ${epStateSave ? 'checked' : ''}>
+             </label>
+             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;">
+               <span>👁 Vision Enabled</span>
+               <input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
              </label>
              <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Whether this endpoint accepts audio input">
                <span>🎧 Audio Enabled</span>
