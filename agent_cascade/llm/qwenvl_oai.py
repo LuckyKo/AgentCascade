@@ -157,11 +157,16 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                     # Otherwise keep the media as a TEXT path-reference so the agent
                     # still sees the file the tool produced (and an image-only server
                     # never receives an input_audio/video_url it would reject + loop on).
+                    # When the router auto-captioned this item (active endpoint lacked the
+                    # modality), it carries a caption -> emit that instead of the bare path
+                    # so the model actually sees the transcript/description.
+                    cap = (item.get('caption') if isinstance(item, dict)
+                           else getattr(item, 'caption', None)) or None
                     if t == 'audio' and not self._audio_input_enabled(generate_cfg):
-                        new_content.append({'type': 'text', 'text': f'[Audio file: {v}]'})
+                        new_content.append({'type': 'text', 'text': f'[Audio] {cap}' if cap else f'[Audio file: {v}]'})
                         continue
                     if t == 'video' and not self._video_input_enabled(generate_cfg):
-                        new_content.append({'type': 'text', 'text': f'[Video file: {v}]'})
+                        new_content.append({'type': 'text', 'text': f'[Video] {cap}' if cap else f'[Video file: {v}]'})
                         continue
                     try:
                         orig_v = v  # pre-conv snapshot: set for all media, consumed only in the audio branch's 'format' (conv_* rewrites v)

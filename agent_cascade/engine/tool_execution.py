@@ -809,29 +809,33 @@ class ToolExecMixin:
         executed_tools.append(tool_name)
 
     @staticmethod
-    def _has_images(messages):
-        """Check if any message in the list contains image content."""
+    def _has_media(messages):
+        """Check if any message contains image, audio, or video content."""
         for msg in messages:
             items = msg.content if isinstance(msg.content, list) else []
             for item in items:
-                img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
-                if img_val:
-                    return True
+                for field in ('image', 'audio', 'video'):
+                    val = item.get(field) if isinstance(item, dict) else getattr(item, field, None)
+                    if val:
+                        return True
         return False
 
-    def _ensure_image_captions(self, messages, agent_type=None, instance_name=None):
-        """Generate captions for uncaptioned images using any vision-capable endpoint.
+    def _ensure_media_captions(self, messages, agent_type=None, instance_name=None):
+        """Generate captions for uncaptioned image/audio/video using the caption endpoint.
 
         Captions are stored as metadata on ContentItem so they survive when falling
-        back to text-only endpoints. This is called before LLM calls that may route
-        through non-vision endpoints.
+        back to endpoints that lack that modality. This is called before LLM calls that
+        may route through a non-capable endpoint.
 
         Args:
             instance_name: Owning instance name (sticky slot plan change #12): enables
                 side-call slot participation (acquire-or-keep, never drop) and the
-                autoloader KV guard inside caption_images().
+                autoloader KV guard inside caption_media().
         """
         router = getattr(self.pool, 'api_router', None)
-        if router and hasattr(router, 'caption_images'):
-            return router.caption_images(messages, agent_type=agent_type, instance_name=instance_name)
+        if router and hasattr(router, 'caption_media'):
+            return router.caption_media(messages,
+                                        modalities=('image', 'audio', 'video'),
+                                        agent_type=agent_type,
+                                        instance_name=instance_name)
         return messages

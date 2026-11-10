@@ -105,24 +105,24 @@ class CompressionHandler:
     # ── Image Captioning Helper (for tool results with uncaptioned images) ──
 
     def _caption_tool_result_images(self, items: List[ContentItem], instance_name: Optional[str] = None) -> None:
-        """Generate captions for uncaptioned image ContentItems in-place.
+        """Generate captions for uncaptioned image/audio/video ContentItems in-place.
 
         Called from _assemble_tool_result before stringifying a ContentItem list
         (e.g., view_image output). Wraps items temporarily in a Message so we can
-        reuse the existing api_router.caption_images() infrastructure.
+        reuse the existing api_router.caption_media() infrastructure.
 
         Errors are swallowed — captioning is best-effort and must never break tool execution.
-        Uncaptioned images will fall back to plain markdown links without captions.
+        Uncaptioned media will fall back to plain markdown links without captions.
 
         Args:
             items: List of ContentItem objects (modified in-place).
             instance_name: Optional compression target's instance name — threads the
-                owning instance into caption_images() for sticky-slot participation
+                owning instance into caption_media() for sticky-slot participation
                 (acquire-or-keep, never drop; plan change #12d).
         """
         try:
             api_router = getattr(self.pool, 'api_router', None)
-            if not api_router or not callable(getattr(api_router, 'caption_images', None)):
+            if not api_router or not callable(getattr(api_router, 'caption_media', None)):
                 return  # captioning infrastructure unavailable
 
             # Determine agent type for endpoint resolution; fall back to orchestrator's default
@@ -133,10 +133,13 @@ class CompressionHandler:
             except (RuntimeError, AttributeError):
                 pass
 
-            # Wrap items in a temporary Message so caption_images can process them
+            # Wrap items in a temporary Message so caption_media can process them
             temp_msg = Message(role=USER, content=list(items))
-            api_router.caption_images([temp_msg], agent_type=agent_type, instance_name=instance_name)
-            # caption_images modifies in-place; items are now captioned if possible
+            api_router.caption_media([temp_msg],
+                                     modalities=('image', 'audio', 'video'),
+                                     agent_type=agent_type,
+                                     instance_name=instance_name)
+            # caption_media modifies in-place; items are now captioned if possible
         except Exception as e:
             logger.debug(f"[CompressionHandler] Image captioning failed (non-fatal): {e}")
 

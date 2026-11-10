@@ -112,7 +112,7 @@ class APIEndpoint:
     # QwenVLChatAtOAI._audio_input_enabled / _video_input_enabled via the merged
     # generate_cfg. Other consumers: to_llm_cfg emission, the UI endpoint-editor
     # toggles (web_ui/app.js), and the caption-endpoint selector
-    # (router._get_caption_endpoint_cfg, which currently keys off vision_enabled).
+    # (router._get_caption_endpoint_cfg, which keys off the per-modality capability map).
     audio_enabled: bool = False        # Whether this endpoint accepts audio input
     video_enabled: bool = False        # Whether this endpoint accepts video input
     use_custom_sampling: bool = False  # Master toggle — if False, all sampler params above are ignored

@@ -491,11 +491,11 @@ class LLMCallMixin:
         # descriptions.
         # Captions are generated ONCE and cached on ContentItem objects, so
         # subsequent retries reuse them.
-        if self._has_images(llm_messages):
+        if self._has_media(llm_messages):
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'generalist'
             # Sticky slot plan change #12d: thread the owning instance so captioning
             # participates in the shared sequential slot (acquire-or-keep, never drop).
-            llm_messages = self._ensure_image_captions(
+            llm_messages = self._ensure_media_captions(
                 llm_messages,
                 agent_type=agent_type,
                 instance_name=getattr(instance, 'instance_name', None),

@@ -184,6 +184,47 @@ def _classify_probe_error(exc: BaseException) -> str:
 # 0.95 gives margin without over-compressing (see reports/gate-nprompt-tokens-fix-plan.md §7).
 _SERVER_CTX_SAFETY_FACTOR = 0.95
 
+# ── Media auto-captioning single source of truth ────────────────────────────────
+# Generalizes the image caption mechanism to audio + video so the single omni
+# endpoint assigned to ``agent_priorities['caption']`` can transcribe/describe any
+# modality. Referenced BARE inside APIRouter methods (these are module globals, not
+# class attributes). The caption MODE stays the existing ``image_caption_mode``
+# setting (unified media-caption gate) — no new persisted key.
+_IMAGE_CAPTION_PROMPT = (
+    'Describe this image in one concise sentence suitable for use as an alt-text description. '
+    'Focus on key visual elements: objects, people, colors, layout, and any text visible.'
+)
+_AUDIO_CAPTION_PROMPT = (
+    'Transcribe this audio verbatim. If it contains no speech, instead give one concise '
+    'sentence describing the sound(s), speaker(s), and any spoken words you can hear.'
+)
+_VIDEO_CAPTION_PROMPT = (
+    'Describe this video in one concise sentence: the scene, the main action, and any text '
+    'or speech visible or audible. If the video is silent, describe only what is shown.'
+)
+_CAPTION_PROMPTS = {
+    'image': _IMAGE_CAPTION_PROMPT,
+    'audio': _AUDIO_CAPTION_PROMPT,
+    'video': _VIDEO_CAPTION_PROMPT,
+}
+# Failure placeholder per modality (replaces the hard-coded '[Image]'). Also the
+# sentinel the auto-gate CLEARS on re-caption (a failed placeholder must re-caption).
+_CAPTION_PLACEHOLDERS = {'image': '[Image]', 'audio': '[Audio]', 'video': '[Video]'}
+# Modality -> endpoint capability flag required by the caption-endpoint resolvers.
+_CAPTION_CAPABILITY = {
+    'image': 'vision_enabled',
+    'audio': 'audio_enabled',
+    'video': 'video_enabled',
+}
+# Absent-flag default PER MODALITY, used only by the DICT-READ fallback paths (chain
+# head / Tier-4 global default) — NOT by the matched-registry getattr (whose field is
+# always present, so its default is dead and is pinned False there for every modality).
+# Risk R3 (the #1 silent bug): vision absent == capable (True, legacy); audio/video
+# absent == NOT capable (False), because their dataclass flags default False. Copying
+# vision's True default here would silently disable audio/video captioning for every
+# non-omni endpoint.
+_CAPTION_ABSENT_DEFAULT = {'image': True, 'audio': False, 'video': False}
+
 
 class APIRouter:
     """
@@ -2723,27 +2764,35 @@ class APIRouter:
         exc.endpoint_failures = all_errors  # List[str], one compact line per endpoint/attempt
         raise exc
 
-    # ── Image Captioning ─────────────────────────────────────────────────
-    # When images lack captions and the target endpoint is text-only, generate
-    # a caption using any available vision-capable endpoint.
+    # ── Media Auto-Captioning ──────────────────────────────────────────────
+    # When image/audio/video items lack a caption and the active endpoint lacks that
+    # modality's capability, generate a caption via the caption endpoint
+    # (agent_priorities['caption']). Prompts + placeholders + capability maps are the
+    # module-scope _CAPTION_PROMPTS / _CAPTION_PLACEHOLDERS / _CAPTION_CAPABILITY /
+    # _CAPTION_ABSENT_DEFAULT constants (single source of truth).
 
-    CAPTION_PROMPT = ('Describe this image in one concise sentence suitable for use as an alt-text description. '
-                      'Focus on key visual elements: objects, people, colors, layout, and any text visible.')
+    @staticmethod
+    def _has_uncaptioned_media(messages, modalities=('image',)):
+        """Check if any message contains a *modalities* item without a caption.
+
+        modalities is a set/list of ContentItem field names ('image'/'audio'/'video').
+        """
+        modalities = set(modalities)
+        for msg in messages:
+            if isinstance(msg.content, list):
+                for item in msg.content:
+                    for m in modalities:
+                        val = item.get(m) if isinstance(item, dict) else getattr(item, m, None)
+                        if val:
+                            cap = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                            if not cap:
+                                return True
+        return False
 
     @staticmethod
     def _has_uncaptioned_images(messages):
         """Check if any message contains images without captions."""
-        from agent_cascade.llm.schema import ContentItem
-        for msg in messages:
-            if isinstance(msg.content, list):
-                for item in msg.content:
-                    if isinstance(item, dict) and item.get('image'):
-                        if not item.get('caption'):
-                            return True
-                    elif hasattr(item, 'image') and item.image:
-                        if not getattr(item, 'caption', None):
-                            return True
-        return False
+        return APIRouter._has_uncaptioned_media(messages, ('image',))
 
     @staticmethod
     def _normalized_caption_mode(pool) -> str:
@@ -2776,25 +2825,35 @@ class APIRouter:
         def_base = normalize_api_base(defaults.get('api_base') or defaults.get('model_server', ''))
         return cfg_base == def_base and cfg.get('model', '') == defaults.get('model', '')
 
-    def _is_active_endpoint_vision(self, instance_name: Optional[str], agent_type: str = '') -> bool:
-        """Return True if the instance's CURRENTLY-allocated endpoint is vision-capable.
+    def _is_active_endpoint_capable(self,
+                                    instance_name: Optional[str],
+                                    agent_type: str = '',
+                                    capability: str = 'vision_enabled',
+                                    absent_default: bool = True) -> bool:
+        """Return True if the instance's CURRENTLY-allocated endpoint declares *capability*.
 
-        Reuses the registry-matching logic from ``_get_vision_endpoint_for_agent``: resolve the
-        instance's ``_last_endpoint_config``, match api_base + model in the live registry, and
-        return that endpoint's ``vision_enabled`` flag.
+        Generalizes the former ``_is_active_endpoint_vision`` to any modality. Resolves
+        the instance's ``_last_endpoint_config``, matches api_base + model against the
+        live registry, and returns that endpoint's capability flag.
 
-        When the instance has NO endpoint config yet (fresh create, session restore, or a reset
-        instance), resolve the FIRST endpoint its next call will try via ``get_endpoint_chain``
-        (using the caller-supplied ``agent_type`` — the same class ``call_with_fallback`` uses)
-        and return that endpoint's explicit ``vision_enabled`` flag. Without this, a restored
-        session's first turn captioned every image even though its assigned endpoint was
-        vision-capable (todo.md:107).
+        When the instance has NO endpoint config yet (fresh create / session restore /
+        reset), resolves the FIRST endpoint its next call will try via ``get_endpoint_chain``
+        (using the caller-supplied ``agent_type`` — the same class ``call_with_fallback``
+        uses) and reads that head cfg's capability.
 
-        Conservative (returns False → caption) when: ``instance_name``/pool are absent, there
-        is no resolvable endpoint chain, or a recorded endpoint matches neither a live enabled
-        endpoint nor the explicitly configured global default. An absent ``vision_enabled`` on
-        the global default or the chain head defaults to vision-capable (True), matching
-        ``_get_any_vision_endpoint`` and the legacy seed default.
+        Conservative (returns False -> caption) when ``instance_name``/pool are absent,
+        there is no resolvable endpoint chain, or a recorded endpoint matches neither a
+        live enabled endpoint nor the explicitly configured global default.
+
+        Absent-flag asymmetry (Risk R3 — the #1 silent bug): the matched-registry
+        ``getattr(ep, capability, False)`` default is pinned False for EVERY modality
+        because an ``APIEndpoint`` always carries the field, so the default is dead there
+        and must not be flipped. Only the two DICT-READ fallbacks — the Tier-4 global
+        default and the chain head — use *absent_default*: vision absent == capable
+        (True, legacy seed default, matching ``_get_any_media_endpoint``), but
+        audio/video absent == NOT capable (False), since those dataclass flags default
+        False. Copying vision's True default for audio/video would silently disable
+        audio/video captioning for every non-omni endpoint.
         """
         if not instance_name or self._pool is None:
             return False
@@ -2808,107 +2867,135 @@ class APIRouter:
                     if not ep.enabled:
                         continue
                     if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
-                        return bool(getattr(ep, 'vision_enabled', False))
-            # No matching registered endpoint → the call was served by the Tier-4 global
-            # default. Honour its vision_enabled (set from General Settings); an absent flag
-            # is treated as vision-capable, matching the legacy _SEED_DEFAULTS['vision_enabled']
-            # default and the sibling _get_any_vision_endpoint (aligning the two absent-paths).
+                        # Typed APIEndpoint always carries the field; default is dead -> False.
+                        return bool(getattr(ep, capability, False))
+            # No matching registered endpoint -> served by the Tier-4 global default.
+            # Honour its capability flag from General Settings; absent -> absent_default.
             if self._matches_global_default(cur_cfg):
                 defaults = self.default_llm_cfg or {}
-                return bool(defaults.get('vision_enabled', True))
+                return bool(defaults.get(capability, absent_default))
             return False
 
         # ── No endpoint allocated yet (session restore / fresh instance) ──────
-        # The next call_with_fallback() starts at the head of this instance's chain,
-        # so that is the effective "active" endpoint for the caption decision. A registered
-        # endpoint's cfg always carries vision_enabled (to_llm_cfg); a bare Tier-4 default
-        # cfg may omit it — in that case treat it as vision-capable, matching
-        # _get_any_vision_endpoint and the legacy seed default. An empty/unresolvable chain
-        # still falls back to captioning.
-        # Use the caller's agent_type (same as caption_images / _get_vision_endpoint_for_agent)
-        # to keep the chain resolution consistent with the actual captioning endpoint choice.
+        # The next call_with_fallback() starts at the head of this instance's chain, so
+        # that is the effective "active" endpoint for the caption decision. A registered
+        # endpoint's cfg always carries the capability (to_llm_cfg); a bare Tier-4 default
+        # cfg may omit it -> read absent_default. An empty/unresolvable chain still falls
+        # back to captioning. Use the caller's agent_type (same as caption_media /
+        # _get_media_endpoint_for_agent) so chain resolution matches the caption choice.
         if not agent_type:
             agent_type = getattr(inst, 'agent_class', '') or 'generalist'
         try:
             chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
         except ValueError as e:
-            logger.debug(f"[APIRouter] Vision check: no endpoint chain for '{instance_name}': {e}")
+            logger.debug(f"[APIRouter] Capability check ({capability}): no endpoint chain for "
+                         f"'{instance_name}': {e}")
             return False
         if not chain:
             return False
-        return bool(chain[0].get('vision_enabled', True))
+        return bool(chain[0].get(capability, absent_default))
 
-    def _get_any_vision_endpoint(self) -> Optional[dict]:
-        """Return the config of any enabled vision-capable endpoint.
+    def _is_active_endpoint_vision(self, instance_name: Optional[str], agent_type: str = '') -> bool:
+        """True if the active endpoint is vision-capable (absent flag == capable, legacy)."""
+        return self._is_active_endpoint_capable(instance_name, agent_type, 'vision_enabled', True)
 
-        The global default is only a valid caption endpoint when it is not explicitly
-        marked text-only (`vision_enabled=False` from General Settings); returning it
-        otherwise would route images to an endpoint that cannot read them.
+    def _is_active_endpoint_audio(self, instance_name: Optional[str], agent_type: str = '') -> bool:
+        """True if the active endpoint accepts audio (absent flag == NOT capable -> caption)."""
+        return self._is_active_endpoint_capable(instance_name, agent_type, 'audio_enabled', False)
+
+    def _is_active_endpoint_video(self, instance_name: Optional[str], agent_type: str = '') -> bool:
+        """True if the active endpoint accepts video (absent flag == NOT capable -> caption)."""
+        return self._is_active_endpoint_capable(instance_name, agent_type, 'video_enabled', False)
+
+    def _get_any_media_endpoint(self, modality: str = 'image') -> Optional[dict]:
+        """Return the config of any enabled endpoint capable of *modality*.
+
+        Generalizes ``_get_any_vision_endpoint``. The capability flag + its absent-flag
+        default come from the modality maps (Risk R3): image absent == capable (legacy),
+        audio/video absent == NOT capable. The global default is only a valid caption
+        endpoint when it is not explicitly marked as lacking *modality*; returning it
+        otherwise would route media to an endpoint that cannot read it.
         """
+        req = _CAPTION_CAPABILITY[modality]
+        absent = _CAPTION_ABSENT_DEFAULT[modality]
         with self._lock:
             for ep in self.endpoints.values():
-                if ep.enabled and getattr(ep, 'vision_enabled', True):
+                if ep.enabled and getattr(ep, req, absent):
                     return ep.to_llm_cfg()
-            # Fallback: default config (absent flag = vision-capable, legacy default)
-            if self.default_llm_cfg and self.default_llm_cfg.get('vision_enabled', True):
+            # Fallback: default config (absent flag == this modality's absent_default).
+            if self.default_llm_cfg and self.default_llm_cfg.get(req, absent):
                 cfg = copy.deepcopy(self.default_llm_cfg)
-                cfg.setdefault('vision_enabled', True)
+                cfg.setdefault(req, absent)
                 return cfg
         return None
 
-    def _get_caption_endpoint_cfg(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
-        """Return a caption endpoint config from ``agent_priorities['caption']``.
+    def _get_caption_endpoint_cfg(self,
+                                  agent_type: str,
+                                  instance_name: Optional[str] = None,
+                                  modality: str = 'image') -> Optional[dict]:
+        """Return a caption endpoint config from ``agent_priorities['caption']`` for *modality*.
 
-        Mirrors ``_get_vision_endpoint_for_agent``'s role at the captioning
+        Mirrors ``_get_media_endpoint_for_agent``'s role at the captioning
         endpoint-selection step, but resolves the reserved pseudo-key
         ``agent_priorities['caption']`` (an ordered ``List[endpoint_id]``, exactly
         like the ``skill_selector`` pseudo-key) instead of the agent chain.
 
         A caption list is a direct fallback list, NOT a rotated agent chain, so it
         is iterated in order and the FIRST entry that resolves to an enabled,
-        vision/caption-capable endpoint wins. Stale/removed ids and entries with an
-        empty ``api_base`` are dropped, mirroring the empty-api_base drop in
+        capability-adequate endpoint for *modality* wins. Stale/removed ids and entries
+        with an empty ``api_base`` are dropped, mirroring the empty-api_base drop in
         ``skills.selector.resolve_endpoints`` and the id-validation in
-        ``set_agent_priorities``. A breaker-open head is deliberately NOT skipped
-        here -- the existing per-image breaker gate in ``caption_images`` degrades
-        it to ``'[Image]'`` like any other caption failure.
+        ``set_agent_priorities``. The capability predicate uses
+        ``_CAPTION_CAPABILITY``/``_CAPTION_ABSENT_DEFAULT`` so a vision-only endpoint is
+        NOT chosen for audio/video (Risk R3: an absent ``audio_enabled`` means NOT
+        capable). A breaker-open head is deliberately NOT skipped here -- the existing
+        per-item breaker gate in ``caption_media`` degrades it to the modality
+        placeholder like any other caption failure.
 
         Returns that endpoint's ``to_llm_cfg()``, or ``None`` when the caption list
-        is empty/absent or nothing resolves -- callers then fall back to the existing
-        ``_get_vision_endpoint_for_agent`` (any-vision, then ``[Image]``), so an
-        empty caption list is byte-for-byte today's behaviour.
+        is empty/absent or nothing resolves for this modality -- callers then fall back
+        to ``_get_media_endpoint_for_agent`` (agent chain, then any-modality, then
+        placeholder), so an empty caption list is byte-for-byte today's behaviour.
 
         ``agent_type``/``instance_name`` are accepted for call-site parity only; a
         caption list is an explicit endpoint order, not an agent-chain rotation, so
         they are not consulted.
         """
+        req = _CAPTION_CAPABILITY[modality]
+        absent = _CAPTION_ABSENT_DEFAULT[modality]
         for eid in list(self.agent_priorities.get('caption') or []):
             with self._lock:
                 ep = self.endpoints.get(eid)
                 if ep is None or not ep.enabled or not ep.api_base \
-                        or not getattr(ep, 'vision_enabled', True):
-                    continue  # stale/removed id, disabled, un-routable, or non-vision -> drop
+                        or not getattr(ep, req, absent):
+                    continue  # stale/removed id, disabled, un-routable, or lacks modality -> drop
                 cfg = ep.to_llm_cfg()
             return cfg
         return None
 
-    def _get_vision_endpoint_for_agent(self, agent_type: str, instance_name: Optional[str] = None) -> Optional[dict]:
-        """Return a vision-capable endpoint for captioning.
+    def _get_media_endpoint_for_agent(self,
+                                      agent_type: str,
+                                      instance_name: Optional[str] = None,
+                                      modality: str = 'image') -> Optional[dict]:
+        """Return a *modality*-capable endpoint for captioning (generalizes _get_vision_endpoint_for_agent).
 
         Preference order:
-          1. The instance's CURRENTLY-allocated endpoint, if it is itself
-             vision-capable — so we never hop off the launcher endpoint that is
-             already serving (and can serve) this conversation.
-          2. The first vision-capable endpoint in the agent's rotated chain.
-          3. Any enabled vision endpoint as a last resort.
+          1. The instance's CURRENTLY-allocated endpoint, if it is itself capable of
+             *modality* — so we never hop off the launcher endpoint that is already
+             serving (and can serve) this conversation.
+          2. The first *modality*-capable endpoint in the agent's rotated chain.
+          3. Any enabled *modality*-capable endpoint as a last resort.
 
-        When ``instance_name`` is given, the per-instance cursor rotates the chain so
-        the resolved vision endpoint matches the agent's current allocation.
+        Capability + absent-default come from the modality maps (Risk R3). When
+        ``instance_name`` is given, the per-instance cursor rotates the chain so the
+        resolved endpoint matches the agent's current allocation.
         """
-        # (1) Prefer the instance's own current endpoint when it already has vision —
-        # avoids an unnecessary switch to a different endpoint just for captioning.
-        # Note: _last_endpoint_config does not store vision_enabled, so we resolve the
-        # flag from the live endpoint registry by matching api_base + model.
+        req = _CAPTION_CAPABILITY[modality]
+        absent = _CAPTION_ABSENT_DEFAULT[modality]
+        # (1) Prefer the instance's own current endpoint when it already supports the
+        # modality — avoids an unnecessary switch to a different endpoint just for
+        # captioning. Note: _last_endpoint_config does not store the capability flag, so
+        # we resolve it from the live endpoint registry by matching api_base + model.
         if instance_name and self._pool is not None:
             inst = self._pool.get_instance(instance_name)
             cur_cfg = getattr(inst, '_last_endpoint_config', None) if inst is not None else None
@@ -2920,143 +3007,223 @@ class APIRouter:
                         if not ep.enabled:
                             continue
                         if normalize_api_base(ep.api_base) == cur_base and ep.model == cur_model:
-                            if getattr(ep, 'vision_enabled', True):
+                            if getattr(ep, req, absent):
                                 return ep.to_llm_cfg()
-                            break  # current endpoint found but text-only → fall through
+                            break  # current endpoint found but lacks modality → fall through
 
-        # (2) First vision-capable endpoint in the agent's rotated chain.
+        # (2) First modality-capable endpoint in the agent's rotated chain.
         chain = self.get_endpoint_chain(agent_type, instance_name=instance_name)
         for cfg in chain:
-            if cfg.get('vision_enabled', True):
+            if cfg.get(req, absent):
                 return cfg
-        # (3) Fallback: any vision endpoint
-        return self._get_any_vision_endpoint()
+        # (3) Fallback: any endpoint capable of this modality.
+        return self._get_any_media_endpoint(modality)
+
+    def _get_any_vision_endpoint(self) -> Optional[dict]:
+        """Back-compat alias for ``_get_any_media_endpoint('image')``."""
+        return self._get_any_media_endpoint('image')
+
+    def _get_vision_endpoint_for_agent(self,
+                                       agent_type: str,
+                                       instance_name: Optional[str] = None) -> Optional[dict]:
+        """Back-compat alias for ``_get_media_endpoint_for_agent(..., modality='image')``."""
+        return self._get_media_endpoint_for_agent(agent_type, instance_name, modality='image')
 
     def caption_images(self, messages, agent_type: str = 'generalist', instance_name: Optional[str] = None) -> List:
+        """Generate captions for uncaptioned images.
+
+        Thin image-only wrapper over ``caption_media`` so existing image callers and
+        tests stay green while audio/video share the same machinery.
         """
-        Generate captions for uncaptioned images in the message list.
+        return self.caption_media(messages, modalities=('image',), agent_type=agent_type, instance_name=instance_name)
 
-        Uses the agent's own endpoint chain to find a vision-capable endpoint
-        for captioning, preserving the agent's configured endpoint order.
+    def caption_media(self,
+                      messages,
+                      modalities=('image',),
+                      agent_type: str = 'generalist',
+                      instance_name: Optional[str] = None) -> List:
+        """Generate captions for uncaptioned image/audio/video items (unified media gate).
 
-        Slot participation (side-call rule): when the resolved vision endpoint is
-        conc=0, the owning instance's sticky slot is synced BEFORE any HTTP fires —
-        acquire-or-keep for the shared pool, including a cross-pool swap when the
-        instance currently holds a different pool's permit (plan §3.10 D1-2). A sync
-        failure RE-RAISES: proceeding would fire an ungated conc=0 HTTP (same policy as
-        call_with_fallback — no slotless state). Callers that treat captioning as
-        best-effort (e.g. compression) already catch and degrade to '[Image]'
-        placeholders. On an autoloader endpoint with state-save enabled, the instance's
-        KV state is saved before and restored after the caption loop so its conversation
-        KV survives the cold request.
+        Generalizes ``caption_images`` to all media modalities. The caption trigger is
+        capability-driven, evaluated per modality:
+          * ``image_caption_mode == 'off'``    -> no captioning at all.
+          * ``'auto'`` + the ACTIVE endpoint is capable of that modality -> skip it
+            (the model reads the raw media; no caption cost).
+          * ``'auto'`` + active endpoint LACKS that modality, OR ``'always'``,
+            and the item has no (or placeholder) caption -> go to the Captioner
+            (``agent_priorities['caption']`` omni endpoint) and apply the caption.
+
+        ``image_caption_mode`` is the single unified media-caption gate (D2) — no new
+        setting. Captions are written to ``item['caption']``/``item.caption`` in place
+        so they survive retries and reach the adapter's gate-closed branches (which emit
+        ``[Modality] <caption>`` instead of a bare ``[Modality file: path]``).
+
+        One caption endpoint cfg is resolved per modality; items whose cfg is identical
+        are batched into a single side-call group, so one omni endpoint serving all
+        modalities reuses one sticky-slot acquire + autoloader KV guard (R5). A modality
+        whose resolver returns None gets that modality's placeholder on its uncaptioned
+        items (safe degradation, R9). The captioner is a direct ``get_chat_model`` side
+        call on a fresh conversation, so captioning never re-enters itself (R1).
+
+        Slot participation (side-call rule, unchanged from image captioning): when the
+        resolved endpoint is conc=0, the owning instance's sticky slot is synced BEFORE
+        any HTTP fires; a sync failure RE-RAISES (best-effort callers catch and degrade
+        to placeholders). On an autoloader endpoint with state-save enabled, the
+        instance KV state is saved before and restored after each caption group.
 
         Args:
-            messages: List of Message objects (may contain images)
-            agent_type: Agent type used for endpoint resolution
+            messages: List of Message objects (may contain image/audio/video items).
+            modalities: Iterable of ContentItem field names to caption — any subset of
+                {'image','audio','video'}. Defaults to image-only (== caption_images).
+            agent_type: Agent type used for endpoint resolution.
             instance_name: Optional owning instance name — enables sticky-slot
                 participation and the autoloader KV guard. When absent, captioning
                 proceeds exactly as before (no slot interaction).
 
         Returns:
-            Modified message list with captions attached to images.
+            The (mutated) message list with captions attached to the media items.
         """
-        # ── Image caption mode gate (auto/always/off) ───────────────────────
-        # Runs BEFORE the "no uncaptioned images" early-skip and BEFORE any sticky-slot /
-        # KV-guard machinery so that a skip produces zero slot/KV side effects. All three
-        # caption triggers (pre-LLM, compression, image_gen) funnel through here.
+        modalities = set(modalities or ('image',))
+        # ── Unified media caption mode gate (auto/always/off) ───────────────────
+        # Runs BEFORE any sticky-slot / KV-guard machinery so a skip produces zero
+        # slot/KV side effects. All caption triggers (pre-LLM, compression) funnel here.
         mode = self._normalized_caption_mode(self._pool)
         if mode == 'off':
-            logger.debug("[APIRouter] Image captioning skipped — mode='off'")
+            logger.debug("[APIRouter] Media captioning skipped — mode='off'")
             return messages
-        if mode == 'auto':
-            if self._is_active_endpoint_vision(instance_name, agent_type=agent_type):
-                # Active endpoint already has vision → no caption cost.
-                logger.debug(f"[APIRouter] Image captioning skipped (mode='auto') — active endpoint "
-                             f"for '{instance_name}' is vision-capable")
-                return messages
-            # Falling back to a text-only endpoint: full-caption ALL images by clearing
-            # placeholder/empty captions so previously-failed ('[Image]') items are re-captioned
-            # with real content. Only touch falsy or '[Image]' captions — never clobber a good one.
-            for msg in messages:
-                items = msg.content if isinstance(msg.content, list) else []
-                for item in items:
-                    img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
-                    if not img_val:
-                        continue
-                    existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
-                    if not existing_caption or existing_caption == '[Image]':
-                        if isinstance(item, dict):
-                            item['caption'] = ''
-                        else:
-                            item.caption = ''
 
-        if not self._has_uncaptioned_images(messages):
+        # ── auto: drop modalities the ACTIVE endpoint already handles natively ──
+        # (capability-driven skip). Then clear falsy / placeholder captions on the
+        # modalities that still need captioning so previously-failed '[Audio]'/
+        # '[Video]'/'[Image]' items re-caption. mode=='always' keeps today's behavior:
+        # it neither skips nor clears, so good captions and failed placeholders stay.
+        if mode == 'auto':
+            _active_check = {
+                'image': self._is_active_endpoint_vision,
+                'audio': self._is_active_endpoint_audio,
+                'video': self._is_active_endpoint_video,
+            }
+            for m in list(modalities):
+                checker = _active_check.get(m)
+                if checker is not None and checker(instance_name, agent_type=agent_type):
+                    modalities.discard(m)
+                    logger.debug(f"[APIRouter] {m} captioning skipped (mode='auto') — active endpoint "
+                                 f"for '{instance_name}' handles {m} natively")
+            for m in modalities:
+                placeholder = _CAPTION_PLACEHOLDERS[m]
+                for msg in messages:
+                    items = msg.content if isinstance(msg.content, list) else []
+                    for item in items:
+                        media_val = item.get(m) if isinstance(item, dict) else getattr(item, m, None)
+                        if not media_val:
+                            continue
+                        existing = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                        if not existing or existing == placeholder:
+                            if isinstance(item, dict):
+                                item['caption'] = ''
+                            else:
+                                item.caption = ''
+
+        if not modalities:
+            logger.debug('[APIRouter] Captioning skipped — active endpoint handles all requested modalities')
+            return messages
+        if not self._has_uncaptioned_media(messages, modalities):
             # Observability: make the "already captioned → skip" path visible so a
             # redundant re-caption (or its absence) is diagnosable from the console.
-            logger.debug('[APIRouter] Captioning skipped — no uncaptioned images present')
+            logger.debug('[APIRouter] Captioning skipped — no uncaptioned media present')
             return messages
 
-        from agent_cascade.llm.schema import ContentItem, Message
-        # Prefer an explicit caption-endpoint list (agent_priorities['caption']);
-        # fall back to the existing any-vision resolution when it is empty/absent,
-        # so an unconfigured caption list is byte-for-byte today's behaviour.
-        vision_cfg = self._get_caption_endpoint_cfg(agent_type, instance_name=instance_name) \
-            or self._get_vision_endpoint_for_agent(agent_type, instance_name=instance_name)
-        if not vision_cfg:
-            # Replace uncaptioned images with placeholder text to ensure safe fallback
-            logger.warning(
-                '[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders')
-            for msg in messages:
+        # Resolve ONE caption endpoint cfg per modality and group uncaptioned items by
+        # cfg identity, so a single omni endpoint serving every modality reuses one
+        # slot-sync + KV guard (R5). A modality with no resolver gets its placeholder.
+        groups = {}  # key=(norm_base, model) -> {'cfg': cfg, 'items': [(msg_idx, item_idx, media_val, modality)]}
+        order = []  # preserve deterministic modality order for log/diagnostic stability
+        for m in sorted(modalities):
+            # Prefer an explicit caption-endpoint list (agent_priorities['caption']);
+            # fall back to the agent-chain / any-modality resolution when empty/absent,
+            # so an unconfigured caption list is byte-for-byte today's behaviour.
+            cfg = self._get_caption_endpoint_cfg(agent_type, instance_name=instance_name, modality=m) \
+                or self._get_media_endpoint_for_agent(agent_type, instance_name=instance_name, modality=m)
+            if not cfg:
+                self._write_media_placeholders(messages, m)
+                continue
+            key = (normalize_api_base(cfg.get('api_base') or cfg.get('model_server', '')), cfg.get('model', ''))
+            if key not in groups:
+                groups[key] = {'cfg': cfg, 'items': []}
+                order.append(key)
+            for msg_idx, msg in enumerate(messages):
                 items = msg.content if isinstance(msg.content, list) else []
-                for item in items:
-                    img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
-                    existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
-                    if img_val and not existing_caption:
-                        cap = '[Image]'
-                        if isinstance(item, dict):
-                            item['caption'] = cap
-                        else:
-                            item.caption = cap
-            return messages
+                for item_idx, item in enumerate(items):
+                    media_val = item.get(m) if isinstance(item, dict) else getattr(item, m, None)
+                    existing = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                    if media_val and not existing:
+                        groups[key]['items'].append((msg_idx, item_idx, media_val, m))
+
+        for key in order:
+            group = groups[key]
+            self._caption_media_group(messages, group['cfg'], group['items'], instance_name)
+        return messages
+
+    def _write_media_placeholders(self, messages, modality: str) -> None:
+        """Stamp ``modality``'s placeholder onto uncaptioned items of that modality.
+
+        Used when no caption endpoint resolves for the modality (R9): today's
+        '[Image]' degradation, generalized per modality.
+        """
+        placeholder = _CAPTION_PLACEHOLDERS[modality]
+        logger.warning(f'[APIRouter] No {modality}-capable caption endpoint found — replacing uncaptioned '
+                       f'{modality} items with placeholders')
+        for msg in messages:
+            items = msg.content if isinstance(msg.content, list) else []
+            for item in items:
+                media_val = item.get(modality) if isinstance(item, dict) else getattr(item, modality, None)
+                existing = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                if media_val and not existing:
+                    if isinstance(item, dict):
+                        item['caption'] = placeholder
+                    else:
+                        item.caption = placeholder
+
+    def _caption_media_group(self, messages, cfg: dict, items, instance_name: Optional[str]) -> None:
+        """Caption a batch of media items via ONE resolved endpoint (the side-call loop).
+
+        Preserves the proven image-caption side-call discipline verbatim, keyed off
+        *cfg*: when the endpoint is conc=0 the owning instance's sticky slot is
+        acquired-or-kept BEFORE any HTTP fires (a sync failure RE-RAISES); on an
+        autoloader endpoint with state_save_enabled the instance KV is saved before the
+        loop and restored in a finally (even on exception). Each item is captioned with
+        its modality-specific prompt; any failure — including a breaker-open base —
+        degrades to that modality's placeholder, never hard-failing (R8). The captioner
+        is a direct ``get_chat_model(cfg).chat`` on a fresh single-message conversation,
+        so it does NOT run the agent turn loop and cannot re-enter captioning (R1).
+
+        items: list of ``(msg_idx, item_idx, media_val, modality)``. Captions are
+        patched back into ``messages[msg_idx].content[item_idx].caption`` in place.
+        """
+        if not items:
+            return
 
         from agent_cascade.llm import get_chat_model
-
-        # Collect all uncaptioned images for batch processing
-        uncaptioned_items = []  # (msg_index, item_index) tuples to patch back
-
-        for msg_idx, msg in enumerate(messages):
-            items = msg.content if isinstance(msg.content, list) else []
-            for item_idx, item in enumerate(items):
-                img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
-                existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
-                if img_val and not existing_caption:
-                    uncaptioned_items.append((msg_idx, item_idx, img_val))
-
-        if not uncaptioned_items:
-            return messages
+        from agent_cascade.llm.schema import ContentItem, Message
 
         # Observability: unambiguous "caption triggered" marker — fires only when a real
-        # vision caption call is about to be made (i.e. NOT the already-captioned skip path).
-        _cap_model = vision_cfg.get('model', 'unknown')
-        logger.info(f"[APIRouter] Captioning {len(uncaptioned_items)} image(s) via vision endpoint "
+        # caption call is about to be made (NOT the already-captioned / native-skip path).
+        _cap_model = cfg.get('model', 'unknown')
+        logger.info(f"[APIRouter] Captioning {len(items)} media item(s) via caption endpoint "
                     f"model='{_cap_model}' instance={instance_name or '-'}")
 
-        # ── Side-call slot sync (plan §3.10): acquire-or-keep, NEVER drop. ──
-        # When the vision endpoint is conc=0 and the owning instance does not already
-        # hold the shared sequential slot, take it at FIFO tail BEFORE any caption HTTP
-        # fires. Holding the shared slot already → sticky-keep (zero cost). No release
-        # on completion — the permit stays on the instance for the lifecycle points.
+        # ── Side-call slot sync: acquire-or-keep, NEVER drop. ──
         _caption_instance = None
         if instance_name and self._pool:
             _caption_instance = self._pool.get_instance(instance_name)
             if _caption_instance is not None:
                 try:
-                    _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
+                    _vbase = cfg.get('api_base') or cfg.get('model_server', 'unknown')
                     with self._lock:
                         _vconc = None
                         for ep in self.endpoints.values():
                             if ep.enabled and normalize_api_base(ep.api_base) == normalize_api_base(_vbase) \
-                                    and ep.model == vision_cfg.get('model'):
+                                    and ep.model == cfg.get('model'):
                                 _vconc = ep.concurrency_limit
                                 break
                     if _vconc is None:
@@ -3072,24 +3239,20 @@ class APIRouter:
                 except AgentTerminatedError:
                     raise
                 except Exception as e:
-                    # Sync failure must NOT be swallowed (same policy as
-                    # call_with_fallback): continuing would fire the caption HTTP at a
-                    # conc=0 endpoint without holding the shared slot — ungated, and the
-                    # instance may be left mid-swap. Re-raise; best-effort callers
-                    # (compression handler) catch this and degrade to '[Image]'
-                    # placeholders, while the pre-LLM caption path fails the turn rather
-                    # than trashing the model.
+                    # Sync failure must NOT be swallowed (same policy as call_with_fallback):
+                    # continuing would fire the caption HTTP at a conc=0 endpoint without
+                    # holding the shared slot — ungated. Best-effort callers (compression
+                    # handler) catch this and degrade to placeholders; the pre-LLM caption
+                    # path fails the turn rather than trashing the model.
                     logger.error(
                         f"[APIRouter] Caption slot sync failed for '{instance_name}': {e}",
                         exc_info=True,
                     )
                     raise
 
-        # ── Autoloader KV guard (plan §3.10 D1-3b): save the instance's KV state before
-        # the cold caption request so a saved-state label is not invalidated; restore in
-        # a finally after the loop (even on exception).
+        # ── Autoloader KV guard: save KV before the cold request, restore in finally. ──
         _kv_saved = False
-        if _caption_instance is not None and vision_cfg.get('state_save_enabled'):
+        if _caption_instance is not None and cfg.get('state_save_enabled'):
             try:
                 from agent_cascade.state_ops import save_instance_state
                 save_instance_state(_caption_instance)
@@ -3097,41 +3260,41 @@ class APIRouter:
             except Exception as e:
                 logger.debug(f"[APIRouter] Pre-caption KV save failed (non-fatal): {e}")
 
-        # Process each uncaptioned image individually for accurate captions
+        # Process each item individually for accurate, per-modality captions.
         all_captions = {}  # key = (msg_idx, item_idx) -> caption text
-
         try:
-            # Batch: send prompt + one image at a time to get per-image captions
-            for msg_idx, item_idx, img_val in uncaptioned_items:
+            for msg_idx, item_idx, media_val, modality in items:
                 try:
-                    # ── Change E gate: never fire a captioning call at a breaker-open base.
-                    # Captioning is non-critical — skip the busy endpoint and fall through to
-                    # the '[Image]' placeholder below (same as any other caption failure).
-                    _vbase = vision_cfg.get('api_base') or vision_cfg.get('model_server', 'unknown')
+                    # ── Never fire a captioning call at a breaker-open base (R8): skip the
+                    # busy endpoint and fall through to the placeholder, like any failure.
+                    _vbase = cfg.get('api_base') or cfg.get('model_server', 'unknown')
                     if self._breaker_is_open(_vbase):
-                        logger.info(f"[APIRouter] Server busy — skipping image captioning at {_vbase} "
-                                    f"(breaker open); using '[Image]' placeholder.")
+                        logger.info(f"[APIRouter] Server busy — skipping {modality} captioning at {_vbase} "
+                                    f"(breaker open); using placeholder.")
                         raise RuntimeError(f"Server busy (breaker open) at {_vbase}")
-                    chat_model = get_chat_model(vision_cfg)
+                    chat_model = get_chat_model(cfg)
+                    # Build the captioner message from the RAW value (audio may be a
+                    # str path OR a base64 dict, video may be a list); the omni
+                    # adapter does its own encoding (R6) — do NOT pre-encode here.
                     cap_msg = Message(role='user',
                                       content=[
-                                          ContentItem(text=self.CAPTION_PROMPT),
-                                          ContentItem(image=img_val),
+                                          ContentItem(text=_CAPTION_PROMPTS[modality]),
+                                          ContentItem(**{modality: media_val}),
                                       ])
                     result_iter = chat_model.chat(
                         messages=[cap_msg],
                         stream=True,
                         delta_stream=False,
-                        extra_generate_cfg=vision_cfg,
+                        extra_generate_cfg=cfg,
                     )
-                    # Consume the generator to get the final response
+                    # Consume the generator to get the final response.
                     last_chunk = None
                     for chunk in result_iter:
                         last_chunk = chunk
                     if last_chunk and len(last_chunk) > 0:
                         caption_text = ''
                         for m in last_chunk:
-                            # Handle both Message objects and dicts returned by chat models
+                            # Handle both Message objects and dicts returned by chat models.
                             content = getattr(m, 'content', None) or (m.get('content') if isinstance(m, dict) else None)
                             if isinstance(content, str):
                                 caption_text += content
@@ -3140,19 +3303,20 @@ class APIRouter:
                                     txt = getattr(ci, 'text', '') or (ci.get('text') if isinstance(ci, dict) else '')
                                     if txt:
                                         caption_text += txt
-                        caption_text = caption_text.strip()[:
-                                                            MAX_CAPTION_LENGTH]  # Cap length to avoid bloating messages
+                        # Reuse the shared caption-length cap (D3/R7) so a long audio
+                        # transcript can't flood the context.
+                        caption_text = caption_text.strip()[:MAX_CAPTION_LENGTH]
                     else:
-                        caption_text = '[Image]'
+                        caption_text = _CAPTION_PLACEHOLDERS[modality]
                 except Exception as e:
-                    logger.warning(f"[APIRouter] Failed to generate image caption: {e}")
-                    caption_text = '[Image]'
+                    logger.warning(f"[APIRouter] Failed to generate {modality} caption: {e}")
+                    caption_text = _CAPTION_PLACEHOLDERS[modality]
 
                 all_captions[(msg_idx, item_idx)] = caption_text
         finally:
-            # ── Autoloader KV guard restore (plan §3.10 D1-3b): put the saved KV state
-            # back after the loop so the agent's conversation KV survives the cold
-            # caption request — even when a caption exception escaped the per-image try.
+            # ── Autoloader KV guard restore: put the saved KV state back after the loop
+            # so the agent's conversation KV survives the cold caption request — even
+            # when a caption exception escaped the per-item try.
             if _kv_saved and _caption_instance is not None \
                     and getattr(_caption_instance, '_slot_release', None) is not None:
                 # Slot-ownership gate: the side-call slot sync above guarantees the
@@ -3165,20 +3329,18 @@ class APIRouter:
                 except Exception as e:
                     logger.warning(f"[APIRouter] Post-caption KV restore failed (non-fatal): {e}")
 
-        # Patch captions back into messages in-place
-        for msg_idx, item_idx, _ in uncaptioned_items:
-            key = (msg_idx, item_idx)
-            caption = all_captions.get(key, '[Image]')
-            items = messages[msg_idx].content if isinstance(messages[msg_idx].content, list) else []
-            if item_idx < len(items):
-                item = items[item_idx]
+        # Patch captions back into messages in-place.
+        for msg_idx, item_idx, _, modality in items:
+            caption = all_captions.get((msg_idx, item_idx), _CAPTION_PLACEHOLDERS[modality])
+            items_list = messages[msg_idx].content if isinstance(messages[msg_idx].content, list) else []
+            if item_idx < len(items_list):
+                item = items_list[item_idx]
                 if isinstance(item, dict):
                     item['caption'] = caption
                 else:
                     item.caption = caption
 
-        logger.info(f"[APIRouter] Captioned {len(uncaptioned_items)} image(s) for vision fallback")
-        return messages
+        logger.info(f"[APIRouter] Captioned {len(items)} media item(s) for capability fallback")
 
     # ── Persistence ──────────────────────────────────────────────────────
 
