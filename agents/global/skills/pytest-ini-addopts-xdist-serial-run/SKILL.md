@@ -1,7 +1,7 @@
 ---
-version: 1.0.5
+version: 1.2.0
 name: pytest-ini-addopts-xdist-serial-run
-description: "Run a focused pytest file serially (no xdist) in a repo whose pytest.ini pins -n auto via addopts, without triggering unrecognized-arguments or accidentally re-including excluded suites; also covers the missing-plugin CI root cause, capping -n in containers, why a marker filter cannot suppress a collection-time ImportError, and the memory-pressure xdist crash (free RAM before theorising)."
+description: "Run a focused pytest file serially (no xdist) in a repo whose pytest.ini pins -n auto via addopts, without triggering unrecognized-arguments or accidentally re-including excluded suites; covers the missing-plugin CI root cause, capping -n in containers, why a marker filter cannot suppress a collection-time ImportError, the two distinct causes of an xdist worker death (RAM pressure vs. a worker-killing test), and when to use serial (failure triage) vs. parallel (full/basic runs)."
 triggers:
   - "pytest"
   - "pytest.ini"
@@ -26,6 +26,21 @@ pins parallelism through an `addopts` line containing `-n auto`, without burning
 `unrecognized arguments` errors, without accidentally dragging excluded extended-suite tests into
 the run, and without discovering halfway through that a collection-time import error was the real
 problem all along.
+
+## Serial vs. parallel — pick the right mode (read this first)
+
+- **Basic / full regression run → parallel.** Use the repo default (`-n auto`), i.e. just
+  `python -m pytest -q`. This is the fast path. A full *serial* suite is 20-40× slower and a
+  massive waste of time for a normal pass/fail sweep — **never run the whole suite serially.**
+- **Serial (no xdist) → ONLY to re-check a specific failure.** xdist workers can hide or crash a
+  failing test's traceback (the `crash-item` / `node down` signatures below). To see the real
+  traceback, re-run JUST that one test/file serially (Step 2). Serial is a *triage* tool, not a
+  full-run tool.
+- **If `-n auto` OOMs on a host with a co-resident model → cap `-n`, don't go serial.**
+  `-n auto` spawns one worker per core and each re-imports the heavy `conftest.py`; with a
+  resident local model that OOMs. The in-session fix is a moderate cap (`-n 4` / `-n 8`) — still
+  far faster than serial — or free the co-resident RAM (`execution_mode="safe"`) if you can.
+  Drop to serial only for a single failing test.
 
 ## Why it bites
 
@@ -70,8 +85,30 @@ a tokenizer singleton built at module scope — `agent_cascade/utils/tokenizatio
 **Same cause, two faces — and neither is a code defect.** The discriminating test is one parameter:
 re-run the identical command with the co-resident RAM freed (e.g. `shell_cmd` `execution_mode="safe"`,
 which unloads local models for the command's duration). If it completes, RAM was the variable; nothing
-about the tests changed. Do not open a new bug for the second signature, and do not blame a previously
-"fixed" terminal-writer or colorama issue until you have re-run with memory available.
+about the tests changed. If you *cannot* free the co-resident model (it is serving your own live
+session), the in-session fix is to **cap `-n` to a moderate count** (`-n 4`/`-n 8`) — not to fall back
+to a full serial run (see "Serial vs. parallel" above). Do not open a new bug for the second
+signature, and do not blame a previously "fixed" terminal-writer or colorama issue until you have
+re-run with memory available.
+
+**Sixth trap — a worker-killing test, which is NOT memory pressure (distinct from the Fifth).** A
+specific test can crash its own xdist worker. Observed: a threaded local socket/HTTP-server test on
+Windows (`socketserver` / `ThreadingHTTPServer` — a test that spawns a server thread and tears it
+down, leaving the worker in a state that aborts it). xdist reports `[gwN] node down: Not properly
+terminated` at the progress point where that test runs, and the *bystander* tests that were in flight
+in that worker get marked `F` (so a whole file of "failures" can be crash collateral, not real
+regressions).
+
+This is a **different cause** from the Fifth trap. Discriminate with two negative tests:
+- **Capping `-n` does NOT fix it** — the crash reproduces at the same progress point with `-n 4`
+  (a RAM cause often survives a moderate cap).
+- **Freeing RAM does NOT fix it** — the host had plenty of free RAM; the crash is structural, not an
+  allocation failure.
+
+The fix is to run the crashing test **serially** (single process — there is no worker to crash) or
+exclude it from the parallel run; it is a *test-isolation* defect, not a harness/memory defect. Do
+NOT file a RAM bug and do NOT keep capping `-n` — neither addresses a worker-killing test. Re-run the
+suspect test alone serially to confirm it is the culprit (it passes or hangs in single-process mode).
 
 ## Procedure
 
@@ -127,11 +164,15 @@ file entirely excluded by markers.
 
 ## Tips
 
-- **Distinguish four failure signatures — different fixes.** `unrecognized arguments: -n` = missing
+- **Distinguish failure signatures — different fixes.** `unrecognized arguments: -n` = missing
   xdist/timeout plugin (add to manifest); `can't start new thread` / OpenBLAS `pthread_create` =
   thread or worker limit (cap `-n`, set thread env vars); `ModuleNotFoundError: <app dep>` = missing
-  runtime dep (install requirements); `MemoryError` / `WinError 8` / `node down` / `no tests ran` =
-  memory pressure (free the co-resident allocation and re-run the same command).
+  runtime dep (install requirements); `MemoryError` / `WinError 8` / `no tests ran` = memory
+  pressure (free the co-resident allocation, or cap `-n`, and re-run the same command).
+- **`node down` has TWO causes — RAM and a worker-killing test.** RAM (Fifth trap): capping `-n` /
+  freeing the co-resident model fixes it. Worker-killing test (Sixth trap): capping and freeing RAM
+  do NOT fix it; the crash pins to ONE test (re-run it serially to confirm) — fix the test's
+  isolation, not the harness, and do not file a RAM bug.
 - **A zero-test run is a failure, not a result.** Before using any run as a baseline, read the passed
   count. `no tests ran`, `Interrupted: 1 error during collection`, and `1 passed` when you expected 84
   are all the same class of error: the harness told you nothing about the code.
@@ -139,7 +180,7 @@ file entirely excluded by markers.
   in flight when the worker died. Re-run that test alone; if it passes, it is not the cause — and the
   next question is *why the worker died*, not *what the test does*.
 - **Check for an existing operational entry before filing a new bug.** The same host-memory failure can
-  present as two different signatures weeks apart; a second filing with a invented root cause is worse
+  present as two different signatures weeks apart; a second filing with an invented root cause is worse
   than no filing.
 - **A/B toggle one variable at a time when measuring.** To learn what a plugin actually affects,
   `pip uninstall` it, re-measure, reinstall, re-measure — inside the same environment. A before/after
@@ -155,10 +196,12 @@ file entirely excluded by markers.
 
 | Pattern | Why it fails |
 |---|---|
+| Running the FULL suite serially to "avoid OOM" | 20-40× slower for no benefit; cap `-n` (or free RAM) for a full run, reserve serial for re-checking ONE failing test |
 | `-p no:xdist` or `-n 0` to get a serial run in a repo pinning `-n auto` | The token lives in addopts; you get `unrecognized arguments` |
 | `-o addopts=""` with no marker filter | Wipes the exclusion filter; excluded suites run and a known-excluded failure reads as a regression |
 | Trusting a run that printed `no tests ran` as a green baseline | A worker died during setup; nothing about the code was observed |
-| Filing a new bug per xdist crash signature | Memory pressure presents as both `no tests ran` and a crashitem INTERNALERROR; the cause and the workaround are the same |
+| Filing a new bug per xdist crash signature | RAM pressure presents as both `no tests ran` and a crashitem INTERNALERROR; the cause and the workaround are the same |
+| Capping `-n` or freeing RAM to fix a worker-killing test | Neither addresses a test that crashes its own worker; the crash pins to one test — run it serially / fix its isolation |
 | Blaming a previously fixed terminal/colorama issue without re-running with memory available | The discriminating variable (free RAM) was never tested |
 | Chasing a marker to hide a broken import | Markers deselect after collection; the import already aborted the run |
 | Capping `-n` on a healthy CI runner | Halves parallelism for a problem that is not thread exhaustion |
