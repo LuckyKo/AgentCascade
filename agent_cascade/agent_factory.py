@@ -15,7 +15,7 @@ from agent_cascade.tools.custom import (Calculate, CodeMap, CopyFile, DeleteFile
                                         ListAgents, ListDir, LoadSkill, ProposeSkill, ReadFile, ReadLogs, ReIndent,
                                         ScanSkills, ShellCmd, SyntaxCheck)
 from agent_cascade.tools.custom import SystemInfo as _SystemInfo
-from agent_cascade.tools.custom import ViewImage, WriteFile
+from agent_cascade.tools.custom import ViewImage, ViewMedia, WriteFile
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.tools.web_extractor import WebExtractor
 from agent_cascade.tools.web_search import WebSearch
@@ -58,6 +58,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             tools_to_register[tool_name] = (t, True, False)
         elif tool_name == 'view_image':
             t = ViewImage()
+            tools_to_register[tool_name] = (t, True, False)
+        elif tool_name == 'view_media':
+            t = ViewMedia()
             tools_to_register[tool_name] = (t, True, False)
         elif tool_name == 'image_gen':
             from agent_cascade.tools.image_gen import ImageGen

@@ -1,10 +1,13 @@
 import atexit
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 import io
@@ -20,9 +23,11 @@ from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_CHARS, DEFAULT_READ_FI
                                     IMAGE_MAX_SHORT_SIDE)
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.utils.media_utils import MediaStorageError, save_image_to_media
+from agent_cascade.utils.media_utils import (MediaStorageError, is_under_media_root, save_image_to_media,
+                                              save_media_to_media)
 from agent_cascade.utils.utils import (_HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT, MAX_DATA_URL_SIZE,
-                                       encode_image_as_base64, is_http_url, json_loads)
+                                       encode_audio_as_base64, encode_image_as_base64, encode_video_as_base64,
+                                       is_http_url, json_loads)
 
 
 def _is_temp_file(p) -> bool:
@@ -895,6 +900,13 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 # media path. Normalize to forward slashes to match save_image_to_media's
                 # return format so downstream consumers see a consistent path shape.
                 media_path = str(resolved).replace('\\', '/')
+                # Reuse-don't-duplicate: a source that already lives under the media root is
+                # never copied again (re-saving would mint a duplicate filename of a file that
+                # is already there). This plain branch already reuses in place for every plain
+                # file; derived artifacts (capture/URL, SVG->PNG, crop) are NEW files and are
+                # saved on the path below, so they are deliberately NOT caught here.
+                suffix = (' (existing file, no copy saved; already in media store)'
+                          if is_under_media_root(resolved) else ' (existing file, no copy saved)')
                 return [
                     # Leave the image item UNCAPTIONED so the return-path guard
                     # (_has_uncaptioned_images) triggers a genuine vision/LLM caption via
@@ -902,7 +914,7 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     # for text-only agents; it does NOT count as an image caption, so it
                     # cannot suppress real captioning. (Reverts 5089a51's pre-filled caption.)
                     ContentItem(image=media_path),
-                    ContentItem(text=f"{caption} (existing file, no copy saved)")
+                    ContentItem(text=f"{caption}{suffix}")
                 ]
 
             try:
@@ -956,6 +968,348 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     os.remove(crop_tmp)
                 except OSError:
                     pass  # non-critical cleanup failure
+
+
+@register_tool('view_media', allow_overwrite=True)
+class ViewMedia(BaseTool, PathResolutionMixin):
+    """View an image, audio, or video file with optional crop / slice / extract.
+
+    Adds audio + video on top of ``view_image`` (whose image plumbing is reused
+    verbatim, not forked):
+      * image: ``crop_region`` (delegates to ``view_image``).
+      * audio/video: ``time_range`` ("start,end" seconds) -> ffmpeg ``-c copy`` slice.
+      * video: ``frame_at`` (seconds) -> extract one frame as a PNG image.
+      * video: ``audio_track`` -> extract the audio track as a 16 kHz mono WAV.
+
+    Returns a ``list[ContentItem]`` (same contract as ``view_image``): one media
+    item (image/audio/video), left UNCAPTIONED so the return-path guard can fire a
+    genuine caption, plus a descriptive text item. ffmpeg is required only for the
+    slice / extract operations; a plain view works without it.
+    """
+
+    # Single source of truth for view_media extension -> modality dispatch. The
+    # image set is taken directly from ViewImage.IMAGE_EXTENSIONS so image
+    # recognition never drifts from the shared image pipeline.
+    _MODALITY_EXTS = {
+        'image': ViewImage.IMAGE_EXTENSIONS,
+        'audio': {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.opus', '.aac'},
+        'video': {'.mp4', '.mkv', '.mov', '.webm', '.avi', '.m4v'},
+    }
+
+    _EXTRACT_HELP = (
+        'Supported media types: ' + ', '.join(sorted(ext.lstrip('.').upper() for exts in _MODALITY_EXTS.values() for ext in exts))
+    )
+
+    name = 'view_media'
+    description = TOOL_METADATA['view_media']['description']
+    parameters = {
+        'type': 'object',
+        'properties': {
+            'path': {
+                'type': 'string',
+                'description': TOOL_METADATA['view_media']['parameters']['path']
+            },
+            'crop_region': {
+                'type': 'string',
+                'description': TOOL_METADATA['view_media']['parameters']['crop_region']
+            },
+            'time_range': {
+                'type': 'string',
+                'description': TOOL_METADATA['view_media']['parameters']['time_range']
+            },
+            'frame_at': {
+                'type': 'number',
+                'description': TOOL_METADATA['view_media']['parameters']['frame_at']
+            },
+            'audio_track': {
+                'type': 'boolean',
+                'description': TOOL_METADATA['view_media']['parameters']['audio_track']
+            },
+        },
+        'required': ['path'],
+    }
+
+    def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
+        try:
+            super().__init__(cfg)
+        except (ValueError, TypeError):
+            super().__init__()
+        self.agent_pool = kwargs.get('agent_pool')
+
+    # ------------------------------------------------------------------ #
+    #  Small helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _media_ext(path: str) -> str:
+        """Extension (lower-case, leading dot) used for dispatch — works for both
+        local paths and http(s) URLs (query/fragment stripped via urlsplit)."""
+        if is_http_url(path):
+            return Path(urlsplit(path).path).suffix.lower()
+        return Path(path).suffix.lower()
+
+    @classmethod
+    def _modality_for_ext(cls, ext: str) -> Optional[str]:
+        for modality, exts in cls._MODALITY_EXTS.items():
+            if ext in exts:
+                return modality
+        return None
+
+    @staticmethod
+    def _parse_time_range(time_range_str: str) -> tuple:
+        """Parse "start,end" seconds into (start, end). Raises ValueError with a
+        clear message on bad input. Enforces 0 <= start < end (clamp past EOF is
+        left to ffmpeg, so an over-long ``end`` is allowed)."""
+        parts = [p.strip() for p in time_range_str.split(',')]
+        if len(parts) != 2:
+            raise ValueError(f"Invalid time_range '{time_range_str}'. Expected 'start,end' in seconds (two numbers).")
+        try:
+            start = float(parts[0])
+            end = float(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid time_range '{time_range_str}'. Both values must be numbers (seconds).")
+        if start < 0 or end <= start:
+            raise ValueError(f"Invalid time_range '{time_range_str}'. Need 0 <= start < end; got start={start}, end={end}.")
+        return start, end
+
+    @staticmethod
+    def _run_ffmpeg(ffmpeg_bin: str, args: list, log_path: str) -> int:
+        """Run an ffmpeg command, capturing all output to ``log_path`` (a temp
+        FILE, never a pipe — so a huge stderr cannot deadlock or flood the result).
+        Returns the exit code. ``args`` is an argv list; never ``shell=True``."""
+        with open(log_path, 'wb') as logf:
+            proc = subprocess.run(args, stdout=logf, stderr=subprocess.STDOUT,
+                                  stdin=subprocess.DEVNULL, check=False)
+        return proc.returncode
+
+    @staticmethod
+    def _tail(path: str, max_lines: int = 15) -> str:
+        """Return the last ``max_lines`` lines of a log file, for ERROR tails."""
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.read().splitlines()
+            return ' | '.join(lines[-max_lines:])
+        except OSError:
+            return '<no ffmpeg log>'
+
+    @classmethod
+    def _save_artifact(cls, source_path: str, modality: str, ext: str) -> str:
+        """Persist a derived ffmpeg artifact into the media store (a NEW file, so
+        it is always saved — unlike a plain-viewed source). On storage failure fall
+        back to an inline base64 / data-URI value."""
+        ext_no_dot = ext.lstrip('.')
+        try:
+            if modality == 'image':
+                return save_image_to_media(image_source=str(source_path), max_short_side=IMAGE_MAX_SHORT_SIDE)
+            return save_media_to_media(source=str(source_path), media_type=modality, ext=ext_no_dot)
+        except MediaStorageError as e:
+            logger.warning('view_media: media storage failed (%s); falling back to inline base64: %s', modality, e)
+            return cls._encode_inline(source_path, modality, ext_no_dot)
+
+    @classmethod
+    def _encode_inline(cls, source_path: str, modality: str, ext: str) -> str:
+        """Base64 fallback when media storage fails (disk full, permissions, ...),
+        mirroring view_image's fallback. Last resort is a file:// URL."""
+        try:
+            if modality == 'image':
+                return encode_image_as_base64(str(source_path), max_short_side_length=IMAGE_MAX_SHORT_SIDE)
+            if modality == 'video':
+                return encode_video_as_base64(str(source_path))
+            # encode_audio_as_base64 returns PURE base64; wrap so the ContentItem
+            # value matches the data-URI shape used for the other modalities.
+            return f'data:audio/{ext};base64,{encode_audio_as_base64(str(source_path))}'
+        except Exception as enc_err:
+            logger.warning('view_media: inline encode failed (%s); using file:// URL: %s', modality, enc_err)
+            return str(Path(source_path).as_uri())
+
+    # ------------------------------------------------------------------ #
+    #  Main call()                                                        #
+    # ------------------------------------------------------------------ #
+
+    def call(self, params: str, **kwargs):
+        from agent_cascade.llm.schema import ContentItem
+
+        try:
+            params = self._verify_json_format_args(params)
+        except ValueError as e:
+            return f"ERROR: {e}"
+
+        path = params['path']
+        crop_region_str = params.get('crop_region')
+        time_range_str = params.get('time_range')
+        frame_at = params.get('frame_at')  # None or number (0.0 is a valid frame)
+        audio_track = bool(params.get('audio_track'))
+        extract_requested = (frame_at is not None) or audio_track
+        slice_requested = time_range_str is not None
+
+        # One operation per call: a slice and an extract are mutually exclusive.
+        if frame_at is not None and audio_track:
+            return 'ERROR: frame_at and audio_track are mutually exclusive; request one extract per call.'
+        if slice_requested and extract_requested:
+            return ('ERROR: time_range cannot be combined with frame_at/audio_track; request either a slice '
+                    'or a single extract (frame_at/audio_track), not both.')
+
+        # Image targets (capture directive / image URL / image file) reuse view_image
+        # verbatim. The audio/video operations never apply to images.
+        is_capture = path == '__screen_capture' or path.startswith('__screen_capture:') or path.startswith('__window_capture:')
+        ext = self._media_ext(path)
+        modality = self._modality_for_ext(ext)
+
+        if is_capture or modality == 'image':
+            if slice_requested or extract_requested:
+                return 'ERROR: time_range/frame_at/audio_track are not applicable to images (use crop_region for a crop).'
+            return self._delegate_image(path, crop_region_str)
+
+        # Non-image target: crop is meaningless, and the extension must resolve.
+        if crop_region_str:
+            return 'ERROR: crop_region applies only to images; for audio/video use time_range to trim.'
+        if modality is None:
+            return f"ERROR: Unsupported media type for '{path}' (unknown extension '{ext or '<none>'}'). {self._EXTRACT_HELP}"
+
+        # frame_at / audio_track are video-only operations.
+        if modality == 'audio' and extract_requested:
+            return 'ERROR: frame_at/audio_track are video-only; audio files support plain view and time_range only.'
+
+        # Validate requested operations up front so a bad time_range/frame_at never
+        # reaches ffmpeg.
+        if slice_requested:
+            try:
+                start, end = self._parse_time_range(time_range_str)
+            except ValueError as e:
+                return f'ERROR: {e}'
+            duration = end - start
+        if frame_at is not None and frame_at < 0:
+            return f'ERROR: frame_at must be non-negative seconds; got {frame_at}.'
+
+        temp_paths: list[Path] = []  # transient ffmpeg/log files, cleaned in finally
+
+        # Resolve the working input: a media URL is downloaded and persisted to the
+        # media store (it is transient, so it must be saved); a local path is resolved
+        # for in-place plain view / ffmpeg input.
+        try:
+            if is_http_url(path):
+                try:
+                    response = requests.get(path, headers=_HTTP_FETCH_HEADERS, timeout=_HTTP_FETCH_TIMEOUT)
+                    response.raise_for_status()
+                except requests.RequestException as e:
+                    return f"ERROR: Failed to download media from {path}: {e}"
+                if len(response.content) > MAX_DATA_URL_SIZE:
+                    return (f"ERROR: Media too large to download ({len(response.content) / (1024 * 1024):.1f} MB "
+                            f"> {MAX_DATA_URL_SIZE // (1024 * 1024)} MB cap): {path}")
+                try:
+                    input_path = save_media_to_media(source=response.content, media_type=modality, ext=ext.lstrip('.'))
+                except MediaStorageError as e:
+                    return f"ERROR: Failed to persist downloaded {modality} from {path}: {e}"
+            else:
+                resolved = self._resolve_path(path)
+                if not resolved.exists():
+                    return f"ERROR: {modality.capitalize()} file not found: {path}"
+                input_path = str(resolved)
+        except ValueError as e:
+            return f"ERROR: {str(e)}"
+
+        try:
+            # --- plain view: reuse the source path (reuse-don't-duplicate) ---
+            if not slice_requested and not extract_requested:
+                media_path = input_path.replace('\\', '/')
+                suffix = (' (existing file, no copy saved; already in media store)'
+                          if is_under_media_root(input_path) else ' (existing file, no copy saved)')
+                caption = f"Viewing {modality}: {path}"
+                item = ContentItem(audio=media_path) if modality == 'audio' else ContentItem(video=media_path)
+                return [item, ContentItem(text=f"{caption}{suffix}")]
+
+            # --- ffmpeg required for every derived operation ---
+            ffmpeg_bin = shutil.which('ffmpeg')
+            if not ffmpeg_bin:
+                return ('ERROR: ffmpeg is required for time_range/frame_at/audio_track but was not found on PATH.')
+
+            # --- slice: ffmpeg -c copy, output keeps the input container/codec ---
+            if slice_requested:
+                out = self._mktemp_ext(ext, temp_paths, 'view_media_slice_')
+                log = self._make_log(temp_paths)
+                rc = self._run_ffmpeg(ffmpeg_bin, [ffmpeg_bin, '-y', '-ss', str(start), '-i', str(input_path),
+                                                    '-t', str(duration), '-c', 'copy', str(out)], str(log))
+                if rc != 0:
+                    return f'ERROR: ffmpeg slice failed (exit {rc}) for {path} [{start}-{end}s]: {self._tail(str(log))}'
+                if not out.exists() or out.stat().st_size == 0:
+                    return f'ERROR: ffmpeg produced an empty slice for {path} [{start}-{end}s]: {self._tail(str(log))}'
+                media_path = self._save_artifact(str(out), modality, ext)
+                caption = f"Viewing {modality} slice: {path} [{start:g}-{end:g}s]"
+                item = ContentItem(audio=media_path) if modality == 'audio' else ContentItem(video=media_path)
+                return [item, ContentItem(text=f"{caption} Saved to: {media_path}")]
+
+            # --- video-only extracts ---
+            if frame_at is not None:
+                out = self._mktemp_ext('.png', temp_paths, 'view_media_frame_')
+                log = self._make_log(temp_paths)
+                rc = self._run_ffmpeg(ffmpeg_bin, [ffmpeg_bin, '-y', '-ss', str(frame_at), '-i', str(input_path),
+                                                    '-frames:v', '1', '-f', 'image2', str(out)], str(log))
+                if rc != 0:
+                    return f'ERROR: ffmpeg frame extract failed (exit {rc}) at {frame_at}s for {path}: {self._tail(str(log))}'
+                if not out.exists() or out.stat().st_size == 0:
+                    return f'ERROR: ffmpeg produced an empty frame at {frame_at}s for {path}: {self._tail(str(log))}'
+                media_path = self._save_artifact(str(out), 'image', '.png')
+                caption = f"Viewing video frame at {frame_at:g}s: {path}"
+                return [ContentItem(image=media_path), ContentItem(text=f"{caption} Saved to: {media_path}")]
+
+            if audio_track:
+                out = self._mktemp_ext('.wav', temp_paths, 'view_media_track_')
+                log = self._make_log(temp_paths)
+                rc = self._run_ffmpeg(ffmpeg_bin, [ffmpeg_bin, '-y', '-i', str(input_path), '-vn',
+                                                    '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', str(out)], str(log))
+                if rc != 0:
+                    return f'ERROR: ffmpeg audio-track extract failed (exit {rc}) for {path}: {self._tail(str(log))}'
+                if not out.exists() or out.stat().st_size == 0:
+                    return f'ERROR: ffmpeg produced an empty audio track for {path}: {self._tail(str(log))}'
+                media_path = self._save_artifact(str(out), 'audio', '.wav')
+                caption = f"Viewing video audio track: {path}"
+                return [ContentItem(audio=media_path), ContentItem(text=f"{caption} Saved to: {media_path}")]
+
+        except (ValueError, TypeError) as e:
+            return f"ERROR: view_media failed for '{path}': {e}"
+        except Exception as e:
+            logger.exception(f"Unexpected error viewing media '{path}'")
+            return f"ERROR: Error viewing media: {str(e)}"
+        finally:
+            # Best-effort cleanup of transient ffmpeg outputs / logs. Only delete
+            # files under the system tempdir so a persisted media file is never unlinked.
+            for p in temp_paths:
+                try:
+                    if p.exists() and _is_temp_file(p):
+                        os.remove(p)
+                except OSError:
+                    pass  # non-critical cleanup failure
+
+    # ------------------------------------------------------------------ #
+    #  Delegation / temp helpers                                        #
+    # ------------------------------------------------------------------ #
+
+    def _delegate_image(self, path: str, crop_region_str: Optional[str]):
+        """Hand an image target (file / http image URL / capture directive) to
+        ViewImage so the image plumbing (SVG->PNG, crop, capture, base64 fallback,
+        reuse-don't-duplicate) is reused verbatim rather than forked."""
+        payload = {'path': path}
+        if crop_region_str:
+            payload['crop_region'] = crop_region_str
+        return ViewImage(agent_pool=self.agent_pool).call(json.dumps(payload))
+
+    @staticmethod
+    def _mktemp_ext(suffix: str, temp_paths: list, prefix: str) -> Path:
+        """Create a closed temp file with the given suffix and track it."""
+        fd, name = tempfile.mkstemp(suffix=suffix, prefix=prefix)
+        os.close(fd)
+        p = Path(name)
+        temp_paths.append(p)
+        return p
+
+    @staticmethod
+    def _make_log(temp_paths: list) -> Path:
+        """Create a temp log file for ffmpeg output capture and track it."""
+        fd, name = tempfile.mkstemp(suffix='.log', prefix='view_media_ffmpeg_')
+        os.close(fd)
+        p = Path(name)
+        temp_paths.append(p)
+        return p
 
 
 @register_tool('write_file', allow_overwrite=True)

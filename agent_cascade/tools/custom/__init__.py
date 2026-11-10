@@ -1,6 +1,6 @@
 from .calculation import Calculate
 from .code_map import CodeMap
-from .file_ops import CopyFile, DeleteFile, EditFile, Grep, ListDir, ReadFile, ReIndent, ViewImage, WriteFile
+from .file_ops import CopyFile, DeleteFile, EditFile, Grep, ListDir, ReadFile, ReIndent, ViewImage, ViewMedia, WriteFile
 from .forget_last_tool import ForgetLast
 from .load_skill import LoadSkill
 from .manager_ops import ListAgents
@@ -14,6 +14,7 @@ from .system_info import SystemInfo
 __all__ = [
     'ReadFile',
     'ViewImage',
+    'ViewMedia',
     'WriteFile',
     'EditFile',
     'ListDir',

@@ -18,6 +18,7 @@ AVAILABLE_TOOLS: List[str] = [
     # Read-only file ops
     'read_file',  # Read file contents
     'view_image',  # View image files
+    'view_media',  # View image/audio/video with crop/slice/extract
     'list_dir',  # List directory contents
     'grep',  # Search for text patterns in files
 
@@ -318,8 +319,9 @@ AFK_ADMIN_PROMPT = (
     '  4. AgentCascade performance -> inspect the telemetry/console logs, identify issues and inefficiencies, '
     'file bug tickets for them, and task the root with an improvement/fix.\n'
     '  5. Project cleanup and extra polish - skills/memory management/documentation update.\n'
-    '  6. Technical-debt refactors: after basic hygiene, take on targeted debt, each as a '
-    'small, reviewable diff (one concern, minimal & reversible), not a big-bang rewrite.\n'
+    '  6. Technical-debt refactors: inspect large code files and quick triage for targeted debt and sub-optimal code. '
+    'Ask for POLISH review of top suspicious file and follow-up fix if deemed necessary. '
+    'Functionality must note change unless obvious bugs have been identified and fixed.\n'
     '  7. (floor - always available) Nothing else obvious -> bounded free research: look '
     'online for ideas to improve AC from similar projects, and leave notes to the user on '
     'what we could do (build on / do not duplicate prior research notes). This tier is '
@@ -443,6 +445,27 @@ TOOL_METADATA = {
                 'Path to the image file, absolute or relative to the workspace root, or an http(s) image URL to download and view. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID.',
             'crop_region':
                 'Optional. Crop region as "x,y,w,h" where x,y are the top-left pixel coordinates in the original image and w,h are the crop width/height in pixels. Use this to zoom into details of large images (e.g., "100,200,500,300" crops a 500x300 region starting at pixel (100,200)).'
+        }
+    },
+    'view_media': {
+        'description': ('View an image, audio, or video file with optional crop / slice / extract. '
+                        'Image behaviour mirrors view_image (including crop_region and screen/window capture '
+                        'directives). Adds audio/video support: "time_range" trims an audio or video file to a '
+                        '[start,end] slice (via ffmpeg), "frame_at" extracts a single video frame as an image, '
+                        'and "audio_track" extracts a video\'s audio track as WAV. A plain view works without '
+                        'ffmpeg; the slice/frame/track operations require ffmpeg on PATH. Returns the media for '
+                        'the model to see.'),
+        'parameters': {
+            'path':
+                'Media file path, absolute or relative to the workspace root, an http(s) media URL, or a capture directive. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID (images only).',
+            'crop_region':
+                'Optional, images only. Crop region as "x,y,w,h" (x,y top-left; w,h size in pixels). Not applicable to audio/video (use time_range).',
+            'time_range':
+                'Optional, audio/video only. Trim to a "start,end" range in seconds (e.g. "5,15"). Mutually exclusive with frame_at/audio_track.',
+            'frame_at':
+                'Optional, video only. Timestamp in seconds (number) of a single frame to extract as an image. Mutually exclusive with time_range/audio_track.',
+            'audio_track':
+                'Optional, video only. Set true to extract the video\'s audio track as a 16 kHz mono WAV. Mutually exclusive with time_range/frame_at.'
         }
     },
     'write_file': {

@@ -76,6 +76,7 @@ DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = frozenset({
     'syntax_check',  # Check file syntax without executing
     'system_info',  # Retrieve current system information
     'view_image',  # View image files or capture screen content
+    'view_media',  # View image/audio/video with crop/slice/extract
     'web_extractor',  # Get content of a webpage
     'web_search',  # Search for information from the internet
     'write_file',  # Create or overwrite files
