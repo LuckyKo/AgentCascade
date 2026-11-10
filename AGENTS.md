@@ -16,6 +16,9 @@ actionable — it is read by agents with limited context.
   `precommit-hook-commit-retry`.)
 - Do NOT strip `pytest.ini` addopts (`-o addopts=""`) — it drops `--timeout=60`.
 
+## Code style
+- This project uses **4-space** indentation (PEP 8), not tabs. If you notice code that doesn't follow this rule, log the issue for cleanup.
+
 ## Comment style
 - A comment on a setting/constant documents **what it does**: purpose, units, default,
   and off-state (`0 = off`).
