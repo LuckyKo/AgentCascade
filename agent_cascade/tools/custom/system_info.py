@@ -251,6 +251,15 @@ class SystemInfo(BaseTool):
                 lines.append('')
                 lines.append(missed)
 
+            # ── Skill autoload failures ── (BUG_0284 observability)
+            # Failed skill auto-loads by reason from the memory-hint auto-load path's
+            # module-level counter. Read-only; omitted entirely if unavailable, so it
+            # can never blank the surrounding dump.
+            autoload = self._render_skill_autoload_failures()
+            if autoload:
+                lines.append('')
+                lines.append(autoload)
+
             lines.append('')
             lines.append('(Raw JSONL export: GET /api/telemetry/export)')
             return '\n'.join(lines)
@@ -301,6 +310,32 @@ class SystemInfo(BaseTool):
             return '\n'.join(out)
         except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
             logger.debug(f"system_info missed-skills render failed: {e}")
+            return ''
+
+    def _render_skill_autoload_failures(self) -> str:
+        """Render skill auto-load failure counts by reason (BUG_0284 observability).
+
+        Reads the module-level ``skill_autoload_failed_by_reason`` dict from
+        ``agent_cascade.memory_hint.manager`` — the counter the auto-load path increments
+        on each failure (``skill_not_found`` / ``disabled`` / ``exception``) so operators
+        can read it from ``system_info`` / ``/api/telemetry`` instead of server stderr.
+        Read-only: this never touches the counter or the auto-load path.
+
+        Renders every reason key present in the counter, sorted for stable output, so a
+        reason added to the dict surfaces automatically instead of being silently hidden.
+        Always shown — a flat run of zeros is itself the signal that auto-loads are
+        healthy — so the only way the section is omitted is a read/import failure. Mirrors
+        `_render_missed_skills`: lazy import (per ``file_ops.py``) and a local try/except
+        returning '' so a memory-hint problem can never blank the surrounding dump.
+        """
+        try:
+            from agent_cascade.memory_hint.manager import skill_autoload_failed_by_reason
+            return ('Skill autoload failures:\n  ' +
+                    '  '.join(f'{reason}={count}'
+                              for reason, count in
+                              sorted(skill_autoload_failed_by_reason.items())))
+        except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
+            logger.debug(f"system_info skill autoload failures render failed: {e}")
             return ''
 
     def _render_help(self, key: str) -> str:

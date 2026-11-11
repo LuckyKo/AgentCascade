@@ -157,6 +157,35 @@ def _ordinal(n: int) -> str:
     return f'{n}{suffix}'
 
 
+# BUG_0284 (observability): structured counter for the BUG_0263 skill auto-load
+# safety-net. Prior to this, an auto-load that did NOT land was logged at INFO
+# (manager.py `_maybe_autoload_skills`), i.e. invisible in production telemetry,
+# so a silently-failing force-load looked identical to "the safety-net never
+# fired". In-memory only (per-process, never persisted) — same lifecycle as the
+# adaptive floors above. The keys are exhaustive and mutually exclusive over the
+# observable outcome of `AgentPool.inject_skill` as seen from here: a 'failed'
+# status is split into `disabled` (the skill IS currently disabled) vs
+# `skill_not_found` — the CATCH-ALL for every other 'failed', NOT only
+# load_full_instructions returning None: inject_skill also returns 'failed' for
+# a missing skill_manager, a missing instance, and a load_full_instructions
+# error it swallows internally (pool/core.py:778-804). An exception that
+# PROPAGATES out of inject_skill maps to `exception`; because inject_skill's own
+# try/except converts load-time failures to 'failed', `exception` only fires for
+# post-load errors (enable_skill/enqueue_message/record_skills_loaded), so a
+# zero there is NOT itself evidence the safety-net is healthy. A success
+# ('loaded'/'already_loaded') increments nothing, so an unchanged 0 with rising
+# hint counts is itself the signal that the failure is UPSTREAM of inject_skill
+# (e.g. a stale `loaded` snapshot) — the open question BUG_0284 asks. Guarded by
+# a lock because tests may drive _process_job from multiple threads even though
+# the production worker is single-threaded.
+skill_autoload_failed_by_reason: Dict[str, int] = {
+    'skill_not_found': 0,
+    'disabled': 0,
+    'exception': 0,
+}
+_AUTOLOAD_FAILURE_LOCK = threading.Lock()
+
+
 class MemoryHintManager:
     """Owns the daemon worker, job queue, vault indexes and hint delivery."""
 
@@ -624,6 +653,12 @@ class MemoryHintManager:
         Best-effort by design: the whole thing is gated on ``skill_autoload_enabled`` and
         every per-skill ``inject_skill`` call is individually guarded so a single bad skill
         (missing manager, load error, not found) can never break the hint-delivery path.
+
+        BUG_0284 observability: a failed auto-load is logged at WARNING (not INFO) and
+        counted in ``skill_autoload_failed_by_reason`` (``skill_not_found`` / ``disabled``
+        / ``exception``). This is pure observability — no load behavior changes. A success
+        logs at INFO and increments nothing, so an unchanged counter alongside rising hint
+        counts localises the failure to upstream of ``inject_skill``.
         """
         if not skill_names or not settings.get('skill_autoload_enabled', True):
             return
@@ -633,10 +668,38 @@ class MemoryHintManager:
                 continue
             try:
                 status, _re_enabled = self._pool.inject_skill(name, n)
+            except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
+                reason = 'exception'
+                with _AUTOLOAD_FAILURE_LOCK:
+                    skill_autoload_failed_by_reason[reason] += 1
+                logger.warning('[MEMORY_HINT] %s: skill auto-load FAILED for %r '
+                               '(reason=%s, hints=%d): %s',
+                               name, n, reason, skill_counts.get(n, 0), e)
+                continue
+            if status == 'failed':
+                # inject_skill returns one 'failed' for several causes (not-found,
+                # disabled-not-loadable, missing skill_manager/instance, and a
+                # load_full_instructions error it swallows internally — full split
+                # documented at the module-level skill_autoload_failed_by_reason
+                # comment). The only distinction readable from the returned status is
+                # disabled-vs-everything-else, via this READ-ONLY skill-manager query
+                # — no load-path or registry change; the query is itself guarded so a
+                # broken skill_manager can never raise into the hint path.
+                reason = 'skill_not_found'
+                try:
+                    sm = getattr(self._pool, 'skill_manager', None)
+                    if sm is not None and sm.is_skill_disabled(n):
+                        reason = 'disabled'
+                except Exception:  # noqa: BLE001 — classification must never raise
+                    pass
+                with _AUTOLOAD_FAILURE_LOCK:
+                    skill_autoload_failed_by_reason[reason] += 1
+                logger.warning('[MEMORY_HINT] %s: skill auto-load FAILED for %r '
+                               '(reason=%s, status=%s, hints=%d)',
+                               name, n, reason, status, skill_counts.get(n, 0))
+            else:
                 logger.info('[MEMORY_HINT] %s: auto-loaded repeatedly-hinted skill %r '
                             '(status=%s, hints=%d)', name, n, status, skill_counts.get(n, 0))
-            except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
-                logger.warning('[MEMORY_HINT] %s: skill auto-load failed for %r: %s', name, n, e)
 
     def _match_memories(self, job: dict, settings: dict, inst) -> 'tuple[List[str], List[str]]':
         """Memory sub-pipeline: the existing specificity gate over the lesson index.
