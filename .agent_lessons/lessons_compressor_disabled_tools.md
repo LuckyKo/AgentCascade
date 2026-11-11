@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # Compressor disabled_tools Bug Investigation Notes
 
 ## Trace Summary (as of 2025-06-25)

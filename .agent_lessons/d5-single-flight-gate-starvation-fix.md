@@ -7,6 +7,7 @@ related:
   - "[[stop-session-slot-leak-race-flake]]"
 confidence: verified
 author: stopfix-coder2_20260930_151706.jsonl
+scope: [agentcascade]
 ---
 
 # D-5 single-flight gate: starvation regression and the cond-block merge fix

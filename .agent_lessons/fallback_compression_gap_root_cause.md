@@ -3,6 +3,7 @@ tags: [compression, fallback, context-window, api-router, execution-engine]
 aliases: [fallback-compression-gap, ctx-fallback-no-compress]
 related: [[api_failover_bug_analysis]]
 confidence: verified
+scope: [agentcascade]
 ---
 
 # Root Cause: Fallback to Lower Context Window Doesn't Trigger Compression

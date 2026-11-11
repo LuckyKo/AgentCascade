@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # Shell & Code Interpreter Timeout Fix V3 - Reviewer Corrections (2026-07-04)
 
 ## What Changed (from V2)

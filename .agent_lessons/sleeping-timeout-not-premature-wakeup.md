@@ -3,6 +3,7 @@ tags: [sleeping-state, async-agents, timeout, compression, root-cause]
 aliases: [premature-sleeping-wakeup, sleeping-timeout-300s]
 related: ["[[lessons_async_call_agent]]", "[[lessons_parent_slot_fix]]", "[[lessons_idle_timer_fix]]"]
 confidence: verified
+scope: [agentcascade]
 ---
 
 # Root agent "premature SLEEPING wakeup" is actually the 300s SLEEPING TIMEOUT

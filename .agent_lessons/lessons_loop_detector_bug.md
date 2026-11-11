@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # Loop Detector Bug Analysis Report
 
 ## Executive Summary

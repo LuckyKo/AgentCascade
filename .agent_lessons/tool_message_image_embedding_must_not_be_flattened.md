@@ -3,6 +3,7 @@ title: Tool Message Image Embedding Must Not Be Flattened
 tags: [vision, images, tool-calling, regression, critical]
 created: 2026-08-08
 status: active
+scope: [agentcascade]
 ---
 
 ## Problem

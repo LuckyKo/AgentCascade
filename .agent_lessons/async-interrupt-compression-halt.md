@@ -3,6 +3,7 @@ tags: [async-shell, compression, halt, inter-agent, race]
 aliases: [async-interrupt-compression-halt, sync-agent-stopped-by-async]
 related: ["[[compression-bug-root-cause-analysis]]", "[[stop-resume-fix]]"]
 confidence: verified
+scope: [agentcascade]
 ---
 
 # Sync Agent Interrupted When Async Agent Finishes — Root Cause: Forced Compression Halts ALL Other Instances

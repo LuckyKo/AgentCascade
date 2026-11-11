@@ -3,6 +3,7 @@ tags: [disabled-tools, tool-policy, researcher, system-info, layer4]
 aliases: [researcher-tool-policy-mismatch, system-info-disabled-tools-false-positive]
 related: ["[[lessons-disabled-tool-auto-deny-fix]]", "[[lessons-realtime-tool-assignment]]"]
 confidence: verified
+scope: [agentcascade]
 ---
 
 # Researcher tool-policy mismatch: system_info reports baseline as disabled but tools actually work

@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # max_input_tokens Propagation Bug Fix - 2026-06-22
 
 ## Problem

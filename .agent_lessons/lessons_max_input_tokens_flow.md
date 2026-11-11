@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # Max Input Tokens Fallback Fix - 2026-06-25
 
 ## Problem

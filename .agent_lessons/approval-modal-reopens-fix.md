@@ -1,3 +1,7 @@
+---
+scope: [agentcascade]
+---
+
 # Approval Modal Reopens After Approve/Reject — Fix Applied
 
 **Date:** 2026-08-06  
