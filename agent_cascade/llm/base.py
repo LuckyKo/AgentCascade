@@ -418,7 +418,7 @@ class BaseChatModel(ABC):
                 estimated_tokens = None
 
             if estimated_tokens is not None:
-                logger.info(
+                logger.debug(
                     f'Agent [{agent_name}] - ALL tokens: {estimated_tokens}, Available tokens: {max_input_tokens}')
 
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
@@ -1195,7 +1195,7 @@ def _truncate_input_messages_roughly(messages: List[Message],
 
     all_tokens = sum([x for x in message_tokens.values()])
     # Log stats with agent name to avoid confusion in multi-agent logs
-    logger.info(f'Agent [{agent_name}] - ALL tokens: {all_tokens}, Available tokens: {available_token}')
+    logger.debug(f'Agent [{agent_name}] - ALL tokens: {all_tokens}, Available tokens: {available_token}')
 
     # Feature 006: Invoke token count callback if registered (for compression tracking)
     if on_token_count_cb is not None and callable(on_token_count_cb):
