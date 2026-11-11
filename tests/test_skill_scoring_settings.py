@@ -226,7 +226,8 @@ class TestAlwaysProtectedWiring:
     def test_settings_default_constant_and_parser_exist(self):
         import agent_cascade.settings as s
         assert s.SKILL_ALWAYS_PROTECTED_DEFAULT == (
-            'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
+            'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator,'
+            'memory-vault-consolidation')
         assert callable(s.parse_skill_always_protected)
 
     def test_poisoned_frozenset_literal_falls_back_to_default(self):

@@ -844,7 +844,8 @@ SKILL_MAX_EVICTIONS_PER_PASS: int = int(os.getenv('AGENT_CASCADE_SKILL_MAX_EVICT
 # format_skill_always_protected() at load/ingress time (consumers re-parse it). The four defaults
 # are the process skills the system itself depends on; a user can add/remove without code changes.
 SKILL_ALWAYS_PROTECTED_DEFAULT: str = (
-    'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator')
+    'self-augmentation,project-memory-writing,bug-tracker-entry-format,skill-creator,'
+    'memory-vault-consolidation')
 
 
 def parse_skill_always_protected(value) -> frozenset:
