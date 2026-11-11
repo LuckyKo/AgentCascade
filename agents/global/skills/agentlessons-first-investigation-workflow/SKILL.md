@@ -18,8 +18,8 @@ generated_from_task: "Investigate AgentCascade todo.md line 158 (__kill killing 
 Spend investigation time on what is NOT yet known, not re-deriving root causes that a prior session already pinned down and verified in `.agent_lessons/`.
 
 ## Procedure
-### Step 1 — Grep the memory dir by symptom + component keywords FIRST
-Before opening source or logs, search `N:\work\WD\AgentCascade\.agent_lessons\` (and `reports/`) for the bug's keywords and subsystem. Example: for a shell-kill/server-death report, grep for `kill`, `ctrl_c`, `console`, `async-shell`, `server`. Lesson files use YAML frontmatter with `tags:` and `aliases:` plus Obsidian-style `[[related]]` links — follow those links to pull the full cluster (e.g. `[[async-shell-wait-queue-blind-polling]] → [[async-shell-wait-queue-fix-impl]]`).
+### Step 1 — Grep the memory vaults by symptom + component keywords FIRST
+Before opening source or logs, search the relevant `.agent_lessons/` vaults (workspace + the project's own vault, e.g. `AgentWorkspace/.agent_lessons/` and `<project-repo>/.agent_lessons/`) and `reports/` for the bug's keywords and subsystem. Example: for a shell-kill/server-death report, grep for `kill`, `ctrl_c`, `console`, `async-shell`, `server`. Lesson files use YAML frontmatter with `tags:`, `scope:`, `aliases:`, `status:`, `confidence:`, plus Obsidian-style `[[related]]` links — follow those links to pull the full cluster (e.g. `[[async-shell-wait-queue-blind-polling]] → [[async-shell-wait-queue-fix-impl]]`). **Ignore files with `status: superseded` or `status: archived`** — they are de-indexed; follow their `superseded_by:` link to the current canonical memory.
 
 ### Step 2 — Trust the `confidence: verified` flag, but re-anchor line numbers
 A lesson marked `confidence: verified` has already gone through an independent review PASS. Treat its ROOT CAUSE as established and do NOT re-run the same experiments. BUT line numbers in lessons drift as code changes — re-confirm each `file.py:NNN` against the live tree before acting (see plan-anchor-verification).
@@ -34,4 +34,4 @@ Reported symptoms are often mislabeled (e.g. user said `__kill` kills the server
 - Lesson files are the single best source of truth in this repo for "what already happened here" — they encode gotchas (e.g. test-harness import traps, flaky-test notes, exact substrings tests assert) that are NOT recoverable from reading code alone.
 - The `related:` links form a graph; a bug's full context is usually 3-5 linked files, not one.
 - Do NOT burn turns re-running reproduction experiments for a bug whose lesson already says "verified" — instead spend the budget on the fix or on confirming the fix landed.
-- If a lesson exists but no fix is committed yet (status: "pending implementation"), that is your starting point for the BUILD phase, not a reason to re-investigate from scratch.
+- If a lesson exists but no fix is committed yet (body says "pending implementation" or `confidence: unconfirmed`), that is your starting point for the BUILD phase, not a reason to re-investigate from scratch.
