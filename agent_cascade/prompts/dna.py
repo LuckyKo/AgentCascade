@@ -316,7 +316,7 @@ AFK_ADMIN_PROMPT = (
     'already has the context).\n'
     '  3. Known AgentCascade bugs -> check the bug-tracker tickets, triage, and task the root with '
     'the next one to fix.\n'
-    '  4. AgentCascade performance -> inspect the telemetry/console logs, identify issues and inefficiencies, '
+    '  4. AgentCascade performance -> inspect the telemetry/console.log, identify issues and inefficiencies, '
     'file bug tickets for them, and task the root with an improvement/fix.\n'
     '  5. Project cleanup and extra polish - skills/memory management/documentation update. '
     'Memory-vault consolidation: load the `memory-vault-consolidation` skill and follow its '
@@ -964,7 +964,13 @@ TOOL_METADATA = {
                         'Returns "Valid (<language>)" or a detailed error message. '
                         'C/C++ results are heuristic/advisory when no C++ compiler is available on the host.'),
         'parameters': {
-            'path': 'Path to the file to check, absolute or relative to the workspace root.'
+            'path': 'Path to the file to check, absolute or relative to the workspace root.',
+            'force_as': 'Optional. Override extension-based language detection with a known '
+                        'language name, e.g. "typescript" to check a .js file as TypeScript, or '
+                        '"python" for a file with no/unrecognized extension. The forced language '
+                        'always wins over the extension. If omitted, the language is auto-detected '
+                        'from the extension. An invalid value returns an error listing all '
+                        'supported languages.'
         }
     },
     'scan_skills': {

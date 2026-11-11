@@ -648,6 +648,10 @@ class SyntaxCheck(BaseTool):
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['syntax_check']['parameters']['path']
+            },
+            'force_as': {
+                'type': 'string',
+                'description': TOOL_METADATA['syntax_check']['parameters']['force_as']
             }
         },
         'required': ['path'],
@@ -661,6 +665,7 @@ class SyntaxCheck(BaseTool):
         try:
             params = self._verify_json_format_args(params)
             rel_path = params.get('path', '')
+            force_as = params.get('force_as')          # optional override of extension detection
         except Exception as e:
             return f"Invalid parameters: {str(e)}"
 
@@ -684,12 +689,19 @@ class SyntaxCheck(BaseTool):
         if abs_path.stat().st_size > 10 * 1024 * 1024:
             return f"ERROR: File '{rel_path}' exceeds 10MB limit. Skipping syntax check."
 
-        # Detect language
-        lang = _detect_language(str(abs_path))
-        if not lang:
-            ext = abs_path.suffix
-            return (f"ERROR: Unsupported file type '{ext}'. "
-                    f"Supported extensions: {', '.join(sorted(_EXT_LANG_MAP.keys()))}")
+        # Resolve language: force_as overrides extension detection (its whole point is to
+        # check files whose extension is unknown/absent). Single source of truth: _CHECKER_MAP.
+        if force_as:
+            lang = str(force_as).strip().lower()
+            if lang not in _CHECKER_MAP:
+                return (f"ERROR: force_as='{force_as}' is not a supported language. "
+                        f"Supported languages: {', '.join(sorted(_CHECKER_MAP.keys()))}")
+        else:
+            lang = _detect_language(str(abs_path))
+            if not lang:
+                ext = abs_path.suffix
+                return (f"ERROR: Unsupported file type '{ext}'. "
+                        f"Supported extensions: {', '.join(sorted(_EXT_LANG_MAP.keys()))}")
 
         # Read file content
         try:
