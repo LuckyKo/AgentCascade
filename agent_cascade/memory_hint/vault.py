@@ -23,6 +23,53 @@ _IDENTITY_FIELDS = ('name', 'description', 'tags', 'aliases')
 
 _FRONTMATTER_RE = re.compile(r'\A---\s*\n(.*?)\n---\s*\n?', re.DOTALL)
 
+# Status values that REMOVE a lesson from the hint index (Feature A: "supersede,
+# don't delete"). ALLOWLIST on purpose: only these exact values de-index. Every
+# other status — the 17 pre-existing free-form values (``in-progress``, ``REMOVED
+# …``), ``active``, ``deprecated``, malformed YAML — and a missing status (the
+# ~402 no-frontmatter files) stay ACTIVE. De-indexed files remain on disk and
+# greppable; deleting the ``status:`` line re-indexes them on the next rescan.
+_DEINDEX_STATUSES = frozenset({'superseded', 'archived'})
+
+
+def _is_deindexed(meta: dict) -> bool:
+    """True only when ``status:`` is exactly ``superseded``/``archived``.
+
+    A missing/non-string ``status`` returns False (active) — the required default
+    for the ~402 no-frontmatter lessons and the free-form-status files alike.
+    """
+    st = meta.get('status', '')
+    if not isinstance(st, str):
+        return False
+    return st.strip().lower() in _DEINDEX_STATUSES
+
+
+def normalize_scope(meta: dict) -> frozenset:
+    """Normalize the ``scope:`` frontmatter field into a lowercase token set.
+
+    ``scope:`` is a comma-separated (or ``[a, b]``) list of namespace keys
+    (Feature C). Absent/empty → ``{'global'}`` so an unscooped lesson is always
+    eligible, mirroring the safe default for no-frontmatter files.
+    """
+    raw = meta.get('scope', '')
+    if not isinstance(raw, str):
+        return frozenset({'global'})
+    tokens = {tok.strip().lower() for tok in raw.split(',') if tok.strip()}
+    return frozenset(tokens) or frozenset({'global'})
+
+
+def _hub_slug(meta: dict) -> Optional[str]:
+    """Return the leaf's ``hub:`` cluster slug, or None if absent/blank.
+
+    Feature B: a hinted leaf carrying ``hub: <slug>`` renders a breadcrumb to its
+    hub note (`` (hub: #<slug>)``). Case is preserved — display-only.
+    """
+    hub = meta.get('hub', '')
+    if not isinstance(hub, str):
+        return None
+    hub = hub.strip()
+    return hub or None
+
 
 def discover_vaults(om) -> List[Path]:
     """Return the ``.agent_lessons/`` dirs under base_dir + extra RO/RW folders.
@@ -113,19 +160,22 @@ def identity_text(frontmatter: dict) -> str:
 class VaultIndex:
     """Holds one vault's documents plus an mtime map for targeted rebuilds.
 
-    ``documents`` maps vault-relative path → ``(identity_text, body_text)``.
+    ``documents`` maps vault-relative path →
+    ``(identity_text, body_text, scope_set, hub_slug)`` where ``scope_set`` is a
+    lowercase namespace token set (Feature C, default ``{'global'}``) and
+    ``hub_slug`` is the leaf's ``hub:`` cluster or ``None`` (Feature B).
     ``mtimes`` maps the same relative path → file mtime, so :meth:`rescan` can
     rebuild only changed files and drop deleted ones (plan §3.3).
     """
 
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)
-        self.documents: Dict[str, Tuple[str, str]] = {}
+        self.documents: Dict[str, Tuple[str, str, frozenset, Optional[str]]] = {}
         self.mtimes: Dict[str, float] = {}
 
     def rescan(self) -> bool:
         """(Re)build the index for this vault. Returns True if anything changed."""
-        new_docs: Dict[str, Tuple[str, str]] = {}
+        new_docs: Dict[str, Tuple[str, str, frozenset, Optional[str]]] = {}
         new_mtimes: Dict[str, float] = {}
         try:
             files = sorted(self.vault_root.rglob('*.md'))
@@ -145,7 +195,12 @@ class VaultIndex:
             if rel == 'memory_stats.json' or rel.startswith('.'):
                 continue
             meta, body = parse_frontmatter(f)
-            new_docs[rel] = (identity_text(meta), body)
+            # Feature A: a superseded/archived lesson stays on disk (greppable) but is
+            # dropped from the hint index. Allowlist-only, so every other status and
+            # the no-frontmatter default stay active.
+            if _is_deindexed(meta):
+                continue
+            new_docs[rel] = (identity_text(meta), body, normalize_scope(meta), _hub_slug(meta))
             new_mtimes[rel] = mtime
 
         changed = (new_docs != self.documents) or (new_mtimes != self.mtimes)
@@ -154,14 +209,14 @@ class VaultIndex:
             self.mtimes = new_mtimes
         return changed
 
-    def all_vaults(self, vault_indexes: Dict[Path, 'VaultIndex']) -> Dict[str, Tuple[str, str]]:
+    def all_vaults(self, vault_indexes: Dict[Path, 'VaultIndex']) -> Dict[str, Tuple[str, str, frozenset, Optional[str]]]:
         """Return the union of documents across all vaults (for the matcher).
 
         Keys are BARE vault-relative paths so they agree with the dedup set, cooldown
         map and stats sidecar (plan §3.1/§3.4). Cross-vault filename collisions resolve
         to first-vault-wins; that is acceptable for this feature's small vault sizes.
         """
-        merged: Dict[str, Tuple[str, str]] = {}
+        merged: Dict[str, Tuple[str, str, frozenset, Optional[str]]] = {}
         for _root, idx in vault_indexes.items():
             for rel, doc in idx.documents.items():
                 # First vault wins on collision; deterministic (sorted insertion).

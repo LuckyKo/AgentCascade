@@ -17,7 +17,7 @@ The query vector uses the body scale only (no identity boost on the query).
 
 import math
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Reuse the exact token pattern from skills/matcher.py:17 for consistency.
 _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
@@ -54,8 +54,17 @@ class MemoryMatcher:
 
     # ── Index building ───────────────────────────────────────────────────────
 
-    def set_documents(self, documents: Dict[str, Tuple[str, str]]) -> None:
-        """(Re)build the full index from ``{rel_path: (identity_text, body_text)}``.
+    def set_documents(self, documents: Dict[str, tuple]) -> None:
+        """(Re)build the full index from ``{rel_path: doc_tuple}``.
+
+        Each doc is a 4-tuple ``(identity_text, body_text, scope_set, hub_slug)``
+        produced by :class:`VaultIndex`. Kept tolerant of the legacy 2-tuple
+        ``(identity_text, body_text)`` (and 3-tuple) shapes via positional
+        unpacking, so a mixed/rescan-partial tree can never crash the worker: a
+        doc with no scope defaults to ``{'global'}`` (always eligible). The
+        ``hub_slug`` 4th element is intentionally IGNORED here — the matcher scores
+        on text and filters on scope only; hub breadcrumbs are rendered from the
+        manager's ``_hubs`` map, not the matcher (no dead state kept in _docs).
 
         Called by the manager after a rescan. Rebuilding the whole union is cheap
         for the small vault sizes this feature targets; per-file mtime tracking
@@ -65,9 +74,16 @@ class MemoryMatcher:
         self._docs.clear()
         self._df.clear()
 
+        # Normalize every doc to (rel, identity, body, scope) once, tolerating
+        # 2/3/4-tuples (index 3 = hub, which the matcher does not consume).
+        items: List[Tuple[str, str, str, frozenset]] = []
+        for rel_path, doc in documents.items():
+            scope = frozenset(doc[2]) if len(doc) > 2 else frozenset({'global'})
+            items.append((rel_path, doc[0], doc[1], scope))
+
         # Pass 1: build raw weighted term frequencies per document + global df.
         raw: Dict[str, Dict[str, float]] = {}
-        for rel_path, (identity_text, body_text) in documents.items():
+        for rel_path, identity_text, body_text, _scope in items:
             counts: Dict[str, int] = {}
             for tok in _tokenize(identity_text):
                 counts[tok] = counts.get(tok, 0) + 1
@@ -81,14 +97,15 @@ class MemoryMatcher:
             for tok in counts:
                 self._df[tok] = self._df.get(tok, 0) + 1
 
-        # Pass 2: weight each doc's terms (identity × W_ID, body × W_BODY) and cache norm.
-        # We recompute the identity/body split weighting by re-tokenizing so the
+        # Pass 2: weight each doc's terms (identity × W_ID, body × W_BODY) and cache
+        # norm. We recompute the identity/body split weighting by re-tokenizing so the
         # identity terms carry W_ID while body terms carry W_BODY. To do that we need
-        # per-field counts, so rebuild with field awareness.
-        for rel_path, (identity_text, body_text) in documents.items():
+        # per-field counts, so rebuild with field awareness. scope is stored for the
+        # match-time scope filter (Feature C).
+        for rel_path, identity_text, body_text, scope in items:
             vec = self._weighted_vector(identity_text, body_text)
             norm = math.sqrt(sum(w * w for w in vec.values())) or 1.0
-            self._docs[rel_path] = {'vec': vec, 'norm': norm}
+            self._docs[rel_path] = {'vec': vec, 'norm': norm, 'scope': scope}
 
     def _idf(self, token: str) -> float:
         """Smoothed IDF: log((N + 1) / (df(t) + 1)) + 1 (plan §3.3)."""
@@ -121,11 +138,18 @@ class MemoryMatcher:
 
     # ── Matching ─────────────────────────────────────────────────────────────
 
-    def match(self, query: str) -> List[Tuple[str, float]]:
+    def match(self, query: str, allowed_scope: Optional[set] = None) -> List[Tuple[str, float]]:
         """Score every document against ``query``. Returns ``(rel_path, cosine)`` desc.
 
         The query vector uses the body scale (W_BODY) only — no identity boost on
         the query side. Documents scoring 0 are omitted.
+
+        ``allowed_scope`` is an optional set of lowercase namespace tokens (Feature C).
+        When ``None`` (the shipped default) there is NO filtering — behavior is
+        byte-identical to before the filter existed. When provided, a doc is skipped
+        unless its scope contains ``'global'`` OR intersects ``allowed_scope`` (exact
+        segment match, so ``strata`` never matches ``unbiasedstrata``). A doc's scope is
+        normalized to lowercase at index time (see :meth:`set_documents`).
         """
         if not self._docs or not (query and query.strip()):
             return []
@@ -147,8 +171,18 @@ class MemoryMatcher:
         if q_norm == 0.0:
             return []
 
+        # Feature C scope filter. None → no filtering (ships dark). Otherwise normalize
+        # to lowercase once and skip docs whose scope neither is global nor intersects.
+        allowed: Optional[frozenset] = None
+        if allowed_scope is not None:
+            allowed = frozenset(
+                s.strip().lower() for s in allowed_scope if isinstance(s, str) and s.strip()
+            )
+
         results: List[Tuple[str, float]] = []
         for rel_path, doc in self._docs.items():
+            if allowed is not None and 'global' not in doc['scope'] and not (doc['scope'] & allowed):
+                continue
             dvec = doc['vec']
             # Dot product over the smaller map's keys.
             dot = 0.0

@@ -206,6 +206,11 @@ class MemoryHintManager:
 
         self._matcher = MemoryMatcher()
         self._vault_indexes: Dict[Path, VaultIndex] = {}
+        # rel_path -> hub cluster slug for hinted-leaf breadcrumbs (Feature B).
+        # Rebuilt in full under _index_lock on every rescan_vaults(); a worker only
+        # reads it via .get() (never iterates), so a rebind between rescan and render
+        # can only make a breadcrumb one rescan late — display-only, never a crash.
+        self._hubs: Dict[str, str] = {}
         self._index_lock = threading.RLock()
 
         # Adaptive signal floor: EWMA of per-turn top-1 scores (in-memory only —
@@ -341,10 +346,20 @@ class MemoryHintManager:
                 # "proj/x.md". Cross-vault filename collisions are rare and acceptable here
                 # (first vault wins); correctness of dedup is the priority.
                 merged = {}
+                hubs = {}
                 for idx in self._vault_indexes.values():
                     for rel, doc in idx.documents.items():
-                        merged.setdefault(rel, doc)
+                        # First vault wins on collision; keep that same vault's hub slug.
+                        if rel in merged:
+                            continue
+                        merged[rel] = doc
+                        # 4th tuple element is the leaf's hub slug (Feature B), None if absent.
+                        if len(doc) > 3 and doc[3]:
+                            hubs[rel] = doc[3]
                 self._matcher.set_documents(merged)
+                # Rebind the hub map atomically under the same lock the matcher is set under,
+                # so _process_job renders breadcrumbs for exactly the indexed doc set.
+                self._hubs = hubs
             # Rescan completion is a meaningful state change (index rebuilt) — INFO.
             logger.info('[MEMORY_HINT] rescan_vaults: %d vault(s), %d lesson(s), changed=%s',
                         len(self._vault_indexes), len(merged), changed)
@@ -607,7 +622,13 @@ class MemoryHintManager:
                 skill_counts = {n: counts.get(n, 0) for n in skill_names}
                 loaded = {str(x).lower() for x in (getattr(inst, '_loaded_skill_names', None) or [])}
 
-        hint_text = self._build_combined(memory_display, skill_names, skill_counts, loaded)
+        # Feature B breadcrumb: resolve each hinted leaf's hub slug (keyed on its bare
+        # rel_path) into a list index-aligned with memory_display. memory_bare and
+        # memory_display come from the SAME to_hint order in _match_memories, so they
+        # align 1:1. Empty hub entries stay empty → byte-identical render (no-op).
+        memory_hubs = [self._hubs.get(p) for p in memory_bare] if memory_bare else None
+        hint_text = self._build_combined(memory_display, skill_names, skill_counts, loaded,
+                                        memory_hubs)
         if not hint_text:
             return
 
@@ -1031,15 +1052,18 @@ class MemoryHintManager:
 
     def _build_combined(self, memory_display: List[str], skill_names: List[str],
                         skill_counts: Optional[Dict[str, int]] = None,
-                        loaded: Optional[set] = None) -> str:
+                        loaded: Optional[set] = None,
+                        memory_hubs: Optional[List[Optional[str]]] = None) -> str:
         """Merge the two sub-pipelines into ONE hint string (plan §D5).
 
         Memory-only output is BYTE-IDENTICAL to the legacy ``_build_hint`` result; a
         skill-only hint gets the ``[MEMORY HINT]`` umbrella tag so log/UI filtering keyed
         on that tag still catches it. ``skill_counts`` / ``loaded`` (BUG_0225) drive the
         per-line recurrence marker and are optional (default ``None`` → no marker).
+        ``memory_hubs`` (Feature B) is an optional list index-aligned with
+        ``memory_display``; it only adds per-line hub breadcrumbs when present.
         """
-        mem_block = self._build_hint(memory_display)   # UNCHANGED method; '' if empty
+        mem_block = self._build_hint(memory_display, memory_hubs)   # '' if empty
         skill_block = self._skill_block(skill_names, skill_counts, loaded)   # '' if empty
         if mem_block and skill_block:
             return mem_block + '\n' + skill_block      # both sections, memory first (stable order)
@@ -1087,7 +1111,7 @@ class MemoryHintManager:
             logger.debug('[MEMORY_HINT] _display_path failed for %s: %s', rel, e)
         return rel
 
-    def _build_hint(self, paths: List[str]) -> str:
+    def _build_hint(self, paths: List[str], hubs: Optional[List[Optional[str]]] = None) -> str:
         """Deterministic hint text listing the matched memory paths (plan §3.3).
 
         ``paths`` are ABSOLUTE display paths (resolved from vault-relative identities
@@ -1095,6 +1119,14 @@ class MemoryHintManager:
         entries by the caller, and each entry's text is truncated to
         ``HINT_ENTRY_MAX_CHARS`` for readability. Bookkeeping identity stays
         vault-relative — only the displayed text here is absolute.
+
+        ``hubs`` (Feature B) is an optional list index-aligned with ``paths`` giving
+        each hinted leaf's cluster-hub slug (or ``None``/empty for a non-clustered
+        leaf). When provided, a breadcrumb `` (hub: #<slug>)`` is appended to that
+        leaf's line — a navigation aid only, never a scoring/gate change. When
+        ``hubs`` is omitted or every entry is empty, output is BYTE-IDENTICAL to the
+        legacy render. The breadcrumb is appended AFTER clipping so a long path can
+        never truncate it.
         """
         if not paths:
             return ''
@@ -1106,7 +1138,13 @@ class MemoryHintManager:
                 return p[:HINT_ENTRY_MAX_CHARS - 1] + '…'
             return p
 
-        lines = [f"  - {_clip(p)}" for p in paths]
+        lines = []
+        for i, p in enumerate(paths):
+            line = f"  - {_clip(p)}"
+            hub = hubs[i] if hubs is not None and i < len(hubs) else None
+            if hub:
+                line += f" (hub: #{hub})"
+            lines.append(line)
         return header + '\n' + '\n'.join(lines)
 
     def _deliver(self, inst, name: str, hint_text: str) -> None:
