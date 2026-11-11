@@ -70,6 +70,21 @@ SKILL_ADVISOR_MAX_CANDIDATES: int = int(
 # monkeypatch it.
 DEBUG_SLOTS: bool = os.getenv('AGENT_CASCADE_DEBUG_SLOTS', '0').strip().lower() in ('1', 'true')
 
+# ── Post-compression MCP tool unload ──────────────────────────────────────────
+# After a successful compression, drop discovered MCP (deferred) tools that were not
+# used: the keep-set is every MCP tool SUCCESSFULLY invoked since the last compression (agent_instance._mcp_tools_used)
+# ∪ every discovered MCP tool named in the post-compression summary text; everything
+# else is unloaded (no longer offered) and _mcp_tools_used is cleared (window boundary). The unload is announced as ONE marker queued onto the next tool result
+# so it survives session reload (see pool/session_io re-derive). The
+# deferred-tool token win is an optimization, not a correctness fix, so this ships
+# dark: set AGENT_CASCADE_UNLOAD_UNUSED_TOOLS_POST_COMPRESSION=1 to enable. Off
+# (default) ⇒ byte-identical behavior to append-only discovery (no marker queued,
+# re-derive unchanged). Gated sites read settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION
+# so tests can monkeypatch it.
+UNLOAD_UNUSED_TOOLS_POST_COMPRESSION: bool = os.getenv(
+    'AGENT_CASCADE_UNLOAD_UNUSED_TOOLS_POST_COMPRESSION', '0'
+).strip().lower() in ('1', 'true')
+
 # ── AFK nudge mode (basic | admin) ─────────────────────────────────────────────
 # 'basic' keeps the current AFK behavior (auto-reject + canned idle nudge). 'admin'
 # spawns a read-only Admin agent that reviews the idle session and hands back the

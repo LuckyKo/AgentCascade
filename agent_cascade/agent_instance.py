@@ -16,7 +16,7 @@ import time
 from collections import deque  # NEW: rolling buffer for cache pool
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.settings import (
@@ -301,6 +301,28 @@ class AgentInstance:
     _discovered_mcp_tools: List[str] = field(
         default_factory=list
     )  # Unlocked deferred (MCP) tool names this instance may be offered, in discovery order
+    # Deferred (MCP) names this instance DISCOVERED but that have since been UNLOADED (after a
+    # post-compression unload of unused tools). MUST be a declared field for the same reason as
+    # _discovered_mcp_tools: slots=True, and both the compression handler and session_io re-derive
+    # assign to it directly. Kept SEPARATE from _discovered_mcp_tools so the discovery history stays
+    # intact and unload is a distinct axis; re-unlock just pops a name back out of this list.
+    _unloaded_mcp_tools: List[str] = field(
+        default_factory=list
+    )  # Discovered MCP names currently unloaded (suppressed from the offered set), append order
+    # MCP tool names SUCCESSFULLY INVOKED since the last compression. Written by the tool-dispatch
+    # path (engine/tool_execution.py) on a successful MCP call; the post-compression unload hook
+    # uses it as the keep-set and CLEARS it (the compression is the window boundary). Declared
+    # field — slots=True — written directly by tool_execution. Empty by construction after a
+    # session reload ("nothing invoked since the last compression/reload"), which is correct.
+    _mcp_tools_used: Set[str] = field(
+        default_factory=set
+    )  # MCP tool names invoked since the last compression (unload keep-set source)
+    # Monotonic per-instance counter of post-compression MCP unload events. Embedded as a #<n>
+    # discriminator in each unload marker so re-unloads of an identical tool set produce distinct
+    # log lines (the notification dedup is exact-text, and an identical re-unload would otherwise be
+    # dropped → over-offer on reload). Seeded from the replayed marker count on session reload
+    # (pool/session_io) so post-reload discriminators continue past the existing ones.
+    _mcp_unload_seq: int = field(default=0)  # count of MCP unload markers emitted this instance
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(
         default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__

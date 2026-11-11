@@ -20,6 +20,7 @@ from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
 from agent_cascade.settings import (DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
                                     UNTRUSTED_TOOL_OUTPUT_TAG, UNTRUSTED_TOOL_OUTPUT_WRAPPER)
+from agent_cascade.tools.mcp_manager import MCPManager
 from agent_cascade.utils.pool_validation import validate_message_pool
 
 
@@ -273,6 +274,13 @@ class ToolExecMixin:
                     if _tool_success and isinstance(tool_result, str):
                         _tool_success, _tool_error = self._detect_tool_result_failure(tool_result)
 
+                    # Track MCP tool usage for post-compression unload (see
+                    # settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION). Tracking is NOT gated by the
+                    # knob — it is a GIL-atomic set.add bounded by the deferred-set size, and the
+                    # hook (compression handler) decides what to do with it. Only MCP (deferred)
+                    # tools are tracked; core tools are never in the unload universe.
+                    if _tool_success and MCPManager.is_mcp_tool(tool_name):
+                        instance._mcp_tools_used.add(tool_name)
                 finally:
                     # Telemetry: record tool call end (non-blocking, always called)
                     if (tel := self._telemetry()) is not None:

@@ -23,12 +23,20 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.llm.schema import USER, ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.runtime_state import state as _runtime_state
+from agent_cascade import settings
 from agent_cascade.settings import (COMPRESSION_MAX_FRACTION, COMPRESSION_MIN_FRACTION,
                                     TOKEN_ESTIMATE_CHAR_DIVISOR)
 from agent_cascade.tool_utils import (clear_truncation_state, format_truncation_notice, get_and_clear_truncation_hints,
                                       truncate_with_spillover, was_tool_call_truncated)
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import VISION_MODEL_TYPES, is_multimodal_content, msg_field
+
+# Marker prefix for the post-compression MCP-tool unload notification (see
+# _unload_unused_mcp_tools): queued onto the next tool result so the agent sees which
+# deferred tools were suppressed, with zero new conversation messages. session_io
+# re-derives the unloaded set by scanning FUNCTION content lines for this exact prefix
+# when a session log is replayed on reload. The emitter (handler) owns the constant.
+MCP_TOOLS_UNLOADED_MARKER = '[SYSTEM] MCP_TOOLS_UNLOADED'
 
 # Tools whose full output remains accessible on disk via their own pagination
 # (start_line/limit). For these, the outer safety net:
@@ -904,6 +912,10 @@ class CompressionHandler:
                     # ── Inject compression feedback into last message (in-tool-response pattern) ──
                     # Appending to the last message's content avoids creating a separate USER message
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
+                    # Post-compression unload of unused MCP tools (opt-in): queues ONE marker onto the
+                    # next tool result (zero new conversation messages; see MCP_TOOLS_UNLOADED_MARKER).
+                    self._maybe_unload_unused_mcp_tools(instance, inst_name,
+                                                        result.summary_text)
                     self._sync_logger_after_compression(inst_name, instance.agent_class, 'forced compression', instance)
 
                     # Authoritative post-compression readout: count AFTER the logger sync and BEFORE
@@ -963,6 +975,99 @@ class CompressionHandler:
 
     # ── Compress Context Tool Handler ────────────────────────────────────────
 
+    def _unload_unused_mcp_tools(self, instance, target_agent_name: str, summary_text) -> None:
+        """Drop discovered MCP (deferred) tools that went unused through the compression window.
+
+        Keep-set = MCP tool names the instance successfully INVOKED since the last compression
+        (``instance._mcp_tools_used``, written by engine/tool_execution.py on each successful MCP
+        call) ∪ every discovered MCP tool named in the post-compression ``summary_text``.
+        Everything else currently discovered but not already unloaded is appended to
+        ``instance._unloaded_mcp_tools`` (a separate axis — the discovery list is never mutated)
+        and announced via ONE marker notification queued onto the next tool result.
+
+        The compression is the window boundary: ``_mcp_tools_used`` is cleared on every call, so
+        the next window starts fresh. After a session reload the set is empty by construction —
+        correct, since "nothing has been invoked since the last compression/reload" (aggressive,
+        but any dropped tool is recoverable by re-running ``tool_search``). If the queued
+        notification never drains (no tool call follows), those names simply re-offer on reload —
+        the safe direction. Caller already gated on settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION.
+        """
+        from agent_cascade.tools.mcp_manager import MCPManager
+
+        # Window boundary is the compression itself: snapshot usage, then clear unconditionally so
+        # the next window starts fresh even if nothing ends up unloaded.
+        used = set(instance._mcp_tools_used)
+        instance._mcp_tools_used.clear()
+
+        discovered = list(getattr(instance, '_discovered_mcp_tools', None) or [])
+        mcp_discovered = [n for n in discovered if MCPManager.is_mcp_tool(n)]
+        if not mcp_discovered:
+            return
+        already_unloaded = set(getattr(instance, '_unloaded_mcp_tools', None) or [])
+
+        summary = summary_text or ''
+        # Summary keep-signal uses a word boundary, not raw substring: a short/common MCP name
+        # (e.g. "log") must not be kept merely because the summary mentions "catalog". Names carry
+        # '-' (a non-word char), so \b at each end correctly delimits the whole name from a longer
+        # adjacent identifier run.
+        def _in_summary(n):
+            return re.search(rf'\b{re.escape(n)}\b', summary) is not None
+        keep = {n for n in mcp_discovered if n in used or _in_summary(n)}
+        # Only fresh names: already-unloaded stay unloaded; never re-announce them.
+        unloaded = [n for n in mcp_discovered if n not in keep and n not in already_unloaded]
+        if not unloaded:
+            return
+
+        instance._unloaded_mcp_tools.extend(unloaded)
+        # ONE marker line queued onto the next tool result (zero new conversation messages,
+        # KV-stable, no prompt-template adjacency hazard). session_io re-derives the unloaded
+        # set from this marker when the log is replayed on session reload. MARKER + name list
+        # must match the exact-prefix contract in pool/session_io._rederive_discovered_mcp_tools.
+        # The #<seq> discriminator makes every marker line unique, so re-unloading an identical
+        # set (after a re-unlock popped it in memory) is NOT deduped away by the exact-text guard
+        # in _inject_compression_notification (which would silently lose the announcement and
+        # over-offer the names on reload).
+        instance._mcp_unload_seq += 1
+        self._inject_compression_notification(
+            instance,
+            f'{MCP_TOOLS_UNLOADED_MARKER} #{instance._mcp_unload_seq}: {', '.join(unloaded)}',
+            target_agent_name)
+        logger.debug(f"[UNLOAD] '{target_agent_name}': unloaded {len(unloaded)} unused MCP "
+                     f"tool(s) post-compression: {', '.join(unloaded)}")
+
+    def _maybe_unload_unused_mcp_tools(self, instance, target_agent_name: str, summary_text) -> None:
+        """Gate + best-effort wrapper around :meth:`_unload_unused_mcp_tools`.
+
+        Every post-compression success path funnels through here so the hook can never be
+        forgotten on a newly added path. The keep-set comes from ``instance._mcp_tools_used``
+        (explicit usage tracking), NOT a scan of the dropped messages — so no pre-compression
+        snapshot is taken and there is zero overhead when the knob is off (early return).
+        An unload failure must never turn a successful compression into a failure, so all
+        exceptions are swallowed to a debug log.
+        """
+        if not settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION:
+            return
+        try:
+            self._unload_unused_mcp_tools(instance, target_agent_name, summary_text)
+        except Exception as e:
+            logger.debug(f"[UNLOAD] post-compression unload failed for '{target_agent_name}': {e}")
+
+    def _latest_compression_summary(self, target_agent_name: str):
+        """Best-effort newest ``<context_summary>`` body, used as the summary keep-signal when
+        no CompressResult is available (the /compress command path only receives the tool's
+        feedback string). Scans the conversation from the END; returns None when no marker is
+        present, which callers treat as 'no summary keep-signal' (invoked set still honored)."""
+        from agent_cascade.compression.helpers import extract_summary_from_marker
+        try:
+            conv = self.pool.get_conversation(target_agent_name)
+            for msg in reversed(list(conv or [])):
+                s = extract_summary_from_marker(msg)
+                if s:
+                    return s
+        except Exception as e:
+            logger.debug(f"[UNLOAD] summary lookup failed for '{target_agent_name}': {e}")
+        return None
+
     def handle_compress_tool(self, args: Any, instance: AgentInstance, target_agent_name: str) -> str:
         """Handle compress_context tool call — delegates to compression module.
 
@@ -1002,6 +1107,13 @@ class CompressionHandler:
 
         if result.success:
             _invalidate_token_cache(instance)  # Invalidate cache before rebuilding working set (Fix Finding #3)
+
+            # Post-compression unload of unused MCP (deferred) tools — opt-in (see
+            # settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION). Queues ONE marker onto the next
+            # tool result (zero new conversation messages); session_io re-derives the unloaded
+            # set on reload from the marker's exact-prefix name list.
+            self._maybe_unload_unused_mcp_tools(instance, target_agent_name,
+                                                result.summary_text)
 
             # Telemetry: record compression event from tool handler path (non-blocking)
             if (tel := self.engine._telemetry()) is not None:
@@ -1188,6 +1300,14 @@ class CompressionHandler:
 
             # Validate message pool after compression
             conv = self.pool.get_conversation(inst_name)
+
+            # Post-compression unload of unused MCP tools (opt-in). Knob-gated so the off-path
+            # does zero work (byte-identical). Queues ONE marker onto the next tool result;
+            # session_io re-derives the unloaded set on reload. /compress has no CompressResult,
+            # so recover the newest summary marker as the summary keep-signal.
+            # (Knob-gating lives in _maybe_unload_unused_mcp_tools, uniform across all three sites.)
+            self._maybe_unload_unused_mcp_tools(instance, inst_name,
+                                                self._latest_compression_summary(inst_name))
 
             self._sync_logger_after_compression(inst_name, instance.agent_class, '/compress command', instance)
 

@@ -133,11 +133,24 @@ def order_offered_tool_names(func_map: dict, disabled: set, instance=None) -> li
 
     if instance is not None:
         discovered = getattr(instance, '_discovered_mcp_tools', None) or []
+        # Names unloaded after a post-compression sweep (see settings.
+        # UNLOAD_UNUSED_TOOLS_POST_COMPRESSION). This is a separate axis from discovery —
+        # ``_discovered_mcp_tools`` is never mutated — so re-unlock is just popping a name out of
+        # this list. Read as a SET here for O(1) membership (the per-name guard below runs once per
+        # discovered tool); the instance field itself stays a list (session re-derive preserves order).
+        # Read-only wrt the instance (compression handler + session re-derive are the only writers;
+        # the offer path never writes).
+        unloaded = set(getattr(instance, '_unloaded_mcp_tools', None) or [])
         seen = set(offered)
         unlocked = 0
         for name in discovered:
             # ``in func_map`` prunes tools whose server disconnected since discovery.
-            if name in deferred and name in func_map and name not in disabled and name not in seen:
+            # ``not in unloaded`` drops names unloaded after the last compression — placed AFTER
+            # the existing guards so a hard disable or the ``__all_mcp_tools__`` sentinel (folded
+            # into ``disabled`` above) always wins precedence; unload is inert when they exclude a
+            # name anyway.
+            if (name in deferred and name in func_map and name not in disabled
+                    and name not in unloaded and name not in seen):
                 offered.append(name)
                 seen.add(name)
                 unlocked += 1

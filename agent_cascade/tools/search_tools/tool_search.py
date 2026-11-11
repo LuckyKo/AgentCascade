@@ -327,6 +327,15 @@ class ToolSearch(BaseTool):
                 if name not in existing:
                     instance._discovered_mcp_tools.append(name)
                     existing.add(name)
+            # Re-unlock: a name just loaded by this search must drop out of the unloaded tail,
+            # or the offer guard would keep suppressing it. Mutate in place (same append-in-place
+            # discipline as the discovered list above — never rebind); cheap + idempotent, and a
+            # no-op when the knob is off (the list stays empty).
+            _unl = getattr(instance, '_unloaded_mcp_tools', None)
+            if _unl:
+                _loaded = set(ranked)
+                for name in [n for n in _unl if n in _loaded]:
+                    _unl.remove(name)
             message = (f'Unlocked {len(ranked)} MCP tool(s) — available on your NEXT call: '
                        f'{', '.join(ranked)}. Call them directly; you do not need to re-search to use them.')
         else:

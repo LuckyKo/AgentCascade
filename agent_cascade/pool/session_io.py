@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -20,49 +21,99 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from ..agent_instance import AgentInstance
 
 
-def _rederive_discovered_mcp_tools(messages) -> list:
-    """Re-derive ``_discovered_mcp_tools`` from a session log's message history.
+def _rederive_discovered_mcp_tools(messages, unloaded_out: 'list | None' = None,
+                                   unload_seq_out: 'list | None' = None) -> list:
+    """Re-derive ``_discovered_mcp_tools`` and the currently-unloaded subset from a log.
 
-    Session reload restores a fresh AgentInstance with no discovered-MCP tail; without
-    re-derivation, tools unlocked before the reload would silently drop out of the offered
-    set. The ONLY stable parse target is the trailing JSON envelope that ``tool_search``
-    emits (F2) — never free text. Scans ``role==FUNCTION`` results named ``tool_search``
-    and, per message, walks lines from the END to the first that json-loads to a dict
-    containing the ``TOOL_SEARCH_ENVELOPE_KEY`` envelope, reading its ``DISCOVERED_KEY``
-    list. Names are collected in first-seen order, deduped. Any parse failure degrades to
-    skipping that message (never raises into load).
+    Two independent signals, applied in log order (last-writer-wins):
+
+    1. DISCOVERY — the trailing JSON envelope ``tool_search`` emits. Strict filter:
+       ``role==FUNCTION`` and ``name==TOOL_SEARCH_ENVELOPE_KEY``; walk content lines from the
+       END to the first json-loadable line containing the envelope, read its ``DISCOVERED_KEY``
+       list, add each name to first-seen order and mark it present. The strict filter is the
+       discovery contract — never loosen it (arbitrary tool output must not false-match).
+
+    2. UNLOAD — the post-compression unload marker. The compression handler queues it onto the
+       NEXT tool result, so it lands inside that tool's FUNCTION content, NOT in a tool_search
+       message. Scan every message's content lines for the exact ``MCP_TOOLS_UNLOADED_MARKER``
+       prefix and parse the comma-separated names that follow it (after a per-unload ``#<n>:``
+       discriminator), removing each from present. Within a message the marker is scanned BEFORE
+       the discovery envelope: the marker is queued at compression, and a tool_search envelope that
+       co-locates in that same tool result is produced after it, so the envelope (add) must win.
+       Targeted to the unique marker prefix, so it needs no role/name filter.
+
+    Returns first-seen order minus names still unloaded. When ``unloaded_out`` is a list, the
+    remaining unloaded names are appended so the caller can seed ``instance._unloaded_mcp_tools``
+    (keeping the offer path correct after reload). When ``unload_seq_out`` is a list, the number of
+    unload markers seen is appended so the caller can seed ``instance._mcp_unload_seq`` — keeping
+    the next emitted discriminator strictly greater than any already in the log (no dedup collision
+    after a reload). Best-effort: if a marker notification never drained into a logged message,
+    those names simply re-offer on reload — the safe direction. Any parse failure degrades to
+    skipping the message (never raises into load).
     """
-    from agent_cascade.tools.search_tools.tool_search import TOOL_SEARCH_ENVELOPE_KEY, DISCOVERED_KEY
+    from agent_cascade.tools.search_tools.tool_search import (
+        TOOL_SEARCH_ENVELOPE_KEY, DISCOVERED_KEY,
+    )
+    from agent_cascade.compression.handler import MCP_TOOLS_UNLOADED_MARKER
 
-    # ``tool_search``'s registered name == its envelope key by design (the envelope is keyed
-    # by the tool's own name); imported rather than hardcoded so the two never drift.
-    discovered: list = []
-    seen = set()
+    # ``tool_search``'s registered name == its envelope key by design (the envelope is keyed by
+    # the tool's own name); imported rather than hardcoded so the two never drift.
+    order: list = []      # first-seen discovery order (never reordered)
+    present: set = set()  # names currently unlocked (not currently unloaded)
+    seq_seen: int = 0     # count of unload markers in the log — seed for the instance unload counter
     for msg in messages:
         try:
             if not isinstance(msg, dict):
                 continue
-            if msg.get(ROLE) != FUNCTION or msg.get('name') != TOOL_SEARCH_ENVELOPE_KEY:
-                continue
             content = msg.get('content')
-            if not isinstance(content, str):
-                continue
-            for line in reversed(content.splitlines()):
+            content_lines = content.splitlines() if isinstance(content, str) else []
+            # (1) Unload marker FIRST — establishes WITHIN-message chronology. The handler queues a
+            #     drained marker onto the NEXT tool result; when that tool result is itself a
+            #     tool_search, the marker and that call's re-unlock discovery envelope co-locate in
+            #     ONE message. The marker is queued at compression, the envelope is produced after it,
+            #     so the envelope (later in time) must win: discard here, add in (2) below. Processing
+            #     every marker line (no break) also lets several markers drained into one result all be
+            #     honored in line order. Cross-message order stays log order (last-writer-wins).
+            for line in content_lines:
                 line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(parsed, dict) and TOOL_SEARCH_ENVELOPE_KEY in parsed:
-                    for name in (parsed[TOOL_SEARCH_ENVELOPE_KEY].get(DISCOVERED_KEY) or []):
-                        if name not in seen:
-                            seen.add(name)
-                            discovered.append(name)
-                    break
+                if line.startswith(MCP_TOOLS_UNLOADED_MARKER):
+                    seq_seen += 1
+                    # Strip the per-unload discriminator ("#<n>: ") between the marker and the names
+                    # so re-unloads of an identical set get unique lines (see handler unload hook).
+                    payload = re.sub(r'^\s*(?:#\d+\s*)?:\s*', '', line[len(MCP_TOOLS_UNLOADED_MARKER):])
+                    for raw in payload.split(','):
+                        name = raw.strip()
+                        if not name:
+                            continue
+                        if name not in order:
+                            order.append(name)  # surface as unloaded even if no envelope preceded
+                        present.discard(name)
+            # (2) Discovery envelope AFTER the marker — strict role+name contract (see docstring).
+            if msg.get(ROLE) == FUNCTION and msg.get('name') == TOOL_SEARCH_ENVELOPE_KEY:
+                for line in reversed(content_lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(parsed, dict) and TOOL_SEARCH_ENVELOPE_KEY in parsed:
+                        env = parsed[TOOL_SEARCH_ENVELOPE_KEY]
+                        for name in (env.get(DISCOVERED_KEY) or []):
+                            if name not in order:
+                                order.append(name)  # first-seen position, never reordered
+                            present.add(name)
+                        break
         except Exception as e:  # defensive: a malformed history must never abort a load
             logger.debug(f'_rederive_discovered_mcp_tools: skipping message due to parse error: {e}')
+    discovered = [n for n in order if n in present]
+    if unloaded_out is not None:
+        unloaded_out.extend(n for n in order if n not in present)
+    if unload_seq_out is not None:
+        # Seed the instance unload counter so the NEXT emitted marker discriminator strictly
+        # exceeds every one already in the log (no dedup collision after reload).
+        unload_seq_out.append(seq_seen)
     return discovered
 
 
@@ -698,10 +749,15 @@ class SessionIOMixin:
             # re-search. Read from ``cleaned`` (the full loaded dict list), not the in-memory
             # working set. Set even when empty so the attribute is always a plain list.
             try:
-                new_inst._discovered_mcp_tools = _rederive_discovered_mcp_tools(cleaned)
+                _unloaded: list = []
+                _seq: list = []
+                new_inst._discovered_mcp_tools = _rederive_discovered_mcp_tools(cleaned, _unloaded, _seq)
+                new_inst._unloaded_mcp_tools = _unloaded  # names unloaded (and not re-unlocked) in the log
+                new_inst._mcp_unload_seq = _seq[0] if _seq else 0  # next emitted marker #N stays unique
             except Exception as e:  # defensive: discovery restore must never abort a load
                 logger.debug(f'[DISCOVERY] re-derive _discovered_mcp_tools failed for {instance_name}: {e}')
                 new_inst._discovered_mcp_tools = []
+                new_inst._unloaded_mcp_tools = []
             self._instances_version += 1
 
             # FIX (todo.md:155): On RESTART the root agent is restored here, NOT via
