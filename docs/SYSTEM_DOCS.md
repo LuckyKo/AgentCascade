@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 0.14.35 (keep in sync with `agent_cascade.__version__`)
-**Last Updated:** 2026-11-10
+**Version:** 0.15.2 (keep in sync with `agent_cascade.__version__`)
+**Last Updated:** 2026-11-11
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -889,6 +889,22 @@ Resume:
 | System Shutdown | All instances | Emergency stop via `_stopped_event` |
 
 **Global Terminate:** The pool has a `_stopped_event` that, when set, halts all active agents. This is used for emergency shutdowns or session termination.
+
+### 5.5.1 Stop Cancellation of In-Flight Shell Commands
+
+A user Stop (`do_stop()` → `pool.stop_session()`) sets `pool.stopped`, but a **sync** `shell_cmd` blocks inside `proc.wait(timeout=...)` and cannot observe phase-boundary checks. Without help it keeps running for its whole timeout and later returns a stale result into the next turn (BUG_0285 — a 300 s pytest run survived Stop and its timeout result was misattributed to a newer command).
+
+`ShellMixin.execute_shell_command` therefore runs a small watcher thread while it waits:
+
+- Every `SHELL_STOP_POLL_INTERVAL` seconds (default 0.5; `AGENT_CASCADE_SHELL_STOP_POLL_INTERVAL`, `0` disables the watcher) it checks two signals via `_sync_shell_superseded()`:
+  - `pool.stopped` is `True` (user pressed Stop), or
+  - `pool._run_generation` changed since launch (Stop followed by a new turn — `_start_gen_thread` clears `pool.stopped` almost immediately, so the generation bump is the durable signal).
+- On cancellation it kills the whole process tree through the same `_terminate_shell_process()` used by the timeout path and the call returns a distinct message: `ERROR: Command cancelled — the user pressed Stop (elapsed Ns)...` (never the `Command timed out after N seconds` wording, so loop detection does not treat a cancellation as a timeout). Partial output captured before the kill is still returned.
+- A `SHELL_STOP_POLL_INTERVAL` of `0` restores the old behaviour (run to timeout) for debugging.
+
+**Windows tree kill:** the first `taskkill` pass uses `/F /T` so the `cmd.exe` wrapper's children die with the root. The second pass stays plain `/F`, and WMIC-discovered leaf PIDs are killed individually without `/T` — a leaf can have been reparented, and `/T` there could reach unrelated processes.
+
+**Async shells are unaffected:** they are tracked tasks with `__status` / `__kill` control, so they keep running across a Stop (only `terminate_instance`/`dismiss` calls `kill_all`). This is deliberate: the output stays recoverable.
 
 ### 5.6 Auto-Dismiss and Resurrection
 

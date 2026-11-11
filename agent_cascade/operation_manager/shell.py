@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
 from agent_cascade.log import logger
+from agent_cascade.settings import SHELL_STOP_POLL_INTERVAL
 from agent_cascade.shell_utils import (DRAIN_THREAD_JOIN_TIMEOUT, build_shell_env, configure_windows_utf8,
                                        drain_pipe_chunks, git_autogc_hint_for_output)
 from agent_cascade.tool_utils import truncate_with_spillover
@@ -35,12 +36,16 @@ _PYTHON_C_FLAG_RE = re.compile(r'\b(?:python[23]?|py)(?:\s+-\w+)*\s+-[ce]\s+', r
 # ─── Module-level helper (used inside ShellMixin) ──────────────────────
 
 
-def _run_taskkill(pid: int, timeout: int = 10) -> subprocess.CompletedProcess:
+def _run_taskkill(pid: int, timeout: int = 10, tree: bool = False) -> subprocess.CompletedProcess:
     """Run taskkill to forcibly terminate a Windows process by PID.
 
     Args:
         pid: Process ID to kill.
         timeout: Seconds before the taskkill call itself times out.
+        tree: Also kill descendants (``/T``). Used for the first pass on a known
+            shell root so cmd.exe children die with it. Leaf PIDs discovered by
+            the WMIC sweep must be killed WITHOUT ``/T`` — a leaf that has been
+            adopted/reparented could otherwise take unrelated processes with it.
 
     Returns:
         subprocess.CompletedProcess on success.
@@ -48,13 +53,36 @@ def _run_taskkill(pid: int, timeout: int = 10) -> subprocess.CompletedProcess:
     Raises:
         Exception if taskkill fails or times out.
     """
+    args = ['taskkill', '/F']
+    if tree:
+        args.append('/T')
+    args.extend(['/PID', str(pid)])
     return subprocess.run(
-        ['taskkill', '/F', '/PID', str(pid)],
+        args,
         capture_output=True,
         timeout=timeout,
         encoding='utf-8',
         errors='replace',
     )
+
+
+def _sync_shell_superseded(pool, generation) -> bool:
+    """True when a running sync shell_cmd should be cancelled.
+
+    Covers the two ways a call is abandoned while it blocks in ``proc.wait()``:
+
+    * the user pressed Stop — ``AgentPool.stopped`` is set by ``stop_session()``;
+    * a newer run generation started (Stop + new turn, reset, session load) —
+      ``pool._run_generation`` no longer matches the value captured at launch.
+
+    Strict on purpose, like ``api_router_pkg.helpers._stop_requested``: pool
+    doubles (MagicMock) expose truthy auto-attributes, so only a real ``True``
+    flag or a real int generation mismatch counts. Safe with pool=None.
+    """
+    if getattr(pool, 'stopped', False) is True:
+        return True
+    current = getattr(pool, '_run_generation', None)
+    return isinstance(current, int) and isinstance(generation, int) and current != generation
 
 
 # ─── Mixin: Shell methods for OperationManager ─────────────────────────
@@ -988,16 +1016,18 @@ class ShellMixin:
         Three-stage strategy to handle race conditions where children spawn
         new processes between termination passes:
 
-          1. taskkill /F (first pass — kills the target + immediate children)
-          2. Brief sleep then second taskkill /F — catches children that were
+          1. taskkill /F /T (first pass — kills the target and its whole tree;
+             without /T the cmd.exe children survive the root kill)
+          2. Brief sleep then a second taskkill /F — catches children that were
              spawned in the window between the first kill and process exit,
              since a dying process can fork new children before it fully terminates.
           3. WMIC sweep — discovers deeper descendants (grandchildren+) that may
-             have been created during passes 1–2 and kills them individually.
+             have been created during passes 1–2 and kills them individually
+             (plain /F: these are leaf PIDs, see _run_taskkill).
         """
         # First pass: taskkill with tree flag
         try:
-            result = _run_taskkill(pid)
+            result = _run_taskkill(pid, tree=True)
             if result.returncode != 0:
                 logger.warning(f"taskkill returned code {result.returncode} for PID {pid}")
         except Exception as e:
@@ -1056,6 +1086,27 @@ class ShellMixin:
                     logger.debug(f"WMIC child kill failed (non-critical): {e}")
         except Exception as e:
             logger.warning(f"WMIC descendant sweep failed: {e}")
+
+    # ------------------------------------------------------------------
+    def _terminate_shell_process(self, proc) -> None:
+        """Force-terminate a Popen started by execute_shell_command (best effort).
+
+        Windows: kill the whole process tree (taskkill /F /T + WMIC sweep) so the
+        cmd.exe wrapper's children die with it. POSIX: kill the process group,
+        falling back to ``proc.kill()``. Shared by the timeout path and the
+        user-Stop watcher so both kill identically.
+        """
+        if ON_WINDOWS:
+            self._terminate_process_tree_windows(proc.pid)
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception as e:
+            logger.debug(f"Unix process group kill failed (falling back to proc.kill): {e}")
+            try:
+                proc.kill()
+            except Exception as e:
+                logger.debug(f"Process kill fallback failed (non-critical): {e}")
 
     # ------------------------------------------------------------------
     def _resolve_shell_redirect_targets(
@@ -1285,23 +1336,44 @@ class ShellMixin:
             t_out.start()
             t_err.start()
 
-            # Wait for process to finish within the timeout window
+            # Wait for the process within the timeout window while a watcher polls
+            # for user Stop. A sync command blocks in wait() for its whole timeout,
+            # so without the watcher a stopped run keeps burning the machine and
+            # later delivers a stale result into the next turn (BUG_0285).
+            cancelled = threading.Event()
+            watcher_done = threading.Event()
+            stop_watcher = None
+            if SHELL_STOP_POLL_INTERVAL > 0:
+                stop_poll = SHELL_STOP_POLL_INTERVAL
+                pool_ref = getattr(self, 'agent_pool', None)
+                run_generation = getattr(pool_ref, '_run_generation', None)
+
+                def _watch_user_stop():
+                    # Exits as soon as the command finishes (watcher_done) or a
+                    # Stop/superseding run generation is observed.
+                    while not watcher_done.wait(stop_poll):
+                        if _sync_shell_superseded(pool_ref, run_generation):
+                            cancelled.set()
+                            self._terminate_shell_process(proc)
+                            return
+
+                stop_watcher = threading.Thread(target=_watch_user_stop,
+                                                daemon=True,
+                                                name='shell_stop_watcher')
+                stop_watcher.start()
+
             try:
                 proc.wait(timeout=effective_timeout)
                 result_ok = True
             except subprocess.TimeoutExpired:
                 result_ok = False
-                if ON_WINDOWS:
-                    self._terminate_process_tree_windows(proc.pid)
-                else:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception as e:
-                        logger.debug(f"Unix process group kill failed (falling back to proc.kill): {e}")
-                        try:
-                            proc.kill()
-                        except Exception as e:
-                            logger.debug(f"Process kill fallback failed (non-critical): {e}")
+                # The watcher may have killed it a moment ago; never double-kill.
+                if not cancelled.is_set():
+                    self._terminate_shell_process(proc)
+            finally:
+                watcher_done.set()
+                if stop_watcher is not None:
+                    stop_watcher.join(timeout=SHELL_STOP_POLL_INTERVAL)
 
             # Wait for reader threads to drain remaining pipe buffers.
             t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
@@ -1330,6 +1402,26 @@ class ShellMixin:
                             self._own(_owned_path, agent_name)
                 except Exception as _own_err:
                     logger.debug('[shell_cmd] redirect ownership marking failed: %s', _own_err)
+
+            # ── User-Stop cancellation path ─────────────────────────
+            # Distinct wording from the timeout message: the command did not
+            # exhaust its timeout, the user interrupted it. Partial output is
+            # still surfaced so nothing captured before the kill is lost.
+            if cancelled.is_set():
+                output = ''
+                if stdout:
+                    output += f"STDOUT (partial):\n{stdout}\n"
+                if stderr:
+                    output += f"STDERR (partial):\n{stderr}\n"
+
+                elapsed = time.time() - exec_start
+                cancel_msg = (f"ERROR: Command cancelled — the user pressed Stop "
+                              f"(elapsed {elapsed:.1f}s). "
+                              f"All child processes have been forcibly terminated. "
+                              f"Command was: `{command[:200]}`.")
+                if output.strip():
+                    return f"{cancel_msg}\n\n{output}"
+                return cancel_msg
 
             if result_ok:
                 output = ''

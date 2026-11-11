@@ -729,6 +729,10 @@ SAFE_MODE_AUTO_VRAM_FLOOR_MB: int = 512  # MB free GPU VRAM — ADVISORY floor (
 WAIT_CMD_MAX_TIMEOUT: float = 180.0  # Max seconds __wait will block when heartbeats are configured (3 min)
 WAIT_CMD_DEFAULT_TIMEOUT: float = 30.0  # Seconds __wait blocks when no heartbeats are configured (-1)
 WAIT_CMD_POLL_INTERVAL: float = 0.5  # Seconds between state polls inside the __wait loop
+# Sync shell_cmd Stop watcher: how often a blocked sync command re-checks whether the
+# user pressed Stop (pool.stopped) or a newer run generation superseded it. 0 = off
+# (a sync command then always runs to its own timeout, even after Stop).
+SHELL_STOP_POLL_INTERVAL: float = float(os.getenv('AGENT_CASCADE_SHELL_STOP_POLL_INTERVAL', '0.5'))
 
 # ── Skills system settings ────────────
 LOAD_SKILL_AUTO: str = 'AUTO'  # Auto-match relevant skills from task context
