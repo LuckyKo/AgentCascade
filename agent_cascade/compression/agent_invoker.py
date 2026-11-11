@@ -361,12 +361,20 @@ def _execute_compressor_and_extract_summary(
         #                          caller holding a permit (leaked/stale state).
         #   3. Skip              — nothing to yield (pool already free); log diagnostic.
         # If we released anything, _yielded_slot is set so the finally block re-acquires.
+        # NOTE: NO save_fn is passed here, deliberately. Compression/consolidation
+        # REWRITES the caller's context (summarizes/discards history) on success, so a
+        # pre-action KV save would be stale the moment the summary lands — dead weight.
+        # save_fn defaults to None (slot_yield_utils.yield_caller_slot), so no save runs;
+        # the consume-once gate in engine/slot_lifecycle.reacquire_after_slot_yield
+        # (_state_label is not None) then makes the finally-side restore a no-op
+        # automatically, while the FIFO slot re-acquire and DMS re-stamp still run.
+        # The Security-check yield (context unchanged) is the path that legitimately keeps
+        # its save_fn — see security_handler.py.
         _yielded_slot = yield_caller_slot(
             agent_pool, engine, caller_inst, caller_name,
             log_prefix='COMPRESSION_SLOT_YIELD',
             release_reason='before_compression',
             before_action='compression',
-            save_fn=engine.save_before_slot_yield,
         )
 
         _last_comp_send = 0.0
@@ -462,12 +470,11 @@ def _execute_compressor_and_extract_summary(
 
         # ── SLOT REACQUIRE: restore caller's slot if we yielded it ──
         # Runs in the outer finally so it fires whether the inner block succeeded or
-        # raised. KV save/restore IS performed here (via the shared yield/reacquire helper):
-        # the caller was slotless for the whole compression window, during which an
-        # interleaved Compressor model swap on a shared conc=0 autoloader can evict its
-        # resident KV — so we saved it before release (save_before_slot_yield) and restore
-        # it now onto the endpoint it actually holds. The old "KV stays resident in RAM"
-        # premise is exactly what that interleaving falsifies. tolerate_failure=True: the
+        # raised. NOTE: NO KV save was made on this path (see the yield above) because
+        # compression rewrites the caller's context, so the pre-action KV would be stale.
+        # reacquire_after_slot_yield still re-acquires the FIFO slot and re-stamps DMS;
+        # its consume-once gate (_state_label is not None) then self-skips the KV restore
+        # with a debug log — no HTTP, keeping the warm KV cache. tolerate_failure=True: the
         # compression caller is mid-turn and must continue even if re-acquisition fails.
         if _yielded_slot and caller_inst is not None:
             logger.debug(

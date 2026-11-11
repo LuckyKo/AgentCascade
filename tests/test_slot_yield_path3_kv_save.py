@@ -193,13 +193,20 @@ class TestProductionCallersUseSharedHelper:
         assert 'engine.save_before_slot_yield' in src, 'security_handler must reference the Path-3 save'
         assert 'save_fn=' in src, 'security_handler must route the save through the helper'
 
-    def test_compression_invoker_routes_save_through_helper(self):
-        """compression/agent_invoker passes ``save_fn=engine.save_before_slot_yield``
-        into the shared yield_caller_slot, so the single Path-3 fix covers its save."""
-        from agent_cascade.compression import agent_invoker
-        src = inspect.getsource(agent_invoker)
-        assert 'yield_caller_slot(' in src, 'compression invoker must use the shared helper'
-        assert 'save_fn=engine.save_before_slot_yield' in src
+    def test_compression_invoker_omits_save_fn(self):
+        """compression/consolidation REWRITES the caller's context, so the shared
+        yield_caller_slot call in agent_invoker deliberately passes NO save_fn. save_fn
+        defaults to None (no KV save runs) and the consume-once _state_label gate in
+        reacquire_after_slot_yield then self-skips the restore. (Security-check keeps its
+        save; see test_security_handler_routes_save_through_helper.)"""
+        from agent_cascade.compression.agent_invoker import (
+            _execute_compressor_and_extract_summary as _comp_helper,
+        )
+        helper_src = inspect.getsource(_comp_helper)
+        assert 'yield_caller_slot(' in helper_src, 'helper must use the shared yield helper'
+        assert 'save_before_slot_yield' not in helper_src, (
+            'compression/consolidation must NOT route a KV save — the context is rewritten')
+        assert 'save_fn=' not in helper_src, 'save_fn kwarg must be omitted so it defaults to None'
 
     def test_tool_dispatcher_is_a_separate_unconditional_path(self):
         """DISCREPANCY NOTE (do not patch): tool_dispatcher's sync-child path does NOT
