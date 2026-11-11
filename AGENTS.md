@@ -18,6 +18,9 @@ actionable — it is read by agents with limited context.
 
 ## Code style
 - This project uses **4-space** indentation (PEP 8), not tabs. If you notice code that doesn't follow this rule, log the issue for cleanup.
+- Never hardcode magic numbers/strings. Constants can stay defined locally;
+  tuneable parameters must be defined in `settings.py`; any prompt that goes
+  to an LLM must be defined in `dna.py`.
 
 ## Comment style
 - A comment on a setting/constant documents **what it does**: purpose, units, default,
