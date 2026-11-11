@@ -52,6 +52,17 @@ _VOLATILE_PREFIX_PATTERNS = (
 _STABLE_PREFIX_CONSTANT_LINE = re.compile(r'^\s*-\s*System:\s*AgentCascade\b')
 
 
+# ── Spawn brief size observability (BUG_0285) ─────────────────────────────────
+# Worker sub-agents re-send their full ~13-15k system harness cold on every spawn
+# (the STABLE_SYSTEM_PROMPT_CLASSES enrollment that would make it cacheable is the
+# risky, user-pulled fix — see BUG_0285). Until that is decoupled, oversized
+# call_agent briefs silently inflate that cold prefix. This constant is the
+# pure-observability threshold: build_task_message warns when the context or task
+# param exceeds it (~1.4k tokens). Warn only — no truncation, no rejection, no
+# change to the spawned message.
+_SPAWN_BRIEF_SIZE_WARN = 5400
+
+
 class PrefixStabilityError(RuntimeError):
     """Raised by _lint_stable_prefix when a volatile field renders into a stable-class
     conversation[0] Session Metadata section.
@@ -450,6 +461,16 @@ class AgentLifecycleManager:
         """
         task_text = args.get('task', '')
         context_text = args.get('context', '')
+
+        # BUG_0285: flag oversized briefs (they inflate the worker's cold-prefix
+        # cost). Measures the raw context/task params as passed to call_agent,
+        # BEFORE caller_prefix/budget wrapping below. Warn only — pure
+        # observability; the returned message is built identically afterwards.
+        if len(context_text) > _SPAWN_BRIEF_SIZE_WARN or len(task_text) > _SPAWN_BRIEF_SIZE_WARN:
+            logger.warning(
+                f"spawn_brief_oversized: context={len(context_text)} chars, "
+                f"task={len(task_text)} chars (threshold {_SPAWN_BRIEF_SIZE_WARN})"
+            )
 
         # Task 1: Include max_turns info in context when call_agent was called
         # with a custom turn budget
