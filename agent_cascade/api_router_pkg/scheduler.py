@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.settings import ENDPOINT_SLOT_ACQUIRE_TIMEOUT
+from agent_cascade import settings
 from agent_cascade.slot_queue import QUEUE_WAIT_TIMEOUT, SlotPool
 
 
@@ -149,9 +150,10 @@ class EndpointScheduler:
             AgentTerminatedError: If instance is terminated while waiting.
         """
         if concurrency_limit == -1:  # unlimited — no scheduling needed
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, concurrency=-1 (unlimited), returning None"
-            )
+            if settings.DEBUG_SLOTS:
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, concurrency=-1 (unlimited), returning None"
+                )
             return None
 
         # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
@@ -159,9 +161,10 @@ class EndpointScheduler:
         is_sequential = (concurrency_limit == 0)
         slot_key = '_shared_sequential_slot_' if is_sequential else normalize_api_base(api_base)
 
-        logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
-                     f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, "
-                     f"instance_name={instance_name}, agent_class={agent_class}")
+        if settings.DEBUG_SLOTS:
+            logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
+                         f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, "
+                         f"instance_name={instance_name}, agent_class={agent_class}")
 
         # Get or create the pool (handles lazy initialization + capacity mapping).
         sched_pool = self._get_or_create_pool(api_base, concurrency_limit)
@@ -209,9 +212,10 @@ class EndpointScheduler:
 
                 # Log release with current pool stats.
                 log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
-                logger.debug(
-                    f"[SLOT] {instance_name} ({agent_class}): release → endpoint='{_ep_name}' model={_model} "
-                    f"api_base={log_target} (pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
+                if settings.DEBUG_SLOTS:
+                    logger.debug(
+                        f"[SLOT] {instance_name} ({agent_class}): release → endpoint='{_ep_name}' model={_model} "
+                        f"api_base={log_target} (pool={slot_key}, active={len(sched_pool._running)}, capacity={sched_pool.capacity})")
 
             return release
 

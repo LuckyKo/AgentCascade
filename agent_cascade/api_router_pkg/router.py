@@ -596,10 +596,7 @@ class APIRouter:
             own_endpoints, _had_own = self._resolve_own_endpoints(agent_type)
 
             if own_endpoints:
-                eid, ep = own_endpoints[0]
-                logger.debug(f"[ENDPOINT_CONCURRENCY] get_effective_concurrency — "
-                             f"agent_type={agent_type}, endpoint_id={eid}, "
-                             f"concurrency_limit={ep.concurrency_limit}")
+                _, ep = own_endpoints[0]
                 return ep.concurrency_limit
 
             # Tier 3+: Fall back to default endpoint by api_base

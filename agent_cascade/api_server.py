@@ -1181,11 +1181,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             from agent_cascade.state_ops import (is_state_save_capable,
                                                  kv_save_effectively_enabled,
                                                  save_instance_state)
+            from agent_cascade.engine.slot_lifecycle import _log_state_skip_once
             settings = getattr(agent_pool, 'settings', None)
             toggle = bool(getattr(settings, 'state_kv_save_enabled', False))
             if not kv_save_effectively_enabled(inst, toggle):
-                logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — KV save disabled by toggle',
-                             instance_name)
+                _log_state_skip_once('afk-admin-save',
+                                     '[STATE_SAVE_SKIP] %s (afk-admin) — KV save disabled by toggle',
+                                     instance_name)
                 return False
             if not is_state_save_capable(getattr(inst, '_last_endpoint_config', None)):
                 logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — endpoint not state-save capable',

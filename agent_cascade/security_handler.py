@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from compression/agent_invoker.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import describe_pool_holders, yield_caller_slot
+from agent_cascade import settings
 
 # Process-level claim registry for Security instance reuse (BUG_0029 Phase 3). The claim is
 # taken by ExecutionEngine._acquire_reusable_system_agent and released in this handler's
@@ -847,8 +848,9 @@ class SecurityAdvisorHandler:
                 # Security agent tries to acquire it. Low-cost, non-blocking; makes a
                 # future "Timed out ... Currently held by: X" timeout immediately
                 # diagnosable from logs alone (the 2026-08-16 incident had no such log).
-                logger.debug(f"[SECURITY_SLOT_ACQUIRE] About to run Security agent; current pool holders: "
-                             f"{self._describe_pool_holders(caller_agent)}")
+                if settings.DEBUG_SLOTS:
+                    logger.debug(f"[SECURITY_SLOT_ACQUIRE] About to run Security agent; current pool holders: "
+                                 f"{self._describe_pool_holders(caller_agent)}")
 
                 # ── DEAD-MAN'S SWITCH state (BUG_0040; analogous to slot_queue.py but with
                 #    fail-fast BEFORE reset and no hard cap — see ordering note below) ──
@@ -1114,7 +1116,8 @@ class SecurityAdvisorHandler:
         # not imported at module scope here, so the except clause would otherwise NameError.
         from agent_cascade.slot_queue import SlotCancelled
 
-        logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
+        if settings.DEBUG_SLOTS:
+            logger.debug(f"[SECURITY_SLOT_REACQUIRE] Restoring slot for '{caller_agent}' after Security check")
         try:
             # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores the KV
             # saved by save_before_slot_yield (only when a label is pending and we actually hold

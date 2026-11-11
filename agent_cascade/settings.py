@@ -58,6 +58,18 @@ SKILL_ADVISOR_MAX_CANDIDATES: int = int(
     os.getenv('AGENT_CASCADE_SKILL_ADVISOR_MAX_CANDIDATES',
               20))  # Top-N skill candidates in the advisor prompt (keyword pre-filter)
 
+# ── Debug-verbosity switches (BUG_0291) ──────────────────────────────────────────
+# Extra per-module slot/scheduler tracing, OFF by default ('0'/unset = off). A normal
+# acquire+release already emits one structured line per transition; set
+# AGENT_CASCADE_DEBUG_SLOTS=1 to additionally emit the redundant per-module duplicates
+# (EndpointScheduler.acquire internals, SLOT_REACQUIRED, router recovery,
+# last_released_endpoint, SECURITY_SLOT_*), the per-turn [MEMORY_HINT] submit line, and
+# the toggle-off [STATE_SAVE_SKIP]/[STATE_RESTORE_SKIP] repeats. Deliberately NOT derived
+# from AGENT_CASCADE_DEBUG — a routine DEBUG run stays quiet (same rationale as
+# AGENT_CASCADE_DEBUG_HTTP; see log.py). Gated sites read settings.DEBUG_SLOTS so tests can
+# monkeypatch it.
+DEBUG_SLOTS: bool = os.getenv('AGENT_CASCADE_DEBUG_SLOTS', '0').strip().lower() in ('1', 'true')
+
 # ── AFK nudge mode (basic | admin) ─────────────────────────────────────────────
 # 'basic' keeps the current AFK behavior (auto-reject + canned idle nudge). 'admin'
 # spawns a read-only Admin agent that reviews the idle session and hands back the

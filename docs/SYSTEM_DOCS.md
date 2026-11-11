@@ -1444,6 +1444,8 @@ Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` trig
 | `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.35` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:766,770`). |
 | `CANDIDATE_MIN_RATINGS` / `CANDIDATE_MAX_PENDING_DAYS` | `5` / `14` | Decision-gate bar for promoting/discarding an update candidate (`settings.py:921-928`). |
 | `AGENT_CASCADE_SKILLS_METRICS_FILE` | `agents/global/skills-metrics.json` | Env override for the durable metrics store path; empty/unset = default. The test suite points it at a per-test temp file so the live store is never written. |
+| `AGENT_CASCADE_DEBUG_SLOTS` | `0` (off) | Env switch to emit redundant per-module slot traces (`EndpointScheduler.acquire` internals, `SLOT_REACQUIRED`, router recovery, `last_released_endpoint`, `SECURITY_SLOT_*`), the per-turn `[MEMORY_HINT]` submit line, and toggle-off `[STATE_SAVE_SKIP]`/`[STATE_RESTORE_SKIP]` repeats. Set to `1` to re-enable. Off for routine DEBUG runs; deliberately independent of `AGENT_CASCADE_DEBUG` (`settings.py`; gated sites: `scheduler.py`, `engine/slot_lifecycle.py`, `slot_queue.py`, `security_handler.py`, `memory_hint/manager.py`). |
+| `AGENT_CASCADE_DEBUG_HTTP` | `0` (off) | Sibling env log switch: raises `httpx`→INFO and `httpcore`→DEBUG (per-request wire trace); otherwise both stay at WARNING (failures only). Lives in `log.py` (configures third-party logger levels, not app call sites). |
 
 Scoring internals (`q0`, `kq`, `n_half`, `g_half`, `r_floor`, `tau_turns`, `δq`, `n_min`, `fair_window_turns`) are module constants in `skills/scoring.py` / `manager.py`, not user settings.
 

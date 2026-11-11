@@ -23,6 +23,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
+from agent_cascade import settings
+
 
 class _AppLoggerProxy:
     """Late-bound delegate to agent_cascade.log.logger.
@@ -686,12 +688,14 @@ def _get_router_from_holder(holder: Any):
     _router = getattr(pool_ref, 'api_router', None) if pool_ref is not None else None
     try:
         if _router is not None:
-            logger.debug(
-                f"[SLOT] {getattr(holder, 'instance_name', '?')}: router recovery source=pool_ref")
+            if settings.DEBUG_SLOTS:
+                logger.debug(
+                    f"[SLOT] {getattr(holder, 'instance_name', '?')}: router recovery source=pool_ref")
         else:
-            logger.debug(
-                f"[SLOT] {getattr(holder, 'instance_name', '?')}: "
-                f"router recovery source=none (_pool_ref missing or api_router absent)")
+            if settings.DEBUG_SLOTS:
+                logger.debug(
+                    f"[SLOT] {getattr(holder, 'instance_name', '?')}: "
+                    f"router recovery source=none (_pool_ref missing or api_router absent)")
     except Exception:
         pass  # observability must never alter the release path
     return _router
@@ -805,6 +809,9 @@ def release_slot_permit(
                     _ep_id = _router._endpoint_id_for_key(_committed[0], _committed[1])
                     if _ep_id is not None:
                         _router._last_released_endpoint = _ep_id
+                        # Unconditional (test-pinned): the session-restore release contract
+                        # asserts exactly one of these marker lines per release
+                        # (tests/test_session_restore_pool_ref.py + _copy).
                         logger.debug(f"[SLOT] {holder_name}: last_released_endpoint → {_ep_id}")
         elif _router is None:
             # BUG_0052 Change C: make the silent skip of the _last_released_endpoint write visible.

@@ -16,6 +16,21 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
 from agent_cascade.settings import POST_YIELD_REACQUIRE_TIMEOUT, REACQUIRE_TIMEOUT
+from agent_cascade import settings
+
+# BUG_0291 item 8: process-lifetime memo of toggle-off state-save/restore-skip lines already
+# emitted, keyed by skip-kind. The toggle is process-constant in practice, so a routine
+# save/yield/restore no longer repeats the same DEBUG line; the branch BEHAVIOUR is unchanged.
+_STATE_SKIP_LOGGED: set = set()
+
+
+def _log_state_skip_once(kind: str, fmt: str, *args) -> None:
+    """Emit a [STATE_SAVE_SKIP]/[STATE_RESTORE_SKIP] DEBUG line only the first time this
+    skip-kind is seen (re-logs if the kind changes). Key it distinctly per call site."""
+    if kind in _STATE_SKIP_LOGGED:
+        return
+    _STATE_SKIP_LOGGED.add(kind)
+    logger.debug(fmt, *args)
 
 
 class SlotLifecycleMixin:
@@ -75,7 +90,8 @@ class SlotLifecycleMixin:
                     # if the LLM call never completes (yield/reacquire cycle). Distinct from the
                     # committed probe-gate marker; never raises.
                     self._safe_note_held_endpoint(router, instance.agent_class, instance.instance_name)
-            logger.debug(f"[SLOT] {instance.instance_name} ({instance.agent_class}): acquired slot [{context}]")
+            if settings.DEBUG_SLOTS:
+                logger.debug(f"[SLOT] {instance.instance_name} ({instance.agent_class}): acquired slot [{context}]")
         except AgentTerminatedError:
             # Clean abort — don't log as error, just propagate for caller to handle
             raise
@@ -140,8 +156,9 @@ class SlotLifecycleMixin:
         # Default-off: the engine's pressure planner handles state retention (demote-to-host). Users may still
         # opt in explicitly via the pool's state_kv_save_enabled setting; safe-mode forces it on for its window.
         if not kv_save_effectively_enabled(instance, self._get_pool_setting('state_kv_save_enabled', False)):
-            logger.debug('[STATE_SAVE_SKIP] %s (%s) — KV save before slot yield disabled by toggle',
-                         inst_name, reason or 'slot-yield')
+            _log_state_skip_once('save',
+                                 '[STATE_SAVE_SKIP] %s (%s) — KV save before slot yield disabled by toggle',
+                                 inst_name, reason or 'slot-yield')
             return False
         try:
             from agent_cascade.state_ops import save_instance_state
@@ -260,8 +277,9 @@ class SlotLifecycleMixin:
         from agent_cascade.state_ops import kv_save_effectively_enabled
         if respect_toggle and not kv_save_effectively_enabled(
                 instance, self._get_pool_setting('state_kv_save_enabled', False)):
-            logger.debug('[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
-                         inst_name, context or 'slot-yield')
+            _log_state_skip_once('restore',
+                                 '[STATE_RESTORE_SKIP] %s (%s) — KV restore after slot yield disabled by toggle',
+                                 inst_name, context or 'slot-yield')
             # Clear any stale label (save may have occurred before toggle was turned OFF).
             self._clear_orphaned_state_label(instance, inst_name)
             return True
@@ -492,7 +510,8 @@ class SlotLifecycleMixin:
                 # endpoint this re-acquire resolved to so a later release updates
                 # _last_released_endpoint even if the LLM call never ran. Never raises.
                 self._safe_note_held_endpoint(router, instance.agent_class, holder_name)
-                logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}'")
+                if settings.DEBUG_SLOTS:
+                    logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}'")
                 return True
             else:
                 # Unlimited — acquire returned None, no callback needed. Any permit the
@@ -559,8 +578,9 @@ class SlotLifecycleMixin:
             # window above — record the endpoint this re-acquire resolved to so a later release
             # updates _last_released_endpoint even if the LLM call never ran. Never raises.
             self._safe_note_held_endpoint(router, instance.agent_class, holder_name)
-            logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}' "
-                         f"after unbounded FIFO wait")
+            if settings.DEBUG_SLOTS:
+                logger.debug(f"[SLOT_REACQUIRED] {context} - re-acquired slot for '{holder_name}' "
+                             f"after unbounded FIFO wait")
             return True
         # Unlimited — acquire returned None, no callback needed. Any permit the
         # caller was still holding is stale by definition; release, don't discard.

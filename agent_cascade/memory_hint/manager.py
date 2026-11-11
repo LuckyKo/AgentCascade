@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from agent_cascade.log import logger
+from agent_cascade import settings
 from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
                                     SKILL_PRECISION_WEIGHT, SKILL_PRECISION_K,
@@ -298,8 +299,9 @@ class MemoryHintManager:
             self._pending[instance_name] = job
         try:
             self._job_queue.put_nowait(job)
-            logger.debug('[MEMORY_HINT] %s: hint job submitted (turn=%d, query_len=%d)',
-                         instance_name, turn, len(query))
+            if settings.DEBUG_SLOTS:
+                logger.debug('[MEMORY_HINT] %s: hint job submitted (turn=%d, query_len=%d)',
+                             instance_name, turn, len(query))
         except Exception as e:  # noqa: BLE001 — never block/raise on the main path
             logger.debug('[MEMORY_HINT] submit failed for %s: %s', instance_name, e)
 
