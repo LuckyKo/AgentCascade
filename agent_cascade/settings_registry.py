@@ -86,6 +86,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'soft_turn_limit', 'state_kv_save_enabled', 'stream_max_silence_seconds', 'stream_max_total_seconds',
     'system_agent_idle_timeout_seconds', 'tail_sync_check_enabled', 'telegram_bridge_enabled',
     'tool_loop_detection_enabled', 'tool_loop_fuzzy_rollback_enabled', 'tool_result_max_chars',
+    'unload_unused_tools_post_compression',
     'user_message_log_enabled', 'wild_read_truncation_chars', 'work_access_folders_ro', 'work_access_folders_rw',
     'token_budget',
 )
@@ -533,7 +534,7 @@ def validate_registry() -> None:
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (104 / 3);
+      * the derived compat sets match their historical sizes (105 / 3);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -545,8 +546,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 104:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 104")
+    if len(POOL_SETTINGS_KEYS) != 105:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 105")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 

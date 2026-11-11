@@ -28,7 +28,8 @@ from agent_cascade.settings import (
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
     DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, DISMISS_THREAD_JOIN_TIMEOUT, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
-    LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, TOOL_LOOP_FUZZY_ROLLBACK_ENABLED)
+    LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, TOOL_LOOP_FUZZY_ROLLBACK_ENABLED,
+    UNLOAD_UNUSED_TOOLS_POST_COMPRESSION)
 
 
 class AgentState(Enum):
@@ -1076,6 +1077,14 @@ class PoolSettings:
     # Master dispatch-mode switch: when False, every call_agent takes the SYNC path
     # regardless of slot-collision analysis (tool_dispatcher.py:397).
     allow_parallel_agents: bool = True
+
+    # MCP tool-unload toggle (web UI "Unload Unused MCP After Compression"). When True, after
+    # a successful compression the handler unloads MCP tools that were not used in the kept
+    # context (compression/handler.py: _maybe_unload_unused_mcp_tools). Default is seeded from the
+    # AGENT_CASCADE_UNLOAD_UNUSED_TOOLS_POST_COMPRESSION env var (False when unset), so documented
+    # env opt-in still works in pool-backed runs; a UI change overrides it live and persists.
+    # The consumer reads pool.settings live so this applies without a restart.
+    unload_unused_tools_post_compression: bool = UNLOAD_UNUSED_TOOLS_POST_COMPRESSION
 
     # AUTOMATIC system-agent checkpoint toggle ONLY — NOT a global KV master switch.
     # Gates the engine's automatic slot-yield/sleep checkpoint saves & restores

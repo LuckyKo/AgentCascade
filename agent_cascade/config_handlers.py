@@ -1093,6 +1093,14 @@ def _handle_allow_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agent
         agent_pool.settings.allow_parallel_agents = bool(ui_cfg['allow_parallel_agents'])
 
 
+@register_config_handler('unload_unused_tools_post_compression')
+def _handle_unload_unused_tools_post_compression(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    # MCP tool-unload toggle: sets pool.settings so the compression handler reads it live
+    # (compression/handler.py: _maybe_unload_unused_mcp_tools). Persisted via save_trigger.
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.unload_unused_tools_post_compression = bool(ui_cfg['unload_unused_tools_post_compression'])
+
+
 @register_config_handler('state_kv_save_enabled')
 def _handle_state_kv_save_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     # Automatic checkpoint toggle only — NOT a global KV master switch. The manual

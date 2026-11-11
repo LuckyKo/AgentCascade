@@ -237,6 +237,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'enable_agent_budgeting',
     'allow_parallel_agents',
     'state_kv_save_enabled',
+    'unload_unused_tools_post_compression',
     'safe_mode_auto_ram_floor_mb',
     'safe_mode_auto_vram_floor_mb',
     'max_parallel_agents',

@@ -561,6 +561,10 @@
                           <input autocomplete="off" type="checkbox" id="setting-allow-parallel" checked />
                         </label>
                         <label class="setting-field toggle-field">
+                          <span title="When enabled, after a successful compression the MCP tools not used in the kept context are unloaded to free tools/list. Takes effect without a restart.">Unload Unused MCP After Compression</span>
+                          <input autocomplete="off" type="checkbox" id="setting-unload-unused-mcp" />
+                        </label>
+                        <label class="setting-field toggle-field">
                           <span title="Automatic checkpointing only: when enabled, agent KV context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted. This does NOT affect the manual Save KV / Load KV buttons — those depend only on endpoint capability.">State KV Save/Restore</span>
                           <input autocomplete="off" type="checkbox" id="setting-state-kv-save" checked />
                         </label>

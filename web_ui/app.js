@@ -163,6 +163,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting' },
   { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents' },
+  { id: '#setting-unload-unused-mcp', prop: 'checked', key: 'unload_unused_tools_post_compression' },
   // state_kv_save_enabled = automatic checkpoint toggle only (Security/compression saves);
   // it does NOT gate the manual Save/Load KV buttons — see index.html tooltip.
   { id: '#setting-state-kv-save', prop: 'checked', key: 'state_kv_save_enabled' },
@@ -1359,6 +1360,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
   // Save Allow Parallel Agents toggle state
   if ($('#setting-allow-parallel')) s['allow_parallel_agents'] = $('#setting-allow-parallel').checked;
+  // Save Unload Unused MCP After Compression toggle state
+  if ($('#setting-unload-unused-mcp')) s['unload_unused_tools_post_compression'] = $('#setting-unload-unused-mcp').checked;
   // Save Slot Queue Timeout (seconds)
   if ($('#setting-slot-queue-timeout')) s['slot_queue_timeout_seconds'] = parseInt($('#setting-slot-queue-timeout').value, 10) || 300;
   // Save State KV Save/Restore toggle state
@@ -6286,6 +6289,7 @@ function getGenerateCfg() {
   if ($('#setting-soft-turn-limit')) cfg.soft_turn_limit = $('#setting-soft-turn-limit').checked;
   if ($('#setting-agent-budgeting')) cfg.enable_agent_budgeting = $('#setting-agent-budgeting').checked;
   if ($('#setting-allow-parallel')) cfg.allow_parallel_agents = $('#setting-allow-parallel').checked;
+  if ($('#setting-unload-unused-mcp')) cfg.unload_unused_tools_post_compression = $('#setting-unload-unused-mcp').checked;
   if ($('#setting-state-kv-save')) cfg.state_kv_save_enabled = $('#setting-state-kv-save').checked;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;

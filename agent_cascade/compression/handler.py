@@ -990,7 +990,8 @@ class CompressionHandler:
         correct, since "nothing has been invoked since the last compression/reload" (aggressive,
         but any dropped tool is recoverable by re-running ``tool_search``). If the queued
         notification never drains (no tool call follows), those names simply re-offer on reload —
-        the safe direction. Caller already gated on settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION.
+        the safe direction. Caller already gated on the live
+        ``pool.settings.unload_unused_tools_post_compression`` (env-constant fallback).
         """
         from agent_cascade.tools.mcp_manager import MCPManager
 
@@ -1045,7 +1046,15 @@ class CompressionHandler:
         An unload failure must never turn a successful compression into a failure, so all
         exceptions are swallowed to a debug log.
         """
-        if not settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION:
+        # UI toggle "Unload Unused MCP After Compression"
+        # (PoolSettings.unload_unused_tools_post_compression). Read pool.settings LIVE so the UI
+        # toggle applies without restart (matches tool_dispatcher.py allow_parallel_agents and the
+        # tail-sync/compression gates in this file). The double getattr is pool-safe: a pool-less
+        # handler (or one whose settings lacks the field) falls back to the module constant, which
+        # keeps env-only contexts and monkeypatched tests meaningful (e.g. object.__new__ doubles).
+        _pool_settings = getattr(getattr(self, 'pool', None), 'settings', None)
+        if not getattr(_pool_settings, 'unload_unused_tools_post_compression',
+                       settings.UNLOAD_UNUSED_TOOLS_POST_COMPRESSION):
             return
         try:
             self._unload_unused_mcp_tools(instance, target_agent_name, summary_text)
