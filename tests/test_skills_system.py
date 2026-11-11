@@ -3893,14 +3893,15 @@ class TestAlwaysProtectedSkills:
         yield
 
     # ------------------------------------------------------------------ parser
-    def test_parse_default_is_exactly_the_four(self):
+    def test_parse_default_is_exactly_the_constant(self):
         from agent_cascade.settings import parse_skill_always_protected, SKILL_ALWAYS_PROTECTED_DEFAULT
-        got = parse_skill_always_protected(None)
-        assert got == {'self-augmentation', 'project-memory-writing',
-                       'bug-tracker-entry-format', 'skill-creator'}
-        # The default constant is the comma-separated seed string.
+        expected = {t.strip().lower() for t in SKILL_ALWAYS_PROTECTED_DEFAULT.split(',') if t.strip()}
+        assert parse_skill_always_protected(None) == expected
+        # The default constant is the comma-separated seed string (may grow, never shrink).
         assert SKILL_ALWAYS_PROTECTED_DEFAULT.split(',') == [
-            'self-augmentation', 'project-memory-writing', 'bug-tracker-entry-format', 'skill-creator']
+            t.strip().lower() for t in SKILL_ALWAYS_PROTECTED_DEFAULT.split(',')]
+        assert {'self-augmentation', 'project-memory-writing',
+                'bug-tracker-entry-format', 'skill-creator'} <= expected
 
     def test_parse_case_insensitive_and_strips_whitespace(self):
         from agent_cascade.settings import parse_skill_always_protected
@@ -3914,18 +3915,16 @@ class TestAlwaysProtectedSkills:
 
     def test_parse_blank_falls_back_to_default(self):
         from agent_cascade.settings import parse_skill_always_protected
-        # A cleared/blank value must NOT unprotect the meta-skills — it falls back to the default four.
-        assert parse_skill_always_protected('') == {'self-augmentation', 'project-memory-writing',
-                                                    'bug-tracker-entry-format', 'skill-creator'}
-        assert parse_skill_always_protected('   ') == {'self-augmentation', 'project-memory-writing',
-                                                       'bug-tracker-entry-format', 'skill-creator'}
+        # A cleared/blank value must NOT unprotect the meta-skills — it falls back to the default set.
+        default = parse_skill_always_protected(None)
+        assert parse_skill_always_protected('') == default
+        assert parse_skill_always_protected('   ') == default
 
     def test_parse_empty_collection_falls_back_to_default(self):
         from agent_cascade.settings import parse_skill_always_protected
         # A pre-parsed empty collection (e.g. a stored frozenset) must also fall back to the default
-        # four — uniform with the blank-string case, so it can never silently unprotect them.
-        expected = {'self-augmentation', 'project-memory-writing',
-                    'bug-tracker-entry-format', 'skill-creator'}
+        # set — uniform with the blank-string case, so it can never silently unprotect them.
+        expected = parse_skill_always_protected(None)
         assert parse_skill_always_protected(frozenset()) == expected
         assert parse_skill_always_protected([]) == expected
         # A non-empty collection is normalized (case-insensitive, whitespace-stripped).
@@ -3944,10 +3943,12 @@ class TestAlwaysProtectedSkills:
 
     def test_handler_missing_key_uses_default(self):
         from agent_cascade.config_handlers import CONFIG_HANDLERS
+        from agent_cascade.settings import parse_skill_always_protected
         pool = _fake_pool({})
         CONFIG_HANDLERS['skill_always_protected']({}, pool, [])
+        # The handler persists the sorted, comma-separated form of the default set.
         assert pool.llm_cfg['skill_always_protected'] == \
-            'bug-tracker-entry-format,project-memory-writing,self-augmentation,skill-creator'
+            ','.join(sorted(parse_skill_always_protected(None)))
 
     # ------------------------------------------------------------------ backward-compat (persistence)
     def test_persist_missing_key_leaves_unset(self, tmp_path):
