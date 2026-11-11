@@ -718,6 +718,240 @@ def _describe_exact_miss(old_content: str, file_content: str,
             f'endings)')
 
 
+# ─── Memory-vault write screen ──────────────────────────────────────────────
+# Persistent indirect prompt-injection guard (OWASP LLM01). Files under
+# .agent_lessons/ and admin_suggestion_box/ are re-loaded as context by future
+# agents, so a poisoned note persists across sessions — the only persistent
+# injection vector in AC. We reject writes whose content looks like an
+# instruction-injection directive. Patterns are deliberately conservative and
+# LINE-ANCHORED (^): a legitimate note that merely *quotes* an injection phrase
+# mid-sentence (e.g. a note about this very screen) does not match; only a
+# directive that opens a line does. The list was validated against the full
+# existing vault corpus (254+ .agent_lessons notes + the suggestion box) with
+# zero false positives.
+
+_INJECTION_PATTERNS = re.compile(
+    r'(?m)'
+    r'^[ \t>*#-]*(?:ignore|disregard|forget)\s+'
+    r'(?:all\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+'
+    r'(?:instructions?|prompts?|messages?|directives?|rules?)'
+    r'|^[ \t>*#-]*(?:reveal|show|print|output|display|dump|expose)\s+'
+    r'(?:me\s+)?(?:the|your|an|this)\s+'
+    r'(?:initial|original|hidden|developer|full|entire|complete)?\s*'
+    r'(?:system|developer|dev)\s+prompt\b'
+    r'|^[ \t>*#-]*(?:system|assistant|admin|root|developer)\s*:\s*'
+    r'(?:ignore|disregard|override|new\s+instructions|from\s+now\s+on|you\s+are\s+now)',
+    re.IGNORECASE,
+)
+
+# Path fragments (forward-slash form) marking a write as targeting a memory
+# vault or the admin suggestion box. Backslashes in the input are normalized
+# to '/' before matching, so Windows paths are covered too.
+_VAULT_PATH_MARKERS = (
+    '.agent_lessons/',
+    'admin_suggestion_box/',
+)
+
+
+def _is_vault_path(file_path: str) -> bool:
+    """True when *file_path* targets a memory vault or the admin suggestion box.
+
+    Backslashes are normalized to '/' so Windows paths match too. Single source of
+    truth for the vault-marker decision, reused by the copy/move pre-check so
+    non-vault destinations can skip reading their source entirely.
+    """
+    normalized = file_path.replace('\\', '/')
+    return any(marker in normalized for marker in _VAULT_PATH_MARKERS)
+
+
+def _screen_vault_write(file_path: str, content: str) -> Optional[str]:
+    """Screen a memory-vault / suggestion-box write for injection directives.
+
+    Returns ``None`` when the write is safe, or a short human-readable reason
+    string when *content* matches ``_INJECTION_PATTERNS``. Only paths containing a
+    fragment in ``_VAULT_PATH_MARKERS`` are screened; every other path returns
+    ``None`` immediately. The flag is read as ``settings.MEMORY_VAULT_WRITE_SCREEN``
+    (lazy import, like the other settings reads in this module) so tests can toggle
+    it by patching the attribute on ``agent_cascade.settings``.
+    """
+    from agent_cascade import settings
+    if not settings.MEMORY_VAULT_WRITE_SCREEN:
+        return None
+    if not _is_vault_path(file_path):
+        return None
+    match = _INJECTION_PATTERNS.search(content)
+    if match:
+        return f"matched pattern {match.group(0)!r}"
+    return None
+
+
+def _screen_vault_copy_move(src_path, dest_path) -> Optional[str]:
+    """Screen a copy/move that would persist *src_path*'s text at *dest_path*.
+
+    A copy or move writes the source file's current content at the destination, so
+    it is screened with the same rules as a direct ``write_file``. Non-vault
+    destinations return immediately (the source is never read, keeping non-vault
+    copies behavior-neutral); directory sources have no single content to screen and
+    non-UTF-8 (binary) sources cannot carry a text injection directive, so both are
+    skipped. The authoritative flag + marker + regex check is still performed by
+    ``_screen_vault_write``.
+    """
+    if not _is_vault_path(dest_path.as_posix()):
+        return None
+    if not src_path.is_file():
+        return None
+    try:
+        content = src_path.read_text(encoding='utf-8')
+    except (UnicodeDecodeError, OSError):
+        return None
+    return _screen_vault_write(dest_path.as_posix(), content)
+
+
+# ── edit_file helpers (extracted from edit_file; pure functions) ───────────
+
+def _edit_parse_range(range_str, total_lines: int) -> tuple:
+    """Parse a line-range spec for delete_and_insert mode.
+
+    Returns (start_idx, end_idx) as 0-based Python slice indices.
+    - start is inclusive, end is exclusive.
+    - 1-indexed input: '3:7' means lines 3 through 7.
+    - Single number '4' means insert before line 4 (empty delete range).
+    - Negative numbers count from end: -1 = last line.
+    - 0 means append at end of file.
+    """
+    # Models often send the range as a JSON number (e.g. 5 or 0); ints are valid
+    # specs, so coerce before parsing instead of failing with AttributeError.
+    range_str = str(range_str).strip()
+
+    if ':' in range_str:
+        parts = range_str.split(':')
+        if len(parts) != 2:
+            raise ValueError(f"Range must have exactly one ':'. Got '{range_str}'")
+
+        start_part, end_part = parts
+
+        # Parse start (empty means delete all from beginning, i.e., start at line 1)
+        if start_part.strip() == '':
+            start = 1  # Delete from the very first line
+        elif start_part.strip() == '0':
+            start = total_lines + 1  # Append beyond last line
+        else:
+            start = int(start_part)
+
+        # Parse end (empty means delete all from start to end of file)
+        if end_part.strip() == '':
+            end = total_lines + 1  # Delete everything from start onward
+        elif end_part.strip() == '0':
+            end = total_lines + 1  # Append at end (same as empty)
+        else:
+            end = int(end_part)
+        if start < 0:
+            start = total_lines + 1 + start  # 1-indexed: -1 → last line
+        if end < 0:
+            end = total_lines + 1 + end  # consistent 1-indexed semantics
+
+        # Clamp to valid 1-indexed bounds. The floor is 1, not 0: a negative
+        # input that underflows (e.g. '-100:-100' on 5 lines) must land on the
+        # first line. Clamping to 0 and then returning start-1=-1 would slice
+        # from the END of the file and duplicate content (Python negative index).
+        start = max(1, min(start, total_lines + 1))
+        end = max(1, min(end, total_lines + 1))
+
+        if start > end:
+            raise ValueError(f"Start ({start}) must be <= end ({end})")
+
+        # Convert to 0-based slice indices
+        return start - 1, end
+
+    else:
+        # Single number = insert-only (or delete single line if new_content is empty)
+        if range_str == '0':
+            return total_lines, total_lines  # Append at end
+        start = int(range_str)
+        if start < 0:
+            start = total_lines + 1 + start
+        # Clamp to [1, total_lines+1] so that out-of-range means append
+        start = max(1, min(start, total_lines + 1))
+        zero_idx = start - 1  # Convert to 0-based index
+        return zero_idx, zero_idx  # Empty range at position (insert point)
+
+
+def _edit_detect_line_ending(line: str) -> str:
+    """Detect the line ending style of a line."""
+    if '\r\n' in line:
+        return '\r\n'
+    elif '\n' in line:
+        return '\n'
+    elif '\r' in line:
+        return '\r'
+    return ''
+
+
+def _edit_get_leading_whitespace(s: str) -> str:
+    """Get leading whitespace of first non-blank line."""
+    for line in s.splitlines():
+        if line.strip():
+            return line[:len(line) - len(line.lstrip())]
+    return ''
+
+
+def _edit_get_indent_width(indent_str: str) -> int:
+    """Calculate indent width in spaces (tab=4)."""
+    return sum(4 if c == '\t' else 1 for c in indent_str if c in ' \t')
+
+
+def _edit_detect_indent_char(indent_str: str) -> str:
+    """Detect whether file uses tabs or spaces for indentation."""
+    return '\t' if '\t' in indent_str else ' '
+
+
+def _edit_render_indent(width: int, indent_char: str) -> str:
+    """Render an indent of the given space-width using the file's indent char."""
+    width = max(0, int(round(width)))
+    if indent_char == '\t':
+        return '\t' * (width // 4)
+    return ' ' * width
+
+
+def _edit_validate_indentation_consistency(content: str, file_path: str) -> list:
+    """Detect indentation anomalies via increment-based threshold analysis."""
+    from collections import Counter
+
+    warnings = []
+    indent_widths = []
+
+    for i, line in enumerate(content.splitlines()):
+        if not line.strip():
+            continue
+        leading_ws = line[:len(line) - len(line.lstrip())]
+        width = _edit_get_indent_width(leading_ws)
+        indent_widths.append((i + 1, width))
+
+    if len(indent_widths) >= 2:
+        increments = [
+            abs(indent_widths[j][1] - indent_widths[j - 1][1]) for j in range(1, len(indent_widths))
+        ]
+        positive_increments = [inc for inc in increments if inc > 0]
+
+        if len(positive_increments) >= 2:
+            typical_increment = Counter(positive_increments).most_common(1)[0][0]
+            threshold_val = max(typical_increment * 3, 8)
+        else:
+            threshold_val = 16
+
+        for j in range(1, len(indent_widths)):
+            prev_line_num, prev_w = indent_widths[j - 1]
+            curr_line_num, curr_w = indent_widths[j]
+            diff = abs(curr_w - prev_w)
+            if diff > threshold_val:
+                direction = 'increased' if curr_w > prev_w else 'decreased'
+                warnings.append(f"Indentation anomaly at line {curr_line_num} in {file_path}: "
+                                f"indent {direction} from {prev_w} to {curr_w} "
+                                f"(jump of {diff} spaces, threshold={threshold_val})")
+
+    return warnings
+
+
 class FileOpsMixin:
     """File operation methods. Expects self to have __init__-set attributes."""
 
@@ -1885,6 +2119,18 @@ class FileOpsMixin:
         else:
             approver_reason = ''
 
+        # Memory-vault write screen (OWASP LLM01, persistent injection vector).
+        # Runs before the backup/write so a rejected write leaves no orphan .bak.
+        # Uses the already-resolved destination (not the raw caller path) so a
+        # relative or traversal spelling cannot dodge the vault-marker check.
+        _rejection = _screen_vault_write(resolved.as_posix(), content)
+        if _rejection:
+            from agent_cascade.log import logger
+            logger.warning('[MEMORY_SCREEN] Rejected write to %s: %s', path, _rejection)
+            return (f"ERROR: Write to '{path}' rejected by memory-vault injection screen "
+                    f"({_rejection}). The content matches prompt-injection patterns. "
+                    f"Remove the offending content and retry.")
+
         try:
             resolved = self._resolve_path(path, mode='rw')
 
@@ -1965,90 +2211,10 @@ class FileOpsMixin:
         delta_width = 0  # Indent delta for heuristic feedback
         absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
         absorbed_suffix = ''  # BUG_0260: text after the replacement tail in an absorbed line
+        count = 0  # exact mode occurrence count (read only in exact response paths)
+        total_lines = 0  # d&i mode total line count (read only in d&i response paths)
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
-
-        # ── Helper: parse range spec for delete_and_insert mode ──────────────
-        def _parse_range(range_str, total_lines: int) -> tuple:
-            """Parse a line-range spec for delete_and_insert mode.
-
-            Returns (start_idx, end_idx) as 0-based Python slice indices.
-            - start is inclusive, end is exclusive.
-            - 1-indexed input: '3:7' means lines 3 through 7.
-            - Single number '4' means insert before line 4 (empty delete range).
-            - Negative numbers count from end: -1 = last line.
-            - 0 means append at end of file.
-            """
-            # Models often send the range as a JSON number (e.g. 5 or 0); ints are valid
-            # specs, so coerce before parsing instead of failing with AttributeError.
-            range_str = str(range_str).strip()
-
-            if ':' in range_str:
-                parts = range_str.split(':')
-                if len(parts) != 2:
-                    raise ValueError(f"Range must have exactly one ':'. Got '{range_str}'")
-
-                start_part, end_part = parts
-
-                # Parse start (empty means delete all from beginning, i.e., start at line 1)
-                if start_part.strip() == '':
-                    start = 1  # Delete from the very first line
-                elif start_part.strip() == '0':
-                    start = total_lines + 1  # Append beyond last line
-                else:
-                    start = int(start_part)
-
-                # Parse end (empty means delete all from start to end of file)
-                if end_part.strip() == '':
-                    end = total_lines + 1  # Delete everything from start onward
-                elif end_part.strip() == '0':
-                    end = total_lines + 1  # Append at end (same as empty)
-                else:
-                    end = int(end_part)
-                if start < 0:
-                    start = total_lines + 1 + start  # 1-indexed: -1 → last line
-                if end < 0:
-                    end = total_lines + 1 + end  # consistent 1-indexed semantics
-
-                # Clamp to valid 1-indexed bounds. The floor is 1, not 0: a negative
-                # input that underflows (e.g. '-100:-100' on 5 lines) must land on the
-                # first line. Clamping to 0 and then returning start-1=-1 would slice
-                # from the END of the file and duplicate content (Python negative index).
-                start = max(1, min(start, total_lines + 1))
-                end = max(1, min(end, total_lines + 1))
-
-                if start > end:
-                    raise ValueError(f"Start ({start}) must be <= end ({end})")
-
-                # Convert to 0-based slice indices
-                return start - 1, end
-
-            else:
-                # Single number = insert-only (or delete single line if new_content is empty)
-                if range_str == '0':
-                    return total_lines, total_lines  # Append at end
-                start = int(range_str)
-                if start < 0:
-                    start = total_lines + 1 + start
-                # Clamp to [1, total_lines+1] so that out-of-range means append
-                start = max(1, min(start, total_lines + 1))
-                zero_idx = start - 1  # Convert to 0-based index
-                return zero_idx, zero_idx  # Empty range at position (insert point)
-
-        def _detect_line_ending(line: str) -> str:
-            """Detect the line ending style of a line."""
-            if '\r\n' in line:
-                return '\r\n'
-            elif '\n' in line:
-                return '\n'
-            elif '\r' in line:
-                return '\r'
-            return ''
-
-        def _leading_whitespace(line: str) -> str:
-            """Return the leading run of spaces/tabs of a line ('' if none)."""
-            stripped = line.lstrip(' \t')
-            return line[:len(line) - len(stripped)]
 
         if match_mode == 'exact':
             count = file_content.count(old_content)
@@ -2279,25 +2445,9 @@ class FileOpsMixin:
 
             last_matched_line = file_lines[orig_end_idx]
 
-            # ── Helper functions for indentation preservation ──────────────
-            def get_leading_whitespace(s: str) -> str:
-                """Get leading whitespace of first non-blank line."""
-                for line in s.splitlines():
-                    if line.strip():
-                        return line[:len(line) - len(line.lstrip())]
-                return ''
-
-            def get_indent_width(indent_str: str) -> int:
-                """Calculate indent width in spaces (tab=4)."""
-                return sum(4 if c == '\t' else 1 for c in indent_str if c in ' \t')
-
-            def detect_indent_char(indent_str: str) -> str:
-                """Detect whether file uses tabs or spaces for indentation."""
-                return '\t' if '\t' in indent_str else ' '
-
-            file_indent = get_leading_whitespace(_indent_anchor)
-            old_indent = get_leading_whitespace(old_content)
-            indent_delta = get_indent_width(file_indent) - get_indent_width(old_indent)
+            file_indent = _edit_get_leading_whitespace(_indent_anchor)
+            old_indent = _edit_get_leading_whitespace(old_content)
+            indent_delta = _edit_get_indent_width(file_indent) - _edit_get_indent_width(old_indent)
             # Store at method scope for response construction
             delta_width = indent_delta
 
@@ -2317,10 +2467,10 @@ class FileOpsMixin:
 
             _new_ws = [l[:len(l) - len(l.lstrip())] for l in new_content_lines if l.strip()]
             _file_ws = list(file_indent_by_line.values())
-            new_base = min((get_indent_width(w) for w in _new_ws), default=0)
-            file_base = min((get_indent_width(w) for w in _file_ws), default=0)
+            new_base = min((_edit_get_indent_width(w) for w in _new_ws), default=0)
+            file_base = min((_edit_get_indent_width(w) for w in _file_ws), default=0)
             indent_offset = file_base - new_base
-            indent_char = detect_indent_char(file_indent)
+            indent_char = _edit_detect_indent_char(file_indent)
 
             # BUG_0069 guard: a shallower-sibling append reproduces the matched block and then
             # appends a block whose base indent is shallower than the matched block's base. A
@@ -2332,20 +2482,13 @@ class FileOpsMixin:
             # only valid when new_content actually STARTS by reproducing that block. A plain
             # replacement that merely re-indents would otherwise be sliced to nothing and
             # silently discarded (or, with empty new_content, turn a deletion into a no-op).
-            _new_rels  = sorted(get_indent_width(w) - new_base  for w in _new_ws)
-            _file_rels = sorted(get_indent_width(w) - file_base for w in _file_ws)
+            _new_rels  = sorted(_edit_get_indent_width(w) - new_base  for w in _new_ws)
+            _file_rels = sorted(_edit_get_indent_width(w) - file_base for w in _file_ws)
             _sibling_append = (bool(new_content.strip())
                                and new_base < file_base
                                and _new_rels != _file_rels
                                and _reproduces_matched_block(new_content.splitlines(),
                                                              file_block_lines))
-
-            def _render_indent(width: int) -> str:
-                """Render an indent of the given space-width using the file's indent char."""
-                width = max(0, int(round(width)))
-                if indent_char == '\t':
-                    return '\t' * (width // 4)
-                return ' ' * width
 
             if _sibling_append:
                 # Keep the matched block at its real file indent and append the trailing
@@ -2372,7 +2515,7 @@ class FileOpsMixin:
                 adjusted_lines = []
                 for line in new_content_lines:
                     own_ws = line[:len(line) - len(line.lstrip())]
-                    base_width = get_indent_width(own_ws) + indent_offset
+                    base_width = _edit_get_indent_width(own_ws) + indent_offset
                     body = line.lstrip()
                     if not body:
                         # Blank/whitespace-only line: lstrip() strips the newline too (it is
@@ -2380,7 +2523,7 @@ class FileOpsMixin:
                         # empty line stays empty instead of being flattened away. The slice
                         # keeps the original ending (\n or \r\n); 'or' covers lines with no ending.
                         body = line[len(own_ws.rstrip(' \t')):] or '\n'
-                    adjusted_lines.append(_render_indent(base_width) + body)
+                    adjusted_lines.append(_edit_render_indent(base_width, indent_char) + body)
 
                 new_content = ''.join(adjusted_lines)
                 # BUG_0186: preserve trailing lines when new_content is shorter than the
@@ -2434,44 +2577,7 @@ class FileOpsMixin:
                                 absorbed_suffix = ''
 
             # Phase 3 — Validation: increment-based indentation anomaly detection
-            from collections import Counter
-
-            def validate_indentation_consistency(content: str, file_path: str) -> list:
-                warnings = []
-                indent_widths = []
-
-                for i, line in enumerate(content.splitlines()):
-                    if not line.strip():
-                        continue
-                    leading_ws = line[:len(line) - len(line.lstrip())]
-                    width = get_indent_width(leading_ws)
-                    indent_widths.append((i + 1, width))
-
-                if len(indent_widths) >= 2:
-                    increments = [
-                        abs(indent_widths[j][1] - indent_widths[j - 1][1]) for j in range(1, len(indent_widths))
-                    ]
-                    positive_increments = [inc for inc in increments if inc > 0]
-
-                    if len(positive_increments) >= 2:
-                        typical_increment = Counter(positive_increments).most_common(1)[0][0]
-                        threshold_val = max(typical_increment * 3, 8)
-                    else:
-                        threshold_val = 16
-
-                    for j in range(1, len(indent_widths)):
-                        prev_line_num, prev_w = indent_widths[j - 1]
-                        curr_line_num, curr_w = indent_widths[j]
-                        diff = abs(curr_w - prev_w)
-                        if diff > threshold_val:
-                            direction = 'increased' if curr_w > prev_w else 'decreased'
-                            warnings.append(f"Indentation anomaly at line {curr_line_num} in {file_path}: "
-                                            f"indent {direction} from {prev_w} to {curr_w} "
-                                            f"(jump of {diff} spaces, threshold={threshold_val})")
-
-                return warnings
-
-            indent_warnings = validate_indentation_consistency(new_content, path)
+            indent_warnings = _edit_validate_indentation_consistency(new_content, path)
 
             # Track heuristic edit history per file
             resolved_path_key = resolved.as_posix()
@@ -2489,71 +2595,16 @@ class FileOpsMixin:
                         ending = '\r'
                     new_content = new_content + ending
         elif match_mode == 'delete_and_insert':
-            # ── delete_and_insert mode: line-range-based surgery ─────────────
-            file_lines = file_content.splitlines(keepends=True)
-            total_lines = len(file_lines)
-
-            # int 0 is a valid "append at EOF" spec; only None/blank-string mean "missing".
-            if range_param is None or (isinstance(range_param, str) and not range_param.strip()):
-                return "ERROR: delete_and_insert mode requires the 'range' parameter (e.g., '5:10')."
-
-            # On empty files, any valid range that resolves to inserting at position 0 is fine;
-            # _parse_range clamps out-of-range values so this will work naturally.
-
-            try:
-                start_idx, end_idx = _parse_range(range_param, total_lines)
-            except (ValueError, IndexError) as e:
-                return f"ERROR: Invalid range '{range_param}' for delete_and_insert mode: {str(e)}"
-
-            # BUG_0109: a range that spans the entire file (top through bottom — ':' , 'N:',
-            # '1:total') plus non-empty new_content means "delete everything and rewrite". That
-            # is almost always an unintended append; treat it as an error-by-design and point to
-            # the right tool/args. A genuine whole-file rewrite belongs in write_file.
-            if total_lines and start_idx == 0 and end_idx >= total_lines and new_content:
-                return (f"ERROR: range '{range_param}' spans the entire file ({total_lines} line(s)) "
-                        f"and new_content is non-empty — this would delete and rewrite the whole file. "
-                        f"For a whole-file replace use write_file; to append use range '0' (or a "
-                        f"line number past the end), or match_mode='exact' on the last lines.")
-
-            # Split file into before/deleted/after sections
-            before = file_lines[:start_idx]
-            after = file_lines[end_idx:]  # end_idx is exclusive (Python slice semantics)
-
-            if new_content:
-                inserted = new_content.splitlines(keepends=True)
-                # Insert new_content VERBATIM — the caller owns the block's indentation.
-                # No indent is inferred from the replaced line: a mixed rule (unindented
-                # lines inherit, indented lines stay absolute) silently corrupts naturally
-                # typed nested blocks, and relative vs absolute indentation cannot be
-                # distinguished unambiguously from the text alone.
-                # Preserve line ending style from surrounding context for ALL inserted lines
-                # (runs AFTER the indent step; only rstrips '\r\n' and appends, so it
-                # never disturbs the leading whitespace set above)
-                if after:
-                    ref_ending = _detect_line_ending(after[0])
-                    if not ref_ending and before:
-                        ref_ending = _detect_line_ending(before[-1])
-                    if ref_ending:
-                        for i in range(len(inserted)):
-                            # Normalize each line's ending to match file style
-                            inserted[i] = inserted[i].rstrip('\r\n') + ref_ending
-                elif before:
-                    # BUG_0220: append-at-EOF (after is empty) — the `if after:` branch above
-                    # never runs, so a pure append used to glue new_content onto the file's
-                    # last line when that line has no trailing newline. file_content is read
-                    # with newlines normalized to '\n'; emit a separating '\n' only when the
-                    # tail is unterminated (a terminated tail must not gain a blank line).
-                    # The write re-renders in the file's own ending style, and the
-                    # inserted lines stay verbatim (no forced trailing NL), matching the
-                    # pre-existing append behavior.
-                    if _detect_line_ending(before[-1]) == '':
-                        before[-1] = before[-1] + '\n'
-                file_lines = before + inserted + after
-            else:
-                # Delete-only: no insertion
-                file_lines = before + after
-
-            new_file_content = ''.join(file_lines)
+            # delete_and_insert mode: line-range-based surgery, delegated to a helper.
+            # Advisory notes for this mode are emitted in _edit_build_response.
+            err, start_idx, end_idx, new_file_content, total_lines = \
+                self._edit_file_delete_and_insert(
+                    file_content=file_content,
+                    range_param=range_param,
+                    new_content=new_content,
+                )
+            if err is not None:
+                return err
 
         else:
             return f"ERROR: Invalid match_mode '{match_mode}'."
@@ -2609,6 +2660,19 @@ class FileOpsMixin:
         else:
             approver_reason = ''
 
+        # Memory-vault write screen (OWASP LLM01, persistent injection vector).
+        # edit_file assembles its result in memory (new_file_content), so the screen
+        # runs here — before the backup/write below — to leave no orphan .bak on
+        # rejection. Uses the already-resolved destination (not the raw caller path)
+        # so a relative or traversal spelling cannot dodge the vault-marker check.
+        _rejection = _screen_vault_write(resolved.as_posix(), new_file_content)
+        if _rejection:
+            from agent_cascade.log import logger
+            logger.warning('[MEMORY_SCREEN] Rejected edit_file write to %s: %s', path, _rejection)
+            return (f"ERROR: Edit to '{path}' rejected by memory-vault injection screen "
+                    f"({_rejection}). The edited content matches prompt-injection patterns. "
+                    f"Remove the offending content and retry.")
+
         try:
             resolved = self._resolve_path(path, mode='rw')
 
@@ -2656,171 +2720,276 @@ class FileOpsMixin:
             resolved.write_bytes(_render_with_newlines(new_file_content, newline_style))
             self._own(resolved, agent_name)
 
-            # Line delta computation using splitlines()
-            if match_mode == 'delete_and_insert':
-                # BUG FIX: In d&i mode, actual_old_content is the range string (e.g. "3:7"),
-                # not the deleted file content. Compute old_lc from the actual range.
-                # BUG_0109: end_idx is an unclamped slice index (':' yields total+1), so
-                # end_idx - start_idx over-reports by one on ranges with an empty end. Clamp
-                # to the real number of lines removed.
-                old_lc = min(end_idx, total_lines) - start_idx
-            else:
-                old_lc = len(actual_old_content.splitlines()) if actual_old_content else 0
-            new_lc = len(new_content.splitlines()) if new_content else 0
-            net_delta = new_lc - old_lc
-            sign = '+' if net_delta >= 0 else ''
-
-            res_msg = f"OK: Edited {path}"
-
-            if match_mode == 'exact':
-                # Exact mode: line range + delta
-                if occurrence == -1:
-                    total_net = net_delta * count
-                    total_sign = '+' if total_net >= 0 else ''
-                    res_msg += (f" (exact, replaced all {count} occurrence(s), first at lines "
-                               f"{exact_start_line}-{exact_end_line}, net {total_sign}{total_net})")
-                else:
-                    res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
-
-            elif match_mode in ('heuristic', 'heuristic_agnostic'):
-                # Discriminated labels for heuristic vs heuristic_agnostic
-                mode_label = 'heuristic' if match_mode == 'heuristic' else 'heur_ag'
-                resolved_path_str = resolved.as_posix()
-
-                res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
-                if absorbed_tail:
-                    res_msg += ' [absorbed overlapping tail line to prevent duplicate]'
-                    if absorbed_suffix:
-                        _suffix_snip = absorbed_suffix.strip()
-                        if len(_suffix_snip) > 60:
-                            _suffix_snip = _suffix_snip[:60] + '…'
-                        res_msg += (f'\n  note: the absorbed line had additional text after '
-                                    f'the replaced tail ("{_suffix_snip}") that this edit '
-                                    f'dropped — re-read the file if you did not intend to '
-                                    f'replace the whole line.')
-
-                # Indent adjustment info (only if non-zero delta detected in heuristic mode)
-                if match_mode == 'heuristic':
-                    if delta_width != 0:
-                        res_msg += f", indent adjusted"
-                    if indent_warnings:
-                        for w in indent_warnings:
-                            res_msg += f"\n  {w}"
-                    # Heuristic edit count warning
-                    edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
-                    if edit_count >= 3:
-                        res_msg += f" [edit #{edit_count} this session]"
-
-            elif match_mode == 'delete_and_insert':
-                d_start = start_idx + 1  # 0-based to 1-based
-                # Clamp to the real last line so the shown range matches the corrected
-                # deleted count (':' / 'N:' yield end_idx = total+1).
-                d_end = min(end_idx, total_lines)
-                if old_lc == 0:
-                    # Insert-only variant. Also covers ranges that reach past EOF (e.g.
-                    # '4:' on a 3-line file), which delete nothing and used to print a
-                    # nonsensical "lines 4-3".
-                    res_msg += f" line {d_start} (d&i, INSERT-ONLY, -0 +{new_lc} = {sign}{net_delta}net)"
-                elif new_content:
-                    # Normal delete+insert
-                    res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
-                    # BUG_0060: echo the deleted first/last ~80 chars so range drift is visible
-                    # without reading the diff. If a prior edit in the same parallel block
-                    # shifted the lines, the deleted content will not match what the caller
-                    # described — the echo makes that obvious. Read from the ORIGINAL
-                    # file_content (pre-edit); file_lines was rebound to the post-edit list
-                    # earlier, so do NOT use it here.
-                    _orig = file_content.splitlines()
-                    _d_first = _orig[start_idx].rstrip('\r\n') if start_idx < len(_orig) else ''
-                    _d_last_i = d_end - 1  # d_end is already clamped to total_lines
-                    _d_last = _orig[_d_last_i].rstrip('\r\n') if 0 <= _d_last_i < len(_orig) else ''
-
-                    def _snip(s):
-                        s = s.strip()
-                        return (s[:80] + '…') if len(s) > 80 else (s if s else '(blank)')
-
-                    if start_idx == _d_last_i:
-                        res_msg += f'\n  deleted: "{_snip(_d_first)}"'
-                    else:
-                        res_msg += (f'\n  deleted first line: "{_snip(_d_first)}"\n'
-                                    f'  deleted last line:  "{_snip(_d_last)}"')
-                    # BUG_0175: a suffix range 'N:' (N>1) parses to end_idx=total+1, so the
-                    # range deletes through EOF and the success message above reports only line
-                    # arithmetic — the tail deletion is silent. The whole-file guard (BUG_0109)
-                    # only fires for start_idx==0, so this case slips past it. Make the message
-                    # honest about the deleted tail; the edit itself is unchanged.
-                    if end_idx >= total_lines and start_idx > 0 and old_lc > 0:
-                        # Read the last-deleted line from the ORIGINAL file_content (file_lines
-                        # was rebound to the post-edit list at :1772/:1775). d_end is already
-                        # clamped to the real last line, so d_end-1 is the last deleted index.
-                        last_deleted = file_content.splitlines()[d_end - 1].rstrip('\r\n')
-                        snippet = last_deleted[:60] + ('...' if len(last_deleted) > 60 else '')
-                        res_msg += (f"\n  note: this also deleted the file's trailing lines "
-                                   f"{d_start}-{d_end} (last deleted line: \"{snippet}\"); "
-                                   f"to append without deleting use range '0' (or a line number "
-                                   f"past the end), or match_mode='exact' on the last lines.")
-                else:
-                    # Delete-only variant. BUG_0096: label it explicitly — a bare "-K +0" reads
-                    # like a replacement that lost its text, which is exactly the confusion this
-                    # path used to cause (a replacement passed under the wrong kwarg name).
-                    res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY, -{old_lc} +0 = {sign}{net_delta}net)"
-
-                # BUG_0213: the range may end mid-block, leaving the block's tail on the
-                # surviving side. The preview above echoes only the deleted lines, so also
-                # surface the first surviving line and say when it reads like residue.
-                # Only meaningful while something survives (d_end == total_lines is the
-                # suffix-to-EOF case already covered by the BUG_0175 note above) and when
-                # the edit actually deleted lines (insert-only has nothing to orphan).
-                _orig_msg_lines = file_content.splitlines()
-                if old_lc > 0 and d_end < len(_orig_msg_lines):
-                    _next_line = _orig_msg_lines[d_end]
-                    _residue_reason = _orphan_residue_reason(
-                        _orig_msg_lines[d_end - 1], _next_line)
-                    if _residue_reason:
-                        _next_snip = _next_line.strip()
-                        if len(_next_snip) > 60:
-                            _next_snip = _next_snip[:60] + '…'
-                        res_msg += (
-                            f'\n  note: line {d_end + 1} after the range '
-                            f'{_residue_reason}: "{_next_snip}" — if that line belongs to '
-                            f'the replaced block, re-read and extend the range to cover it '
-                            f'(or use match_mode=\'exact\').')
-
-                # BUG_0224: the opposite direction of the residue check — the range may
-                # START on a structural opener (heading / fence / def-class / table
-                # separator) that the replacement does not re-supply, silently leaving a
-                # section without its heading. Advisory only: re-heading a section on
-                # purpose is valid, so never reject the edit.
-                if old_lc > 0 and start_idx < len(_orig_msg_lines):
-                    _first_deleted = _orig_msg_lines[start_idx].rstrip('\r\n')
-                    _opener_kind = _structural_opener_kind(_first_deleted)
-                    if _opener_kind and not _new_content_restores_opener(new_content, _opener_kind):
-                        _fd_snip = _first_deleted.strip()
-                        if len(_fd_snip) > 60:
-                            _fd_snip = _fd_snip[:60] + '…'
-                        res_msg += (
-                            f'\n  note: range started on a heading/structural opener '
-                            f'("{_fd_snip}") that the replacement does not restore — '
-                            f'the section may now be missing its heading.')
-
-            if duplicate_note:
-                res_msg += f'\n  {duplicate_note}'
-
-            if justification:
-                res_msg += f"\nSecurity Justification: {justification}"
-            if approver_reason:
-                res_msg += self._approver_reason_line(approver_reason)
-
-            # Unified diff snippet in code block (no redundant ---/+++ headers, both point to same file)
-            if diff_content:
-                res_msg += f'\n```\n{diff_content}\n```'
-
-            if backup_path_str:
-                res_msg += f'\n  backup → {backup_path_str}'
-
-            return res_msg
+            # Response construction delegated to _edit_build_response. Any
+            # exception it raises is caught by this try, as before extraction.
+            return self._edit_build_response(
+                path=path, match_mode=match_mode, resolved=resolved,
+                file_content=file_content, actual_old_content=actual_old_content,
+                new_content=new_content, occurrence=occurrence, count=count,
+                start_idx=start_idx, end_idx=end_idx, total_lines=total_lines,
+                exact_start_line=exact_start_line, exact_end_line=exact_end_line,
+                match_ratio=match_ratio, delta_width=delta_width,
+                absorbed_tail=absorbed_tail, absorbed_suffix=absorbed_suffix,
+                indent_warnings=indent_warnings, duplicate_note=duplicate_note,
+                diff_content=diff_content, backup_path_str=backup_path_str,
+                justification=justification, approver_reason=approver_reason,
+            )
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
+
+    def _edit_file_delete_and_insert(self, *, file_content, range_param,
+                                         new_content) -> tuple:
+        """delete_and_insert mode: line-range-based surgery.
+
+        Returns (error, start_idx, end_idx, new_file_content, total_lines).
+        When error is not None the caller must return it verbatim; the other
+        fields are then meaningless. Pure string work - no I/O.
+        """
+        # ── delete_and_insert mode: line-range-based surgery ─────────────
+        file_lines = file_content.splitlines(keepends=True)
+        total_lines = len(file_lines)
+
+        # int 0 is a valid "append at EOF" spec; only None/blank-string mean "missing".
+        if range_param is None or (isinstance(range_param, str) and not range_param.strip()):
+            return ("ERROR: delete_and_insert mode requires the 'range' parameter (e.g., '5:10').", None, None, None, total_lines)
+
+        # On empty files, any valid range that resolves to inserting at position 0 is fine;
+        # _edit_parse_range clamps out-of-range values so this will work naturally.
+
+        try:
+            start_idx, end_idx = _edit_parse_range(range_param, total_lines)
+        except (ValueError, IndexError) as e:
+            return (f"ERROR: Invalid range '{range_param}' for delete_and_insert mode: {str(e)}", None, None, None, total_lines)
+
+        # BUG_0109: a range that spans the entire file (top through bottom — ':' , 'N:',
+        # '1:total') plus non-empty new_content means "delete everything and rewrite". That
+        # is almost always an unintended append; treat it as an error-by-design and point to
+        # the right tool/args. A genuine whole-file rewrite belongs in write_file.
+        if total_lines and start_idx == 0 and end_idx >= total_lines and new_content:
+            return (f"ERROR: range '{range_param}' spans the entire file ({total_lines} line(s)) "
+                    f"and new_content is non-empty — this would delete and rewrite the whole file. "
+                    f"For a whole-file replace use write_file; to append use range '0' (or a "
+                    f"line number past the end), or match_mode='exact' on the last lines.",
+                    None, None, None, total_lines)
+
+        # Split file into before/deleted/after sections
+        before = file_lines[:start_idx]
+        after = file_lines[end_idx:]  # end_idx is exclusive (Python slice semantics)
+
+        if new_content:
+            inserted = new_content.splitlines(keepends=True)
+            # Insert new_content VERBATIM — the caller owns the block's indentation.
+            # No indent is inferred from the replaced line: a mixed rule (unindented
+            # lines inherit, indented lines stay absolute) silently corrupts naturally
+            # typed nested blocks, and relative vs absolute indentation cannot be
+            # distinguished unambiguously from the text alone.
+            # Preserve line ending style from surrounding context for ALL inserted lines
+            # (runs AFTER the indent step; only rstrips '\r\n' and appends, so it
+            # never disturbs the leading whitespace set above)
+            if after:
+                ref_ending = _edit_detect_line_ending(after[0])
+                if not ref_ending and before:
+                    ref_ending = _edit_detect_line_ending(before[-1])
+                if ref_ending:
+                    for i in range(len(inserted)):
+                        # Normalize each line's ending to match file style
+                        inserted[i] = inserted[i].rstrip('\r\n') + ref_ending
+            elif before:
+                # BUG_0220: append-at-EOF (after is empty) — the `if after:` branch above
+                # never runs, so a pure append used to glue new_content onto the file's
+                # last line when that line has no trailing newline. file_content is read
+                # with newlines normalized to '\n'; emit a separating '\n' only when the
+                # tail is unterminated (a terminated tail must not gain a blank line).
+                # The write re-renders in the file's own ending style, and the
+                # inserted lines stay verbatim (no forced trailing NL), matching the
+                # pre-existing append behavior.
+                if _edit_detect_line_ending(before[-1]) == '':
+                    before[-1] = before[-1] + '\n'
+            file_lines = before + inserted + after
+        else:
+            # Delete-only: no insertion
+            file_lines = before + after
+
+        new_file_content = ''.join(file_lines)
+        return (None, start_idx, end_idx, new_file_content, total_lines)
+
+    def _edit_build_response(self, *, path, match_mode, resolved, file_content,
+                             actual_old_content, new_content, occurrence, count,
+                             start_idx, end_idx, total_lines, exact_start_line,
+                             exact_end_line, match_ratio, delta_width,
+                             absorbed_tail, absorbed_suffix, indent_warnings,
+                             duplicate_note, diff_content, backup_path_str,
+                             justification, approver_reason) -> str:
+        """Build the success message for a completed edit.
+
+        Called from inside edit_file's post-write try, so any exception it
+        raises surfaces as edit_file's 'Approved but execution failed' branch
+        exactly as before extraction. The d&i advisory-note family
+        (BUG_0060/0175/0213/0224/0250) is emitted here.
+        """
+        # Line delta computation using splitlines()
+        if match_mode == 'delete_and_insert':
+            # BUG FIX: In d&i mode, actual_old_content is the range string (e.g. "3:7"),
+            # not the deleted file content. Compute old_lc from the actual range.
+            # BUG_0109: end_idx is an unclamped slice index (':' yields total+1), so
+            # end_idx - start_idx over-reports by one on ranges with an empty end. Clamp
+            # to the real number of lines removed.
+            old_lc = min(end_idx, total_lines) - start_idx
+        else:
+            old_lc = len(actual_old_content.splitlines()) if actual_old_content else 0
+        new_lc = len(new_content.splitlines()) if new_content else 0
+        net_delta = new_lc - old_lc
+        sign = '+' if net_delta >= 0 else ''
+
+        res_msg = f"OK: Edited {path}"
+
+        if match_mode == 'exact':
+            # Exact mode: line range + delta
+            if occurrence == -1:
+                total_net = net_delta * count
+                total_sign = '+' if total_net >= 0 else ''
+                res_msg += (f" (exact, replaced all {count} occurrence(s), first at lines "
+                           f"{exact_start_line}-{exact_end_line}, net {total_sign}{total_net})")
+            else:
+                res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+
+        elif match_mode in ('heuristic', 'heuristic_agnostic'):
+            # Discriminated labels for heuristic vs heuristic_agnostic
+            mode_label = 'heuristic' if match_mode == 'heuristic' else 'heur_ag'
+            resolved_path_str = resolved.as_posix()
+
+            res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+            if absorbed_tail:
+                res_msg += ' [absorbed overlapping tail line to prevent duplicate]'
+                if absorbed_suffix:
+                    _suffix_snip = absorbed_suffix.strip()
+                    if len(_suffix_snip) > 60:
+                        _suffix_snip = _suffix_snip[:60] + '…'
+                    res_msg += (f'\n  note: the absorbed line had additional text after '
+                                f'the replaced tail ("{_suffix_snip}") that this edit '
+                                f'dropped — re-read the file if you did not intend to '
+                                f'replace the whole line.')
+
+            # Indent adjustment info (only if non-zero delta detected in heuristic mode)
+            if match_mode == 'heuristic':
+                if delta_width != 0:
+                    res_msg += f", indent adjusted"
+                if indent_warnings:
+                    for w in indent_warnings:
+                        res_msg += f"\n  {w}"
+                # Heuristic edit count warning
+                edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
+                if edit_count >= 3:
+                    res_msg += f" [edit #{edit_count} this session]"
+
+        elif match_mode == 'delete_and_insert':
+            d_start = start_idx + 1  # 0-based to 1-based
+            # Clamp to the real last line so the shown range matches the corrected
+            # deleted count (':' / 'N:' yield end_idx = total+1).
+            d_end = min(end_idx, total_lines)
+            if old_lc == 0:
+                # Insert-only variant. Also covers ranges that reach past EOF (e.g.
+                # '4:' on a 3-line file), which delete nothing and used to print a
+                # nonsensical "lines 4-3".
+                res_msg += f" line {d_start} (d&i, INSERT-ONLY, -0 +{new_lc} = {sign}{net_delta}net)"
+            elif new_content:
+                # Normal delete+insert
+                res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                # BUG_0060: echo the deleted first/last ~80 chars so range drift is visible
+                # without reading the diff. If a prior edit in the same parallel block
+                # shifted the lines, the deleted content will not match what the caller
+                # described — the echo makes that obvious. Read from the ORIGINAL
+                # file_content (pre-edit); file_lines was rebound to the post-edit list
+                # earlier, so do NOT use it here.
+                _orig = file_content.splitlines()
+                _d_first = _orig[start_idx].rstrip('\r\n') if start_idx < len(_orig) else ''
+                _d_last_i = d_end - 1  # d_end is already clamped to total_lines
+                _d_last = _orig[_d_last_i].rstrip('\r\n') if 0 <= _d_last_i < len(_orig) else ''
+
+                def _snip(s):
+                    s = s.strip()
+                    return (s[:80] + '…') if len(s) > 80 else (s if s else '(blank)')
+
+                if start_idx == _d_last_i:
+                    res_msg += f'\n  deleted: "{_snip(_d_first)}"'
+                else:
+                    res_msg += (f'\n  deleted first line: "{_snip(_d_first)}"\n'
+                                f'  deleted last line:  "{_snip(_d_last)}"')
+                # BUG_0175: a suffix range 'N:' (N>1) parses to end_idx=total+1, so the
+                # range deletes through EOF and the success message above reports only line
+                # arithmetic — the tail deletion is silent. The whole-file guard (BUG_0109)
+                # only fires for start_idx==0, so this case slips past it. Make the message
+                # honest about the deleted tail; the edit itself is unchanged.
+                if end_idx >= total_lines and start_idx > 0 and old_lc > 0:
+                    # Read the last-deleted line from the ORIGINAL file_content (file_lines
+                    # was rebound to the post-edit list at :1772/:1775). d_end is already
+                    # clamped to the real last line, so d_end-1 is the last deleted index.
+                    last_deleted = file_content.splitlines()[d_end - 1].rstrip('\r\n')
+                    snippet = last_deleted[:60] + ('...' if len(last_deleted) > 60 else '')
+                    res_msg += (f"\n  note: this also deleted the file's trailing lines "
+                               f"{d_start}-{d_end} (last deleted line: \"{snippet}\"); "
+                               f"to append without deleting use range '0' (or a line number "
+                               f"past the end), or match_mode='exact' on the last lines.")
+            else:
+                # Delete-only variant. BUG_0096: label it explicitly — a bare "-K +0" reads
+                # like a replacement that lost its text, which is exactly the confusion this
+                # path used to cause (a replacement passed under the wrong kwarg name).
+                res_msg += f" lines {d_start}-{d_end} (d&i, DELETE-ONLY, -{old_lc} +0 = {sign}{net_delta}net)"
+
+            # BUG_0213: the range may end mid-block, leaving the block's tail on the
+            # surviving side. The preview above echoes only the deleted lines, so also
+            # surface the first surviving line and say when it reads like residue.
+            # Only meaningful while something survives (d_end == total_lines is the
+            # suffix-to-EOF case already covered by the BUG_0175 note above) and when
+            # the edit actually deleted lines (insert-only has nothing to orphan).
+            _orig_msg_lines = file_content.splitlines()
+            if old_lc > 0 and d_end < len(_orig_msg_lines):
+                _next_line = _orig_msg_lines[d_end]
+                _residue_reason = _orphan_residue_reason(
+                    _orig_msg_lines[d_end - 1], _next_line)
+                if _residue_reason:
+                    _next_snip = _next_line.strip()
+                    if len(_next_snip) > 60:
+                        _next_snip = _next_snip[:60] + '…'
+                    res_msg += (
+                        f'\n  note: line {d_end + 1} after the range '
+                        f'{_residue_reason}: "{_next_snip}" — if that line belongs to '
+                        f'the replaced block, re-read and extend the range to cover it '
+                        f'(or use match_mode=\'exact\').')
+
+            # BUG_0224: the opposite direction of the residue check — the range may
+            # START on a structural opener (heading / fence / def-class / table
+            # separator) that the replacement does not re-supply, silently leaving a
+            # section without its heading. Advisory only: re-heading a section on
+            # purpose is valid, so never reject the edit.
+            if old_lc > 0 and start_idx < len(_orig_msg_lines):
+                _first_deleted = _orig_msg_lines[start_idx].rstrip('\r\n')
+                _opener_kind = _structural_opener_kind(_first_deleted)
+                if _opener_kind and not _new_content_restores_opener(new_content, _opener_kind):
+                    _fd_snip = _first_deleted.strip()
+                    if len(_fd_snip) > 60:
+                        _fd_snip = _fd_snip[:60] + '…'
+                    res_msg += (
+                        f'\n  note: range started on a heading/structural opener '
+                        f'("{_fd_snip}") that the replacement does not restore — '
+                        f'the section may now be missing its heading.')
+
+        if duplicate_note:
+            res_msg += f'\n  {duplicate_note}'
+
+        if justification:
+            res_msg += f"\nSecurity Justification: {justification}"
+        if approver_reason:
+            res_msg += self._approver_reason_line(approver_reason)
+
+        # Unified diff snippet in code block (no redundant ---/+++ headers, both point to same file)
+        if diff_content:
+            res_msg += f'\n```\n{diff_content}\n```'
+
+        if backup_path_str:
+            res_msg += f'\n  backup → {backup_path_str}'
+
+        return res_msg
 
     # ─── Re-indent ────────────────────────────────────────────────────────
 
@@ -3679,6 +3848,18 @@ class FileOpsMixin:
         else:
             approver_reason = ''
 
+        # Memory-vault write screen (OWASP LLM01). A copy into the vault persists the
+        # source file's text at the destination, so it is screened like a direct write
+        # — before the backup/write below so a rejected copy leaves no orphan .bak.
+        # Directories and binary sources are skipped (see _screen_vault_copy_move).
+        _rejection = _screen_vault_copy_move(src_path, self._resolve_path(destination, mode='rw'))
+        if _rejection:
+            from agent_cascade.log import logger
+            logger.warning('[MEMORY_SCREEN] Rejected copy_file to %s: %s', destination, _rejection)
+            return (f"ERROR: Copy to '{destination}' rejected by memory-vault injection screen "
+                    f"({_rejection}). The source content matches prompt-injection patterns. "
+                    f"Remove the offending content and retry.")
+
         try:
             dest_path = self._resolve_path(destination, mode='rw')
 
@@ -3774,6 +3955,18 @@ class FileOpsMixin:
             approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
             approver_reason = ''
+
+        # Memory-vault write screen (OWASP LLM01). A move into the vault persists the
+        # source file's text at the destination, so it is screened like a direct write
+        # — before the backup/unlink/move below, so a rejected move never destroys the
+        # source. Directories and binary sources are skipped (see _screen_vault_copy_move).
+        _rejection = _screen_vault_copy_move(src_path, self._resolve_path(destination, mode='rw'))
+        if _rejection:
+            from agent_cascade.log import logger
+            logger.warning('[MEMORY_SCREEN] Rejected move_file to %s: %s', destination, _rejection)
+            return (f"ERROR: Move to '{destination}' rejected by memory-vault injection screen "
+                    f"({_rejection}). The source content matches prompt-injection patterns. "
+                    f"Remove the offending content and retry.")
 
         try:
             dest_path = self._resolve_path(destination, mode='rw')
