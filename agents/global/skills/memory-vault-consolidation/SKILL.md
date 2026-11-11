@@ -8,7 +8,7 @@ triggers:
   - "supersede lessons"
   - "de-index lessons"
   - "vault triage"
-version: "1"
+version: "1.0.0"
 ---
 
 # Memory Vault Consolidation

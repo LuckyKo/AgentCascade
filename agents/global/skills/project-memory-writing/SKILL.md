@@ -7,7 +7,7 @@ triggers:
   - "project memory frontmatter"
   - "before delivering final result"
   - "memory line numbers stale"
-version: "2"
+version: "2.0.0"
 ---
 
 # Project Memory Writing Guide
