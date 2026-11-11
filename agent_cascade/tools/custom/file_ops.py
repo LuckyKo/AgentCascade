@@ -996,7 +996,7 @@ class ViewMedia(BaseTool, PathResolutionMixin):
         'video': {'.mp4', '.mkv', '.mov', '.webm', '.avi', '.m4v'},
     }
 
-    _EXTRACT_HELP = (
+    _SUPPORTED_MEDIA_HELP = (
         'Supported media types: ' + ', '.join(sorted(ext.lstrip('.').upper() for exts in _MODALITY_EXTS.values() for ext in exts))
     )
 
@@ -1123,6 +1123,119 @@ class ViewMedia(BaseTool, PathResolutionMixin):
             return str(Path(source_path).as_uri())
 
     # ------------------------------------------------------------------ #
+    #  Best-effort ffprobe metadata (BUG_0283)                            #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _format_duration(seconds: object, force_hours: bool = False) -> str:
+        """Render a duration (seconds, as ffprobe reports it) as ``MM:SS``, or
+        ``HH:MM:SS`` when it spans at least an hour or ``force_hours`` is set.
+        Videos always carry the hour field (``00:01:23``); audio shows minutes
+        until it exceeds one hour. Returns ``''`` for missing/unparseable input."""
+        if seconds is None:
+            return ''
+        try:
+            total = int(round(float(seconds)))
+        except (TypeError, ValueError):
+            return ''
+        if total < 0:
+            return ''
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        if h or force_hours:
+            return f'{h:02d}:{m:02d}:{s:02d}'
+        return f'{m:02d}:{s:02d}'
+
+    @staticmethod
+    def _parse_frame_rate(value: object) -> str:
+        """Parse an ffprobe ``avg_frame_rate`` fraction (e.g. ``'30/1'``,
+        ``'30000/1001'``) into a short fps string (``'30'`` / ``'29.97'``).
+        Returns ``''`` for unknown (``'0/0'``) or malformed values."""
+        if not isinstance(value, str) or '/' not in value:
+            return ''
+        try:
+            num, den = (float(x) for x in value.split('/', 1))
+            fps = num / den
+        except (TypeError, ValueError, ZeroDivisionError):
+            return ''
+        if fps <= 0:
+            return ''
+        rounded = round(fps)
+        if abs(fps - rounded) < 1e-6:
+            return str(rounded)
+        return f'{fps:.2f}'
+
+    def _probe_media_metadata(self, input_path: str, modality: str) -> str:
+        """Best-effort ffprobe summary appended to a view_media caption.
+
+        Returns a short parenthesised string such as ``(1920x1080, 30fps,
+        00:01:23, h264)`` for video or ``(44.1kHz, stereo, 03:45, flac)`` for
+        audio, or ``''`` when ffprobe is unavailable, the probe fails, or no
+        useful field is found. Best-effort by contract: it never raises and a
+        plain view still works with no ffmpeg installed. Probe failures (non-zero
+        exit / exception) are logged at WARNING with a [MEDIA_PROBE] tag; the
+        ffprobe-not-on-PATH case stays silent (documented no-ffmpeg contract)."""
+        ffprobe_bin = shutil.which('ffprobe')
+        if not ffprobe_bin:
+            return ''  # documented contract: plain view works without ffmpeg
+        try:
+            proc = subprocess.run(
+                [ffprobe_bin, '-v', 'error',
+                 '-show_entries', 'format=duration:stream=width,height,avg_frame_rate,'
+                                  'sample_rate,channels,codec_name',
+                 '-of', 'json', str(input_path)],
+                capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL, check=False,
+            )
+            if proc.returncode != 0:
+                logger.warning('[MEDIA_PROBE] ffprobe failed (rc=%d) for %s: %s', proc.returncode, input_path, proc.stderr.strip()[:200])
+                return ''
+            data = json.loads(proc.stdout)
+            fmt = data.get('format') or {}
+            streams = data.get('streams') or []
+            parts = []
+
+            if modality == 'video':
+                # A video file may also carry an audio stream; pick the one with dims.
+                stream = next((s for s in streams if s.get('width') and s.get('height')), {})
+                width, height = stream.get('width'), stream.get('height')
+                if width and height:
+                    parts.append(f'{width}x{height}')
+                fps = self._parse_frame_rate(stream.get('avg_frame_rate'))
+                if fps:
+                    parts.append(f'{fps}fps')
+                duration = self._format_duration(fmt.get('duration'), force_hours=True)
+                if duration:
+                    parts.append(duration)
+                if stream.get('codec_name'):
+                    parts.append(stream['codec_name'])
+            elif modality == 'audio':
+                stream = next((s for s in streams if s.get('sample_rate')), {})
+                sample_rate = stream.get('sample_rate')
+                if sample_rate is not None:
+                    try:
+                        parts.append(f'{float(sample_rate) / 1000:g}kHz')
+                    except (TypeError, ValueError):
+                        pass
+                channels = stream.get('channels')
+                if channels is not None:
+                    try:
+                        n = int(channels)
+                        parts.append({1: 'mono', 2: 'stereo'}.get(n, f'{n}ch'))
+                    except (TypeError, ValueError):
+                        pass
+                duration = self._format_duration(fmt.get('duration'))
+                if duration:
+                    parts.append(duration)
+                if stream.get('codec_name'):
+                    parts.append(stream['codec_name'])
+
+            return '(' + ', '.join(parts) + ')' if parts else ''
+        except Exception as e:
+            logger.warning('[MEDIA_PROBE] ffprobe probe failed for %s: %s', input_path, e)
+            return ''
+
+    # ------------------------------------------------------------------ #
     #  Main call()                                                        #
     # ------------------------------------------------------------------ #
 
@@ -1164,7 +1277,7 @@ class ViewMedia(BaseTool, PathResolutionMixin):
         if crop_region_str:
             return 'ERROR: crop_region applies only to images; for audio/video use time_range to trim.'
         if modality is None:
-            return f"ERROR: Unsupported media type for '{path}' (unknown extension '{ext or '<none>'}'). {self._EXTRACT_HELP}"
+            return f"ERROR: Unsupported media type for '{path}' (unknown extension '{ext or '<none>'}'). {self._SUPPORTED_MEDIA_HELP}"
 
         # frame_at / audio_track are video-only operations.
         if modality == 'audio' and extract_requested:
@@ -1215,6 +1328,9 @@ class ViewMedia(BaseTool, PathResolutionMixin):
                 suffix = (' (existing file, no copy saved; already in media store)'
                           if is_under_media_root(input_path) else ' (existing file, no copy saved)')
                 caption = f"Viewing {modality}: {path}"
+                meta = self._probe_media_metadata(input_path, modality)
+                if meta:
+                    caption += f" {meta}"
                 item = ContentItem(audio=media_path) if modality == 'audio' else ContentItem(video=media_path)
                 return [item, ContentItem(text=f"{caption}{suffix}")]
 
@@ -1235,6 +1351,9 @@ class ViewMedia(BaseTool, PathResolutionMixin):
                     return f'ERROR: ffmpeg produced an empty slice for {path} [{start}-{end}s]: {self._tail(str(log))}'
                 media_path = self._save_artifact(str(out), modality, ext)
                 caption = f"Viewing {modality} slice: {path} [{start:g}-{end:g}s]"
+                meta = self._probe_media_metadata(str(out), modality)
+                if meta:
+                    caption += f" {meta}"
                 item = ContentItem(audio=media_path) if modality == 'audio' else ContentItem(video=media_path)
                 return [item, ContentItem(text=f"{caption} Saved to: {media_path}")]
 
@@ -1250,6 +1369,10 @@ class ViewMedia(BaseTool, PathResolutionMixin):
                     return f'ERROR: ffmpeg produced an empty frame at {frame_at}s for {path}: {self._tail(str(log))}'
                 media_path = self._save_artifact(str(out), 'image', '.png')
                 caption = f"Viewing video frame at {frame_at:g}s: {path}"
+                # Probe the source video (not the PNG) for resolution/fps context.
+                meta = self._probe_media_metadata(input_path, modality)
+                if meta:
+                    caption += f" {meta}"
                 return [ContentItem(image=media_path), ContentItem(text=f"{caption} Saved to: {media_path}")]
 
             if audio_track:
@@ -1263,6 +1386,9 @@ class ViewMedia(BaseTool, PathResolutionMixin):
                     return f'ERROR: ffmpeg produced an empty audio track for {path}: {self._tail(str(log))}'
                 media_path = self._save_artifact(str(out), 'audio', '.wav')
                 caption = f"Viewing video audio track: {path}"
+                meta = self._probe_media_metadata(str(out), 'audio')
+                if meta:
+                    caption += f" {meta}"
                 return [ContentItem(audio=media_path), ContentItem(text=f"{caption} Saved to: {media_path}")]
 
         except (ValueError, TypeError) as e:

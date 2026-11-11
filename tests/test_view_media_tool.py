@@ -7,6 +7,7 @@ a plain (or already-in-store) source.
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -269,3 +270,217 @@ def test_view_image_under_media_root_not_re_saved(fixtures, monkeypatch):
     assert res[0].caption is None
     assert 'already in media store' in res[1].text
     assert 'no copy saved' in res[1].text
+
+
+# --------------------------------------------------------------------- #
+#  ffprobe metadata (BUG_0283)                                          #
+# --------------------------------------------------------------------- #
+
+_VIDEO_PROBE = {
+    'streams': [
+        {'index': 0, 'codec_name': 'h264', 'width': 1920, 'height': 1080,
+         'avg_frame_rate': '30/1'},
+        {'index': 1, 'codec_name': 'aac', 'sample_rate': '48000', 'channels': 2},
+    ],
+    'format': {'duration': '83.4'},
+}
+
+_AUDIO_PROBE = {
+    'streams': [
+        {'index': 0, 'codec_name': 'flac', 'sample_rate': '44100', 'channels': 2},
+    ],
+    'format': {'duration': '225'},
+}
+
+
+def _fake_run(payload, calls):
+    """Return a subprocess.run replacement that records argv/kwargs and yields
+    ``payload`` as JSON on stdout."""
+    def _run(args, **kw):
+        calls.append((args, kw))
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+    return _run
+
+
+def _wire_ffprobe(monkeypatch, payload):
+    """Patch ffprobe lookup + subprocess.run; return the calls recorder."""
+    calls = []
+    monkeypatch.setattr(file_ops.shutil, 'which',
+                        lambda name: 'C:/fake/ffprobe.exe' if name == 'ffprobe' else None)
+    monkeypatch.setattr(file_ops.subprocess, 'run', _fake_run(payload, calls))
+    return calls
+
+
+def test_probe_video_formats_expected_string(monkeypatch):
+    calls = _wire_ffprobe(monkeypatch, _VIDEO_PROBE)
+    tool = ViewMedia()
+    assert tool._probe_media_metadata('movie.mp4', 'video') == '(1920x1080, 30fps, 00:01:23, h264)'
+    # Best-effort subprocess contract: argv list, no shell, capture/text/timeout set,
+    # and the requested input path is passed through verbatim.
+    args, kw = calls[0]
+    assert args[0] == 'C:/fake/ffprobe.exe'
+    assert 'movie.mp4' in args
+    assert '-of' in args and 'json' in args
+    assert not kw.get('shell')
+    assert kw.get('capture_output') is True and kw.get('text') is True
+    assert kw.get('timeout') == 5
+
+
+def test_probe_audio_formats_expected_string(monkeypatch):
+    _wire_ffprobe(monkeypatch, _AUDIO_PROBE)
+    tool = ViewMedia()
+    assert tool._probe_media_metadata('song.flac', 'audio') == '(44.1kHz, stereo, 03:45, flac)'
+
+
+def test_probe_returns_empty_when_ffprobe_missing(monkeypatch):
+    monkeypatch.setattr(file_ops.shutil, 'which', lambda name: None)
+    # subprocess.run must never be reached without ffprobe; blow up if it is.
+    def _boom(*a, **kw):
+        raise AssertionError('subprocess.run called without ffprobe')
+    monkeypatch.setattr(file_ops.subprocess, 'run', _boom)
+    tool = ViewMedia()
+    assert tool._probe_media_metadata('movie.mp4', 'video') == ''
+
+
+def test_probe_swallows_subprocess_failure(monkeypatch):
+    monkeypatch.setattr(file_ops.shutil, 'which', lambda name: 'C:/fake/ffprobe.exe')
+    def _raise(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd='ffprobe', timeout=5)
+    monkeypatch.setattr(file_ops.subprocess, 'run', _raise)
+    tool = ViewMedia()
+    assert tool._probe_media_metadata('movie.mp4', 'video') == ''  # never raises
+
+
+def test_probe_swallows_malformed_json(monkeypatch):
+    monkeypatch.setattr(file_ops.shutil, 'which', lambda name: 'C:/fake/ffprobe.exe')
+    def _bad_json(args, **kw):
+        return subprocess.CompletedProcess(args, 0, 'not json at all', '')
+    monkeypatch.setattr(file_ops.subprocess, 'run', _bad_json)
+    tool = ViewMedia()
+    assert tool._probe_media_metadata('movie.mp4', 'video') == ''
+
+
+def test_probe_nonzero_rc_logs_media_probe_warning(monkeypatch, caplog):
+    """returncode != 0 path: returns '' and emits one [MEDIA_PROBE] WARNING.
+
+    file_ops uses a module-level `logging.getLogger(__name__)` (NOT the shared
+    agent_cascade.log logger), so caplog must target that logger's real name —
+    read from file_ops.logger.name rather than guessed.
+    """
+    monkeypatch.setattr(file_ops.shutil, 'which', lambda name: 'C:/fake/ffprobe.exe')
+    def _rc1(args, **kw):
+        return subprocess.CompletedProcess(args, 1, '', 'No such file or directory')
+    monkeypatch.setattr(file_ops.subprocess, 'run', _rc1)
+    tool = ViewMedia()
+    with caplog.at_level(logging.WARNING, logger=file_ops.logger.name):
+        assert tool._probe_media_metadata('movie.mp4', 'video') == ''
+    warnings = [r for r in caplog.records
+                if r.levelname == 'WARNING' and '[MEDIA_PROBE]' in r.getMessage()]
+    assert len(warnings) == 1
+    assert 'rc=1' in warnings[0].getMessage()
+
+
+def test_probe_skips_missing_fields_gracefully(monkeypatch):
+    # No fps, no codec, no dims on the video stream -> only what ffprobe reported shows.
+    payload = {
+        'streams': [{'codec_name': 'mpeg2video', 'width': 720, 'height': 480}],
+        'format': {'duration': '700'},
+    }
+    _wire_ffprobe(monkeypatch, payload)
+    tool = ViewMedia()
+    # duration >= 1h for video -> HH:MM:SS; fps skipped (absent), codec present.
+    assert tool._probe_media_metadata('old.mpeg', 'video') == '(720x480, 00:11:40, mpeg2video)'
+
+
+def test_probe_unknown_modality_returns_empty(monkeypatch):
+    """An unknown modality (e.g. 'image') must not enter the audio branch."""
+    _wire_ffprobe(monkeypatch, {'streams': [{'sample_rate': 44100, 'channels': 2}], 'format': {'duration': '5'}})
+    tool = ViewMedia()
+    result = tool._probe_media_metadata('photo.png', 'image')
+    assert result == ''
+
+
+# --------------------------------------------------------------------- #
+#  Caption-site probes must target the DERIVED output, not the source    #
+#  (BUG_0283 issues #1/#2). These mock the whole ffmpeg+ffprobe flow at  #
+#  the subprocess level and assert on ContentItem.text.                  #
+# --------------------------------------------------------------------- #
+
+# Slice output carries the slice's own (short) duration; the full source carries
+# its (long) duration. Resolution/fps are identical (-c copy slice), so DURATION
+# is the only discriminator -> a caption with the source duration fails the test.
+_SLICE_OUT_PROBE = {
+    'streams': [{'codec_name': 'h264', 'width': 1920, 'height': 1080, 'avg_frame_rate': '30/1'}],
+    'format': {'duration': '1.0'},
+}
+_SLICE_SRC_PROBE = {
+    'streams': [{'codec_name': 'h264', 'width': 1920, 'height': 1080, 'avg_frame_rate': '30/1'}],
+    'format': {'duration': '83.4'},
+}
+# Audio-track output is a 16 kHz mono WAV; the source video carries WxH/fps/codec.
+# Modality and content both differ, so the caption can't accidentally match.
+_TRACK_OUT_PROBE = {
+    'streams': [{'codec_name': 'pcm_s16le', 'sample_rate': '16000', 'channels': 1}],
+    'format': {'duration': '2.0'},
+}
+_TRACK_SRC_PROBE = _VIDEO_PROBE  # source video metadata (must NOT appear in an audio-track caption)
+
+
+def _wire_ffmpeg_and_ffprobe(monkeypatch, out_payload, src_payload):
+    """Single subprocess.run replacement for BOTH the ffmpeg run and the ffprobe
+    caption-site probe.
+
+    The ffmpeg call writes a non-empty artifact at its output path (so the
+    ``out.exists() and st_size > 0`` guards pass) and records that path. The ffprobe
+    call then returns ``out_payload`` only if it is probing THAT recorded path,
+    otherwise ``src_payload``. This is the whole point of the test: if production
+    probes the wrong target (the source), it gets ``src_payload`` and the caption
+    assertions fail -- no vacuous pass from a path-agnostic mock.
+    """
+    state = {'out': None}
+
+    def _run(args, **kw):
+        exe = str(args[0])
+        target = str(args[-1])
+        if 'ffprobe' in exe:
+            payload = out_payload if target == state['out'] else src_payload
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+        # ffmpeg: stand up a real, non-empty output file at argv's final path.
+        Path(target).write_bytes(b'\x00' * 1024)
+        state['out'] = target
+        return subprocess.CompletedProcess(args, 0, b'', b'')
+
+    monkeypatch.setattr(file_ops.shutil, 'which',
+                        lambda name: {'ffmpeg': 'C:/fake/ffmpeg.exe',
+                                      'ffprobe': 'C:/fake/ffprobe.exe'}.get(name))
+    monkeypatch.setattr(file_ops.subprocess, 'run', _run)
+
+
+def test_slice_caption_reports_slice_duration_not_source(tmp_path, tool_store, monkeypatch):
+    """Issue #2: the time_range caption must show the SLICE's duration, not the
+    full source's. Resolution/fps are shared (``-c copy``) so only duration differs.
+    """
+    src = tmp_path / 'full.mp4'
+    src.write_bytes(b'fake-video-source')  # exists() check; content irrelevant, ffmpeg is mocked
+    _wire_ffmpeg_and_ffprobe(monkeypatch, _SLICE_OUT_PROBE, _SLICE_SRC_PROBE)
+    tool = _make_tool()
+    res = tool.call(json.dumps({'path': str(src), 'time_range': '0,1'}))
+    text = res[1].text
+    assert 'slice' in text and 'Saved to:' in text
+    assert '00:00:01' in text, f'expected slice duration 00:00:01 in caption: {text}'
+    assert '00:01:23' not in text, f'source duration leaked into slice caption: {text}'
+
+
+def test_audio_track_caption_reports_audio_not_video_metadata(tmp_path, tool_store, monkeypatch):
+    """Issue #1: the audio_track caption must describe the derived 16 kHz mono WAV
+    (kHz + channels), NOT the source video (resolution/fps/codec).
+    """
+    src = tmp_path / 'video.mp4'
+    src.write_bytes(b'fake-video-source')
+    _wire_ffmpeg_and_ffprobe(monkeypatch, _TRACK_OUT_PROBE, _TRACK_SRC_PROBE)
+    tool = _make_tool()
+    res = tool.call(json.dumps({'path': str(src), 'audio_track': True}))
+    text = res[1].text
+    assert 'audio track' in text and 'Saved to:' in text
+    assert '16kHz' in text and 'mono' in text, f'expected audio metadata (16kHz/mono) in caption: {text}'
+    assert 'x1080' not in text and 'fps' not in text, f'video metadata leaked into audio-track caption: {text}'
