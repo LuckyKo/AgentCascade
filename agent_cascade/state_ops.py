@@ -9,6 +9,13 @@ autoloader's per-model max-5 LRU eviction to manage disk usage.
 
 from typing import Optional
 
+import concurrent.futures
+import concurrent.futures.thread
+import logging
+import logging.handlers
+import threading
+import weakref
+
 import httpx
 
 from agent_cascade.log import _AppLoggerProxy
@@ -21,6 +28,99 @@ logger = _AppLoggerProxy()
 
 # Track which instances have confirmed no legacy files — skip their cleanup checks.
 _legacy_cleanup_done_instances: set[str] = set()
+
+
+# BUG_0295: hard wall-clock deadline on the restore round-trip. httpx's `timeout`
+# bounds EACH socket operation (connect/read/write/pool), NOT the whole request — so a
+# half-open connection whose response flush stalls mid-body never trips httpx.ReadTimeout
+# and can pin the orchestrator turn forever (RC-1). The executor deadline below is the
+# true total-request ceiling. The small margin lets httpx's own read timeout fire first
+# (cleaner: it names the exception) in the merely-slow case; only the pathological
+# never-returns stall reaches the executor deadline. +5s is negligible against the
+# default 120s budget while leaving a grace window.
+_RESTORE_TIMEOUT_MARGIN_S = 5.0
+
+
+class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """1-worker executor whose worker is a DAEMON and is NOT registered with
+    `concurrent.futures.thread._threads_queues`.
+
+    The restore worker can be abandoned mid-round-trip by the deadline in
+    restore_state and stay blocked on the socket. With the stock executor that worker
+    is a non-daemon thread and the atexit `_python_exit` hook `t.join()`s it with no
+    timeout — so a single wedged restore would block clean interpreter/test-process
+    shutdown. This mirrors CPython 3.12 `_adjust_thread_count` (pinned to AC's
+    interpreter) but starts a daemon and omits the `_threads_queues` registration, so
+    shutdown never joins a wedged worker.
+    """
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        if len(self._threads) < self._max_workers:
+            t = threading.Thread(
+                name='%s_%d' % (self._thread_name_prefix or self, len(self._threads)),
+                target=concurrent.futures.thread._worker,
+                args=(weakref.ref(self, weakref_cb),
+                      self._work_queue,
+                      self._initializer,
+                      self._initargs),
+                daemon=True,
+            )
+            t.start()
+            self._threads.add(t)
+            # Deliberately NOT added to concurrent.futures.thread._threads_queues:
+            # that registration is exactly what makes `_python_exit` join the worker.
+
+
+# One shared worker, reused across restores — bounds thread growth (the plan's
+# micro-opt, avoids a fresh executor per call). Tradeoff: because it is a SINGLE
+# worker, one never-returning restore also makes subsequent restores queue and fail
+# fast to cold-start until that socket is reclaimed (or the process restarts). That is
+# degraded (no KV restore) but NEVER a pinned turn — the intended tradeoff; monitor
+# worker/queue depth if it recurs.
+_RESTORE_EXECUTOR = _DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix='state-restore')
+
+
+def _emit_critical_to_file_handler(message: str) -> None:
+    """Best-effort mirror of a critical restore WARNING straight to console.log.
+
+    RC-2 (BUG_0295): the app logger's FIRST handler is a synchronous stdout
+    StreamHandler; if the Windows console wedges, `logger.warning` blocks there and
+    console.log (the second handler) never receives the record. Emitting the
+    actionable line directly through the already-open RotatingFileHandler keeps it on
+    disk even when the console handler is stalled. Never raises — a broken log write
+    must not turn a logged failure back into an exception on the restore path.
+    """
+    try:
+        for handler in getattr(logger, 'handlers', None) or []:
+            if isinstance(handler, logging.handlers.RotatingFileHandler):
+                record = logging.LogRecord(
+                    name='agent_cascade.state_ops',
+                    level=logging.WARNING,
+                    pathname=__file__,
+                    lineno=0,
+                    msg=message,
+                    args=(),
+                    exc_info=None,
+                )
+                handler.emit(record)
+                break
+    except Exception:
+        pass
+
+
+def _warn_restore_failure(label: str, exc: BaseException) -> None:
+    """Warn a restore transport/worker failure naming the exception, and mirror it to
+    console.log (see _emit_critical_to_file_handler). Shared by the generic failure
+    handler and the worker-raised-TimeoutError path in restore_state."""
+    message = 'State restore failed for label=%s: %s: %s' % (label, type(exc).__name__, exc)
+    logger.warning(message)
+    _emit_critical_to_file_handler(message)
 
 
 def _normalize_api_base(api_base: str) -> str:
@@ -304,13 +404,43 @@ def save_state(api_base: str, model: str, instance_name: str,
 
 
 def restore_state(api_base: str, model: str, label: str) -> bool:
-    """Restore KV cache state. Returns True if successful."""
+    """Restore KV cache state. Returns True if successful.
+
+    Bounded by a hard wall-clock deadline (BUG_0295): the blocking POST runs on a
+    shared single-worker executor and the caller waits at most
+    ``STATE_HTTP_TIMEOUT + _RESTORE_TIMEOUT_MARGIN_S``. On timeout the caller falls back
+    to the existing no-restore / cold-start branch (see restore_instance_state, which
+    clears the label so it never re-fires) instead of pinning the orchestrator turn on a
+    round-trip that never returns. No caller change; fully reversible — delete the
+    executor wrapper to revert.
+    """
     try:
         base = _normalize_api_base(api_base)
         url = f"{base}/v1/models/{model}/state/load"
         logger.debug('State restore: POST %s (label=%s, timeout=%.0fs)',
                        url, label, STATE_HTTP_TIMEOUT)
-        resp = httpx.post(url, json={'label': label}, timeout=STATE_HTTP_TIMEOUT)
+
+        # Explicit per-phase timeouts instead of the bare float: a bare timeout sets
+        # connect/read/write/pool ALL to the same value, so a slow connect or a pool wait
+        # eats the read budget. The restore is a long response, so read gets the full
+        # STATE_HTTP_TIMEOUT while the other phases keep a fixed 10s cap.
+        timeout = httpx.Timeout(connect=10, read=STATE_HTTP_TIMEOUT, write=10, pool=10)
+        deadline = STATE_HTTP_TIMEOUT + _RESTORE_TIMEOUT_MARGIN_S
+
+        def _post_load():
+            return httpx.post(url, json={'label': label}, timeout=timeout)
+
+        # Run the blocking POST off the caller's thread so the CALLER is bounded by a true
+        # total-request deadline, independent of whether httpx's per-operation timeout
+        # fires. CAVEAT — do NOT read this as "bounded": the abandoned worker may linger
+        # blocked on the socket; it is released ONLY if httpx's read timeout eventually
+        # fires. Under the exact observed BUG_0295 failure (httpx's timeout never fires)
+        # the worker is NOT bounded by httpx and leaks until OS/TCP keepalive or process
+        # restart. A leaked (daemon) thread is strictly better than a pinned turn — the
+        # intended tradeoff; monitor worker/queue depth if it recurs.
+        future = _RESTORE_EXECUTOR.submit(_post_load)
+        resp = future.result(timeout=deadline)
+
         if resp.status_code != 200:
             # WARNING, not DEBUG: the caller reports "State restore failed … cleared label"
             # right after, and that line cannot carry the reason (restore_state returns
@@ -319,11 +449,33 @@ def restore_state(api_base: str, model: str, label: str) -> bool:
             # "was saved for a different model". See _refusal_detail / BUG_0178.
             logger.warning('State restore refused for label=%s: HTTP %d %s',
                            label, resp.status_code, _refusal_detail(resp))
-        return resp.status_code == 200
+            return False
+
+        return True
+    except concurrent.futures.TimeoutError:
+        # concurrent.futures.TimeoutError is an ALIAS of the builtin TimeoutError (3.11+),
+        # so this branch also fires when the WORKER itself raised a TimeoutError. Name an
+        # exception only when the worker genuinely raised one (a real transport failure the
+        # caller clears the label off); an abandoned round-trip — still pending, or the
+        # micro-race that completed-without-exception right as result() gave up — is our
+        # deadline and must report the timeout, never a phantom 'NoneType: None'.
+        exc = future.exception() if future.done() else None
+        if exc is not None:
+            _warn_restore_failure(label, exc)
+            return False
+        # The round-trip never returned within the deadline: httpx's per-operation timeout
+        # did NOT unblock us (the BUG_0295 signature) — the EXECUTOR deadline did. Mirror the
+        # WARNING to console.log so it survives a wedged console handler (RC-2).
+        message = ('[STATE_RESTORE_TIMEOUT] label=%s — restore did not return within %.0fs; '
+                   'falling back to no-restore (cold start)'
+                   % (label, STATE_HTTP_TIMEOUT + _RESTORE_TIMEOUT_MARGIN_S))
+        logger.warning(message)
+        _emit_critical_to_file_handler(message)
+        return False
     except Exception as e:
-        # Transport/timeout: the restore did not happen. The reason is the exception, and
-        # the caller will warn that the label was cleared — so this must name the failure.
-        logger.warning('State restore failed for label=%s: %s: %s', label, type(e).__name__, e)
+        # Transport/timeout: the restore did not happen. The reason is the exception, and the
+        # caller will warn that the label was cleared — so this must name the failure.
+        _warn_restore_failure(label, e)
         return False
 
 
