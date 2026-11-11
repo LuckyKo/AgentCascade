@@ -78,6 +78,12 @@ _PRIORITY_CANDIDATE = 4  # Upgrade candidates (agents/global/candidates/) — st
 # Candidate storage: stable name-keyed dirs under agents/global/candidates/<name>/SKILL.md.
 _CANDIDATES_DIR = Path('agents/global/candidates')
 
+# Default durable skill-metrics store, relative to the process CWD (the repo root in
+# production). AGENT_CASCADE_SKILLS_METRICS_FILE overrides it — tests point it at a per-test
+# temp path so a pool built during a test can never flush onto the live store; unset or
+# empty means "use the default".
+_DEFAULT_METRICS_FILE = Path('agents/global/skills-metrics.json')
+
 # Retries for deleting a candidate dir (Windows file-lock scenarios).
 _CANDIDATE_DIR_RETRIES = 3
 
@@ -86,12 +92,25 @@ _CANDIDATE_DIR_RETRIES = 3
 _EMPTY_VERSION_RATING = {'count': 0, 'sum': 0.0, 'latest': None}
 
 
+def _tmp_sibling(dst: Path) -> Path:
+    """Unique sibling temp path for an atomic replace onto ``dst``.
+
+    The name MUST be unique per writer (pid + random suffix). A fixed ``<name>.tmp`` is
+    shared by every process writing the same target, so two concurrent writers interleave:
+    the first ``os.replace`` consumes the temp file and the second raises ENOENT
+    (WinError 2) — the metrics store is written by both the server and any test/CLI process
+    that constructs a SkillManager. Keeping the temp file in the target's own directory is
+    what makes ``os.replace`` atomic (same volume).
+    """
+    return dst.with_name(f'{dst.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp')
+
+
 def _atomic_write_text(dst: Path, content: str) -> None:
-    """Atomically write ``content`` to ``dst`` via a sibling .tmp + os.replace.
+    """Atomically write ``content`` to ``dst`` via a unique sibling .tmp + os.replace.
 
     NOT a plain rename: os.replace is Windows-safe when the target already exists.
     """
-    tmp_out = dst.with_suffix('.tmp')
+    tmp_out = _tmp_sibling(dst)
     tmp_out.write_text(content, encoding='utf-8')
     _os.replace(str(tmp_out), str(dst))
 
@@ -236,7 +255,8 @@ class SkillManager:
         self._servable_index: Dict[str, Tuple[Path, dict]] = {}  # lower_name -> (SKILL.md Path, parsed)
 
         # Metrics infrastructure (batched activation tracking)
-        self._metrics_file = Path('agents/global/skills-metrics.json')
+        self._metrics_file = Path(_os.getenv('AGENT_CASCADE_SKILLS_METRICS_FILE')
+                                  or _DEFAULT_METRICS_FILE)
         self._metrics: Dict[str, Dict[str, Any]] = {}  # skill_name -> {total_loads, by_version}
         self._metrics_lock = threading.Lock()
         self._pending_flush_count = 0  # tracks buffered increments
@@ -288,12 +308,17 @@ class SkillManager:
         Uses fcntl.flock on POSIX for multi-process safety. On Windows, flock is a
         no-op — we accept the limitation and rely on os.replace() atomicity.
         Metrics are best-effort in multi-process scenarios.
+
+        The temp file is uniquely named per writer (see ``_tmp_sibling``): the store is
+        shared by the server, CLI and test processes, and a fixed temp name makes two
+        concurrent flushes collide (the loser's ``os.replace`` fails with ENOENT).
         """
+        tmp_path = None
         try:
             # Ensure parent directory exists before writing
             self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
-            tmp_path = self._metrics_file.with_suffix('.tmp')
+            tmp_path = _tmp_sibling(self._metrics_file)
             # Snapshot under lock (deep copy: nested per-skill dicts are shared with live state).
             # The tree is small JSON; copying is far cheaper than risking a torn write.
             with self._metrics_lock:
@@ -342,9 +367,10 @@ class SkillManager:
                     backoff *= 2
         except Exception as e:
             logger.debug('[SKILLS] Failed to flush metrics to disk (best-effort, self-heals): %s', e)
-            # Clean up orphaned temp file if it exists
+            # Clean up this writer's temp file (never a shared name, so only ours can leak).
             try:
-                tmp_path.unlink(missing_ok=True)
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -2119,7 +2145,7 @@ class SkillManager:
                     # while production_root may be overridden to another drive in tests — a
                     # cross-drive rename raises WinError 17. Copying via a same-dir temp file
                     # is Windows-safe and matches the candidate-flow write path.
-                    tmp_out = target_file.with_suffix('.tmp')
+                    tmp_out = _tmp_sibling(target_file)
                     tmp_out.write_text(pending_file.read_text(encoding='utf-8'), encoding='utf-8')
                     _os.replace(str(tmp_out), str(target_file))
                     self._skills_registry[name]['file_path'] = str(target_file)

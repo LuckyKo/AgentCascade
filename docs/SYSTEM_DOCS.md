@@ -1398,7 +1398,7 @@ where `u` = saturating usage (`n`=loads), `q̂` = shrinkage quality vs the neutr
 
 ### 10.5 Durable Metrics Store (`agents/global/skills-metrics.json`)
 
-A **durable, cross-restart per-skill clock** — not a per-session counter (`manager.py:239`, schema 1.3, `_default_metrics_entry` at `manager.py:116`). This persistence is what makes invalidation correct: usage/recency survives restarts and session boundaries, so a skill loaded once across many sessions isn't mistaken for fresh.
+A **durable, cross-restart per-skill clock** — not a per-session counter (`manager.py:258`, schema 1.3, `_default_metrics_entry` at `manager.py:135`). This persistence is what makes invalidation correct: usage/recency survives restarts and session boundaries, so a skill loaded once across many sessions isn't mistaken for fresh.
 
 | Field | Meaning |
 |-------|---------|
@@ -1408,6 +1408,8 @@ A **durable, cross-restart per-skill clock** — not a per-session counter (`man
 | `last_activity_turn` | Global-turn value at the skill's last activity (for the recency age `A`) |
 | `by_version` | Per-version rating history (avg rating + `last_used`), schema 1.2 |
 | *(top-level)* `global_activity_turns` | Cumulative user-turn clock bumped once per user turn; drives `A` for every skill |
+
+**Store path and write safety.** The path is `AGENT_CASCADE_SKILLS_METRICS_FILE` (env) or the CWD-relative default `agents/global/skills-metrics.json`; empty/unset = default (`_DEFAULT_METRICS_FILE`, `manager.py:85`). Every flush writes a **uniquely named** sibling temp (`_tmp_sibling`, `manager.py:95`: `<name>.<pid>.<rand>.tmp`) and `os.replace`s it over the target, so the server, a CLI and a test process can flush the same store concurrently without consuming each other's temp file. Because the default is CWD-relative and `AgentPool` builds a `SkillManager` on construction, tests redirect the path to a per-test temp file (autouse `_isolate_skill_metrics_store` in `tests/conftest.py`) — a test-constructed pool can never write the live store.
 
 ### 10.6 Precision Demotion (in the hint gate)
 
@@ -1425,6 +1427,7 @@ Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` trig
 | `SKILL_PRECISION_WEIGHT` | `1` | Enable the hint re-rank (§10.6); `0` = off (`settings.py:762`). |
 | `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.35` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:766,770`). |
 | `CANDIDATE_MIN_RATINGS` / `CANDIDATE_MAX_PENDING_DAYS` | `5` / `14` | Decision-gate bar for promoting/discarding an update candidate (`settings.py:921-928`). |
+| `AGENT_CASCADE_SKILLS_METRICS_FILE` | `agents/global/skills-metrics.json` | Env override for the durable metrics store path; empty/unset = default. The test suite points it at a per-test temp file so the live store is never written. |
 
 Scoring internals (`q0`, `kq`, `n_half`, `g_half`, `r_floor`, `tau_turns`, `δq`, `n_min`, `fair_window_turns`) are module constants in `skills/scoring.py` / `manager.py`, not user settings.
 

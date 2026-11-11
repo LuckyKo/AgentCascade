@@ -9,6 +9,7 @@ Ollama without external API keys when a server is available, and skip cleanly
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +44,15 @@ os.environ['AGENT_CASCADE_INSTANCE_ID'] = _derive_test_instance_id()
 # an opt-out override read by agent_cascade/tools/custom/shell_cmd.py; it does
 # NOT change production defaults (which still honor the pool toggle).
 os.environ['AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW'] = '1'
+
+# Skill metrics store: SkillManager defaults to the CWD-relative
+# agents/global/skills-metrics.json — the LIVE store (agent_cascade/skills/manager.py,
+# AGENT_CASCADE_SKILLS_METRICS_FILE). AgentPool builds a manager on construction and flushes it
+# on stop, so a test process (or a pool built at IMPORT time, before any fixture runs) would
+# overwrite production ratings/load counters. Point every manager at a per-process temp file here;
+# the autouse _isolate_skill_metrics_store fixture narrows it to a per-test file.
+os.environ['AGENT_CASCADE_SKILLS_METRICS_FILE'] = str(
+    Path(tempfile.gettempdir()) / f'agent_cascade_{_derive_test_instance_id()}' / 'skills-metrics.json')
 
 # Ensure the project root is on sys.path so top-level packages like `config`
 # are importable in xdist workers (which don't inherit CWD from the launcher).
@@ -890,6 +900,23 @@ def make_hermetic_skill_manager(tmp_path):
 def hermetic_skill_manager(tmp_path):
     """Fixture wrapper around :func:`make_hermetic_skill_manager` for tests that take a manager."""
     return make_hermetic_skill_manager(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_metrics_store(tmp_path, monkeypatch):
+    """Point every SkillManager built during a test at a per-test metrics store.
+
+    ``SkillManager.__init__`` defaults its store to the CWD-relative
+    ``agents/global/skills-metrics.json``, ``AgentPool.__init__`` builds one (pool/core.py:260)
+    and ``pool.stopped = True`` flushes it (pool/core.py:446). Tests therefore wrote the LIVE
+    store: a test-only or empty snapshot could replace the production ratings/load counters
+    whenever the suite ran (BUG_0286). The env override keeps every pool/discovery test
+    behaving exactly as before while making the metrics path a throwaway temp file. Tests that
+    need a specific store still assign ``manager._metrics_file`` explicitly — that always wins.
+    """
+    monkeypatch.setenv('AGENT_CASCADE_SKILLS_METRICS_FILE',
+                       str(tmp_path / 'agents' / 'global' / 'skills-metrics.json'))
+    yield
 
 
 # ---------------------------------------------------------------------------

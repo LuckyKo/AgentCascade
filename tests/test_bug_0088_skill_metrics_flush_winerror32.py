@@ -87,5 +87,7 @@ def test_persistent_lock_degrades_to_debug(hermetic_skill_manager, caplog):
         f'expected DEBUG only, got: {[(r.levelname, r.getMessage()) for r in debug_lines]}'
 
     # Orphaned temp file removed; no final metrics file (replace never succeeded).
-    tmp = m._metrics_file.with_suffix('.tmp')
-    assert not tmp.exists(), 'orphaned .tmp must be cleaned up'
+    # The temp name is unique per writer now (_tmp_sibling), so assert no stray *.tmp
+    # siblings were left in the target directory rather than guessing the exact name.
+    strays = list(m._metrics_file.parent.glob('*.tmp'))
+    assert not strays, f'orphaned .tmp must be cleaned up, found: {[p.name for p in strays]}'
