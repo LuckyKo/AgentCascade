@@ -81,13 +81,25 @@ last_validated: <date>
 
 Each leaf gets `hub: <cluster-slug>` in frontmatter (additive; body untouched). The hint render path appends ` (hub: #<slug>)` to the hinted leaf's line. **Leaves are never suppressed** — hubs are additive index files.
 
-### AFK procedure (idempotent)
+### AFK procedure (idempotent, incremental)
 
+**Step 0 — Delta audit (do this FIRST, before any writes):**
+1. Count existing state: `glob('*-hub.md')` per vault = hub count; grep `^hub:` per vault = tagged-leaf count; grep `^status:\s*(superseded|archived)` = de-indexed count.
+2. Compare against the last `clusters.json` (in `logs/`). New files since last run = files on disk not in the previous `clusters.json`. If zero new files and zero new `related:` edges, **skip the run** — report "no delta, nothing to do" and stop.
+3. If there IS a delta (new files, new backlinks, new clusters), proceed to Step 1.
+
+**Step 1 — Execute (only the delta):**
 1. **Snapshot** the vault dir to a dated backup before any write.
-2. Run clustering → emit `clusters.json` (slug → leaf list). Deterministic.
-3. For each new cluster (no existing `<slug>-hub.md`): spawn a sub-agent with the cluster's leaf bodies, ask for the hub template. Write with `write_file`.
-4. Set `hub: <cluster-slug>` in each leaf's frontmatter (only if absent — idempotent).
-5. Update `last_validated:` on every hub.
+2. Run clustering → emit updated `clusters.json` (slug → leaf list). Deterministic.
+3. For each **new** cluster (no existing `<slug>-hub.md`): spawn a sub-agent with the cluster's leaf bodies, ask for the hub template. Write with `write_file`.
+4. Set `hub: <cluster-slug>` in each **new** leaf's frontmatter (only if absent — idempotent).
+5. Update `last_validated:` on **all** hubs (cheap touch).
+6. Run smart-action triage on **new** multi-member clusters only (supersede/merge/archive).
+
+**Verification (always, even on skip):**
+- Spot-check 3 random leaves: `hub:` field present and matches a real hub file.
+- Spot-check 1 hub file: leaf list matches the actual files on disk.
+- Confirm `status: superseded` files are excluded by `_is_deindexed()` (run 1 memory_hint test).
 
 Re-run finds existing hubs, updates only `last_validated`, adds no duplicate links.
 
