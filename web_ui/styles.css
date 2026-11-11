@@ -550,12 +550,12 @@ body {
 /* State-based colors for the pulse indicator */
 .main-tab.state-running .sub-tab-pulse {
   background: #58a6ff;         /* Blue for RUNNING - currently processing/calling LLM */
-  box-shadow: none;            /* BUG_0212: no per-frame shadow re-raster on the scaled animated dot; glow is on the parent (drop-shadow, ~L574) */
+  box-shadow: none;            /* no per-frame shadow re-raster on the scaled animated dot; the active-tab glow lives on the static icon, never an ancestor */
 }
 
 .main-tab.state-sleeping .sub-tab-pulse {
   background: #d29922;         /* Orange for SLEEPING - waiting for async tools to complete */
-  box-shadow: none;            /* BUG_0212: same — keeps the pulse a cheap composited opacity+scale, no re-raster */
+  box-shadow: none;            /* same — keeps the pulse a cheap composited opacity+scale, no re-raster */
 }
 
 .main-tab.state-idle .sub-tab-pulse,
@@ -569,8 +569,10 @@ body {
   opacity: 0.2;
 }
 
-/* Move glow effect to parent to avoid GPU filter compositing on animated element */
-.main-tab-bar .main-tab.agent-active .tab-icon-container {
+/* Active-tab glow lives on the STATIC icon glyph, never on an ancestor of the
+   per-frame-animated .sub-tab-pulse dot: a filter on an ancestor is re-rasterized
+   every frame the dot scales, while on the static emoji it is computed once. */
+.main-tab-bar .main-tab.agent-active .main-tab-icon {
   filter: drop-shadow(0 0 6px var(--accent));
 }
 
