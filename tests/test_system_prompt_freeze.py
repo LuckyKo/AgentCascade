@@ -12,6 +12,7 @@ Expected pre-fix failures: T1, T2, T4, T5, T6, T8, T10, T11, T12 (9 of 12).
 T3, T7, T13 are regression pins that pass pre-fix.
 """
 
+import logging
 import time
 import threading
 from unittest.mock import MagicMock, patch
@@ -22,6 +23,7 @@ from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.lifecycle_manager import (
     AgentLifecycleManager,
     _inject_metadata_into_message,
+    logger as _lm_logger,  # the exact emitting logger object, for caplog targeting
 )
 
 
@@ -626,4 +628,55 @@ class TestSelfAugInjectionOnFrozenInstance:
         )
         assert inst.conversation[0].content == before, (
             'conversation[0] was mutated by self-aug injection on frozen instance'
+        )
+
+
+# ──────────────────────────────────────────────
+# BUG_0290 — frozen-prompt metadata skip is expected: DEBUG, not WARNING
+# ──────────────────────────────────────────────
+
+
+class TestFrozenMetadataSkipLogLevel:
+
+    def test_frozen_skip_emits_no_warning(self, caplog):
+        """The designed frozen-prompt skip must not pollute the WARNING channel.
+
+        A live instance with a frozen system prompt legitimately skips metadata
+        injection (the heading was already absent — no new degradation), so the
+        line is expected-path and logs at DEBUG. Guard behaviour (skip without
+        mutating conversation[0]) is unchanged; only the level moved.
+        """
+        inst = _make_instance()
+        pool = _make_pool(config_version=0)
+        # Heading-free content so the (unfrozen) path WOULD have injected, proving
+        # the skip is what suppressed it rather than an idempotency no-op.
+        sys_msg = Message(role=SYSTEM, content='You are worker1.\n\n# Role\nNo heading here.')
+        inst._system_prompt_frozen = True  # exercise the guard branch directly
+
+        # Target the exact emitting object lifecycle_manager logs through; set its
+        # level so the DEBUG record is actually created (shared module logger).
+        with caplog.at_level(logging.DEBUG, logger=_lm_logger.name):
+            _inject_metadata_into_message(sys_msg, pool, inst)
+
+        skip = [r for r in caplog.records if '[SYS_PROMPT_FROZEN]' in r.getMessage()]
+        assert skip, 'expected the frozen-skip line to still be emitted (now at DEBUG)'
+        assert all(r.levelno < logging.WARNING for r in skip), (
+            'frozen-skip must not reach the WARNING channel; got '
+            f'{[(r.levelno, r.getMessage()) for r in skip]}'
+        )
+        # Skip behaviour preserved: no metadata injected into the frozen prompt.
+        assert '## Session Metadata' not in sys_msg.content
+
+    def test_unfrozen_instance_still_gets_metadata_block(self):
+        """No-regression pin: an unfrozen instance still receives the Session
+        Metadata block (the downgrade must not change the injection path)."""
+        inst = _make_instance()
+        pool = _make_pool(config_version=0)
+        sys_msg = Message(role=SYSTEM, content='You are worker1.\n\n# Role\nNo heading here.')
+        assert not getattr(inst, '_system_prompt_frozen', False)
+
+        _inject_metadata_into_message(sys_msg, pool, inst)
+
+        assert '## Session Metadata' in sys_msg.content, (
+            'unfrozen injection regressed: Session Metadata block not injected'
         )

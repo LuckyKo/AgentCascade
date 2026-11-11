@@ -151,7 +151,7 @@ def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance:
     # atomic unit against a concurrent freeze_system_prompt().
     with instance._compression_lock:
         if getattr(instance, '_system_prompt_frozen', False):
-            logger.warning(
+            logger.debug(
                 '[SYS_PROMPT_FROZEN] metadata injection skipped on live %s', instance.instance_name)
             return
 
