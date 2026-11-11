@@ -256,6 +256,9 @@ class WsMessageHandler:
         from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
 
         transitioned = 0
+        # Instances we force-transition to IDLE here. Their in-flight telemetry turn
+        # must be closed below (BUG_0287) — record the names as we go.
+        closed_turn_instances = []
         for inst_name, instance in list(agent_pool.instances.items()):
             try:
                 agent_pool._mark_activity(inst_name)
@@ -265,6 +268,7 @@ class WsMessageHandler:
                     if current_state in ACTIVE_STATES:
                         instance._transition(AgentState.IDLE)
                         transitioned += 1
+                        closed_turn_instances.append(inst_name)
                         logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
 
                 # Clear any pending continue merge state on stop
@@ -279,6 +283,20 @@ class WsMessageHandler:
 
         # Halt threads, release slots, and unblock pending approvals
         agent_pool.stop_session()
+
+        # BUG_0287: Stop transitions agents to IDLE directly in this handler and
+        # bypasses the engine's _run_finalize (engine/run_loop.py) — the only other
+        # record_turn_end call site. Without this, the stopped turn stays open in
+        # TelemetryManager._active_turns and the next record_turn_start discards it
+        # (losing its duration and LLM/tool attribution). record_turn_end pops and
+        # no-ops on a missing turn, so this is idempotent even if the engine's own
+        # finalize also runs.
+        if (tel := getattr(agent_pool, 'telemetry', None)) is not None:
+            for name in closed_turn_instances:
+                try:
+                    tel.record_turn_end(name)
+                except Exception as e:
+                    logger.warning(f"[STOP_TEL] record_turn_end failed for {name}: {e}")
 
         # Increment run generation AFTER slot release
         agent_pool._run_generation += 1
