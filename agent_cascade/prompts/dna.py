@@ -17,7 +17,7 @@ AVAILABLE_TOOLS: List[str] = [
 
     # Read-only file ops
     'read_file',  # Read file contents
-    'view_image',  # View image files
+    # 'view_image',  # View image files - DEPRECATED
     'view_media',  # View image/audio/video with crop/slice/extract
     'list_dir',  # List directory contents
     'grep',  # Search for text patterns in files
@@ -453,7 +453,7 @@ TOOL_METADATA = {
                         '"time_range" trims an audio/video file to a [start,end] slice; '
                         '"frame_at" extracts one video frame as an image; '
                         '"audio_track" extracts a video\'s audio track as a 16 kHz mono WAV. '
-                        'A plain view needs no ffmpeg; the slice/frame/track operations require ffmpeg on PATH.'),
+                        'Provides text captions to any media type that the model can\'t support. '),
         'parameters': {
             'path':
                 'Media file path, absolute or relative to the workspace root, an http(s) media URL, or a capture directive. Special directives: "__screen_capture" for full screen capture (all monitors); "__screen_capture:N" to capture physical monitor N by 0-based index; "__window_capture:PID" to capture a specific window by its process ID (images only).',

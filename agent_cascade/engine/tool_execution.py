@@ -18,8 +18,33 @@ from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
-from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS
+from agent_cascade.settings import (DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
+                                    UNTRUSTED_TOOL_OUTPUT_TAG, UNTRUSTED_TOOL_OUTPUT_WRAPPER)
 from agent_cascade.utils.pool_validation import validate_message_pool
+
+
+# Tools whose STRING output is attacker-controllable (file/web/log/shell/code reads).
+# v1 allowlist. Excluded: view_media/view_image (multimodal), list_dir (filenames
+# only), calculate (pure arithmetic), call_agent (inter-agent), and every editor tool.
+_UNTRUSTED_TOOLS: frozenset[str] = frozenset({
+    'read_file', 'grep', 'web_extractor', 'read_logs', 'shell_cmd', 'code_interpreter',
+})
+
+
+def _wrap_untrusted(tool_name: str, result):
+    """Wrap a tool result in trust-boundary delimiters for the LLM-facing function
+    message (OWASP LLM01). Returns result unchanged when the feature flag is off, the
+    tool is not in the untrusted allowlist, or the result is not a string (multimodal
+    / structured output). Reads UNTRUSTED_TOOL_OUTPUT_WRAPPER as a module global so
+    tests can toggle it via monkeypatch on this module.
+    """
+    if not UNTRUSTED_TOOL_OUTPUT_WRAPPER:
+        return result
+    if tool_name not in _UNTRUSTED_TOOLS:
+        return result
+    if not isinstance(result, str):
+        return result
+    return f'<{UNTRUSTED_TOOL_OUTPUT_TAG}>\n{result}\n</{UNTRUSTED_TOOL_OUTPUT_TAG}>'
 
 
 class ToolExecMixin:
@@ -291,10 +316,16 @@ class ToolExecMixin:
                     # Build function result message — include function_id and
                     # tool_success per OpenAI spec
                 # function_id was extracted BEFORE _execute_tool call above
+                # Trust-boundary wrap (OWASP LLM01): _wrap_untrusted wraps the
+                # already-post-processed result — truncation/warnings are applied first
+                # by _postprocess_tool_result, so the delimiters add ~40 chars over
+                # DEFAULT_TOOL_RESULT_MAX_CHARS. The same fn_msg reaches conv, the JSONL
+                # log, and the UI response stream, so with the flag ON the <tag> markers
+                # are visible to the user by design (explicit data framing).
                 fn_msg = Message(
                     role=FUNCTION,
                     name=tool_name,
-                    content=tool_result,
+                    content=_wrap_untrusted(tool_name, tool_result),
                     extra={
                         'function_id': function_id or '1',
                         'tool_success': _tool_success,

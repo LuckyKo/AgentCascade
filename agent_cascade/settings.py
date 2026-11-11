@@ -129,6 +129,25 @@ REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('AGENT_CASCADE_REASONING_O
 # enabled later without re-architecting.
 SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '0') == '1'
 
+# Trust boundary (OWASP LLM01, indirect prompt injection): when ON, untrusted tool
+# outputs are wrapped in <tag> delimiters and a standing system-prompt line tells the
+# model to treat delimited content as data, never instructions. Default OFF — no
+# behavior change unless AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT=1.
+UNTRUSTED_TOOL_OUTPUT_WRAPPER: bool = os.getenv('AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT', '0') == '1'
+# Single source of truth for the trust-boundary delimiter tag, shared by the
+# tool-output wrapper (engine/tool_execution.py) and the system-prompt line
+# (engine/turn_setup.py).
+UNTRUSTED_TOOL_OUTPUT_TAG: str = 'untrusted_tool_output'
+
+# ── Memory vault write screen (OWASP LLM01, persistent indirect prompt injection) ──
+# Screen writes into .agent_lessons/ and admin_suggestion_box/ for instruction-injection
+# patterns before they hit disk. This is the only PERSISTENT injection vector in AC — a
+# poisoned vault note is re-loaded as context by every future agent. Default ON: it rejects
+# only obviously malicious directives (pattern list + zero-false-positive validation live in
+# _INJECTION_PATTERNS in operation_manager/file_operations.py). Disable with
+# AGENT_CASCADE_MEMORY_VAULT_WRITE_SCREEN=0.
+MEMORY_VAULT_WRITE_SCREEN: bool = os.getenv('AGENT_CASCADE_MEMORY_VAULT_WRITE_SCREEN', '1') == '1'
+
 
 def _resolve_default_workspace() -> str:
     """Resolve DEFAULT_WORKSPACE at import time.
