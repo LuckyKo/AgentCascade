@@ -260,6 +260,15 @@ class SystemInfo(BaseTool):
                 lines.append('')
                 lines.append(autoload)
 
+            # ── Code interpreter hangs ── (BUG_0289 observability)
+            # Code-interpreter hangs by reason (timeout / watchdog / iopub_stall) from the
+            # code_interpreter tool's module-level counter. Read-only; omitted entirely if
+            # unavailable, so it can never blank the surrounding dump.
+            hangs = self._render_code_interp_hangs()
+            if hangs:
+                lines.append('')
+                lines.append(hangs)
+
             lines.append('')
             lines.append('(Raw JSONL export: GET /api/telemetry/export)')
             return '\n'.join(lines)
@@ -336,6 +345,32 @@ class SystemInfo(BaseTool):
                               sorted(skill_autoload_failed_by_reason.items())))
         except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
             logger.debug(f"system_info skill autoload failures render failed: {e}")
+            return ''
+
+    def _render_code_interp_hangs(self) -> str:
+        """Render code-interpreter hang counts by reason (BUG_0289 observability).
+
+        Reads the module-level ``code_interp_hung_by_reason`` dict from
+        ``agent_cascade.tools.code_interpreter`` — the counter the timeout/watchdog paths
+        increment when a kernel times out or is watchdog-killed, so operators can read it
+        from ``system_info`` / ``/api/telemetry`` instead of server stderr. Read-only: this
+        never touches the counter or the kernel code path.
+
+        Renders every reason key present in the counter, sorted for stable output, so a
+        reason added to the dict surfaces automatically instead of being silently hidden.
+        Always shown — a flat run of zeros is itself the healthy signal — so the only way
+        the section is omitted is a read/import failure. Mirrors
+        `_render_skill_autoload_failures`: lazy import and a local try/except returning ''
+        so a code-interpreter problem can never blank the surrounding dump.
+        """
+        try:
+            from agent_cascade.tools.code_interpreter import code_interp_hung_by_reason
+            return ('Code interpreter hangs by reason:\n  ' +
+                    '  '.join(f'{reason}={count}'
+                              for reason, count in
+                              sorted(code_interp_hung_by_reason.items())))
+        except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
+            logger.debug(f"system_info code-interpreter hangs render failed: {e}")
             return ''
 
     def _render_help(self, key: str) -> str:

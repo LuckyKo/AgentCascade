@@ -196,6 +196,18 @@ _WATCHDOG_KILLED: set = set()
 # Value format: {'container_id': str, 'timestamp': float} — timestamp enables TTL cleanup.
 _STALE_CONTAINERS: Dict[str, dict] = {}
 
+# BUG_0289: cumulative code-interpreter hang counts by reason, surfaced via system_info
+# telemetry so operators can answer "is the kernel hung or just slow?" without a
+# post-hoc container. Keys are a fixed schema; ``iopub_stall`` intentionally stays 0 in
+# this observability-only pass — the watchdog cannot distinguish an IOPub-stalled kernel
+# from a generically idle one, so every unresponsive kill is recorded under ``watchdog``
+# (see _kernel_watchdog). Increment only via _record_code_interp_hang.
+code_interp_hung_by_reason: Dict[str, int] = {
+    'timeout': 0, 'watchdog': 0, 'iopub_stall': 0,
+}
+# Guards increments: the watchdog thread and an in-flight call thread share this dict.
+_HUNG_COUNTER_LOCK = threading.Lock()
+
 # TTL for stale containers in seconds (10 minutes)
 STALE_CONTAINER_TTL = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '600'))
 
@@ -404,6 +416,102 @@ if threading.current_thread() is threading.main_thread():
 _WATCHDOG_TERMINATE = threading.Event()
 
 
+def _code_fingerprint(code: str, max_len: int = 60) -> str:
+    """Short, log-safe fingerprint of submitted code for hang triage (BUG_0289).
+
+    First line (truncated to ``max_len``) plus an 8-char hash of the full payload, so a
+    triage reader can spot *which* snippet a stuck kernel was running without dumping the
+    whole cell into server logs. Never raises.
+    """
+    try:
+        first = (code.splitlines()[0] if code else '').strip()
+        if len(first) > max_len:
+            first = first[:max_len]
+        digest = hashlib.sha1((code or '').encode('utf-8', 'replace')).hexdigest()[:8]
+        return f'{first}…[{digest}]' if first else f'<empty>…[{digest}]'
+    except Exception as e:  # noqa: BLE001 — observability must never break the caller
+        return f'<unfingerprintable: {e}>'
+
+
+def _record_kernel_touch(kernel_id: str, session_name: str, code: str) -> None:
+    """Record who last submitted code to a kernel and what that code was (BUG_0289).
+
+    Called at the code-submission point in ``CodeInterpreter.call``. Stored on the existing
+    ``_KERNEL_ACTIVITY`` entry so the watchdog and the timeout handler can report *why* a
+    kernel went idle. Updates in place only when the entry already exists (it is created at
+    kernel start with the required ``last_active`` key), so we never create a partial record
+    the watchdog would choke on. Never raises.
+    """
+    try:
+        fp = _code_fingerprint(code)
+        with _KERNEL_LOCK:
+            act = _KERNEL_ACTIVITY.get(kernel_id)
+            if isinstance(act, dict):
+                act['last_touched_by'] = session_name
+                act['last_code_fingerprint'] = fp
+    except Exception as e:  # noqa: BLE001 — observability must never break the caller
+        logger.debug(f"record kernel touch for {kernel_id} failed: {e}")
+
+
+def _record_code_interp_hang(reason: str) -> None:
+    """Increment the hung-by-reason counter (BUG_0289).
+
+    Lock-guarded so the watchdog thread and an in-flight call thread can't lose increments
+    on the same key. A reason not in the fixed schema still gets a key so a future reason is
+    not silently dropped — the system_info render iterates the live dict.
+    """
+    with _HUNG_COUNTER_LOCK:
+        code_interp_hung_by_reason[reason] = code_interp_hung_by_reason.get(reason, 0) + 1
+
+
+def _kernel_triage(kernel_id: str) -> dict:
+    """Snapshot triage context for a kernel from ``_KERNEL_ACTIVITY`` (BUG_0289).
+
+    Returns ``idle_for_s`` (seconds since ``last_active``), ``last_touched_by`` and
+    ``code_fp``; values default to ``'?'`` when the entry is missing. Never raises.
+    """
+    try:
+        with _KERNEL_LOCK:
+            act = _KERNEL_ACTIVITY.get(kernel_id, {})
+        if not isinstance(act, dict):
+            return {'idle_for_s': '?', 'last_touched_by': '?', 'code_fp': '?'}
+        last_active = act.get('last_active')
+        idle_for_s = round(time.time() - last_active, 1) if last_active else '?'
+        return {
+            'idle_for_s': idle_for_s,
+            'last_touched_by': act.get('last_touched_by', '?'),
+            'code_fp': act.get('last_code_fingerprint', '?'),
+        }
+    except Exception as e:  # noqa: BLE001 — observability must never break the caller
+        logger.debug(f"kernel triage snapshot failed for {kernel_id}: {e}")
+        return {'idle_for_s': '?', 'last_touched_by': '?', 'code_fp': '?'}
+
+
+def _log_timeout_escalation(kernel_id: str, exec_timeout, partial_result: str) -> None:
+    """Emit the enriched timeout WARNING with triage context, then bump the hung-by-reason
+    counter (BUG_0289).
+
+    Split out of ``CodeInterpreter.call``'s ``except TimeoutError`` so the log line is
+    unit-testable without a live kernel (house convention for this module). Pure
+    observability: it changes no threshold, tier, or escalation behavior — the caller
+    still runs the 3-tier recovery unchanged.
+
+    Fields: kernel id, seconds idle, last tool/session that touched the kernel, a short
+    fingerprint of the last submitted code, and the length of the partial output captured
+    before the timeout. The escalation path already has partial output in hand, so it is
+    passed in rather than re-derived.
+    """
+    try:
+        tri = _kernel_triage(kernel_id)
+        logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating... "
+                       f"kernel={kernel_id} idle_for_s={tri['idle_for_s']} "
+                       f"last_touched_by={tri['last_touched_by']} code_fp={tri['code_fp']} "
+                       f"partial_output_len={len(partial_result)}")
+        _record_code_interp_hang('timeout')
+    except Exception as e:  # noqa: BLE001 — observability must never break the caller
+        logger.debug(f"timeout-escalation observability failed for {kernel_id}: {e}")
+
+
 def _kernel_watchdog():
     """Background thread that kills unresponsive kernels.
 
@@ -414,16 +522,27 @@ def _kernel_watchdog():
     while not _WATCHDOG_TERMINATE.is_set():
         _WATCHDOG_TERMINATE.wait(timeout=5)
         now = time.time()
-        stale_kernels: list[tuple] = []  # (kernel_id, timeout_used)
+        stale_kernels: list[tuple] = []  # (kernel_id, wd_timeout, idle_for_s, last_touched_by, code_fp)
         with _KERNEL_LOCK:
             for kernel_id, activity in list(_KERNEL_ACTIVITY.items()):
                 wd_timeout = activity.get('watchdog_timeout', CONTAINER_WATCHDOG_TIMEOUT)
-                if now - activity['last_active'] > wd_timeout:
-                    stale_kernels.append((kernel_id, wd_timeout))
+                idle_for_s = now - activity['last_active']
+                if idle_for_s > wd_timeout:
+                    stale_kernels.append((
+                        kernel_id, wd_timeout, round(idle_for_s, 1),
+                        activity.get('last_touched_by', '?'),
+                        activity.get('last_code_fingerprint', '?'),
+                    ))
 
-        for kernel_id, wd_timeout in stale_kernels:
+        for kernel_id, wd_timeout, idle_for_s, last_touched_by, code_fp in stale_kernels:
+            # BUG_0289 triage context: report the ACTUAL idle duration (not just the
+            # threshold), who last submitted code, and what that code was. partial_output is
+            # not reachable here (it lives in a call's TimeoutError args), so it is omitted.
+            # No stall detection is invented: iopub_stall stays 0, kill is recorded as watchdog.
             logger.warning(f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
-                           f"{wd_timeout}s. Killing container.")
+                           f"{idle_for_s}s (threshold {wd_timeout}s), killing container. "
+                           f"last_touched_by={last_touched_by} code_fp={code_fp}")
+            _record_code_interp_hang('watchdog')
 
             # Mark as watchdog-killed and remove from client/container tracking atomically
             kc_to_shutdown = None
@@ -1171,20 +1290,26 @@ class CodeInterpreter(BaseToolWithFileAccess):
         fixed_code = '\n'.join(fixed_code)
         fixed_code += '\n\n'  # Prevent code not executing in notebook due to no line breaks at the end
 
+        # Record who submitted this code and what it was, so a later timeout/watchdog event
+        # can name the last snippet the kernel was running (BUG_0289).
+        _record_kernel_touch(kernel_id, session_name, code)
+
         try:
             result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id,
                                         iopub_idle_timeout=iopub_idle)
         except TimeoutError as e:
-            # On timeout, escalate through 3 tiers to recover the kernel
-            logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating...")
-
-            interrupted = False
-
             # Collect any partial output accumulated before the timeout
             # The TimeoutError carries partial_output in its args if available
             partial_result = ''
             if e.args and isinstance(e.args[0], dict):
                 partial_result = e.args[0].get('partial_output', '')
+
+            # On timeout, escalate through 3 tiers to recover the kernel.
+            # BUG_0289 triage context (enriched WARNING + hung-by-reason counter); the
+            # 3-tier recovery below is unchanged.
+            _log_timeout_escalation(kernel_id, exec_timeout, partial_result)
+
+            interrupted = False
 
             # Drain constants: prevent resource exhaustion from runaway IOPub message streams
             DRAIN_TOTAL_TIMEOUT = 5.0  # Max seconds spent draining IOPub messages per call
