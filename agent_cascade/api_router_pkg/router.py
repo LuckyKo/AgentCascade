@@ -264,6 +264,9 @@ class APIRouter:
         )  # Agent types with active endpoint priorities (gates Tier 3 last-successful fallback)
         self._lock = threading.Lock()
         self._pool = None  # Set externally by AgentPool when router is attached
+        # BUG_0291 item 4: process-lifetime memo of sanity-probe skip lines already emitted,
+        # keyed by (endpoint, reason) so the redundant per-acquisition DEBUG line logs once per reason.
+        self._sanity_probe_logged: Dict[Tuple[str, str], bool] = {}
 
         # Register with the bypass-path gate so HTTP paths that skip
         # call_with_fallback (context detection, image_gen) can consult our
@@ -2046,6 +2049,21 @@ class APIRouter:
             remaining = br['window'] - (time.monotonic() - br['opened_at'])
             return max(0.0, remaining)
 
+    def _log_sanity_skip(self, endpoint_key, reason_key, msg_fmt, *args):
+        """Emit a '[APIRouter] Skipping sanity probe' DEBUG line only the FIRST time this
+        (endpoint, reason) pair is seen in the process. The reason string is part of the dict
+        key, so a change of reason for the same endpoint naturally re-logs. Collapses the
+        per-acquisition sanity-skip chatter (BUG_0291 item 4); the event stays recoverable —
+        only its repetition is suppressed."""
+        key = (endpoint_key, reason_key)
+        if key in self._sanity_probe_logged:
+            return
+        with self._lock:
+            if key in self._sanity_probe_logged:
+                return
+            self._sanity_probe_logged[key] = True
+        logger.debug(msg_fmt, *args)
+
     # ── Retry + Fallback Execution ───────────────────────────────────────
 
     def call_with_fallback(self,
@@ -2208,8 +2226,10 @@ class APIRouter:
                     continue
 
                 if self._breaker_is_open(_probe_base):
-                    logger.debug(f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                                 f"(server breaker open — leaving to breaker/fallback machinery)")
+                    self._log_sanity_skip(
+                        (_probe_base, llm_cfg.get('model', '')), 'breaker-open',
+                        "[APIRouter] Skipping sanity probe for '%s' @ %s (server breaker open — leaving to breaker/fallback machinery)",
+                        llm_cfg.get('model', ''), _probe_base)
                 else:
                     if _inst_name:
                         with self._lock:
@@ -2231,13 +2251,15 @@ class APIRouter:
                     _shared_held = self._base_actively_held(_probe_key)
 
                     if _is_live and not _blacklisted:
-                        logger.debug(
-                            f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                            f"(instance '{_inst_name}' holds a live connection — fast path)")
+                        self._log_sanity_skip(
+                            (_probe_base, llm_cfg.get('model', '')), 'live-connection',
+                            "[APIRouter] Skipping sanity probe for '%s' @ %s (instance '%s' holds a live connection — fast path)",
+                            llm_cfg.get('model', ''), _probe_base, _inst_name)
                     elif _shared_held and not _blacklisted:
-                        logger.debug(
-                            f"[APIRouter] Skipping sanity probe for '{llm_cfg.get('model', '')}' @ {_probe_base} "
-                            f"(shared-pool holder active — base demonstrably reachable)")
+                        self._log_sanity_skip(
+                            (_probe_base, llm_cfg.get('model', '')), 'shared-pool-holder',
+                            "[APIRouter] Skipping sanity probe for '%s' @ %s (shared-pool holder active — base demonstrably reachable)",
+                            llm_cfg.get('model', ''), _probe_base)
                     elif _blacklisted:
                         logger.debug(f"[APIRouter] Skipping endpoint '{llm_cfg.get('model', '')}' @ {_probe_base} "
                                      f"(blacklisted — no sanity probe)")

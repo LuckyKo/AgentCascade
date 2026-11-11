@@ -585,7 +585,6 @@ class RunLoopMixin:
 
     def _run_preflight(self, instance: AgentInstance) -> None:
         """Prepare run state and generation before entering the guarded loop."""
-        logger.debug('engine.run() ENTRY - instance=%s', instance.instance_name)
         # Every run starts with a clean turn-consumed flag so the first budget
         # consumption of this run counts as exactly one user turn in telemetry.
         # Set BEFORE any early-exit path so a stale flag can never suppress it.
@@ -664,8 +663,6 @@ class RunLoopMixin:
         for the documented early-exit path.
         """
         # ── Phase 1: Setup ─────────────────────────────────────────────
-        logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
-
         # Telemetry: record turn start (non-blocking)
         if (tel := self._telemetry()) is not None:
             try:
@@ -971,10 +968,6 @@ class RunLoopMixin:
                     instance.sleeping_since = time.monotonic()
                 logger.debug('EXIT - %s %s→%s%s', instance.instance_name, current_state.name, target.name,
                              ' [suspension-preserved]' if preserve else '')
-            elif current_state == AgentState.TERMINATED:
-                logger.debug('EXIT - %s already TERMINATED', instance.instance_name)
-            else:
-                logger.debug('EXIT - %s in %s state', instance.instance_name, current_state.name)
 
     def _is_terminal_stop(self, inst_name: str) -> bool:
         """Check if this instance has a TERMINAL stop condition (cannot resume).

@@ -237,8 +237,8 @@ class SkillMatcher:
         else:
             results = results[:_TOP_K]
 
-        logger.debug("[SKILLS] Match query '%s' → %d results (top=%s)", query[:80], len(results),
-                     results[0][0] if results else 'none')
+        logger.debug('[SKILLS] Match query (len=%d) → %d results (top=%s)',
+                     len(query), len(results), results[0][0] if results else 'none')
         return results
 
     def match_with_stats(self, query: str,
@@ -274,7 +274,4 @@ class SkillMatcher:
         tokens = set(_TOKEN_RE.findall((query or '').lower()))
         n_tokens = len(tokens)
         n_in_vocab = sum(1 for kw in tokens if self._idf.get(kw, 0.0) > 0.0)
-        logger.debug('[SKILLS] match_with_stats tokens=%d in_vocab=%d results=%d top=%s',
-                     n_tokens, n_in_vocab, len(results),
-                     results[0][0] if results else 'none')
         return results, n_tokens, n_in_vocab

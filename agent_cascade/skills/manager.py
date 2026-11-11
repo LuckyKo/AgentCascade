@@ -1270,11 +1270,9 @@ class SkillManager:
         # Cache check: TTL first (cheap), then signature (expensive)
         now = time.monotonic()
         if (now - self._cache_timestamp) < self._cache_ttl:
-            logger.debug('[SKILLS] Cache hit — skipping discovery (age=%.1fs)', now - self._cache_timestamp)
             return
         current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
         if current_sig == self._cache_signature:
-            logger.debug('[SKILLS] Cache hit — signature unchanged (age=%.1fs)', now - self._cache_timestamp)
             return
 
         logger.info('[SKILLS] Starting skill discovery across %d paths', len(skill_paths))
