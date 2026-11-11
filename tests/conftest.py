@@ -569,6 +569,140 @@ def _trace_handle_count(request):
 
 
 # ---------------------------------------------------------------------------
+# BUG_0293 — neutralize the per-create_app media-cleanup scheduler thread
+# ---------------------------------------------------------------------------
+# api_server.create_app() calls start_media_cleanup_scheduler() (api_server.py:
+# 2777), which spawns a daemon 'media-cleanup-scheduler' thread that sleeps for
+# interval_hours (6h) and has NO stop signal — it is unreclaimable from outside.
+# create_app() runs once per API-server / E2E test (test_api_endpoints.py has
+# 40+ calls alone), so one thread leaks per test. The BUG_0293 checkpoint
+# histogram shows it jump 0 -> 30 between tests 500 and 1000 (64% of live
+# threads), the direct cause of the serial run hitting `can't start new thread`
+# around test ~3,900. The scheduler only deletes media older than 30 days and no
+# test asserts on it, so it is neutralized for the whole test session: the stub
+# still returns a Thread (the documented return type is preserved, and callers
+# ignore it anyway) but never starts it, so no live thread accumulates. api_server
+# re-resolves the symbol from the module inside create_app, so patching the module
+# attribute covers every caller regardless of fixture ordering. Test-layer only —
+# production behavior is unchanged.
+
+@pytest.fixture(scope='session', autouse=True)
+def _neutralize_media_cleanup_scheduler():
+    """Neutralize the leaked media-cleanup-scheduler daemon thread (BUG_0293)."""
+    import threading as _threading
+    try:
+        import agent_cascade.utils.media_utils as _mu
+    except Exception:
+        yield
+        return
+    original = getattr(_mu, 'start_media_cleanup_scheduler', None)
+    if original is None:
+        yield
+        return
+
+    def _noop_scheduler(*args, **kwargs):
+        # Inert: return an unstarted Thread so the call contract holds, but spawn
+        # no live thread. Daemon threads leak a copy per create_app() otherwise.
+        return _threading.Thread(target=lambda: None,
+                                 name='media-cleanup-scheduler', daemon=True)
+
+    _mu.start_media_cleanup_scheduler = _noop_scheduler
+    try:
+        yield
+    finally:
+        _mu.start_media_cleanup_scheduler = original
+
+
+# ---------------------------------------------------------------------------
+# BUG_0293 — live-thread checkpoint counter + session-end histogram
+# ---------------------------------------------------------------------------
+# Serial (`-n 0`) full-suite runs used to abort at ~3,900 tests with
+# `RuntimeError: can't start new thread` raised from pytest-timeout's
+# `timer.start()`. The process hit the host thread limit because daemon
+# threads from test-spawned services accumulated across the single long-lived
+# process instead of being torn down per test.
+#
+# This hook makes the leak (and any future regression of it) diagnosable from
+# the run log alone, at near-zero cost: we sample `threading.active_count()`
+# plus a top thread-name histogram every 500 tests (a modulo counter — no
+# per-test `enumerate()`), append it to a per-worker checkpoint file, and at
+# session end emit the peak thread count and the dominant thread names. The
+# histogram names the leaking subsystem (e.g. a growing `Thread-N`/`Timer-N`
+# family = uncanceled timers; a named service family = a stopped-lease gap),
+# so the next exhaustion is pinpointed without re-running the whole suite.
+#
+# Written under `_crash_dumps/<worker>_thread_leaks.log` alongside the
+# existing handle-trace output. Best-effort: never raises into the test loop.
+
+try:
+    _THREAD_LEAK_INTERVAL = max(1, int(os.environ.get('AC_THREAD_LEAK_INTERVAL', '500') or '500'))
+except ValueError:  # never raise into the test loop on a bad operator knob
+    _THREAD_LEAK_INTERVAL = 500
+_thread_leak_state = {'count': 0, 'peak': 0}
+
+
+def _thread_leak_log_path() -> Path:
+    worker = os.environ.get('PYTEST_XDIST_WORKER', 'main')
+    return Path(__file__).resolve().parent / '_crash_dumps' / f'{worker}_thread_leaks.log'
+
+
+def _thread_hist_top(limit: int = 12) -> list:
+    """(name, count) pairs for the most common thread names, most frequent first."""
+    from collections import Counter
+    import threading as _threading
+    names = Counter(t.name for t in _threading.enumerate())
+    return names.most_common(limit)
+
+
+def pytest_runtest_logreport(report):
+    """Cheap thread-leak checkpoint: count one per executed test, sample every N."""
+    if report.when != 'call':
+        return
+    state = _thread_leak_state
+    state['count'] += 1
+    if state['count'] % _THREAD_LEAK_INTERVAL:
+        return
+    try:
+        import threading as _threading
+        count = _threading.active_count()
+        state['peak'] = max(state['peak'], count)
+        top = _thread_hist_top()
+        log_path = _thread_leak_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        top_str = ', '.join(f"{name}x{n}" for name, n in top[:8])
+        with open(log_path, 'a', buffering=1) as f:
+            f.write(f"tests={state['count']} live_threads={count} top=[{top_str}]\n")
+    except Exception:
+        pass  # instrumentation must never break a test run
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """One-line thread summary so any run's log carries peak + dominant names."""
+    state = _thread_leak_state
+    if not state['count']:
+        return
+    try:
+        import threading as _threading
+        final_count = _threading.active_count()
+        state['peak'] = max(state['peak'], final_count)
+        top = _thread_hist_top()
+        top_str = ', '.join(f"{name}x{n}" for name, n in top[:5])
+        summary = (f"[thread-leak] executed={state['count']} "
+                   f"peak_threads={state['peak']} final_threads={final_count} "
+                   f"top=[{top_str}]")
+        log_path = _thread_leak_log_path()
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, 'a', buffering=1) as f:
+                f.write(summary + '\n')
+        except Exception:
+            pass
+        print('\n' + summary)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Fixtures: local LLM configuration dicts
 # ---------------------------------------------------------------------------
 
