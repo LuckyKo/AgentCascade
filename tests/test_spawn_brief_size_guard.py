@@ -1,22 +1,34 @@
-"""Regression tests for BUG_0285: spawn brief size warning.
+"""Regression tests for the spawn-brief size guard (two-tier: DEBUG routine band,
+WARNING pathological).
 
 The guard lives in ``AgentLifecycleManager.build_task_message`` (the single point
 where ``context`` and ``task`` are assembled into the sub-agent's first message).
-It is PURE OBSERVABILITY: when the raw ``context`` or ``task`` param passed to
-``call_agent`` exceeds ``_SPAWN_BRIEF_SIZE_WARN`` chars, it logs a ``warning``.
-No truncation, no rejection — the returned Message must be built identically.
+It is PURE OBSERVABILITY: no truncation, no rejection — the returned Message is
+built identically.
 
-These tests pin both directions of that contract:
-  * oversized context / oversized task → warning emitted,
-  * context at/below threshold → no warning,
-  * warning never changes the returned message content.
+The guard is two-tier:
+  * routine band     (``_SPAWN_BRIEF_SIZE_WARN`` < size <= 2x the floor) -> DEBUG,
+  * pathological band (size > 2x ``_SPAWN_BRIEF_SIZE_WARN``)           -> WARNING.
+The routine band covers normal Coder briefs (observed 6-7k), so it stays DEBUG to
+avoid constant WARNING noise, while a genuinely oversized brief (> 2x the floor)
+still escalates to WARNING.
+
+These tests pin both tiers:
+  * at/below the floor            -> no record at all,
+  * in the routine band           -> DEBUG record, no WARNING,
+  * pathological (> 2x floor)     -> WARNING record,
+  * the returned message is never altered (no truncation).
 """
 
 import logging
 
 import pytest
 
-from agent_cascade.lifecycle_manager import AgentLifecycleManager, _SPAWN_BRIEF_SIZE_WARN
+from agent_cascade.lifecycle_manager import (
+    AgentLifecycleManager,
+    _SPAWN_BRIEF_SIZE_WARN,
+    _SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL,
+)
 
 # AC routes its own log records through this named logger; caplog must target it
 # (same convention as the rest of the suite).
@@ -33,47 +45,75 @@ def _mgr():
     return AgentLifecycleManager.__new__(AgentLifecycleManager)
 
 
-def _oversize_warnings(caplog):
+def _records(caplog, levelno):
     return [r for r in caplog.records
-            if r.levelno == logging.WARNING and 'spawn_brief_oversized' in r.getMessage()]
+            if r.levelno == levelno and 'spawn_brief_oversized' in r.getMessage()]
 
 
-def test_oversized_context_triggers_warning(caplog):
-    oversized = 'c' * (_SPAWN_BRIEF_SIZE_WARN + 1)
-    with caplog.at_level(logging.WARNING, logger=_APP_LOGGER):
-        _mgr().build_task_message({'task': 'do it', 'context': oversized}, 'caller')
-    warnings = _oversize_warnings(caplog)
-    assert len(warnings) == 1, f"expected exactly one oversize warning, got {warnings}"
+def _warnings(caplog):
+    return _records(caplog, logging.WARNING)
 
 
-def test_context_at_or_below_threshold_does_not_warn(caplog):
-    # Exactly at the threshold (not >) must stay silent — boundary check.
-    at_threshold = 'c' * _SPAWN_BRIEF_SIZE_WARN
-    with caplog.at_level(logging.WARNING, logger=_APP_LOGGER):
-        _mgr().build_task_message({'task': 'do it', 'context': at_threshold}, 'caller')
-    assert _oversize_warnings(caplog) == []
+def _debugs(caplog):
+    return _records(caplog, logging.DEBUG)
 
 
-def test_oversized_task_triggers_warning(caplog):
-    oversized = 't' * (_SPAWN_BRIEF_SIZE_WARN + 1)
-    with caplog.at_level(logging.WARNING, logger=_APP_LOGGER):
-        _mgr().build_task_message({'task': oversized, 'context': 'short'}, 'caller')
-    assert len(_oversize_warnings(caplog)) == 1
+def test_at_or_below_floor_is_silent(caplog):
+    # Exactly at the floor (not >) must produce no record at all.
+    at_floor = 'c' * _SPAWN_BRIEF_SIZE_WARN
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
+        _mgr().build_task_message({'task': 'do it', 'context': at_floor}, 'caller')
+    assert _warnings(caplog) == []
+    assert _debugs(caplog) == []
 
 
-def test_warning_is_pure_observability_message_unchanged(caplog):
-    """The warning must not truncate or otherwise alter the returned message."""
-    big_context = 'C' * (_SPAWN_BRIEF_SIZE_WARN + 100)
-    big_task = 'T' * (_SPAWN_BRIEF_SIZE_WARN + 200)
+def test_routine_band_logs_debug_not_warning(caplog):
+    # The observed Coder-brief band (floor+1 .. 2x) must be DEBUG, never WARNING.
+    routine = 'c' * (_SPAWN_BRIEF_SIZE_WARN + 1)
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
+        _mgr().build_task_message({'task': 'do it', 'context': routine}, 'caller')
+    assert len(_debugs(caplog)) == 1
+    assert _warnings(caplog) == []
+
+
+def test_routine_band_upper_edge_stays_debug(caplog):
+    # Exactly at the pathological line (not >) must remain DEBUG (boundary check).
+    at_pathological = 'c' * _SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
+        _mgr().build_task_message({'task': 'do it', 'context': at_pathological}, 'caller')
+    assert len(_debugs(caplog)) == 1
+    assert _warnings(caplog) == []
+
+
+def test_pathological_task_triggers_warning(caplog):
+    # A genuinely oversized brief (> 2x the floor) escalates to WARNING.
+    pathological = 't' * (_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL + 1)
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
+        _mgr().build_task_message({'task': pathological, 'context': 'short'}, 'caller')
+    assert len(_warnings(caplog)) == 1
+    assert _debugs(caplog) == []
+
+
+def test_pathological_context_triggers_warning(caplog):
+    pathological = 'c' * (_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL + 1)
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
+        _mgr().build_task_message({'task': 'short', 'context': pathological}, 'caller')
+    assert len(_warnings(caplog)) == 1
+
+
+def test_guard_is_pure_observability_message_unchanged(caplog):
+    """The guard must not truncate or otherwise alter the returned message (any tier)."""
+    big_context = 'C' * (_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL + 100)
+    big_task = 'T' * (_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL + 200)
     args = {'task': big_task, 'context': big_context}
 
-    with caplog.at_level(logging.WARNING, logger=_APP_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=_APP_LOGGER):
         mgr = _mgr()
         first = mgr.build_task_message(dict(args), 'caller')
         second = mgr.build_task_message(dict(args), 'caller')
 
-    # Exactly one warning per call, and none of them may have suppressed content.
-    assert len(_oversize_warnings(caplog)) == 2
+    # One WARNING per call (both pathological), and none may have suppressed content.
+    assert len(_warnings(caplog)) == 2
 
     content = first.content
     # The documented, unmodified wrapper format.
@@ -82,7 +122,7 @@ def test_warning_is_pure_observability_message_unchanged(caplog):
     # No truncation: the raw context and task are present verbatim.
     assert big_context in content
     assert big_task in content
-    # Deterministic: warning introduces no state/mutation, identical calls match.
+    # Deterministic: the guard introduces no state/mutation, identical calls match.
     assert first.content == second.content
 
 

@@ -61,6 +61,10 @@ _STABLE_PREFIX_CONSTANT_LINE = re.compile(r'^\s*-\s*System:\s*AgentCascade\b')
 # param exceeds it (~1.4k tokens). Warn only — no truncation, no rejection, no
 # change to the spawned message.
 _SPAWN_BRIEF_SIZE_WARN = 5400
+# The 5400-char band is routine for Coder briefs (observed 6-7k in `task`), so it
+# logs at DEBUG; only a genuinely pathological brief (> 2x the floor) escalates to
+# WARNING. Warn-only in both tiers — no truncation, no rejection.
+_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL = 2 * _SPAWN_BRIEF_SIZE_WARN
 
 
 class PrefixStabilityError(RuntimeError):
@@ -466,8 +470,18 @@ class AgentLifecycleManager:
         # cost). Measures the raw context/task params as passed to call_agent,
         # BEFORE caller_prefix/budget wrapping below. Warn only — pure
         # observability; the returned message is built identically afterwards.
-        if len(context_text) > _SPAWN_BRIEF_SIZE_WARN or len(task_text) > _SPAWN_BRIEF_SIZE_WARN:
+        # Two-tier signal: the 5400-char band is routine for Coder briefs, so it
+        # logs at DEBUG; only a genuinely pathological brief (> 2x the floor)
+        # escalates to WARNING. Pure observability in both tiers — no truncation.
+        _max_brief = max(len(context_text), len(task_text))
+        if _max_brief > _SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL:
             logger.warning(
+                f"spawn_brief_oversized: context={len(context_text)} chars, "
+                f"task={len(task_text)} chars "
+                f"(pathological threshold {_SPAWN_BRIEF_SIZE_WARN_PATHOLOGICAL})"
+            )
+        elif _max_brief > _SPAWN_BRIEF_SIZE_WARN:
+            logger.debug(
                 f"spawn_brief_oversized: context={len(context_text)} chars, "
                 f"task={len(task_text)} chars (threshold {_SPAWN_BRIEF_SIZE_WARN})"
             )
