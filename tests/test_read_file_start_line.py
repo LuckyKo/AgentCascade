@@ -37,8 +37,9 @@ def big_file():
     """A >200KB, 4051-line file mirroring the BUG_0022 target shape.
 
     Module-scoped: written ONCE (the per-test write was racy under xdist — a worker's
-    unlink could delete another worker's fixture mid-read). Left in place after the
-    module; it is a tiny, name-unique scratch file inside DEFAULT_WORKSPACE.
+    unlink could delete another worker's fixture mid-read) and removed at module
+    teardown. The name is PID-unique, so each xdist worker removes only its OWN file
+    (race-free — the original shared-name clobber is gone).
 
     Padding is sized so a 44-line window stays UNDER the BUG_0246 read_file char trip
     (DEFAULT_READ_FILE_MAX_CHARS=3000): these tests validate start_line/limit windowing,
@@ -48,7 +49,13 @@ def big_file():
     # Unique per xdist worker process so concurrent workers never clobber each other's
     # fixture file mid-read (the shared 'bug22_big.py' name was racy under xdist).
     name = f'bug22_big_{os.getpid()}.py'
-    return _ws_file(name, '\n'.join(lines) + '\n')
+    p = _ws_file(name, '\n'.join(lines) + '\n')
+    yield p
+    # Teardown: this worker's own PID-keyed file — safe to remove (no sibling shares it).
+    try:
+        p.unlink()
+    except OSError:
+        pass
 
 
 def test_offset_alias_reads_requested_window(big_file):
