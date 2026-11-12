@@ -486,14 +486,11 @@ TOOL_METADATA = {
         'description': ('Performs a surgical text replacement within an existing file. '
                         'Always use this instead of write_file for modifying parts of a file, '
                         'as it is safer and preserves the rest of the content. '
-                        'Requires user approval if you do not own the file. '
-                        'Always read the file content before attempting an edit. '
-                        'Note: when you issue several reducible edits (exact/heuristic, '
-                        'single occurrence) to the SAME file in one turn, they are applied '
-                        'together as one atomic change against the file as it stood just before '
-                        'the batch is applied — either all apply or none. So make each edit '
-                        'independent and anchored on the CURRENT file content; if an edit '
-                        'depends on the output of another, send it in a later turn instead.'),
+                        'Requires user approval if you do not own the file. When you issue several reducible edits '
+                        '(exact/heuristic, single occurrence) to the SAME file in one turn, they apply together as one '
+                        'atomic change (all-or-none) against the file as it stood just before the batch — so keep each '
+                        'edit independent and anchored on the current content; if one depends on another\'s output, '
+                        'send it in a later turn. Always read the file content before attempting an edit.'),
         'parameters': {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
