@@ -214,38 +214,44 @@ def _waiter_names(pool_obj):
 
 
 def _capture_slotpool_logs():
-    """Capture DEBUG records from the app logger + package logger into a list."""
-    records = []
-    lock = threading.Lock()
-
-    class _Capture(logging.Handler):
-
-        def emit(self, record):
-            with lock:
-                try:
-                    records.append(record)
-                except Exception:
-                    pass
-
-    handler = _Capture(level=logging.DEBUG)
-    targets = []
-    for name in ('agent_cascade_logger', 'agent_cascade'):
-        lg = logging.getLogger(name)
-        old_level = lg.level
-        lg.setLevel(logging.DEBUG)
-        lg.addHandler(handler)
-        targets.append((lg, old_level))
-    return records, handler, targets
+    """Capture DEBUG records from every app logger (incl. the per-instance child)."""
+    from tests.slot_test_helpers import capture_slotpool_logs
+    return capture_slotpool_logs()
 
 
 def _restore_logs(handler, targets):
-    for lg, old_level in targets:
-        lg.removeHandler(handler)
-        lg.setLevel(old_level)
+    from tests.slot_test_helpers import restore_slotpool_logs
+    restore_slotpool_logs(handler, targets)
 
 
 def _find(records, needle):
     return [r for r in records if needle in (r.getMessage() if hasattr(r, 'getMessage') else str(r))]
+
+
+def test_capture_helper_reaches_per_instance_child_logger(monkeypatch):
+    """BUG_0294: the live emitter after ``init_logging()`` is ``agent_cascade_logger.<id>``.
+
+    That child carries an explicit INFO level, so a capture helper that raises only the
+    ancestors' levels leaves its DEBUG records uncreatable — they never reach any handler
+    and the [SLOTPOOL] assertions below see an empty list.
+    """
+    from agent_cascade import instance_id as _instance_id
+
+    child = logging.getLogger('agent_cascade_logger.bug0294_probe')
+    child.setLevel(logging.INFO)
+    monkeypatch.setattr(_instance_id, 'get_instance_id', lambda: 'bug0294_probe')
+
+    records, handler, targets = _capture_slotpool_logs()
+    try:
+        child.debug('bug0294 child record')
+    finally:
+        _restore_logs(handler, targets)
+
+    assert any('bug0294 child record' in r.getMessage() for r in records), \
+        'capture helper must reach the per-instance child logger'
+    assert sum('bug0294 child record' in r.getMessage() for r in records) == 1, \
+        'a record must be captured once, not once per attached logger (child + ancestors)'
+    assert child.level == logging.INFO, 'capture helper must restore the child level'
 
 
 # ============================================================================

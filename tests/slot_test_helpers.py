@@ -12,6 +12,7 @@ The factories are parameterized so both suites share ONE implementation:
 No LLM or network. Pure test doubles.
 """
 
+import logging
 import threading
 from typing import List, Optional
 from unittest.mock import MagicMock
@@ -103,3 +104,52 @@ def app_logger_names():
     if _id:
         names.append(f'agent_cascade_logger.{_id}')
     return names
+
+
+def capture_slotpool_logs():
+    """Attach a DEBUG capture handler to every app-logger name.
+
+    Returns ``(records, handler, targets)``; pass ``handler``/``targets`` to
+    :func:`restore_slotpool_logs`. The child ``agent_cascade_logger.<id>`` MUST be
+    included: after ``init_logging()`` it is the live emitter and carries an
+    explicit INFO level, so raising only the ancestors' levels makes its DEBUG
+    records uncreatable (they never reach any handler) — see BUG_0294.
+    """
+    records = []
+    lock = threading.Lock()
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.DEBUG)
+            self._seen = set()
+
+        def emit(self, record):
+            with lock:
+                # The same handler is attached to the per-instance child AND its ancestors,
+                # and logging calls each logger's handlers along the propagation chain — so
+                # one record would be appended once per attached logger. Dedupe by identity:
+                # callers assert "exactly one line per transition".
+                if id(record) in self._seen:
+                    return
+                self._seen.add(id(record))
+                try:
+                    records.append(record)
+                except Exception:
+                    pass
+
+    handler = _Capture()
+    targets = []
+    for name in app_logger_names():
+        lg = logging.getLogger(name)
+        old_level = lg.level
+        lg.setLevel(logging.DEBUG)
+        lg.addHandler(handler)
+        targets.append((lg, old_level))
+    return records, handler, targets
+
+
+def restore_slotpool_logs(handler, targets):
+    """Undo :func:`capture_slotpool_logs` (remove the handler, restore levels)."""
+    for lg, old_level in targets:
+        lg.removeHandler(handler)
+        lg.setLevel(old_level)

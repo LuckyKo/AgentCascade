@@ -31,7 +31,6 @@ import os as _os
 _os.environ.setdefault('AGENT_CASCADE_INSTANCE_ID', f"e2e_{_os.getpid()}")
 
 import asyncio
-import logging
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -148,35 +147,13 @@ def _build_real_operation_manager(pool, base_dir):
 
 
 def _capture_logs():
-    records = []
-    lock = threading.Lock()
-
-    class _Capture(logging.Handler):
-
-        def emit(self, record):
-            with lock:
-                try:
-                    records.append(record)
-                except Exception:
-                    pass
-
-    handler = _Capture(level=logging.DEBUG)
-    # The app logger is "agent_cascade_logger" (TOP-LEVEL, NOT under the package).
-    logger_names = ['agent_cascade_logger', 'agent_cascade']
-    targets = []
-    for name in logger_names:
-        lg = logging.getLogger(name)
-        old_level = lg.level
-        lg.setLevel(logging.DEBUG)
-        lg.addHandler(handler)
-        targets.append((lg, old_level))
-    return records, handler, targets
+    from tests.slot_test_helpers import capture_slotpool_logs
+    return capture_slotpool_logs()
 
 
 def _restore_logs(handler, targets):
-    for lg, old_level in targets:
-        lg.removeHandler(handler)
-        lg.setLevel(old_level)
+    from tests.slot_test_helpers import restore_slotpool_logs
+    restore_slotpool_logs(handler, targets)
 
 
 def _find(records, needle):

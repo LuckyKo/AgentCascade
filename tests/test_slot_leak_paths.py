@@ -227,33 +227,14 @@ def _queue_waiter(router, name, timeout=15.0, instance_resolver=None):
 
 
 def _capture_logs():
-    """Capture records from the app logger + package logger into a list."""
-    records = []
-    lock = threading.Lock()
-
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            with lock:
-                try:
-                    records.append(record)
-                except Exception:
-                    pass
-
-    handler = _Capture(level=logging.DEBUG)
-    targets = []
-    for name in ('agent_cascade_logger', 'agent_cascade'):
-        lg = logging.getLogger(name)
-        old_level = lg.level
-        lg.setLevel(logging.DEBUG)
-        lg.addHandler(handler)
-        targets.append((lg, old_level))
-    return records, handler, targets
+    """Capture records from every app logger (incl. the per-instance child)."""
+    from tests.slot_test_helpers import capture_slotpool_logs
+    return capture_slotpool_logs()
 
 
 def _restore_logs(handler, targets):
-    for lg, old_level in targets:
-        lg.removeHandler(handler)
-        lg.setLevel(old_level)
+    from tests.slot_test_helpers import restore_slotpool_logs
+    restore_slotpool_logs(handler, targets)
 
 
 def _find(records, needle):
