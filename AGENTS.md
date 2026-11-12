@@ -83,6 +83,14 @@ actionable — it is read by agents with limited context.
 - When writing tests, never hardcode magic numbers/strings to match expected values;
   import and reference the constants from the code under test (single source of truth,
   keeps tests in sync when the value changes).
+- **Never let a test touch production config.** E2E/integration tests must run under a
+  separate instance (`AGENT_CASCADE_INSTANCE_ID`, conftest sets `test_<pid>`) and a temp
+  config dir. Never read or write the live `config/` (`api_endpoints.json`,
+  `pool_settings.json`, `session_state.json`): reading it sends real LLM traffic to the
+  user's endpoints, writing it destroys their setup. Config files are instance-scoped
+  (`<name>_<instance_id>.json`) and the runtime refuses the live single-instance path under
+  pytest — do not bypass that with an explicit live path or by clearing the instance ID.
+  A manual E2E script against production is a user decision, never a test's default.
 
 ## Operations
 - **Restarting the server:** committed changes and module-level constants are inert
