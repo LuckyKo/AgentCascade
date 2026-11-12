@@ -8,12 +8,31 @@ reorder/swap of the top endpoint is reflected on the next call.
 import sys
 import os
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.api_integration_pkg.state_builder import build_state_from_pool
 from agent_cascade.api_router_pkg.router import APIRouter
 from agent_cascade.api_router_pkg.endpoints import APIEndpoint
+
+
+@pytest.fixture(autouse=True)
+def _isolated_router_config(tmp_path, monkeypatch):
+    """Give each test a private APIRouter config dir so no leaked default_llm_cfg applies (BUG_0292).
+
+    ``APIRouter._load()`` merges a ``default_llm_cfg`` persisted to disk by ANY earlier test
+    over the cfg passed to ``__init__``. ``tests/conftest.py`` sets the session-wide
+    ``AGENT_CASCADE_TEST_CONFIG_DIR``, so every router in the run shares one file: a pool
+    created in ``tests/test_api_endpoints.py`` writes ``model='test_model'`` there, and the
+    empty-chain test below then resolves Tier-4 to that leaked model instead of the template.
+
+    Passing ``config_dir=`` to ``APIRouter`` cannot isolate a test, because the env var takes
+    precedence over the argument (see ``api_router_pkg/router.py``); redirect the env var
+    itself for the duration of each test instead.
+    """
+    monkeypatch.setenv('AGENT_CASCADE_TEST_CONFIG_DIR', str(tmp_path / 'config'))
 
 
 class _FakeLlm:
