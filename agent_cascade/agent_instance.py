@@ -1000,15 +1000,10 @@ class PoolSettings:
     inner_loop_detect_enabled: bool = True  # Enable in-message loop detection during streaming
     loop_min_chars: int = 4000  # Min chars before activating heavy checks
     loop_max_chars: int = 60960  # Hard char limit — force-trigger detection if exceeded (~12K tokens)
-    loop_score_threshold: int = 350  # DEPRECATED — scoring-based detection removed in Phase 3
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
     loop_char_run_enabled: bool = True  # Character run detection
     loop_char_run_limit: int = 129  # Character run limit (consecutive identical chars)
-    loop_sentence_rep_enabled: bool = True  # DEPRECATED — sentence repetition detection removed in Phase 3
-    loop_ngram_rep_enabled: bool = True  # DEPRECATED — n-gram repetition detection removed in Phase 3
-    loop_block_rep_enabled: bool = True  # DEPRECATED — block repetition detection removed in Phase 3
-    loop_entropy_enabled: bool = True  # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
 
     # Max chars guard toggle — controls the hard character limit detection guard.
     loop_max_chars_enabled: bool = True  # Enable max chars hard limit guard
@@ -1125,15 +1120,14 @@ class PoolSettings:
     def to_dict(self) -> dict:
         """Serialize settings to a JSON-safe dictionary.
 
-        Excludes deprecated loop detection fields that were removed in Phase 3.
-        Also excludes sleeping_timeout (deprecated since 2026-08, agents stay SLEEPING until woken).
+        Excludes sleeping_timeout (deprecated since 2026-08, agents stay SLEEPING until woken).
         """
         from dataclasses import asdict
         result = asdict(self)
-        # Remove deprecated fields no longer used by InnerLoopDetector (Phase 3 cleanup)
-        for field in ('loop_score_threshold', 'loop_sentence_rep_enabled', 'loop_ngram_rep_enabled',
-                      'loop_block_rep_enabled', 'loop_entropy_enabled', 'sleeping_timeout'):
-            result.pop(field, None)
+        # sleeping_timeout is a handler-only key (settings_registry._HANDLER_ONLY_KEYS):
+        # kept in the dataclass so handler coverage stays bidirectional, but excluded
+        # from persisted output here.
+        result.pop('sleeping_timeout', None)
         return result
 
     @classmethod
