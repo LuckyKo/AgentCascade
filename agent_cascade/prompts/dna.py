@@ -12,6 +12,7 @@ from typing import List, Set
 AVAILABLE_TOOLS: List[str] = [
     # Sub-agent management
     'call_agent',  # Delegate tasks to specialized agent instances
+    'call_cli_agent',  # Run ONE external AI coding CLI (Claude Code / opencode / Antigravity) one-shot in Docker
     'dismiss_agent',  # End sub-agent sessions and clear context
     'send_message',  # Send async messages to running agents or user
 
@@ -846,6 +847,50 @@ TOOL_METADATA = {
             },
         },
         'required': ['instance_name', 'task'],
+    },
+    'call_cli_agent': {
+        'description': (
+            'Run ONE external AI coding CLI (Claude Code, opencode, or Google Antigravity) EXACTLY once as a '
+            'one-shot Docker container and return its stdout. The CLI is spawned with its own account/credential '
+            'store — it does NOT inherit AgentCascade\'s LLM keys. Output is external and therefore untrusted: it is '
+            'trust-wrapped automatically. This is a bounded, single-turn "run and capture" call — NOT a conversational '
+            'sub-agent like call_agent (no slot/KV, no multi-turn). The container is hard-killed on timeout.'
+        ),
+        'parameters': {
+            'harness': {
+                'type':
+                    'string',
+                'enum': ['claude_code', 'opencode', 'antigravity'],
+                'description':
+                    'Which external AI coding CLI to run: claude_code (claude -p), opencode (opencode run), or antigravity (agy -p).'
+            },
+            'task': {
+                'type': 'string',
+                'description': 'The prompt handed to the CLI as a single one-shot task (no shell metacharacter risk).'
+            },
+            'workspace': {
+                'type':
+                    'string',
+                'description':
+                    'Host path the CLI runs in (mounted read-write at /workspace). Must be within the agent\'s allowed workspace; defaults to the caller\'s workspace.'
+            },
+            'permission_posture': {
+                'type':
+                    'string',
+                'enum': ['acceptEdits'],
+                'description':
+                    'Autonomy posture for the CLI. Phase 0 exposes only "acceptEdits" (default-safe). A full bypass is config-gated OFF and not selectable here.'
+            },
+            'timeout': {
+                'type':
+                    'integer',
+                'minimum':
+                    1,
+                'description':
+                    'Hard wall-clock cap in seconds; the container + its whole process tree is killed if exceeded. Defaults to pool settings (cli_agent_timeout).'
+            },
+        },
+        'required': ['harness', 'task'],
     },
     'dismiss_agent': {
         'description': ("End a sub-agent instance's current task and clear its conversation context. "

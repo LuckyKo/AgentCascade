@@ -53,6 +53,8 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             tools_to_register[tool_name] = (SendMessage(agent_pool=agent_pool), False, False)
         elif tool_name == 'dismiss_agent':
             tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
+        elif tool_name == 'call_cli_agent':
+            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
         elif tool_name == 'read_file':
             t = ReadFile()
             tools_to_register[tool_name] = (t, True, False)

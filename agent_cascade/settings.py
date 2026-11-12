@@ -734,6 +734,12 @@ CI_MIN_EXECUTION_TIMEOUT: int = 1  # Minimum per-call execution timeout (seconds
 CI_MIN_WATCHDOG_TIMEOUT: int = 30  # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
 
+# ── External CLI coding-agent (call_cli_agent) settings ──
+CLI_AGENT_TIMEOUT: int = int(os.getenv('M6_CLI_AGENT_TIMEOUT', '1800'))  # Hard wall-clock cap per one-shot run (seconds)
+CLI_AGENT_MIN_TIMEOUT: int = 1  # Minimum one-shot wall-clock cap (seconds)
+MAX_CLI_AGENT_CHILDREN: int = int(os.getenv('M6_MAX_CLI_AGENT_CHILDREN', '2'))  # Concurrent one-shot containers cap
+CLI_AGENT_MIN_CHILDREN: int = 1  # Minimum concurrent one-shot cap (never 0)
+
 # ── Cache pool settings ────────────────────────
 CACHE_POOL_ENABLED: bool = False  # Toggle cache pool on/off (default: disabled)
 CACHE_POOL_SIZE: int = int(os.getenv('AGENT_CASCADE_CACHE_POOL_SIZE', '50'))  # Rolling buffer entries per instance

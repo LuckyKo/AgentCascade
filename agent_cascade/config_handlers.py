@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Optional
 
 from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 from agent_cascade.settings import (CI_MIN_EXECUTION_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL, CI_MIN_WATCHDOG_TIMEOUT,
+                                    CLI_AGENT_MIN_CHILDREN, CLI_AGENT_MIN_TIMEOUT,
                                     SKILL_ALWAYS_PROTECTED_DEFAULT, SKILL_SCORE_SETTINGS, clamp_skill_setting,
                                     format_skill_always_protected)
 from agent_cascade.settings_registry import (
@@ -477,6 +478,21 @@ def _handle_retry_max_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
         if val < 1.0:
             raise ValueError(f"retry_max_delay must be ≥ 1.0, got {val}")
         agent_pool.settings.retry_max_delay = val
+
+
+# ── External CLI coding-agent (call_cli_agent) settings handlers ──
+@register_config_handler('cli_agent_timeout')
+def _handle_cli_agent_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the hard wall-clock cap per one-shot call_cli_agent run (seconds)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.cli_agent_timeout = max(CLI_AGENT_MIN_TIMEOUT, int(ui_cfg['cli_agent_timeout']))
+
+
+@register_config_handler('max_cli_agent_children')
+def _handle_max_cli_agent_children(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update the concurrent call_cli_agent one-shot container cap."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.max_cli_agent_children = max(CLI_AGENT_MIN_CHILDREN, int(ui_cfg['max_cli_agent_children']))
 
 
 @register_config_handler('ci_execution_timeout')

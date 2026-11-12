@@ -31,6 +31,7 @@ from agent_cascade.utils.pool_validation import validate_message_pool
 # only), calculate (pure arithmetic), call_agent (inter-agent), and every editor tool.
 _UNTRUSTED_TOOLS: frozenset[str] = frozenset({
     'read_file', 'grep', 'web_extractor', 'read_logs', 'shell_cmd', 'code_interpreter',
+    'call_cli_agent',
 })
 
 # Per-member cap for the full args sent to the security guard in a grouped edit batch.

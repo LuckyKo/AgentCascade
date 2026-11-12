@@ -21,6 +21,7 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
     'edit_file',  # Edit existing files (requires approval if not agent-owned)
     'delete_file',  # Delete files (requires approval if not agent-owned)
     'copy_file',  # Copy files or directories
+    'call_cli_agent',  # Spawn an external AI coding CLI (Claude Code / opencode / Antigravity) in Docker
 })
 
 # ── Agent-class default disabled tools (defense-in-depth) ────────────────────
@@ -144,6 +145,7 @@ DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
 # but should be accepted by disabled_tools validation
 RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
     'call_agent',
+    'call_cli_agent',
     'dismiss_agent',
     'list_agents',
     '__all_mcp_tools__',  # Sentinel value for MCP tool blocking (not a real tool)

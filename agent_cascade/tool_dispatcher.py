@@ -13,6 +13,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager, CompressionH
 """
 
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
@@ -23,6 +24,11 @@ if TYPE_CHECKING:
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
+
+# [VERDICT]-anchored deny matcher for the call_cli_agent Security-advisor gate. Mirrors the
+# advisor's structured "[VERDICT] APPROVE|DENY" contract (advisor_runner._VERDICT_RE) so prose
+# that merely mentions "deny" never triggers a block.
+_CLI_DENY_RE = re.compile(r'\[VERDICT\]\s*DENY', re.IGNORECASE)
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
@@ -196,6 +202,11 @@ class ToolDispatcher:
             result = self.handle_dismiss_agent(resolved, instance)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
+        elif tool_name == 'call_cli_agent':
+            resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            result = self.handle_call_cli_agent(resolved, instance)
+            self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
+            return result
         elif tool_name == 'compress_context':
             resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
             # compress_context runs synchronously inline (compression/handler.py) and does NOT set
@@ -254,6 +265,108 @@ class ToolDispatcher:
                 self.pool._mark_activity(instance.instance_name)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
+
+    # ── call_cli_agent Handler ───────────────────────────────────────────────
+
+    def handle_call_cli_agent(self, resolved: dict, instance: 'AgentInstance') -> str:
+        """Run ONE external AI coding CLI one-shot, with full gating. Additive; never
+        touches slot/KV machinery (unlike call_agent). Gating order (plan §3.4/§5):
+        registry → nesting → workspace → posture/timeout → preflight → approval →
+        Security-advisor → spawn. The returned string is returned UNWRAPPED — the
+        universal `_UNTRUSTED_TOOLS` wrap site (tool_execution._wrap_untrusted) trusts it.
+        """
+        from agent_cascade.advisor_runner import run_lightweight_advisor
+        from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
+        from agent_cascade.engine.cli_agent_runner import run_cli_agent
+        from uuid import uuid4
+
+        harness = resolved.get('harness')
+        task = resolved.get('task')
+        if not isinstance(harness, str) or not isinstance(task, str) or not task.strip():
+            return "Error: call_cli_agent requires a 'harness' and a non-empty 'task'."
+
+        # 1. Registry resolution (unknown harness never reaches the gating path).
+        try:
+            adapter = get_adapter(harness)
+        except HarnessNotFoundError as e:
+            return f"Error: {e}"
+
+        # 2. Nesting-depth guard (same primitive as call_agent).
+        caller_depth = getattr(self.pool.get_instance(instance.instance_name), '_nest_depth', 0)
+        if err := self._check_nesting_depth(instance, caller_depth + 1):
+            return err
+
+        # 3. Workspace resolution — must stay within the agent's RW-allowed base.
+        op_manager = getattr(self.pool, 'operation_manager', None)
+        workspace = resolved.get('workspace') or getattr(self.pool.settings, 'default_workspace', None)
+        if not workspace:
+            return 'Error: call_cli_agent could not resolve a workspace.'
+        try:
+            ws_path = str(op_manager._resolve_path(workspace, mode='rw', instance_name=instance.instance_name))
+        except ValueError as e:
+            return f"Error: workspace not permitted: {e}"
+
+        # 4. Posture + timeout (Phase 0: only the default-safe 'acceptEdits' posture).
+        posture = resolved.get('permission_posture') or 'acceptEdits'
+        if posture != 'acceptEdits':
+            return f"Error: posture '{posture}' is not available in Phase 0 (only 'acceptEdits')."
+        timeout = resolved.get('timeout') or getattr(self.pool.settings, 'cli_agent_timeout', 1800)
+        try:
+            timeout = int(timeout)
+            if timeout < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            return "Error: 'timeout' must be a positive integer (seconds)."
+
+        # 5. Preflight — presence probe BEFORE approval, so we never prompt for a
+        #    harness that is not installed (cheaper than a wasted approval round-trip).
+        if not adapter.preflight():
+            return f"Harness CLI for '{harness}' is not installed on the host; nothing was spawned."
+
+        # 6. User approval (skipped when the path is already auto-approved for this agent).
+        auto_approved = False
+        if op_manager is not None:
+            if not op_manager._is_auto_approved(ws_path, instance.instance_name):
+                approved, reason = op_manager.request_user_approval(
+                    agent_name=instance.instance_name, tool_name='call_cli_agent',
+                    tool_args=resolved,
+                    description=f"Run external CLI '{harness}' one-shot in workspace '{ws_path}'.")
+                if not approved:
+                    return f"User denied call_cli_agent: {reason}"
+            else:
+                auto_approved = True
+
+        # 7. Security-advisor gate (best-effort; skipped when auto-approved).
+        if getattr(self.pool, 'auto_security', False) and not auto_approved:
+            advisor = run_lightweight_advisor(
+                self.pool, agent_class='Security',
+                instance_name=f'Security_cli_{uuid4().hex[:8]}',
+                task=f"Pre-spawn review of call_cli_agent(harness={harness}, workspace={ws_path}).\nTask:\n{task}",
+                caller=instance.instance_name, max_turns=None)
+            # Fail CLOSED (P2-1): an advisor that errored/timed out (ok False) is a BLOCK, not a
+            # pass. A real verdict is honoured only via the [VERDICT] marker, so prose that merely
+            # mentions "deny" cannot cause a false block.
+            if not getattr(advisor, 'ok', False):
+                return (f"Security advisor produced no usable verdict (error/timeout); "
+                        f"call_cli_agent blocked (fail-closed) for harness '{harness}'.")
+            if _CLI_DENY_RE.search(getattr(advisor, 'output_text', '') or ''):
+                return f"Security advisor DENIED call_cli_agent: {getattr(advisor, 'output_text', '')[:500]}"
+
+        # 8-10. Spawn one-shot, capture, persist, return (runner owns timeout/teardown).
+        try:
+            result = run_cli_agent(adapter=adapter, task=task, workspace=ws_path,
+                                   permission_posture=posture, timeout=timeout,
+                                   pool=self.pool, caller_name=instance.instance_name)
+        except HarnessNotFoundError as e:  # preflight race / direct-runner edge
+            return f"Error: {e}"
+        except Exception as e:  # noqa: BLE001 — a failed spawn must not crash the caller turn
+            logger.exception('call_cli_agent run failed for %s', harness)
+            return f"Error: call_cli_agent ({harness}) failed: {e}"
+
+        header = (f"call_cli_agent harness={harness} "
+                  f"exit={result.exit_code} posture={result.requested_posture} "
+                  f"timed_out={result.timed_out} full_output={result.log_path}")
+        return f"{header}\n\n=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}"
 
     # ── call_agent Handlers ──────────────────────────────────────────────────
 

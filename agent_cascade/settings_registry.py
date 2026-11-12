@@ -62,7 +62,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'allow_parallel_agents', 'approval_timeout_seconds', 'auto_continue', 'auto_rollback_on_loop',
     'auto_skill_enabled', 'auto_skill_extra_turns', 'auto_skill_min_turns', 'auto_skill_mode',
     'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars', 'ci_execution_timeout',
-    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'code_char_limit', 'completion_classifier_enabled',
+    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'cli_agent_timeout', 'code_char_limit', 'completion_classifier_enabled',
     'compression_context_reserve_tokens', 'compression_force_cooldown', 'compression_force_threshold',
     'compression_max_attempts', 'compression_proactive_threshold', 'compression_timeout',
     'compression_warning_threshold', 'default_load_skill_mode', 'default_workspace',
@@ -72,7 +72,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'list_dir_char_limit', 'loop_char_run_enabled', 'loop_char_run_limit', 'loop_confirm_required',
     'loop_cooldown_feeds', 'loop_exact_rollback_enabled', 'loop_fuzzy_warning_enabled', 'loop_max_chars',
     'loop_max_chars_enabled', 'loop_min_chars', 'loop_suspicion_threshold', 'loop_two_phase_enabled',
-    'max_auto_rollbacks', 'max_images_for_llm', 'max_nesting_depth', 'max_parallel_agents', 'max_turns',
+    'max_auto_rollbacks', 'max_cli_agent_children', 'max_images_for_llm', 'max_nesting_depth', 'max_parallel_agents', 'max_turns',
     'max_workers', 'memory_hint_cooldown_seconds', 'memory_hint_enabled', 'memory_hint_max_entries',
     'memory_hint_query_chars', 'memory_hint_skill_autoload_enabled',
     'memory_hint_skill_autoload_threshold', 'memory_hint_skill_suggestions', 'memory_hint_skill_threshold',
@@ -546,8 +546,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 105:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 105")
+    if len(POOL_SETTINGS_KEYS) != 107:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 107")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 
