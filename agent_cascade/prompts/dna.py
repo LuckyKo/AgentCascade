@@ -486,11 +486,9 @@ TOOL_METADATA = {
         'description': ('Performs a surgical text replacement within an existing file. '
                         'Always use this instead of write_file for modifying parts of a file, '
                         'as it is safer and preserves the rest of the content. '
-                        'Requires user approval if you do not own the file. When you issue several reducible edits '
-                        '(exact/heuristic, single occurrence) to the SAME file in one turn, they apply together as one '
-                        'atomic change (all-or-none) against the file as it stood just before the batch — so keep each '
-                        'edit independent and anchored on the current content; if one depends on another\'s output, '
-                        'send it in a later turn. Always read the file content before attempting an edit.'),
+                        'Requires user approval if you do not own the file. You may issue several edits to the same '
+                        'file in one turn — make each edit\'s old_content unique and non-overlapping so every edit is '
+                        'independently findable. Always read the file content before attempting an edit.'),
         'parameters': {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
