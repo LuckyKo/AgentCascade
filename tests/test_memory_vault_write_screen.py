@@ -178,6 +178,7 @@ class FakeVaultFileOps(FakeWriteOps):
         self.move_file = FileOpsMixin.move_file.__get__(self)
         # edit_file delegates to these (extracted from its inline body); bind them
         # so the fake reaches the same collaborators as the real mixin.
+        self._edit_compute_match = FileOpsMixin._edit_compute_match.__get__(self)
         self._edit_build_response = FileOpsMixin._edit_build_response.__get__(self)
         self._edit_file_delete_and_insert = FileOpsMixin._edit_file_delete_and_insert.__get__(self)
         # staticmethods → plain functions stored on the instance (NOT class attrs)

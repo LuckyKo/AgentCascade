@@ -10,7 +10,7 @@ import shutil
 import time
 import zipfile
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -990,6 +990,42 @@ def _edit_validate_indentation_consistency(content: str, file_path: str) -> list
                                 f"(jump of {diff} spaces, threshold={threshold_val})")
 
     return warnings
+
+
+# ─── batch edit primitives (multi-edit same-file atomic grouping) ───────────
+
+@dataclass
+class EditSpec:
+    """One edit in a same-file atomic batch. Carries only what `_edit_compute_match`
+    consumes; batch members are pre-filtered reducible at the engine scan, so no
+    occurrence/replacement_text is needed here."""
+    old_content: str
+    new_content: str
+    match_mode: str
+
+
+@dataclass
+class EditResult:
+    """Computed match for one edit against a single read of the file. Returned by
+    `_edit_compute_match` (shared by the single `edit_file` path and `batch_mutate_file`)
+    carrying every value `_edit_build_response` / `_build_batch_edit_results` needs, plus
+    the (start_pos, end_pos, replacement_text) triple used for reverse-offset batch apply."""
+    start_pos: int
+    end_pos: int
+    replacement_text: str
+    # raw file bytes matched (pre-transform), used by response builder + batch apply.
+    actual_old_content: str
+    # post-transform new_content (heuristic re-indented); the value actually written.
+    new_content: str
+    count: int = 1
+    exact_start_line: Optional[int] = None
+    exact_end_line: Optional[int] = None
+    match_ratio: float = 1.0
+    norm_kind: Optional[str] = None
+    absorbed_tail: bool = False
+    absorbed_suffix: str = ''
+    delta_width: int = 0
+    indent_warnings: list = field(default_factory=list)
 
 
 class FileOpsMixin:
@@ -2258,53 +2294,25 @@ class FileOpsMixin:
 
     # ─── Edit file (with nested helpers) ──────────────────────────────────
 
-    def edit_file(self,
-                  path: str,
-                  agent_name: str,
-                  old_content: str,
-                  new_content: str,
-                  match_mode: str = 'exact',
-                  range_param: str = None,
-                  occurrence: int = None,
-                  justification: str = '') -> str:
-        """Edit a file surgically — auto-approved for agent-owned files."""
-        try:
-            resolved = self._resolve_path(path, mode='rw')
-        except Exception as e:
-            return f"ERROR: {str(e)}"
-
-        if not resolved.exists():
-            return f"File not found for surgical edit: {path}"
-
-        try:
-            original_bytes = resolved.read_bytes()
-        except Exception as e:
-            return f"ERROR: Failed to read file: {str(e)}"
-        try:
-            raw_text = original_bytes.decode('utf-8')
-        except UnicodeDecodeError:
-            return f"ERROR: File has invalid UTF-8 encoding: {path}"
-        # Preserve the file's own line endings. read_text()/write_text() translate every
-        # ending to the OS native style, which silently rewrites the whole file on Windows
-        # (one-line edit on an LF file → every line becomes CRLF). Match against a
-        # normalized view and re-render in the file's style on write.
-        newline_style = _detect_newline_style(raw_text)
-        file_content = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+    def _edit_compute_match(self, file_content, match_mode, old_content, new_content,
+                            occurrence, path, resolved):
+        """Shared match computation for the reducible edit modes (exact / heuristic /
+        heuristic_agnostic) against a single file read. Returns an EditResult carrying
+        every value the response builders consume, or an error / no-op string that the
+        caller returns verbatim. Used by both edit_file and batch_mutate_file so the
+        match logic is a single source of truth; delete_and_insert and the whole-file
+        new_file_content assembly stay in edit_file.
+        """
         actual_old_content = old_content
         match_ratio = 1.0
-        # Initialize variables before match-mode dispatch (defensive scoping)
         exact_start_line = None
         exact_end_line = None
-        indent_warnings = []  # Initialized to avoid NameError risk
-        start_idx = None  # d&i mode range indices
-        end_idx = None  # d&i mode range indices
-        delta_width = 0  # Indent delta for heuristic feedback
-        absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
-        absorbed_suffix = ''  # BUG_0260: text after the replacement tail in an absorbed line
-        count = 0  # exact mode occurrence count (read only in exact response paths)
-        total_lines = 0  # d&i mode total line count (read only in d&i response paths)
-        norm_kind = None  # None = literal exact; 'tab/space' | 'unicode' = normalized fallback
-
+        indent_warnings = []
+        delta_width = 0
+        absorbed_tail = False
+        absorbed_suffix = ''
+        count = 0
+        norm_kind = None
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
 
         if match_mode == 'exact':
@@ -2424,6 +2432,7 @@ class FileOpsMixin:
                 return (f"ERROR: occurrence={occurrence} is not supported with the "
                         f"tab/space-normalized fallback (only the 1st match is found). "
                         f"Use occurrence=1 or match_mode='heuristic'.")
+            start_pos = match_start_pos
         elif match_mode in ('heuristic', 'heuristic_agnostic'):
             file_lines = file_content.splitlines(keepends=True)
 
@@ -2698,9 +2707,80 @@ class FileOpsMixin:
                     else:
                         ending = '\r'
                     new_content = new_content + ending
-        elif match_mode == 'delete_and_insert':
-            # delete_and_insert mode: line-range-based surgery, delegated to a helper.
-            # Advisory notes for this mode are emitted in _edit_build_response.
+            start_pos = file_content.index(actual_old_content)
+        else:
+            return f"ERROR: Invalid match_mode '{match_mode}'."
+
+        end_pos = start_pos + len(actual_old_content)
+        return EditResult(
+            start_pos=start_pos, end_pos=end_pos, replacement_text=new_content,
+            actual_old_content=actual_old_content, new_content=new_content, count=count,
+            exact_start_line=exact_start_line, exact_end_line=exact_end_line,
+            match_ratio=match_ratio, norm_kind=norm_kind, absorbed_tail=absorbed_tail,
+            absorbed_suffix=absorbed_suffix, delta_width=delta_width,
+            indent_warnings=indent_warnings,
+        )
+
+    def edit_file(self,
+                  path: str,
+                  agent_name: str,
+                  old_content: str,
+                  new_content: str,
+                  match_mode: str = 'exact',
+                  range_param: str = None,
+                  occurrence: int = None,
+                  justification: str = '') -> str:
+        """Edit a file surgically — auto-approved for agent-owned files."""
+        try:
+            resolved = self._resolve_path(path, mode='rw')
+        except Exception as e:
+            return f"ERROR: {str(e)}"
+
+        if not resolved.exists():
+            return f"File not found for surgical edit: {path}"
+
+        try:
+            original_bytes = resolved.read_bytes()
+        except Exception as e:
+            return f"ERROR: Failed to read file: {str(e)}"
+        try:
+            raw_text = original_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return f"ERROR: File has invalid UTF-8 encoding: {path}"
+        # Preserve the file's own line endings. read_text()/write_text() translate every
+        # ending to the OS native style, which silently rewrites the whole file on Windows
+        # (one-line edit on an LF file → every line becomes CRLF). Match against a
+        # normalized view and re-render in the file's style on write.
+        newline_style = _detect_newline_style(raw_text)
+        file_content = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+        actual_old_content = old_content
+        match_ratio = 1.0
+        # Initialize variables before match-mode dispatch (defensive scoping)
+        exact_start_line = None
+        exact_end_line = None
+        indent_warnings = []  # Initialized to avoid NameError risk
+        start_idx = None  # d&i mode range indices
+        end_idx = None  # d&i mode range indices
+        delta_width = 0  # Indent delta for heuristic feedback
+        absorbed_tail = False  # BUG_0168: set when heuristic span is extended to absorb overlapping tail
+        absorbed_suffix = ''  # BUG_0260: text after the replacement tail in an absorbed line
+        count = 0  # exact mode occurrence count (read only in exact response paths)
+        total_lines = 0  # d&i mode total line count (read only in d&i response paths)
+        norm_kind = None  # None = literal exact; 'tab/space' | 'unicode' = normalized fallback
+
+        # occurrence arrives as int or str (LLM fidelity, e.g. '-1'); the whole-file
+        # new_file_content dispatch below compares it numerically (== -1 / is not None),
+        # so normalize it once here. Range/type validation stays in _edit_compute_match,
+        # which surfaces its own error string for a genuinely invalid value.
+        if occurrence is not None:
+            try:
+                occurrence = int(occurrence)
+            except (ValueError, TypeError):
+                pass
+
+        if match_mode == 'delete_and_insert':
+            # delete_and_insert: line-range surgery, delegated to a helper. Advisory
+            # notes for this mode are emitted in _edit_build_response.
             err, start_idx, end_idx, new_file_content, total_lines = \
                 self._edit_file_delete_and_insert(
                     file_content=file_content,
@@ -2709,9 +2789,27 @@ class FileOpsMixin:
                 )
             if err is not None:
                 return err
-
         else:
-            return f"ERROR: Invalid match_mode '{match_mode}'."
+            # exact / heuristic / heuristic_agnostic (and invalid mode) share
+            # _edit_compute_match with batch_mutate_file (single source of truth).
+            # A string return is an error / no-op surfaced verbatim.
+            _res = self._edit_compute_match(
+                file_content, match_mode, old_content, new_content,
+                occurrence, path, resolved)
+            if isinstance(_res, str):
+                return _res
+            actual_old_content = _res.actual_old_content
+            count = _res.count
+            match_ratio = _res.match_ratio
+            norm_kind = _res.norm_kind
+            exact_start_line = _res.exact_start_line
+            exact_end_line = _res.exact_end_line
+            delta_width = _res.delta_width
+            absorbed_tail = _res.absorbed_tail
+            absorbed_suffix = _res.absorbed_suffix
+            indent_warnings = _res.indent_warnings
+            match_start_pos = _res.start_pos
+            new_content = _res.new_content
 
         # Reuse file_content from the first read — no need to re-read.
         # Compute the post-edit content for every mode BEFORE approval/backup. This is pure
@@ -2848,6 +2946,169 @@ class FileOpsMixin:
             )
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
+
+    def batch_mutate_file(self, path, edits, agent_name, justification=''):
+        """Apply N reducible edits to one file atomically (all-or-nothing) under a single
+        mutate() lock, establishing ownership once. Returns a list of N result strings
+        (one per edit, in call order) so the engine can emit exactly one FUNCTION message
+        per original tool call.
+
+        Every edit is matched against the ORIGINAL file bytes — not intermediate states —
+        so the ordering between members never matters. If any member fails to match, two
+        matches overlap, or the write is otherwise rejected, NOTHING is written: the same
+        rollback message is returned for all N members, leaving the file bytes and mtime
+        untouched. This is the whole point of the grouping — a later edit anchoring on an
+        earlier one's not-yet-written output is caught and rolled back, not half-applied.
+
+        Callers pass members already filtered to the reducible default branch (exact /
+        heuristic / heuristic_agnostic, single occurrence). delete_and_insert and the
+        whole-file new_file_content assembly remain edit_file-only.
+        """
+        path_str = str(path)
+        n = len(edits)
+        try:
+            resolved = self._resolve_path(path, mode='rw')
+        except Exception as e:
+            return [f"ERROR: Cannot resolve path '{path_str}': {str(e)}"] * n
+        try:
+            original_bytes = resolved.read_bytes()
+        except Exception as e:
+            return [f"ERROR: Failed to read file '{path_str}': {str(e)}"] * n
+        # Decode once; a non-UTF-8 file is not editable, matching edit_file's read guard.
+        try:
+            raw_text = original_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return [f"ERROR: Failed to decode file '{path_str}' as UTF-8"] * n
+        newline_style = _detect_newline_style(raw_text)
+        file_content = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+
+        # Match every edit against the ORIGINAL content (occurrence=None: reducible members
+        # are single-occurrence by the engine scan). A string return is an error/no-match
+        # from _edit_compute_match → the whole batch rolls back (atomicity).
+        results = []
+        for spec in edits:
+            r = self._edit_compute_match(
+                file_content, spec.match_mode, spec.old_content, spec.new_content,
+                None, path_str, resolved)
+            if isinstance(r, str):
+                # 'REJECTED:' prefix (not 'REJECTED BATCH:') so _detect_tool_result_failure's
+                # first-line error heuristic classifies the rollback as a failure.
+                msg = (f"REJECTED: a batched edit did not apply ({r}). All {n} batched edits "
+                       f"to '{path_str}' were rolled back — the file is unchanged. Re-emit "
+                       f"every edit anchored on the CURRENT file content.")
+                return [msg] * n
+            results.append(r)
+
+        # Reverse-offset application requires non-overlapping matches. Two members editing
+        # the same region contradict — reject the whole batch rather than guess precedence.
+        ordered = sorted(results, key=lambda r: r.start_pos)
+        for prev, nxt in zip(ordered, ordered[1:]):
+            if nxt.start_pos < prev.end_pos:
+                # 'REJECTED:' prefix so _detect_tool_result_failure classifies the rollback
+                # as a failure (see the no-match guard above).
+                msg = (f"REJECTED: two batched edits to '{path_str}' overlap "
+                       f"(offsets {prev.start_pos}-{prev.end_pos} and "
+                       f"{nxt.start_pos}-{nxt.end_pos}). All {n} edits were rolled back — the "
+                       f"file is unchanged. Split the overlapping edits across turns so each "
+                       f"is anchored on the prior result.")
+                return [msg] * n
+
+        # Apply in reverse offset order so earlier (lower) offsets stay valid.
+        new_content = file_content
+        for r in ordered:
+            new_content = new_content[:r.start_pos] + r.replacement_text + new_content[r.end_pos:]
+
+        # A batch whose replacements render byte-identical to the original:
+        # no write, no backup.
+        if new_content == file_content:
+            return [f"WARNING: No-op batch — the combined result is byte-identical to the "
+                    f"current file ({path_str}); nothing was written and no backup created."] * n
+
+        # Memory-vault write screen (OWASP LLM01) on the combined result before touching the
+        # disk — same contract as edit_file: reject before any backup/write so no orphan .bak.
+        _rejection = _screen_vault_write(resolved.as_posix(), new_content)
+        if _rejection:
+            from agent_cascade.log import logger
+            logger.warning('[MEMORY_SCREEN] Rejected batch edit_file write to %s: %s', path_str, _rejection)
+            return [f"ERROR: Batch edit to '{path_str}' rejected by memory-vault injection "
+                    f"screen ({_rejection}). All {n} edits were rolled back."] * n
+
+        # Atomic commit: the whole N-edit write is one backup + one write under the global
+        # mutate() lock, with edit_file's concurrent-modification guard.
+        try:
+            resolved = self._resolve_path(path_str, mode='rw')
+            with file_mutation.mutate():
+                try:
+                    current_bytes = resolved.read_bytes()
+                except Exception as e:
+                    return [f"ERROR: Failed to re-read file before writing: {str(e)}"] * n
+                if current_bytes != original_bytes:
+                    return [f"ERROR: '{path_str}' changed on disk between read and write "
+                            f"(concurrent modification). The batched edit was NOT applied — "
+                            f"re-read and retry with the current content."] * n
+
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
+                shutil.copy2(resolved, backup_path)
+                backup_path_str = self._backup_path_str(backup_path)
+
+                resolved.write_bytes(_render_with_newlines(new_content, newline_style))
+                self._own(resolved, agent_name)
+        except Exception as e:
+            return [f"ERROR: Approved but batch execution failed: {str(e)}"] * n
+
+        return self._build_batch_edit_results(
+            path_str, resolved, edits, results, file_content, new_content,
+            backup_path_str, justification)
+
+    def _build_batch_edit_results(self, path, resolved, edits, results, original_content,
+                                  new_content, backup_path_str, justification):
+        """Assemble one result string per batch member — a thin wrapper over
+        _edit_build_response so the advisory-note family and per-edit metadata stay a single
+        source of truth. The unified diff and backup describe the single atomic write: member
+        #1 shows the combined diff, the rest reference it rather than repeating it.
+        """
+        old_lines = original_content.splitlines()
+        new_lines = new_content.splitlines()
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
+        diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+        if diff_content:
+            all_diff_lines = diff_content.splitlines()
+            if len(all_diff_lines) > 20:
+                first_lines = all_diff_lines[:8]
+                last_lines = all_diff_lines[-8:]
+                diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+
+        n = len(results)
+        out = []
+        for i, (spec, r) in enumerate(zip(edits, results)):
+            # Member #1 carries the combined batch diff; later members show no diff block
+            # (they describe the same single atomic write). The first line stays canonical
+            # ('OK: Edited …' / 'REJECTED: …') so _detect_tool_result_failure classifies it
+            # from the first line exactly as it would a standalone edit result.
+            body = self._edit_build_response(
+                path=path, match_mode=spec.match_mode, resolved=resolved,
+                file_content=original_content, actual_old_content=r.actual_old_content,
+                new_content=r.new_content, occurrence=None, count=r.count,
+                start_idx=0, end_idx=0, total_lines=0,
+                exact_start_line=r.exact_start_line, exact_end_line=r.exact_end_line,
+                match_ratio=r.match_ratio, delta_width=r.delta_width,
+                absorbed_tail=r.absorbed_tail, absorbed_suffix=r.absorbed_suffix,
+                indent_warnings=r.indent_warnings, duplicate_note='',
+                diff_content=(diff_content if i == 0 else ''),
+                backup_path_str=backup_path_str,
+                # Approver provenance is unavailable for a grouped batch; the
+                # approve/reject decision lives in the approval record.
+                justification=justification, approver_reason='', norm_kind=r.norm_kind,
+            )
+            if n > 1:
+                body += (f"\n  (member {i + 1}/{n} of an atomic {n}-edit batch to {path}; "
+                         f"the combined diff for the whole batch is shown in result #1.)")
+            out.append(body)
+        return out
 
     def _edit_file_delete_and_insert(self, *, file_content, range_param,
                                          new_content) -> tuple:

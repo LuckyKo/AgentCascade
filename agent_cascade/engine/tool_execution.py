@@ -8,6 +8,7 @@ and the imports needed by these methods were added. The mixin is composed into
 
 from __future__ import annotations
 
+import os
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -72,6 +73,13 @@ class ToolExecMixin:
         """
         used_any_tool = False
         executed_tools = []  # Track which tools were actually executed (for orphan handling)
+        # Multi-edit same-file grouping: leader-eager-emit bookkeeping. file_groups maps a
+        # leader tool-call index to the ordered member indices of a reducible same-file run;
+        # _already_emitted tracks indices whose FUNCTION result the leader already emitted,
+        # so the loop skips them without re-running dispatch side effects. No groups → both
+        # are inert and the single-edit path is unchanged.
+        file_groups = self._scan_file_mutation_groups(turn_output, inst_name)
+        _already_emitted = set()
 
         # ── Resolve tool policy once (template, disabled tools, function map) ────────
         # Outside the loop. Template and disabled tool list don't change during the loop.
@@ -119,6 +127,10 @@ class ToolExecMixin:
                 if not use_tool:
                     continue
 
+                # Leader already emitted this member's result via the grouped batch path.
+                if _out_idx in _already_emitted:
+                    continue
+
                 # Cooperatively wait if paused — don't skip tool execution, just wait
                 while self.pool.is_paused():
                     if self._is_terminal_stop(inst_name):
@@ -157,6 +169,33 @@ class ToolExecMixin:
 
                     used_any_tool = True
                     continue  # Skip actual tool execution
+
+                # ── Multi-edit same-file atomic grouping (engine-level) ────────────
+                # A reducible same-file run collapses to one approval + one atomic
+                # all-or-nothing write. Only the LEADER (whose index is a dict key)
+                # dispatches; it emits exactly N FUNCTION results (successes and any
+                # failures), then continues so the loop never re-runs dispatch for the
+                # members. file_groups empty → _group is None → no-op (single-edit path
+                # unchanged).
+                _group = file_groups.get(_out_idx)
+                if _group is not None:
+                    try:
+                        self._execute_file_mutation_batch(
+                            instance, inst_name, _group, turn_output,
+                            response, executed_tools, _already_emitted)
+                    except Exception as _batch_err:
+                        # The batch executor is internally guarded and should never
+                        # propagate, but emit an error result for any member it left
+                        # un-emitted so no tool_call_id is orphaned (no API 400).
+                        for _m in _group:
+                            if _m in _already_emitted:
+                                continue
+                            self._emit_synthetic_fn_msg(
+                                instance, turn_output[_m], _m,
+                                f'Error: edit_file execution failed: {_batch_err}',
+                                executed_tools, _already_emitted, response)
+                    used_any_tool = True
+                    continue
 
                 used_any_tool = True
 
@@ -878,3 +917,205 @@ class ToolExecMixin:
                                         agent_type=agent_type,
                                         instance_name=instance_name)
         return messages
+
+    _MAX_BATCH_GROUP_SIZE = 10  # max reducible same-file edits grouped per run; excess fall back per-call.
+
+    def _scan_edit_reducible(self, tool_args, inst_name) -> Optional[str]:
+        """Return the normcase path key when ``tool_args`` is a reducible single-occurrence
+        exact/heuristic ``edit_file`` call, else ``None`` (caller falls back to the per-call
+        path). delete_and_insert, occurrence=-1, occurrence>1 and whole-file rewrites never
+        group. Placeholder resolution is run conservatively and a failure bails to None."""
+        if not isinstance(tool_args, dict):
+            return None
+        mode = tool_args.get('match_mode', 'exact')
+        if mode not in ('exact', 'heuristic', 'heuristic_agnostic'):
+            return None
+        occ = tool_args.get('occurrence')
+        if occ is not None and occ not in (1, '1'):
+            return None
+        path = tool_args.get('path')
+        if not isinstance(path, str) or not path.strip():
+            return None
+        resolved = self._resolve_placeholders(tool_args, inst_name, 'edit_file')
+        if not isinstance(resolved, dict):
+            return None
+        rpath = resolved.get('path')
+        if not isinstance(rpath, str) or not rpath.strip():
+            return None
+        return os.path.normcase(rpath.strip())
+
+    def _scan_file_mutation_groups(self, turn_output, inst_name) -> dict:
+        """Return ``{leader_index: [member_indices]}`` for runs of >=2 consecutive reducible
+        ``edit_file`` calls that resolve to the same path. A run breaks on any non-edit_file
+        tool, a different-path edit, a non-reducible edit, or compression — so the leader's
+        eager emit never reorders FUNCTION results relative to an interleaved call (API
+        correctness). Members beyond ``_MAX_BATCH_GROUP_SIZE`` fall back to the per-call path."""
+        groups = {}
+        run = []  # [(idx, path_key)]
+
+        def _flush():
+            if len(run) >= 2:
+                members = [idx for idx, _ in run[:self._MAX_BATCH_GROUP_SIZE]]
+                groups[members[0]] = members
+            run.clear()
+
+        for idx, out in enumerate(turn_output):
+            use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+            if not use_tool:
+                continue
+            if tool_name == 'compress_context':
+                _flush()
+                continue
+            if tool_name != 'edit_file':
+                _flush()
+                continue
+            path_key = self._scan_edit_reducible(tool_args, inst_name)
+            if path_key is None:
+                _flush()
+                continue
+            if run and run[-1][1] != path_key:
+                _flush()
+            run.append((idx, path_key))
+        _flush()
+        return groups
+
+    def _emit_synthetic_fn_msg(self, instance, out, idx, result_str, executed_tools,
+                               already_emitted, response) -> None:
+        """Emit one FUNCTION result for a grouped edit_file call, mirroring the per-call
+        ``fn_msg`` construction (role/name/content/extra + append/log + response stream +
+        bookkeeping). The leader uses it for both successes and rollbacks so the batch emits
+        exactly ``N`` results.
+
+        Exception-safe by construction: the result message is always appended to
+        ``response`` and the bookkeeping (``executed_tools`` / ``already_emitted``) always
+        runs, even if building the message or appending it to the conversation log fails.
+        Marking ``already_emitted`` unconditionally is what stops the batch's error handler
+        from re-attempting (and re-failing on) the same member — a per-member emit failure
+        can never abort the run or crash the dispatch loop. A best-effort "execution failed"
+        result stands in when the real message cannot be built."""
+        extra = getattr(out, 'extra', None) or {}
+        function_id = extra.get('function_id')
+        try:
+            if isinstance(result_str, str):
+                success, _ = self._detect_tool_result_failure(result_str)
+            else:
+                success = True
+            fn_msg = Message(
+                role=FUNCTION,
+                name='edit_file',
+                content=_wrap_untrusted('edit_file', result_str),
+                extra={
+                    'function_id': function_id or '1',
+                    'tool_success': success,
+                },
+            )
+        except Exception as build_err:
+            # The real result message couldn't be built; emit a minimal failure result so
+            # this call still gets a response and the batch keeps moving.
+            logger.error(f'grouped edit_file result build failed (idx={idx}): {format_crash(build_err)}')
+            fn_msg = Message(
+                role=FUNCTION,
+                name='edit_file',
+                content=_wrap_untrusted('edit_file',
+                                        f'Error: edit_file execution failed: {format_crash(build_err)}'),
+                extra={'function_id': function_id or '1', 'tool_success': False},
+            )
+        # A conversation-log append error must not stop the result from reaching the
+        # response stream or the bookkeeping, so it is logged and swallowed.
+        try:
+            self._append_and_log(instance, fn_msg)
+        except Exception as append_err:
+            logger.error(f'grouped edit_file fn_msg log append failed (idx={idx}): {format_crash(append_err)}')
+        response.append(fn_msg)
+        executed_tools.append('edit_file')
+        already_emitted.add(idx)
+
+    def _execute_file_mutation_batch(self, instance, inst_name, group_indices, turn_output,
+                                     response, executed_tools, already_emitted) -> None:
+        """Run a grouped edit_file batch: parse members, ONE approval, ONE atomic
+        all-or-nothing write via ``batch_mutate_file``, then emit exactly
+        ``len(group_indices)`` FUNCTION results. The whole body is guarded so that if
+        anything raises before all N are emitted, an inner handler emits an error result
+        for every still-un-emitted member — guaranteeing the emit-exactly-N invariant (no
+        orphaned tool_call_ids, hence no API 400 on the next turn)."""
+        n = len(group_indices)
+        try:
+            from agent_cascade.operation_manager.file_operations import EditSpec
+            op_manager = getattr(self.pool, 'operation_manager', None)
+            if op_manager is None:
+                raise RuntimeError('operation_manager unavailable for grouped edit batch')
+            specs = []
+            path_str = None
+            justifications = []
+            previews = []
+            for idx in group_indices:
+                _, _, raw_args, _ = self._detect_tool(turn_output[idx])
+                resolved = self._resolve_placeholders(raw_args, inst_name, 'edit_file')
+                if not isinstance(resolved, dict):
+                    raise ValueError('unresolvable edit arguments')
+                oc = resolved.get('old_content')
+                nc = resolved.get('new_content')
+                if not isinstance(oc, str) or not isinstance(nc, str):
+                    raise ValueError('old_content/new_content must be strings')
+                if path_str is None:
+                    pth = resolved.get('path')
+                    if not isinstance(pth, str) or not pth.strip():
+                        raise ValueError('edit path missing')
+                    path_str = pth.strip()
+                specs.append(EditSpec(old_content=oc, new_content=nc,
+                                      match_mode=resolved.get('match_mode', 'exact')))
+                j = resolved.get('justification')
+                if isinstance(j, str) and j.strip():
+                    justifications.append(j.strip())
+                previews.append({'idx': idx, 'mode': resolved.get('match_mode', 'exact'),
+                                 'old_preview': oc[:200], 'new_preview': nc[:200]})
+            if len(specs) != n:
+                raise ValueError('spec/member count mismatch')
+            justification = ' | '.join(justifications)
+
+            # One approval for the whole batch. tool_args['justification'] feeds the WebUI
+            # header + Telegram "Reason:"; description is the numbered per-edit summary
+            # (Telegram body + advisor + audit); tool_args['batch'] holds the previews.
+            tool_args = {
+                'path': path_str,
+                'match_mode': specs[0].match_mode,
+                'batch_size': n,
+                'batch': previews,
+                'justification': f'approve applies all {n} edits atomically; reject applies none',
+            }
+            lines = [f'Atomic multi-edit ({n} edit_file calls) to: {path_str}',
+                     'Approving applies ALL edits atomically; rejecting applies NONE.']
+            for i, sp in enumerate(specs, 1):
+                lines.append(f'  {i}. ({sp.match_mode}) {sp.old_content[:80]!r} -> {sp.new_content[:80]!r}')
+            description = '\n'.join(lines)
+
+            if not op_manager._is_auto_approved(path_str, inst_name):
+                approved, reason = op_manager.request_user_approval(
+                    agent_name=inst_name, tool_name='edit_file',
+                    tool_args=tool_args, description=description)
+                if not approved:
+                    results = [f'REJECTED: {reason}'] * n
+                else:
+                    results = op_manager.batch_mutate_file(path_str, specs, inst_name, justification)
+            else:
+                results = op_manager.batch_mutate_file(path_str, specs, inst_name, justification)
+
+            if not isinstance(results, (list, tuple)) or len(results) != n:
+                results = [str(results)] * n  # defensive; batch_mutate_file guarantees len N
+            for idx, res in zip(group_indices, results):
+                if idx in already_emitted:
+                    continue
+                self._emit_synthetic_fn_msg(instance, turn_output[idx], idx, res,
+                                            executed_tools, already_emitted, response)
+        except Exception as e:
+            summary = format_crash(e)
+            logger.error(f'Grouped edit_file batch failed for {inst_name}: {summary}')
+            if TB_DEDUP.should_log_full_tb(TB_DEDUP.get_tb_key(e)):
+                logger.debug('Grouped edit_file batch traceback:\n' + traceback.format_exc())
+            for idx in group_indices:
+                if idx in already_emitted:
+                    continue
+                self._emit_synthetic_fn_msg(
+                    instance, turn_output[idx], idx,
+                    f'Error: edit_file execution failed: {summary}',
+                    executed_tools, already_emitted, response)

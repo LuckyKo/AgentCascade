@@ -487,7 +487,13 @@ TOOL_METADATA = {
                         'Always use this instead of write_file for modifying parts of a file, '
                         'as it is safer and preserves the rest of the content. '
                         'Requires user approval if you do not own the file. '
-                        'Always read the file content before attempting an edit.'),
+                        'Always read the file content before attempting an edit. '
+                        'Note: when you issue several reducible edits (exact/heuristic, '
+                        'single occurrence) to the SAME file in one turn, they are applied '
+                        'together as one atomic change against the file as it stood just before '
+                        'the batch is applied — either all apply or none. So make each edit '
+                        'independent and anchored on the CURRENT file content; if an edit '
+                        'depends on the output of another, send it in a later turn instead.'),
         'parameters': {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
