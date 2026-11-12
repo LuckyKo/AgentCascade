@@ -198,12 +198,12 @@ _STALE_CONTAINERS: Dict[str, dict] = {}
 
 # BUG_0289: cumulative code-interpreter hang counts by reason, surfaced via system_info
 # telemetry so operators can answer "is the kernel hung or just slow?" without a
-# post-hoc container. Keys are a fixed schema; ``iopub_stall`` intentionally stays 0 in
+# post-hoc container. Keys are a fixed schema; ``stuck`` intentionally stays 0 in
 # this observability-only pass — the watchdog cannot distinguish an IOPub-stalled kernel
-# from a generically idle one, so every unresponsive kill is recorded under ``watchdog``
+# from a generically idle one, so every unresponsive kill is recorded under ``idle_reap``
 # (see _kernel_watchdog). Increment only via _record_code_interp_hang.
 code_interp_hung_by_reason: Dict[str, int] = {
-    'timeout': 0, 'watchdog': 0, 'iopub_stall': 0,
+    'idle_reap': 0, 'exec_timeout': 0, 'stuck': 0,
 }
 # Guards increments: the watchdog thread and an in-flight call thread share this dict.
 _HUNG_COUNTER_LOCK = threading.Lock()
@@ -507,7 +507,7 @@ def _log_timeout_escalation(kernel_id: str, exec_timeout, partial_result: str) -
                        f"kernel={kernel_id} idle_for_s={tri['idle_for_s']} "
                        f"last_touched_by={tri['last_touched_by']} code_fp={tri['code_fp']} "
                        f"partial_output_len={len(partial_result)}")
-        _record_code_interp_hang('timeout')
+        _record_code_interp_hang('exec_timeout')
     except Exception as e:  # noqa: BLE001 — observability must never break the caller
         logger.debug(f"timeout-escalation observability failed for {kernel_id}: {e}")
 
@@ -538,11 +538,11 @@ def _kernel_watchdog():
             # BUG_0289 triage context: report the ACTUAL idle duration (not just the
             # threshold), who last submitted code, and what that code was. partial_output is
             # not reachable here (it lives in a call's TimeoutError args), so it is omitted.
-            # No stall detection is invented: iopub_stall stays 0, kill is recorded as watchdog.
+            # No stall detection is invented: stuck stays 0, the idle kill is recorded as idle_reap.
             logger.warning(f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
                            f"{idle_for_s}s (threshold {wd_timeout}s), killing container. "
                            f"last_touched_by={last_touched_by} code_fp={code_fp}")
-            _record_code_interp_hang('watchdog')
+            _record_code_interp_hang('idle_reap')
 
             # Mark as watchdog-killed and remove from client/container tracking atomically
             kc_to_shutdown = None

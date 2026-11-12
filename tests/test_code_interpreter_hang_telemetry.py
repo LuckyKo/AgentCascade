@@ -39,7 +39,7 @@ from agent_cascade.tools.code_interpreter import (  # noqa: E402
 from agent_cascade.tools.custom.system_info import SystemInfo  # noqa: E402
 from tests.slot_test_helpers import app_logger_names  # noqa: E402
 
-_KEYS = ('timeout', 'watchdog', 'iopub_stall')
+_KEYS = ('idle_reap', 'exec_timeout', 'stuck')
 _HEADER = 'Code interpreter hangs by reason:'
 
 
@@ -165,7 +165,7 @@ class TestTimeoutWarning:
         act['last_code_fingerprint'] = 'import os…deadbeef'
         try:
             _raise_levels(caplog)
-            before = _COUNTER['timeout']
+            before = _COUNTER['exec_timeout']
             _log_timeout_escalation(kid, 120, 'hello partial')  # len == 13
 
             line = next(
@@ -177,7 +177,7 @@ class TestTimeoutWarning:
             assert 'partial_output_len=13' in line
             idle = _field(line, 'idle_for_s')
             assert idle is not None and 40.0 < float(idle) < 45.0
-            assert _COUNTER['timeout'] == before + 1
+            assert _COUNTER['exec_timeout'] == before + 1
         finally:
             _restore_levels(caplog)
             _cleanup(kid)
@@ -220,7 +220,7 @@ class TestWatchdogWarning:
         monkeypatch.setattr(ci, '_cleanup_stale_containers', lambda now: None)
         try:
             _raise_levels(caplog)
-            before = _COUNTER['watchdog']
+            before = _COUNTER['idle_reap']
             _kernel_watchdog()
 
             # The background watchdog thread may or may not have grabbed the entry first;
@@ -236,7 +236,7 @@ class TestWatchdogWarning:
             # idle is reported inline (seconds before "(threshold"); just sanity-check the
             # actual idle value shows up in the line, not the stale 300s threshold alone.
             assert '305' in line or idle is not None
-            assert _COUNTER['watchdog'] >= before + 1
+            assert _COUNTER['idle_reap'] >= before + 1
         finally:
             _restore_levels(caplog)
             _cleanup(kid)
@@ -293,19 +293,19 @@ class TestHangCounterTelemetry:
     def test_section_reflects_current_values(self, monkeypatch):
         for k in _KEYS:
             monkeypatch.setitem(_COUNTER, k, 0)
-        monkeypatch.setitem(_COUNTER, 'timeout', 7)
-        monkeypatch.setitem(_COUNTER, 'watchdog', 3)
+        monkeypatch.setitem(_COUNTER, 'exec_timeout', 7)
+        monkeypatch.setitem(_COUNTER, 'idle_reap', 3)
         out = _dump()
-        assert _hang_counts(out) == {'timeout': 7, 'watchdog': 3, 'iopub_stall': 0}
+        assert _hang_counts(out) == {'exec_timeout': 7, 'idle_reap': 3, 'stuck': 0}
 
     def test_render_reflects_production_increment(self, monkeypatch):
         """A counter bump via the production helper shows up in a fresh render (read live)."""
         for k in _KEYS:
             monkeypatch.setitem(_COUNTER, k, 0)
         assert _hang_counts(_dump()) == {k: 0 for k in _KEYS}
-        _record_code_interp_hang('watchdog')
-        _record_code_interp_hang('watchdog')
-        assert _hang_counts(_dump()) == {'timeout': 0, 'watchdog': 2, 'iopub_stall': 0}
+        _record_code_interp_hang('idle_reap')
+        _record_code_interp_hang('idle_reap')
+        assert _hang_counts(_dump()) == {'exec_timeout': 0, 'idle_reap': 2, 'stuck': 0}
 
     def test_section_omitted_on_render_failure(self, monkeypatch):
         """A read/import failure degrades only this section, never blanks the dump."""

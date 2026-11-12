@@ -261,7 +261,7 @@ class SystemInfo(BaseTool):
                 lines.append(autoload)
 
             # ── Code interpreter hangs ── (BUG_0289 observability)
-            # Code-interpreter hangs by reason (timeout / watchdog / iopub_stall) from the
+            # Code-interpreter hangs by reason (idle_reap / exec_timeout / stuck) from the
             # code_interpreter tool's module-level counter. Read-only; omitted entirely if
             # unavailable, so it can never blank the surrounding dump.
             hangs = self._render_code_interp_hangs()
@@ -351,8 +351,8 @@ class SystemInfo(BaseTool):
         """Render code-interpreter hang counts by reason (BUG_0289 observability).
 
         Reads the module-level ``code_interp_hung_by_reason`` dict from
-        ``agent_cascade.tools.code_interpreter`` — the counter the timeout/watchdog paths
-        increment when a kernel times out or is watchdog-killed, so operators can read it
+        ``agent_cascade.tools.code_interpreter`` — the counter the exec-timeout / idle-reap paths
+        increment when a kernel times out (heavy cell) or is reaped after idle inactivity, so operators can read it
         from ``system_info`` / ``/api/telemetry`` instead of server stderr. Read-only: this
         never touches the counter or the kernel code path.
 
