@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from agent_cascade.operation_manager import file_mutation
 from agent_cascade.operation_manager.approval_provenance import APPROVER_REASON_LABEL
 from agent_cascade.operation_manager.grep_ignore import DEFAULT_IGNORED_DIRS
 from agent_cascade.tool_utils import truncate_with_spillover
@@ -2101,6 +2102,20 @@ class FileOpsMixin:
             return f"ERROR: {str(e)}"
         is_new = not resolved.exists()
 
+        # Clobber-guard baseline for the overwrite branch: capture the target's mtime+size
+        # now, BEFORE the unbounded approval wait, so the commit region can detect a write
+        # that landed while we were parked. O(1) stat — no full re-read of a file we are
+        # about to overwrite. A brand-new file has no baseline, so it is left unguarded.
+        if not is_new:
+            try:
+                _stat = resolved.stat()
+                baseline_mtime_ns = _stat.st_mtime_ns
+                baseline_size = _stat.st_size
+            except Exception:
+                baseline_mtime_ns = baseline_size = None
+        else:
+            baseline_mtime_ns = baseline_size = None
+
         if not self._is_auto_approved(path, agent_name, creating_new=True):
             description = f"Overwrite existing file: {path} ({len(content)} chars)"
             approved, reason = self.request_user_approval(
@@ -2134,24 +2149,60 @@ class FileOpsMixin:
         try:
             resolved = self._resolve_path(path, mode='rw')
 
-            # Backup if overwriting
-            backup_path_str = ''
-            is_new = not resolved.exists()
-            if not is_new:
-                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
-                shutil.copy2(resolved, backup_path)
-                backup_path_str = self._backup_path_str(backup_path)
+            # Commit region (guard → backup → write → own) serialized by the process-global
+            # mutation lock; acquired after the re-resolve so the guard and the write target
+            # the same resolved path. The response construction below stays outside the lock.
+            with file_mutation.mutate():
+                # Clobber guard (overwrite branch only): if the file changed since the
+                # pre-approval snapshot — by an external editor, a second AC instance, or a
+                # sibling thread that released the lock before us — abort instead of silently
+                # overwriting. mtime+size is a cheap O(1) check; the tradeoff is no full
+                # re-read of a file being overwritten, so a same-size rewrite landing inside
+                # one clock tick can slip past it; edit_file uses the strictly stronger
+                # raw-byte compare, and that asymmetry is intentional.
+                #
+                # The unguarded case is the new-file branch (baseline None). That also covers
+                # a path that was absent at the pre-approval check but created externally
+                # during the unbounded approval wait: with no baseline the write proceeds,
+                # backing up and overwriting whatever appeared. This is an accepted, inherent
+                # gap of not re-reading the target, not a bug.
+                if baseline_mtime_ns is not None:
+                    try:
+                        _live = resolved.stat()
+                    except Exception:
+                        _live = None
+                    if (_live is None
+                            or _live.st_mtime_ns != baseline_mtime_ns
+                            or _live.st_size != baseline_size):
+                        return (f"ERROR: {path} changed on disk between read and write "
+                                f"(concurrent modification). The write was NOT applied — "
+                                f"re-read the file and retry with the current content.")
 
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding='utf-8')
-            self._own(resolved, agent_name)
+                # Backup if overwriting. is_new_now is re-derived inside the lock (unlike the
+                # pre-approval is_new baseline) so the backup decision reflects the file's
+                # state at commit time, just before the verbatim write.
+                backup_path_str = ''
+                is_new_now = not resolved.exists()
+                if not is_new_now:
+                    safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                    backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
+                    shutil.copy2(resolved, backup_path)
+                    backup_path_str = self._backup_path_str(backup_path)
+
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                # Verbatim write: newline='' disables OS line-ending translation so the
+                # caller's bytes land unchanged (an LF file is not flipped to CRLF on
+                # Windows). A full overwrite has no source style to preserve, so this is not
+                # _render_with_newlines — a new file has no newline style to detect.
+                with resolved.open('w', encoding='utf-8', newline='') as _f:
+                    _f.write(content)
+                self._own(resolved, agent_name)
 
             line_count = len(content.splitlines())
             file_size_str = self._format_size(len(content.encode('utf-8')))
-            verb = 'Created' if is_new else 'Overwrote'
+            verb = 'Created' if is_new_now else 'Overwrote'
             msg = f"OK: {verb} {path} ({line_count} lines, {file_size_str})"
 
             if justification:
@@ -2676,49 +2727,56 @@ class FileOpsMixin:
         try:
             resolved = self._resolve_path(path, mode='rw')
 
-            # Concurrent-modification guard: approval can take an arbitrary amount of time,
-            # and another process/agent may have written the file since our read. Writing the
-            # stale result would silently clobber that work. Compare raw bytes (cheap relative
-            # to the edit) and abort without a backup or write if anything changed.
-            try:
-                current_bytes = resolved.read_bytes()
-            except Exception as e:
-                return f"ERROR: Failed to re-read file before writing: {str(e)}"
-            if current_bytes != original_bytes:
-                return (f"ERROR: {path} changed on disk between read and write (concurrent "
-                        f"modification). The edit was NOT applied — re-read the file and retry "
-                        f"with the current content.")
+            # The commit region (re-read → guard → backup → write → own) is serialized by a
+            # process-global mutex so two agent threads editing the same file cannot race
+            # through it. The lock is acquired here, AFTER the re-resolve, so the guard's
+            # re-read and the write below operate on the same resolved path. The match
+            # computation above and the response construction below stay outside the lock.
+            with file_mutation.mutate():
+                # Concurrent-modification guard: approval can take an arbitrary amount of time,
+                # and another process/agent may have written the file since our read. Writing the
+                # stale result would silently clobber that work. Compare raw bytes (cheap relative
+                # to the edit) and abort without a backup or write if anything changed. Under the
+                # lock this also sees writes from a sibling thread that finished after our read.
+                try:
+                    current_bytes = resolved.read_bytes()
+                except Exception as e:
+                    return f"ERROR: Failed to re-read file before writing: {str(e)}"
+                if current_bytes != original_bytes:
+                    return (f"ERROR: {path} changed on disk between read and write (concurrent "
+                            f"modification). The edit was NOT applied — re-read the file and retry "
+                            f"with the current content.")
 
-            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-            backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
-            shutil.copy2(resolved, backup_path)
-            backup_path_str = self._backup_path_str(backup_path)
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
+                shutil.copy2(resolved, backup_path)
+                backup_path_str = self._backup_path_str(backup_path)
 
-            # BUG_0250: advisory-only check for an adjacent duplicate line that this edit
-            # newly introduced (anchor text repeated in new_content, or a boundary that
-            # left the anchor behind). Computed before the write; the bytes are untouched.
-            duplicate_note = _adjacent_duplicate_note(file_content, new_file_content, match_mode)
+                # BUG_0250: advisory-only check for an adjacent duplicate line that this edit
+                # newly introduced (anchor text repeated in new_content, or a boundary that
+                # left the anchor behind). Computed before the write; the bytes are untouched.
+                duplicate_note = _adjacent_duplicate_note(file_content, new_file_content, match_mode)
 
-            # Generate unified diff before writing (both old and new content available)
-            # keepends=False: avoids double-newlines when joined with '\n' below
-            old_lines = file_content.splitlines()
-            new_lines = new_file_content.splitlines()
-            diff_lines = list(
-                difflib.unified_diff(old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
-            # Skip --- and +++ headers (first 2), keep @@ headers and content
-            diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
-            # Limit to 20 lines max; truncate with ellipsis if longer
-            if diff_content:
-                all_diff_lines = diff_content.splitlines()
-                if len(all_diff_lines) > 20:
-                    first_lines = all_diff_lines[:8]
-                    last_lines = all_diff_lines[-8:]
-                    diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+                # Generate unified diff before writing (both old and new content available)
+                # keepends=False: avoids double-newlines when joined with '\n' below
+                old_lines = file_content.splitlines()
+                new_lines = new_file_content.splitlines()
+                diff_lines = list(
+                    difflib.unified_diff(old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
+                # Skip --- and +++ headers (first 2), keep @@ headers and content
+                diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+                # Limit to 20 lines max; truncate with ellipsis if longer
+                if diff_content:
+                    all_diff_lines = diff_content.splitlines()
+                    if len(all_diff_lines) > 20:
+                        first_lines = all_diff_lines[:8]
+                        last_lines = all_diff_lines[-8:]
+                        diff_content = '\n'.join(first_lines + ['...'] + last_lines)
 
-            resolved.write_bytes(_render_with_newlines(new_file_content, newline_style))
-            self._own(resolved, agent_name)
+                resolved.write_bytes(_render_with_newlines(new_file_content, newline_style))
+                self._own(resolved, agent_name)
 
             # Response construction delegated to _edit_build_response. Any
             # exception it raises is caught by this try, as before extraction.
