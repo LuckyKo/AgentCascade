@@ -65,7 +65,7 @@ except ImportError:
 
 # Re-exports for backward compatibility (Phase 4a refactor)
 from agent_cascade.content_parse import _extract_system_message, _parse_multimodal_content
-from agent_cascade.path_security import _get_allowed_file_roots, _is_path_allowed  # noqa: F401 (re-export)
+from agent_cascade.path_security import _get_allowed_file_roots, _is_path_allowed, _is_within  # noqa: F401 (only _get_allowed_file_roots is a re-export; _is_path_allowed/_is_within are used in-module)
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
@@ -80,6 +80,11 @@ session_lock = threading.Lock()
 # buffer) cannot block the shared _sender_loop drain loop and stall every other
 # client. On timeout the offending connection is closed and discarded.
 WS_SEND_TIMEOUT = 5.0
+
+# Recursion ceiling for /api/find_file: bounds walk stack/depth. Symlink loops are
+# already handled independently by the realpath visited-set; this is a backstop for
+# non-cyclic but very deep trees. Not env-tunable — raising it re-opens the unbounded-walk edge.
+FIND_FILE_MAX_DEPTH = 12
 
 # ── Media upload endpoint ────────────────────────────────────────────────────
 # Generous server-side ceiling for a single media upload (transfer only). The
@@ -2639,11 +2644,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Simple recursive search, ignoring common large/irrelevant directories
             ignore_dirs = {'.git', 'node_modules', '__pycache__', '.pytest_cache', 'venv', 'env', '.env'}
 
-            def search_dir(current_dir):
+            # Termination guards for the recursive walk: a realpath visited-set breaks
+            # symlink/junction loops, and the depth cap bounds stack use for abnormally
+            # deep trees. Neither prunes content of a normal tree (no aliasing, depth <= cap).
+            seen_dirs = set()
+
+            def search_dir(current_dir, depth=0):
                 try:
+                    if depth > FIND_FILE_MAX_DEPTH:
+                        return
+                    try:
+                        key = os.path.realpath(str(current_dir))
+                    except OSError as e:
+                        logger.debug(f"Cannot resolve directory (skipping): {e}")
+                        return
+                    if key in seen_dirs:
+                        return
+                    seen_dirs.add(key)
                     for item in current_dir.iterdir():
                         if item.is_dir() and item.name not in ignore_dirs:
-                            search_dir(item)
+                            search_dir(item, depth + 1)
                         elif item.is_file() and item.name == filename:
                             matches.append(str(item.absolute()))
                 except (PermissionError, OSError) as e:
@@ -2667,8 +2687,16 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.get('/{path:path}')
     async def serve_static(path: str):
         file_path = os.path.normpath(os.path.join(web_ui_dir, path))
-        # Path traversal protection: ensure resolved path is still within web_ui_dir
-        if not (file_path.startswith(web_ui_dir + os.sep) or file_path == web_ui_dir):
+        # Resolve both candidate and served root through symlinks/junctions before
+        # containment. The root dir itself is servable (== root). Reusing the canonical
+        # _is_within guard keeps the trailing-separator sibling-prefix check that the
+        # normpath trap depends on. Fail closed on any resolution error.
+        try:
+            candidate = os.path.realpath(file_path)
+            root = os.path.realpath(web_ui_dir)
+        except OSError:
+            return JSONResponse(status_code=403, content={'message': 'Forbidden'})
+        if not _is_within(Path(candidate), Path(root)):
             return JSONResponse(status_code=403, content={'message': 'Forbidden'})
         if os.path.isfile(file_path):
             return FileResponse(file_path, headers=_NO_CACHE_HEADERS)
