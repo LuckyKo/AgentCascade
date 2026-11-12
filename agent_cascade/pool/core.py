@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_cascade.agents import Assistant
-from agent_cascade.instance_id import get_instance_id
+from agent_cascade.instance_id import instance_scoped_filename
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
@@ -155,11 +155,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         self._enable_async_shell_console_window = False  # default OFF; _load_pool_settings may override
 
         # ── PoolSettings persistence ────────────────────────────────────────
-        instance_id = get_instance_id()
-        if instance_id:
-            self._pool_settings_path = self.api_router._config_dir / f"pool_settings_{instance_id}.json"
-        else:
-            self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
+        self._pool_settings_path = self.api_router._config_dir / instance_scoped_filename('pool_settings')
         self._settings_save_lock = threading.Lock()  # guards concurrent save operations
         # BUG_0029 Phase 2: seeds runtime_state.state.auto_security through the class-level
         # property (assignment channel — no persistence). Must stay BEFORE _load_pool_settings()

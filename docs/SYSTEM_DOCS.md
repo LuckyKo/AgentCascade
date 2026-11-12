@@ -265,6 +265,15 @@ The API Server also owns the MCP (Model Context Protocol) server configuration â
 - **Failover Logic:** Automatically retries failed requests on alternative endpoints
 - **Per-Class Quotas:** Different agent classes may have different concurrency limits based on their LLM cost and rate limits
 
+**Persistence and instance separation:** endpoints, `agent_priorities`, and the General Settings
+`default_llm_cfg` persist in the project `config/` dir under an instance-scoped name (same rule
+as `pool_settings`): `api_endpoints.json` in single-instance mode, `api_endpoints_<id>.json` when
+`AGENT_CASCADE_INSTANCE_ID` is set. A named instance that only has the legacy unsuffixed file gets
+a one-time copy on load. Pytest processes set a `test_<pid>` instance ID, and
+`_load()`/`_save()`/`ensure_api_endpoints_config()` refuse the live single-instance file outright,
+so a test can neither read the real endpoint list (real LLM traffic) nor overwrite it. See
+BUG_0296.
+
 ### 3.6 Compression System
 
 **What it represents:** The mechanism that keeps agent conversations within token budget by summarizing older messages while preserving critical context through cumulative markers.

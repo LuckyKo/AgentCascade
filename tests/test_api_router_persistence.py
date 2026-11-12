@@ -229,7 +229,9 @@ def test_save_creates_single_bak_generation(router):
     router._save()
 
     bak = router._backup_path()
-    assert bak.name == 'api_endpoints.json.bak', f"unexpected backup filename: {bak.name}"
+    # Instance-scoped stem (BUG_0296): the backup sits next to the primary under the SAME name.
+    assert bak.parent == router._config_path.parent, f"bak is not a sibling of the primary: {bak}"
+    assert bak.name == router._config_path.name + '.bak', f"unexpected backup filename: {bak.name}"
     assert bak.exists()
 
     bak_names = [e['name'] for e in read_json(bak)['endpoints']]

@@ -4,6 +4,7 @@ Moved verbatim from api_router.py (Phase 3a pure-move refactor).
 """
 
 import json
+import sys
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -21,6 +22,78 @@ class _AppLoggerProxy:
 
 logger = _AppLoggerProxy()
 
+
+#: File stem of the endpoint config (``api_endpoints.json`` / ``api_endpoints_<id>.json``).
+API_ENDPOINTS_STEM = 'api_endpoints'
+
+
+def project_config_dir() -> Path:
+    """The REAL (live) config directory, i.e. ``<project root>/config``.
+
+    This file lives in ``api_router_pkg/`` — two levels below the project root — so it needs
+    ``parent.parent.parent`` to reach it (verified: the original monolith's ``parent.parent``
+    resolved to ``N:\\work\\WD\\AgentCascade``, where ``config/`` with ``secrets.json`` lives).
+    """
+    return Path(__file__).resolve().parent.parent.parent / 'config'
+
+
+def is_test_process() -> bool:
+    """True when the current process is pytest.
+
+    Used to make the LIVE config unreachable from tests: a test process must never read the
+    live endpoint list (that would send real LLM traffic) and must never write it.
+    """
+    return 'pytest' in sys.modules
+
+
+def is_live_api_endpoints_path(path) -> bool:
+    """True if ``path`` is the live single-instance config (``<project>/config/api_endpoints.json``)."""
+    p = Path(path)
+    return (p.name == f'{API_ENDPOINTS_STEM}.json'
+            and p.parent.resolve() == project_config_dir().resolve())
+
+
+def api_endpoints_config_path(config_dir) -> Path:
+    """Path of the endpoint config inside ``config_dir``, instance-scoped when an instance ID is set.
+
+    Same rule as ``pool_settings``: single-instance mode keeps ``api_endpoints.json``; a named
+    instance (including every pytest process, whose conftest sets ``test_<pid>``) uses
+    ``api_endpoints_<instance_id>.json``. Tests therefore cannot open the live file even when the
+    ``AGENT_CASCADE_TEST_CONFIG_DIR`` redirect is missing (BUG_0296).
+    """
+    from agent_cascade.instance_id import instance_scoped_filename
+
+    return Path(config_dir) / instance_scoped_filename(API_ENDPOINTS_STEM)
+
+
+def migrate_legacy_api_endpoints_config(config_dir) -> bool:
+    """Copy a legacy single-instance ``api_endpoints.json`` to the instance-scoped name.
+
+    Named instances used to share the single-instance file. After the instance-scoped rename
+    such a deployment would find no config and silently start with zero endpoints, so the first
+    load copies the legacy file across (the original is left untouched).
+
+    Never runs under pytest: there the legacy path may be the LIVE file, and tests must not
+    read it (BUG_0296). Returns True when a copy was made.
+    """
+    if is_test_process():
+        return False
+    legacy = Path(config_dir) / f'{API_ENDPOINTS_STEM}.json'
+    scoped = api_endpoints_config_path(config_dir)
+    if scoped == legacy or scoped.exists() or not legacy.exists():
+        return False
+    try:
+        import shutil
+
+        scoped.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, scoped)
+    except OSError as e:
+        logger.error(f"[INIT] Failed to migrate {legacy} -> {scoped}: {e}")
+        return False
+    logger.info(f"[INIT] Instance-scoped endpoint config created from {legacy} -> {scoped}")
+    return True
+
+
 def ensure_api_endpoints_config(config_dir: Optional[str] = None) -> bool:
     """
     Ensure api_endpoints.json exists at startup without instantiating APIRouter.
@@ -28,18 +101,15 @@ def ensure_api_endpoints_config(config_dir: Optional[str] = None) -> bool:
     Returns True if the file already existed or was created successfully, False on failure.
     """
     try:
-        if config_dir is not None:
-            config_path = Path(config_dir) / 'api_endpoints.json'
-        else:
-            # Project-root config dir (same logic as APIRouter.__init__).
-            # This file lives in api_router_pkg/ — one level deeper than the original
-            # monolith (agent_cascade/api_router.py), so it needs an extra .parent to
-            # reach project root. Verified: original .parent.parent from the monolith
-            # resolved to N:\work\WD\AgentCascade (project root, where config/ with
-            # secrets.json lives); without this fix it resolves to agent_cascade/,
-            # which auto-creates a stray agent_cascade/config/ dir.
-            project_root = Path(__file__).resolve().parent.parent.parent
-            config_path = project_root / 'config' / 'api_endpoints.json'
+        config_path = api_endpoints_config_path(
+            config_dir if config_dir is not None else project_config_dir())
+
+        # Hard guard: a test process must never create (or read) the live endpoint config.
+        if is_test_process() and is_live_api_endpoints_path(config_path):
+            logger.error('[INIT] Refusing to touch the LIVE api_endpoints.json from a test process')
+            return False
+
+        migrate_legacy_api_endpoints_config(config_path.parent)
 
         if config_path.exists():
             return True
@@ -54,12 +124,12 @@ def ensure_api_endpoints_config(config_dir: Optional[str] = None) -> bool:
             json.dump(default_config, f, indent=2)
 
         logger.warning(
-            'config/api_endpoints.json not found; created with empty default configuration. '
+            f'{config_path} not found; created with empty default configuration. '
             'Please configure at least one LLM endpoint.'
         )
         return True
     except OSError as e:
-        logger.error('[INIT] Failed to create config/api_endpoints.json: %s', e)
+        logger.error('[INIT] Failed to create the endpoint config: %s', e)
         return False
 
 MAX_CAPTION_LENGTH = 300              # Maximum length for image captions generated by vision model

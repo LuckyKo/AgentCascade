@@ -25,7 +25,10 @@ from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Tu
 import requests
 
 from agent_cascade.api_router_pkg.endpoints import (CANONICAL_AGENT_TYPES, MAX_CAPTION_LENGTH,
-                                                    RATE_LIMIT_WINDOW_SECONDS, APIEndpoint)
+                                                    RATE_LIMIT_WINDOW_SECONDS, APIEndpoint,
+                                                    api_endpoints_config_path,
+                                                    is_live_api_endpoints_path, is_test_process,
+                                                    migrate_legacy_api_endpoints_config)
 from agent_cascade.api_router_pkg.helpers import (_interruptible_sleep,
                                                  _should_abort_lockfree)
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
@@ -244,8 +247,12 @@ class APIRouter:
         Args:
             default_llm_cfg: The main LLM config from General Settings. This
                             is always the last-resort fallback and is never deleted.
-            config_dir:     Directory to persist api_endpoints.json.
-                            Defaults to workspace/config.
+            config_dir:     Directory holding the endpoint config. Defaults to project config/.
+                            The file name is instance-scoped: ``api_endpoints.json`` in
+                            single-instance mode, ``api_endpoints_<instance_id>.json`` when
+                            ``AGENT_CASCADE_INSTANCE_ID`` is set (same rule as
+                            ``pool_settings``). Pytest processes set a ``test_<pid>`` ID, so a
+                            test can never open the live file.
                             NOTE: the test-only ``AGENT_CASCADE_TEST_CONFIG_DIR`` environment
                             variable takes precedence over this argument. That is deliberate
                             (test pools pass the real project-root config dir here, and the
@@ -376,7 +383,10 @@ class APIRouter:
             # resolved to N:\work\WD\AgentCascade, where config/ with secrets.json lives).
             project_root = Path(__file__).resolve().parent.parent.parent
             self._config_dir = project_root / 'config'
-        self._config_path = self._config_dir / 'api_endpoints.json'
+        # Instance-scoped like pool_settings: a named instance (and every pytest process,
+        # via conftest's test_<pid> ID) gets api_endpoints_<id>.json and can never open the
+        # single-instance file the live server uses (BUG_0296).
+        self._config_path = api_endpoints_config_path(self._config_dir)
 
         # Load persisted config if available
         self._load()
@@ -3402,6 +3412,11 @@ class APIRouter:
         Windows, so a reader never observes a partially written config.
         """
         try:
+            # Hard guard (BUG_0296): a pytest process must never overwrite the LIVE config.
+            if is_test_process() and is_live_api_endpoints_path(self._config_path):
+                logger.error('[APIRouter] Refusing to WRITE the LIVE api_endpoints.json from a '
+                             f'test process ({self._config_path}); save skipped')
+                return
             self._config_dir.mkdir(parents=True, exist_ok=True)
             data = {
                 'endpoints': [ep.to_dict() for ep in self.endpoints.values()],
@@ -3478,7 +3493,17 @@ class APIRouter:
         If the file does not exist, it is created with an empty default
         configuration and a warning is logged so the user knows to configure
         at least one LLM endpoint.
+
+        Hard guard (BUG_0296): a pytest process must never read or create the LIVE
+        single-instance config. Reading it would send real LLM traffic (the endpoint list is
+        real), so a test that somehow resolves the live path simply keeps the
+        ``default_llm_cfg`` it was constructed with.
         """
+        if is_test_process() and is_live_api_endpoints_path(self._config_path):
+            logger.error('[APIRouter] Refusing to load the LIVE api_endpoints.json from a test '
+                         f'process ({self._config_path}); keeping the constructor config')
+            return
+        migrate_legacy_api_endpoints_config(self._config_dir)
         if not self._config_path.exists():
             # Auto-create with safe defaults on first startup.
             try:

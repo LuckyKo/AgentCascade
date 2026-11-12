@@ -55,6 +55,22 @@ def get_instance_suffix() -> str:
     return f"_{iid}" if iid else ''
 
 
+def instance_scoped_filename(stem: str, ext: str = '.json') -> str:
+    """Return the instance-scoped file name for a config file.
+
+    ``pool_settings`` -> ``pool_settings.json`` in single-instance mode, or
+    ``pool_settings_<instance_id>.json`` when ``AGENT_CASCADE_INSTANCE_ID`` is set. The same
+    rule applies to every per-instance config file (e.g. ``api_endpoints``), so parallel
+    instances - and, in particular, pytest processes (which set a ``test_<pid>`` instance ID) -
+    can never open the single-instance file that the live server uses.
+
+    Args:
+        stem: File name without extension.
+        ext: Extension including the leading dot (default '.json').
+    """
+    return f"{stem}{get_instance_suffix()}{ext}"
+
+
 def make_instance_dir(base_path: str) -> str:
     """Create an instance-specific directory path.
 
