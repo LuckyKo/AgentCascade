@@ -174,6 +174,34 @@ def test_approval_called_with_no_justification_kwarg_and_batch_field_present():
     assert kwargs['description'].splitlines()[0].startswith('Multi-edit')
 
 
+# ── full per-edit args reach the guard (no silent truncation) ─────────────────
+
+def test_batch_carries_full_args_not_truncated_previews():
+    big = 'Z' * 500          # deliberately > the old 200-char preview cap
+    op = _op(auto_approve=False)
+    op.edit_file = Mock(return_value='OK: Edited')
+    _drive(op, _edit_calls(2, new_content=big))
+    batch = op.request_user_approval.call_args.kwargs['tool_args']['batch']
+    assert len(batch) == 2
+    for entry in batch:
+        assert entry['new_content'] == big          # FULL content, not cut to 200
+        assert 'old_preview' not in entry and 'new_preview' not in entry
+
+
+def test_batch_truncates_oversized_field_with_marker():
+    from agent_cascade.engine.tool_execution import _MAX_EDIT_ARG_CHARS, _edit_arg_for_guard
+    huge = 'Y' * (_MAX_EDIT_ARG_CHARS + 500)
+    op = _op(auto_approve=False)
+    op.edit_file = Mock(return_value='OK: Edited')
+    _drive(op, _edit_calls(2, new_content=huge))
+    entry = op.request_user_approval.call_args.kwargs['tool_args']['batch'][0]
+    assert entry['new_content'].startswith('Y' * _MAX_EDIT_ARG_CHARS)
+    assert f'[TRUNCATED, {len(huge)} chars total]' in entry['new_content']
+    # direct unit checks of the helper:
+    assert _edit_arg_for_guard('abc') == 'abc'
+    assert _edit_arg_for_guard('X' * 10, cap=5) == 'XXXXX\n…[TRUNCATED, 10 chars total]'
+
+
 # ── reject path: all N get REJECTED results, no mutation ───────────────────────
 
 def test_reject_yields_rejected_result_for_every_member():

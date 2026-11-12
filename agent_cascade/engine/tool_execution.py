@@ -33,6 +33,23 @@ _UNTRUSTED_TOOLS: frozenset[str] = frozenset({
     'read_file', 'grep', 'web_extractor', 'read_logs', 'shell_cmd', 'code_interpreter',
 })
 
+# Per-member cap for the full args sent to the security guard in a grouped edit batch.
+# The guard should see the COMPLETE old_content/new_content of each edit: a truncated
+# input is a security blind spot (a malicious tail past the cut would be invisible).
+# The cap is a context-safety valve for pathological hunks, not a default: it only
+# truncates a single field that exceeds it, and marks it so the guard is never
+# silently shown a partial edit.
+_MAX_EDIT_ARG_CHARS = 8000
+
+
+def _edit_arg_for_guard(s: str, cap: int = _MAX_EDIT_ARG_CHARS) -> str:
+    """Full edit-field content for the security guard. If a single field exceeds the
+    safety cap, truncate and append a marker so the guard knows it is not seeing the
+    whole field (and can be conservative about it)."""
+    if len(s) <= cap:
+        return s
+    return s[:cap] + f'\n…[TRUNCATED, {len(s)} chars total]'
+
 
 def _wrap_untrusted(tool_name: str, result):
     """Wrap a tool result in trust-boundary delimiters for the LLM-facing function
@@ -1061,7 +1078,7 @@ class ToolExecMixin:
             specs = []
             path_str = None
             justifications = []
-            previews = []
+            members = []
             for idx in group_indices:
                 _, _, raw_args, _ = self._detect_tool(turn_output[idx])
                 resolved = self._resolve_placeholders(raw_args, inst_name, 'edit_file')
@@ -1082,20 +1099,22 @@ class ToolExecMixin:
                 j = resolved.get('justification')
                 if isinstance(j, str) and j.strip():
                     justifications.append(j.strip())
-                previews.append({'idx': idx, 'mode': resolved.get('match_mode', 'exact'),
-                                 'old_preview': oc[:200], 'new_preview': nc[:200]})
+                members.append({'idx': idx, 'mode': resolved.get('match_mode', 'exact'),
+                                'old_content': _edit_arg_for_guard(oc),
+                                'new_content': _edit_arg_for_guard(nc)})
             if len(specs) != n:
                 raise ValueError('spec/member count mismatch')
             justification = ' | '.join(justifications)
 
             # One approval for the whole batch. tool_args['justification'] feeds the WebUI
             # header + Telegram "Reason:"; description is the numbered per-edit summary
-            # (Telegram body + advisor + audit); tool_args['batch'] holds the previews.
+            # (Telegram body + advisor + audit); tool_args['batch'] holds the per-edit args —
+            # full, unless a single field exceeds _MAX_EDIT_ARG_CHARS (then capped + marked).
             tool_args = {
                 'path': path_str,
                 'match_mode': specs[0][2],
                 'batch_size': n,
-                'batch': previews,
+                'batch': members,
                 'justification': f'approve applies all {n} edits (serially, no rollback); reject applies none',
             }
             lines = [f'Multi-edit ({n} serial edit_file calls) to: {path_str}',
