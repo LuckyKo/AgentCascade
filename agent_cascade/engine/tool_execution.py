@@ -8,6 +8,7 @@ and the imports needed by these methods were added. The mixin is composed into
 
 from __future__ import annotations
 
+import json
 import os
 import traceback
 from pathlib import Path
@@ -170,9 +171,10 @@ class ToolExecMixin:
                     used_any_tool = True
                     continue  # Skip actual tool execution
 
-                # ── Multi-edit same-file atomic grouping (engine-level) ────────────
-                # A reducible same-file run collapses to one approval + one atomic
-                # all-or-nothing write. Only the LEADER (whose index is a dict key)
+                # ── Multi-edit same-file grouping (engine-level) ────────────
+                # A reducible same-file run collapses to one approval + N serial
+                # edit_file applications (no rollback). Only the LEADER (whose index
+                # is a dict key)
                 # dispatches; it emits exactly N FUNCTION results (successes and any
                 # failures), then continues so the loop never re-runs dispatch for the
                 # members. file_groups empty → _group is None → no-op (single-edit path
@@ -924,7 +926,16 @@ class ToolExecMixin:
         """Return the normcase path key when ``tool_args`` is a reducible single-occurrence
         exact/heuristic ``edit_file`` call, else ``None`` (caller falls back to the per-call
         path). delete_and_insert, occurrence=-1, occurrence>1 and whole-file rewrites never
-        group. Placeholder resolution is run conservatively and a failure bails to None."""
+        group. Placeholder resolution is run conservatively and a failure bails to None.
+
+        ``tool_args`` arrives as a JSON string on live LLM output (the raw
+        function_call.arguments field); normalize to a dict before the field checks,
+        mirroring the dispatcher's json.loads. A non-dict payload bails to None."""
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except (ValueError, TypeError):
+                return None
         if not isinstance(tool_args, dict):
             return None
         mode = tool_args.get('match_mode', 'exact')
@@ -1032,15 +1043,18 @@ class ToolExecMixin:
 
     def _execute_file_mutation_batch(self, instance, inst_name, group_indices, turn_output,
                                      response, executed_tools, already_emitted) -> None:
-        """Run a grouped edit_file batch: parse members, ONE approval, ONE atomic
-        all-or-nothing write via ``batch_mutate_file``, then emit exactly
-        ``len(group_indices)`` FUNCTION results. The whole body is guarded so that if
-        anything raises before all N are emitted, an inner handler emits an error result
+        """Run a grouped edit_file batch: parse members, ONE approval for the whole group,
+        then apply each member SERIALLY through the existing single-edit ``edit_file``
+        path (each call ``pre_approved=True`` so it skips only the per-member gate the
+        group decision above already cleared — the memory-vault screen, concurrent-write
+        guard, backup, and ownership still run per member). Each member keeps its own
+        ``edit_file`` feedback; a later member failing does not roll back earlier ones.
+        Emits exactly ``len(group_indices)`` FUNCTION results. The whole body is guarded so
+        that if anything raises before all N are emitted, the handler emits an error result
         for every still-un-emitted member — guaranteeing the emit-exactly-N invariant (no
         orphaned tool_call_ids, hence no API 400 on the next turn)."""
         n = len(group_indices)
         try:
-            from agent_cascade.operation_manager.file_operations import EditSpec
             op_manager = getattr(self.pool, 'operation_manager', None)
             if op_manager is None:
                 raise RuntimeError('operation_manager unavailable for grouped edit batch')
@@ -1057,13 +1071,14 @@ class ToolExecMixin:
                 nc = resolved.get('new_content')
                 if not isinstance(oc, str) or not isinstance(nc, str):
                     raise ValueError('old_content/new_content must be strings')
+                pth = resolved.get('path')
+                if not isinstance(pth, str) or not pth.strip():
+                    raise ValueError('edit path missing')
                 if path_str is None:
-                    pth = resolved.get('path')
-                    if not isinstance(pth, str) or not pth.strip():
-                        raise ValueError('edit path missing')
                     path_str = pth.strip()
-                specs.append(EditSpec(old_content=oc, new_content=nc,
-                                      match_mode=resolved.get('match_mode', 'exact')))
+                elif pth.strip() != path_str:
+                    raise ValueError('batch members target different paths')
+                specs.append((oc, nc, resolved.get('match_mode', 'exact')))
                 j = resolved.get('justification')
                 if isinstance(j, str) and j.strip():
                     justifications.append(j.strip())
@@ -1078,17 +1093,19 @@ class ToolExecMixin:
             # (Telegram body + advisor + audit); tool_args['batch'] holds the previews.
             tool_args = {
                 'path': path_str,
-                'match_mode': specs[0].match_mode,
+                'match_mode': specs[0][2],
                 'batch_size': n,
                 'batch': previews,
-                'justification': f'approve applies all {n} edits atomically; reject applies none',
+                'justification': f'approve applies all {n} edits (serially, no rollback); reject applies none',
             }
-            lines = [f'Atomic multi-edit ({n} edit_file calls) to: {path_str}',
-                     'Approving applies ALL edits atomically; rejecting applies NONE.']
-            for i, sp in enumerate(specs, 1):
-                lines.append(f'  {i}. ({sp.match_mode}) {sp.old_content[:80]!r} -> {sp.new_content[:80]!r}')
+            lines = [f'Multi-edit ({n} serial edit_file calls) to: {path_str}',
+                     'Approving applies ALL edits (serially, no rollback); rejecting applies NONE.']
+            for i, (oc, nc, mode) in enumerate(specs, 1):
+                lines.append(f'  {i}. ({mode}) {oc[:80]!r} -> {nc[:80]!r}')
             description = '\n'.join(lines)
 
+            approval_reason = ''
+            approved = True
             if not op_manager._is_auto_approved(path_str, inst_name):
                 approved, reason = op_manager.request_user_approval(
                     agent_name=inst_name, tool_name='edit_file',
@@ -1096,12 +1113,21 @@ class ToolExecMixin:
                 if not approved:
                     results = [f'REJECTED: {reason}'] * n
                 else:
-                    results = op_manager.batch_mutate_file(path_str, specs, inst_name, justification)
-            else:
-                results = op_manager.batch_mutate_file(path_str, specs, inst_name, justification)
+                    approval_reason = reason
+            if approved:
+                # Apply each member serially through the single-edit path. pre_approved=True
+                # skips only the per-member approval gate the group decision already cleared.
+                results = [op_manager.edit_file(path=path_str, agent_name=inst_name,
+                            old_content=oc, new_content=nc, match_mode=mode,
+                            justification=justification, pre_approved=True)
+                           for (oc, nc, mode) in specs]
+            # Surface the approver's (security guard's) decision on the lead result so the
+            # model sees WHY the batch was approved, not just the caller's justification.
+            if results and approval_reason:
+                results[0] = f'Approval ({inst_name}): {approval_reason}\n' + results[0]
 
             if not isinstance(results, (list, tuple)) or len(results) != n:
-                results = [str(results)] * n  # defensive; batch_mutate_file guarantees len N
+                results = [str(results)] * n  # defensive; every path above sets exactly N
             for idx, res in zip(group_indices, results):
                 if idx in already_emitted:
                     continue

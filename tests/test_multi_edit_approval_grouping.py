@@ -1,19 +1,22 @@
-"""Multi-edit same-file atomic grouping — primitive-level tests.
+"""Multi-edit same-file grouping — primitive + batch-application tests.
 
-Covers the two layers the feature adds:
-  1. ``batch_mutate_file`` (file_operations): N reducible edits applied atomically
-     against the ORIGINAL file bytes — all-or-nothing, exactly N result strings,
-     ownership established once.
-  2. ``_scan_file_mutation_groups`` (engine): which same-file same-turn edit runs
-     collapse into a group (reducibility + consecutiveness + cap).
+The grouped-batch path does two things and nothing else:
+  1. ONE security approval for a run of N same-file edit_file calls, so the guard
+     sees every member (not just the first), and
+  2. applies each member SERIALLY through the existing single-edit ``edit_file``
+     path — ``pre_approved=True`` suppresses only the per-member approval gate.
 
-The end-to-end leader/emit path is exercised indirectly: the invariant that makes it
-API-safe is "batch_mutate_file always returns exactly N strings, on every exit path",
-which is asserted here on the happy, no-match, and overlap paths.
+There is no atomic batch primitive; application lives only in ``edit_file``. These
+tests pin the contract ``edit_file`` gained (``pre_approved``) plus the two batch
+guarantees the engine relies on — per-member feedback with no rollback of earlier
+members, and the approver's reason surfaced on the lead result. The grouping scan
+(which runs collapse into one group) is also pinned here.
 """
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -22,7 +25,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_cascade.operation_manager import OperationManager  # noqa: E402
-from agent_cascade.operation_manager.file_operations import EditSpec  # noqa: E402
 from agent_cascade.engine.tool_execution import ToolExecMixin  # noqa: E402
 
 
@@ -37,81 +39,122 @@ def _owned_file(om, tmpdir, name, content, agent='coder'):
     return f
 
 
-# ── batch_mutate_file ──────────────────────────────────────────────────────────
+# ── edit_file(pre_approved=True) ───────────────────────────────────────────────
 
-def test_batch_applies_all_edits_atomically(tmpdir):
+def test_pre_approved_skips_per_call_approval_still_writes(tmpdir):
+    """pre_approved=True suppresses ONLY the approval gate: an UNowned file — which
+    would otherwise prompt — is edited without any request_user_approval call, and a
+    control (same manager, pre_approved=False) confirms the gate really does fire
+    when the flag is absent."""
     om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'f.txt', 'a\nb\nc\nd\n')
-    specs = [EditSpec('a', 'A', 'exact'), EditSpec('c', 'C', 'exact')]
-    results = om.batch_mutate_file(str(f), specs, 'coder')
-    assert len(results) == 2
-    assert all(r.startswith('OK') for r in results), results
-    assert f.read_text(encoding='utf-8') == 'A\nb\nC\nd\n'
+    f = Path(tmpdir, 'pp.txt')
+    f.write_text('a\nb\n', encoding='utf-8')   # NOT owned -> would normally prompt
+    om.request_user_approval = Mock(return_value=(True, 'ok'))
+
+    result = om.edit_file(str(f), 'coder', 'a', 'A', 'exact', pre_approved=True)
+    om.request_user_approval.assert_not_called()   # the gate was skipped
+    assert result.startswith('OK'), result
+    assert f.read_text(encoding='utf-8') == 'A\nb\n'
+
+    # Control: an unowned edit WITHOUT pre_approved must reach the gate.
+    g = Path(tmpdir, 'pp2.txt')
+    g.write_text('c\n', encoding='utf-8')
+    om.edit_file(str(g), 'coder', 'c', 'C', 'exact')
+    om.request_user_approval.assert_called_once()
 
 
-def test_batch_rolls_back_whole_when_an_edit_anchors_on_another_output(tmpdir):
-    """§7.2 causative case: edit #2 anchors on edit #1's not-yet-written output.
-    Because every edit is matched against the ORIGINAL bytes, edit #2 finds nothing →
-    the whole batch rolls back; file bytes AND mtime must be untouched."""
+def test_pre_approved_still_runs_vault_screen_and_concurrent_guard(tmpdir):
+    """pre_approved must NOT skip the memory-vault screen or the concurrent-modification
+    guard. We hook the vault screen to (a) prove it ran by observing its call, and
+    (b) mutate the file on disk from inside it — after edit_file's initial read but
+    before the guarded re-read. The guard must then abort the write: no backup, the
+    intruder's bytes stand, the edit is not applied."""
     om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'g.txt', 'a\nb\nc\n')
-    before_bytes = f.read_bytes()
-    before_mtime = f.stat().st_mtime_ns
-    specs = [EditSpec('b', 'b\nb2', 'exact'),   # writes 'b2' only after the atomic write
-             EditSpec('b2', 'b3', 'exact')]      # anchors on edit #1's output → no match
-    results = om.batch_mutate_file(str(f), specs, 'coder')
-    assert len(results) == 2
-    assert all('REJECTED:' in r for r in results), results
-    assert f.read_bytes() == before_bytes
-    assert f.stat().st_mtime_ns == before_mtime
+    f = _owned_file(om, tmpdir, 'cg.txt', 'a\nb\n')
+
+    def _mutate_then_pass(*a, **k):
+        f.write_bytes(b'INTRUDER\n')   # simulate a concurrent write between read and commit
+        return None                     # vault screen: no objection to the content
+
+    with patch('agent_cascade.operation_manager.file_operations._screen_vault_write',
+               side_effect=_mutate_then_pass) as screen:
+        result = om.edit_file(str(f), 'coder', 'a', 'A', 'exact', pre_approved=True)
+
+    screen.assert_called_once()                    # vault screen still ran under pre_approved
+    assert 'concurrent' in result.lower(), result  # guard aborted the write
+    assert f.read_bytes() == b'INTRUDER\n'         # intruder's bytes stand; edit not applied
 
 
-def test_batch_rejects_overlapping_edits_unchanged(tmpdir):
+# ── serial batch application (engine _execute_file_mutation_batch) ─────────────
+
+class _BatchHarness(ToolExecMixin):
+    """Drives the REAL ``_execute_file_mutation_batch`` against a REAL OperationManager
+    so the per-member ``edit_file`` calls hit real files and produce real results. Only
+    the detect / placeholder / append collaborators are overridden; the batch body and
+    emit path are production code."""
+
+    def __init__(self, om):
+        self.pool = SimpleNamespace(operation_manager=om)
+
+    def _detect_tool(self, out):
+        return (True, out['name'], out['args'], '')
+
+    def _resolve_placeholders(self, tool_args, inst_name, tool_name):
+        return tool_args           # identity — no {placeholder} machinery under test
+
+    def _append_and_log(self, instance, message, **kwargs):
+        return None                # keep the conversation-log side effect out of the witness
+
+    def run(self, members, inst_name='coder'):
+        turn_output = [{'name': 'edit_file', 'args': m} for m in members]
+        response, executed_tools, already_emitted = [], [], set()
+        self._execute_file_mutation_batch(
+            SimpleNamespace(), inst_name, list(range(len(members))),
+            turn_output, response, executed_tools, already_emitted)
+        return response
+
+
+def test_serial_batch_three_members_three_results_middle_failure_isolated(tmpdir):
+    """3 same-file members -> 3 distinct per-edit results. The MIDDLE member does not
+    match; only IT reports an error. Members 1 and 3 stay applied (asserted via file
+    state) — a later member failing does not roll back earlier ones."""
     om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'h.txt', 'hello world\n')
-    before = f.read_bytes()
-    specs = [EditSpec('hello', 'HI', 'exact'),
-             EditSpec('hello world', 'GONE', 'exact')]  # overlaps edit #1
-    results = om.batch_mutate_file(str(f), specs, 'coder')
-    assert len(results) == 2
-    assert all('REJECTED:' in r and 'overlap' in r for r in results), results
-    assert f.read_bytes() == before
+    f = _owned_file(om, tmpdir, 'b3.txt', 'a\nb\nc\n')
+    h = _BatchHarness(om)
+    members = [
+        {'path': str(f), 'old_content': 'a', 'new_content': 'A', 'match_mode': 'exact'},
+        {'path': str(f), 'old_content': 'ZZZ', 'new_content': 'X', 'match_mode': 'exact'},  # no match
+        {'path': str(f), 'old_content': 'c', 'new_content': 'C', 'match_mode': 'exact'},
+    ]
+    contents = [m.content for m in h.run(members)]
+    assert len(contents) == 3
+    assert len(set(contents)) == 3, 'each member must keep its own result'
+    assert 'OK' in contents[0] and 'OK' in contents[2]
+    first = next(ln.strip() for ln in contents[1].splitlines() if ln.strip()).lower()
+    assert first.startswith(('error:', 'rejected:', 'failed:', 'invalid:')), contents[1]
+    # Members 1 and 3 applied; member 2 did not corrupt anything.
+    assert f.read_text(encoding='utf-8') == 'A\nb\nC\n'
 
 
-def test_batch_ownership_established_once(tmpdir):
-    """Ownership is set once inside the atomic write; a later single edit_file on the
-    same file must auto-approve (proves _own fired and persists)."""
+def test_batch_surfaces_guard_reason_on_lead_result(tmpdir):
+    """When the (unowned) batch's single approval returns a non-empty reason, that
+    reason is prefixed on result #0 only — the model sees WHY the guard approved —
+    and every member is still applied."""
     om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'i.txt', 'x\ny\n')
-    specs = [EditSpec('x', 'X', 'exact'), EditSpec('y', 'Y', 'exact')]
-    om.batch_mutate_file(str(f), specs, 'coder')
-    assert f.read_text(encoding='utf-8') == 'X\nY\n'
-    assert om._is_auto_approved(str(f), 'coder') is True
+    f = Path(tmpdir, 'b1.txt')
+    f.write_text('a\nb\n', encoding='utf-8')   # unowned -> approval gate entered
+    om._is_auto_approved = Mock(return_value=False)
+    om.request_user_approval = Mock(return_value=(True, 'guard: looks safe'))
 
-def test_batch_rejects_member_with_identical_old_new(tmpdir):
-    """A member whose old_content==new_content is a no-op surfaced by _edit_compute_match
-    as an error (identical to a standalone edit). The whole batch rolls back atomically and
-    the file is left untouched — no partial write."""
-    om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'j.txt', 'a\nb\n')
-    before = f.read_bytes()
-    results = om.batch_mutate_file(
-        str(f), [EditSpec('b', 'B', 'exact'), EditSpec('a', 'a', 'exact')], 'coder')
-    assert len(results) == 2
-    assert all(r.startswith('REJECTED:') for r in results), results
-    assert f.read_bytes() == before
-
-
-def test_batch_failure_results_detectable_as_failure(tmpdir):
-    """The engine classifies success/failure from the FIRST line, so rollback headers
-    must start with a recognized error token — not a custom 'REJECTED BATCH:' label."""
-    om = _make_om(tmpdir)
-    f = _owned_file(om, tmpdir, 'k.txt', 'a\nb\n')
-    results = om.batch_mutate_file(
-        str(f), [EditSpec('b', 'B', 'exact'), EditSpec('ZZZ', 'X', 'exact')], 'coder')
-    for r in results:
-        first = next(ln.strip() for ln in r.split('\n') if ln.strip()).lower()
-        assert first.startswith(('error:', 'rejected:', 'failed:', 'invalid:')), first
+    h = _BatchHarness(om)
+    members = [
+        {'path': str(f), 'old_content': 'a', 'new_content': 'A', 'match_mode': 'exact'},
+        {'path': str(f), 'old_content': 'b', 'new_content': 'B', 'match_mode': 'exact'},
+    ]
+    response = h.run(members, inst_name='coder')
+    assert 'Approval (coder): guard: looks safe' in response[0].content
+    assert all('Approval (' not in m.content for m in response[1:])
+    assert f.read_text(encoding='utf-8') == 'A\nB\n'
 
 
 # ── engine scan (grouping) ─────────────────────────────────────────────────────
