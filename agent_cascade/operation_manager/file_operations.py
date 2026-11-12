@@ -888,6 +888,45 @@ def _edit_detect_line_ending(line: str) -> str:
     return ''
 
 
+# Conservative typographic-punctuation → ASCII table used by the exact-match
+# locating tier. Only punctuation/whitespace that a caller transcribing
+# read_file output (or pasting prose) tends to substitute is mapped; letters
+# and zero-width characters are never mapped because they are meaning-bearing.
+# Every entry maps to ASCII and no key or value contains \n or \r, so the
+# table can never add or remove a newline — line-break structure is invariant.
+# Built as a str.translate table (single C-level pass) rather than a chain of
+# .replace() calls, which matters because this runs over the whole file.
+_EDIT_MATCH_TRANS = str.maketrans({
+    '\u2018': "'",     # left single quote → apostrophe
+    '\u2019': "'",     # right single quote / apostrophe → apostrophe
+    '\u201c': '"',     # left double quote → straight double quote
+    '\u201d': '"',     # right double quote → straight double quote
+    '\u2013': '-',     # en dash → hyphen-minus
+    '\u2014': '-',     # em dash → hyphen-minus
+    '\u2026': '...',   # horizontal ellipsis → three dots
+    '\u00a0': ' ',     # no-break space → space
+    '\u202f': ' ',     # narrow no-break space → space
+    '\u2009': ' ',     # thin space → space
+})
+
+
+def _edit_normalize_for_match(s: str) -> str:
+    """Apply the conservative char-map in ``_EDIT_MATCH_TRANS``.
+
+    This is the second stage of the exact-match locating tier: it is fed the
+    tab-normalized strings produced by stage 1 (so the tab→4-space step is not
+    duplicated here) and applies the typographic map on top of them, letting an
+    ``old_content`` typed with smart quotes, en/em dashes, ellipsis, or nbsp
+    variants still locate its span in the file.
+
+    LOCATE-ONLY: applied symmetrically to ``old_content`` and the file purely
+    to find WHERE a match lives. It is never applied to ``new_content``, and
+    the replacement always uses the file's raw bytes, so it cannot change what
+    is written — only which region is selected.
+    """
+    return s.translate(_EDIT_MATCH_TRANS)
+
+
 def _edit_get_leading_whitespace(s: str) -> str:
     """Get leading whitespace of first non-blank line."""
     for line in s.splitlines():
@@ -2264,6 +2303,7 @@ class FileOpsMixin:
         absorbed_suffix = ''  # BUG_0260: text after the replacement tail in an absorbed line
         count = 0  # exact mode occurrence count (read only in exact response paths)
         total_lines = 0  # d&i mode total line count (read only in d&i response paths)
+        norm_kind = None  # None = literal exact; 'tab/space' | 'unicode' = normalized fallback
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
 
@@ -2280,11 +2320,24 @@ class FileOpsMixin:
                 norm_count = norm_file.count(norm_old)
 
                 if norm_count == 0:
-                    # BUG_0231: locate the nearest candidate region instead of
-                    # comparing old_content line 1 against file line 1.
-                    _hint = _describe_exact_miss(old_content, file_content, _TAB_W)
-                    return (f"ERROR: Pattern not found in {path} (exact) — {_hint}. "
-                            f"Try heuristic match_mode or include more context lines")
+                    # Second stage: the tab-only stage missed, so retry after mapping
+                    # common typographic punctuation (smart quotes / en-em dashes /
+                    # ellipsis / nbsp variants) to ASCII on top of the already-tab-
+                    # normalized strings. This only widens WHERE a span can be found;
+                    # the file's raw bytes are still what get replaced.
+                    norm_old = _edit_normalize_for_match(norm_old)
+                    norm_file = _edit_normalize_for_match(norm_file)
+                    norm_count = norm_file.count(norm_old)
+
+                    if norm_count == 0:
+                        # BUG_0231: locate the nearest candidate region instead of
+                        # comparing old_content line 1 against file line 1.
+                        _hint = _describe_exact_miss(old_content, file_content, _TAB_W)
+                        return (f"ERROR: Pattern not found in {path} (exact) — {_hint}. "
+                                f"Try heuristic match_mode or include more context lines")
+                    norm_kind = 'unicode'
+                else:
+                    norm_kind = 'tab/space'
 
                 # Normalized match found — extract the raw (tab-indented) file content
                 # so the replacement operates on the file's actual bytes.
@@ -2296,7 +2349,7 @@ class FileOpsMixin:
                 # prefix). Reject it and suggest a safer match mode.
                 if norm_start > 0 and norm_file[norm_start - 1] != '\n':
                     return (f"ERROR: Pattern not found in {path} (exact) — the "
-                            f"tab/space-normalized match starts mid-line, which is "
+                            f"{norm_kind}-normalized match starts mid-line, which is "
                             f"ambiguous. Try heuristic match_mode, or include the "
                             f"full line in old_content.")
                 _sl = norm_file[:norm_start].count('\n')
@@ -2309,7 +2362,7 @@ class FileOpsMixin:
                         and norm_end < len(norm_file)
                         and norm_file[norm_end] not in ('\n', '\r')):
                     return (f"ERROR: Pattern not found in {path} (exact) — the "
-                            f"tab/space-normalized match ends mid-line, which is "
+                            f"{norm_kind}-normalized match ends mid-line, which is "
                             f"ambiguous. Try heuristic match_mode, or include the "
                             f"full line in old_content.")
                 _el = (norm_file[:norm_end - 1].count('\n')
@@ -2791,6 +2844,7 @@ class FileOpsMixin:
                 indent_warnings=indent_warnings, duplicate_note=duplicate_note,
                 diff_content=diff_content, backup_path_str=backup_path_str,
                 justification=justification, approver_reason=approver_reason,
+                norm_kind=norm_kind,
             )
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -2877,7 +2931,7 @@ class FileOpsMixin:
                              exact_end_line, match_ratio, delta_width,
                              absorbed_tail, absorbed_suffix, indent_warnings,
                              duplicate_note, diff_content, backup_path_str,
-                             justification, approver_reason) -> str:
+                             justification, approver_reason, norm_kind=None) -> str:
         """Build the success message for a completed edit.
 
         Called from inside edit_file's post-write try, so any exception it
@@ -2903,13 +2957,14 @@ class FileOpsMixin:
 
         if match_mode == 'exact':
             # Exact mode: line range + delta
+            mode_token = f'{norm_kind}-norm' if norm_kind else 'exact'
             if occurrence == -1:
                 total_net = net_delta * count
                 total_sign = '+' if total_net >= 0 else ''
-                res_msg += (f" (exact, replaced all {count} occurrence(s), first at lines "
+                res_msg += (f" ({mode_token}, replaced all {count} occurrence(s), first at lines "
                            f"{exact_start_line}-{exact_end_line}, net {total_sign}{total_net})")
             else:
-                res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_token}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
 
         elif match_mode in ('heuristic', 'heuristic_agnostic'):
             # Discriminated labels for heuristic vs heuristic_agnostic
@@ -3031,6 +3086,18 @@ class FileOpsMixin:
                         f'\n  note: range started on a heading/structural opener '
                         f'("{_fd_snip}") that the replacement does not restore — '
                         f'the section may now be missing its heading.')
+
+        # Non-literal-match disclosure — single site for every edit whose applied
+        # match was not a raw exact match: the heuristic modes, or the exact-path
+        # normalized-fallback tier (norm_kind set). Keyed on match_mode + norm_kind
+        # so the wording stays uniform across the success message.
+        if match_mode in ('heuristic', 'heuristic_agnostic'):
+            res_msg += (f'\n  ⚠ non-literal match (heuristic, {match_ratio:.0%}) at lines '
+                        f'{exact_start_line}-{exact_end_line} — verify the applied block')
+        elif norm_kind:
+            res_msg += (f'\n  ⚠ matched after {norm_kind} normalization at lines '
+                        f'{exact_start_line}-{exact_end_line} — the file\'s actual bytes '
+                        f'were used; re-read to confirm')
 
         if duplicate_note:
             res_msg += f'\n  {duplicate_note}'
