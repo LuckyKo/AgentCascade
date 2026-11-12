@@ -246,6 +246,13 @@ class APIRouter:
                             is always the last-resort fallback and is never deleted.
             config_dir:     Directory to persist api_endpoints.json.
                             Defaults to workspace/config.
+                            NOTE: the test-only ``AGENT_CASCADE_TEST_CONFIG_DIR`` environment
+                            variable takes precedence over this argument. That is deliberate
+                            (test pools pass the real project-root config dir here, and the
+                            env var must keep their writes confined), but it means a router
+                            built under pytest does NOT write to ``config_dir``. In tests,
+                            always redirect the env var instead of relying on the argument
+                            (see ``tests/conftest.py``).
             policy:         RetryPolicy governing retry behavior. Controls both
                             per-endpoint max retries (endpoint_max_retries) and
                             backoff parameters (base_delay, max_delay, jitter_factor).

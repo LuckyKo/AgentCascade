@@ -42,9 +42,9 @@ def _read_existing(path: Path) -> dict:
 def _session_state_path() -> Path:
     """Path to config/session_state.json (sibling of api_endpoints.json).
 
-    In tests, AGENT_CASCADE_TEST_CONFIG_DIR points at a per-session temp dir, so the
-    state file is isolated from the real config/ (matching APIRouter's behavior) and a
-    session rename in one test never pollutes the real file.
+    In tests, AGENT_CASCADE_TEST_CONFIG_DIR points at a per-test temp dir, so the
+    state file is isolated from the real config/ (matching APIRouter's behavior) and no
+    test can see another test's session state.
     """
     env_dir = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
     if env_dir:

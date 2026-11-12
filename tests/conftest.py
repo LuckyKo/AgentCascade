@@ -960,17 +960,56 @@ class MockAgentPool:
 
 
 @pytest.fixture(scope='session', autouse=True)
-def isolated_config_dir(tmp_path_factory):
-    """Set AGENT_CASCADE_TEST_CONFIG_DIR to a temp directory for the entire test session.
+def _test_config_baseline(tmp_path_factory):
+    """Keep AGENT_CASCADE_TEST_CONFIG_DIR set for the WHOLE session, not just per test.
 
-    This ensures all APIRouter instances created during tests use an isolated config
-    directory instead of the production project-root/config directory.
+    Module/session-scoped fixtures are set up BEFORE function-scoped fixtures, so a
+    module-scoped app or pool (e.g. ``tests/test_api_endpoints.py::test_app``) builds its
+    ``APIRouter`` while no per-test directory exists yet. If the variable were unset at that
+    moment, the router would resolve to the REAL workspace config dir: it would READ the
+    live endpoint list (real LLM traffic) and any ``_save()`` would overwrite the user's
+    real ``config/api_endpoints.json``. This baseline makes the never-touch-real-config
+    guarantee hold at every point of the session, including between tests.
     """
-    test_config = tmp_path_factory.mktemp('test_config')
+    baseline = tmp_path_factory.mktemp('test_config_session')
+    previous = os.environ.get('AGENT_CASCADE_TEST_CONFIG_DIR')
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(baseline)
+    yield baseline
+    if previous is None:
+        os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+    else:
+        os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = previous
+
+
+@pytest.fixture(autouse=True)
+def isolated_config_dir(tmp_path, _test_config_baseline):
+    """Point AGENT_CASCADE_TEST_CONFIG_DIR at a FRESH temp directory for EACH test.
+
+    This keeps every test's ``config/api_endpoints.json`` and ``config/session_state.json``
+    private. It must not be session-scoped: ``APIRouter._load()`` merges a persisted
+    ``default_llm_cfg`` (model, ``model_server``, ``max_input_tokens``, sampling, ...) OVER
+    the cfg passed to ``__init__``, so a shared directory makes that config process-global -
+    whichever test saved last changes every later test's Tier-4 default and compression
+    limit (BUG_0296; the BUG_0292 freshness test was one symptom).
+
+    Scope interactions matter: module-scoped fixtures (``test_app`` and friends) are built
+    before this fixture for a given test, so they keep the session baseline directory, while
+    everything created inside a test gets the private per-test directory. Teardown restores
+    the baseline (never "unset"), so a test that leaks its own value - ``tests/stress``
+    does - cannot hand it to the next test.
+
+    The directory is created lazily by the writers (``APIRouter._save``/``_load`` and
+    ``session_state_store`` both mkdir their parent), so tests that never touch config see
+    no extra files in ``tmp_path``.
+
+    Tests that need their own layout still patch this variable (see the ``router`` fixture
+    below and ``tests/test_api_router_persistence.py``); the autouse fixture only guarantees
+    each test STARTS from a clean directory.
+    """
+    test_config = tmp_path / 'test_config'
     os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(test_config)
     yield test_config
-    # Cleanup not strictly necessary (tmp_path handles it), but explicit is clear
-    os.environ.pop('AGENT_CASCADE_TEST_CONFIG_DIR', None)
+    os.environ['AGENT_CASCADE_TEST_CONFIG_DIR'] = str(_test_config_baseline)
 
 
 @pytest.fixture(scope='session', autouse=True)
