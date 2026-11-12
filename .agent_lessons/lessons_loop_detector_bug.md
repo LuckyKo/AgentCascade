@@ -70,7 +70,7 @@ When a child agent loops during `call_agent` execution:
 
 1. **Loop detected** in `execution_engine.py::_pre_llm_checks()` at line 1187
    - `LoopDetectedError` raised with `agent_name=None`
-   
+
 2. **Propagates out of** `engine.run()` at line 794-796:
    ```python
    except LoopDetectedError:
@@ -114,12 +114,12 @@ When a child agent loops during `call_agent` execution:
                f"Exceeded retries ({retry_count}/{max_auto_retries}). Stopping."
            )
            # ...
-       
+
        logger.warning(
            f"Loop detected for {instance_name}: {e.reason}. "
            f"Surgical rollback (Retry {retry_count + 1}/{max_auto_retries})."
        )
-       
+
        # Surgical rollback + hint injection under per-instance lock for atomicity
        pool.surgical_rollback(instance_name, e.pop_count, reason=e.reason)  # ← Uses instance_name from wrapper!
    ```
@@ -139,23 +139,23 @@ def run_agent_in_pool_with_recovery(
     max_auto_retries: int = 3,
     auto_rollback_enabled: bool = True,
 ) -> Iterator[List[Message]]:
-    
+
     retry_count = 0
     instance = pool.get_instance(instance_name)
-    
+
     while retry_count <= max_auto_retries:
         try:
             # Execute through unified engine
             yield from run_agent_in_pool(pool, instance_name)
             return  # Success — no loop detected
-            
+
         except LoopDetectedError as e:
             # ... logging ...
-            
+
             # BUG: This always rolls back 'instance_name' parameter,
             # which is the ROOT agent, not necessarily the agent that looped!
             pool.surgical_rollback(instance_name, e.pop_count, reason=e.reason)
-            
+
             # Inject hint message into the WRONG agent's conversation
             hint_msg = Message(
                 role=USER,
@@ -163,11 +163,11 @@ def run_agent_in_pool_with_recovery(
                         f"Try a different approach to break the pattern.",
             )
             instance.append_message(hint_msg)  # ← Adds to root agent, not child!
-            
+
             retry_count += 1
 ```
 
-**The Problem**: 
+**The Problem**:
 - `instance_name` is the **root agent name** passed as a parameter
 - When a child agent loops, the exception bubbles up through the call stack
 - The recovery handler uses `instance_name` (root) instead of `e.agent_name` (which is None)
@@ -215,7 +215,7 @@ raise LoopDetectedError(reason=reason, agent_name=instance_name, pop_count=pop_c
 except LoopDetectedError as e:
     # FIX: Use the agent_name from the exception if available, otherwise fallback to instance_name
     looped_agent = e.agent_name if e.agent_name else instance_name
-    
+
     if not auto_rollback_enabled or retry_count >= max_auto_retries:
         logger.warning(
             f"Loop detected for {looped_agent}: {e.reason}. "
@@ -286,7 +286,7 @@ except LoopDetectedError as e:
 ## Files to Modify
 
 1. `agent_cascade/execution_engine.py` - Line 1187
-2. `agent_cascade/run_agent_unified.py` - Line 412  
+2. `agent_cascade/run_agent_unified.py` - Line 412
 3. `agent_cascade/api_integration.py` - Lines 351-381
 
 ---

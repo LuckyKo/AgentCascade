@@ -1,5 +1,6 @@
 ---
 scope: [agentcascade]
+hub: max-input-tokens
 ---
 
 # Max Input Tokens Fallback Fix - 2026-06-25
@@ -74,5 +75,5 @@ The config merge order matters when endpoints have different context window size
 - `lessons_max_input_tokens_propagation_fix.md` — Propagation fix from template to execution engine
 
 ---
-*Document created: 2026-06-25*  
+*Document created: 2026-06-25*
 *Fix by: CommitAgent*

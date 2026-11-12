@@ -60,15 +60,15 @@ agent_invoker.invoke_compression_agent(...)
 - This is intentional (comment at line 157-160) but means propagate_settings' work is discarded
 
 #### Issue B: _build_resources_block missing agent_class fallback
-- `_get_active_functions_from_template` has a fallback: if `template.agent_type` is empty, 
+- `_get_active_functions_from_template` has a fallback: if `template.agent_type` is empty,
   it reads `instance.agent_class` (lines 114-117)
 - `_build_resources_block` does NOT have this fallback (line 262)
-- If Compressor template lacks `agent_type`, the system prompt tool list won't include 
+- If Compressor template lacks `agent_type`, the system prompt tool list won't include
   Layer 3 defense-in-depth defaults, but actual filtering WILL still work
 
 #### Issue C: propagate_settings doesn't set _generate_cfg_override if no propagated_max
 - Lines 533-536: `if propagated_max:` — only sets override when max_input_tokens is truthy
-- If caller has no max_input_tokens config, `_generate_cfg_override` stays None after 
+- If caller has no max_input_tokens config, `_generate_cfg_override` stays None after
   the first block but gets properly set in the second block (lines 557-564)
 
 ## DEFAULT_COMPRESSOR_DISABLED_TOOLS

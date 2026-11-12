@@ -1,5 +1,6 @@
 ---
 scope: [agentcascade]
+hub: max-input-tokens
 ---
 
 # max_input_tokens Propagation Bug Fix - 2026-06-22
@@ -31,7 +32,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'max_turns',
     'max_parallel_agents',
     'max_input_tokens',  # Context size setting (per-endpoint, not LLM parameter)
-    
+
     # ... rest of keys
 )
 ```
