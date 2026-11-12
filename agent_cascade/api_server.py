@@ -2686,7 +2686,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             temp_dir = Path(DEFAULT_WORKSPACE) / 'temp_uploads'
             temp_dir.mkdir(exist_ok=True)
 
-            file_path = temp_dir / file.filename
+            # file.filename is client-controlled: take only the basename so a
+            # '../' or absolute component cannot escape temp_uploads (mirrors the
+            # media-upload handler's "do NOT mirror /api/parse's raw-filename write"
+            # note). A normal upload (plain filename) is unchanged.
+            safe_name = Path(file.filename or '').name or 'upload'
+            file_path = temp_dir / safe_name
             with file_path.open('wb') as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
