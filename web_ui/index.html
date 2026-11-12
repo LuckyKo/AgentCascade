@@ -565,7 +565,7 @@
                           <input autocomplete="off" type="checkbox" id="setting-unload-unused-mcp" />
                         </label>
                         <label class="setting-field toggle-field">
-                          <span title="Automatic checkpointing only: when enabled, agent KV context is preserved across system operations (Security checks, compression). When disabled, context may need to be reloaded if the model cache is evicted. This does NOT affect the manual Save KV / Load KV buttons — those depend only on endpoint capability.">State KV Save/Restore</span>
+                          <span title="Automatic checkpointing only: when enabled, agent KV context is preserved across the Security-check slot yield (context is unchanged, so a saved KV survives a model-swap eviction). Compression no longer saves KV — it rewrites the context, so a pre-compression save would be stale. When disabled, context may need to be reloaded if the model cache is evicted. This does NOT affect the manual Save KV / Load KV buttons — those depend only on endpoint capability.">State KV Save/Restore (Security)</span>
                           <input autocomplete="off" type="checkbox" id="setting-state-kv-save" checked />
                         </label>
                         <label class="setting-field">
