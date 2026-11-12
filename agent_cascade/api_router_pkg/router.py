@@ -34,7 +34,8 @@ from agent_cascade.api_router_pkg.helpers import (_interruptible_sleep,
 from agent_cascade.api_router_pkg.normalization import normalize_api_base
 from agent_cascade.api_router_pkg.scheduler import EndpointScheduler
 from agent_cascade.cost import is_priced
-from agent_cascade.error_reporting import TB_DEDUP, format_endpoint_error
+from agent_cascade.error_reporting import (TB_DEDUP, format_endpoint_error,
+                                          is_model_scoped_failure)
 from agent_cascade.exceptions import AgentTerminatedError, ContextWindowExceeded, ServerBusyError
 from agent_cascade.retry_policy import POLICY_DEFAULT, RetryPolicy, calculate_backoff, is_deterministic_client_error
 from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, BREAKER_MAX_WINDOW_SECONDS, BREAKER_WINDOW_GROWTH,
@@ -1904,20 +1905,28 @@ class APIRouter:
     # ── Per-Server Circuit Breaker (Change B/D) ──────────────────────────
 
     def _is_server_busy_loading(self, error: Exception) -> bool:
-        """True when an error carries the SERVER_BUSY_LOADING signature.
+        """True when an error means the BASE is busy, not just one model.
 
-        Matches ModelServiceError with HTTP code 503, or error text like
-        'Failed to load model ... failed to start' (llama.cpp loader busy).
-        Real per-model errors (404 model-not-found, 400 invalid-request) do NOT
-        match and therefore never trip the server breaker — they only earn the
-        per-(base, model) cooldown.
+        A model-scoped failure short-circuits to False: ``Failed to load model '<id>'``
+        is a refusal for THAT model (VRAM fit, bad args, missing backend). One
+        autoloader base serves many models, so tripping the per-base breaker would
+        blacklist the healthy ones; those errors only earn the per-(base, model)
+        cooldown. Everything else keeps the previous contract: a 503 from the endpoint,
+        or a base-level busy signature (connection cap, queue, explicit server-busy).
+        Real per-model errors (404 model-not-found, 400 invalid-request) do not match
+        either and therefore never trip the server breaker.
         """
+        if is_model_scoped_failure(error):
+            return False
         from agent_cascade.llm.base import ModelServiceError
         if isinstance(error, ModelServiceError) and str(getattr(error, 'code', None)) == '503':
             return True
         err_str = str(error).lower()
-        return ('failed to load model' in err_str or 'failed to start' in err_str or 'model load error' in err_str or
-                'loading of model' in err_str)
+        return ('too many concurrent connections' in err_str
+                or 'queue is unavailable' in err_str
+                or 'server busy' in err_str
+                or 'service unavailable' in err_str
+                or 'failed to start' in err_str)
 
     def _breaker_trip(self, base_key: str, reason: str) -> None:
         """Trip or re-trip (with grown window) the breaker for a normalized base.

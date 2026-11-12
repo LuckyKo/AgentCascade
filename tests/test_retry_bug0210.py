@@ -7,9 +7,12 @@ even when the endpoint card said ``Retries = 1`` or ``2``. The card's retry budg
 the user's contract: N retries means N+1 attempts before failover, regardless of the
 error class.
 
-Cross-caller protection is deliberately unchanged: the first busy error still trips
-the per-server breaker, so every OTHER caller skips this base until the window/probe
-matures. Only the caller that is already inside its retry loop spends its card budget.
+Cross-caller protection is unchanged for a genuinely BUSY base: the first base-scoped
+busy error (connection cap, queue, "server busy") still trips the per-server breaker, so
+every OTHER caller skips this base until the window/probe matures. A MODEL-scoped loading
+failure (`Failed to load model '<id>'`) is deliberately excluded - the base is still
+healthy for every other model it serves (BUG_0297). Only the caller already inside its
+retry loop spends its card budget either way.
 
 Run: pytest tests/test_retry_bug0210.py -v
 """
@@ -73,8 +76,14 @@ def install_chain(router, card_retries):
     return ep_busy, ep_next
 
 
-def busy_503():
+def model_load_503():
+    """MODEL-scoped: this model could not be loaded; other models on the base are fine."""
     return ModelServiceError(message='Failed to load model', code=503)
+
+
+def base_busy_503():
+    """BASE-scoped: the server itself is saturated (connection cap)."""
+    return ModelServiceError(message='Too many concurrent connections', code=503)
 
 
 @pytest.mark.parametrize('card_retries', [0, 1, 2])
@@ -89,7 +98,7 @@ def test_busy_503_honors_card_retry_count_before_cross_base_failover(card_retrie
     def call_fn(llm_cfg):
         if llm_cfg.get('api_base') == BUSY_BASE:
             busy_calls.append(llm_cfg.get('model'))
-            raise busy_503()
+            raise model_load_503()
         next_calls.append(llm_cfg.get('model'))
         return 'ok'
 
@@ -121,8 +130,41 @@ def test_busy_503_plain_text_signature_also_honors_card_retries():
     assert len(busy_calls) == 3
 
 
-def test_busy_503_still_trips_breaker_for_other_callers():
-    """The card budget is per caller; the breaker still stops OTHER callers hammering."""
+def test_model_scoped_503_does_not_skip_other_models_on_same_base():
+    """BUG_0297: one model refusing to load must not blacklist its whole base.
+
+    Replays the 2026-11-12 11:51 incident shape: two models share one autoloader base,
+    the first 503s with "Failed to load model '<id>'", the second is healthy. Before the
+    fix the base breaker opened and the healthy model was skipped without a request.
+    """
+    router = make_router()
+    base = 'http://shared-bug0297.test:9100/v1'
+    ep_a = APIEndpoint(name='model-a-ep', api_base=base, model='model-a', max_retries=0)
+    ep_b = APIEndpoint(name='model-b-ep', api_base=base, model='model-b', max_retries=0)
+    router.add_endpoint(ep_a)
+    router.add_endpoint(ep_b)
+    router.set_agent_priorities(AGENT_TYPE, [ep_a.id, ep_b.id])
+
+    calls = []
+
+    def call_fn(llm_cfg):
+        calls.append(llm_cfg.get('model'))
+        if llm_cfg.get('model') == 'model-a':
+            raise model_load_503()
+        return 'ok'
+
+    result = router.call_with_fallback(AGENT_TYPE, call_fn, agent_instance_name='bug0297-inst')
+
+    assert result == 'ok'
+    assert calls == ['model-a', 'model-b'], (
+        'the healthy model on the same base must still be called')
+    assert not router._breaker_is_open(base), (
+        'a model-scoped load failure must not trip the per-base breaker')
+
+
+def test_base_busy_503_still_trips_breaker_for_other_callers():
+    """The card budget is per caller; the breaker still stops OTHER callers hammering
+    a genuinely saturated base (connection cap / queue), even after BUG_0297."""
     router = make_router()
     install_chain(router, card_retries=2)
 
@@ -132,7 +174,7 @@ def test_busy_503_still_trips_breaker_for_other_callers():
     def first_call(llm_cfg):
         if llm_cfg.get('api_base') == BUSY_BASE:
             first_busy_calls.append(1)
-            raise busy_503()
+            raise base_busy_503()
         first_next_calls.append(1)
         return 'ok'
 
@@ -148,7 +190,7 @@ def test_busy_503_still_trips_breaker_for_other_callers():
     def second_call(llm_cfg):
         if llm_cfg.get('api_base') == BUSY_BASE:
             second_busy_calls.append(1)
-            raise busy_503()
+            raise base_busy_503()
         second_next_calls.append(1)
         return 'ok'
 

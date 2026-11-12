@@ -336,6 +336,35 @@ def classify_endpoint_failure(e: Any) -> str:
         return 'unknown error'
 
 
+#: Text signatures that scope a failure to ONE model rather than to the server. One
+#: autoloader base can serve many models, so "this model could not be loaded" says
+#: nothing about the other models on the same base.
+_MODEL_SCOPED_FAILURE_SIGNATURES = (
+    'failed to load model',
+    'model load error',
+    'loading of model',
+    'no longer loaded',
+    'is not loaded',
+    'cannot load ',
+)
+
+
+def is_model_scoped_failure(e: Any) -> bool:
+    """True when ``e`` reports a failure of THIS model, not of the server.
+
+    Used by the per-base circuit breaker: a shared base (llama-autoloader, many models)
+    must not be blacklisted because one model's load was refused. Model-scoped failures
+    belong to the per-``(base, model)`` cooldown instead. Never raises.
+    """
+    if e is None:
+        return False
+    try:
+        text = str(e).lower()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return any(sig in text for sig in _MODEL_SCOPED_FAILURE_SIGNATURES)
+
+
 def summarize_exhaustion(e: Any) -> str:
     """Compact digest of a terminal "All API endpoints exhausted" error for log lines.
 

@@ -11,10 +11,12 @@ Covers the approved fix for the single-GPU model-swap storm:
   breaker-open base; caption_images does not fire at the busy base.
 - Concurrency (M5): two agents with DIFFERENT slot pools (conc=0 + conc>0) on the
   same normalized base during half_open → exactly ONE probe fired.
-- Integration (mock, no GPU): busy base (503 "Failed to load model") + healthy
-  different-base endpoint → zero hammering while open, failover works, exactly one
-  probe after the window, recovery resumes; hot-loop check (breaker held open past
-  the cap → clean degradation).
+- Integration (mock, no GPU): busy base (503 "Too many concurrent connections", a
+  BASE-scoped signature) + healthy different-base endpoint → zero hammering while open,
+  failover works, exactly one probe after the window, recovery resumes; hot-loop check
+  (breaker held open past the cap → clean degradation).
+- BUG_0297: a MODEL-scoped 503 ("Failed to load model '<id>'") must not trip the per-base
+  breaker, so the other models served by that base stay callable.
 
 No real LLM/GPU/network required: HTTP is mocked or a local mock server is used.
 """
@@ -37,8 +39,9 @@ from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, ENDPOINT_BLACKL
 # The `router` / `mock_servers` fixtures come from conftest automatically (no local
 # definition needed). Plain helper functions are re-exported below so any external
 # importer keeps working and there is a single source of truth in conftest.py.
-from tests.conftest import _busy_error  # noqa: E402,F401
-from tests.conftest import BUSY_ERR_TEXT, FAST_RETRY_POLICY, _add_endpoint, _set_max_retries
+from tests.conftest import _busy_error, _model_load_error  # noqa: E402,F401
+from tests.conftest import (BUSY_ERR_TEXT, FAST_RETRY_POLICY, MODEL_LOAD_ERR_TEXT, _add_endpoint,
+                            _set_max_retries)  # noqa: E402,F401
 
 # ============================================================================
 # Change A — normalization
@@ -145,6 +148,39 @@ class TestBreakerStateMachine:
             assert not router._is_server_busy_loading(err)
         router._record_server_busy(base, Exception('404 - model not found'))
         assert normalize_api_base(base) not in router._server_breakers
+
+    def test_model_load_failure_does_not_trip_breaker(self, router):
+        """A per-model load refusal must not blacklist the base (BUG_0297).
+
+        One autoloader base serves many models; `Failed to load model '<id>'` is about
+        that model only (VRAM fit, bad args, missing backend).
+        """
+        base = 'http://127.0.0.1:1234/v1'
+        errors = (
+            _model_load_error(),
+            ModelServiceError(code='503', message="Failed to load model 'qwen3.8'"),
+            ModelServiceError(code='503', exception=Exception("Failed to load model 'x'")),
+            Exception('Cannot load m.gguf: measured need VRAM {GPU1: 14222MB}'),
+        )
+        for err in errors:
+            assert not router._is_server_busy_loading(err), err
+            router._record_server_busy(base, err)
+        assert normalize_api_base(base) not in router._server_breakers
+        assert not router._breaker_should_skip(base)
+
+    def test_base_scoped_busy_still_trips(self, router):
+        """The legacy base-level signatures must keep tripping (no over-correction)."""
+        base = 'http://127.0.0.1:1234/v1'
+        errors = (
+            _busy_error(),
+            ModelServiceError(code='503', message='Too many concurrent connections'),
+            Exception('503 - Service Unavailable'),
+            Exception('server busy - retry later'),
+        )
+        for err in errors:
+            assert router._is_server_busy_loading(err), err
+        router._record_server_busy(base, errors[1])
+        assert router._breaker_is_open(base)
 
     def test_open_to_half_open_after_window(self, router):
         base = 'http://127.0.0.1:1234/v1'

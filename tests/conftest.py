@@ -1151,11 +1151,20 @@ FAST_RETRY_POLICY = _RetryPolicy(
     endpoint_max_retries=1,
 )
 
-BUSY_ERR_TEXT = '503 - Failed to load model: qwen2.5 failed to start'
+# Base-scoped busy signature: the SERVER is saturated (connection cap / queue), so every
+# model on that base is affected and the per-base breaker is the right response.
+BUSY_ERR_TEXT = '503 - Too many concurrent connections'
+# Model-scoped signature: THIS model could not be loaded. Other models on the same base
+# stay healthy, so this must NOT trip the per-base breaker (BUG_0297).
+MODEL_LOAD_ERR_TEXT = '503 - Failed to load model: qwen2.5 failed to start'
 
 
 def _busy_error():
     return Exception(BUSY_ERR_TEXT)
+
+
+def _model_load_error():
+    return Exception(MODEL_LOAD_ERR_TEXT)
 
 
 @pytest.fixture
@@ -1205,10 +1214,12 @@ def _set_max_retries(router, value):
 
 
 class _MockLLMHandler(_http_server.BaseHTTPRequestHandler):
-    """Busy server: 503 'Failed to load model' for /chat/completions; /models lists models.
+    """Busy server: 503 'Too many concurrent connections' for /chat/completions; /models lists models.
 
     ``server_ref`` points at a dict shared with the test so hit counts are tracked
-    PER SERVER (two mock servers run concurrently in one process).
+    PER SERVER (two mock servers run concurrently in one process). The busy body is
+    deliberately BASE-scoped: a model-scoped 503 ('Failed to load model') must not trip
+    the per-base breaker (BUG_0297).
     """
     busy = True
     server_ref = None  # set per-server: {'busy': bool, 'hits': {path: int}}
@@ -1237,7 +1248,7 @@ class _MockLLMHandler(_http_server.BaseHTTPRequestHandler):
         self.rfile.read(length)
         import json
         if self.server_ref and self.server_ref.get('busy'):
-            body = {'error': 'Failed to load model: qwen2.5 failed to start'}
+            body = {'error': 'Too many concurrent connections'}
             self.send_response(503)
         else:
             body = {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
