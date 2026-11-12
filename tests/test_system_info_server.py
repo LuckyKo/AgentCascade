@@ -314,7 +314,7 @@ class TestSystemInfoTelemetryDump:
         assert 'Config fingerprints (A/B, by resolved model):' in out
         # Resolved row present; model→llm_calls adjacency proves the runs column
         # was removed (old format had 'runs=' between them).
-        assert 'config_model=dflash2  llm_calls=2' in out
+        assert 'resolved_model=dflash2  llm_calls=2' in out
 
     def test_ab_dump_does_not_refilter(self):
         """Defense against a second copy of the llm_calls==0 predicate drifting back
@@ -333,7 +333,7 @@ class TestSystemInfoTelemetryDump:
         out = self._tool_with(_GhostTelemetry()).call('{"help": "telemetry"}')
         # The dump no longer filters: the ghost would render if the getter let it
         # through — which it does not in production (see test_telemetry.py).
-        assert 'config_model=Swift-1.5  llm_calls=0' in out
+        assert 'resolved_model=Swift-1.5  llm_calls=0' in out
 
     def test_populated_dump_renders_all_sections(self):
         out = self._tool_with(_FakeTelemetry()).call('{"help": "telemetry"}')

@@ -180,7 +180,7 @@ class SystemInfo(BaseTool):
                     avg_tps = c.get('avg_tps', '')
                     # runs is a turn-start count with no single resolved-model home
                     # under this re-key, so it is intentionally omitted from the line.
-                    lines.append(f"  {fp}  config_model={model}  "
+                    lines.append(f"  {fp}  resolved_model={model}  "
                                  f"llm_calls={llm_calls}  "
                                  f"llm_time={c.get('total_llm_latency_sec', '')}s  "
                                  f"turn_time={c.get('total_duration_sec', '')}s  "

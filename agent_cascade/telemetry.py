@@ -39,9 +39,6 @@ MAX_ERROR_MESSAGE_LENGTH = 200
 # A detected miss is only counted as waste when the reprocessed prompt exceeds
 # this floor — small deltas are normal prompt variation, not wasted recompute.
 CACHE_MISS_NOISE_FLOOR_TOKENS = 1024
-# An idle gap larger than this between two calls on the same instance is treated
-# as an evicted (cold) KV cache rather than an active-cache miss.
-CACHE_IDLE_TTL_MS = 5 * 60 * 1000
 
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
 from agent_cascade.settings import DEFAULT_RECENT_EVENT_COUNT, MAX_EVENTS_IN_MEMORY, MODEL_PRICING
@@ -698,8 +695,9 @@ class TelemetryCollector:
 
         Otherwise returns ``{'missed': int, 'root_cause': str, 'idle_ms': float}`` where
         ``root_cause`` is one of ``'cold_start'`` (first call, no baseline),
-        ``'model_change'`` (different model than prev — the cache key moved),
-        ``'idle_ttl'`` (gap over ``CACHE_IDLE_TTL_MS`` — cache evicted), or ``'other'``.
+        ``'model_change'`` (different model than prev — the cache key moved), or ``'other'``.
+        ``idle_ms`` is a raw inter-call measurement (no eviction inference); the retired
+        idle-eviction heuristic now reports large idle gaps as ``'other'``.
         For the differential case ``missed = min(prev_prompt, cur_prompt) - cached``; for a
         cold start ``missed = prompt_tokens - cached`` (the full uncached re-prefill).
 
@@ -735,10 +733,8 @@ class TelemetryCollector:
             idle_ms = now_ms - (prev.get('prev_ts_ms') or 0)
             if model != prev.get('prev_model'):
                 root_cause = 'model_change'
-            elif idle_ms > CACHE_IDLE_TTL_MS:
-                root_cause = 'idle_ttl'
             else:
-                root_cause = 'other'
+                root_cause = 'other'   # honest "unknown gap", not a fabricated eviction claim
             return {'missed': missed, 'root_cause': root_cause, 'idle_ms': idle_ms}
         except (TypeError, ValueError):
             return None

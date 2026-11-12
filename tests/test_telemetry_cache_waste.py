@@ -5,7 +5,7 @@ Covers the per-instance prev-snapshot miss detector added to TelemetryCollector:
   * the STICKY reported_cache guard that keeps a never-reports-cache provider
     (e.g. a backend that omits cached_tokens) from being miscounted as waste,
   * the noise-floor threshold,
-  * the three root-cause tags (model_change / idle_ttl / other),
+  * the root-cause tags (cold_start / model_change / other),
   * the compression reset (post-compression smaller prompt must NOT count),
   * session + per-config waste totals,
   * the optional $-cost gated on MODEL_PRICING.
@@ -16,7 +16,7 @@ Mirrors the fixture + call style of tests/test_telemetry.py.
 import pytest
 
 import agent_cascade.telemetry as telemetry_module
-from agent_cascade.telemetry import CACHE_IDLE_TTL_MS, TelemetryCollector
+from agent_cascade.telemetry import TelemetryCollector
 
 
 @pytest.fixture
@@ -98,17 +98,25 @@ class TestCacheWasteDetection:
         assert len(evs) == 1
         assert evs[0]['waste_root_cause'] == 'model_change'
 
-    # 7. same model, idle > TTL → root_cause='idle_ttl'.
-    def test_idle_beyond_ttl_tags_root_cause(self, collector):
+    # 7. same model, large idle gap, prev reported, cached=0 → root_cause='other'.
+    #    (The no-signal 'idle_ttl' eviction heuristic was retired — idle time is not an
+    #    eviction signal; llama.cpp has no wall-clock KV eviction.)
+    def test_large_idle_gap_same_model_tags_other(self, collector):
         _classify(collector, 'inst', prompt=5000, cached=4000, model='A')
-        # Push the previous call's timestamp far enough back that the next call's
-        # idle gap exceeds CACHE_IDLE_TTL_MS (simulates an evicted cold cache).
-        collector._cache_scan_state['inst']['prev_ts_ms'] -= (CACHE_IDLE_TTL_MS + 1000)
+        # Push prev timestamp back by >5 min to re-create the old "idle_ttl" scenario.
+        collector._cache_scan_state['inst']['prev_ts_ms'] -= (300_000 + 1000)
         _classify(collector, 'inst', prompt=5000, cached=0, model='A')
         evs = _wasted_events(collector)
         assert len(evs) == 1
-        assert evs[0]['waste_root_cause'] == 'idle_ttl'
-        assert evs[0]['idle_ms'] > CACHE_IDLE_TTL_MS
+        assert evs[0]['waste_root_cause'] == 'other'   # was 'idle_ttl'
+        assert evs[0]['idle_ms'] > 300_000             # idle_ms measurement preserved
+
+    def test_idle_ttl_root_cause_is_never_emitted(self, collector):
+        # Drive a mix of calls including a large-idle same-model miss.
+        _classify(collector, 'inst', prompt=5000, cached=4000, model='A')
+        collector._cache_scan_state['inst']['prev_ts_ms'] -= (300_000 + 1000)
+        _classify(collector, 'inst', prompt=5000, cached=0, model='A')
+        assert all(e.get('waste_root_cause') != 'idle_ttl' for e in _wasted_events(collector))
 
     # 8. same model, idle<=TTL, cached=0, prev reported → root_cause='other'.
     def test_same_model_active_cache_miss_tags_other(self, collector):
