@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.error_reporting import TB_DEDUP, build_terminal_message, summarize_exhaustion
+from agent_cascade.error_reporting import (TB_DEDUP, build_terminal_message, is_rate_limited,
+                                           summarize_exhaustion)
 from agent_cascade.exact_loop_detect import detect_exact_loop as _detect_exact_loop
 from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected, ContextWindowExceeded,
                                       FallbackCompressionRequired, MaxTokenExceeded, ServerBusyError)
@@ -1028,23 +1029,33 @@ class LLMCallMixin:
         state.last_output = None
 
         # 429 / ServerBusy overload guard (additive — does NOT touch other error types).
-        # A 429 (backend rate limit / context-cache exhaustion) or ServerBusyError (every endpoint on
-        # a breaker-open physical server; the router already burned its bounded fail-fast wait) is
-        # transient-but-pointless to hammer: re-queueing just burns the retry budget and, without this
-        # guard, the loop exits via the while-guard and _finalize_llm_result emits a useless
-        # "[SYSTEM ERROR: Empty LLM response]". classify_error keeps these retryable (correct for the
-        # transient case), so we cap them HERE instead: when THIS attempt is the last one the budget allows,
-        # stop and surface an informative overload message. Fires one attempt before the terminal branch
-        # below (retry_count+1 >= max_attempts), so it always wins for 429/ServerBusy and never for
+        # A 429 (backend rate limit) or ServerBusyError (every endpoint on a
+        # breaker-open physical server; the router already burned its bounded fail-fast wait)
+        # is transient-but-pointless to hammer: re-queueing just burns the retry budget and,
+        # without this guard, the loop exits via the while-guard and _finalize_llm_result
+        # emits a useless "[SYSTEM ERROR: Empty LLM response]". classify_error keeps these
+        # retryable (correct for the transient case), so we cap them HERE instead: when THIS
+        # attempt is the last one the budget allows, stop and surface an informative overload
+        # message. Fires one attempt before the terminal branch below
+        # (retry_count+1 >= max_attempts), so it always wins for 429/ServerBusy and never for
         # other classes. N = this attempt's ordinal (retry_count is pre-increment here).
-        _is_overload = isinstance(e, ServerBusyError) or '429' in str(e).lower() or 'rate limit' in str(e).lower()
+        # The surfaced text is derived from the actual error: "HTTP 429" is only claimed
+        # for a genuine rate limit, never for a busy server (BUG_0298).
+        _is_server_busy = isinstance(e, ServerBusyError)
+        _is_overload = _is_server_busy or is_rate_limited(e)
         if _is_overload and state.retry_count + 1 >= max_attempts:
             _attempts = state.retry_count + 1
             logger.error(f"[ENDPOINT_RETRY] LLM endpoint overloaded for {inst_name} after {_attempts} "
-                         f"attempts (429/ServerBusy): {summarize_exhaustion(e)}")
-            yield Message(role=ASSISTANT,
-                         content=f"[SYSTEM ERROR: LLM endpoint overloaded (HTTP 429) after {_attempts} "
-                                 f"attempts — context cache exhausted]")
+                         f"attempts ({'ServerBusy' if _is_server_busy else 'rate limit'}): "
+                         f"{summarize_exhaustion(e)}")
+            if _is_server_busy:
+                _msg = (f"[SYSTEM ERROR: LLM server busy after {_attempts} attempt(s) — no "
+                        f"endpoint was reachable (every base is breaker-open; the router "
+                        f"sent no requests)]")
+            else:
+                _msg = (f"[SYSTEM ERROR: LLM endpoint rate-limited (HTTP 429) after "
+                        f"{_attempts} attempt(s) — the provider is throttling requests]")
+            yield Message(role=ASSISTANT, content=_msg)
             state.error_already_yielded = True
             return True
 

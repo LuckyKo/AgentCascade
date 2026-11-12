@@ -322,7 +322,7 @@ def classify_endpoint_failure(e: Any) -> str:
         if any(s in text for s in ('refused', 'unreachable', 'no route to host', 'connection reset', 'broken pipe',
                                    'winerror 10055', 'winerror 10061')):
             return 'connection refused/unreachable'
-        if 'rate limit' in text or '429' in text:
+        if is_rate_limited(e):
             return 'rate limited (HTTP 429)'
         if 'unauthorized' in text or 'forbidden' in text or 'invalid api key' in text \
                 or 'authentication' in text:
@@ -363,6 +363,30 @@ def is_model_scoped_failure(e: Any) -> bool:
     except Exception:  # pragma: no cover - defensive
         return False
     return any(sig in text for sig in _MODEL_SCOPED_FAILURE_SIGNATURES)
+
+
+#: Text markers that identify a real rate-limit response when no numeric status is
+#: attached (unwrapped SDK errors). A bare ``'429'`` substring is NOT a marker: ports and
+#: token counts contain it too.
+_RATE_LIMIT_TEXT_MARKERS = ('rate limit', 'too many requests', 'error code: 429', 'http 429')
+
+
+def is_rate_limited(e: Any) -> bool:
+    """True when ``e`` is a genuine rate limit (429 status or explicit marker text).
+
+    A structured numeric status wins over text: bare ``'429'`` inside a message is
+    often a port or a token count, not an HTTP status.
+    """
+    if e is None:
+        return False
+    code = str(getattr(e, 'code', None) or '').strip()
+    if code.isdigit():
+        return code == '429'
+    try:
+        text = str(e).lower()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return any(marker in text for marker in _RATE_LIMIT_TEXT_MARKERS)
 
 
 def summarize_exhaustion(e: Any) -> str:

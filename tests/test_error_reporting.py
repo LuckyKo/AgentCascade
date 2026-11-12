@@ -202,6 +202,39 @@ class TestClassifyEndpointFailure:
         assert cls(RuntimeError('read timed out after 30s')) == 'network timeout'
         assert cls(RuntimeError('429 Too Many Requests')) == 'rate limited (HTTP 429)'
 
+    def test_bare_429_substring_is_not_a_rate_limit(self):
+        """A port or token count containing '429' must not be labelled HTTP 429."""
+        from agent_cascade.error_reporting import classify_endpoint_failure as cls
+        assert cls(RuntimeError('connect failed to http://127.0.0.1:4290/v1')) != 'rate limited (HTTP 429)'
+        assert cls(RuntimeError('context length 4290 exceeds limit')) != 'rate limited (HTTP 429)'
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2b. is_rate_limited (BUG_0298)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsRateLimited:
+
+    def test_structured_code_wins(self):
+        from agent_cascade.error_reporting import is_rate_limited
+        assert is_rate_limited(_mse(code='429', message='whatever'))
+        # A server that says 503 is a server error, even if the body mentions rate limits.
+        assert not is_rate_limited(_mse(code='503', message='rate limit exceeded'))
+
+    def test_text_markers(self):
+        from agent_cascade.error_reporting import is_rate_limited
+        assert is_rate_limited(RuntimeError('429 Too Many Requests'))
+        assert is_rate_limited(RuntimeError('Error code: 429 - rate limit'))
+        assert is_rate_limited(RuntimeError('HTTP 429 from provider'))
+
+    def test_non_rate_limit_errors(self):
+        from agent_cascade.error_reporting import is_rate_limited
+        assert not is_rate_limited(None)
+        assert not is_rate_limited(RuntimeError('connect failed to http://127.0.0.1:4290/v1'))
+        assert not is_rate_limited(RuntimeError('context length 4290 exceeds limit'))
+        assert not is_rate_limited(RuntimeError('server busy'))
+
     def test_none_input(self):
         from agent_cascade.error_reporting import classify_endpoint_failure as cls
         assert cls(None) == 'unknown error'
