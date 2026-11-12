@@ -41,7 +41,8 @@ from agent_cascade.retry_policy import POLICY_DEFAULT, RetryPolicy, calculate_ba
 from agent_cascade.settings import (BREAKER_BASE_WINDOW_SECONDS, BREAKER_MAX_WINDOW_SECONDS, BREAKER_WINDOW_GROWTH,
                                     ENDPOINT_BLACKLIST_SECONDS, ENDPOINT_COOLDOWN_SECONDS,
                                     ENDPOINT_DETERMINISTIC_FAILURE_THRESHOLD, ENDPOINT_FAILURE_CLEANUP_HOURS,
-                                    REACQUIRE_TIMEOUT, SANITY_PROBE_ENABLED, SANITY_PROBE_TIMEOUT_SECONDS,
+                                    LLM_CALL_DEADLINE_SECONDS, REACQUIRE_TIMEOUT, SANITY_PROBE_ENABLED,
+                                    SANITY_PROBE_TIMEOUT_SECONDS, SERVER_BUSY_RETRY_DELAY_SECONDS,
                                     SERVER_BUSY_WAIT_CAP_SECONDS)
 from agent_cascade.slot_queue import release_slot_permit
 from agent_cascade.utils.atomic_json import atomic_write_json
@@ -228,6 +229,50 @@ _CAPTION_CAPABILITY = {
 # vision's True default here would silently disable audio/video captioning for every
 # non-omni endpoint.
 _CAPTION_ABSENT_DEFAULT = {'image': True, 'audio': False, 'video': False}
+
+
+def _retry_after_seconds(error: Exception) -> Optional[float]:
+    """Parse a ``Retry-After`` header from an error's HTTP response, if present.
+
+    Walks ``error`` then its wrapped ``.exception`` (the OAI backend stores the raw
+    OpenAIError there — see :class:`agent_cascade.llm.base.ModelServiceError`), finds a
+    ``.response``, and reads its ``Retry-After`` header — integer/float seconds or an
+    RFC-7231 HTTP-date (seconds from now). Works with both httpx and requests header
+    types by matching the key case-insensitively. Returns ``None`` when absent or
+    unparseable; never raises so a malformed header cannot break retry backoff.
+    """
+    for candidate in (error, getattr(error, 'exception', None)):
+        if candidate is None:
+            continue
+        headers = getattr(getattr(candidate, 'response', None), 'headers', None)
+        if not headers:
+            continue
+        try:
+            value = next((v for k, v in headers.items()
+                          if str(k).lower() == 'retry-after'), None)
+        except (AttributeError, TypeError):
+            continue
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return max(0.0, float(text))
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime, timezone
+            from email.utils import parsedate_to_datetime
+            parsed = parsedate_to_datetime(text)
+            if parsed is not None:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                delta = (parsed - datetime.now(timezone.utc)).total_seconds()
+                return max(0.0, delta)
+        except Exception:
+            continue
+    return None
 
 
 class APIRouter:
@@ -1928,6 +1973,26 @@ class APIRouter:
                 or 'service unavailable' in err_str
                 or 'failed to start' in err_str)
 
+    def _busy_aware_delay(self, error: Exception, attempt: int) -> float:
+        """Retry delay for a busy-loading error — long enough to span a real load.
+
+        Starts from the generic backoff, then raises it to the
+        ``SERVER_BUSY_RETRY_DELAY_SECONDS`` floor (0 disables the knob) and to any
+        ``Retry-After`` the endpoint sent, so the per-endpoint retry budget covers a
+        JIT model load instead of exhausting on sub-second retries. Bounded by
+        ``LLM_CALL_DEADLINE_SECONDS`` (0 disables). The sleep is interruptible, so a
+        large value is still safe to stop.
+        """
+        delay = calculate_backoff(attempt, self.policy)
+        if SERVER_BUSY_RETRY_DELAY_SECONDS > 0:
+            delay = max(delay, SERVER_BUSY_RETRY_DELAY_SECONDS)
+        ra = _retry_after_seconds(error)
+        if ra is not None:
+            delay = max(delay, ra)
+        if LLM_CALL_DEADLINE_SECONDS > 0:
+            delay = min(delay, LLM_CALL_DEADLINE_SECONDS)
+        return delay
+
     def _breaker_trip(self, base_key: str, reason: str) -> None:
         """Trip or re-trip (with grown window) the breaker for a normalized base.
 
@@ -2762,8 +2827,13 @@ class APIRouter:
                             logger.debug(f"[APIRouter] {error_msg}\nTraceback:\n{traceback.format_exc()}")
 
                         if attempt < max_retries:
-                            # Use centralized backoff policy (consistent with execution engine)
-                            delay = calculate_backoff(attempt + 1, self.policy)
+                            # Busy-loading 503s wait long enough to span a real model load
+                            # (honour Retry-After when present); everything else keeps the
+                            # centralized backoff policy (consistent with execution engine).
+                            if self._is_server_busy_loading(e):
+                                delay = self._busy_aware_delay(e, attempt + 1)
+                            else:
+                                delay = calculate_backoff(attempt + 1, self.policy)
                             logger.info(f"[APIRouter] Backing off {delay:.1f}s before retry "
                                         f"for endpoint '{endpoint_name}' @ {endpoint_base}")
                             # Interruptible sleep: check termination every 0.5s during retry backoff

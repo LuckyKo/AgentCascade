@@ -529,6 +529,9 @@ BREAKER_WINDOW_GROWTH: float = float(os.getenv('AGENT_CASCADE_BREAKER_WINDOW_GRO
 SERVER_BUSY_WAIT_CAP_SECONDS: float = float(
     os.getenv('AGENT_CASCADE_SERVER_BUSY_WAIT_CAP_SECONDS',
               30.0))  # Per-call cap for the D1 fail-fast wait when the whole endpoint chain is breaker-gated (seconds)
+SERVER_BUSY_RETRY_DELAY_SECONDS: float = float(
+    os.getenv('AGENT_CASCADE_SERVER_BUSY_RETRY_DELAY_SECONDS',
+              0.0))  # Minimum seconds to wait before the next retry on a busy-loading 503, so the per-endpoint budget spans a real model load. 0 = generic backoff (Retry-After is still honoured when present). Bounded by LLM_CALL_DEADLINE_SECONDS
 
 # Settings for token estimation
 # Aggressive estimate used for telemetry and output estimation.
