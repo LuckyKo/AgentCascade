@@ -363,7 +363,15 @@ class TestAdapterArgv:
 
     def test_opencode_argv(self):
         cmd = OpencodeAdapter().build_launch_cmd(task='add tests', workspace='/ws', posture='acceptEdits')
-        assert cmd == ['opencode', 'run', '--auto', 'add tests']
+        assert cmd == ['opencode', 'run', '--standalone', '--auto', 'add tests']
+
+    def test_opencode_standalone_and_auth_var(self):
+        # --standalone must be emitted so the per-call injected env is authoritative (a shared
+        # bg server caches env and would ignore the key). Zen/Go auth reads OPENCODE_API_KEY,
+        # not OPENAI_API_KEY.
+        cmd = OpencodeAdapter().build_launch_cmd(task='x', workspace='/ws', posture='acceptEdits')
+        assert '--standalone' in cmd
+        assert OpencodeAdapter.auth_env_var == 'OPENCODE_API_KEY'
 
     def test_antigravity_argv(self):
         cmd = AntigravityAdapter().build_launch_cmd(task='add tests', workspace='/ws', posture='acceptEdits')

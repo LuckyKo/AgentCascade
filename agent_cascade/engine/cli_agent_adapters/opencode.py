@@ -26,10 +26,11 @@ class OpencodeAdapter:
     harness = 'opencode'
     binary = 'opencode'
     output_format = 'default'  # plain text is opencode's default --format; no flag emitted
-    # opencode reads per-provider env keys (no single native var). The stored key is injected as
-    # the most common provider's var (OPENAI_API_KEY); a non-OpenAI provider needs a
-    # cli_opencode_key_env follow-up. See DIG finding #2 / plan open-assumption A2.
-    auth_env_var = 'OPENAI_API_KEY'
+    # opencode v2's "Environment" auth method reads the Zen free-tier (and Go) catalog key from
+    # OPENCODE_API_KEY (alias OPENCODE_ZEN_API_KEY) — the documented headless path: a static key
+    # from opencode.ai/auth, no interactive `auth login`. Non-Zen providers (e.g. OpenAI) would
+    # need a per-provider env-var override (a cli_opencode_key_env follow-up).
+    auth_env_var = 'OPENCODE_API_KEY'
     model_flag = '--model'  # opencode run -m/--model provider/model
 
     # Posture → argv tokens. opencode has no documented destructive bypass flag; 'bypass'
@@ -48,13 +49,16 @@ class OpencodeAdapter:
 
     def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
                          model: Optional[str] = None) -> list[str]:
-        """Build the one-shot argv: ``opencode run [--auto] [--model M] [--] <task>``.
+        """Build the one-shot argv: ``opencode run --standalone [--auto] [--model M] [--] <task>``.
 
-        ``workspace`` is unused here — set by the runner's ``docker run -w``. The task is a
-        single positional token guarded with ``--`` via the shared ``append_task_guarded``.
-        When ``model`` is set it is appended as ``--model <model>`` (no model → no flag).
+        ``--standalone`` forces a fresh private per-invocation server that reads the injected env
+        at startup; a shared background opencode server caches env once and would ignore the
+        per-call auth key, so it must be bypassed. ``workspace`` is unused here — set by the
+        runner's ``docker run -w``. The task is a single positional token guarded with ``--`` via
+        the shared ``append_task_guarded``. When ``model`` is set it is appended as
+        ``--model <model>`` (no model → no flag).
         """
-        cmd = [self.binary, 'run', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
+        cmd = [self.binary, 'run', '--standalone', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
         if model and self.model_flag:
             cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
