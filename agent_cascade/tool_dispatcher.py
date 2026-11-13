@@ -198,7 +198,24 @@ class ToolDispatcher:
             return result
         elif tool_name == 'call_cli_agent':
             resolved = self.engine._resolve_placeholders(tool_args, instance.instance_name, tool_name)
-            result = self.handle_call_cli_agent(resolved, instance)
+            # call_cli_agent (sync) blocks the holder for up to the CLI timeout (the container is
+            # hard-killed at that bound), so mark it as a legitimately-bounded blocking tool — same
+            # defect class as compress_context (t292) — so the holder-side DMS does not terminate a
+            # holder mid-run. Bound = the effective timeout (arg, else settings.cli_agent_timeout);
+            # it is a REAL bound (the run is hard-killed at it), so it is deliberately NOT capped at
+            # holder_dms_max_bound_s. Async launches return fast and the marker is cleared in finally.
+            try:
+                cli_bound = float(resolved.get('timeout') or getattr(self.pool.settings, 'cli_agent_timeout', 1800))
+            except (TypeError, ValueError):
+                cli_bound = float(getattr(self.pool.settings, 'cli_agent_timeout', 1800))
+            instance._in_blocking_tool = ('call_cli_agent', time.monotonic(), cli_bound)
+            try:
+                result = self.handle_call_cli_agent(resolved, instance)
+            finally:
+                instance._in_blocking_tool = None
+                # DMS post-return re-stamp (t293-followup): the sync run held the permit silently, so
+                # re-stamp last_activity on return.
+                self.pool._mark_activity(instance.instance_name)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         elif tool_name == 'compress_context':

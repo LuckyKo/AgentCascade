@@ -67,6 +67,8 @@ class FakePool:
         op._is_auto_approved.return_value = False
         op.request_user_approval.return_value = (True, 'ok')
         self.operation_manager = op
+        # The call_cli_agent dispatch branch re-stamps activity on return (DMS t293-followup).
+        self._mark_activity = MagicMock()
 
     def get_instance(self, name):
         return self.instances.get(name)
@@ -190,6 +192,66 @@ class TestResultShape:
             {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
             pool.get_instance('Maine'))
         assert 'timed_out=True' in out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3b. Holder-DMS bounded-tool marker (t292 defect class)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestDmsBlockingMarker:
+    """call_cli_agent (sync) blocks the holder for up to the CLI timeout, so the dispatch
+    branch must set the holder-DMS ``_in_blocking_tool`` marker and clear it on return —
+    otherwise the idle manager's dead-man's-switch terminates a holder mid-run after 300s of
+    silence (a real wedged-instance false positive: a long sync CLI run looked 'wedged')."""
+
+    def _dispatch_with_marker_spy(self, pool, monkeypatch, resolved, tool_args):
+        dispatcher = ToolDispatcher(pool)
+        engine = MagicMock()
+        engine._resolve_placeholders.return_value = resolved
+        engine._cache_tool_args = MagicMock()
+        dispatcher.set_engine(engine)
+        dispatcher._run_child_sync = MagicMock(return_value='SYNC_ROUTED')
+        dispatcher._run_child_async = MagicMock(return_value='ASYNC_ROUTED')
+        monkeypatch.setattr(shutil, 'which', lambda *a, **k: '/usr/bin/fake')
+        monkeypatch.setattr(cli_agent_runner, 'run_cli_agent',
+                            MagicMock(return_value=_fake_result()))
+        inst = _make_instance('Maine')
+        pool.instances['Maine'] = inst
+
+        seen = {}
+        real_handler = dispatcher.handle_call_cli_agent
+
+        def spy(res, instance):
+            seen['during'] = instance._in_blocking_tool
+            return real_handler(res, instance)
+
+        monkeypatch.setattr(dispatcher, 'handle_call_cli_agent', spy)
+        dispatcher.execute_tool(inst, 'call_cli_agent', tool_args, [], function_id='1')
+        return seen['during'], inst
+
+    def test_sync_sets_and_clears_marker_with_arg_timeout(self, monkeypatch):
+        pool = FakePool(instances={'Maine': _make_instance('Maine')})
+        during, inst = self._dispatch_with_marker_spy(
+            pool, monkeypatch,
+            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws', 'timeout': 300},
+            {'harness': 'claude_code', 'task': 'do it', 'timeout': 300})
+        name, _mono, bound = during
+        assert name == 'call_cli_agent'
+        assert bound == 300.0  # the arg timeout, deliberately NOT capped at holder_dms_max_bound_s
+        assert inst._in_blocking_tool is None  # cleared on return
+
+    def test_marker_bound_falls_back_to_settings_default(self, monkeypatch):
+        pool = FakePool(instances={'Maine': _make_instance('Maine')})
+        pool.settings.cli_agent_timeout = 1800
+        during, inst = self._dispatch_with_marker_spy(
+            pool, monkeypatch,
+            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws'},
+            {'harness': 'claude_code', 'task': 'do it'})
+        name, _mono, bound = during
+        assert name == 'call_cli_agent'
+        assert bound == 1800.0  # settings default, no timeout arg
+        assert inst._in_blocking_tool is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
