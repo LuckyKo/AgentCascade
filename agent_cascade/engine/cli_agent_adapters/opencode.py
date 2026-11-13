@@ -14,6 +14,7 @@ Auth: own provider auth (``opencode auth``) or provider env keys — independent
 from __future__ import annotations
 
 import shutil
+from typing import Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
     append_task_guarded, resolve_posture_flags, strip_ac_credentials)
@@ -25,6 +26,11 @@ class OpencodeAdapter:
     harness = 'opencode'
     binary = 'opencode'
     output_format = 'default'  # plain text is opencode's default --format; no flag emitted
+    # opencode reads per-provider env keys (no single native var). The stored key is injected as
+    # the most common provider's var (OPENAI_API_KEY); a non-OpenAI provider needs a
+    # cli_opencode_key_env follow-up. See DIG finding #2 / plan open-assumption A2.
+    auth_env_var = 'OPENAI_API_KEY'
+    model_flag = '--model'  # opencode run -m/--model provider/model
 
     # Posture → argv tokens. opencode has no documented destructive bypass flag; 'bypass'
     # intentionally maps to the same default-safe ``--auto`` (we never emit a YOLO token).
@@ -40,13 +46,17 @@ class OpencodeAdapter:
         """Presence probe: is ``opencode`` on the PATH (host side)?"""
         return shutil.which(self.binary) is not None
 
-    def build_launch_cmd(self, *, task: str, workspace: str, posture: str) -> list[str]:
-        """Build the one-shot argv: ``opencode run [--auto] [--] <task>``.
+    def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
+                         model: Optional[str] = None) -> list[str]:
+        """Build the one-shot argv: ``opencode run [--auto] [--model M] [--] <task>``.
 
         ``workspace`` is unused here — set by the runner's ``docker run -w``. The task is a
         single positional token guarded with ``--`` via the shared ``append_task_guarded``.
+        When ``model`` is set it is appended as ``--model <model>`` (no model → no flag).
         """
         cmd = [self.binary, 'run', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
+        if model and self.model_flag:
+            cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
         return cmd
 

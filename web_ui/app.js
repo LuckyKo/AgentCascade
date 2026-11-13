@@ -297,7 +297,27 @@ const POOL_SETTINGS_MAP = [
   // Global default endpoint capability: False makes llm/base.py caption images to text
   // before the call instead of sending them inline.
   { id: '#setting-vision-enabled', prop: 'checked', key: 'vision_enabled' },
+  // CLI Agents: read-only extra-paths mount (bool). Dict-valued fields are hydrated manually
+  // in syncPoolSettings (after the POOL_SETTINGS_MAP loop) because they need per-harness DOM updates.
+  { id: '#setting-cli-paths-ro', prop: 'checked', key: 'cli_agent_paths_ro' },
 ];
+
+// CLI Agents (call_cli_agent): dict-valued pool maps hydrated from the server snapshot.
+// Server is authoritative (no localStorage). The enable map is {harness: bool}; the model
+// map is {harness: string}. Key values live ONLY in secrets.json server-side and never appear here.
+const CLI_HARNESSES = ['claude_code', 'opencode', 'antigravity'];
+let cliAgentEnabledMap = {};
+let cliAgentModelsMap = {};
+
+/** Push the per-harness enable checkboxes + model inputs from the in-memory maps. */
+function renderCliAgentControls() {
+  for (const h of CLI_HARNESSES) {
+    const cb = document.getElementById('setting-cli-agent-enabled-' + h);
+    if (cb) cb.checked = !!cliAgentEnabledMap[h];
+    const mi = document.querySelector('.cli-agent-model[data-harness="' + h + '"]');
+    if (mi && document.activeElement !== mi) mi.value = cliAgentModelsMap[h] || '';
+  }
+}
 
 // ── UI preferences store (Phase 4, plan §4.1 class D) ──────────────────────────
 // Presentation-only state that stays in the browser. Never sent to the server.
@@ -378,6 +398,16 @@ function saveUiPrefs(prefs) {
 		      renderToolsForSelectedAgent();
 		    }
 		  }
+
+		// CLI Agents (call_cli_agent): hydrate the per-harness enable + model maps from the
+		// server snapshot (server wins; no localStorage). Key values are never in pool_settings.
+		if (ps.cli_agent_enabled && typeof ps.cli_agent_enabled === 'object') {
+		cliAgentEnabledMap = { ...ps.cli_agent_enabled };
+		}
+		if (ps.cli_agent_models && typeof ps.cli_agent_models === 'object') {
+		cliAgentModelsMap = { ...ps.cli_agent_models };
+		}
+		renderCliAgentControls();
 
 		// AFK is server-backed (state_builder _add_pool_runtime_settings): the server is
 		// authoritative, so the controls are hydrated from the snapshot — a control the
@@ -1791,6 +1821,38 @@ if (autoSecurityToggle) {
       state.securityResponses = {};
     }
     renderApprovals();
+  });
+}
+
+// ── CLI Agents (call_cli_agent) event wiring ───────────────────────────────
+for (const h of CLI_HARNESSES) {
+  const cb = document.getElementById('setting-cli-agent-enabled-' + h);
+  if (cb) {
+    cb.addEventListener('change', () => {
+      cliAgentEnabledMap[h] = cb.checked;
+      queueSettingChange('cli_agent_enabled', { ...cliAgentEnabledMap });
+    });
+  }
+  const mi = document.querySelector('.cli-agent-model[data-harness="' + h + '"]');
+  if (mi) {
+    mi.addEventListener('change', () => {
+      const v = mi.value.trim();
+      if (v) cliAgentModelsMap[h] = v; else delete cliAgentModelsMap[h];
+      queueSettingChange('cli_agent_models', { ...cliAgentModelsMap });
+    });
+  }
+}
+// "Enter Key" buttons: prompt for the key, send it via the dedicated ws message
+// (secrets_loader.set_secret on the server; the value NEVER traverses pool_settings).
+for (const btn of document.querySelectorAll('.cli-agent-key-btn')) {
+  const harness = btn.getAttribute('data-harness');
+  if (!harness) continue;
+  btn.addEventListener('click', () => {
+    const key = prompt('API key for ' + harness + ' (leave blank to clear):');
+    if (key === null) return;  // user cancelled
+    send({ type: 'set_cli_agent_key', harness, key });
+    btn.textContent = key.trim() ? 'Key saved' : 'Cleared';
+    setTimeout(() => { btn.textContent = 'Enter Key'; }, 2500);
   });
 }
 
@@ -6400,6 +6462,12 @@ function getGenerateCfg() {
   if (typeof agentDisabledTools !== 'undefined') {
     cfg.disabled_tools = agentDisabledTools;
   }
+
+  // CLI Agents (call_cli_agent): per-harness enable + model dicts (server-authoritative,
+  // hydrated from ps in syncPoolSettings). Sent as dicts so the config handler receives the
+  // full map (matches the full-map-replace handler contract).
+  cfg.cli_agent_enabled = { ...cliAgentEnabledMap };
+  cfg.cli_agent_models = { ...cliAgentModelsMap };
 
   if (defaultWorkspace && defaultWorkspace.textContent && defaultWorkspace.textContent !== 'Loading...') {
     cfg.default_workspace = defaultWorkspace.textContent.replace(' (Pending restart)', '').trim();

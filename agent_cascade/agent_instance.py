@@ -22,7 +22,7 @@ from agent_cascade.llm.schema import SYSTEM, Message
 from agent_cascade.settings import (
     AGENT_IDLE_CHECK_INTERVAL, AGENT_IDLE_TIMEOUT, AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL, AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS, CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS, HOLDER_DMS_WINDOW_S, HOLDER_DMS_MAX_BOUND_S,
-    CI_EXECUTION_TIMEOUT, CI_STALE_CONTAINER_TTL, CI_WATCHDOG_TIMEOUT, CLI_AGENT_TIMEOUT, COMPRESSION_FORCE_THRESHOLD,
+    CI_EXECUTION_TIMEOUT, CI_STALE_CONTAINER_TTL, CI_WATCHDOG_TIMEOUT, CLI_AGENT_TIMEOUT, CLI_AGENT_PATHS_RO_DEFAULT, COMPRESSION_FORCE_THRESHOLD,
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
@@ -1037,6 +1037,10 @@ class PoolSettings:
     # External CLI coding-agent (call_cli_agent) settings
     cli_agent_timeout: int = CLI_AGENT_TIMEOUT  # Hard wall-clock cap per one-shot external-CLI run (seconds)
     max_cli_agent_children: int = MAX_CLI_AGENT_CHILDREN  # Concurrent one-shot external-CLI containers cap
+    cli_agent_enabled: dict = field(default_factory=dict)  # {harness: bool}; empty == every harness OFF
+    cli_agent_images: dict = field(default_factory=dict)  # {harness: image:tag}; empty -> runner fallback chain
+    cli_agent_models: dict = field(default_factory=dict)  # {harness: model}; empty -> CLI's own default model
+    cli_agent_paths_ro: bool = CLI_AGENT_PATHS_RO_DEFAULT  # Mount inherited extra-paths read-only (0/False = off)
 
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True  # Enable lightweight tail-length checks after writes

@@ -495,6 +495,44 @@ def _handle_max_cli_agent_children(ui_cfg: dict, agent_pool: Optional[Any], agen
         agent_pool.settings.max_cli_agent_children = max(CLI_AGENT_MIN_CHILDREN, int(ui_cfg['max_cli_agent_children']))
 
 
+@register_config_handler('cli_agent_enabled')
+def _handle_cli_agent_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the per-harness enable map (external CLI auto-setup). Full-map replace; non-bool dropped.
+
+    The Web UI always sends the complete merged map (mirrors disabled_tools), so a replace is
+    correct; a partial dict would silently drop other harnesses.
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        v = ui_cfg.get('cli_agent_enabled', {})
+        if isinstance(v, dict):
+            agent_pool.settings.cli_agent_enabled = {k: bool(x) for k, x in v.items() if isinstance(x, bool)}
+
+
+@register_config_handler('cli_agent_images')
+def _handle_cli_agent_images(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the per-harness image map. Full-map replace; non-str dropped."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        v = ui_cfg.get('cli_agent_images', {})
+        if isinstance(v, dict):
+            agent_pool.settings.cli_agent_images = {k: str(x) for k, x in v.items() if isinstance(x, str)}
+
+
+@register_config_handler('cli_agent_models')
+def _handle_cli_agent_models(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the per-harness default-model map. Full-map replace; non-str dropped."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        v = ui_cfg.get('cli_agent_models', {})
+        if isinstance(v, dict):
+            agent_pool.settings.cli_agent_models = {k: str(x) for k, x in v.items() if isinstance(x, str)}
+
+
+@register_config_handler('cli_agent_paths_ro')
+def _handle_cli_agent_paths_ro(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Master read-only toggle for mounting inherited extra-paths into the CLI container."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.cli_agent_paths_ro = bool(ui_cfg.get('cli_agent_paths_ro', False))
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

@@ -740,6 +740,26 @@ CLI_AGENT_MIN_TIMEOUT: int = 1  # Minimum one-shot wall-clock cap (seconds)
 MAX_CLI_AGENT_CHILDREN: int = int(os.getenv('M6_MAX_CLI_AGENT_CHILDREN', '2'))  # Concurrent one-shot containers cap
 CLI_AGENT_MIN_CHILDREN: int = 1  # Minimum concurrent one-shot cap (never 0)
 
+# Master read-only toggle for inherited extra-paths: when True the runner also mounts the
+# agent's ``operation_manager.extra_work_folders_ro`` (read-only) into the CLI container.
+# 0/False = workspace-only mount (current behavior, default). RO only — the external CLI is untrusted.
+CLI_AGENT_PATHS_RO_DEFAULT: bool = False
+
+#: Shared multi-harness image tag built from ``Dockerfile.cli_agent`` (claude + opencode + agy
+#: all on PATH). One build / one containment surface; the ``cli_agent_images`` pool map still
+#: permits per-harness tags and ``M6_CLI_AGENT_DOCKER_IMAGE`` stays the ops escape hatch.
+CLI_AGENT_DEFAULT_IMAGE: str = 'cli_agent:all'
+
+
+def cli_agent_default_image(harness: str) -> str:
+    """Default Docker image tag for a CLI harness.
+
+    Phase 0 ships ONE shared multi-harness image, so every harness resolves to the same tag.
+    The ``harness`` arg is kept for a future per-harness image but is currently ignored; the
+    ``cli_agent_images`` pool map is the supported way to pin a per-harness tag today.
+    """
+    return CLI_AGENT_DEFAULT_IMAGE
+
 # ── Cache pool settings ────────────────────────
 CACHE_POOL_ENABLED: bool = False  # Toggle cache pool on/off (default: disabled)
 CACHE_POOL_SIZE: int = int(os.getenv('AGENT_CASCADE_CACHE_POOL_SIZE', '50'))  # Rolling buffer entries per instance

@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
     HarnessNotFoundError, RuntimeAdapter, get_adapter)
@@ -66,31 +66,110 @@ def _get_semaphore(cap: int) -> threading.Semaphore:
         return _CLI_SEMAPHORE
 
 
-def _cli_agent_image() -> str:
-    """Docker image for the one-shot container.
+_REPO_ROOT = str(_LOGS_DIR.parent)  # repo root (contains logs/ and Dockerfile.cli_agent)
+_DOCKERFILE = _LOGS_DIR.parent / 'Dockerfile.cli_agent'
 
-    Defaults to the ``code_interpreter`` content-hashed image (reusing that recipe's
-    single source of truth for the image tag). NOTE: that image does NOT bake in the
-    external CLIs — point ``M6_CLI_AGENT_DOCKER_IMAGE`` at a harness-bearing image for
-    real (non-mocked) runs. This is an ops/deployment concern outside Phase-0's tested
-    scope; the runner's command construction, gating, and lifecycle are harness-agnostic
-    and are exercised with mocked ``subprocess.run``.
+# Image auto-build memo: a set of tags known present (skip re-inspecting/re-building).
+# _BUILD_LOCK serializes concurrent first-miss builds so two threads never `docker build` the
+# same tag at once. A tag whose build FAILS is NOT added — the next call retries (fail-open).
+_BUILD_LOCK = threading.Lock()
+_BUILD_OK: set[str] = set()
+
+# Short-TTL cache so repeated status calls don't hammer `docker image inspect`.
+# value is (ts, present: bool | None). None means docker was unavailable (indeterminate).
+_QUOTA_TTL_SECONDS: float = 120.0
+_IMAGE_PRESENT_CACHE: dict[str, tuple[float, Optional[bool]]] = {}
+
+
+def _image_present(tag: str) -> Optional[bool]:
+    """True if ``docker image inspect <tag>`` succeeds, False if the tag is missing,
+    None if docker itself is unavailable/unreachable (indeterminate). Never raises."""
+    try:
+        r = subprocess.run(['docker', 'image', 'inspect', tag],
+                           capture_output=True, text=True, timeout=15,
+                           encoding='utf-8', errors='replace')
+        return r.returncode == 0
+    except Exception as e:  # noqa: BLE001 — docker not installed / timeout → indeterminate
+        logger.debug('call_cli_agent image inspect failed for %s: %s', tag, e)
+        return None
+
+
+def _image_present_cached(tag: str) -> Optional[bool]:
+    """TTL-cached wrapper around :func:`_image_present` (status calls only)."""
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _IMAGE_PRESENT_CACHE.get(tag)
+    if cached and (now - cached[0]) < _QUOTA_TTL_SECONDS:
+        return cached[1]
+    present = _image_present(tag)
+    _IMAGE_PRESENT_CACHE[tag] = (now, present)
+    return present
+
+
+def _ensure_image(tag: str) -> None:
+    """Best-effort auto-build of a missing image once (behind ``_BUILD_LOCK``), memoized.
+
+    A confirmed-present or already-built tag returns immediately. A missing tag triggers a
+    single ``docker build``; failure logs a warning and returns (the caller still spawns,
+    and the existing spawn-error path surfaces a clean result — never crash the turn)."""
+    with _BUILD_LOCK:
+        if tag in _BUILD_OK:
+            return
+        if _image_present(tag) is True:
+            _BUILD_OK.add(tag)
+            return
+        try:
+            r = subprocess.run(
+                ['docker', 'build', '-t', tag, '-f', str(_DOCKERFILE), _REPO_ROOT],
+                capture_output=True, text=True, timeout=1800,
+                encoding='utf-8', errors='replace')
+            if r.returncode == 0:
+                _BUILD_OK.add(tag)
+                logger.info('call_cli_agent built image %s', tag)
+            else:
+                logger.warning('call_cli_agent image build failed for %s (rc=%s): %s',
+                               tag, r.returncode, (r.stderr or '')[-500:])
+        except Exception as e:  # noqa: BLE001 — fail-open; caller's spawn path handles it
+            logger.warning('call_cli_agent image build error for %s: %s', tag, e)
+
+
+def _cli_agent_image(harness: Optional[str] = None, pool: Optional[Any] = None) -> str:
+    """Docker image for the one-shot container (per-harness config → shared default → auto-build).
+
+    Resolution order (escape-hatch precedence preserved byte-for-byte for ops who set it today):
+      1. ``M6_CLI_AGENT_DOCKER_IMAGE`` env override.
+      2. ``pool.settings.cli_agent_images[harness]`` per-harness override.
+      3. shared default ``cli_agent_default_image(harness)`` → ``cli_agent:all``.
+    When a harness/pool is supplied, a missing image is auto-built once (see :func:`_ensure_image`).
+    With no harness/pool (legacy callers) it falls back to the ``code_interpreter`` content-hashed
+    image tag exactly as before, so any existing caller stays byte-safe.
     """
     override = os.getenv('M6_CLI_AGENT_DOCKER_IMAGE')
     if override:
         return override
+    if harness is not None and pool is not None:
+        from agent_cascade.settings import cli_agent_default_image
+        images = getattr(getattr(pool, 'settings', None), 'cli_agent_images', None) or {}
+        tag = images.get(harness) or cli_agent_default_image(harness)
+        _ensure_image(tag)
+        return tag
     from agent_cascade.tools.code_interpreter import _compute_docker_image_tag
     return _compute_docker_image_tag()
 
 
 def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[str],
-                      image: str) -> list[str]:
+                      image: str, env_vars: Optional[dict[str, str]] = None,
+                      extra_ro_mounts: Optional[list[dict]] = None) -> list[str]:
     """Build the one-shot ``docker run --rm`` argv, reusing the code_interpreter containment recipe.
 
     Same caps/limits/path-normalization as ``code_interpreter`` (imported lazily to keep this
     module light and avoid a heavy import-time dependency), scoped to the target workspace RW.
     NO ``-d`` (no detached Jupyter kernel), NO forwarded ports, NO ``--name`` reuse — this is a
     foreground one-shot; ``--rm`` auto-cleans on exit.
+
+    Auth keys are injected as ``-e <VAR>=<value>`` flags (NEVER a ``secrets.json`` bind-mount)
+    so the container sees only the one native key it needs. ``extra_ro_mounts`` are mounted
+    ``:ro`` when the pool's ``cli_agent_paths_ro`` toggle is on. With both empty the argv is
+    byte-identical to the pre-auto-setup recipe (default OFF = no behavior change).
     """
     # Lazy import: same source of truth for limits + path normalization, no copy-paste drift.
     from agent_cascade.tools.code_interpreter import (
@@ -106,9 +185,12 @@ def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[
         '--pids-limit=' + str(CONTAINER_PID_LIMIT),
         '-v', f'{_normalize_path_for_docker(os.path.realpath(workspace))}:/workspace',
         '-w', '/workspace',
-        image,
-        *harness_cmd,
     ]
+    for _k, _v in (env_vars or {}).items():
+        cmd += ['-e', f'{_k}={_v}']
+    for _m in (extra_ro_mounts or []):
+        cmd += ['-v', f"{_m['host']}:{_m['container']}:ro"]
+    cmd += [image, *harness_cmd]
     return cmd
 
 
@@ -147,7 +229,7 @@ def _persist_log(*, caller_name: str, harness: str, exit_code: int, timed_out: b
 
 def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
                   workspace: str, permission_posture: str, timeout: int, pool,
-                  caller_name: str) -> CliAgentResult:
+                  caller_name: str, model: Optional[str] = None) -> CliAgentResult:
     """Spawn ONE external CLI as a one-shot Docker container, block, capture stdout+exit.
 
     Raises HarnessNotFoundError if ``harness`` is unregistered or its preflight (presence
@@ -178,15 +260,62 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
                 f"Harness CLI for '{harness}' not installed (presence probe failed).")
     harness = harness or adapter.harness
 
+    # (A) Per-harness ENABLE gate (D6: every harness defaults OFF until explicitly enabled in
+    # pool_settings). When off, return exit 126 "disabled" WITHOUT acquiring the semaphore or
+    # spawning a container. Placed before `cap`/`sem` so a disabled harness never occupies a slot.
+    _settings = getattr(pool, 'settings', None)
+    _enabled_map = (getattr(_settings, 'cli_agent_enabled', None) or {}) if _settings is not None else {}
+    if not _enabled_map.get(harness, False):
+        msg = f"harness '{harness}' is disabled (enable it in the Web UI: CLI Agents section)."
+        log_path = _persist_log(caller_name=caller_name, harness=harness, exit_code=126,
+                                timed_out=False, stdout='', stderr=msg,
+                                requested_posture=permission_posture)
+        return CliAgentResult(stdout='', stderr=msg, exit_code=126, timed_out=False,
+                              log_path=log_path, requested_posture=permission_posture)
+
+    # (B) Auth key: inject the single native env var the harness reads, via docker -e (never a
+    # secrets.json bind-mount). Skipped for key-less harnesses (adapter.auth_env_var is None).
+    _env_vars: dict[str, str] = {}
+    _auth_env_var = getattr(adapter, 'auth_env_var', None)
+    if _auth_env_var:
+        from config.secrets_loader import get_secret
+        _key = get_secret(f'cli_{harness}_key')
+        if _key:
+            _env_vars[_auth_env_var] = _key
+
+    # (C) Model: call-level argument wins, else the per-harness default map. Dict-guarded so a
+    # MagicMock settings (test doubles) never leaks an auto-attribute into the adapter argv.
+    _model = model
+    if not _model:
+        _models = getattr(_settings, 'cli_agent_models', None)
+        _model = _models.get(harness) if isinstance(_models, dict) else None
+
+    # (D) Inherited extra-paths read-only mounts, gated by cli_agent_paths_ro (default OFF).
+    # Only real dirs are mounted; RO only — the external CLI is untrusted. `is True` so a
+    # MagicMock settings does not spuriously enter the mount-building path.
+    _extra_ro: list[dict] = []
+    if getattr(_settings, 'cli_agent_paths_ro', False) is True:
+        from agent_cascade.tools.code_interpreter import EXTRA_RO_MOUNT_PREFIX, _normalize_path_for_docker
+        _om = getattr(pool, 'operation_manager', None)
+        _ro_roots = getattr(_om, 'extra_work_folders_ro', None)
+        if isinstance(_ro_roots, (list, tuple)):
+            for _i, _p in enumerate(sorted(str(x) for x in _ro_roots)):
+                _real = os.path.realpath(_p)
+                if os.path.isdir(_real):
+                    _extra_ro.append({'host': _normalize_path_for_docker(_real),
+                                      'container': f'{EXTRA_RO_MOUNT_PREFIX}{_i}'})
+
     cap = getattr(pool.settings, 'max_cli_agent_children', 2)
     sem = _get_semaphore(cap)
 
     with sem:  # release guaranteed on every path from here to return
         container_name = f'cli_agent_{uuid.uuid4().hex[:12]}'
-        harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace, posture=permission_posture)
-        image = _cli_agent_image()
+        harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
+                                               posture=permission_posture, model=_model)
+        image = _cli_agent_image(harness, pool)
         docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
-                                       harness_cmd=harness_cmd, image=image)
+                                       harness_cmd=harness_cmd, image=image,
+                                       env_vars=_env_vars, extra_ro_mounts=_extra_ro)
         clean_env = adapter.child_env(os.environ.copy())
 
         timed_out = False
@@ -216,3 +345,50 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
         return CliAgentResult(stdout=stdout, stderr=stderr, exit_code=exit_code,
                               timed_out=timed_out, log_path=log_path,
                               requested_posture=permission_posture)
+
+
+def cli_agent_status(pool) -> dict[str, dict]:
+    """Per-harness readiness snapshot for the Web UI + ``system_info`` render. Never raises.
+
+    Shape: ``{harness: {enabled, key_configured, image_present, quota_available, model}}``.
+      * ``key_configured`` is ``None`` for key-less harnesses (``adapter.auth_env_var`` is None,
+        e.g. antigravity's cached OAuth) and ``bool`` otherwise.
+      * ``image_present`` is a TTL-cached ``docker image inspect`` result (``None`` when docker
+        itself is unavailable — indeterminate, not a hard "missing").
+      * ``quota_available`` is always ``'unknown'`` in Phase 0; an adapter MAY add a
+        ``probe_quota(self) -> str`` ('ok'|'exhausted'|'unknown') and any exception maps to 'unknown'.
+    """
+    from agent_cascade.engine.cli_agent_adapters import get_adapter, registered_harnesses
+    from agent_cascade.settings import cli_agent_default_image
+    from config.secrets_loader import get_secret
+    out: dict[str, dict] = {}
+    _settings = getattr(pool, 'settings', None)
+    enabled_map = getattr(_settings, 'cli_agent_enabled', None) or {}
+    images_map = getattr(_settings, 'cli_agent_images', None) or {}
+    models_map = getattr(_settings, 'cli_agent_models', None) or {}
+    for h in registered_harnesses():
+        try:
+            adapter = get_adapter(h)
+            _auth = getattr(adapter, 'auth_env_var', None)
+            key_configured = None if _auth is None else bool(get_secret(f'cli_{h}_key'))
+            image_present = _image_present_cached(images_map.get(h) or cli_agent_default_image(h))
+            _probe = getattr(adapter, 'probe_quota', None)
+            if _probe is None:
+                quota_available = 'unknown'
+            else:
+                try:
+                    quota_available = _probe()
+                except Exception:  # noqa: BLE001 — a failing probe is 'unknown', never fatal
+                    quota_available = 'unknown'
+            out[h] = {
+                'enabled': bool(enabled_map.get(h, False)),
+                'key_configured': key_configured,
+                'image_present': image_present,
+                'quota_available': quota_available,
+                'model': models_map.get(h),
+            }
+        except Exception as e:  # noqa: BLE001 — status must never crash the caller
+            logger.debug('cli_agent_status failed for %s: %s', h, e)
+            out[h] = {'enabled': False, 'key_configured': None, 'image_present': None,
+                      'quota_available': 'unknown', 'model': None}
+    return out

@@ -56,13 +56,13 @@ from agent_cascade.settings import (
 # ── Key name lists (the single source of truth for "which keys exist") ─────────
 
 # PoolSettings-backed keys persisted to config/pool_settings.json. This is the
-# historical ``POOL_SETTINGS_KEYS`` (100 keys): the update_config save-trigger set
+# historical ``POOL_SETTINGS_KEYS`` (111 keys): the update_config save-trigger set
 # and the pool_settings.json persist set.
 _POOL_KEYS: Tuple[str, ...] = (
     'allow_parallel_agents', 'approval_timeout_seconds', 'auto_continue', 'auto_rollback_on_loop',
     'auto_skill_enabled', 'auto_skill_extra_turns', 'auto_skill_min_turns', 'auto_skill_mode',
     'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars', 'ci_execution_timeout',
-    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'cli_agent_timeout', 'code_char_limit', 'completion_classifier_enabled',
+    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'cli_agent_enabled', 'cli_agent_images', 'cli_agent_models', 'cli_agent_paths_ro', 'cli_agent_timeout', 'code_char_limit', 'completion_classifier_enabled',
     'compression_context_reserve_tokens', 'compression_force_cooldown', 'compression_force_threshold',
     'compression_max_attempts', 'compression_proactive_threshold', 'compression_timeout',
     'compression_warning_threshold', 'default_load_skill_mode', 'default_workspace',
@@ -256,6 +256,11 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'session_name': DEFAULT_SESSION_NAME,
     # Extra top-level pool_settings.json keys.
     'disabled_tools': {},
+    # CLI-agent dict maps (default_factory fields are EXCLUDED from _POOL_FIELD_DEFAULTS,
+    # so they must be seeded explicitly here or _make_specs() KeyErrors at import).
+    'cli_agent_enabled': {},
+    'cli_agent_images': {},
+    'cli_agent_models': {},
     # Handler-only keys (see _HANDLER_ONLY_KEYS): neutral values, never persisted.
     'mcpServers': {},
 }
@@ -281,6 +286,11 @@ _PY_TYPES: Dict[str, Any] = {
     'work_access_folders_ro': list,
     'work_access_folders_rw': list,
     'stop_sequences': (str, list),
+    # Collection-valued pool keys; dict also inferred by _default_type({}) but pinned here
+    # for explicitness/consistency with disabled_tools.
+    'cli_agent_enabled': dict,
+    'cli_agent_images': dict,
+    'cli_agent_models': dict,
 }
 
 #: Keys the server never imports from a client-side blob during migration.
@@ -534,7 +544,7 @@ def validate_registry() -> None:
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (105 / 3);
+      * the derived compat sets match their historical sizes (111 / 3);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -546,8 +556,8 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 107:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 107")
+    if len(POOL_SETTINGS_KEYS) != 111:
+        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 111")
     if len(EXTRA_PERSIST_KEYS) != 3:
         raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
 

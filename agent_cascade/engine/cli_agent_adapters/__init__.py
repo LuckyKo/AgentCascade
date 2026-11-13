@@ -19,7 +19,7 @@ CLI's real executable, which differs from the harness name for Antigravity
 """
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Optional, Protocol
 
 
 class HarnessNotFoundError(Exception):
@@ -41,20 +41,32 @@ class RuntimeAdapter(Protocol):
     binary: str  # real CLI executable token used inside build_launch_cmd's argv
     output_format: str  # per-adapter output-format default; baked into argv only when the CLI
                         # exposes the flag — opencode omits it (plain text is already its default)
+    auth_env_var: Optional[str]  # container env var this CLI reads for auth; None == not an API-key
+                                 # model (e.g. antigravity uses a cached interactive OAuth login)
+    model_flag: Optional[str]  # argv flag that selects the model (e.g. '--model'); None == no flag
+                               # is emitted even when a model is requested (byte-safe default)
 
     def preflight(self) -> bool:
         """Return True when this harness's CLI is present and usable (presence probe)."""
         ...
 
-    def build_launch_cmd(self, *, task: str, workspace: str, posture: str) -> list[str]:
+    def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
+                         model: Optional[str] = None) -> list[str]:
         """Return the one-shot argv list (NO ``shell=True``) that runs ``task`` once.
 
         ``posture`` is a resolved, already-authorized permission posture (e.g.
         ``'acceptEdits'``). The final answer MUST go to stdout; diagnostics to stderr.
         ``workspace`` is already the container CWD via the runner's ``docker run -w``; it is
         carried here for a future (Phase 2) adapter that needs it inside argv.
+        ``model`` (when non-empty) is appended as ``[model_flag, model]`` ONLY if the adapter
+        declares a ``model_flag``; with no flag or no model the argv is unchanged (byte-safe).
         """
         ...
+
+    # Optional per-harness quota probe: ``probe_quota(self) -> str`` returning
+    # ``'ok' | 'exhausted' | 'unknown'``. Adapters MAY implement it; the status builder
+    # treats its absence (or any exception) as ``'unknown'`` so a 4th adapter gets a
+    # working status surface with zero extra code and no run is ever blocked.
 
     def child_env(self, base_env: dict[str, str]) -> dict[str, str]:
         """Return a copy of ``base_env`` with AC-owned credentials stripped."""

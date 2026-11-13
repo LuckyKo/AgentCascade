@@ -889,8 +889,20 @@ TOOL_METADATA = {
                 'description':
                     'Hard wall-clock cap in seconds; the container + its whole process tree is killed if exceeded. Defaults to pool settings (cli_agent_timeout).'
             },
+            'status': {
+                'type':
+                    'boolean',
+                'description':
+                    'True to introspect every harness instead of running one: returns per-harness {enabled, key_configured, image_present, quota_available, model}. When true, harness/task are ignored and no container spawns.'
+            },
+            'model': {
+                'type':
+                    'string',
+                'description':
+                    'Optional model to request from the CLI. Falls back to the pool\'s per-harness cli_agent_models default; if neither is set the CLI uses its own default. Harnesses without a documented model flag ignore it.'
+            },
         },
-        'required': ['harness', 'task'],
+        'required': [],
     },
     'dismiss_agent': {
         'description': ("End a sub-agent instance's current task and clear its conversation context. "

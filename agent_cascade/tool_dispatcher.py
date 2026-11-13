@@ -277,13 +277,20 @@ class ToolDispatcher:
         """
         from agent_cascade.advisor_runner import run_lightweight_advisor
         from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
-        from agent_cascade.engine.cli_agent_runner import run_cli_agent
+        from agent_cascade.engine.cli_agent_runner import cli_agent_status, run_cli_agent
         from uuid import uuid4
+        import json
+
+        # Status/introspection short-circuit: never spawns, ignores harness/task, returns a
+        # per-harness readiness snapshot. Placed first so a status-only call (schema now has
+        # required=[]) does not trip the harness/task validation below.
+        if resolved.get('status'):
+            return json.dumps(cli_agent_status(self.pool), indent=2)
 
         harness = resolved.get('harness')
         task = resolved.get('task')
         if not isinstance(harness, str) or not isinstance(task, str) or not task.strip():
-            return "Error: call_cli_agent requires a 'harness' and a non-empty 'task'."
+            return "Error: call_cli_agent requires a 'harness' and a non-empty 'task' (or status=True)."
 
         # 1. Registry resolution (unknown harness never reaches the gating path).
         try:
@@ -356,7 +363,8 @@ class ToolDispatcher:
         try:
             result = run_cli_agent(adapter=adapter, task=task, workspace=ws_path,
                                    permission_posture=posture, timeout=timeout,
-                                   pool=self.pool, caller_name=instance.instance_name)
+                                   pool=self.pool, caller_name=instance.instance_name,
+                                   model=resolved.get('model'))
         except HarnessNotFoundError as e:  # preflight race / direct-runner edge
             return f"Error: {e}"
         except Exception as e:  # noqa: BLE001 — a failed spawn must not crash the caller turn

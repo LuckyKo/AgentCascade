@@ -24,6 +24,7 @@ unauthenticated CI run exits "authentication required" rather than hanging.
 from __future__ import annotations
 
 import shutil
+from typing import Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
     append_task_guarded, resolve_posture_flags, strip_ac_credentials)
@@ -35,6 +36,12 @@ class AntigravityAdapter:
     harness = 'antigravity'
     binary = 'agy'  # NOT 'antigravity' — see module docstring (verified deviation)
     output_format = 'text'  # --output-format text is agy's default; emitted for explicitness
+    # agy authenticates with a cached interactive Google OAuth login — there is NO env-var API
+    # key, so the runner injects no key and status reports key_configured=None (DIG finding #2).
+    auth_env_var = None
+    # agy's verified 1.5.3 --help does not document a model-selection flag; leaving this None
+    # means a requested model is never emitted (byte-safe). Revisit if a flag is confirmed.
+    model_flag = None
     # Self-exit guard against the agy non-TTY hang (issue #318). Bounded well under the
     # runner's default wall-clock cap (1800s) so the CLI exits cleanly first.
     _PRINT_TIMEOUT_SEC = 600
@@ -48,17 +55,22 @@ class AntigravityAdapter:
         """Presence probe: is the ``agy`` binary on the PATH (host side)?"""
         return shutil.which(self.binary) is not None
 
-    def build_launch_cmd(self, *, task: str, workspace: str, posture: str) -> list[str]:
+    def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
+                         model: Optional[str] = None) -> list[str]:
         """Build the one-shot argv: ``agy -p [--mode accept-edits] --print-timeout N -- <task>``.
 
         ``workspace`` is unused here — set by the runner's ``docker run -w``. The task is a
         single positional token guarded with ``--`` via the shared ``append_task_guarded``.
+        ``model`` is accepted for protocol parity but never emitted (``model_flag`` is None —
+        agy has no documented model flag), so a requested model is silently ignored (byte-safe).
         """
         cmd = [
             self.binary, '-p', *resolve_posture_flags(self._POSTURE_FLAGS, posture),
             '--output-format', self.output_format,
             '--print-timeout', str(self._PRINT_TIMEOUT_SEC),
         ]
+        if model and self.model_flag:
+            cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
         return cmd
 

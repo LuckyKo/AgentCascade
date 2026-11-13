@@ -794,6 +794,43 @@
                       </div>
                     </details>
 
+                    <!-- External CLI Agents (call_cli_agent) auto-setup -->
+                    <details class="settings-section">
+                      <summary class="settings-section-title">CLI Agents</summary>
+                      <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <p style="font-size:11px;color:var(--text-muted);margin:0 0 6px;">Enable per-harness. Image is auto-built on first use. Keys are stored locally in secrets.json (never sent via settings).</p>
+                        <label class="setting-field toggle-field" style="margin-bottom:6px;">
+                          <span title="When ON, the shared read-only extra_work_folders_ro are bind-mounted into CLI-agent containers. OFF by default (inherited only when needed).">Mount extra paths (read-only)</span>
+                          <input autocomplete="off" type="checkbox" id="setting-cli-paths-ro" />
+                        </label>
+                        <div style="display:grid;grid-template-columns:1fr auto auto;gap:4px 8px;align-items:center;">
+                          <span style="font-size:11px;color:var(--text-muted);grid-column:1/3;">Harness</span>
+                          <span style="font-size:11px;color:var(--text-muted);grid-column:3/4;">Model / Key</span>
+
+                          <label class="setting-field toggle-field" style="grid-column:1/2;margin:0;">
+                            <span>claude_code</span>
+                            <input autocomplete="off" type="checkbox" id="setting-cli-agent-enabled-claude_code" />
+                          </label>
+                          <input autocomplete="off" type="text" class="cli-agent-model" data-harness="claude_code" placeholder="model" style="font-size:11px;width:90px;" />
+                          <button type="button" class="cli-agent-key-btn" data-harness="claude_code" style="font-size:11px;">Enter Key</button>
+
+                          <label class="setting-field toggle-field" style="grid-column:1/2;margin:0;">
+                            <span>opencode</span>
+                            <input autocomplete="off" type="checkbox" id="setting-cli-agent-enabled-opencode" />
+                          </label>
+                          <input autocomplete="off" type="text" class="cli-agent-model" data-harness="opencode" placeholder="model" style="font-size:11px;width:90px;" />
+                          <button type="button" class="cli-agent-key-btn" data-harness="opencode" style="font-size:11px;">Enter Key</button>
+
+                          <label class="setting-field toggle-field" style="grid-column:1/2;margin:0;">
+                            <span>antigravity</span>
+                            <input autocomplete="off" type="checkbox" id="setting-cli-agent-enabled-antigravity" />
+                          </label>
+                          <input autocomplete="off" type="text" class="cli-agent-model" data-harness="antigravity" placeholder="model" style="font-size:11px;width:90px;" />
+                          <span style="font-size:10px;color:var(--text-muted);">OAuth</span>
+                        </div>
+                      </div>
+                    </details>
+
                     <!-- Skill Invalidation (adaptive count-cap) — ON by default -->
                     <details class="settings-section">
                       <summary class="settings-section-title">Skill Invalidation</summary>

@@ -269,6 +269,13 @@ class SystemInfo(BaseTool):
                 lines.append('')
                 lines.append(hangs)
 
+            # External CLI-agent readiness (enabled/key/image/quota/model per harness). Read-only;
+            # omitted entirely if unavailable, so it can never blank the surrounding dump.
+            cli_agents = self._render_cli_agents()
+            if cli_agents:
+                lines.append('')
+                lines.append(cli_agents)
+
             lines.append('')
             lines.append('(Raw JSONL export: GET /api/telemetry/export)')
             return '\n'.join(lines)
@@ -371,6 +378,29 @@ class SystemInfo(BaseTool):
                               sorted(code_interp_hung_by_reason.items())))
         except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
             logger.debug(f"system_info code-interpreter hangs render failed: {e}")
+            return ''
+
+    def _render_cli_agents(self) -> str:
+        """Render per-harness ``call_cli_agent`` readiness (auto-setup observability).
+
+        Delegates to ``cli_agent_runner.cli_agent_status`` (single source of truth, shared with
+        the Web UI). Read-only: spawns nothing. Never raises — lazy import + local try/except
+        returning '' so a CLI-agent problem can never blank the surrounding dump.
+        """
+        try:
+            from agent_cascade.engine.cli_agent_runner import cli_agent_status
+            status = cli_agent_status(self.agent_pool)
+            lines = ['External CLI agents (call_cli_agent):']
+            for harness, st in sorted(status.items()):
+                lines.append(
+                    f'  {harness}: enabled={st.get('enabled')}'
+                    f' key={st.get('key_configured')}'
+                    f' image={st.get('image_present')}'
+                    f' quota={st.get('quota_available')}'
+                    f' model={st.get('model')}')
+            return '\n'.join(lines)
+        except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
+            logger.debug(f"system_info cli-agents render failed: {e}")
             return ''
 
     def _render_help(self, key: str) -> str:

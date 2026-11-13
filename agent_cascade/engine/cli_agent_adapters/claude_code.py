@@ -13,6 +13,7 @@ independent of AC, so no AC credential is required or inherited.
 from __future__ import annotations
 
 import shutil
+from typing import Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
     append_task_guarded, resolve_posture_flags, strip_ac_credentials)
@@ -24,6 +25,8 @@ class ClaudeCodeAdapter:
     harness = 'claude_code'
     binary = 'claude'
     output_format = 'text'  # --output-format text
+    auth_env_var = 'ANTHROPIC_API_KEY'  # native key the runner injects via -e when configured
+    model_flag = '--model'  # claude accepts --model <name>; appended only when a model resolves
 
     # Posture → argv tokens. 'bypass' is destructive and is never selected by the tool
     # schema (Phase 0 exposes only 'acceptEdits'); it exists here for a future config
@@ -37,16 +40,20 @@ class ClaudeCodeAdapter:
         """Presence probe: is ``claude`` on the PATH (host side)?"""
         return shutil.which(self.binary) is not None
 
-    def build_launch_cmd(self, *, task: str, workspace: str, posture: str) -> list[str]:
+    def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
+                         model: Optional[str] = None) -> list[str]:
         """Build the one-shot argv. ``workspace`` is unused here — the working directory
         is set by the runner's ``docker run -w`` (keeps the adapter container-agnostic).
 
         The task is a single positional token (no shell → no metacharacter injection); a task
         starting with ``-`` is guarded with ``--`` (via the shared ``append_task_guarded``) so
-        it is not parsed as a flag.
+        it is not parsed as a flag. When ``model`` is set it is appended as ``--model <model>``
+        before the task (no model → no flag, byte-safe).
         """
         cmd = [self.binary, '-p', *resolve_posture_flags(self._POSTURE_FLAGS, posture),
                '--output-format', self.output_format]
+        if model and self.model_flag:
+            cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
         return cmd
 

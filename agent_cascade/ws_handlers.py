@@ -90,6 +90,7 @@ class WsMessageHandler:
             'reject': self.handle_reject,
             'ask_security': self.handle_ask_security,
             'set_auto_security': self.handle_set_auto_security,
+            'set_cli_agent_key': self.handle_set_cli_agent_key,
             'set_afk': self.handle_set_afk,
             'edit_message': self.handle_edit_message,
             'delete_messages': self.handle_delete_messages,
@@ -1446,6 +1447,28 @@ class WsMessageHandler:
             from agent_cascade.runtime_state import state as _runtime_state
             _runtime_state.set_auto_security(enabled)
         # Broadcast updated state to all clients immediately, preventing stale overrides from pending messages
+        await self._broadcast()
+
+    async def handle_set_cli_agent_key(self, data: dict) -> None:
+        """Persist an external-CLI API key (Web UI "Enter key" button) via the single secrets writer.
+
+        Never routes the key through ``update_settings``/``update_config`` (it must not appear in
+        the pool_settings blob or the state broadcast). Key-less harnesses (``adapter.auth_env_var``
+        None — e.g. antigravity's cached OAuth) are a no-op: there is nothing to store. The value
+        is written by ``secrets_loader.set_secret`` which never logs it.
+        """
+        harness = data.get('harness')
+        if not harness or not isinstance(harness, str):
+            return
+        from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
+        try:
+            adapter = get_adapter(harness)
+        except HarnessNotFoundError:
+            return
+        if getattr(adapter, 'auth_env_var', None) is None:
+            return  # key-less harness (antigravity): nothing to store
+        from config.secrets_loader import set_secret
+        set_secret(f'cli_{harness}_key', str(data.get('key') or ''))
         await self._broadcast()
 
     async def handle_set_afk(self, data: dict) -> None:

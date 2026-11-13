@@ -1,0 +1,20 @@
+# One-shot container image for call_cli_agent — a SINGLE shared multi-harness image
+# (claude_code + opencode) so there is one build and one containment surface. The
+# per-harness cli_agent_images pool map may still pin a specific tag; the runner builds
+# this file automatically on first miss (cli_agent:all). Antigravity (agy) ships its own
+# non-npm installer and is intentionally NOT baked here — opt-in use needs its own image;
+# cli_agent_status still reports it, and preflight fails cleanly if it is absent.
+FROM node:20-slim
+
+# claude-code + opencode-ai are published to npm; install globally so both are on PATH.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates curl ripgrep jq \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --no-fund --no-audit @anthropic-ai/claude-code opencode-ai
+
+# Non-root is optional here: the runner passes --cap-drop=ALL + no-new-privileges and only
+# bind-mounts the target workspace, so the existing user inside the container sees only /workspace.
+WORKDIR /workspace
+
+# Smoke-test entrypoint (the runner overrides with the harness argv): just prints which CLIs exist.
+CMD ["sh", "-c", "echo 'cli_agent:all ready'; which claude || true; which opencode || true"]

@@ -12,6 +12,7 @@ This file is gitignored. If it does not exist, all lookups return None.
 import json
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -73,3 +74,26 @@ def get_secret(name: str) -> Optional[Any]:
     """
     secrets = _load_secrets()
     return secrets.get(name)
+
+
+_SECRETS_LOCK = threading.Lock()
+
+
+def set_secret(name: str, value: str) -> None:
+    """Persist one secret to config/secrets.json and refresh the in-memory cache (thread-safe).
+
+    Creates the file if missing, preserves every other key, and writes via an atomic
+    tmp+replace so a concurrent reader never sees a partial file. The refreshed cache means
+    :func:`get_secret` reflects the write immediately. The value is never logged.
+    """
+    global _SECRETS_CACHE
+    with _SECRETS_LOCK:
+        cache = dict(_load_secrets())  # copy so the write doesn't mutate the live cache mid-dump
+        cache[name] = value
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, 'secrets.json')
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2)
+        os.replace(tmp, path)  # atomic: reader never sees a partial file
+        _SECRETS_CACHE = cache  # refresh — get_secret reflects the write immediately
