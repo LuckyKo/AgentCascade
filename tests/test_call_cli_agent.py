@@ -524,7 +524,7 @@ class TestAdapterArgv:
         cmd = AntigravityAdapter().build_launch_cmd(task='add tests', workspace='/ws', posture='acceptEdits')
         # agy's -p is greedy: prompt attached via '=' and placed last, --mode before it.
         assert cmd == ['agy', '--mode', 'accept-edits', '--output-format', 'text',
-                       '--print-timeout', '600', '-p=add tests']
+                       '--print-timeout', '600s', '-p=add tests']
 
     def test_leading_dash_task_guarded(self):
         # The flag-injection guard is shared by the positional-task adapters — assert it there.

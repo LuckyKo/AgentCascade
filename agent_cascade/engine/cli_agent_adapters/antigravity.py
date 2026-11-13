@@ -43,7 +43,8 @@ class AntigravityAdapter:
     # means a requested model is never emitted (byte-safe). Revisit if a flag is confirmed.
     model_flag = None
     # Self-exit guard against the agy non-TTY hang (issue #318). Bounded well under the
-    # runner's default wall-clock cap (1800s) so the CLI exits cleanly first.
+    # runner's default wall-clock cap (1800s) so the CLI exits cleanly first. agy's
+    # --print-timeout is a Go duration string, so the value is emitted with an 's' suffix.
     _PRINT_TIMEOUT_SEC = 600
 
     _POSTURE_FLAGS: dict[str, list[str]] = {
@@ -57,7 +58,7 @@ class AntigravityAdapter:
 
     def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
                          model: Optional[str] = None) -> list[str]:
-        """Build the one-shot argv: ``agy [--mode accept-edits] --output-format text --print-timeout N -p=<task>``.
+        """Build the one-shot argv: ``agy [--mode accept-edits] --output-format text --print-timeout Ns -p=<task>``.
 
         ``workspace`` is unused here — set by the runner's ``docker run -w``. The prompt is
         attached to ``-p`` via ``=`` and placed LAST because agy's ``-p`` is greedy: a bare
@@ -69,7 +70,7 @@ class AntigravityAdapter:
         cmd = [
             self.binary, *resolve_posture_flags(self._POSTURE_FLAGS, posture),
             '--output-format', self.output_format,
-            '--print-timeout', str(self._PRINT_TIMEOUT_SEC),
+            '--print-timeout', f'{self._PRINT_TIMEOUT_SEC}s',
         ]
         if model and self.model_flag:
             cmd += [self.model_flag, model]
