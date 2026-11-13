@@ -693,6 +693,26 @@ class MemoryHintManager:
 
         self._deliver(inst, name, hint_text)
 
+        # BUG_0311: book the posted hint for observability. Single choke point — every
+        # non-empty hint passes through here, so this counts hints and captures the exact
+        # char cost (token-waste proxy) of what the model received. Best-effort and placed
+        # AFTER _deliver and OUTSIDE inst._compression_lock (record_hint takes
+        # _telemetry_lock only, which must not be held under the engine-owned compression
+        # lock — same placement discipline as the BUG_0189 ledger bump above). A telemetry
+        # failure must NEVER break the hint path.
+        try:
+            _t = getattr(self._pool, 'telemetry', None)
+            if _t is not None and hasattr(_t, 'record_hint'):
+                _t.record_hint(
+                    name,
+                    job.get('agent_class'),
+                    len(memory_bare),
+                    len(skill_names),
+                    len(hint_text),
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
+            logger.debug('[MEMORY_HINT] %s: hint telemetry failed: %s', name, e)
+
     def _maybe_autoload_skills(self, inst, name: str, skill_names: List[str],
                               skill_counts: Dict[str, int], loaded: set, settings: dict) -> None:
         """BUG_0263: auto-load a skill that keeps getting hinted but was never loaded.
@@ -1198,8 +1218,30 @@ class MemoryHintManager:
             from .stats import bump_read_count
             bump_read_count(vault_root, rel_path)
             inst = self._pool.get_instance(instance_name)
+            actioned = False
             if inst is not None:
                 with inst._compression_lock:
+                    # BUG_0311: attribute a hint→read CONVERSION. A read counts as "actioned"
+                    # only when it is the FIRST-EVER read of a lesson still in _recently_hinted
+                    # (within the cooldown window): rel_path must be present in _recently_hinted
+                    # AND ABSENT from _memories_read BEFORE this add. A re-read of an already-
+                    # read lesson does NOT re-count, so total_memories_actioned counts distinct
+                    # hinted lessons → memory_action_rate is a bounded fraction (≤1.0 per entry).
+                    # _recently_hinted is a dict keyed by bare rel_path, so `in` is a key lookup.
+                    # Caveat: _recently_hinted is cooldown-pruned, so a lesson read AFTER its
+                    # hint expired from the window is under-counted (conservative).
+                    actioned = (rel_path in getattr(inst, '_recently_hinted', {})) and \
+                               (rel_path not in getattr(inst, '_memories_read', set()))
                     inst._memories_read.add(rel_path)
+            # Emit the actioned event OUTSIDE the compression lock (record_* takes
+            # _telemetry_lock only). Best-effort: a telemetry failure must never affect
+            # the read — and the bump + read-set already completed above.
+            if actioned:
+                try:
+                    _t = getattr(self._pool, 'telemetry', None)
+                    if _t is not None and hasattr(_t, 'record_memory_actioned'):
+                        _t.record_memory_actioned(instance_name, rel_path)
+                except Exception as e:  # noqa: BLE001 — best-effort, never affect the read
+                    logger.debug('[MEMORY_HINT] actioned telemetry failed for %s: %s', instance_name, e)
         except Exception as e:  # noqa: BLE001 — never affect the read itself
             logger.debug('[MEMORY_HINT] on_memory_read failed for %s: %s', instance_name, e)

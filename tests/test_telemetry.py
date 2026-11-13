@@ -2035,3 +2035,65 @@ class TestConfigClassTimeReconciliation:
         assert len(configs) == 1
         assert configs[0]['total_duration_sec'] >= 0
         assert configs[0]['total_llm_latency_sec'] >= 0
+
+
+# ---------------------------------------------------------------------------
+# Hint-usage telemetry (BUG_0311)
+# ---------------------------------------------------------------------------
+
+
+class TestHintTelemetry:
+
+    _HINT_KEYS = (
+        'total_hints_posted', 'hint_memory_entries', 'hint_skill_entries',
+        'total_hint_chars', 'total_memories_actioned', 'memory_action_rate',
+    )
+
+    def test_fresh_collector_hint_defaults_and_rate_none(self, collector):
+        """Fresh session: all hint counters 0 and memory_action_rate is None (div guard)."""
+        s = collector.get_session_summary()
+        for k in ('total_hints_posted', 'hint_memory_entries',
+                  'hint_skill_entries', 'total_hint_chars', 'total_memories_actioned'):
+            assert s[k] == 0, f'{k} should default to 0'
+        assert s['memory_action_rate'] is None  # no entries posted → n/a, not 0%
+
+    def test_record_hint_accumulates_counters(self, collector):
+        collector.record_hint('inst', 'coder', n_memories=2, n_skills=1, char_count=400)
+        collector.record_hint('inst', 'coder', n_memories=3, n_skills=0, char_count=100)
+        s = collector.get_session_summary()
+        assert s['total_hints_posted'] == 2
+        assert s['hint_memory_entries'] == 5
+        assert s['hint_skill_entries'] == 1
+        assert s['total_hint_chars'] == 500
+
+    def test_record_memory_actioned_and_action_rate(self, collector):
+        """memory_action_rate = total_memories_actioned / hint_memory_entries."""
+        collector.record_hint('inst', 'coder', n_memories=4, n_skills=0, char_count=800)
+        collector.record_memory_actioned('inst', 'a.md')
+        collector.record_memory_actioned('inst', 'b.md')
+        s = collector.get_session_summary()
+        assert s['total_memories_actioned'] == 2
+        # 2 / 4 = 0.5 (rounded to 3 dp)
+        assert s['memory_action_rate'] == 0.5
+
+    def test_events_are_typed(self, collector):
+        """get_recent_events() surfaces the hint_posted + memory_actioned events."""
+        collector.record_hint('inst', 'coder', n_memories=1, n_skills=2, char_count=10)
+        collector.record_memory_actioned('inst', 'x.md')
+        types = [e['type'] for e in collector.get_recent_events()]
+        assert 'hint_posted' in types
+        assert 'memory_actioned' in types
+        posted = [e for e in collector.get_recent_events() if e['type'] == 'hint_posted'][-1]
+        assert posted['n_memories'] == 1
+        assert posted['n_skills'] == 2
+        assert posted['char_count'] == 10
+        act = [e for e in collector.get_recent_events() if e['type'] == 'memory_actioned'][-1]
+        assert act['rel_path'] == 'x.md'
+
+    def test_hint_keys_present_alongside_all_others(self, collector):
+        """The new keys are additive — no existing summary key is dropped."""
+        s = collector.get_session_summary()
+        for k in self._HINT_KEYS:
+            assert k in s, f'missing key {k}'
+        # sanity: a pre-existing key still present
+        assert 'total_compressions' in s

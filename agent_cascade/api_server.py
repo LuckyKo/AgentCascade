@@ -446,6 +446,38 @@ def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance
     return not last or (now - last) >= AFK_NUDGE_COOLDOWN
 
 
+def _build_skill_action_table(metrics: dict) -> list:
+    """Build the BUG_0311 per-skill hint action-rate table (BUG_0311).
+
+    Pure helper (reads only its argument) so the ordering/exclusion/rounding rules can be
+    unit-tested directly, independent of the FastAPI route. Given ``skill_manager.
+    get_metrics()`` output it returns ``[{skill, hints, loads, action_rate}]``:
+
+    - EXCLUDES the synthetic ``'self-augmentation'`` entry.
+    - ``action_rate = round(loads / hints, 3)`` when ``hints > 0`` else ``None``.
+    - Sorted by ``hints`` descending.
+
+    CAVEAT: ``loads`` is the durable ``total_loads`` ledger, a SUPERSET of runtime
+    ``load_skill`` (counts init-time AUTO/advisor/explicit loads too), so ``action_rate``
+    can exceed 1.0 and is an approximation of hint effectiveness — not a strict hit rate.
+    Tolerates ``None`` / empty metrics (returns ``[]``).
+    """
+    rows: list = []
+    for name, m in (metrics or {}).items():
+        if name == 'self-augmentation':
+            continue
+        hints = (m or {}).get('hints', 0) or 0
+        loads = (m or {}).get('total_loads', 0) or 0
+        rows.append({
+            'skill': name,
+            'hints': hints,
+            'loads': loads,
+            'action_rate': round(loads / hints, 3) if hints > 0 else None,
+        })
+    rows.sort(key=lambda r: r['hints'], reverse=True)
+    return rows
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.log import install_uvicorn_log_bridge, logger
 
@@ -2076,15 +2108,38 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.get('/api/telemetry')
     async def api_telemetry():
         """Return session telemetry summary and per-config comparison data."""
-        if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
-            return {
-                'session': agent_pool.telemetry.get_session_summary(),
-                'configs': agent_pool.telemetry.get_config_comparison(),
-                'agent_classes': agent_pool.telemetry.get_agent_class_summary(),
-                'skills': agent_pool.telemetry.get_skill_usage_summary(),
-                'recent_events': agent_pool.telemetry.get_recent_events(50),
-            }
-        return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [], 'recent_events': []}
+        if not (agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry):
+            return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [],
+                    'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []}}
+        session = agent_pool.telemetry.get_session_summary()
+        # BUG_0311 "hints" slice — read-only aggregation, no new counters, no schema
+        # change. hint_stats = the hint subset of get_session_summary(); skill_table =
+        # per-skill {skill, hints, loads, action_rate} from skill_manager.get_metrics(),
+        # EXCLUDING the synthetic 'self-augmentation' entry, sorted by hints desc.
+        # CAVEAT: 'loads' is the durable total_loads ledger (a SUPERSET of runtime
+        # load_skill — also counts init-time AUTO/advisor/explicit loads), so
+        # action_rate=loads/hints is an approximation of hint effectiveness, not a strict
+        # per-hint hit rate. Best-effort: any hiccup degrades to empty so the panel never
+        # blanks.
+        hint_stats = {k: session.get(k) for k in (
+            'total_hints_posted', 'hint_memory_entries', 'hint_skill_entries',
+            'total_hint_chars', 'total_memories_actioned', 'memory_action_rate',
+        )}
+        skill_table: list = []
+        try:
+            sm = getattr(agent_pool, 'skill_manager', None)
+            if sm is not None and hasattr(sm, 'get_metrics'):
+                skill_table = _build_skill_action_table(sm.get_metrics())
+        except Exception:  # noqa: BLE001 — observability must never break the API
+            skill_table = []
+        return {
+            'session': session,
+            'configs': agent_pool.telemetry.get_config_comparison(),
+            'agent_classes': agent_pool.telemetry.get_agent_class_summary(),
+            'skills': agent_pool.telemetry.get_skill_usage_summary(),
+            'recent_events': agent_pool.telemetry.get_recent_events(50),
+            'hints': {'hint_stats': hint_stats, 'skill_table': skill_table},
+        }
 
     @app.get('/api/telemetry/export')
     async def api_telemetry_export():

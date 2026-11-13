@@ -6772,6 +6772,8 @@ function updateTelemetryPanel(telemetry) {
   // time with parallelism; excludes call_agent wait, idle and queue time).
   set('telem-wallclock', telemetry.wallclock_ms != null ? formatDuration(telemetry.wallclock_ms) : '—');
   set('telem-compressions', formatNumber(telemetry.total_compressions));
+  set('telem-hints-posted', formatNumber(telemetry.total_hints_posted));
+  set('telem-hint-chars', formatNumber(telemetry.total_hint_chars));
   set('telem-malformed', formatNumber(telemetry.total_auto_continues));
   set('telem-loops-outer', formatNumber(telemetry.loops_outer));
   set('telem-loops-inner', formatNumber(telemetry.loops_inner));
@@ -6894,6 +6896,35 @@ function updateTelemetrySkillTable(rows) {
   }).join('');
 }
 
+function updateTelemetryHintTable(rows) {
+  const tbody = document.getElementById('telem-hint-tbody');
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No hint data yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+    // action_rate = total_loads / hints. total_loads is a durable SUPERSET (it also counts
+    // init-time AUTO/advisor/explicit loads), so the rate CAN exceed 1.0 (>100%). Reuse
+    // getSuccessClass only for the ≤1.0 range; a >100% rate is not a "success" — render it
+    // neutral (no success class) so 150% is not painted green. (Display-only, never a gate.)
+    const rate = r.action_rate;
+    const pct = rate * 100;
+    const rateClass = rate > 1 ? '' : getSuccessClass(pct);
+    const rateCell = (rate !== null && rate !== undefined)
+      ? `<span class="${rateClass}">${pct.toFixed(1)}%</span>`
+      : '—';
+    return `<tr>
+      <td title="${escapeHtml(r.skill)}">${escapeHtml(r.skill)}</td>
+      <td>${formatNumber(r.hints || 0)}</td>
+      <td>${formatNumber(r.loads || 0)}</td>
+      <td>${rateCell}</td>
+    </tr>`;
+  }).join('');
+}
+
 // Fetch full telemetry from API (for config comparison data not in WebSocket)
 async function fetchTelemetry() {
   try {
@@ -6903,6 +6934,7 @@ async function fetchTelemetry() {
     if (data.configs) updateTelemetryConfigTable(data.configs);
     if (data.agent_classes) updateTelemetryAgentClassTable(data.agent_classes);
     if (data.skills) updateTelemetrySkillTable(data.skills);
+    if (data.hints?.skill_table) updateTelemetryHintTable(data.hints.skill_table);
   } catch (err) {
     console.warn('Failed to fetch telemetry:', err);
   }

@@ -122,6 +122,13 @@ class TelemetryCollector:
             'skill_advisor_calls': 0,
             'skill_advisor_denials': 0,
             'skill_advisor_fallbacks': 0,
+            # Hint-usage observability counters (BUG_0311). Pure additive surfacing of
+            # what the hint path already emitted; never affects hint generation/gating.
+            'total_hints_posted': 0,            # non-empty hint blocks delivered
+            'hint_memory_entries': 0,           # Σ memory entries shown across posted blocks
+            'hint_skill_entries': 0,            # Σ skill entries shown across posted blocks
+            'total_hint_chars': 0,              # Σ len(hint_text) — token-waste proxy (chars)
+            'total_memories_actioned': 0,       # lesson reads that followed a hint
             # RFC 9211 Cache-Status (prompt-cache hit/miss) counters
             'llm_cache_hits': 0,
             'llm_cache_misses': 0,
@@ -1394,6 +1401,61 @@ class TelemetryCollector:
         self._write_event(event)
 
 
+    def record_hint(
+        self,
+        instance_name: str,
+        agent_class,
+        n_memories: int,
+        n_skills: int,
+        char_count: int,
+    ):
+        """Record one non-empty hint block delivered to the model (BUG_0311).
+
+        Observability-only: called at the single hint-surface choke point in
+        ``memory_hint/manager.py`` right after ``_deliver``. Mirrors ``record_compression``
+        (event dict under ``_telemetry_lock`` + ``_write_event``), with NO cache-baseline
+        side effects. Counters use direct ``+=`` on keys pre-initialized in ``__init__``,
+        exactly matching ``record_compression``.
+        """
+        with _telemetry_lock:
+            event = {
+                'type': 'hint_posted',
+                'instance': instance_name,
+                'agent_class': agent_class,
+                'n_memories': n_memories,
+                'n_skills': n_skills,
+                'char_count': char_count,
+                'timestamp': _now_iso(),
+            }
+            self._session_stats['total_hints_posted'] += 1
+            self._session_stats['hint_memory_entries'] += n_memories
+            self._session_stats['hint_skill_entries'] += n_skills
+            self._session_stats['total_hint_chars'] += char_count
+
+        self._write_event(event)
+
+    def record_memory_actioned(self, instance_name: str, rel_path: str):
+        """Record the FIRST read of a hinted lesson back (BUG_0311).
+
+        Called from ``on_memory_read`` only when ``rel_path`` was still present in the
+        instance's ``_recently_hinted`` map at read time AND had not been read before — i.e.
+        it measures a hinted→first-read CONVERSION, not every read. This keeps
+        ``total_memories_actioned`` = distinct hinted lessons actually read, so the derived
+        ``memory_action_rate`` stays a bounded fraction (≤1.0). Under-counts lessons read
+        after their hint left the cooldown window. No cache side effects.
+        """
+        with _telemetry_lock:
+            event = {
+                'type': 'memory_actioned',
+                'instance': instance_name,
+                'rel_path': rel_path,
+                'timestamp': _now_iso(),
+            }
+            self._session_stats['total_memories_actioned'] += 1
+
+        self._write_event(event)
+
+
     # ── Aggregation & Reporting (thread-safe, return defensive copies) ─────
 
     def get_session_summary(self) -> Dict:
@@ -1425,6 +1487,15 @@ class TelemetryCollector:
         # Derived from server-reported cached_tokens (authoritative) + header fallback.
         _cache_total = stats.get('llm_cache_hits', 0) + stats.get('llm_cache_misses', 0)
         llm_cache_hit_ratio = round(stats.get('llm_cache_hits', 0) / _cache_total, 3) if _cache_total > 0 else None
+
+        # Hint effectiveness (BUG_0311): fraction of posted memory-hint entries the
+        # instance read back. None when nothing was posted, so a fresh session reports
+        # "n/a" rather than a misleading 0%.
+        _hint_mem_entries = stats.get('hint_memory_entries', 0)
+        memory_action_rate = (
+            round(stats.get('total_memories_actioned', 0) / _hint_mem_entries, 3)
+            if _hint_mem_entries > 0 else None
+        )
 
         # Coverage: fraction of LLM calls that were actually classified (hit or miss).
         # Low coverage means most traffic came from non-supporting backends (no usage),
@@ -1474,6 +1545,17 @@ class TelemetryCollector:
             'skill_advisor_calls': stats.get('skill_advisor_calls', 0),
             'skill_advisor_denials': stats.get('skill_advisor_denials', 0),
             'skill_advisor_fallbacks': stats.get('skill_advisor_fallbacks', 0),
+            # ── Hint usage (BUG_0311) ──────────────────────────────────────────
+            # Additive observability of the hint path (no generation change). The
+            # skill-side action-rate is NOT derived here: it comes read-only from
+            # skill_manager.get_metrics() at the API layer (a superset approximation —
+            # total_loads includes init-time loads, so it is not a strict per-hint rate).
+            'total_hints_posted': stats.get('total_hints_posted', 0),
+            'hint_memory_entries': stats.get('hint_memory_entries', 0),
+            'hint_skill_entries': stats.get('hint_skill_entries', 0),
+            'total_hint_chars': stats.get('total_hint_chars', 0),
+            'total_memories_actioned': stats.get('total_memories_actioned', 0),
+            'memory_action_rate': memory_action_rate,
             # RFC 9211 prompt-cache hit/miss counters + derived hit ratio.
             'llm_cache_hits': stats.get('llm_cache_hits', 0),
             'llm_cache_misses': stats.get('llm_cache_misses', 0),

@@ -1015,6 +1015,14 @@
                       <div class="telemetry-value" id="telem-compressions">0</div>
                     </div>
                     <div class="telemetry-card">
+                      <div class="telemetry-label" title="Non-empty hint blocks delivered to the model this session">Hints Posted</div>
+                      <div class="telemetry-value" id="telem-hints-posted">0</div>
+                    </div>
+                    <div class="telemetry-card">
+                      <div class="telemetry-label" title="Σ characters of hint payloads injected (token-waste proxy)">Hint Chars</div>
+                      <div class="telemetry-value" id="telem-hint-chars">0</div>
+                    </div>
+                    <div class="telemetry-card">
                       <div class="telemetry-label">Malformed</div>
                       <div class="telemetry-value" id="telem-malformed">0</div>
                     </div>
@@ -1104,6 +1112,25 @@
                     </table>
                   </div>
                   <button id="telem-export-btn" class="btn btn-secondary" style="width: 100%; margin-top: 12px;">📥 Export Raw Telemetry (JSONL)</button>
+                </div>
+              </div>
+
+              <div class="settings-section">
+                <h3 class="settings-section-title">Hint Usage</h3>
+                <div class="settings-section-body">
+                  <div id="telemetry-hint-table" class="telemetry-table-container">
+                    <table class="telemetry-table">
+                      <thead>
+                        <tr><th>Skill</th><th>Hints</th><th>Loads</th><th>Action Rate</th></tr>
+                      </thead>
+                      <tbody id="telem-hint-tbody">
+                        <tr><td colspan="4" style="text-align:center; color:var(--text-secondary)">No hint data yet</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style="margin-top: 10px; font-size: 0.85em; color: var(--text-secondary);">
+                    Action Rate ≈ Loads / Hints (a superset approximation: Loads includes init-time AUTO/advisor loads, not only loads triggered by a hint). Excludes synthetic self-augmentation.
+                  </p>
                 </div>
               </div>
             </div>

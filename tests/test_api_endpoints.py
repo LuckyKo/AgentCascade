@@ -606,6 +606,34 @@ class TestSessionsInstanceAwareLogDir:
         data = resp.json()
         assert isinstance(data, dict)
 
+    def test_get_telemetry_includes_hints(self, client):
+        """GET /api/telemetry carries the BUG_0311 'hints' slice in BOTH branches.
+
+        Mirrors the graceful style of the other telemetry endpoint tests: a pool with no
+        active telemetry returns an empty-but-well-shaped hints slice (fallback branch),
+        so the test asserts the STRUCTURE always holds, and asserts the 6 hint_stats keys
+        only when a summary was actually produced (real branch).
+        """
+        resp = client.get('/api/telemetry')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'hints' in data, "missing 'hints' key on /api/telemetry"
+        hints = data['hints']
+        assert 'hint_stats' in hints and 'skill_table' in hints, \
+            f"hints must carry hint_stats + skill_table, got {list(hints)}"
+        assert isinstance(hints['skill_table'], list)
+        # When telemetry is active the session summary populated hint_stats with all 6 keys;
+        # on a telemetry-less pool the graceful fallback returns {} — assert shape only then.
+        stats = hints['hint_stats']
+        if stats:
+            for k in ('total_hints_posted', 'hint_memory_entries', 'hint_skill_entries',
+                      'total_hint_chars', 'total_memories_actioned', 'memory_action_rate'):
+                assert k in stats, f"hint_stats missing {k}"
+        # the synthetic self-augmentation entry is excluded from the action-rate table
+        skills_in_table = {r['skill'] for r in hints['skill_table']}
+        assert 'self-augmentation' not in skills_in_table
+
+
     def test_get_telemetry_export_returns_jsonl(self, client_no_exceptions):
         """GET /api/telemetry/export returns telemetry log (may be empty)."""
         resp = client_no_exceptions.get('/api/telemetry/export')
@@ -3569,3 +3597,42 @@ class TestMediaGenProjectRoot:
             assert entry.get('id') == bid
             assert isinstance(entry.get('connection_fields'), list)
             assert isinstance(entry.get('advanced_fields'), list)
+
+
+class TestBuildSkillActionTable:
+    """Focused unit test for the _build_skill_action_table helper (BUG_0311).
+
+    The helper is pure (reads only its argument), so it is exercised directly without an
+    app/pool — pins the self-augmentation exclusion, hints-desc ordering, action_rate
+    rounding/None handling, and empty/None tolerance.
+    """
+
+    def test_excludes_self_augmentation_sorts_and_rounds(self):
+        from agent_cascade.api_server import _build_skill_action_table
+        metrics = {
+            'alpha': {'hints': 5, 'total_loads': 3},
+            'beta': {'hints': 2, 'total_loads': 2},
+            'self-augmentation': {'hints': 99, 'total_loads': 99},
+        }
+        rows = _build_skill_action_table(metrics)
+        names = [r['skill'] for r in rows]
+        assert 'self-augmentation' not in names          # synthetic entry excluded
+        assert names == ['alpha', 'beta']                # sorted by hints desc (5 > 2)
+        assert rows[0]['action_rate'] == round(3 / 5, 3)  # 0.6, rounded to 3 dp
+        assert rows[0]['hints'] == 5 and rows[0]['loads'] == 3
+        assert rows[1]['action_rate'] == round(2 / 2, 3)  # 1.0
+
+    def test_action_rate_none_when_no_hints_and_can_exceed_one(self):
+        from agent_cascade.api_server import _build_skill_action_table
+        rows = _build_skill_action_table({
+            'zero': {'hints': 0, 'total_loads': 0},  # no hints → None
+            'over': {'hints': 2, 'total_loads': 3},  # durable total_loads superset → >1.0
+        })
+        by = {r['skill']: r for r in rows}
+        assert by['zero']['action_rate'] is None
+        assert by['over']['action_rate'] == round(3 / 2, 3)  # 1.5 (not clamped to 1.0)
+
+    def test_empty_and_none_metrics_tolerated(self):
+        from agent_cascade.api_server import _build_skill_action_table
+        assert _build_skill_action_table({}) == []
+        assert _build_skill_action_table(None) == []

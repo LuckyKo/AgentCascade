@@ -291,6 +291,25 @@ class _FakeInst:
         self._skill_hint_counts = {}
 
 
+class _RecordingTelemetry:
+    """Real recording double for BUG_0311 hint telemetry.
+
+    NOT a MagicMock: a bare MagicMock silently absorbs record_* calls, making the
+    assertion "record_hint was called" trivially true. This double stores every call so
+    tests assert the code actually invoked it with the right arguments.
+    """
+
+    def __init__(self):
+        self.hints = []      # (instance_name, agent_class, n_memories, n_skills, char_count)
+        self.actioned = []   # (instance_name, rel_path)
+
+    def record_hint(self, instance_name, agent_class, n_memories, n_skills, char_count):
+        self.hints.append((instance_name, agent_class, n_memories, n_skills, char_count))
+
+    def record_memory_actioned(self, instance_name, rel_path):
+        self.actioned.append((instance_name, rel_path))
+
+
 class TestManagerDedup:
     def _manager_with_lesson(self, tmp_path, enabled=True, skill_manager=None):
         v = tmp_path / 'proj' / '.agent_lessons'
@@ -626,6 +645,109 @@ class TestManagerDedup:
         for p in expected_in:
             assert p in hint, f'{p} (top-3) missing from hint: {hint}'
         assert excluded not in hint, f'{excluded} (4th) must be capped out of hint'
+
+    # ── BUG_0311: hint-usage telemetry at the _deliver / on_memory_read seams ──
+
+    def test_process_job_records_hint_telemetry(self, tmp_path):
+        """A delivered hint books exactly one record_hint with the real entry counts."""
+        mgr, inst = self._manager_with_lesson(tmp_path)
+        rec = _RecordingTelemetry()
+        mgr._pool.telemetry = rec
+        job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+        # Execution witness: a hint really was delivered, so the recording double MUST have
+        # observed it (this fails if the call site is wrong / swallowed).
+        assert len(inst._tool_warnings) == 1
+        assert len(rec.hints) == 1, f'expected exactly one record_hint, got {rec.hints}'
+        instance_name, agent_class, n_mem, n_skill, chars = rec.hints[0]
+        assert instance_name == 'w'
+        assert agent_class == 'test_agent'
+        assert n_mem == 1        # compression-debug.md is the sole match
+        assert n_skill == 0      # memory-only fixture (no skill manager)
+        assert chars == len(inst._tool_warnings[0])  # exact char cost of the payload
+        assert chars > 0         # non-empty hint
+
+    def test_process_job_no_hint_telemetry_when_not_delivered(self, tmp_path):
+        """No hint delivered (already-read dedup) ⇒ record_hint is NEVER called."""
+        mgr, inst = self._manager_with_lesson(tmp_path)
+        rec = _RecordingTelemetry()
+        mgr._pool.telemetry = rec
+        with inst._compression_lock:
+            inst._memories_read.add('compression-debug.md')
+        job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+        assert inst._tool_warnings == []   # nothing delivered
+        assert rec.hints == []             # and nothing booked
+
+    def test_on_memory_read_records_actioned_only_on_first_read(self, tmp_path):
+        """First read of a hinted lesson books actioned; a re-read of the SAME path does NOT.
+
+        total_memories_actioned must count DISTINCT hinted lessons actually read, so the
+        derived memory_action_rate stays a bounded fraction (≤1.0) — re-reading one lesson
+        N× must not inflate the numerator.
+        """
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        _write_lesson(v, 'x.md', 'X', 'desc', 'body text here')
+        inst = _FakeInst()
+        inst._recently_hinted['x.md'] = time.monotonic()   # recently hinted, not yet read
+        pool = MagicMock()
+        pool.telemetry = _RecordingTelemetry()
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.on_memory_read('w', v, 'x.md')   # first read → actioned
+        assert pool.telemetry.actioned == [('w', 'x.md')]
+        # Still in _recently_hinted, but now also in _memories_read → a re-read must NOT re-count.
+        assert 'x.md' in inst._recently_hinted
+        assert 'x.md' in inst._memories_read
+        mgr.on_memory_read('w', v, 'x.md')   # second read of the same lesson
+        assert pool.telemetry.actioned == [('w', 'x.md')]   # counted once only
+
+    def test_on_memory_read_not_actioned_when_not_recently_hinted(self, tmp_path):
+        """A read of a never-hinted lesson does NOT book record_memory_actioned."""
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        _write_lesson(v, 'x.md', 'X', 'desc', 'body text here')
+        inst = _FakeInst()   # _recently_hinted starts empty
+        assert 'x.md' not in inst._recently_hinted
+        pool = MagicMock()
+        pool.telemetry = _RecordingTelemetry()
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.on_memory_read('w', v, 'x.md')
+        assert pool.telemetry.actioned == []
+
+    def test_telemetry_record_hint_raises_does_not_break_delivery(self, tmp_path):
+        """A raising record_hint must NOT break the hint path: the block is still delivered."""
+        class _Raising:
+            def record_hint(self, *a, **kw):
+                raise RuntimeError('telemetry down')
+        mgr, inst = self._manager_with_lesson(tmp_path)
+        mgr._pool.telemetry = _Raising()
+        job = {'instance_name': 'w', 'query': 'debugging a compression hang in the engine loop',
+               'agent_class': 'test_agent', 'submitted_at': time.monotonic(), 'turn': 3}
+        mgr._process_job(job)
+        # The hint must still reach the model despite the telemetry blow-up.
+        assert len(inst._tool_warnings) == 1
+
+    def test_telemetry_record_actioned_raises_does_not_break_read(self, tmp_path):
+        """A raising record_memory_actioned must NOT affect the read bookkeeping."""
+        class _Raising:
+            def record_memory_actioned(self, *a, **kw):
+                raise RuntimeError('telemetry down')
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        _write_lesson(v, 'x.md', 'X', 'desc', 'body text here')
+        inst = _FakeInst()
+        inst._recently_hinted['x.md'] = time.monotonic()   # triggers the actioned path
+        pool = MagicMock()
+        pool.telemetry = _Raising()
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        mgr.on_memory_read('w', v, 'x.md')   # must not raise to the caller
+        assert 'x.md' in inst._memories_read  # read-set still recorded
 
 
 # ── 4b. Manager: self-calibrating gate (floor / gap / noise) ───────────────
