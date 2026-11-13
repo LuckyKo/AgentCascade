@@ -880,7 +880,7 @@ TOOL_METADATA = {
                 'type':
                     'string',
                 'description':
-                    'Host path the CLI runs in (mounted read-write at /workspace). Must be within the agent\'s allowed workspace; defaults to the caller\'s workspace.'
+                    'Host path the CLI runs in (mounted read-write at /workspace). Must be the agent\'s default workspace or one of its extra read-write paths — a read-only path or any path outside the agent\'s allowed base is rejected. Defaults to the caller\'s default workspace.'
             },
             'permission_posture': {
                 'type':
