@@ -31,15 +31,23 @@ import time
 import uuid
 
 from agent_cascade.async_shell_pkg.constants import SPAWN_PUBLISH_TIMEOUT
-from agent_cascade.async_shell_pkg.task import _elapsed_for_task
 from agent_cascade.async_shell_pkg.tracker import AsyncShellTracker, _PendingSpawn
 from agent_cascade.shell_utils import drain_pipe_lines
-from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.log import logger
 
 
 class CliAgentTracker(AsyncShellTracker):
     """Background runner for external CLI one-shot containers (see module docstring)."""
+
+    # Relabel every inherited message via the parent's label hooks instead of copying
+    # get_status / kill_task / _build_completion_header. Everything not overridden here
+    # (e.g. _RUN_NOUN_LOWER, used only by the unreachable Ctrl+C path) inherits the
+    # shell default — see the hook definitions on AsyncShellTracker.
+    _TOOL_NAME = 'call_cli_agent'              # ⟨call_cli_agent completed⟩ / status⟩
+    _RUN_NOUN = 'call_cli_agent run'           # "call_cli_agent run killed / kill requested / already finished"
+    _SPILLOVER_TOOL_NAME = 'call_cli_agent_async'
+    _SHOW_HEARTBEAT_LINE = False               # completion-only: no heartbeat line in __status
+    _SHOW_COMMAND_LINE = False                 # task.command is an opaque run_id, never echo it
 
     def __init__(self, pool=None):
         super().__init__(pool=pool)
@@ -257,28 +265,39 @@ class CliAgentTracker(AsyncShellTracker):
                              f"tool_id={tool_id}: {e}")
 
     # ────────────────────────────────────────────────────────────────────────
-    def _build_completion_header(self, tool_id: int, task, timed_out: bool = False,
-                                 error: str = None) -> str:
-        """CLI-labeled completion header. Timeout is reported with the conventional exit 124
-        (matching the synchronous runner) regardless of the raw container exit code."""
-        elapsed = _elapsed_for_task(task)
-        if timed_out and not error:
-            timeout_val = task.timeout if task else '?'
-            return (f"⟨call_cli_agent completed⟩ Tool ID: {tool_id}\n"
-                    f"Timed out after {timeout_val}s ({elapsed:.1f}s total, exit=124). "
-                    f"Container terminated.")
-        if error:
-            return (f"⟨call_cli_agent completed⟩ Tool ID: {tool_id}\n"
-                    f"Error: {error} ({elapsed:.1f}s elapsed).")
-        rc = task.return_code if task and task.return_code is not None else 0
-        if rc == -1:
-            status = 'killed externally (via __kill)'
-        elif rc == 0:
-            status = 'success'
-        else:
-            status = f"exit code {rc}"
-        return (f"⟨call_cli_agent completed⟩ Tool ID: {tool_id}\n"
-                f"Completed in {elapsed:.1f} s ({status}).")
+    def _timeout_header_line(self, timeout_val, elapsed: float) -> str:
+        """Timeout tail: report the conventional exit 124 (matching the sync runner) and
+        'Container terminated' instead of the shell's 'All child processes terminated'."""
+        return (f"Timed out after {timeout_val}s ({elapsed:.1f}s total, exit=124). "
+                f"Container terminated.")
+
+    def _dead_run_message(self, agent_name: str, tool_id: int) -> str:
+        """Terminal message for a reaped run. Overrides the parent's whole string (not a
+        substring rewrite) so shell wording never leaks — structurally independent from the
+        parent template on purpose (BUG_0305 E5)."""
+        return (f"No running call_cli_agent run found for agent '{agent_name}' with tool_id "
+                f"{tool_id} — TERMINAL: this run has completed or crashed and its record was "
+                f"cleaned up. Do NOT poll again; the result is unobtainable from here (any "
+                f"completion message was already queued). Continue without it.")
+
+    def _timeout_hint(self, task) -> str:
+        """Suppress the shell-only git-autogc hint — it never applies to a container run."""
+        return ''
+
+    def _completion_body(self, agent_name: str, tool_id: int, header: str, *,
+                         timed_out: bool = False, error: str = None) -> str:
+        """Error-route delivery body: persist the error, append the full_output footer,
+        trust-wrap. The merged (normal/timeout) path builds its own message in
+        ``_build_completion_message`` and never reaches here, so persist happens exactly once.
+        """
+        task = self._get_task(agent_name, tool_id)
+        ctx = self._ctx(task)
+        log_path = self._persist(
+            caller_name=ctx.get('caller_name', 'unknown'), harness=ctx.get('harness', 'unknown'),
+            exit_code=-1, timed_out=timed_out, stdout='', stderr=error or '',
+            requested_posture=ctx.get('requested_posture', 'acceptEdits'))
+        body = header if not log_path or log_path == '<persist-failed>' else f"{header}\n\nfull_output={log_path}"
+        return self._wrap(body)
 
     # ────────────────────────────────────────────────────────────────────────
     def _build_completion_message(self, agent_name: str, tool_id: int, task,
@@ -290,7 +309,8 @@ class CliAgentTracker(AsyncShellTracker):
         recorded exit code to the conventional 124.
         """
         # Flag timeout for the completed-run normalization, then persist FULL output (raw lines,
-        # read before the display truncation consumes/advances the position).
+        # read before super()'s display truncation consumes/advances the position — persist is
+        # position-independent, so this ordering is safe).
         if task is not None and timed_out:
             task._cli_timed_out = True
         log_path = ''
@@ -305,27 +325,9 @@ class CliAgentTracker(AsyncShellTracker):
                 timed_out=timed_out, stdout=stdout_full, stderr=stderr_full,
                 requested_posture=ctx.get('requested_posture', 'acceptEdits'))
 
-        header = self._build_completion_header(tool_id, task, timed_out=timed_out)
-        remaining_text = self._get_remaining_output_text(agent_name, tool_id)
-        msg = header if not remaining_text else f"{header}\n\nOutput:\n{remaining_text}"
-        msg = f"{msg}\n\nfull_output={log_path}"
-        return self._wrap(msg)
-
-    # ────────────────────────────────────────────────────────────────────────
-    def _send_completion_message(self, agent_name: str, tool_id: int, timed_out: bool = False,
-                                 error: str = None) -> None:
-        """Standalone error-route completion (the normal/timeout paths use the merged build in
-        _track_task). Trust-wrapped like every other async delivery; persists the error so a
-        later ``read_logs`` still shows why the run failed."""
-        task = self._get_task(agent_name, tool_id)
-        header = self._build_completion_header(tool_id, task, timed_out=timed_out, error=error)
-        ctx = self._ctx(task)
-        log_path = self._persist(
-            caller_name=ctx.get('caller_name', 'unknown'), harness=ctx.get('harness', 'unknown'),
-            exit_code=-1, timed_out=timed_out, stdout='', stderr=error or '',
-            requested_posture=ctx.get('requested_posture', 'acceptEdits'))
-        body = header if not log_path or log_path == '<persist-failed>' else f"{header}\n\nfull_output={log_path}"
-        self._deliver_completion(agent_name, self._wrap(body))
+        # Parent assembles header + remaining output (no git hint — _timeout_hint returns '').
+        msg = super()._build_completion_message(agent_name, tool_id, task, timed_out=timed_out)
+        return self._wrap(f"{msg}\n\nfull_output={log_path}")
 
     # ────────────────────────────────────────────────────────────────────────
     def _record_completed_run(self, agent_name: str, tool_id: int, task) -> None:
@@ -358,93 +360,3 @@ class CliAgentTracker(AsyncShellTracker):
             if run_id is not None:
                 with self._lock:
                     self._launch_ctx.pop(run_id, None)
-
-    # ────────────────────────────────────────────────────────────────────────
-    def get_status(self, agent_name: str, tool_id: int):
-        """Manual status check (CLI-labeled, no heartbeat line, no raw command echo).
-
-        Returned to the dispatcher, so it is trust-wrapped there — NOT here. Falls back to the
-        completed-run store when the live task has already been reaped.
-        """
-        task = self._get_task(agent_name, tool_id)
-        if task is None:
-            run = self._get_completed_run(agent_name, tool_id)
-            if run is not None:
-                rc = run.get('return_code')
-                elapsed = run.get('elapsed', 0.0) or 0.0
-                output = run.get('output')
-                msg = (f"⟨call_cli_agent status⟩ Tool ID: {tool_id}\n"
-                       f"Process already completed (exit code {rc}, {elapsed:.0f}s).")
-                if output:
-                    msg += f"\n\nOutput:\n{output}"
-                return msg
-            return (f"No running call_cli_agent run found for agent '{agent_name}' with tool_id "
-                    f"{tool_id} — TERMINAL: this run has completed or crashed and its record was "
-                    f"cleaned up. Do NOT poll again; the result is unobtainable from here (any "
-                    f"completion message was already queued). Continue without it.")
-
-        with task._lock:
-            pid = task.pid
-            completed = task.completed
-            return_code = task.return_code
-            elapsed = time.time() - task.start_time  # inline: already hold the non-reentrant lock
-            combined = list(task.stdout_lines) + list(task.stderr_lines)
-            consumed_lines = combined[task.last_heartbeat_sent_pos:]
-            task.last_heartbeat_sent_pos = len(combined)
-
-        if completed:
-            rc = return_code if return_code is not None else '?'
-            status_label = f"completed (exit code {rc}, {elapsed:.0f}s)"
-        else:
-            status_label = f"running ({elapsed:.0f}s elapsed)"
-
-        msg = (f"⟨call_cli_agent status⟩ Tool ID: {tool_id}\n"
-               f"Status: {status_label}\n"
-               f"PID: {pid}\n")
-
-        if consumed_lines:
-            output_text = self._format_output_text(consumed_lines)
-            char_limit = self._get_shell_char_limit()
-            if char_limit > 0:
-                try:
-                    base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
-                        self._pool, 'operation_manager') else None
-                    if base_dir:
-                        output_text = truncate_with_spillover(
-                            output_text, char_limit, instance_name=agent_name,
-                            tool_name='call_cli_agent_async', base_dir=base_dir, operation_mode='mid')
-                except Exception as e:
-                    logger.debug(f"[CliAgent] truncate_with_spillover failed in get_status for "
-                                 f"{agent_name}: {e}")
-            msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
-        else:
-            msg += '\nNo new output since last status check.'
-        return msg
-
-    # Ordered leading-token rewrites for the inherited kill_task wording. Specific phrases run
-    # before the generic ones so the dead-message body ("this shell has completed") maps to its own
-    # pair. Mirrors the call_cli_agent labelling get_status already uses; the teardown ACTION itself
-    # is cli-correct via the _kill_process_tree override — only the *wording* is cosmetic here.
-    _KILL_LABEL_REWRITE = (
-        ('No running shell found', 'No running call_cli_agent run found'),
-        ('this shell has completed', 'this run has completed'),
-        ('Shell killed', 'call_cli_agent run killed'),
-        ('Shell kill requested', 'call_cli_agent run kill requested'),
-        ('Shell already finished', 'call_cli_agent run already finished'),
-    )
-
-    # ────────────────────────────────────────────────────────────────────────
-    def kill_task(self, agent_name: str, tool_id: int):
-        """Inherited ``kill_task`` with its shell-hardcoded confirmation wording relabeled.
-
-        The teardown action is correct (the ``_kill_process_tree`` override runs); only the
-        inherited strings ("Shell killed…", "Shell already finished…", and the reaped-task
-        ``_dead_shell_message``) leak shell terminology and would read inconsistently beside
-        ``get_status``. Returned to the dispatcher and trust-wrapped there, so NOT wrapped here.
-        """
-        msg = super().kill_task(agent_name, tool_id)
-        if msg is None:
-            return msg
-        for old, new in self._KILL_LABEL_REWRITE:
-            msg = msg.replace(old, new)
-        return msg

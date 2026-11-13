@@ -1304,3 +1304,80 @@ class TestRealExecution:
             with task._lock:
                 assert task.completed is True
                 assert task.return_code == 7, f"Expected exit code 7, got {task.return_code}"
+
+
+
+# ============================================================================
+# Label-hook byte-identity (BUG_0305)
+#
+# These lock the refactor's central invariant: the extracted label hooks must
+# reproduce the pre-change shell_cmd / call_cli_agent output BYTE FOR BYTE. The
+# literals below were captured from the original (pre-refactor) code; the only
+# thing that may change is the source of the string (constant -> hook), never
+# the bytes it produces. _elapsed_for_task uses wall-clock time, so the clock is
+# frozen to make the rendered elapsed deterministic.
+# ============================================================================
+
+
+class TestLabelHookByteIdentity:
+
+    # Captured from the pre-change AsyncShellTracker output.
+    PARENT_DEAD = (
+        "No running shell found for agent 'agentX' with tool_id 99999 \u2014 TERMINAL: "
+        'this shell has completed or crashed and its record was cleaned up. Do NOT poll '
+        'again; the result is unobtainable from here (any completion message was already '
+        'queued). Continue without it.'
+    )
+    PARENT_HEADER_NORMAL = '⟨shell_cmd completed⟩ Tool ID: 7\nCompleted in 12.3 s (success).'
+    PARENT_HEADER_TIMEOUT = (
+        '⟨shell_cmd completed⟩ Tool ID: 7\nTimed out after 300s (12.3s total). '
+        'All child processes terminated.'
+    )
+    PARENT_HEADER_ERROR = '⟨shell_cmd completed⟩ Tool ID: 7\nError: boom (12.3s elapsed).'
+
+    def _frozen_task(self, monkeypatch):
+        """A completed task whose elapsed is exactly 12.345s (frozen clock)."""
+        tracker = AsyncShellTracker(pool=None)
+        task = AsyncShellTask(tool_id=7, agent_name='agentX', command='echo hi',
+                              pid=4242, completed=True, return_code=0,
+                              stdout_lines=['x'], timeout=300)
+        task.start_time = 1000.0
+        monkeypatch.setattr(time, 'time', lambda: 1012.345)
+        return tracker, task
+
+    def test_parent_label_hook_defaults_are_shell_strings(self, monkeypatch):
+        """Default label hooks must yield the historical shell_cmd bytes."""
+        tracker, task = self._frozen_task(monkeypatch)
+
+        # Dead/reaped path via kill_task on an unknown tool_id (delegates to _dead_run_message).
+        assert tracker.kill_task('agentX', 99999) == self.PARENT_DEAD
+        # Header, all three branches.
+        assert tracker._build_completion_header(7, task) == self.PARENT_HEADER_NORMAL
+        assert tracker._build_completion_header(7, task, timed_out=True) == self.PARENT_HEADER_TIMEOUT
+        assert tracker._build_completion_header(7, task, error='boom') == self.PARENT_HEADER_ERROR
+
+    # Captured from the pre-change CliAgentTracker output.
+    CLI_DEAD = (
+        "No running call_cli_agent run found for agent 'agentX' with tool_id 99999 \u2014 "
+        'TERMINAL: this run has completed or crashed and its record was cleaned up. Do NOT '
+        'poll again; the result is unobtainable from here (any completion message was already '
+        'queued). Continue without it.'
+    )
+    CLI_TIMEOUT_TAIL = 'Timed out after 300s (12.3s total, exit=124). Container terminated.'
+
+    def test_cli_hooks_set(self):
+        """CliAgentTracker overrides must produce the historical call_cli_agent bytes."""
+        from agent_cascade.async_shell_pkg.cli_agent_tracker import CliAgentTracker
+
+        assert CliAgentTracker._TOOL_NAME == 'call_cli_agent'
+        assert CliAgentTracker._RUN_NOUN == 'call_cli_agent run'
+        assert CliAgentTracker._SPILLOVER_TOOL_NAME == 'call_cli_agent_async'
+        assert CliAgentTracker._SHOW_HEARTBEAT_LINE is False
+        assert CliAgentTracker._SHOW_COMMAND_LINE is False
+
+        t = CliAgentTracker(pool=None)
+        # Suppress the shell-only git-autogc hint (BUG_0139 E2) and use the container wording.
+        assert t._timeout_hint(None) == ''
+        assert t._timeout_header_line(300, 12.345) == self.CLI_TIMEOUT_TAIL
+        # Whole-string dead-message override (no substring rewrite, BUG_0305 E5).
+        assert t._dead_run_message('agentX', 99999) == self.CLI_DEAD
