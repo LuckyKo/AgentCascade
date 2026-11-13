@@ -169,7 +169,9 @@ def test_never_broadcast_keys_now_broadcast():
 # intended behaviour (the snapshot is the client's complete settings contract); the
 # pinned values below are the values a default PoolSettings + empty llm_cfg produce.
 _GOLDEN_CORE = {
-    'idle_timeout_seconds': 900.0,
+    # 1600 = the current AGENT_IDLE_TIMEOUT default (synced from the user's live config);
+    # 900 was the previous default.
+    'idle_timeout_seconds': 1600.0,
     'system_agent_idle_timeout_seconds': 300.0,
     'max_parallel_agents': 3,
     'auto_continue': True,
