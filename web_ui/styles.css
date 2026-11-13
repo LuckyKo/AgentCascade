@@ -2061,6 +2061,26 @@ body {
   color: var(--text-primary);
 }
 
+/* CLI Agents settings: per-harness vertical block (replaced the old cramped
+   3-column "Harness / Model / Key" grid table). The action buttons inherit
+   .btn.btn-secondary for full UI consistency; these rules only add grouping
+   rhythm and keep the buttons left-aligned instead of stretching full-width. */
+.cli-agent-harness {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* `button.` prefix raises specificity above .btn so the compact sizing below
+   is not overridden by the .btn base rule's font-size/padding, regardless of
+   stylesheet order. */
+button.cli-agent-key-btn,
+button.cli-agent-oauth-placeholder {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
 .btn-danger {
   background: var(--danger-dim);
   color: var(--danger);

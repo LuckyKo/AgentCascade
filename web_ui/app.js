@@ -2484,9 +2484,19 @@ function handleServerMessage(data) {
               const startIdx = (sa.history_count || 0) - (sa.messages?.length || 0);
               if (startIdx > 0) {
                 console.error(`[WS] ${name}: delta without prefix (startIdx=${startIdx}) — protocol violation, dropping frame`);
+                // A (re)attached client has no baseline for this agent, so it can't
+                // splice the delta. Request a full snapshot now (rate-limited to 5s)
+                // so the panel resyncs in ~1 round-trip instead of waiting up to ~60s
+                // for the periodic force_full.
+                const _now = Date.now();
+                if (!_noBaselineResyncAt[name] || _now - _noBaselineResyncAt[name] > 5000) {
+                  _noBaselineResyncAt[name] = _now;
+                  _sendRequestState(name);
+                }
               } else {
                 state.subAgents[name] = sa;
                 sa._lastHistoryCount = sa.history_count || 0;
+                delete _noBaselineResyncAt[name]; // baseline established — stop tracking
               }
             }
           } else {
@@ -5199,6 +5209,13 @@ function _maybeRequestState(instanceName, agentState) {
     agentState._resyncRequestedAt = now;
   }
 }
+
+// Rate-limited resync store for the NO-BASELINE case (see the WS delta fallback
+// branch): when a (re)attached client receives a delta frame for an agent it has
+// no baseline for, we request a full snapshot so it resyncs in ~1 round-trip
+// instead of waiting up to ~60s for the periodic force_full. Keyed by instance
+// name; one request per 5s (same cadence as _maybeRequestState).
+const _noBaselineResyncAt = {};
 
 // ── Agent selector ───────────────────────────────────────────────────────────
 
