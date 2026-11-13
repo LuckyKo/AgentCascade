@@ -478,6 +478,79 @@ def _build_skill_action_table(metrics: dict) -> list:
     return rows
 
 
+def _build_skill_evolution_table(metrics: dict) -> list:
+    """BUG_0312 per-skill skill-evolution table (read-only projection of the durable ledger).
+
+    Pure helper (reads only its argument) so the ordering/exclusion rules can be
+    unit-tested directly, independent of the FastAPI route. Given ``skill_manager.
+    get_metrics()`` output it returns ``[{skill, updates, promotions, discards,
+    transitions, status}]``:
+
+    - EXCLUDES the synthetic ``'self-augmentation'`` entry.
+    - Counts default to 0 when a ledger entry predates these fields (``.get(field, 0)``),
+      so an entry with no evolution activity — or a pre-BUG_0312 on-disk record — reads
+      as all-zero and never crashes the projection.
+    - Sorted by ``transitions`` descending (most-evolved first), name ascending tiebreak.
+
+    Tolerates ``None`` / empty metrics (returns ``[]``).
+    """
+    rows: list = []
+    for name, m in (metrics or {}).items():
+        if name == 'self-augmentation':
+            continue
+        m = m or {}
+        rows.append({
+            'skill': name,
+            'updates': m.get('updates', 0) or 0,
+            'promotions': m.get('promotions', 0) or 0,
+            'discards': m.get('discards', 0) or 0,
+            'transitions': m.get('transitions', 0) or 0,
+            'status': m.get('status'),
+        })
+    # transitions desc, then name asc (negate to avoid reverse=True flipping the name key).
+    rows.sort(key=lambda r: (-r['transitions'], r['skill']))
+    return rows
+
+
+def _build_skill_evolution_aggregate(table: list, pruned_total: int = 0) -> dict:
+    """BUG_0312 global skill-evolution aggregate derived from an evolution table.
+
+    Sums the per-skill fields already projected by :func:`_build_skill_evolution_table`
+    (which excludes the synthetic ``'self-augmentation'`` entry), so the aggregate never
+    double-counts it. ``acceptance_rate = promoted / (promoted + discarded)`` is the
+    Gate-B rating-gate rate (the ticket's headline); it has a divide-by-zero guard →
+    ``None`` when no candidate has been decided yet. ``net_inactive`` is net churn
+    (skills currently persisted status=inactive); ``pruned_total`` is the durable global
+    deletion counter passed in (it lives top-level in the ledger, not per-skill).
+
+    Read-only: mutates nothing. Tolerates an empty ``table`` (returns all-zero / None).
+    """
+    promotions = sum(r['promotions'] for r in table)
+    discards = sum(r['discards'] for r in table)
+    decisions = promotions + discards
+    return {
+        'promotions': promotions,
+        'discards': discards,
+        'updates': sum(r['updates'] for r in table),
+        'net_inactive': sum(1 for r in table if r['status'] == 'inactive'),
+        'pruned_total': int(pruned_total or 0),
+        'acceptance_rate': round(promotions / decisions, 3) if decisions > 0 else None,
+    }
+
+
+def _empty_skill_evolution_slice() -> dict:
+    """Shape-stable empty ``evolution`` slice for /api/telemetry (no pool/metrics/error).
+
+    Guarantees the client always reads a well-shaped ``{aggregate, table}`` — never
+    ``undefined`` — so the panel degrades to its empty state instead of NaN-ing.
+    """
+    return {
+        'aggregate': {'promotions': 0, 'discards': 0, 'updates': 0, 'net_inactive': 0,
+                      'pruned_total': 0, 'acceptance_rate': None},
+        'table': [],
+    }
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     from agent_cascade.log import install_uvicorn_log_bridge, logger
 
@@ -2110,7 +2183,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Return session telemetry summary and per-config comparison data."""
         if not (agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry):
             return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [],
-                    'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []}}
+                    'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []},
+                    'evolution': _empty_skill_evolution_slice()}
         session = agent_pool.telemetry.get_session_summary()
         # BUG_0311 "hints" slice — read-only aggregation, no new counters, no schema
         # change. hint_stats = the hint subset of get_session_summary(); skill_table =
@@ -2126,12 +2200,24 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'total_hint_chars', 'total_memories_actioned', 'memory_action_rate',
         )}
         skill_table: list = []
+        evo_slice = _empty_skill_evolution_slice()
         try:
             sm = getattr(agent_pool, 'skill_manager', None)
             if sm is not None and hasattr(sm, 'get_metrics'):
-                skill_table = _build_skill_action_table(sm.get_metrics())
+                metrics = sm.get_metrics()
+                skill_table = _build_skill_action_table(metrics)
+                # BUG_0312 "evolution" slice — read-only projection of the durable per-skill
+                # Gate-B/churn ledger (no new counters written here, no schema change).
+                # pruned_total is a top-level ledger field read off the manager (best-effort).
+                evo_table = _build_skill_evolution_table(metrics)
+                evo_slice = {
+                    'aggregate': _build_skill_evolution_aggregate(
+                        evo_table, sm.get_pruned_total()),
+                    'table': evo_table,
+                }
         except Exception:  # noqa: BLE001 — observability must never break the API
             skill_table = []
+            evo_slice = _empty_skill_evolution_slice()
         return {
             'session': session,
             'configs': agent_pool.telemetry.get_config_comparison(),
@@ -2139,6 +2225,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'skills': agent_pool.telemetry.get_skill_usage_summary(),
             'recent_events': agent_pool.telemetry.get_recent_events(50),
             'hints': {'hint_stats': hint_stats, 'skill_table': skill_table},
+            'evolution': evo_slice,
         }
 
     @app.get('/api/telemetry/export')

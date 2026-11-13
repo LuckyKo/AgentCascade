@@ -633,6 +633,31 @@ class TestSessionsInstanceAwareLogDir:
         skills_in_table = {r['skill'] for r in hints['skill_table']}
         assert 'self-augmentation' not in skills_in_table
 
+    def test_get_telemetry_includes_evolution(self, client):
+        """GET /api/telemetry carries the BUG_0312 'evolution' slice in BOTH branches.
+
+        Same graceful style as the hints test: assert the STRUCTURE always holds, then
+        assert per-row keys only when the table was actually produced.
+        """
+        resp = client.get('/api/telemetry')
+        assert resp.status_code == 200
+        data = resp.json()
+        assert 'evolution' in data, "missing 'evolution' key on /api/telemetry"
+        evo = data['evolution']
+        assert 'aggregate' in evo and 'table' in evo, \
+            f"evolution must carry aggregate + table, got {list(evo)}"
+        assert isinstance(evo['table'], list)
+        agg_keys = {'promotions', 'discards', 'updates', 'net_inactive',
+                    'pruned_total', 'acceptance_rate'}
+        assert set(agg_keys).issubset(set(evo['aggregate'])), \
+            f"evolution.aggregate missing keys: {agg_keys - set(evo['aggregate'])}"
+        # synthetic self-augmentation is excluded from the evolution table too
+        evo_skills = {r['skill'] for r in evo['table']}
+        assert 'self-augmentation' not in evo_skills
+        # per-row shape is fixed when the table is populated
+        for row in evo['table']:
+            assert {'skill', 'updates', 'promotions', 'discards',
+                    'transitions', 'status'} <= set(row)
 
     def test_get_telemetry_export_returns_jsonl(self, client_no_exceptions):
         """GET /api/telemetry/export returns telemetry log (may be empty)."""

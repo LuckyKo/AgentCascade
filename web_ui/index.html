@@ -1133,6 +1133,35 @@
                   </p>
                 </div>
               </div>
+
+              <div class="settings-section">
+                <h3 class="settings-section-title">Skill Evolution</h3>
+                <div class="settings-section-body">
+                  <div class="telemetry-grid">
+                    <div class="telemetry-card">
+                      <div class="telemetry-label" title="Gate B rating gate: promoted / (promoted + discarded). — when no candidate decided yet">Acceptance Rate</div>
+                      <div class="telemetry-value" id="telem-evo-accept">—</div>
+                    </div>
+                    <div class="telemetry-card">
+                      <div class="telemetry-label" title="Snapshot: skills currently persisted as status=inactive (not a time-windowed churn rate)">Inactive</div>
+                      <div class="telemetry-value" id="telem-evo-churn">0</div>
+                    </div>
+                  </div>
+                  <div id="telemetry-evo-table" class="telemetry-table-container">
+                    <table class="telemetry-table">
+                      <thead>
+                        <tr><th>Skill</th><th>Updates</th><th>Promotions</th><th>Discards</th><th>Transitions</th><th>Status</th></tr>
+                      </thead>
+                      <tbody id="telem-evo-tbody">
+                        <tr><td colspan="6" style="text-align:center; color:var(--text-secondary)">No evolution data yet</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style="margin-top: 10px; font-size: 0.85em; color: var(--text-secondary);">
+                    Acceptance = promoted / (promoted+discarded) by the rating gate. Inactive = skills currently persisted as status=inactive (a snapshot, not time-windowed churn); Transitions = lifetime promote/discard/enable/disable. Pruned (deleted) skills are counted globally only. Soft-registry-eviction does not change this count. Excludes synthetic self-augmentation.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>

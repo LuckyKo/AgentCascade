@@ -6925,6 +6925,43 @@ function updateTelemetryHintTable(rows) {
   }).join('');
 }
 
+function updateTelemetryEvoTable(rows) {
+  const tbody = document.getElementById('telem-evo-tbody');
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-secondary)">No evolution data yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+    // status is 'active' | 'inactive' | null (never churned). Degrade to '—', never 'null'.
+    const status = r.status == null ? '—' : escapeHtml(r.status);
+    return `<tr>
+      <td title="${escapeHtml(r.skill)}">${escapeHtml(r.skill)}</td>
+      <td>${formatNumber(r.updates || 0)}</td>
+      <td>${formatNumber(r.promotions || 0)}</td>
+      <td>${formatNumber(r.discards || 0)}</td>
+      <td>${formatNumber(r.transitions || 0)}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+}
+
+function updateTelemetryEvoCards(agg) {
+  // Local setter mirrors updateTelemetryPanel's `set` idiom. The evolution panel is fed ONLY
+  // by the full /api/telemetry fetch (the WS session summary carries no evolution aggregate),
+  // so these cards update at the same cadence as the table — never blanked by a WS frame.
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+  // acceptance_rate is null when no candidate has been decided (0/0) → render '—', never NaN.
+  const acc = (agg != null) ? agg.acceptance_rate : null;
+  set('telem-evo-accept', (acc === null || acc === undefined) ? '—' : (acc * 100).toFixed(1) + '%');
+  set('telem-evo-churn', formatNumber(agg && agg.net_inactive != null ? agg.net_inactive : 0));
+}
+
 // Fetch full telemetry from API (for config comparison data not in WebSocket)
 async function fetchTelemetry() {
   try {
@@ -6935,6 +6972,8 @@ async function fetchTelemetry() {
     if (data.agent_classes) updateTelemetryAgentClassTable(data.agent_classes);
     if (data.skills) updateTelemetrySkillTable(data.skills);
     if (data.hints?.skill_table) updateTelemetryHintTable(data.hints.skill_table);
+    if (data.evolution?.table) updateTelemetryEvoTable(data.evolution.table);
+    if (data.evolution?.aggregate) updateTelemetryEvoCards(data.evolution.aggregate);
   } catch (err) {
     console.warn('Failed to fetch telemetry:', err);
   }

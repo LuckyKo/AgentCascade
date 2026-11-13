@@ -139,7 +139,12 @@ def _default_metrics_entry(status: str = 'active') -> dict:
     ``_increment_load_count``) build a bare dict by hand and bypass this helper, so every
     reader of these fields must use ``.get(field, default)`` — never assume this shape."""
     return {'total_loads': 0, 'by_version': {}, 'status': status,
-            'last_activity_turn': None, 'hints': 0}
+            'last_activity_turn': None, 'hints': 0,
+            # BUG_0312 skill-evolution ledger (additive; no schema bump — readers use
+            # .get(field, default)). promotions/discards = Gate B rating-gate outcomes
+            # (evaluate_candidates), updates = candidate registered (SKILL.md rewrite /
+            # version bump), transitions = lifetime promote/discard/disable/enable.
+            'transitions': 0, 'promotions': 0, 'discards': 0, 'updates': 0}
 
 
 def _priority_for_root(root: Path) -> int:
@@ -267,6 +272,11 @@ class SkillManager:
         # in the metrics store; bumped once per user turn via bump_activity_turn() and read
         # back in _load_metrics(). Survives restart + session boundaries.
         self._global_activity_turns: int = 0
+        # BUG_0312 durable global deletion counter. prune_stale_metrics removes metrics
+        # entries outright, so a pruned skill leaves no per-skill record; this single
+        # top-level ledger field (same clock pattern as global_activity_turns) is the only
+        # way to count true deletions across restarts.
+        self._pruned_total: int = 0
         self._load_metrics()  # load on startup
 
     # ── Metrics Persistence (Batched Writes) ────────────────────────────────
@@ -291,6 +301,8 @@ class SkillManager:
             # Missing/absent (old files) → 0; the age helper treats 0 as "clock never advanced"
             # and degrades to wall-clock / PROTECTED rather than mass-evicting.
             self._global_activity_turns = int(data.get('global_activity_turns', 0) or 0)
+            # BUG_0312 durable global deletion counter. Missing/absent (old files) → 0.
+            self._pruned_total = int(data.get('pruned_total', 0) or 0)
             # Persisted status=inactive (schema 1.3) → exclude from discovery this startup.
             # (Env-var SKILLS_DISABLED already seeded _disabled_names in __init__; both are lowercase.)
             for _name, _m in self._metrics.items():
@@ -330,7 +342,13 @@ class SkillManager:
                 # last_activity_turn rides along as an optional key. Snapshot under the lock.
                 data = {'schema_version': '1.3',
                         'skills': _copy.deepcopy(self._metrics),
-                        'global_activity_turns': self._global_activity_turns}
+                        'global_activity_turns': self._global_activity_turns,
+                        # BUG_0312 global pruned-deletion counter (top-level field, no schema
+                        # bump — read via .get(..., 0)). Must be written explicitly here:
+                        # _flush serializes only this fixed set of top-level keys, so a new
+                        # top-level counter that is not added to this dict silently does not
+                        # persist. Per-skill evolution counters ride inside self._metrics.
+                        'pruned_total': self._pruned_total}
 
             # Open temp file for writing with exclusive lock (POSIX only)
             fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
@@ -436,6 +454,10 @@ class SkillManager:
                 for key in stale_keys:
                     del self._metrics[key]
                     logger.info("[SKILLS] Pruned stale metrics for skill '%s'", key)
+                # BUG_0312: a pruned skill leaves no per-skill record, so record the deletion
+                # count in the durable global counter (under _metrics_lock, same leaf).
+                if stale_keys:
+                    self._pruned_total += len(stale_keys)
 
         # Step 4: flush only if something was removed.
         if stale_keys:
@@ -620,6 +642,8 @@ class SkillManager:
                     entry = _default_metrics_entry(new_status)
                     self._metrics[name] = entry
                 entry['status'] = new_status
+                # BUG_0312 churn: a disable/enable is a lifecycle transition.
+                entry['transitions'] = entry.get('transitions', 0) + 1
 
         # Persist + invalidate OUTSIDE the write lock (flush takes _metrics_lock itself).
         self._flush_metrics_to_disk()
@@ -1709,6 +1733,17 @@ class SkillManager:
                 return self._metrics.get(skill_name, {'total_loads': 0, 'by_version': {}})
             return dict(self._metrics)
 
+    def get_pruned_total(self) -> int:
+        """BUG_0312 durable global skill-deletion counter (top-level ledger field).
+
+        Public read accessor so the API layer does not reach into the private
+        ``_pruned_total`` directly. Read under ``_metrics_lock`` — the lock that
+        guards the counter's only writer, ``prune_stale_metrics`` — for a
+        consistent snapshot.
+        """
+        with self._metrics_lock:
+            return self._pruned_total
+
     def get_rating_info(self, skill_name: str) -> tuple:
         """Return (average or None, count) for a skill's ratings under one lock acquisition."""
         with self._metrics_lock:
@@ -2289,6 +2324,11 @@ class SkillManager:
                         'latest': agg.get('latest')
                     }
                 entry['ratings_by_version'] = by_version_ratings
+            # BUG_0312: an upgrade candidate = one SKILL.md rewrite / version bump. Counted
+            # once per (re-)seated candidate. entry is guaranteed non-None (created above),
+            # and may be a bare hand-built dict (bypasses _default_metrics_entry), so read
+            # with .get(field, 0). _metrics_lock is a leaf here (caller holds _write_lock).
+            entry['updates'] = entry.get('updates', 0) + 1
 
         new_version = parsed.get('version', '1.0.0')
         if new_version == prod_version:
@@ -2462,6 +2502,9 @@ class SkillManager:
                         'latest': winner.get('latest'),
                         'last_version': new_version
                     }
+                # BUG_0312 Gate B ACCEPT: candidate promoted over the incumbent.
+                entry['promotions'] = entry.get('promotions', 0) + 1
+                entry['transitions'] = entry.get('transitions', 0) + 1
 
         avg_cand, cand_n = self._version_rating_avg(name, new_version)
         avg_prod, prod_n = self._version_rating_avg(name, prod_version)
@@ -2514,6 +2557,9 @@ class SkillManager:
                         'last_version': prod_version
                     }
                 # else: legacy fallback — keep the existing aggregate as-is
+                # BUG_0312 Gate B REJECT: candidate discarded (rating-gate loss or orphan).
+                entry['discards'] = entry.get('discards', 0) + 1
+                entry['transitions'] = entry.get('transitions', 0) + 1
 
         logger.info("[SKILLS] Candidate '%s' discarded (incumbent v%s restored)", name, prod_version)
 
