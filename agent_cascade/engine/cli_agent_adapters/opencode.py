@@ -49,16 +49,16 @@ class OpencodeAdapter:
 
     def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
                          model: Optional[str] = None) -> list[str]:
-        """Build the one-shot argv: ``opencode run --standalone [--auto] [--model M] [--] <task>``.
+        """Build the one-shot argv: ``opencode run [--auto] [--model M] [--] <task>``.
 
-        ``--standalone`` forces a fresh private per-invocation server that reads the injected env
-        at startup; a shared background opencode server caches env once and would ignore the
-        per-call auth key, so it must be bypassed. ``workspace`` is unused here — set by the
-        runner's ``docker run -w``. The task is a single positional token guarded with ``--`` via
-        the shared ``append_task_guarded``. When ``model`` is set it is appended as
-        ``--model <model>`` (no model → no flag).
+        ``opencode run`` is inherently a one-shot: without ``--attach`` it starts its own ephemeral
+        local server (random port) that reads the injected env at startup, then exits — so no
+        standalone flag is needed (this opencode version has no ``--standalone``). ``workspace`` is
+        unused here — set by the runner's ``docker run -w``. The task is a single positional token
+        guarded with ``--`` via the shared ``append_task_guarded``. When ``model`` is set it is
+        appended as ``--model <model>`` (no model → no flag).
         """
-        cmd = [self.binary, 'run', '--standalone', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
+        cmd = [self.binary, 'run', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
         if model and self.model_flag:
             cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
