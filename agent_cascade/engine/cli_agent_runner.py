@@ -251,14 +251,41 @@ def _persist_log(*, caller_name: str, harness: str, exit_code: int, timed_out: b
         return '<persist-failed>'
 
 
+# Mid-point truncation cap for the in-band result message: a CLI's useful content sits at BOTH
+# ends (task setup + final result); a long middle of progress noise is dropped with a marker
+# that names how much was omitted and where the full output lives. The full stdout/stderr is
+# ALWAYS persisted to log_path (the JSONL record is untruncated), so this only trims the
+# in-band message the agent sees, never the record.
+_CLI_RESULT_MAX_CHARS = 12000
+
+
+def _truncate_midpoint(text: str, max_chars: int = _CLI_RESULT_MAX_CHARS,
+                      log_path: str = '') -> str:
+    """Keep the head + tail of ``text`` and drop the middle when it exceeds ``max_chars``.
+
+    Returns ``text`` unchanged when it fits. The marker names how many chars were dropped and
+    points at the full-output log so the agent can retrieve the middle via read_logs if needed.
+    """
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    omitted = len(text) - 2 * half
+    where = f' — full output: {log_path}' if log_path else ''
+    return text[:half] + f"\n[… {omitted} chars omitted from the middle{where} …]\n" + text[-half:]
+
+
 def format_cli_result_message(harness: str, result: CliAgentResult) -> str:
     """Render a CliAgentResult into the handler's user-facing result string. Shared by the
     synchronous handler and the async early-completion path so both present an identical shape
-    (the universal _UNTRUSTED_TOOLS wrap site still wraps the returned string)."""
+    (the universal _UNTRUSTED_TOOLS wrap site still wraps the returned string). Large
+    stdout/stderr are mid-point truncated (head + tail kept, middle dropped) so a 150KB run does
+    not flood the in-band message; the full output stays in result.log_path."""
     header = (f"call_cli_agent harness={harness} "
               f"exit={result.exit_code} posture={result.requested_posture} "
               f"timed_out={result.timed_out} full_output={result.log_path}")
-    return f"{header}\n\n=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}"
+    stdout = _truncate_midpoint(result.stdout, log_path=result.log_path)
+    stderr = _truncate_midpoint(result.stderr, log_path=result.log_path)
+    return f"{header}\n\n=== STDOUT ===\n{stdout}\n\n=== STDERR ===\n{stderr}"
 
 
 def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,

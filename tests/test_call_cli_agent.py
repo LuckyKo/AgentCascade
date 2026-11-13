@@ -193,6 +193,25 @@ class TestResultShape:
             pool.get_instance('Maine'))
         assert 'timed_out=True' in out
 
+    def test_large_output_is_midpoint_truncated(self):
+        # A 30000-char stream must NOT be returned verbatim; head + tail are kept with an
+        # omission marker that points at the full-output log.
+        result = CliAgentResult(stdout='X' * 30000, stderr='S' * 30000, exit_code=0,
+                                timed_out=False, log_path='/logs/x.jsonl',
+                                requested_posture='acceptEdits')
+        msg = cli_agent_runner.format_cli_result_message('claude_code', result)
+        assert 'X' * 30000 not in msg  # full stdout not returned verbatim
+        assert 'chars omitted from the middle' in msg
+        assert '/logs/x.jsonl' in msg  # the marker names where the full output lives
+
+    def test_small_output_is_unchanged(self):
+        result = CliAgentResult(stdout='short output', stderr='ok', exit_code=0,
+                                timed_out=False, log_path='/logs/x.jsonl',
+                                requested_posture='acceptEdits')
+        msg = cli_agent_runner.format_cli_result_message('claude_code', result)
+        assert '=== STDOUT ===\nshort output' in msg
+        assert 'chars omitted' not in msg
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3b. Holder-DMS bounded-tool marker (t292 defect class)

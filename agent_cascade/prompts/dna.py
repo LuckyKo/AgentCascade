@@ -895,7 +895,7 @@ TOOL_METADATA = {
                 'minimum':
                     1,
                 'description':
-                    'Hard wall-clock cap in seconds; the container + its whole process tree is killed if exceeded. Defaults to pool settings (cli_agent_timeout).'
+                    'Hard wall-clock cap in seconds; the container + its whole process tree is killed if exceeded. Defaults to 30 minutes (pool settings cli_agent_timeout); pass a larger value to extend for long-running tasks.'
             },
             'status': {
                 'type':
