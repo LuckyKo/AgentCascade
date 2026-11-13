@@ -517,7 +517,11 @@ body {
   color: var(--text-primary);
 }
 
-/* Pulsing dot for active sub-agents */
+/* Dot for active sub-agents.
+   Static on purpose: an infinite animation keeps the compositor producing frames
+   while the tab is focused, and that GPU work competes with a co-resident model
+   (measurably drops tokens/s). A steady dot still conveys "active". Do not add an
+   animation here. */
 .sub-tab-pulse {
   display: inline-block;
   width: 8px;
@@ -526,52 +530,36 @@ body {
   background: var(--accent);    /* Default blue for RUNNING */
   opacity: 1;
   transition: opacity 0.3s ease-in-out, background 0.3s ease-in-out;
-  animation: subtab-pulse 1.5s ease-in-out infinite;
 }
 
-/* Non-blinking variant for active-but-not-streaming agents */
+/* Non-blinking variant for active-but-not-streaming agents. Kept as a distinct
+   class because the JS selects it; it is now visually identical on purpose. */
 .sub-tab-pulse.static {
   animation: none;
 }
 
-@keyframes subtab-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  50% {
-    opacity: 0.5;
-    transform: scale(0.8);
-  }
-}
-
-/* State-based colors for the pulse indicator */
+/* State-based colors for the indicator */
 .main-tab.state-running .sub-tab-pulse {
   background: #58a6ff;         /* Blue for RUNNING - currently processing/calling LLM */
-  box-shadow: none;            /* no per-frame shadow re-raster on the scaled animated dot; the active-tab glow lives on the static icon, never an ancestor */
 }
 
 .main-tab.state-sleeping .sub-tab-pulse {
   background: #d29922;         /* Orange for SLEEPING - waiting for async tools to complete */
-  box-shadow: none;            /* same — keeps the pulse a cheap composited opacity+scale, no re-raster */
 }
 
 .main-tab.state-idle .sub-tab-pulse,
 .main-tab.state-completing .sub-tab-pulse,
 .main-tab.state-terminated .sub-tab-pulse {
   background: #8b949e;         /* Gray for IDLE/COMPLETING/TERMINATED - not actively doing anything */
-  box-shadow: none;
 }
 
 .sub-tab-pulse.dimmed {
   opacity: 0.2;
 }
 
-/* Active-tab glow lives on the STATIC icon glyph, never on an ancestor of the
-   per-frame-animated .sub-tab-pulse dot: a filter on an ancestor is re-rasterized
-   every frame the dot scales, while on the static emoji it is computed once. */
+/* Active-tab glow lives on the STATIC icon glyph, never on an ancestor of the dot:
+   a filter on an ancestor of an animated child re-rasters every frame. The dot no
+   longer animates, but keeping the glow here also keeps the invariant simple. */
 .main-tab-bar .main-tab.agent-active .main-tab-icon {
   filter: drop-shadow(0 0 6px var(--accent));
 }
@@ -1751,9 +1739,10 @@ body {
 .approval-bar {
   padding: 16px 24px;
   border-bottom: 1px solid var(--approval-border);
-  background: rgba(26, 46, 26, 0.9);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  /* Opaque on purpose: this bar spans the full width and persists while approvals
+     are pending, so a backdrop blur would re-raster whenever the page composites a
+     frame (for example while tokens stream). At 90% opacity it added little. */
+  background: #1a2e1a;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2531,7 +2520,10 @@ button.cli-agent-oauth-placeholder {
   height: 6px;                     /* Thinner fill within the bar for visual clarity */
   background: var(--accent);
   width: 0%;
-  transition: width 0.3s ease, background-color 0.3s ease;
+  /* No width transition: this fill updates ~1x/s while tokens stream, and a 0.3s
+     width animation each time keeps the compositor busy for most of the run. The
+     bar snaps to the new value instead (background-color still fades on warning). */
+  transition: background-color 0.3s ease;
   position: absolute;
   left: 8px;                       /* Align with padding */
   top: 50%;                        /* Center vertically within the bar */
@@ -2969,8 +2961,14 @@ button.cli-agent-oauth-placeholder {
   padding: 4px 0;
 }
 
-/* ─── GPU Savings: Pause infinite animations when NOT generating ──────────── */
-body:not(.is-generating) .sub-tab-pulse,
-body:not(.is-generating) .activity-queued {
-  animation-play-state: paused !important;
+/* The UI intentionally has no infinite animations: they keep the compositor
+   producing frames while the tab is focused, competing with a co-resident model.
+   This also honours the OS reduced-motion setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

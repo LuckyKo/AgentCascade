@@ -1,19 +1,18 @@
-"""Regression pin: no filter/box-shadow on any ancestor of the pulsing tab dot.
+"""Regression pin: the WebUI has no per-frame CSS animation or backdrop blur.
 
-The per-frame animated `.sub-tab-pulse` dot is a direct child of
-`.tab-icon-container` (see web_ui/app.js: the tab icon is built as
-`<span class="sub-tab-pulse"> ... <span class="main-tab-icon">...`). A CSS
-`filter` (e.g. `drop-shadow`) or a non-`none` `box-shadow` placed on the dot
-itself or on ANY ancestor of it is re-rasterized on every animation frame the
-dot scales/opacity-animates. That per-frame filter re-raster is the GPU cost
-this fix eliminated by relocating the active-tab glow onto the static
-`.main-tab-icon` sibling.
+An infinite CSS animation keeps the browser producing composited frames for as
+long as the tab is focused. When the browser and the inference engine share the
+display GPU (Windows/WDDM), that work steals time from token generation (~9%
+measured on a small background window; more for a full viewed window).
 
-This test parses web_ui/styles.css and asserts the invariant holds. It targets
-the SPECIFIC rules that previously carried the filter/shadow (the direct parent
-and the dot itself) rather than a blanket "no filter anywhere" check, so it is a
-true pin on the regression vector and does not forbid unrelated, non-ancestor
-shadows elsewhere in the sheet.
+A `filter` or non-`none` `box-shadow` on the animated element or any ancestor
+re-rasterizes every frame, which is why the indicator was made static and its
+glow moved to a static sibling. This test parses web_ui/styles.css and asserts:
+
+  - no `animation: ... infinite` declaration anywhere,
+  - `.sub-tab-pulse` does not reference an animation,
+  - the persistent `.approval-bar` carries no `backdrop-filter`,
+  - the dot and its ancestor carry no filter / non-none box-shadow.
 """
 
 import re
@@ -23,8 +22,8 @@ import pytest
 
 CSS_PATH = Path(__file__).parent.parent / 'web_ui' / 'styles.css'
 
-# A filter declaration, but not `backdrop-filter` (which legitimately sits on
-# non-animated elements such as the approval bar).
+# A filter declaration, but not `backdrop-filter` (which may legitimately sit on a
+# transient element such as a modal overlay).
 _FILTER_RE = re.compile(r'(?<![A-Za-z-])filter\s*:')
 # box-shadow declaration, capturing its value so `box-shadow: none` is allowed.
 _SHADOW_RE = re.compile(r'box-shadow\s*:\s*([^;{}]*)')
@@ -74,11 +73,11 @@ def blocks() -> list[tuple[str, str]]:
     return _blocks(_strip_comments(CSS_PATH.read_text(encoding='utf-8')))
 
 
-class TestAnimatedDotHasNoFilteredAncestor:
+class TestIndicatorHasNoFilteredAncestor:
 
     def test_tab_icon_container_carries_no_filter_or_shadow(self, blocks):
-        # `.tab-icon-container` is the dot's DIRECT PARENT: the original glow
-        # lived here (`filter: drop-shadow(...)`) and was the regression source.
+        # `.tab-icon-container` is the dot's DIRECT PARENT. A filter or shadow here
+        # would re-raster every frame if a dot animation is ever reintroduced.
         offenders = []
         for sel, body in blocks:
             if '.tab-icon-container' in sel:
@@ -86,38 +85,39 @@ class TestAnimatedDotHasNoFilteredAncestor:
         assert not offenders, f'.tab-icon-container (ancestor of .sub-tab-pulse) must not carry: {offenders}'
 
     def test_subtab_pulse_dot_carries_no_filter_or_shadow(self, blocks):
-        # The dot's own state rules must keep `box-shadow: none` (allowed) and
-        # never add a `filter`.
+        # Keep the dot free of filter/shadow; the active-tab glow lives on the
+        # static `.main-tab-icon` sibling instead.
         offenders = []
         for sel, body in blocks:
             if '.sub-tab-pulse' in sel and not sel.startswith('@keyframes'):
                 offenders.extend((sel, p) for p in _bad_properties(body))
         assert not offenders, f'.sub-tab-pulse rules must not carry: {offenders}'
 
-    def test_pulse_keyframes_have_no_filter_or_shadow(self, blocks):
-        # The animated keyframe itself must animate opacity/transform only.
-        offenders = []
-        for sel, body in blocks:
-            if sel.replace('-', ' ').split()[:1] == ['@keyframes'] and 'subtab-pulse' in sel:
-                offenders.extend((sel, p) for p in _bad_properties(body))
-        assert offenders == [], f'@keyframes subtab-pulse must not carry filter/box-shadow: {offenders}'
 
+class TestNoContinuousAnimation:
 
-class TestPulseIndicatorStillPresent:
+    def test_no_infinite_animation_anywhere(self, blocks):
+        # An infinite animation keeps the compositor producing frames while the tab
+        # is focused; that is the steady GPU cost. Pausing it while idle is not
+        # enough: it must not run *during generation*.
+        offenders = [
+            sel for sel, body in blocks
+            if re.search(r'animation\s*:[^;{}]*\binfinite\b', body)
+        ]
+        assert not offenders, f'infinite CSS animation(s) reintroduced: {offenders}'
 
-    def _keyframes_body(self, blocks):
-        for sel, body in blocks:
-            if sel.split()[:1] == ['@keyframes'] and 'subtab-pulse' in sel:
-                return body
-        return None
-
-    def test_pulse_keyframes_still_defined(self, blocks):
-        # Pin: the glow fix must not have deleted the animation.
-        body = self._keyframes_body(blocks)
-        assert body is not None, '@keyframes subtab-pulse was removed'
-        assert re.search(r'opacity\s*:', body), 'subtab-pulse keyframes must still animate opacity'
-
-    def test_dot_still_references_the_pulse_animation(self, blocks):
+    def test_pulse_dot_is_static(self, blocks):
         rule = next((b for sel, b in blocks if sel == '.sub-tab-pulse'), None)
         assert rule is not None, '.sub-tab-pulse base rule missing'
-        assert 'subtab-pulse' in rule, 'the dot must still reference the subtab-pulse animation'
+        assert re.search(r'animation\s*:', rule) is None, \
+            '.sub-tab-pulse must stay static (no animation)'
+
+    def test_approval_bar_has_no_backdrop_filter(self, blocks):
+        # This bar spans the full width and persists while approvals are pending; a
+        # backdrop blur behind it re-rasters whenever the page composites a frame,
+        # so it is a per-frame GPU cost during streaming.
+        rules = [b for sel, b in blocks if sel == '.approval-bar']
+        assert rules, '.approval-bar rule missing'
+        for body in rules:
+            assert 'backdrop-filter' not in body, \
+                '.approval-bar must not carry backdrop-filter'
