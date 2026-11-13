@@ -371,6 +371,16 @@ class TestAdapterArgv:
         # so no standalone flag is emitted.
         assert OpencodeAdapter.auth_env_var == 'OPENCODE_API_KEY'
 
+    def test_opencode_model_autoprefix(self):
+        # A bare model ID is auto-prefixed with 'opencode/' (opencode requires provider/model);
+        # an ID that already carries a provider is passed through untouched.
+        a = OpencodeAdapter().build_launch_cmd(task='x', workspace='/ws', posture='acceptEdits',
+                                              model='deepseek-v4.1-flash-free')
+        assert '--model' in a and 'opencode/deepseek-v4.1-flash-free' in a
+        b = OpencodeAdapter().build_launch_cmd(task='x', workspace='/ws', posture='acceptEdits',
+                                              model='anthropic/claude-sonnet-4')
+        assert 'anthropic/claude-sonnet-4' in b and 'opencode/anthropic/' not in ' '.join(b)
+
     def test_antigravity_argv(self):
         cmd = AntigravityAdapter().build_launch_cmd(task='add tests', workspace='/ws', posture='acceptEdits')
         assert cmd == ['agy', '-p', '--mode', 'accept-edits', '--output-format', 'text',

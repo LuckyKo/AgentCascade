@@ -32,6 +32,10 @@ class OpencodeAdapter:
     # need a per-provider env-var override (a cli_opencode_key_env follow-up).
     auth_env_var = 'OPENCODE_API_KEY'
     model_flag = '--model'  # opencode run -m/--model provider/model
+    # opencode -m requires ``provider/model``. Bare IDs are opencode-hosted (Zen/Go) models, so we
+    # auto-prefix them with ``opencode/``; an ID that already carries a provider (contains ``/``)
+    # is passed through untouched (e.g. ``anthropic/claude-...`` via opencode).
+    model_provider_prefix = 'opencode'
 
     # Posture → argv tokens. opencode has no documented destructive bypass flag; 'bypass'
     # intentionally maps to the same default-safe ``--auto`` (we never emit a YOLO token).
@@ -56,10 +60,14 @@ class OpencodeAdapter:
         standalone flag is needed (this opencode version has no ``--standalone``). ``workspace`` is
         unused here — set by the runner's ``docker run -w``. The task is a single positional token
         guarded with ``--`` via the shared ``append_task_guarded``. When ``model`` is set it is
-        appended as ``--model <model>`` (no model → no flag).
+        appended as ``--model <model>``; a bare model ID is auto-prefixed with ``opencode/``
+        (opencode requires ``provider/model``), while an ID that already carries a provider is
+        passed through (no model → no flag).
         """
         cmd = [self.binary, 'run', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
         if model and self.model_flag:
+            if self.model_provider_prefix and '/' not in model:
+                model = f'{self.model_provider_prefix}/{model}'
             cmd += [self.model_flag, model]
         append_task_guarded(cmd, task)
         return cmd
