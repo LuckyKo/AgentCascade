@@ -233,6 +233,15 @@ class TestCompression:
         assert events[0]['tokens_saved'] == 400
         assert events[0]['fraction'] == 0.4
 
+    def test_compaction_validation_losses_default_zero_and_surfaced(self, collector):
+        # Counter must be present (surfaced) in the session summary even before any loss event.
+        assert collector.get_session_summary()['total_compaction_validation_losses'] == 0
+
+    def test_increments_total_compaction_validation_losses(self, collector):
+        for _ in range(2):
+            collector.record_compaction_validation_loss('inst', 3, 1)
+        assert collector.get_session_summary()['total_compaction_validation_losses'] == 2
+
     def test_compression_tracked_per_turn(self, collector):
         """A compression during an active turn is reflected in the config stats."""
         fp = 'fp_compress'

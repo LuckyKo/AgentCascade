@@ -161,6 +161,28 @@ CONSOLIDATION_PROMPT = (
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
     'Present the consolidated summary below.{end_instruction}')
 
+# Post-consolidation data-integrity audit (CompressionReviewer). The reviewer is a diff-check:
+# it compares the summaries that went INTO a consolidation hop against the one that came OUT, and
+# returns a single scalar verdict. The DROP-OK wording mirrors CONSOLIDATION_PROMPT's own contract
+# so the reviewer does not flag content the consolidation is explicitly allowed to discard.
+COMPACTION_REVIEWER_PROMPT = (
+    'You are auditing a memory-consolidation step for DATA LOSS.\n\n'
+    'The input summaries below were merged into a single consolidated summary. Determine whether the\n'
+    'consolidated summary dropped, contradicted, or invented anything that was genuinely important in\n'
+    'the inputs and should have survived the hop.\n\n'
+    '--- INCOMING SUMMARIES (inputs to the consolidation) ---\n{incoming_summaries}\n--- END INCOMING SUMMARIES ---\n\n'
+    '--- OUTGOING SUMMARY (the consolidated output to audit) ---\n{outgoing_summary}\n--- END OUTGOING SUMMARY ---\n\n'
+    'Be conservative. A consolidation is EXPECTED to be shorter and one level more abstract. Redundant\n'
+    'details, minor steps, and intermediate reasoning are ALLOWED to be dropped — do NOT flag them, and\n'
+    'do NOT flag faithful paraphrase or abstraction of the same meaning.\n\n'
+    'Flag only real loss of genuinely important data: open/pending tasks and task status, the carried\n'
+    'supervisor instruction, key decisions and architectural choices, bug-ticket numbers / file paths /\n'
+    'file:line references / instance names, explicit user instructions and constraints, temporal anchors\n'
+    '(dates/timestamps) that anchor later work, and task outcomes a later turn would need.\n\n'
+    'End your output with exactly ONE verdict line and nothing after it except the required end marker:\n'
+    '`[PASS]` if nothing important was lost, or `[LOSS: itemA, itemB, ...]` naming each lost item.'
+    '{end_instruction}')
+
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
     'A sub-agent has requested to execute a tool. Please verify if this operation is safe.\n\n'

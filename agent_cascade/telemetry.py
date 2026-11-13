@@ -111,6 +111,7 @@ class TelemetryCollector:
             'total_auto_continues': 0,
             'total_retries': 0,
             'total_compressions': 0,
+            'total_compaction_validation_losses': 0,  # post-L2 compaction reviewer flagged loss on exhaustion
             'write_failures': 0,  # Track write failures for diagnostics
             'tool_calls_by_name': defaultdict(int),
             'tool_failures_by_name': defaultdict(int),
@@ -1367,6 +1368,32 @@ class TelemetryCollector:
 
         self._write_event(event)
 
+    def record_compaction_validation_loss(
+        self,
+        instance_name: str,
+        attempts: int,
+        missing_items_count: int,
+    ):
+        """Record that a post-consolidation review exhausted its retries with data loss.
+
+        Advisory signal only: the compaction still succeeded with the best-so-far summary spliced.
+        This event lets operators see how often the reviewer would have flagged a loss but could
+        not fix it before the retry bound. No cache-baseline side effects (unlike record_compression).
+        """
+        with _telemetry_lock:
+            event = {
+                'type': 'compaction_validation_loss',
+                'instance': instance_name,
+                'attempts': attempts,
+                'missing_items_count': missing_items_count,
+                'timestamp': _now_iso(),
+            }
+            self._session_stats['total_compaction_validation_losses'] = \
+                self._session_stats.get('total_compaction_validation_losses', 0) + 1
+
+        self._write_event(event)
+
+
     # ── Aggregation & Reporting (thread-safe, return defensive copies) ─────
 
     def get_session_summary(self) -> Dict:
@@ -1438,6 +1465,7 @@ class TelemetryCollector:
             'total_auto_continues': stats.get('total_auto_continues', 0),
             'total_retries': stats['total_retries'],
             'total_compressions': stats['total_compressions'],
+            'total_compaction_validation_losses': stats.get('total_compaction_validation_losses', 0),
             'write_failures': stats.get('write_failures', 0),
             'agent_instance_calls': stats['agent_instance_calls'],
             'llm_calls_by_model': dict(stats['llm_calls_by_model']),

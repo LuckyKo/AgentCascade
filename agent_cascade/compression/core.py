@@ -17,6 +17,7 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER, COMPRESSION_PROMPT
 from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade.settings import (CHARS_PER_TOKEN_ESTIMATE,
                                     COMPRESSION_MAX_CONSOLIDATION_TOKENS, COMPRESSION_MIN_USAGE_PCT,
+                                    COMPRESSION_REVIEWER_ENABLED, COMPRESSION_REVIEW_MAX_RETRIES,
                                     DEFAULT_MAX_INPUT_TOKENS)
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import (estimate_functions_tokens, extract_text_from_message, get_message_stats,
@@ -186,6 +187,128 @@ def measure_context_usage(agent_pool, target_agent_name: str, history) -> tuple[
         return None
 
 
+def _validate_and_reconsolidate(
+    agent_pool,
+    target_agent_name: str,
+    summaries_to_consolidate: list,
+    summary_spans: list,
+    initial_summary: str,
+) -> str:
+    """Post-consolidation data-integrity gate. ADVISORY-ON-FAILURE.
+
+    Reviews the Phase-2 consolidated summary with the tool-less CompressionReviewer. On a LOSS
+    verdict it re-runs consolidation up to COMPRESSION_REVIEW_MAX_RETRIES times, pinning the
+    flagged items verbatim, and keeps the best-so-far (fewest flagged items; ties resolve to the
+    latest attempt). Returns the summary to splice into the pool.
+
+    SAFETY (non-negotiable): this function NEVER raises into _consolidate_markers and NEVER blocks
+    compaction. A first-review reviewer error returns initial_summary; a re-consolidation failure
+    skips that attempt and proceeds to the next retry; a reviewer error while auditing a retry
+    candidate returns the current best-so-far. On exhaustion with loss still flagged, it splices the
+    best-so-far anyway and emits a loud logger.error + a telemetry event so the loss is observable —
+    not silent.
+
+    Runs OUTSIDE the target's _compression_lock (same as the Phase-2 LLM call). Honors
+    agent_pool.stopped per attempt. Returns initial_summary unchanged when the gate is disabled,
+    making the no-gate path byte-identical.
+    """
+    # Disabled -> reviewer is never invoked; behavior identical to the pre-gate path.
+    if not COMPRESSION_REVIEWER_ENABLED:
+        return initial_summary
+
+    try:
+        # Imported inside the body so tests can patch agent_invoker's module symbols.
+        from agent_cascade.compression.agent_invoker import (invoke_compaction_reviewer,
+                                                             invoke_consolidation_agent)
+
+        incoming_text = '\n\n'.join(f'--- Incoming summary {i} ---\n{s}'
+                                    for i, s in enumerate(summaries_to_consolidate, 1))
+
+        def _review(candidate: str):
+            """Return (is_pass, missing_items) or raise; callers handle fail-open."""
+            return invoke_compaction_reviewer(
+                agent_pool=agent_pool,
+                incoming_summaries=incoming_text,
+                outgoing_summary=candidate,
+                caller_name=target_agent_name,
+            )
+
+        # Attempt 1 is the summary already produced in Phase 2.
+        try:
+            is_pass, missing = _review(initial_summary)
+        except Exception as e:
+            logger.error(f"Compaction reviewer unavailable for '{target_agent_name}' — "
+                         f"skipping validation (fail-open): {e}")
+            return initial_summary
+
+        if is_pass:
+            return initial_summary
+
+        # Best-so-far: fewest flagged items; equal counts resolve toward the latest attempt.
+        best_summary, best_missing = initial_summary, len(missing)
+        attempts = 1
+        stopped_break = False
+
+        for retry in range(COMPRESSION_REVIEW_MAX_RETRIES):
+            if getattr(agent_pool, 'stopped', False):
+                stopped_break = True
+                break
+            attempts += 1
+            try:
+                new_summary, _ = invoke_consolidation_agent(
+                    agent_pool=agent_pool,
+                    marker_summaries=summaries_to_consolidate,
+                    marker_time_ranges=summary_spans,
+                    caller_name=target_agent_name,
+                    preserve_items=missing,
+                )
+            except Exception as e:
+                logger.error(f"Re-consolidation attempt failed for '{target_agent_name}' "
+                             f"(retry {retry + 1}): {e}")
+                continue
+
+            if not new_summary or not new_summary.strip():
+                continue
+
+            try:
+                is_pass, missing = _review(new_summary)
+            except Exception as e:
+                logger.error(f"Compaction reviewer unavailable mid-retry for '{target_agent_name}' "
+                             f"— accepting current best (fail-open): {e}")
+                return best_summary
+
+            if is_pass:
+                return new_summary
+
+            if len(missing) <= best_missing:  # ties -> latest wins
+                best_summary, best_missing = new_summary, len(missing)
+
+        # Pool stopped mid-review: keep the best-so-far quietly — a shutdown is not a data-loss event
+        # and must not be counted/reported as one.
+        if stopped_break:
+            logger.info(f"Agent pool stopped during compaction review for '{target_agent_name}' — "
+                        f"keeping best summary (best_missing={best_missing}) without exhausting retries.")
+            return best_summary
+
+        # Retries exhausted with loss still flagged: splice the best-so-far anyway, but shout.
+        logger.error(f"Compaction review exhausted {attempts} attempt(s) for '{target_agent_name}': "
+                     f"accepting best summary with {best_missing} potentially-dropped item(s). "
+                     f"Validation is advisory — compaction succeeded with the best available summary.")
+        try:
+            from agent_cascade.execution_engine import ExecutionEngine
+            engine = ExecutionEngine(agent_pool)
+            if (tel := engine._telemetry()) is not None:
+                tel.record_compaction_validation_loss(target_agent_name, attempts, best_missing)
+        except Exception as e:
+            logger.debug(f"Compaction validation-loss telemetry failed (non-fatal): {e}")
+        return best_summary
+
+    except Exception as e:
+        # Absolute safety net: the gate must never escalate into _consolidate_markers.
+        logger.error(f"Compaction validation gate failed for '{target_agent_name}' — "
+                     f"accepting initial summary (fail-open): {e}")
+        return initial_summary
+
 def _consolidate_markers(
     agent_pool,
     target_agent_name: str,
@@ -295,6 +418,17 @@ def _consolidate_markers(
 
         logger.info(f"Consolidation summary generated for '{target_agent_name}': "
                     f"{len(consolidated_summary)} chars from {len(summaries_to_consolidate)} summaries")
+
+        # ── Phase 2.5: Post-consolidation data-integrity validation gate ──
+        # Advisory-on-failure. Runs OUTSIDE target_inst._compression_lock, like the Phase-2 LLM
+        # call. Must never raise or block; the accepted summary below is what gets spliced.
+        consolidated_summary = _validate_and_reconsolidate(
+            agent_pool=agent_pool,
+            target_agent_name=target_agent_name,
+            summaries_to_consolidate=summaries_to_consolidate,
+            summary_spans=summary_spans,
+            initial_summary=consolidated_summary,
+        )
 
         # ── Phase 3: Re-read + rebuild under lock (defensive against concurrent changes) ──
         with target_inst._compression_lock:

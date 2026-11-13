@@ -16,12 +16,15 @@ from agent_cascade.api_integration import broadcast_stream_update
 from agent_cascade.compression.helpers import format_marker_timestamp
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import ASSISTANT
-from agent_cascade.prompts.dna import COMPRESSION_END_MARKER, COMPRESSION_PROMPT, CONSOLIDATION_PROMPT
-from agent_cascade.settings import COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS
+from agent_cascade.prompts.dna import (COMPACTION_REVIEWER_PROMPT, COMPRESSION_END_MARKER, COMPRESSION_PROMPT,
+                                       CONSOLIDATION_PROMPT)
+from agent_cascade.settings import (COMPACTION_REVIEWER_MAX_TURNS, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES,
+                                    COMPRESSOR_AGENT_MAX_TURNS)
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from security_handler.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import yield_caller_slot
-from agent_cascade.utils.thinking_block import strip_thinking_blocks
+from agent_cascade.utils.thinking_block import (_MARKDOWN_BOLD_RE, _THINK_BLOCK_BRACKET_RE, _THINK_BLOCK_RE,
+                                                strip_thinking_blocks)
 from agent_cascade.utils.utils import (_format_tool_calls_for_text, _msg_field_or_extra, _reasoning_to_text,
                                        extract_text_from_message)
 
@@ -40,6 +43,10 @@ _lock = threading.Lock()
 
 _compressor_invocation_counter = 0
 
+# Separate counter so reviewer launches never collide with compressor instance names in the
+# logger cache (instance_name, agent_class). Same lock guards both counters.
+_reviewer_invocation_counter = 0
+
 # Conversational filler prefixes to strip from summaries
 _SUMMARY_PREFIXES = [
     'here is a summary', 'here is the summary', 'summary:',
@@ -52,6 +59,11 @@ _SUMMARY_PREFIXES = [
 # before it is treated as malformed. `[^\n]*` captures a single line only — any trailing
 # newline would fail the `\s*$` anchor and be flagged malformed.
 _CAPTION_TAIL_RE = re.compile(r'^\s*CAPTION:\s*(?P<caption>[^\n]*)\s*$')
+
+# Reviewer verdict item list: ``[LOSS: itemA, itemB, ...]``. Non-greedy up to the first ``]`` so a
+# stray bracket inside an item label cannot swallow the rest of the line. Used by
+# _parse_compaction_verdict; the leading ``[LOSS`` is matched case-insensitively.
+_REVIEWER_LOSS_RE = re.compile(r'\[LOSS:\s*(?P<items>[^\]]*)\]', re.IGNORECASE)
 
 
 def _parse_compression_output(raw: str) -> Tuple[str, str]:
@@ -121,6 +133,59 @@ def _parse_compression_output(raw: str) -> Tuple[str, str]:
         caption = ''
 
     return summary_body, caption
+
+
+def _parse_compaction_verdict(raw: str) -> tuple[bool, list[str]]:
+    """Parse the CompressionReviewer's [PASS] / [LOSS: items] verdict.
+
+    Mirrors the multi-fallback discipline of security_handler._parse_verdict: it normalizes
+    thinking blocks and the [END] token, strips markdown bold, then picks the verdict token that
+    appears LAST in the text (the reviewer is instructed to put the verdict on its final line).
+
+    The caller passes the reviewer's summary body — the COMPRESSION_END_MARKER is already stripped
+    upstream — so this parser only looks at the verdict tokens.
+
+    Ambiguous / unparseable input resolves to PASS (fail-open): a reviewer that cannot decide must
+    never trigger a retry-storm or block compaction. A ``[LOSS`` token with no parseable bracketed
+    item list is likewise treated as ambiguous → PASS.
+
+    Returns:
+        (is_pass, missing_items) where missing_items is a list of short item labels, empty on PASS.
+    """
+    text = raw or ''
+    # Defensive: the shipped caller (_execute_compressor_and_extract_summary) already strips thinking blocks and [END]; re-striping here keeps the parser correct if a future raw-text caller feeds it unprocessed model output.
+    # Strip thinking blocks before parsing (same guards as _parse_verdict).
+    try:
+        if '<think' in text.lower() or '<thought' in text.lower():
+            text = _THINK_BLOCK_RE.sub('', text)
+        if '[think' in text.lower() or '[thought' in text.lower():
+            text = _THINK_BLOCK_BRACKET_RE.sub('', text)
+    except Exception as e:  # Defensive: a parser failure must never escalate to a compaction failure.
+        logger.debug(f"Thinking-block stripping in compaction verdict failed (non-critical): {e}")
+
+    text = re.sub(r'\s*\[END\]\s*', ' ', text, flags=re.IGNORECASE)
+    text = _MARKDOWN_BOLD_RE.sub('', text)  # **[LOSS: a, b]** -> [LOSS: a, b]
+
+    upper = text.upper()
+    pass_pos = upper.rfind('[PASS')
+    loss_pos = upper.rfind('[LOSS')
+
+    if loss_pos > pass_pos and loss_pos != -1:
+        m = _REVIEWER_LOSS_RE.search(text, loss_pos)
+        if m is not None:
+            items = [it.strip() for it in m.group('items').split(',') if it.strip()]
+            if items:
+                return False, items
+        # A [LOSS token that carries no bracketed item list is ambiguous — fail-open to PASS.
+        logger.debug(f"Malformed [LOSS] verdict (no parseable item list) — treating as PASS: {text[loss_pos:loss_pos + 80]!r}")
+        return True, []
+
+    if pass_pos != -1:
+        return True, []
+
+    # No verdict token at all → ambiguous → PASS (fail-open).
+    logger.debug('Compaction reviewer produced no recognizable verdict token — treating as PASS (fail-open)')
+    return True, []
 
 
 def _is_content_empty(val):
@@ -316,6 +381,7 @@ def _execute_compressor_and_extract_summary(
     comp_state_key: str,
     caller_name: str,
     timeout_label: str = 'Compression',
+    agent_class: str = 'Compressor',
 ) -> Tuple[str, str]:
     """Execute compressor via engine.run() with slot bypass and extract summary.
 
@@ -328,6 +394,8 @@ def _execute_compressor_and_extract_summary(
         comp_state_key: Instance name/state key for tracking.
         caller_name: Name of the calling agent instance.
         timeout_label: Label for timeout error messages ("Compression" or "Consolidation").
+        agent_class: Agent class for the telemetry call record (defaults to 'Compressor'; the
+            reviewer passes 'CompressionReviewer'). Run mechanics are identical.
 
     Returns:
         A 2-tuple ``(summary, caption)`` — summary with thinking blocks and end marker
@@ -463,7 +531,7 @@ def _execute_compressor_and_extract_summary(
         if (tel := engine._telemetry()) is not None:
             try:
                 tel.record_agent_instance_call(
-                    comp_state_key, 'Compressor', caller_name, latency_ms=_call_latency_ms,
+                    comp_state_key, agent_class, caller_name, latency_ms=_call_latency_ms,
                 )
             except Exception:
                 pass
@@ -792,6 +860,7 @@ def invoke_consolidation_agent(
     marker_summaries: List[str],
     caller_name: str | None = None,
     marker_time_ranges: List[Tuple[float | None, float | None]] | None = None,
+    preserve_items: List[str] | None = None,
 ) -> Tuple[str, str]:
     """Invoke Compressor to consolidate multiple existing summaries into one.
 
@@ -805,6 +874,10 @@ def invoke_consolidation_agent(
                      reads agent_pool.session_name (falls back to 'Orchestrator').
         marker_time_ranges: Optional parallel list of ``(start_ts, end_ts)`` covered by each
                      summary. When provided, each entry is labelled with its start timestamp.
+        preserve_items: Optional list of item labels the previous attempt dropped and that MUST be
+                     retained verbatim. When non-empty, a tightening instruction is appended to the
+                     prompt (used by the post-consolidation reviewer retry on a LOSS verdict).
+                     None/empty → prompt is identical to the no-retry path (backward compatible).
 
     Returns:
         A 2-tuple ``(summary, caption)`` — same contract as invoke_compression_agent().
@@ -824,6 +897,15 @@ def invoke_consolidation_agent(
 
     from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
     end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
+
+    # Retry path only: re-run with the items the reviewer flagged as dropped. Appending to
+    # end_instruction keeps the base CONSOLIDATION_PROMPT untouched (and the no-retry prompt
+    # byte-identical). Single source of truth for the "MUST retain verbatim" wording.
+    if preserve_items:
+        _items = ', '.join(str(i).strip() for i in preserve_items if str(i).strip())
+        if _items:
+            end_instruction += (f"\n\nThe previous attempt DROPPED the following required items — you "
+                                f"MUST retain them verbatim in the consolidated summary: {_items}.")
 
     consolidation_prompt = CONSOLIDATION_PROMPT.format(
         summaries_text=summaries_text.strip(), end_instruction=end_instruction
@@ -872,3 +954,142 @@ def invoke_consolidation_agent(
                     agent_pool.active_stack_remove(comp_state_key)
                 except Exception:
                     pass
+
+
+def _generate_reviewer_instance_name() -> str:
+    """Generate a unique instance name for a compaction-reviewer launch.
+
+    Uses its own counter (prefix 'CompressionReviewer_') so reviewer names never collide with
+    compressor names in the logger cache key (instance_name, agent_class). Thread-safe via _lock.
+    """
+    with _lock:
+        global _reviewer_invocation_counter
+        _reviewer_invocation_counter += 1
+        return f'CompressionReviewer_{_reviewer_invocation_counter}'
+
+
+def _ensure_reviewer_loaded(agent_pool) -> None:
+    """Ensure the CompressionReviewer agent template is loaded in the pool.
+
+    Mirrors _ensure_compressor_loaded. Relies on BUG_0235's mtime-based template invalidation so a
+    newly added soul is picked up at runtime via the on-demand load path.
+
+    Raises:
+        RuntimeError: If the reviewer cannot be loaded or is unavailable.
+    """
+    if not agent_pool.get_agent('CompressionReviewer'):
+        try:
+            agent_pool.load_agent('CompressionReviewer')
+        except Exception as e:
+            raise RuntimeError(f"Could not load CompressionReviewer: {e}") from e
+
+    rv_agent = agent_pool.get_agent('CompressionReviewer')
+    if not rv_agent:
+        raise RuntimeError('CompressionReviewer is None after loading')
+
+
+def _configure_reviewer_instance(rv_instance: Any) -> None:
+    """Force a CompressionReviewer instance to be fully tool-less (output-only).
+
+    The reviewer is a single-shot diff-check that must never call a tool. Every known tool is
+    disabled here, using the same known-tool union the disabled_tools resolver filters against
+    (TOOL_REGISTRY + RUNTIME_REGISTERED_TOOLS) so the set stays complete without hardcoding a list.
+    Defense-in-depth: the Layer-1 instance override is always merged and the use-time registry
+    filter intersects it with the live registry, so the reviewer is offered zero tools regardless
+    of its template or UI config.
+    """
+    from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+    from agent_cascade.tools.base import TOOL_REGISTRY
+    disabled = set(TOOL_REGISTRY.keys()) | set(RUNTIME_REGISTERED_TOOLS)
+    # Sentinel that blocks all dynamically registered MCP tools; not a real tool name.
+    disabled.add('__all_mcp_tools__')
+    rv_instance._generate_cfg_override = {'disabled_tools': sorted(disabled)}
+
+
+def invoke_compaction_reviewer(
+    agent_pool: Any,
+    incoming_summaries: str,
+    outgoing_summary: str,
+    caller_name: str,
+) -> Tuple[bool, list]:
+    """Launch the CompressionReviewer to audit one consolidated summary for data loss.
+
+    Single-shot (max_turns=1), tool-less, fresh instance per launch, acquired via the same
+    _create_system_agent / yield_caller_slot / _execute_compressor_and_extract_summary plumbing as
+    the Compressor (no save_fn — compaction rewrites the caller's context).
+
+    Returns a parsed scalar verdict. An ambiguous reviewer output (no verdict token) resolves to
+    PASS. Launch/infra failures raise RuntimeError so the CALLER's gate fail-opens — this function
+    deliberately does NOT swallow its own errors, so a reviewer outage is distinguishable from a
+    genuine verdict.
+
+    Args:
+        agent_pool: The AgentPool instance (provides agent loading and state management).
+        incoming_summaries: Rendered incoming summary block (same rendering as consolidation).
+        outgoing_summary: The candidate consolidated summary to audit.
+        caller_name: Calling agent instance name for slot management / telemetry attribution.
+
+    Returns:
+        (is_pass, missing_items) — missing_items is a list of short labels, empty on PASS.
+
+    Raises:
+        RuntimeError: If the reviewer cannot be loaded/launched or returns invalid output.
+    """
+    if not agent_pool:
+        raise RuntimeError('agent_pool not connected')
+
+    _ensure_reviewer_loaded(agent_pool)
+
+    reviewer_key = _generate_reviewer_instance_name()
+
+    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
+    end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for the review
+    review_prompt = COMPACTION_REVIEWER_PROMPT.format(
+        incoming_summaries=incoming_summaries.strip(),
+        outgoing_summary=outgoing_summary.strip(),
+        end_instruction=end_instruction,
+    )
+
+    try:
+        # Lazy import to avoid the execution_engine → compression circular dependency.
+        from agent_cascade.execution_engine import ExecutionEngine
+        engine = ExecutionEngine(agent_pool)
+        rv_instance = engine._create_system_agent(
+            agent_class='CompressionReviewer',
+            instance_name=reviewer_key,
+            task=review_prompt,
+            caller=caller_name,
+        )
+
+        _configure_reviewer_instance(rv_instance)
+        # Single-shot: decoupled from COMPRESSOR_AGENT_MAX_TURNS so a Compressor budget bump can't
+        # silently give the reviewer a multi-turn tool loop. Must stay 1.
+        rv_instance.max_turns = COMPACTION_REVIEWER_MAX_TURNS
+
+        verdict_text, _ = _execute_compressor_and_extract_summary(
+            agent_pool, engine, rv_instance, reviewer_key, caller_name,
+            timeout_label='Compaction review',
+            agent_class='CompressionReviewer',
+        )
+
+        return _parse_compaction_verdict(verdict_text)
+
+    except Exception as e:
+        # The only consumer is the gate (_validate_and_reconsolidate), which fail-opens on any
+        # Exception without parsing the message, so no message-substring laundering can start a
+        # retry storm here. Re-wrap as RuntimeError to keep the failure class distinct from the
+        # parsed (non-raising) verdicts.
+        raise RuntimeError(f"Compaction review failed: {e}") from e
+    finally:
+        # Clean up reviewer agent state when done (mirrors the consolidation invoker's finally);
+        # defensive so a pool that lacks the cleanup path can never escalate a clean verdict.
+        try:
+            with agent_pool._execution._state_lock:
+                if reviewer_key in agent_pool.instance_state:
+                    agent_pool.instance_state[reviewer_key]['active'] = False
+                    try:
+                        agent_pool.active_stack_remove(reviewer_key)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
