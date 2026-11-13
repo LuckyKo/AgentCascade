@@ -295,11 +295,9 @@ class ToolDispatcher:
                 return "Error: 'tool_id' must be an integer Tool ID from a launched run."
             verb = (resolved.get('task') or '').strip().lower()
             if verb == '__kill':
-                res = tracker.kill_task(instance.instance_name, tid)
-                return res if res is not None else f"Shell kill requested for tool_id {tid}."
+                return tracker.kill_task(instance.instance_name, tid)
             if verb == '__status':
-                res = tracker.get_status(instance.instance_name, tid)
-                return res if res is not None else f"Status requested for tool_id {tid}."
+                return tracker.get_status(instance.instance_name, tid)
             return ("Guidance: when 'tool_id' is set, 'task' must be '__status' (check status/output) "
                     "or '__kill' (terminate the run). To launch a new run, omit 'tool_id'.")
 
@@ -410,10 +408,7 @@ class ToolDispatcher:
             logger.exception('call_cli_agent run failed for %s', harness)
             return f"Error: call_cli_agent ({harness}) failed: {e}"
 
-        header = (f"call_cli_agent harness={harness} "
-                  f"exit={result.exit_code} posture={result.requested_posture} "
-                  f"timed_out={result.timed_out} full_output={result.log_path}")
-        return f"{header}\n\n=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}"
+        return format_cli_result_message(harness, result)
 
     # ── call_agent Handlers ──────────────────────────────────────────────────
 

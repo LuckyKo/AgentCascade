@@ -71,9 +71,9 @@ class PreparedCliAgentRun:
     """
 
     early_result: Optional[CliAgentResult]
-    docker_cmd: list[str]
-    container_name: str
-    clean_env: dict
+    docker_cmd: Optional[list[str]]
+    container_name: Optional[str]
+    clean_env: Optional[dict]
     cap: int
     harness: str
     caller_name: str
@@ -299,7 +299,12 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
         return PreparedCliAgentRun(
             early_result=CliAgentResult(stdout='', stderr=msg, exit_code=126, timed_out=False,
                                         log_path=log_path, requested_posture=permission_posture),
-            docker_cmd=[], container_name='', clean_env={}, cap=2,
+            # early_result is set, so the caller returns this directly and must not read the
+            # spawn fields — they are None to make that contract type-enforceable. cap is unused
+            # in this branch; mirror the configured default (real path: same getattr) instead of
+            # a magic literal.
+            docker_cmd=None, container_name=None, clean_env=None,
+            cap=getattr(_settings, 'max_cli_agent_children', 2),
             harness=harness, caller_name=caller_name, requested_posture=permission_posture)
 
     # (B) Auth key: inject the single native env var the harness reads, via docker -e (never a

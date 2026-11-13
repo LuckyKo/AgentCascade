@@ -174,36 +174,14 @@ class CliAgentTracker(AsyncShellTracker):
         deadline = time.time() + SPAWN_PUBLISH_TIMEOUT
         while 'proc' not in spawn_result and 'error' not in spawn_result:
             if time.time() >= deadline:
-                with task._lock:
-                    if isinstance(task.process, _PendingSpawn):
-                        task.process = None
-                spawn_thread.join(timeout=5)
-                orphan = spawn_result.get('proc')
-                if orphan is not None:
-                    try:
-                        self._kill_process_tree(orphan, agent_name, tool_id)
-                    except Exception as kill_err:
-                        logger.warning(f"[CliAgent] Failed to kill orphaned spawn for "
-                                       f"{agent_name} tool_id={tool_id}: {kill_err}")
-                sem.release()  # never handed to the task; release now or the slot leaks
+                self._abort_spawn(task, spawn_thread, spawn_result, sem, agent_name, tool_id)
                 raise RuntimeError(f"Container spawn did not complete within "
                                    f"{SPAWN_PUBLISH_TIMEOUT:.0f}s for {agent_name} tool_id={tool_id}")
             time.sleep(0.05)
 
         if 'error' in spawn_result:
-            with task._lock:
-                if isinstance(task.process, _PendingSpawn):
-                    task.process = None
-            spawn_thread.join(timeout=5)
-            orphan = spawn_result.get('proc')
-            if orphan is not None:
-                try:
-                    self._kill_process_tree(orphan, agent_name, tool_id)
-                except Exception as kill_err:
-                    logger.warning(f"[CliAgent] Failed to kill orphaned spawn for "
-                                   f"{agent_name} tool_id={tool_id}: {kill_err}")
-            sem.release()  # spawn failed — release now; _record_completed_run sees no _cli_sem
-            raise spawn_result['error']
+            self._abort_spawn(task, spawn_thread, spawn_result, sem, agent_name, tool_id)
+            raise spawn_result['error']  # spawn failed — release already done, no _cli_sem handed
 
         proc = spawn_result['proc']
 
@@ -234,6 +212,29 @@ class CliAgentTracker(AsyncShellTracker):
             task._stderr_lock = stderr_lock
 
         return task
+
+    # ────────────────────────────────────────────────────────────────────────
+    def _abort_spawn(self, task, spawn_thread, spawn_result: dict, sem,
+                     agent_name: str, tool_id: int) -> None:
+        """Undo a spawn whose process never reached the task, so no slot or orphan leaks.
+
+        Shared by the publish-timeout and Popen-error paths in :meth:`_spawn_process`: reset the
+        ``_PendingSpawn`` placeholder under ``task._lock``, join the spawn thread, kill any late
+        orphined container, then release the semaphore — which was never handed to ``task._cli_sem``,
+        so ``_record_completed_run`` will not release it. Each caller raises its own error after.
+        """
+        with task._lock:
+            if isinstance(task.process, _PendingSpawn):
+                task.process = None
+        spawn_thread.join(timeout=5)
+        orphan = spawn_result.get('proc')
+        if orphan is not None:
+            try:
+                self._kill_process_tree(orphan, agent_name, tool_id)
+            except Exception as kill_err:
+                logger.warning(f"[CliAgent] Failed to kill orphaned spawn for "
+                               f"{agent_name} tool_id={tool_id}: {kill_err}")
+        sem.release()  # never handed to the task; release now or the slot leaks
 
     # ────────────────────────────────────────────────────────────────────────
     def _kill_process_tree(self, proc, agent_name: str, tool_id: int) -> None:
@@ -418,4 +419,32 @@ class CliAgentTracker(AsyncShellTracker):
             msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
         else:
             msg += '\nNo new output since last status check.'
+        return msg
+
+    # Ordered leading-token rewrites for the inherited kill_task wording. Specific phrases run
+    # before the generic ones so the dead-message body ("this shell has completed") maps to its own
+    # pair. Mirrors the call_cli_agent labelling get_status already uses; the teardown ACTION itself
+    # is cli-correct via the _kill_process_tree override — only the *wording* is cosmetic here.
+    _KILL_LABEL_REWRITE = (
+        ('No running shell found', 'No running call_cli_agent run found'),
+        ('this shell has completed', 'this run has completed'),
+        ('Shell killed', 'call_cli_agent run killed'),
+        ('Shell kill requested', 'call_cli_agent run kill requested'),
+        ('Shell already finished', 'call_cli_agent run already finished'),
+    )
+
+    # ────────────────────────────────────────────────────────────────────────
+    def kill_task(self, agent_name: str, tool_id: int):
+        """Inherited ``kill_task`` with its shell-hardcoded confirmation wording relabeled.
+
+        The teardown action is correct (the ``_kill_process_tree`` override runs); only the
+        inherited strings ("Shell killed…", "Shell already finished…", and the reaped-task
+        ``_dead_shell_message``) leak shell terminology and would read inconsistently beside
+        ``get_status``. Returned to the dispatcher and trust-wrapped there, so NOT wrapped here.
+        """
+        msg = super().kill_task(agent_name, tool_id)
+        if msg is None:
+            return msg
+        for old, new in self._KILL_LABEL_REWRITE:
+            msg = msg.replace(old, new)
         return msg

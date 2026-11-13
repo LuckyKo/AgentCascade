@@ -190,6 +190,17 @@ def test_kill_leads_with_docker_kill():
     kc.assert_called_once_with('ctr42')
     assert proc.poll() is not None  # client backstop flipped it dead
     assert 'killed' in msg.lower()
+    # kill_task must not leak the inherited "Shell" wording — assert the tool label, not just 'killed'.
+    assert 'call_cli_agent' in msg, f"__kill wording should carry the tool label: {msg!r}"
+    assert 'shell' not in msg.lower(), f"__kill wording leaked shell terminology: {msg!r}"
+
+
+def test_kill_reaped_task_is_cli_labelled():
+    """A __kill against an already-reaped run relabels the inherited dead-shell message."""
+    tracker = CliAgentTracker(pool=None)
+    msg = tracker.kill_task('test_agent', 99999)  # no task registered -> reaped path
+    assert 'call_cli_agent run' in msg, f"dead-run wording should carry the tool label: {msg!r}"
+    assert 'shell' not in msg.lower(), f"dead-run wording leaked shell terminology: {msg!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
