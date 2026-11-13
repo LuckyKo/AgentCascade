@@ -13,7 +13,6 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager, CompressionH
 """
 
 import os
-import re
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
@@ -24,11 +23,6 @@ if TYPE_CHECKING:
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
-
-# [VERDICT]-anchored deny matcher for the call_cli_agent Security-advisor gate. Mirrors the
-# advisor's structured "[VERDICT] APPROVE|DENY" contract (advisor_runner._VERDICT_RE) so prose
-# that merely mentions "deny" never triggers a block.
-_CLI_DENY_RE = re.compile(r'\[VERDICT\]\s*DENY', re.IGNORECASE)
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
@@ -272,13 +266,11 @@ class ToolDispatcher:
         """Run ONE external AI coding CLI one-shot, with full gating. Additive; never
         touches slot/KV machinery (unlike call_agent). Gating order (plan §3.4/§5):
         registry → nesting → workspace → posture/timeout → preflight → approval →
-        Security-advisor → spawn. The returned string is returned UNWRAPPED — the
+        spawn. The returned string is returned UNWRAPPED — the
         universal `_UNTRUSTED_TOOLS` wrap site (tool_execution._wrap_untrusted) trusts it.
         """
-        from agent_cascade.advisor_runner import run_lightweight_advisor
         from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
         from agent_cascade.engine.cli_agent_runner import cli_agent_status, run_cli_agent
-        from uuid import uuid4
         import json
 
         # Status/introspection short-circuit: never spawns, ignores harness/task, returns a
@@ -331,33 +323,13 @@ class ToolDispatcher:
             return f"Harness CLI for '{harness}' is not installed on the host; nothing was spawned."
 
         # 6. User approval (skipped when the path is already auto-approved for this agent).
-        auto_approved = False
-        if op_manager is not None:
-            if not op_manager._is_auto_approved(ws_path, instance.instance_name):
-                approved, reason = op_manager.request_user_approval(
-                    agent_name=instance.instance_name, tool_name='call_cli_agent',
-                    tool_args=resolved,
-                    description=f"Run external CLI '{harness}' one-shot in workspace '{ws_path}'.")
-                if not approved:
-                    return f"User denied call_cli_agent: {reason}"
-            else:
-                auto_approved = True
-
-        # 7. Security-advisor gate (best-effort; skipped when auto-approved).
-        if getattr(self.pool, 'auto_security', False) and not auto_approved:
-            advisor = run_lightweight_advisor(
-                self.pool, agent_class='Security',
-                instance_name=f'Security_cli_{uuid4().hex[:8]}',
-                task=f"Pre-spawn review of call_cli_agent(harness={harness}, workspace={ws_path}).\nTask:\n{task}",
-                caller=instance.instance_name, max_turns=None)
-            # Fail CLOSED (P2-1): an advisor that errored/timed out (ok False) is a BLOCK, not a
-            # pass. A real verdict is honoured only via the [VERDICT] marker, so prose that merely
-            # mentions "deny" cannot cause a false block.
-            if not getattr(advisor, 'ok', False):
-                return (f"Security advisor produced no usable verdict (error/timeout); "
-                        f"call_cli_agent blocked (fail-closed) for harness '{harness}'.")
-            if _CLI_DENY_RE.search(getattr(advisor, 'output_text', '') or ''):
-                return f"Security advisor DENIED call_cli_agent: {getattr(advisor, 'output_text', '')[:500]}"
+        if op_manager is not None and not op_manager._is_auto_approved(ws_path, instance.instance_name):
+            approved, reason = op_manager.request_user_approval(
+                agent_name=instance.instance_name, tool_name='call_cli_agent',
+                tool_args=resolved,
+                description=f"Run external CLI '{harness}' one-shot in workspace '{ws_path}'.")
+            if not approved:
+                return f"User denied call_cli_agent: {reason}"
 
         # 8-10. Spawn one-shot, capture, persist, return (runner owns timeout/teardown).
         try:

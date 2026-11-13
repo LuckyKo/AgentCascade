@@ -5,7 +5,7 @@ Harnesses the three-layer design:
   * runner layer   — Docker command, credential strip, wall-clock timeout +
                      container-kill teardown, concurrency-cap semaphore.
   * handler layer  — gating order (registry → nesting → workspace → posture/
-                     timeout → preflight → approval → advisor → spawn) and the
+                     timeout → preflight → approval → spawn) and the
                      dispatch routing that bypasses slot/KV machinery.
 
 Everything that would need a real Docker image or real CLI binary is mocked:
@@ -13,18 +13,16 @@ Everything that would need a real Docker image or real CLI binary is mocked:
 spawning happens anywhere.
 """
 
-import inspect
 import shutil
 import subprocess
 import threading
 import time
 
-from unittest.mock import MagicMock, create_autospec
+from unittest.mock import MagicMock
 
 import pytest
 
 from agent_cascade import constants
-from agent_cascade.advisor_runner import run_lightweight_advisor
 from agent_cascade.engine import tool_execution
 from agent_cascade.engine.cli_agent_adapters.antigravity import AntigravityAdapter
 from agent_cascade.engine.cli_agent_adapters.claude_code import ClaudeCodeAdapter
@@ -51,8 +49,7 @@ class FakePool:
 
     operation_manager is a MagicMock whose defaults are the happy path:
     _resolve_path returns a concrete path, _is_auto_approved False (approval
-    required), request_user_approval (True, 'ok'). auto_security defaults False
-    so the advisor gate is skipped unless a test turns it on.
+    required), request_user_approval (True, 'ok').
     """
 
     def __init__(self, instances=None):
@@ -63,7 +60,6 @@ class FakePool:
         self.settings.max_cli_agent_children = 2
         self.settings.default_workspace = '/ws/default'
         self.api_router = None  # signals no slot path exists here
-        self.auto_security = False
         self.register_async_call = MagicMock()
 
         op = MagicMock()
@@ -246,68 +242,6 @@ class TestApprovalRejected:
             pool.get_instance('Maine'))
         assert 'denied' in out.lower()
         runner.assert_not_called()
-
-
-class TestAdvisorGate:
-    """Security-advisor gate: signature binding (P1), fail-closed (P2-1), marker-only match."""
-
-    def _patched_advisor(self, monkeypatch, *, ok=True, output_text=''):
-        """Install a create_autospec mock so the handler's kwargs MUST bind to the real
-        run_lightweight_advisor signature — a wrong kwarg (e.g. the old 'task_text') raises
-        TypeError inside the handler, instead of being silently swallowed by lambda *a,**k.
-        """
-        mock = create_autospec(
-            run_lightweight_advisor,
-            return_value=MagicMock(ok=ok, output_text=output_text))
-        monkeypatch.setattr('agent_cascade.advisor_runner.run_lightweight_advisor', mock)
-        return mock
-
-    def test_signature_binds_with_task_kwarg(self):
-        # Pin the real param name: handler must pass task=, never task_text=.
-        sig = inspect.signature(run_lightweight_advisor)
-        sig.bind(None, agent_class='Security', instance_name='x',
-                 task='prompt', caller='y', max_turns=None)
-        with pytest.raises(TypeError):
-            sig.bind(None, agent_class='Security', instance_name='x',
-                     task_text='prompt', caller='y', max_turns=None)
-
-    def test_deny_verdict_blocks_spawn(self, monkeypatch):
-        pool = FakePool(instances={'Maine': _make_instance('Maine')})
-        pool.auto_security = True
-        dispatcher, runner = _make_handler(pool, monkeypatch)
-        advisor_mock = self._patched_advisor(
-            monkeypatch, ok=True, output_text='[VERDICT] DENY: unsafe workspace')
-        out = dispatcher.handle_call_cli_agent(
-            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
-            pool.get_instance('Maine'))
-        assert 'DENIED' in out
-        advisor_mock.assert_called_once()  # kwargs bound or create_autospec would have raised
-        runner.assert_not_called()
-
-    def test_fail_closed_on_no_verdict(self, monkeypatch):
-        # Advisor errored / timed out (ok False) → BLOCK, do not spawn (P2-1 fail-closed).
-        pool = FakePool(instances={'Maine': _make_instance('Maine')})
-        pool.auto_security = True
-        dispatcher, runner = _make_handler(pool, monkeypatch)
-        self._patched_advisor(monkeypatch, ok=False, output_text='')
-        out = dispatcher.handle_call_cli_agent(
-            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
-            pool.get_instance('Maine'))
-        assert 'fail-closed' in out.lower() or 'blocked' in out.lower()
-        runner.assert_not_called()
-
-    def test_prose_deny_without_marker_does_not_block(self, monkeypatch):
-        # ok=True and prose merely mentions "deny" (no [VERDICT] marker) → must proceed.
-        pool = FakePool(instances={'Maine': _make_instance('Maine')})
-        pool.auto_security = True
-        dispatcher, runner = _make_handler(pool, monkeypatch)
-        self._patched_advisor(
-            monkeypatch, ok=True,
-            output_text='We could not deny anything; the workspace looks fine.')
-        dispatcher.handle_call_cli_agent(
-            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
-            pool.get_instance('Maine'))
-        runner.assert_called_once()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
