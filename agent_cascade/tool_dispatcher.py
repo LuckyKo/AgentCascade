@@ -24,6 +24,12 @@ from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
 
+# Tail-inclusive DMS shield margin for call_cli_agent: the enforced wall-clock is the CLI timeout
+# PLUS the kill+persist teardown tail (_kill_container is capped at 15s), so the holder-DMS shield
+# must outlive the whole span or a run that actually times out gets killed mid-teardown. Used by
+# _resolve_cli_timeout / the call_cli_agent dispatch branch.
+_CLI_AGENT_TEARDOWN_MARGIN_S = 20.0
+
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
 
@@ -129,6 +135,20 @@ class ToolDispatcher:
         """
         return float(getattr(self.pool.settings, 'holder_dms_max_bound_s', 900.0) or 900.0)
 
+    def _resolve_cli_timeout(self, resolved) -> Tuple[int, bool]:
+        """Effective call_cli_agent wall-clock timeout (seconds), shared by the DMS marker (bound) and
+        the handler (enforced timeout) so the two can never drift. Mirrors the original `or` semantics:
+        a falsy/omitted 'timeout' falls back to settings.cli_agent_timeout. Returns (value, ok); ok is
+        False only when a present, non-falsy 'timeout' is non-numeric (the value then falls back to the
+        settings default — the handler rejects the call; the marker just uses value as a safe bound)."""
+        default = getattr(self.pool.settings, 'cli_agent_timeout', 1800)
+        raw = resolved.get('timeout') or default
+        try:
+            t = int(raw)
+        except (TypeError, ValueError):
+            return int(default), False
+        return t, t >= 1
+
     def _resolve_dms_bound(self, tool_obj, tool_name: str, resolved, instance) -> float:
         """Resolve a sync tool's DMS bound at the dispatch boundary (t292).
 
@@ -201,13 +221,11 @@ class ToolDispatcher:
             # call_cli_agent (sync) blocks the holder for up to the CLI timeout (the container is
             # hard-killed at that bound), so mark it as a legitimately-bounded blocking tool — same
             # defect class as compress_context (t292) — so the holder-side DMS does not terminate a
-            # holder mid-run. Bound = the effective timeout (arg, else settings.cli_agent_timeout);
-            # it is a REAL bound (the run is hard-killed at it), so it is deliberately NOT capped at
-            # holder_dms_max_bound_s. Async launches return fast and the marker is cleared in finally.
-            try:
-                cli_bound = float(resolved.get('timeout') or getattr(self.pool.settings, 'cli_agent_timeout', 1800))
-            except (TypeError, ValueError):
-                cli_bound = float(getattr(self.pool.settings, 'cli_agent_timeout', 1800))
+            # holder mid-run. Bound = effective timeout + _CLI_AGENT_TEARDOWN_MARGIN_S (tail-inclusive:
+            # a run that times out is still blocked in _kill_container/_persist_log); deliberately NOT
+            # capped at holder_dms_max_bound_s. Async launches return fast; cleared in finally.
+            cli_timeout, _ = self._resolve_cli_timeout(resolved)
+            cli_bound = float(cli_timeout) + _CLI_AGENT_TEARDOWN_MARGIN_S
             instance._in_blocking_tool = ('call_cli_agent', time.monotonic(), cli_bound)
             try:
                 result = self.handle_call_cli_agent(resolved, instance)
@@ -348,12 +366,8 @@ class ToolDispatcher:
         posture = resolved.get('permission_posture') or 'acceptEdits'
         if posture != 'acceptEdits':
             return f"Error: posture '{posture}' is not available in Phase 0 (only 'acceptEdits')."
-        timeout = resolved.get('timeout') or getattr(self.pool.settings, 'cli_agent_timeout', 1800)
-        try:
-            timeout = int(timeout)
-            if timeout < 1:
-                raise ValueError
-        except (TypeError, ValueError):
+        timeout, timeout_ok = self._resolve_cli_timeout(resolved)
+        if not timeout_ok:
             return "Error: 'timeout' must be a positive integer (seconds)."
 
         # 5. Preflight — presence probe BEFORE approval, so we never prompt for a

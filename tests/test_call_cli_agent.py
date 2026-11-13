@@ -29,7 +29,7 @@ from agent_cascade.engine.cli_agent_adapters.claude_code import ClaudeCodeAdapte
 from agent_cascade.engine.cli_agent_adapters.opencode import OpencodeAdapter
 from agent_cascade.engine import cli_agent_runner
 from agent_cascade.engine.cli_agent_runner import CliAgentResult
-from agent_cascade.tool_dispatcher import ToolDispatcher
+from agent_cascade.tool_dispatcher import ToolDispatcher, _CLI_AGENT_TEARDOWN_MARGIN_S
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared fakes
@@ -280,24 +280,52 @@ class TestDmsBlockingMarker:
         pool = FakePool(instances={'Maine': _make_instance('Maine')})
         during, inst = self._dispatch_with_marker_spy(
             pool, monkeypatch,
-            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws', 'timeout': 300},
-            {'harness': 'claude_code', 'task': 'do it', 'timeout': 300})
+            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws', 'timeout': 300,
+             'execution_mode': 'sync'},
+            {'harness': 'claude_code', 'task': 'do it', 'timeout': 300, 'execution_mode': 'sync'})
         name, _mono, bound = during
         assert name == 'call_cli_agent'
-        assert bound == 300.0  # the arg timeout, deliberately NOT capped at holder_dms_max_bound_s
+        # Tail-inclusive: the arg timeout PLUS the kill+persist teardown margin (deliberately NOT
+        # capped at holder_dms_max_bound_s).
+        assert bound == 300.0 + _CLI_AGENT_TEARDOWN_MARGIN_S
         assert inst._in_blocking_tool is None  # cleared on return
+        pool._mark_activity.assert_called_once_with('Maine')  # DMS post-return re-stamp
 
     def test_marker_bound_falls_back_to_settings_default(self, monkeypatch):
         pool = FakePool(instances={'Maine': _make_instance('Maine')})
         pool.settings.cli_agent_timeout = 1800
         during, inst = self._dispatch_with_marker_spy(
             pool, monkeypatch,
-            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws'},
-            {'harness': 'claude_code', 'task': 'do it'})
+            {'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws',
+             'execution_mode': 'sync'},
+            {'harness': 'claude_code', 'task': 'do it', 'execution_mode': 'sync'})
         name, _mono, bound = during
         assert name == 'call_cli_agent'
-        assert bound == 1800.0  # settings default, no timeout arg
+        # settings default + teardown margin, no timeout arg
+        assert bound == 1800.0 + _CLI_AGENT_TEARDOWN_MARGIN_S
         assert inst._in_blocking_tool is None
+
+    def test_marker_cleared_and_restamped_on_exception(self, monkeypatch):
+        """Even when the handler raises, the dispatch branch's finally must clear the marker and
+        re-stamp activity — otherwise a handler crash wedges the holder in the DMS shield."""
+        pool = FakePool(instances={'Maine': _make_instance('Maine')})
+        inst = pool.instances['Maine']
+        dispatcher = ToolDispatcher(pool)
+        engine = MagicMock()
+        engine._resolve_placeholders.return_value = {
+            'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws',
+            'execution_mode': 'sync'}
+        engine._cache_tool_args = MagicMock()
+        dispatcher.set_engine(engine)
+        # Force the handler to raise so we exercise the dispatch branch's finally (clear + re-stamp).
+        monkeypatch.setattr(dispatcher, 'handle_call_cli_agent',
+                           MagicMock(side_effect=RuntimeError('boom')))
+        with pytest.raises(RuntimeError):
+            dispatcher.execute_tool(inst, 'call_cli_agent',
+                                    {'harness': 'claude_code', 'task': 'do it', 'execution_mode': 'sync'},
+                                    [], function_id='1')
+        assert inst._in_blocking_tool is None  # cleared on the exception path
+        pool._mark_activity.assert_called_once_with('Maine')  # re-stamp still happens
 
 
 # ──────────────────────────────────────────────────────────────────────────────

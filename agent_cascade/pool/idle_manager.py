@@ -20,10 +20,12 @@ from ..slot_queue import _holder_activity_context
 
 # ── Holder-side dead-man's-switch: bounded-blocking-tool bounds (plan t220 §3.4, generalized t292) ──
 # A holder carrying an ``_in_blocking_tool`` marker is EXCLUDED from auto-preempt while
-# (now - start) < bound. As of t292 the SINGLE producer of that marker is the dispatch
-# boundary (ToolDispatcher.execute_tool), which writes a 3-tuple carrying the tool's
-# ``BaseTool.dms_bound()`` value (or the settings cap ``holder_dms_max_bound_s`` when the
-# tool declares no finite bound). So supporting a new long tool means implementing its
+# (now - start) < bound. The dispatch boundary (ToolDispatcher.execute_tool) is the producer:
+# for generic tools it writes a 3-tuple carrying the tool's ``BaseTool.dms_bound()`` value (or
+# the settings cap ``holder_dms_max_bound_s`` when the tool declares no finite bound). call_cli_agent
+# is a special case that carries a TAIL-INCLUSIVE bound (effective CLI timeout +
+# _CLI_AGENT_TEARDOWN_MARGIN_S, deliberately NOT capped at the settings cap) because its container
+# is hard-killed at the timeout. So supporting a new long generic tool means implementing its
 # ``dms_bound()`` — NOT editing this registry and NOT writing the marker by hand.
 #
 # The entries below are DEFENSIVE FALLBACK bounds only, consulted when a marker lacks a
