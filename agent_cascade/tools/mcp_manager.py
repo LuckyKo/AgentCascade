@@ -15,9 +15,11 @@
 import asyncio
 import atexit
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -29,6 +31,17 @@ from dotenv import load_dotenv
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseTool
 from agent_cascade.utils.media_utils import save_media_to_media, MediaStorageError
+
+
+# BUG_0310 R1 — upper bound on the MCP connect + handshake wait. initConfig used to
+# call future.result() with NO timeout, so a slow/offline `npx` subprocess spawn could
+# hang the boot thread for minutes. A generous 60 s default so a legitimately slow first
+# `npx` resolve is not mistaken for a hang; override via AGENT_CASCADE_MCP_CONNECT_TIMEOUT_S.
+# On expiry the wait raises concurrent.futures.TimeoutError, which flows into the existing
+# handled failure path (config_handlers._handle_mcp_servers logs "[MCP] Eager initialization
+# failed") — boot continues WITHOUT MCP, no new crash path. The drop is logged loudly so it
+# is never a silent "MCP quietly disabled".
+MCP_CONNECT_TIMEOUT_S: float = float(os.getenv('AGENT_CASCADE_MCP_CONNECT_TIMEOUT_S', 60.0))
 
 
 class MCPManager:
@@ -160,8 +173,38 @@ class MCPManager:
         # Submit coroutine to the event loop and wait for the result
         future = asyncio.run_coroutine_threadsafe(self.init_config_async(config), self.loop)
         try:
-            result = future.result()  # You can specify a timeout if desired
+            # BUG_0310 R1: bounded wait — MCP_CONNECT_TIMEOUT_S caps the boot thread so a
+            # dead/slow npx can no longer hang startup indefinitely.
+            result = future.result(timeout=MCP_CONNECT_TIMEOUT_S)
             return result
+        except concurrent.futures.TimeoutError as e:
+            # concurrent.futures.TimeoutError IS the builtin TimeoutError (3.11+), so this
+            # branch also catches a worker that raised TimeoutError itself (result() re-raises
+            # the task's exception). A still-PENDING future => our bounded wait expired; a DONE
+            # future => the worker failed. Name the cause accurately (see memory
+            # executor-deadline-timeouterror-and-daemon-worker-gotchas).
+            if future.done():
+                logger.error(f'Failed in initializing MCP tools: {e}')
+            else:
+                logger.error('[MCP] Eager initialization TIMED OUT after %.1fs waiting for the '
+                             'MCP connect/handshake — no MCP tools loaded this boot. Raise '
+                             'AGENT_CASCADE_MCP_CONNECT_TIMEOUT_S if the server is legitimately '
+                             'slow, or disable it: %s',
+                             MCP_CONNECT_TIMEOUT_S, list(config['mcpServers'].keys()))
+                # BUG_0310 review: cancel the coroutine we abandoned instead of letting it
+                # finish later — a slow-but-successful connect would otherwise spawn a live
+                # MCP subprocess + populate self.clients while we discard the tools
+                # (connected-but-unregistered). .cancel() requests CancelledError on the
+                # asyncio task via the loop. Best-effort: a cancel failure must NOT turn the
+                # bounded-timeout path into a new crash (it self-heals via the idempotency
+                # guard on the next config re-push anyway).
+                try:
+                    future.cancel()
+                except Exception as cancel_err:  # noqa: BLE001 — never mask the timeout
+                    logger.debug('[MCP] Could not cancel the timed-out init task (%s); it will '
+                                 'self-heal on the next config re-push via the idempotency guard.',
+                                 cancel_err)
+            raise e
         except Exception as e:
             logger.error(f'Failed in initializing MCP tools: {e}')
             raise e

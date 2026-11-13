@@ -368,6 +368,37 @@ class MemoryHintManager:
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.debug('[MEMORY_HINT] rescan_vaults failed: %s', e)
 
+    def rescan_vaults_background(self) -> None:
+        """Kick off the initial vault rescan on a daemon thread (BUG_0310 R2).
+
+        Boot used to call ``rescan_vaults()`` SYNCHRONOUSLY, walking every
+        ``.agent_lessons`` vault and rebuilding the matcher index on the BOOT thread
+        — a cost that grows with the lesson corpus. The hint index is best-effort and
+        non-critical, so the initial build is deferred here off the critical path.
+
+        The ONLY observable change: the first hint issued right after boot may briefly
+        see an EMPTY index until this background rescan finishes. That is acceptable and
+        bounded because:
+          (a) every index mutation already happens under ``self._index_lock`` (see
+              :meth:`rescan_vaults`), so a concurrent reader never sees a half-built or
+              torn index — it just sees the (still empty) dict from before the rescan; and
+          (b) the worker's idle tick calls ``_maybe_rescan_if_config_changed()``, whose
+              FIRST tick always rescans: the manager's ``_last_config_version`` starts at
+              -1 while the pool's ``_config_version`` starts at 0, so ``0 != -1`` fires a
+              rescan even with zero config events. The empty index therefore never
+              persists indefinitely, independent of this one-shot thread.
+
+        Safe to call from any thread: ``rescan_vaults()`` serializes all state under the
+        RLock, so this daemon thread coexists with the hint worker and the config-version
+        safety net with no race. ``daemon=True`` so a slow/hung vault walk can never block
+        interpreter exit.
+        """
+        threading.Thread(
+            target=self.rescan_vaults,
+            name='memory-hint-initial-rescan',
+            daemon=True,
+        ).start()
+
     def _maybe_rescan_if_config_changed(self) -> None:
         """Safety net: rescan if pool._config_version advanced (plan §6.2)."""
         try:

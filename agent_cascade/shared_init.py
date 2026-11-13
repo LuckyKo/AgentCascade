@@ -15,6 +15,7 @@ from typing import Optional
 
 from agent_cascade.log import logger
 from agent_cascade.telemetry import TelemetryCollector
+from agent_cascade.utils import boot_timing
 
 
 def _env_float(name: str) -> Optional[float]:
@@ -308,6 +309,7 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
 
     # Ensure config files exist before any agent/infrastructure that depends on them
     ensure_config_files(project_root)
+    boot_timing.mark('config_files')
 
     # Read env vars with NO hardcoded default: an absent var yields None so the user's
     # persisted value in pool_settings.json is left untouched (no boot clobber).
@@ -316,10 +318,12 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     idle_check_interval = _env_float('AGENT_CASCADE_IDLE_CHECK_INTERVAL')
 
     operation_mgr = create_operation_manager(workspace_dir)
+    boot_timing.mark('operation_manager')
 
     agents_path = str(project_root / 'agents')
     agent_pool = create_agent_pool(llm_cfg, agents_path, workspace_dir, operation_mgr)
     configure_and_start_pool(agent_pool, idle_timeout, system_agent_idle_timeout, idle_check_interval)
+    boot_timing.mark('pool_start')
 
     return operation_mgr, agent_pool
 
@@ -359,7 +363,8 @@ def initialize_mcp_servers(agent_pool, project_root) -> None:
         # Templates (Assistant/FnCallAgent) carry function_map; AgentInstance does not.
         # Registering into instances instead would raise AttributeError (see memory).
         all_templates = list(agent_pool.templates.values())
-        mcp_handler({'mcpServers': mcp_servers}, agent_pool, all_templates)
+        with boot_timing.Phase('mcp_connect'):
+            mcp_handler({'mcpServers': mcp_servers}, agent_pool, all_templates)
 
         from agent_cascade.tools.mcp_manager import MCPManager
         mcp_mgr = MCPManager()

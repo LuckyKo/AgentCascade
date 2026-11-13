@@ -13,6 +13,7 @@ from agent_cascade.agents import Assistant
 from agent_cascade.instance_id import instance_scoped_filename
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
+from agent_cascade.utils import boot_timing
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.runtime_state import state as _runtime_state
 
@@ -124,6 +125,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             self.api_router = APIRouter(default_llm_cfg=llm_cfg, config_dir=config_dir)
             # Back-reference so api_router can check terminated_instances during retries
             self.api_router._pool = self
+        boot_timing.mark('api_router')
         self.telemetry = telemetry
         self.operation_manager = operation_manager
 
@@ -178,6 +180,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         self._pending_work_folders = None
         self._load_pool_settings()  # load persisted values, overriding defaults
         self._apply_pending_config()  # apply work folders/workspace that need operation_manager
+        boot_timing.mark('pool_settings_load')
 
         # ── Focused managers (delegation targets) ───────────────────────────
         # Only LoggerManager and IdleManager get their own files — they have
@@ -293,7 +296,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             _skill_tiers.append(_candidate_skills)
 
         if _skill_tiers:
-            self.skill_manager.discover(_skill_tiers)
+            with boot_timing.Phase('skill_discover'):
+                self.skill_manager.discover(_skill_tiers)
 
         # Run the candidate decision gate once after discovery completes (catches
         # candidates left pending from a previous session).
@@ -374,13 +378,19 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             self.memory_hint_manager = MemoryHintManager(self)
             if (self.llm_cfg or {}).get('memory_hint_enabled', False):
                 self.memory_hint_manager.start()
-                self.memory_hint_manager.rescan_vaults()
+                # BUG_0310 R2: rescan is backgrounded; see MemoryHintManager.rescan_vaults_background()
+                # for the single-source-of-truth empty-window invariant.
+                self.memory_hint_manager.rescan_vaults_background()
+                # Kickoff only — the vault walk is backgrounded, so this times the thread
+                # spawn, not the rescan. Inside the guard so it never fires when hints are off.
+                boot_timing.mark('memory_hint_rescan')
         except Exception as e:  # noqa: BLE001 — never block pool init on the hint system
             logger.warning(f"Memory-hint manager init failed (non-critical): {e}")
             self.memory_hint_manager = None
 
         # ── Agent discovery ──────────────────────────────────────────────────
-        self._discover_agents(agents_dir)
+        with boot_timing.Phase('discover_agents'):
+            self._discover_agents(agents_dir)
 
     def has_active_agent(self) -> bool:
         """Return True if any pool instance is in an active state.
@@ -653,8 +663,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             try:
                 # Need llm_cfg from api_router or fall back to empty dict
                 llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {}) if self.api_router else {})
-                template = load_agent_template(self, agent_name, llm_cfg)
-                self._register_template(agent_name, template, soul_file)
+                # Per-agent sub-mark at DEBUG: 12 lines would spam INFO, but they let us
+                # see which template (first one pays heavy tool-module imports) dominates.
+                with boot_timing.Phase(f'load_agent:{agent_name}', debug=True):
+                    template = load_agent_template(self, agent_name, llm_cfg)
+                    self._register_template(agent_name, template, soul_file)
                 logger.info('[OK] Loaded agent: %s', agent_name)
             except Exception as e:
                 logger.error('[ERROR] Failed to load agent %s: %s', agent_name, e)

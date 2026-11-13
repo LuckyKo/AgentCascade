@@ -53,6 +53,12 @@ except ValueError as e:
     raise SystemExit(1)
 
 # ── NOW safe to import agent_cascade modules ────────────────────────────────
+# boot_timing captures _T0 here (near process start) so all later [BOOT-TIMING]
+# marks share one origin. Pure logging — no behavior change.
+from agent_cascade.utils import boot_timing
+
+boot_timing.mark('boot_timing_ready')  # instance-id parse predates _T0; marks boot_timing coming online
+
 from pathlib import Path
 
 # ── Workspace Detection (shared) ─────────────────────────────────────────────
@@ -61,6 +67,7 @@ from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
 
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
+boot_timing.mark('imports_workspace')
 
 # Tool availability is driven by AVAILABLE_TOOLS in dna.py.
 #
@@ -236,6 +243,7 @@ if __name__ == '__main__':
             chatbot_config,
             auto_security=effective_auto_security,
         )
+        boot_timing.mark('create_app')
         logger.debug('FastAPI app created successfully')
         if args.auto_security:
             logger.info('[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)')
@@ -262,6 +270,7 @@ if __name__ == '__main__':
         logger.error('[FATAL] Port %d is already in use after ~%ds; another process may be holding it. '
                      'Use --port <PORT> or stop the other process. (%s)', port, 20 * 0.5, e)
         raise SystemExit(1)
+    boot_timing.mark('bind')
 
     # Create server first so signal handler can reference it. host/port are still passed to
     # Config for logging/messages; uvicorn skips its own bind because we pass sockets=[sock].
@@ -281,6 +290,7 @@ if __name__ == '__main__':
         # uvicorn 0.34.x binds internally without SO_REUSEADDR and calls sys.exit(1) on
         # EADDRINUSE (surfacing as SystemExit, not OSError), so the old errno-98 handler
         # was dead code. The pre-bound socket above makes that path unreachable.
+        boot_timing.mark('uvicorn_ready')
         server.run(sockets=[sock])
     except Exception as e:
         logger.error('[FATAL] Server crashed: %s', e)
