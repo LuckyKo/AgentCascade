@@ -1,0 +1,16 @@
+# Editor configuration. Indentation is a single source of truth here:
+# Python uses 4 spaces (PEP 8, see AGENTS.md); the WebUI bundle uses 2 spaces.
+# A tab-indented region makes the indent unit ambiguous at edit time and invites
+# whitespace-only diff churn (see BUG_00305 / tests/test_web_ui_indentation.py).
+root = true
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[web_ui/*.js]
+indent_style = space
+indent_size = 2
+
+[*]
+charset = utf-8

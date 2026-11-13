@@ -15,3 +15,13 @@ repos:
         args: ["--remove"]
       - id: mixed-line-ending
         args: ["--fix=lf"]
+  # Guard against tab-indented regions in the WebUI bundle: an ambiguous indent
+  # unit lets a line-only insertion re-base a neighbouring block's whitespace and
+  # land whitespace-only diff churn (BUG_00305, tests/test_web_ui_indentation.py).
+  - repo: local
+    hooks:
+      - id: webui-js-indent-spaces
+        name: web_ui JS uses space indentation (no leading tabs)
+        entry: python scripts/check_js_indentation.py
+        language: system
+        files: ^web_ui/.*\.js$

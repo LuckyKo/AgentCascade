@@ -1200,6 +1200,23 @@ The API server broadcasts two types of messages:
 
 Clients handle both types transparently — full snapshots replace the current view entirely, while stream updates merge deltas into the active response.
 
+### Source Style & Guards
+
+`web_ui/*.js` is **space-indented with 2 spaces** — a single style file-wide, because a
+tab-indented region makes the indent unit ambiguous at any edit site: a line-only insertion
+can then re-base a neighbouring block's leading whitespace and land whitespace-only
+`+`/`-` pairs in an otherwise additive diff. That ambiguity is invisible to
+`node --check` / `syntax_check` (JS parses identically regardless of leading whitespace).
+
+| Layer | File | Role |
+|-------|------|------|
+| Editor hint | `.editorconfig` | `indent_style = space`, 2 for `web_ui/*.js` (4 for `*.py`) |
+| Pre-commit | `scripts/check_js_indentation.py` | Fails the commit on any tab-indented line |
+| Test (CI) | `tests/test_web_ui_indentation.py` | Same analyzer applied to every `web_ui/*.js` |
+
+Both entry points import the shared analyzer `tests/_js_indent_check.py`, so the rule has a
+single implementation.
+
 ---
 
 ## 9. Memory-Hint System

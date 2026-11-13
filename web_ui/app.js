@@ -356,75 +356,75 @@ function saveUiPrefs(prefs) {
   localStorage.setItem(UI_PREFS_KEY, JSON.stringify(filtered));
 }
 
-	/** Sync pool settings from the server's pool_settings snapshot into the UI controls.
-	 * Called on every state/stream_update frame so the UI matches server truth.
-	 * Server value always wins for server-backed controls (Batch B): hydration is
-	 * unconditional except for the element the user is actively focused on, so a live
-	 * keystroke is never stomped mid-edit.
-	 * @param {Object} ps - Pool settings object from the server state frame */
-		function syncPoolSettings(ps) {
-		  if (!ps) return;
+/** Sync pool settings from the server's pool_settings snapshot into the UI controls.
+ * Called on every state/stream_update frame so the UI matches server truth.
+ * Server value always wins for server-backed controls (Batch B): hydration is
+ * unconditional except for the element the user is actively focused on, so a live
+ * keystroke is never stomped mid-edit.
+ * @param {Object} ps - Pool settings object from the server state frame */
+function syncPoolSettings(ps) {
+  if (!ps) return;
 
-		  for (const { id, prop, key, transform, output } of POOL_SETTINGS_MAP) {
-	    const el = $(id);
-	    if (el && ps[key] !== undefined) {
-	      // Server value always wins for server-backed controls (Batch B): no local-preference guard.
-	      // Only skip a control the user is actively editing (prevents stale-tick stomps mid-edit).
-	      if (el === document.activeElement) continue;
-	      const newVal = transform ? transform(ps[key]) : ps[key];
-	      // No-op filter: skip if value already matches.
-	      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
-	      else { if (String(el[prop]) === String(newVal)) continue; }
-	      el[prop] = newVal;
-	      // Range readouts (e.g. "Temperature 0.8") only refresh from the 'input' handler;
-	      // a programmatic hydration must update them too or they keep the stale HTML default.
-	      if (output && prop === 'value') {
-	        const outEl = $(output);
-	        const n = parseFloat(el.value);
-	        if (outEl && Number.isFinite(n)) {
-	          const step = el.step || '';
-	          outEl.textContent = step.includes('.') ? n.toFixed(step.split('.')[1].length) : String(n);
-	        }
-	      }
-	    }
-	  }
+  for (const { id, prop, key, transform, output } of POOL_SETTINGS_MAP) {
+    const el = $(id);
+    if (el && ps[key] !== undefined) {
+      // Server value always wins for server-backed controls (Batch B): no local-preference guard.
+      // Only skip a control the user is actively editing (prevents stale-tick stomps mid-edit).
+      if (el === document.activeElement) continue;
+      const newVal = transform ? transform(ps[key]) : ps[key];
+      // No-op filter: skip if value already matches.
+      if (prop === 'checked') { if (el[prop] === !!newVal) continue; }
+      else { if (String(el[prop]) === String(newVal)) continue; }
+      el[prop] = newVal;
+      // Range readouts (e.g. "Temperature 0.8") only refresh from the 'input' handler;
+      // a programmatic hydration must update them too or they keep the stale HTML default.
+      if (output && prop === 'value') {
+        const outEl = $(output);
+        const n = parseFloat(el.value);
+        if (outEl && Number.isFinite(n)) {
+          const step = el.step || '';
+          outEl.textContent = step.includes('.') ? n.toFixed(step.split('.')[1].length) : String(n);
+        }
+      }
+    }
+  }
 
-		  // Sync disabled_tools from server if available and we have agent data to apply it to.
-		  // Server value always wins (Batch B): the in-memory agentDisabledTools map is the sole
-		  // source for tool checkbox rendering; no localStorage write (server is authoritative).
-		  if (ps.disabled_tools && typeof ps.disabled_tools === 'object' && state.agents?.length > 0) {
-		    Object.assign(agentDisabledTools, ps.disabled_tools);
-		    if (settingToolsList && settingAgentSelect) {
-		      renderToolsForSelectedAgent();
-		    }
-		  }
+  // Sync disabled_tools from server if available and we have agent data to apply it to.
+  // Server value always wins (Batch B): the in-memory agentDisabledTools map is the sole
+  // source for tool checkbox rendering; no localStorage write (server is authoritative).
+  if (ps.disabled_tools && typeof ps.disabled_tools === 'object' && state.agents?.length > 0) {
+    Object.assign(agentDisabledTools, ps.disabled_tools);
+    if (settingToolsList && settingAgentSelect) {
+      renderToolsForSelectedAgent();
+    }
+  }
 
-		// CLI Agents (call_cli_agent): hydrate the per-harness enable + model maps from the
-		// server snapshot (server wins; no localStorage). Key values are never in pool_settings.
-		if (ps.cli_agent_enabled && typeof ps.cli_agent_enabled === 'object') {
-		cliAgentEnabledMap = { ...ps.cli_agent_enabled };
-		}
-		if (ps.cli_agent_models && typeof ps.cli_agent_models === 'object') {
-		cliAgentModelsMap = { ...ps.cli_agent_models };
-		}
-		renderCliAgentControls();
+  // CLI Agents (call_cli_agent): hydrate the per-harness enable + model maps from the
+  // server snapshot (server wins; no localStorage). Key values are never in pool_settings.
+  if (ps.cli_agent_enabled && typeof ps.cli_agent_enabled === 'object') {
+    cliAgentEnabledMap = { ...ps.cli_agent_enabled };
+  }
+  if (ps.cli_agent_models && typeof ps.cli_agent_models === 'object') {
+    cliAgentModelsMap = { ...ps.cli_agent_models };
+  }
+  renderCliAgentControls();
 
-		// AFK is server-backed (state_builder _add_pool_runtime_settings): the server is
-		// authoritative, so the controls are hydrated from the snapshot — a control the
-		// user is actively editing is skipped to avoid stomping a live keystroke.
-	  if (ps.afk_enabled !== undefined && afkToggle) {
-	    afkToggle.checked = !!ps.afk_enabled;
-	  }
-	  if (ps.afk_message !== undefined && settingAfkMessage && document.activeElement !== settingAfkMessage) {
-	    settingAfkMessage.value = ps.afk_message;
-	  }
-	  if (ps.afk_mode !== undefined && afkModeSelect && document.activeElement !== afkModeSelect) {
-	    afkModeSelect.value = ps.afk_mode;
-	  }
+  // AFK is server-backed (state_builder _add_pool_runtime_settings): the server is
+  // authoritative, so the controls are hydrated from the snapshot — a control the
+  // user is actively editing is skipped to avoid stomping a live keystroke.
+  if (ps.afk_enabled !== undefined && afkToggle) {
+    afkToggle.checked = !!ps.afk_enabled;
+  }
+  if (ps.afk_message !== undefined && settingAfkMessage && document.activeElement !== settingAfkMessage) {
+    settingAfkMessage.value = ps.afk_message;
+  }
+  if (ps.afk_mode !== undefined && afkModeSelect && document.activeElement !== afkModeSelect) {
+    afkModeSelect.value = ps.afk_mode;
+  }
 
-		  // Update two-phase input enabled state after server settings sync
-		  updateTwoPhaseInputsEnabled();
-		}
+  // Update two-phase input enabled state after server settings sync
+  updateTwoPhaseInputsEnabled();
+}
 
 // ── Backend-authoritative settings (Batch B, Phase 2) ──────────────────────────
 // The server is the single source of truth for every server-backed setting. The client
@@ -1492,87 +1492,87 @@ function saveSettings(sendToServer) {
   updateAllContextBars();
 }
 
-	function loadSettings() {
-	  try {
-	    // Phase 4: class-D presentation keys come from the dedicated ui-prefs store.
-	    // Server-backed keys are hydrated by syncPoolSettings() from the server snapshot.
-	    const s = loadUiPrefs();
-	    if (!Object.keys(s).length) {
-	      // No saved prefs — mark loaded and return (HTML defaults apply).
-	      settingsLoaded = true;
-	      return;
-	    }
+function loadSettings() {
+  try {
+    // Phase 4: class-D presentation keys come from the dedicated ui-prefs store.
+    // Server-backed keys are hydrated by syncPoolSettings() from the server snapshot.
+    const s = loadUiPrefs();
+    if (!Object.keys(s).length) {
+      // No saved prefs — mark loaded and return (HTML defaults apply).
+      settingsLoaded = true;
+      return;
+    }
 
-	    const _isFiniteRestore = (v) =>
-	      (typeof v === 'number' && Number.isFinite(v)) ||
-	      (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
-	    const _present = (v) => v !== null && v !== undefined;
+    const _isFiniteRestore = (v) =>
+      (typeof v === 'number' && Number.isFinite(v)) ||
+      (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
+    const _present = (v) => v !== null && v !== undefined;
 
-	    // Class-D: font size
-	    if (settingFontSize && _isFiniteRestore(s['setting-font-size'])) {
-	      settingFontSize.value = s['setting-font-size'];
-	      settingFontSize.dispatchEvent(new Event('input'));
-	    }
+    // Class-D: font size
+    if (settingFontSize && _isFiniteRestore(s['setting-font-size'])) {
+      settingFontSize.value = s['setting-font-size'];
+      settingFontSize.dispatchEvent(new Event('input'));
+    }
 
-	    // Class-D: line numbers / message metadata toggles
-	    if (settingLinesEnabled && _present(s['setting-lines-enabled'])) {
-	      settingLinesEnabled.checked = s['setting-lines-enabled'];
-	      settingLinesEnabled.dispatchEvent(new Event('change'));
-	    }
-	    if (settingMsgMeta && _present(s['setting-msg-meta'])) {
-	      settingMsgMeta.checked = !!s['setting-msg-meta'];
-	    }
+    // Class-D: line numbers / message metadata toggles
+    if (settingLinesEnabled && _present(s['setting-lines-enabled'])) {
+      settingLinesEnabled.checked = s['setting-lines-enabled'];
+      settingLinesEnabled.dispatchEvent(new Event('change'));
+    }
+    if (settingMsgMeta && _present(s['setting-msg-meta'])) {
+      settingMsgMeta.checked = !!s['setting-msg-meta'];
+    }
 
-	    // Class-D: sound toggles
-	    if (settingSoundIntervention && _present(s['setting-sound-intervention'])) {
-	      settingSoundIntervention.checked = s['setting-sound-intervention'];
-	    }
-	    if (settingSoundCompleted && _present(s['setting-sound-completed'])) {
-	      settingSoundCompleted.checked = s['setting-sound-completed'];
-	    }
-	    if (settingSoundNotification && _present(s['setting-sound-notification'])) {
-	      settingSoundNotification.checked = s['setting-sound-notification'];
-	    }
+    // Class-D: sound toggles
+    if (settingSoundIntervention && _present(s['setting-sound-intervention'])) {
+      settingSoundIntervention.checked = s['setting-sound-intervention'];
+    }
+    if (settingSoundCompleted && _present(s['setting-sound-completed'])) {
+      settingSoundCompleted.checked = s['setting-sound-completed'];
+    }
+    if (settingSoundNotification && _present(s['setting-sound-notification'])) {
+      settingSoundNotification.checked = s['setting-sound-notification'];
+    }
 
-	    // Class-D: truncate-tools (default ON when absent)
-	    if (settingTruncateTools) {
-	      settingTruncateTools.checked = _present(s['truncate-tools']) ? !!s['truncate-tools'] : true;
-	      settingTruncateTools.dispatchEvent(new Event('change'));
-	    }
+    // Class-D: truncate-tools (default ON when absent)
+    if (settingTruncateTools) {
+      settingTruncateTools.checked = _present(s['truncate-tools']) ? !!s['truncate-tools'] : true;
+      settingTruncateTools.dispatchEvent(new Event('change'));
+    }
 
-	    // Class-D: auto-tab-focus
-	    if (settingAutoTabFocus && _present(s['auto-tab-focus'])) {
-	      settingAutoTabFocus.checked = s['auto-tab-focus'];
-	    }
+    // Class-D: auto-tab-focus
+    if (settingAutoTabFocus && _present(s['auto-tab-focus'])) {
+      settingAutoTabFocus.checked = s['auto-tab-focus'];
+    }
 
-	    // Class-D: colors
-	    if (settingUserColor && _present(s['setting-user-color'])) {
-	      settingUserColor.value = s['setting-user-color'];
-	      settingUserColor.dispatchEvent(new Event('input'));
-	    }
-	    if (settingAssistantColor && _present(s['setting-assistant-color'])) {
-	      settingAssistantColor.value = s['setting-assistant-color'];
-	      settingAssistantColor.dispatchEvent(new Event('input'));
-	    }
-	    if (settingRawEditColor && _present(s['setting-raw-edit-color'])) {
-	      settingRawEditColor.value = s['setting-raw-edit-color'];
-	      settingRawEditColor.dispatchEvent(new Event('input'));
-	    }
+    // Class-D: colors
+    if (settingUserColor && _present(s['setting-user-color'])) {
+      settingUserColor.value = s['setting-user-color'];
+      settingUserColor.dispatchEvent(new Event('input'));
+    }
+    if (settingAssistantColor && _present(s['setting-assistant-color'])) {
+      settingAssistantColor.value = s['setting-assistant-color'];
+      settingAssistantColor.dispatchEvent(new Event('input'));
+    }
+    if (settingRawEditColor && _present(s['setting-raw-edit-color'])) {
+      settingRawEditColor.value = s['setting-raw-edit-color'];
+      settingRawEditColor.dispatchEvent(new Event('input'));
+    }
 
-	    // Class-D: image detail / max image size
-	    if (settingImageDetail && _present(s['setting-image-detail'])) {
-	      settingImageDetail.value = s['setting-image-detail'];
-	    }
-	    if (settingMaxImageSize && _isFiniteRestore(s['setting-max-image-size'])) {
-	      settingMaxImageSize.value = s['setting-max-image-size'];
-	    }
+    // Class-D: image detail / max image size
+    if (settingImageDetail && _present(s['setting-image-detail'])) {
+      settingImageDetail.value = s['setting-image-detail'];
+    }
+    if (settingMaxImageSize && _isFiniteRestore(s['setting-max-image-size'])) {
+      settingMaxImageSize.value = s['setting-max-image-size'];
+    }
 
-	    // Mark settings as loaded so beforeunload won't save HTML defaults
-	    settingsLoaded = true;
-	  } catch (e) {
-	    console.error('Failed to load settings', e);
-	  }
-	}
+    // Mark settings as loaded so beforeunload won't save HTML defaults
+    settingsLoaded = true;
+  } catch (e) {
+    console.error('Failed to load settings', e);
+  }
+}
 
 // Auto-save settings on any change in the panel (debounced for sliders/typing)
 let _saveSettingsTimer;
@@ -1888,39 +1888,39 @@ function connect() {
   const url = `${proto}//${location.host}/ws/chat`;
   ws = new WebSocket(url);
 
-	  ws.onopen = () => {
-	    state.connected = true;
-	    connectionDot.classList.add('connected');
-	    connectionDot.title = 'Connected';
-	    statusText.textContent = '';
-	    if (statusSave) statusSave.textContent = 'Connected';
-	    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-	    // Backend-authoritative (Batch B): the server is the source of truth for settings and the
-	    // session name. On connect we no longer push update_config or set_session_name — the initial
-	    // state frame (pool_settings + settings_revision + session_name) re-hydrates the UI, and only
-	    // an explicit user rename sends set_session_name (see the session-name input handler).
+  ws.onopen = () => {
+    state.connected = true;
+    connectionDot.classList.add('connected');
+    connectionDot.title = 'Connected';
+    statusText.textContent = '';
+    if (statusSave) statusSave.textContent = 'Connected';
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // Backend-authoritative (Batch B): the server is the source of truth for settings and the
+    // session name. On connect we no longer push update_config or set_session_name — the initial
+    // state frame (pool_settings + settings_revision + session_name) re-hydrates the UI, and only
+    // an explicit user rename sends set_session_name (see the session-name input handler).
 
-	    // Phase 5: one-time migration from the legacy localStorage blob.
-	    // Read the old agent-cascade-settings (or qwen-settings) blob and send any keys the
-	    // server does not already have. The server applies them through the delta pipeline and
-	    // marks _settings_migrated_v1 so this only happens once.
-	    if (!localStorage.getItem('_settings_migrated_v1')) {
-	      const oldRaw = localStorage.getItem('agent-cascade-settings') || localStorage.getItem('qwen-settings');
-	      if (oldRaw) {
-	        try {
-	          const oldBlob = JSON.parse(oldRaw);
-	          if (Object.keys(oldBlob).length) {
-	            send({ type: 'migrate_settings_local', settings: oldBlob });
-	            // Local sentinel so we don't re-send on every reconnect within this release.
-	            localStorage.setItem('_settings_migrated_v1', '1');
-	          }
-	        } catch { /* malformed blob — skip migration */ }
-	      } else {
-	        // No old blob — nothing to migrate.
-	        localStorage.setItem('_settings_migrated_v1', '1');
-	      }
-	    }
-	  };
+    // Phase 5: one-time migration from the legacy localStorage blob.
+    // Read the old agent-cascade-settings (or qwen-settings) blob and send any keys the
+    // server does not already have. The server applies them through the delta pipeline and
+    // marks _settings_migrated_v1 so this only happens once.
+    if (!localStorage.getItem('_settings_migrated_v1')) {
+      const oldRaw = localStorage.getItem('agent-cascade-settings') || localStorage.getItem('qwen-settings');
+      if (oldRaw) {
+        try {
+          const oldBlob = JSON.parse(oldRaw);
+          if (Object.keys(oldBlob).length) {
+            send({ type: 'migrate_settings_local', settings: oldBlob });
+            // Local sentinel so we don't re-send on every reconnect within this release.
+            localStorage.setItem('_settings_migrated_v1', '1');
+          }
+        } catch { /* malformed blob — skip migration */ }
+      } else {
+        // No old blob — nothing to migrate.
+        localStorage.setItem('_settings_migrated_v1', '1');
+      }
+    }
+  };
 
   ws.onclose = () => {
     state.connected = false;
@@ -2315,12 +2315,12 @@ function handleServerMessage(data) {
         statusModel.textContent = data.current_model;
       }
 
-	      if (data.default_workspace && defaultWorkspace) {
-	        // Server is authoritative for default workspace (Batch B) — always hydrate from server.
-	        defaultWorkspace.textContent = data.default_workspace;
-	        defaultWorkspace.title = data.default_workspace;
-	        defaultWorkspace.style.color = '';
-	      }
+      if (data.default_workspace && defaultWorkspace) {
+        // Server is authoritative for default workspace (Batch B) — always hydrate from server.
+        defaultWorkspace.textContent = data.default_workspace;
+        defaultWorkspace.title = data.default_workspace;
+        defaultWorkspace.style.color = '';
+      }
 
       // FIX B (turn-end full-rebuild): only invalidate panel caches on genuine 'state'
       // frames (initial load / explicit full-state reset). A routine turn-end 'done' frame
@@ -2812,10 +2812,10 @@ function handleServerMessage(data) {
         showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
 
         // Remove only pool settings from localStorage so syncPoolSettings will apply server values.
-	        // Server is authoritative (Batch B) — no localStorage cleanup needed for pool settings.
-	        // The server-side import handler applies the new values and broadcasts the update.
+        // Server is authoritative (Batch B) — no localStorage cleanup needed for pool settings.
+        // The server-side import handler applies the new values and broadcasts the update.
 
-	        // Apply imported settings directly to UI controls (no need to wait for state message).
+        // Apply imported settings directly to UI controls (no need to wait for state message).
         if (data.settings) {
           for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
             const el = $(id);
@@ -2844,12 +2844,12 @@ function handleServerMessage(data) {
           if (data.settings && data.settings.auto_security !== undefined) {
             withRetry(
               () => autoSecurityToggle,
-	              () => {
-	                const newMode = Boolean(data.settings.auto_security);
-	                state.autoSecurity = newMode;
-	                autoSecurityToggle.checked = newMode;
-	                // Server is authoritative for auto-security (Batch B) — no localStorage write.
-	              }
+              () => {
+                const newMode = Boolean(data.settings.auto_security);
+                state.autoSecurity = newMode;
+                autoSecurityToggle.checked = newMode;
+                // Server is authoritative for auto-security (Batch B) — no localStorage write.
+              }
             );
           }
         }
@@ -5239,11 +5239,11 @@ function renderAgentSelect() {
       if (agent.index === state.viewingAgentIndex) opt2.selected = true;
       settingAgentSelect.appendChild(opt2);
     }
-	  }
+  }
 
-	  // Server is authoritative for disabled_tools (Batch B) — no localStorage write.
-	  renderToolsForSelectedAgent();
-	}
+  // Server is authoritative for disabled_tools (Batch B) — no localStorage write.
+  renderToolsForSelectedAgent();
+}
 
 function renderToolsForSelectedAgent() {
   if (!settingToolsList || !settingAgentSelect) return;
@@ -5282,13 +5282,13 @@ function handleToolToggleChange(e) {
   const tName = chk.dataset.tool;
   if (!agentDisabledTools[aName]) agentDisabledTools[aName] = [];
   if (!e.target.checked) {
-	    if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
-	  } else {
-	    agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
-	  }
-	  // Server is authoritative — send the updated map via the delta pipeline.
-	  queueSettingChange('disabled_tools', { ...agentDisabledTools });
-	}
+    if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
+  } else {
+    agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
+  }
+  // Server is authoritative — send the updated map via the delta pipeline.
+  queueSettingChange('disabled_tools', { ...agentDisabledTools });
+}
 
 if (settingAgentSelect) {
   settingAgentSelect.addEventListener('change', (e) => {
