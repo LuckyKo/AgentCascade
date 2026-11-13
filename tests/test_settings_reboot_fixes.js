@@ -126,6 +126,9 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     agentDisabledTools: {},
     send() {},
     updateTwoPhaseInputsEnabled() {},
+    renderCliAgentControls() {},  // called at the end of syncPoolSettings (CLI Agents)
+    cliAgentEnabledMap: {},       // getGenerateCfg reads it; syncPoolSettings re-assigns it
+    cliAgentModelsMap: {},
     defaultWorkspace: null,
     Event: function Event(type) { this.type = type; }, // loadSettings dispatches new Event('input')
     validateRetrySettings() {}, // called at the end of getGenerateCfg; no-op stub

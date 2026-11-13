@@ -80,6 +80,8 @@ function makeEl(tag = 'div') {
     scrollTop: 0,
     scrollHeight: 0,
     clientHeight: 0,
+    // app.js scrollPanelToBottom() calls scrollTo({ top, behavior: 'instant' }).
+    scrollTo(opts) { el.scrollTop = Number(opts && opts.top) || 0; },
     selectionStart: 0,
     selectionEnd: 0,
     _attrs: {},

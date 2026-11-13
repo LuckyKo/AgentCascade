@@ -93,6 +93,9 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     agentDisabledTools: {},
     send() {},
     updateTwoPhaseInputsEnabled() {},
+    renderCliAgentControls() {},  // called at the end of syncPoolSettings (CLI Agents)
+    cliAgentEnabledMap: {},       // getGenerateCfg reads it; syncPoolSettings re-assigns it
+    cliAgentModelsMap: {},
     renderToolsForSelectedAgent() {},
     afkToggle: null,
     settingAfkMessage: null,

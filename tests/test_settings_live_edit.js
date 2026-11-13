@@ -92,6 +92,9 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     agentDisabledTools: {},
     send() {},
     updateTwoPhaseInputsEnabled() {},
+    renderCliAgentControls() {},  // called at the end of syncPoolSettings (CLI Agents)
+    cliAgentEnabledMap: {},       // getGenerateCfg reads it; syncPoolSettings re-assigns it
+    cliAgentModelsMap: {},
     // Module-level element globals referenced by getGenerateCfg/saveSettings. They are all
     // guarded by truthiness in the source, so null is a safe no-op stub here.
     approvalTimeoutSeconds: null,
