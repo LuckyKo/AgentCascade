@@ -1,6 +1,7 @@
 import glob as _glob
 import json
 import logging
+import re
 from pathlib import Path
 
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -8,9 +9,16 @@ from agent_cascade.tools.base import BaseTool, register_tool
 
 logger = logging.getLogger(__name__)
 
+# Entries shown when neither `range` nor `by_line` picks a window (the tail is the
+# interesting part of an agent log). Also the match window when `filter` is set.
+DEFAULT_TAIL_ENTRIES = 20
+# LLM-supplied flags sometimes arrive as strings despite the boolean schema.
+_TRUE_STRINGS = frozenset({'1', 'true', 'yes', 'on'})
+_FALSE_STRINGS = frozenset({'0', 'false', 'no', 'off', ''})
+
 @register_tool('read_logs', allow_overwrite=True)
 class ReadLogs(BaseTool):
-    """Read agent log files with middle-point truncation."""
+    """Read agent log files with middle-point truncation, optionally filter-matched."""
 
     name = 'read_logs'
     description = TOOL_METADATA['read_logs']['description']
@@ -46,6 +54,20 @@ class ReadLogs(BaseTool):
                 'type': 'boolean',
                 'default': False,
                 'description': TOOL_METADATA['read_logs']['parameters']['by_line']
+            },
+            'filter': {
+                'type': 'string',
+                'description': TOOL_METADATA['read_logs']['parameters']['filter']
+            },
+            'filter_regex': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['read_logs']['parameters']['filter_regex']
+            },
+            'filter_case_sensitive': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['read_logs']['parameters']['filter_case_sensitive']
             }
         },
         'required': ['log_file'],
@@ -134,6 +156,59 @@ class ReadLogs(BaseTool):
         # _parse_range returns a 0-based half-open slice; convert back to the
         # 1-based inclusive bounds used for physical-line filtering.
         return start_idx + 1, end_idx
+
+    @staticmethod
+    def _as_bool(value, default=False) -> bool:
+        """Coerce an LLM-supplied flag to bool (the schema says boolean, clients send strings)."""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
+        return default
+
+    @staticmethod
+    def _entry_match_text(item) -> str:
+        """Return the text a ``filter`` is matched against for one log entry.
+
+        Unparsed lines match as-is; parsed entries match against their full JSON
+        serialization (never the truncated preview), so a filter can find text that
+        ``max_chars_per_message`` would otherwise hide. ``ensure_ascii=False`` keeps
+        non-ASCII log text literally matchable.
+        """
+        if isinstance(item, str):
+            return item
+        try:
+            return json.dumps(item, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(item)
+
+    @classmethod
+    def _build_filter_matcher(cls, pattern: str, use_regex=False, case_sensitive=False):
+        """Compile ``filter`` into a predicate over entries.
+
+        Raises ValueError with an actionable message for an invalid regex.
+        """
+        if use_regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                regex = re.compile(pattern, flags)
+            except re.error as e:
+                raise ValueError(
+                    f"invalid filter regex {pattern!r}: {e}. Fix the pattern, or set "
+                    'filter_regex=false to match it as literal text.'
+                ) from e
+            return lambda item: regex.search(cls._entry_match_text(item)) is not None
+        if case_sensitive:
+            return lambda item: pattern in cls._entry_match_text(item)
+        needle = pattern.casefold()
+        return lambda item: needle in cls._entry_match_text(item).casefold()
 
     @staticmethod
     def _humanize_size(file_path: Path) -> str:
@@ -489,10 +564,30 @@ class ReadLogs(BaseTool):
         if total == 0:
             return f"OK: Read {file_path} entries 0/0 ({fmt}, {file_size_str})"
 
-        _by_line_raw = params.get('by_line', False)
-        by_line = (_by_line_raw if isinstance(_by_line_raw, bool)
-                   else str(_by_line_raw).strip().lower() in ('1', 'true', 'yes', 'on'))
+        by_line = self._as_bool(params.get('by_line', False))
 
+        # --- Optional entry filter ---
+        # Matching runs over the WHOLE entry (untruncated), so it can find text that
+        # `max_chars_per_message` would cut out of the simple preview. With a filter
+        # active, `range` counts matches instead of all entries, and the header says so.
+        filter_pattern = params.get('filter')
+        if filter_pattern == '':
+            filter_pattern = None
+        matcher = None
+        filter_label = ''
+        if filter_pattern is not None:
+            use_regex = self._as_bool(params.get('filter_regex', False))
+            try:
+                matcher = self._build_filter_matcher(
+                    filter_pattern, use_regex,
+                    self._as_bool(params.get('filter_case_sensitive', False)))
+            except ValueError as e:
+                return f"Error: {e}"
+            filter_label = f'/{filter_pattern}/' if use_regex else f"'{filter_pattern}'"
+
+        match_total = None  # number of entries matching the filter (None = no filter)
+        match_first = match_last = None
+        line_start = line_end = None
         try:
             if by_line:
                 # BUG_0195: interpret `range` as physical file lines. Requires a
@@ -509,16 +604,41 @@ class ReadLogs(BaseTool):
                 line_start, line_end = self._parse_file_line_range(range_str, total_file_lines)
                 selected = [t for t in all_lines
                             if t[1] is not None and line_start <= t[1] <= line_end]
+                if matcher is not None:
+                    # The line window is the scope; the filter narrows it further.
+                    selected = [t for t in selected if matcher(t[2])]
+                    match_total = len(selected)
+                    match_first, match_last = 1, match_total
                 if not selected:
+                    if matcher is not None:
+                        return (f"OK: Read {file_path} matches 0 in file lines "
+                                f"{line_start}-{line_end} ({fmt}, {file_size_str}; "
+                                f"filter {filter_label})")
                     return (f"Error: No log entries on file lines "
                             f"{line_start}-{line_end} in {file_path}.")
+            elif matcher is not None:
+                matches = [t for t in all_lines if matcher(t[2])]
+                match_total = len(matches)
+                if not matches:
+                    # Recoverable empty result: the caller can widen the filter or
+                    # drop it to read the entries themselves.
+                    return (f"OK: Read {file_path} matches 0 of {total} entries "
+                            f"({fmt}, {file_size_str}; filter {filter_label})")
+                if range_str is not None:
+                    start_idx, end_idx = self._parse_range(range_str, match_total)
+                else:
+                    # Default window = tail of the MATCHES (mirrors the no-filter default).
+                    start_idx = max(0, match_total - DEFAULT_TAIL_ENTRIES)
+                    end_idx = match_total
+                selected = matches[start_idx:end_idx]
+                match_first, match_last = start_idx + 1, end_idx
             elif range_str is not None:
                 # Unified range parameter (1-indexed inclusive like re_indent / edit_file)
                 start_idx, end_idx = self._parse_range(range_str, total)
                 selected = all_lines[start_idx:end_idx]
             else:
-                # Default fallback — last 20 entries
-                selected = all_lines[-20:]
+                # Default fallback — last DEFAULT_TAIL_ENTRIES entries
+                selected = all_lines[-DEFAULT_TAIL_ENTRIES:]
         except (ValueError, IndexError) as e:
             return f"Error parsing range '{range_str}': {e}"
 
@@ -531,12 +651,23 @@ class ReadLogs(BaseTool):
         # BUG_0195: the window is in ENTRY coordinates (the coordinate `range`
         # accepts). Physical file lines are appended when every selected entry
         # has one, so a reader can translate citations without guessing.
+        # With a filter the window is in MATCH coordinates instead, reported against
+        # the entry total so the omitted non-matching entries stay recoverable.
         first = truncated_lines[0][0]
         last = truncated_lines[-1][0]
         src_lines = [src for _, src, _ in truncated_lines if src is not None]
 
-        header = f"OK: Read {file_path} entries {first}-{last}/{total} ({fmt}, {file_size_str}"
-        if len(src_lines) == len(truncated_lines):
+        if match_total is None:
+            header = f"OK: Read {file_path} entries {first}-{last}/{total} ({fmt}, {file_size_str}"
+            cite_file_lines = True
+        else:
+            # by_line already names the line window, so don't repeat it below.
+            scope = (f"in file lines {line_start}-{line_end}" if by_line
+                     else f"of {total} entries")
+            header = (f"OK: Read {file_path} matches {match_first}-{match_last}/{match_total} "
+                      f"{scope} ({fmt}, {file_size_str}; filter {filter_label}")
+            cite_file_lines = not by_line
+        if cite_file_lines and len(src_lines) == len(truncated_lines):
             header += f"; file lines {src_lines[0]}-{src_lines[-1]}"
         header += ')'
 

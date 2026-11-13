@@ -687,7 +687,9 @@ TOOL_METADATA = {
         'description': (
             'Read a JSON/JSONL log file (agent logs, JSON arrays, single objects, or files with mixed/malformed lines). '
             'Large message contents are truncated to prevent context overflow while retaining the beginning and end. '
-            'Handles other text files and nested extra fields as well.'
+            'Handles other text files and nested extra fields as well. '
+            'Use `filter` to jump straight to the entries you care about (e.g. all "--- CONTEXT COMPRESSED" markers) '
+            'instead of paging a huge log.'
         ),
         'parameters': {
             'log_file':
@@ -695,13 +697,19 @@ TOOL_METADATA = {
             'max_chars_per_message':
                 'Maximum characters to keep for each string value in messages. Default: 1000.',
             'range':
-                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries. Entry index is NOT the physical file line — the output shows both (entry index and `L <file line>`) when they differ. Pass by_line=true to interpret this range as physical file lines instead.',
+                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries — or, when `filter` is set, to the last 20 MATCHES. Entry index is NOT the physical file line — the output shows both (entry index and `L <file line>`) when they differ. Pass by_line=true to interpret this range as physical file lines instead.',
             'mode':
                 'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
             'format':
                 'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing. In raw mode each line is prefixed with its physical file line (`L<n>:`) or, when no line mapping exists, its entry index (`E<n>:`).',
             'by_line':
-                'When true, interpret `range` as physical file line numbers (1-based inclusive) instead of entry indices, e.g. range="181:259" reads every log entry whose source line falls in 181-259. Requires an explicit range; not supported for whole-file JSON arrays (which have no per-entry line mapping).'
+                'When true, interpret `range` as physical file line numbers (1-based inclusive) instead of entry indices, e.g. range="181:259" reads every log entry whose source line falls in 181-259. Requires an explicit range; not supported for whole-file JSON arrays (which have no per-entry line mapping). When `filter` is also set, only matching entries inside that line window are shown.',
+            'filter':
+                'Keep only entries containing this text. The match runs over the WHOLE entry — role, content, tool-call arguments, reasoning — before any truncation, so it also finds text that the short simple preview cuts out. Defaults to a literal, case-insensitive substring match. While a filter is active, `range` counts MATCHES (not all entries) and the header reports `matches first-last/<total matches> of <total entries>`; every shown line still carries its real entry index and file line, so the omitted entries remain reachable by re-reading without the filter. Example: filter="--- CONTEXT COMPRESSED" lists every compaction marker in a huge log. Omit or leave empty for no filtering.',
+            'filter_regex':
+                'When true, treat `filter` as a Python regex instead of a literal substring (e.g. "CONTEXT COMPRESSED|role.*tool"). Case-insensitivity still follows filter_case_sensitive. An invalid pattern returns an error naming the problem instead of raising.',
+            'filter_case_sensitive':
+                'When true, `filter` matching is case-sensitive. Default false (case-insensitive), so "error" finds "ERROR".'
         }
     },
     'image_gen': {
