@@ -6379,6 +6379,9 @@ function getGenerateCfg() {
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   // Global default endpoint vision capability (consumed by llm/base.py via generate_cfg).
   if ($('#setting-vision-enabled')) cfg.vision_enabled = $('#setting-vision-enabled').checked;
+  // CLI Agents: read-only extra-paths mount (bool). Server-backed (POOL_SETTINGS_MAP hydrates it);
+  // must also be read here so saveSettings() -> queueSettingChange sends the toggle to the server.
+  if ($('#setting-cli-paths-ro')) cfg.cli_agent_paths_ro = $('#setting-cli-paths-ro').checked;
   // Empty input → NaN; fall back to the HTML default (3). Use an explicit NaN check (NOT `|| 3`)
   // so a legitimate `0` (no rollbacks) is preserved — `0 || 3` would wrongly coerce it to 3. `-1` (unlimited) also survives.
   if ($('#setting-max-rollbacks')) { const _mar = parseInt($('#setting-max-rollbacks').value); cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar; }
