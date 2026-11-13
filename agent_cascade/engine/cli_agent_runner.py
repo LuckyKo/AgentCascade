@@ -16,7 +16,9 @@ one-shot ``docker run --rm ... <image> <harness-argv>`` and captures stdout+exit
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import subprocess
 import threading
 import uuid
@@ -90,19 +92,30 @@ def _get_semaphore(cap: int) -> threading.Semaphore:
         return _CLI_SEMAPHORE
 
 
-_REPO_ROOT = str(_LOGS_DIR.parent)  # repo root (contains logs/ and Dockerfile.cli_agent)
+_REPO_ROOT = str(_LOGS_DIR.parent)  # repo root (contains logs/ and the cli_agent Dockerfiles)
 _DOCKERFILE = _LOGS_DIR.parent / 'Dockerfile.cli_agent'
+# Per-harness Dockerfile overrides: any harness not listed here builds the shared image.
+# antigravity has its own file (agy is not in the shared image); single source of truth.
+_HARNESS_DOCKERFILE: dict[Optional[str], Path] = {
+    'antigravity': _LOGS_DIR.parent / 'Dockerfile.cli_agent_agy',
+}
 
-# Image auto-build memo: a set of tags known present (skip re-inspecting/re-building).
-# _BUILD_LOCK serializes concurrent first-miss builds so two threads never `docker build` the
-# same tag at once. A tag whose build FAILS is NOT added — the next call retries (fail-open).
+# Image auto-build memo: tag -> unix epoch until which the tag is considered verified-OK, so
+# steady-state calls do no docker work. When the epoch passes the present/age check re-runs, so a
+# stale image is refreshed within a running process (not only on restart). _BUILD_LOCK serializes
+# concurrent first-miss builds so two threads never `docker build` the same tag at once. A tag
+# whose build FAILS is dropped (the next call retries — fail-open).
 _BUILD_LOCK = threading.Lock()
-_BUILD_OK: set[str] = set()
+_BUILD_OK: dict[str, float] = {}
 
 # Short-TTL cache so repeated status calls don't hammer `docker image inspect`.
 # value is (ts, present: bool | None). None means docker was unavailable (indeterminate).
 _QUOTA_TTL_SECONDS: float = 120.0
 _IMAGE_PRESENT_CACHE: dict[str, tuple[float, Optional[bool]]] = {}
+
+# Short-TTL cache for the binary-presence probe (fail-fast check), same semantics as
+# _IMAGE_PRESENT_CACHE: value is (ts, present: bool | None); None means docker unavailable.
+_BINARY_IN_IMAGE_CACHE: dict[tuple[str, str], tuple[float, Optional[bool]]] = {}
 
 
 def _image_present(tag: str) -> Optional[bool]:
@@ -129,30 +142,112 @@ def _image_present_cached(tag: str) -> Optional[bool]:
     return present
 
 
-def _ensure_image(tag: str) -> None:
-    """Best-effort auto-build of a missing image once (behind ``_BUILD_LOCK``), memoized.
+def _image_age_days(tag: str) -> Optional[float]:
+    """Age of ``tag`` in fractional days from ``docker inspect --format {{.Created}}``.
 
-    A confirmed-present or already-built tag returns immediately. A missing tag triggers a
-    single ``docker build``; failure logs a warning and returns (the caller still spawns,
-    and the existing spawn-error path surfaces a clean result — never crash the turn)."""
+    Returns ``None`` when the age is indeterminate (docker unavailable/unreachable, a non-zero
+    inspect exit, or an unparseable timestamp) — callers treat that as "not stale" and do NOT
+    force a rebuild. Never raises."""
+    try:
+        r = subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Created}}', tag],
+                           capture_output=True, text=True, timeout=15,
+                           encoding='utf-8', errors='replace')
+        if r.returncode != 0:
+            return None
+        s = (r.stdout or '').strip()
+        if not s:
+            return None
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        # Docker's Created carries nanosecond precision (7-9 fractional digits); fromisoformat
+        # only accepts up to 6, so trim any excess. Exactly-6-or-fewer is left untouched.
+        s = re.sub(r'\.(\d{6})\d+', r'.\1', s)
+        created = datetime.fromisoformat(s)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created).total_seconds() / 86400.0
+    except Exception as e:  # noqa: BLE001 — docker unavailable / parse failure → indeterminate
+        logger.debug('call_cli_agent image age inspect failed for %s: %s', tag, e)
+        return None
+
+
+def _binary_in_image(image: str, binary: str) -> Optional[bool]:
+    """True if ``binary`` resolves (``command -v``) inside ``image``, False if it is missing,
+    None if docker itself is unavailable/unreachable (indeterminate). TTL-cached per
+    ``(image, binary)``; never raises."""
+    now = datetime.now(timezone.utc).timestamp()
+    key = (image, binary)
+    cached = _BINARY_IN_IMAGE_CACHE.get(key)
+    if cached and (now - cached[0]) < _QUOTA_TTL_SECONDS:
+        return cached[1]
+    try:
+        r = subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'sh', image,
+                            '-c', f'command -v {binary}'],
+                           capture_output=True, text=True, timeout=60,
+                           encoding='utf-8', errors='replace')
+        present = r.returncode == 0
+    except Exception as e:  # noqa: BLE001 — docker not installed / timeout → indeterminate
+        logger.debug('call_cli_agent binary probe failed for %s in %s: %s', binary, image, e)
+        present = None
+    _BINARY_IN_IMAGE_CACHE[key] = (now, present)
+    return present
+
+
+def _ensure_image(tag: str, harness: Optional[str] = None, max_age_days: Optional[float] = 7) -> None:
+    """Best-effort ensure ``tag`` exists and is not stale, re-checking on a refresh cadence.
+
+    Picks the per-harness Dockerfile when known (``_HARNESS_DOCKERFILE``) else the shared one. A
+    tag verified present and younger than ``max_age_days`` (or just built) is memoized in
+    ``_BUILD_OK`` until its refresh window elapses, so steady-state calls do no docker work; once
+    the window passes the present/age check re-runs and a now-stale image is rebuilt (so npm-
+    installed CLIs and the agy installer pick up the latest within a running process, not only on
+    restart). ``max_age_days`` None or <= 0 skips the staleness check (build only when missing). A
+    build failure logs a warning and drops the memo so the next call retries — the caller's spawn
+    path then surfaces a clean result instead of crashing the turn (fail-open)."""
+    # Coerce defensively: a pool could supply a non-numeric override; the "never raises" guarantee
+    # must hold. None or <= 0 -> no staleness (build only when missing).
+    max_age_window: Optional[float] = None
+    if max_age_days is not None:
+        try:
+            val = float(max_age_days)
+        except (TypeError, ValueError):
+            val = 0.0
+        if math.isfinite(val) and val > 0:
+            max_age_window = val
+    now = datetime.now(timezone.utc).timestamp()
     with _BUILD_LOCK:
-        if tag in _BUILD_OK:
+        next_check = _BUILD_OK.get(tag)
+        if next_check is not None and now < next_check:
             return
         if _image_present(tag) is True:
-            _BUILD_OK.add(tag)
-            return
+            age = _image_age_days(tag) if max_age_window is not None else None
+            if age is None or age <= max_age_window:
+                # Fresh: re-check right as it would go stale. Indeterminate (age None): short TTL.
+                _BUILD_OK[tag] = (now + (max_age_window - age) * 86400.0) if age is not None \
+                    else now + _QUOTA_TTL_SECONDS
+                return
+            logger.info('call_cli_agent image %s is %.1fd old (> max_age %s), refreshing',
+                        tag, age, max_age_window)
+        df = _HARNESS_DOCKERFILE.get(harness, _DOCKERFILE)
         try:
             r = subprocess.run(
-                ['docker', 'build', '-t', tag, '-f', str(_DOCKERFILE), _REPO_ROOT],
+                ['docker', 'build', '-t', tag, '-f', str(df), _REPO_ROOT],
                 capture_output=True, text=True, timeout=1800,
                 encoding='utf-8', errors='replace')
             if r.returncode == 0:
-                _BUILD_OK.add(tag)
+                # Re-verified: schedule the next staleness re-check, and drop any cached
+                # binary-presence probe for this tag so the freshly-built contents win.
+                _BUILD_OK[tag] = (now + max_age_window * 86400.0) if max_age_window is not None \
+                    else now + _QUOTA_TTL_SECONDS
+                for key in [k for k in _BINARY_IN_IMAGE_CACHE if k[0] == tag]:
+                    del _BINARY_IN_IMAGE_CACHE[key]
                 logger.info('call_cli_agent built image %s', tag)
             else:
+                _BUILD_OK.pop(tag, None)
                 logger.warning('call_cli_agent image build failed for %s (rc=%s): %s',
                                tag, r.returncode, (r.stderr or '')[-500:])
         except Exception as e:  # noqa: BLE001 — fail-open; caller's spawn path handles it
+            _BUILD_OK.pop(tag, None)
             logger.warning('call_cli_agent image build error for %s: %s', tag, e)
 
 
@@ -174,7 +269,13 @@ def _cli_agent_image(harness: Optional[str] = None, pool: Optional[Any] = None) 
         from agent_cascade.settings import cli_agent_default_image
         images = getattr(getattr(pool, 'settings', None), 'cli_agent_images', None) or {}
         tag = images.get(harness) or cli_agent_default_image(harness)
-        _ensure_image(tag)
+        # Out of scope to elevate to a PoolSettings field; read the (optional) per-pool override,
+        # else the env-backed module constant. None -> _ensure_image builds only when missing.
+        max_age = getattr(getattr(pool, 'settings', None), 'cli_agent_image_max_age_days', None)
+        if max_age is None:
+            from agent_cascade.settings import CLI_AGENT_IMAGE_MAX_AGE_DAYS
+            max_age = CLI_AGENT_IMAGE_MAX_AGE_DAYS
+        _ensure_image(tag, harness=harness, max_age_days=max_age)
         return tag
     from agent_cascade.tools.code_interpreter import _compute_docker_image_tag
     return _compute_docker_image_tag()
@@ -371,6 +472,14 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
     harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
                                            posture=permission_posture, model=_model)
     image = _cli_agent_image(harness, pool)
+    # Fail-fast: a present-but-wrong image (e.g. silently failed build or a mis-pinned tag) would
+    # otherwise spawn and die with a cryptic in-container module error. Only a definitive False
+    # rejects; None (docker unavailable / indeterminate) falls through to the normal spawn path.
+    if _binary_in_image(image, adapter.binary) is False:
+        raise HarnessNotFoundError(
+            f"CLI binary '{adapter.binary}' (harness '{harness}') is not present in image "
+            f"'{image}'. Build or pin a dedicated image that includes '{adapter.binary}' "
+            f"(e.g. set cli_agent_images['{harness}'] to a tag that has it).")
     docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
                                    harness_cmd=harness_cmd, image=image,
                                    env_vars=_env_vars, extra_ro_mounts=_extra_ro)

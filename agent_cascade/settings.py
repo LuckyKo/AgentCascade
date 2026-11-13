@@ -745,19 +745,27 @@ CLI_AGENT_MIN_CHILDREN: int = 1  # Minimum concurrent one-shot cap (never 0)
 # 0/False = workspace-only mount (current behavior, default). RO only — the external CLI is untrusted.
 CLI_AGENT_PATHS_RO_DEFAULT: bool = False
 
-#: Shared multi-harness image tag built from ``Dockerfile.cli_agent`` (claude + opencode + agy
-#: all on PATH). One build / one containment surface; the ``cli_agent_images`` pool map still
-#: permits per-harness tags and ``M6_CLI_AGENT_DOCKER_IMAGE`` stays the ops escape hatch.
+#: Shared multi-harness image tag built from ``Dockerfile.cli_agent`` (claude + opencode on
+#: PATH). One build / one containment surface; the ``cli_agent_images`` pool map still permits
+#: per-harness tags and ``M6_CLI_AGENT_DOCKER_IMAGE`` stays the ops escape hatch.
 CLI_AGENT_DEFAULT_IMAGE: str = 'cli_agent:all'
+
+#: Dedicated image tag for antigravity (agy). agy ships a non-npm binary installer so it is
+#: intentionally NOT baked into the shared image; built from ``Dockerfile.cli_agent_agy``.
+CLI_AGENT_ANTIGRAVITY_IMAGE: str = 'cli_agent_agy'
+
+#: Periodic refresh window in days for a CLI-agent image: an existing image older than this is
+#: rebuilt on next use (so npm-installed CLIs + the agy installer pull the latest), re-checked on a
+#: cadence so refresh happens within a running process. 0 or negative disables staleness rebuilds
+#: (the image is only built when missing).
+CLI_AGENT_IMAGE_MAX_AGE_DAYS: int = int(os.getenv('M6_CLI_AGENT_IMAGE_MAX_AGE_DAYS', '7'))
 
 
 def cli_agent_default_image(harness: str) -> str:
-    """Default Docker image tag for a CLI harness.
-
-    Phase 0 ships ONE shared multi-harness image, so every harness resolves to the same tag.
-    The ``harness`` arg is kept for a future per-harness image but is currently ignored; the
-    ``cli_agent_images`` pool map is the supported way to pin a per-harness tag today.
-    """
+    """Default Docker image tag for a CLI harness. antigravity resolves to its dedicated
+    image (agy is not in the shared image); every other harness shares cli_agent:all."""
+    if harness == 'antigravity':
+        return CLI_AGENT_ANTIGRAVITY_IMAGE
     return CLI_AGENT_DEFAULT_IMAGE
 
 # ── Cache pool settings ────────────────────────

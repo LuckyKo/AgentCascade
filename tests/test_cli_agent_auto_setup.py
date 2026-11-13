@@ -15,6 +15,7 @@ No Docker, no real CLI binary, no production secrets.json is ever touched.
 """
 
 import asyncio
+import datetime
 import json
 import os
 import sys
@@ -131,7 +132,7 @@ class TestDockerCmd:
 
 
 def test_ensure_image_builds_once_and_memoizes(monkeypatch, tmp_path):
-    monkeypatch.setattr(runner, '_BUILD_OK', set())
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
     monkeypatch.setattr(runner, '_image_present', lambda tag: False)
     calls = []
 
@@ -152,7 +153,7 @@ def test_ensure_image_builds_once_and_memoizes(monkeypatch, tmp_path):
 
 def test_ensure_image_fail_open_on_build_error(monkeypatch):
     """A failed build must not raise and must NOT be memoized (so it can retry)."""
-    monkeypatch.setattr(runner, '_BUILD_OK', set())
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
     monkeypatch.setattr(runner, '_image_present', lambda tag: False)
     monkeypatch.setattr(runner.subprocess, 'run',
                         lambda cmd, **kw: (_ for _ in ()).throw(OSError('no docker')))
@@ -321,6 +322,7 @@ class TestDockerCmdNegatives:
         monkeypatch.setattr(sl, 'get_secret',
                             lambda name: 'TOPSECRET' if name == 'cli_claude_code_key' else None)
         monkeypatch.setattr(runner, '_cli_agent_image', lambda h, p: 'img:tag')  # skip image logic
+        monkeypatch.setattr(runner, '_binary_in_image', lambda image, binary: True)  # skip fail-fast probe
         monkeypatch.setattr(runner, '_LOGS_DIR', tmp_path)
         captured = {}
 
@@ -344,3 +346,195 @@ class TestDockerCmdNegatives:
         assert not any('TOPSECRET' in str(v) for v in (captured['env'] or {}).values())
         # and never bind-mounted
         assert not any('secrets.json' in str(x) for x in cmd)
+
+
+# ── dedicated antigravity image + periodic refresh + fail-fast ───────────────────
+
+
+def test_cli_agent_default_image_routes_antigravity():
+    from agent_cascade.settings import (CLI_AGENT_ANTIGRAVITY_IMAGE, CLI_AGENT_DEFAULT_IMAGE,
+                                         cli_agent_default_image)
+    assert cli_agent_default_image('antigravity') == 'cli_agent_agy' == CLI_AGENT_ANTIGRAVITY_IMAGE
+    for h in ('claude_code', 'opencode'):
+        assert cli_agent_default_image(h) == 'cli_agent:all' == CLI_AGENT_DEFAULT_IMAGE
+
+
+def test_cli_agent_image_max_age_days_default_is_7():
+    from agent_cascade.settings import CLI_AGENT_IMAGE_MAX_AGE_DAYS
+    # Falsifiable: fails if the documented default is changed (env unset in the test env).
+    assert CLI_AGENT_IMAGE_MAX_AGE_DAYS == 7
+
+
+def test_dockerfile_agy_exists_and_has_installer():
+    df = os.path.join(_REPO, 'Dockerfile.cli_agent_agy')
+    assert os.path.isfile(df), df
+    with open(df, encoding='utf-8') as fh:
+        text = fh.read()
+    assert 'node:20-slim' in text
+    assert 'antigravity.google/cli/install.sh' in text  # official non-npm installer
+    assert 'ENV PATH' in text and '/root/.local/bin' in text  # installer drops agy there
+
+
+def _recorder(returncode=0):
+    """(calls, fake_run): appends every subprocess.run argv and returns a MagicMock rc."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return MagicMock(stdout='', stderr='', returncode=returncode)
+    return calls, fake_run
+
+
+def test_ensure_image_picks_harness_dockerfile(monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
+    monkeypatch.setattr(runner, '_image_present', lambda tag: False)  # force build path
+    monkeypatch.setattr(runner, '_DOCKERFILE', tmp_path / 'Dockerfile.cli_agent')
+    monkeypatch.setattr(runner, '_REPO_ROOT', str(tmp_path))
+    monkeypatch.setattr(runner, '_HARNESS_DOCKERFILE',
+                        {'antigravity': tmp_path / 'Dockerfile.cli_agent_agy'})
+    calls, fake_run = _recorder()
+    monkeypatch.setattr(runner.subprocess, 'run', fake_run)
+
+    runner._ensure_image('cli_agent_agy', harness='antigravity')
+    agy_build = calls[-1]
+    assert agy_build[agy_build.index('-f') + 1].endswith('Dockerfile.cli_agent_agy')
+
+    runner._ensure_image('cli_agent:all', harness='claude_code')  # shared fallback
+    shared_build = calls[-1]
+    assert shared_build[shared_build.index('-f') + 1].endswith('Dockerfile.cli_agent')
+
+
+def test_ensure_image_rebuilds_when_stale_skips_when_fresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, '_image_present', lambda tag: True)  # present, decide by age
+    monkeypatch.setattr(runner, '_DOCKERFILE', tmp_path / 'Dockerfile.cli_agent')
+    monkeypatch.setattr(runner, '_REPO_ROOT', str(tmp_path))
+    calls, fake_run = _recorder()
+    monkeypatch.setattr(runner.subprocess, 'run', fake_run)
+
+    # older than max_age -> rebuild, then memoize the refreshed image.
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
+    monkeypatch.setattr(runner, '_image_age_days', lambda tag: 10.0)
+    runner._ensure_image('t:stale', max_age_days=7)
+    assert any('build' in c and 't:stale' in c for c in calls)
+    assert 't:stale' in runner._BUILD_OK
+
+    # fresh -> memoize without any build.
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
+    monkeypatch.setattr(runner, '_image_age_days', lambda tag: 1.0)
+    n = len(calls)
+    runner._ensure_image('t:fresh', max_age_days=7)
+    assert len(calls) == n
+    assert 't:fresh' in runner._BUILD_OK
+
+    # indeterminate age -> treat as not stale, never force a rebuild.
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
+    monkeypatch.setattr(runner, '_image_age_days', lambda tag: None)
+    n = len(calls)
+    runner._ensure_image('t:unknown', max_age_days=7)
+    assert len(calls) == n
+    assert 't:unknown' in runner._BUILD_OK
+
+
+def test_ensure_image_memo_expires_and_rechecks_staleness(monkeypatch, tmp_path):
+    """Cadence memo (finding #1): a fresh image is memoized (no docker work) until its refresh
+    window elapses, then the age is re-evaluated and a now-stale image is rebuilt — within ONE
+    process, i.e. periodic refresh does not require a restart."""
+    monkeypatch.setattr(runner, '_image_present', lambda tag: True)
+    monkeypatch.setattr(runner, '_DOCKERFILE', tmp_path / 'Dockerfile.cli_agent')
+    monkeypatch.setattr(runner, '_REPO_ROOT', str(tmp_path))
+    calls, fake_run = _recorder()
+    monkeypatch.setattr(runner.subprocess, 'run', fake_run)
+    monkeypatch.setattr(runner, '_BUILD_OK', {})
+
+    # fresh (age 1 < 7) -> memoize, zero docker work.
+    ages = {'v': 1.0}
+    monkeypatch.setattr(runner, '_image_age_days', lambda tag: ages['v'])
+    runner._ensure_image('t:r', max_age_days=7)
+    assert len(calls) == 0 and 't:r' in runner._BUILD_OK
+    runner._ensure_image('t:r', max_age_days=7)  # still inside the memo window -> no re-inspect
+    assert len(calls) == 0
+
+    # simulate the window elapsing (age now stale AND the memo's validity-until in the past).
+    ages['v'] = 99.0
+    runner._BUILD_OK['t:r'] = 0.0
+    runner._ensure_image('t:r', max_age_days=7)
+    assert any('build' in c and 't:r' in c for c in calls)  # re-evaluated -> refreshed
+
+
+def test_image_age_days_parses_and_handles_error(monkeypatch):
+    # ~5 days ago, aware ISO timestamp -> age ~5.0
+    created = (datetime.datetime.now(datetime.timezone.utc)
+               - datetime.timedelta(days=5)).isoformat()
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: MagicMock(returncode=0, stdout=created))
+    age = runner._image_age_days('t:x')
+    assert age is not None and 4.9 < age < 5.1
+
+    # docker writes nanosecond precision + Z suffix -> still parses to a positive age.
+    monkeypatch.setattr(runner.subprocess, 'run', lambda cmd, **kw: MagicMock(
+        returncode=0, stdout='2024-01-01T00:00:00.123456789Z'))
+    assert runner._image_age_days('t:y') is not None
+
+    # non-zero inspect exit -> None (indeterminate).
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: MagicMock(returncode=1, stdout=''))
+    assert runner._image_age_days('t:z') is None
+
+    # docker unavailable -> None.
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: (_ for _ in ()).throw(OSError('no docker')))
+    assert runner._image_age_days('t:z') is None
+
+
+def test_binary_in_image_true_false_none(monkeypatch):
+    monkeypatch.setattr(runner, '_BINARY_IN_IMAGE_CACHE', {})
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: MagicMock(returncode=0, stdout='/usr/bin/agy'))
+    assert runner._binary_in_image('img', 'agy') is True
+
+    monkeypatch.setattr(runner, '_BINARY_IN_IMAGE_CACHE', {})
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: MagicMock(returncode=1, stdout=''))
+    assert runner._binary_in_image('img', 'agy') is False
+
+    monkeypatch.setattr(runner, '_BINARY_IN_IMAGE_CACHE', {})
+    monkeypatch.setattr(runner.subprocess, 'run',
+                        lambda cmd, **kw: (_ for _ in ()).throw(OSError('no docker')))
+    assert runner._binary_in_image('img', 'agy') is None
+
+
+def test_binary_in_image_ttl_cached(monkeypatch):
+    monkeypatch.setattr(runner, '_BINARY_IN_IMAGE_CACHE', {})
+    calls, fake_run = _recorder()
+    monkeypatch.setattr(runner.subprocess, 'run', fake_run)
+    runner._binary_in_image('img', 'agy')
+    runner._binary_in_image('img', 'agy')  # cached -> no second docker run
+    assert len(calls) == 1
+
+
+def _ready_pool():
+    return NS(settings=NS(cli_agent_enabled={'claude_code': True}, cli_agent_images={},
+                          cli_agent_models={}, cli_agent_paths_ro=False,
+                          max_cli_agent_children=2))
+
+
+@pytest.mark.parametrize('probe_result,should_raise', [(False, True), (True, False), (None, False)])
+def test_prepare_cli_agent_run_fail_fast_on_missing_binary(monkeypatch, tmp_path,
+                                                           probe_result, should_raise):
+    from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
+    monkeypatch.setattr(runner, '_LOGS_DIR', tmp_path)
+    monkeypatch.setattr(runner, '_cli_agent_image', lambda h, p: 'img:tag')
+    monkeypatch.setattr(runner, '_binary_in_image', lambda image, binary: probe_result)
+    spawn = MagicMock()
+    monkeypatch.setattr(runner.subprocess, 'run', spawn)
+    kwargs = dict(adapter=get_adapter('claude_code'), harness='claude_code', task='t',
+                  workspace=str(tmp_path), permission_posture='acceptEdits',
+                  pool=_ready_pool(), caller_name='c')
+    if should_raise:
+        with pytest.raises(HarnessNotFoundError, match='not present in image'):
+            runner.prepare_cli_agent_run(**kwargs)
+        spawn.assert_not_called()  # rejects before any spawn
+    else:
+        prepared = runner.prepare_cli_agent_run(**kwargs)
+        assert prepared.early_result is None
+        assert prepared.docker_cmd is not None  # normal spawn path reached

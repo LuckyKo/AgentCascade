@@ -1,0 +1,17 @@
+# Dedicated image for the antigravity (agy) CLI. agy ships a non-npm binary installer,
+# so it is intentionally NOT in the shared Dockerfile.cli_agent. Same node:20-slim base
+# (Debian bookworm, glibc 2.36 >= the 2.28 agy requires).
+FROM node:20-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+# agy's installer drops the binary in ~/.local/bin (root → /root/.local/bin); put it on PATH.
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /workspace
+
+# Smoke-test entrypoint (the runner overrides with the harness argv).
+CMD ["sh", "-c", "echo 'cli_agent_agy ready'; which agy || true"]

@@ -392,6 +392,9 @@ def _isolate_runner_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_agent_runner, '_CLI_SEMAPHORE_SIZE', None, raising=False)
     monkeypatch.setattr(cli_agent_runner, '_LOGS_DIR', tmp_path)
     monkeypatch.setenv('M6_CLI_AGENT_DOCKER_IMAGE', 'testimg:tag')  # skip image tag computation
+    # The runner probes the image for the harness binary before spawning (fail-fast); this file
+    # models the spawn directly, so skip the probe to keep subprocess.run counting to the spawn.
+    monkeypatch.setattr(cli_agent_runner, '_binary_in_image', lambda image, binary: True)
 
 
 def _pool_for_runner(cap=2):
