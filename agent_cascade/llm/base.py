@@ -30,9 +30,9 @@ from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import tokenizer
-from agent_cascade.utils.utils import (estimate_functions_tokens, format_as_multimodal_message, format_as_text_message,
-                                       get_message_stats, has_chinese_messages, json_dumps_compact, json_loads,
-                                       merge_generate_cfgs, print_traceback)
+from agent_cascade.utils.utils import (coerce_content_item, estimate_functions_tokens, format_as_multimodal_message,
+                                       format_as_text_message, get_message_stats, has_chinese_messages,
+                                       json_dumps_compact, json_loads, merge_generate_cfgs, print_traceback)
 
 LLM_REGISTRY = {}
 
@@ -949,6 +949,8 @@ class BaseChatModel(ABC):
 def _format_as_text_messages(messages: List[Message]) -> List[Message]:
     for msg in messages:
         if isinstance(msg.content, list):
+            # Coerce first: a raw dict appended in place would fail `item.type`.
+            msg.content = [coerce_content_item(item) for item in msg.content]
             for item in msg.content:
                 assert item.type == 'text'
         else:

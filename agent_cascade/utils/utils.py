@@ -46,6 +46,9 @@ from agent_cascade.settings import (CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_MAX_SHOR
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
 
+# Keywords a ContentItem accepts — derived from the model itself so the two cannot drift.
+_CONTENT_ITEM_FIELDS = frozenset(ContentItem.model_fields)
+
 # Maximum size for base64 data URL decoded content (50MB) to prevent resource exhaustion
 MAX_DATA_URL_SIZE = 50 * 1024 * 1024
 
@@ -608,6 +611,35 @@ def json_dumps_compact(obj: dict, ensure_ascii=False, indent=None, **kwargs) -> 
     return json.dumps(obj, ensure_ascii=ensure_ascii, indent=indent, cls=PydanticJSONEncoder, **kwargs)
 
 
+def coerce_content_item(item) -> ContentItem:
+    """Return one content-list entry as a ``ContentItem``.
+
+    ``Message.content`` is typed ``Union[str, List[ContentItem]]``, but a list can be
+    mutated in place after validation (``msg.content.append(...)``), so a raw dict can
+    sneak in without pydantic re-validating it. Every LLM adapter calls
+    ``item.get_type_and_value()``, so such a dict would abort the whole LLM call with
+    ``AttributeError`` and (worse) repeat on every retry. Coerce instead: a dict with a
+    single content field becomes a real ``ContentItem``; anything unrecognizable degrades
+    to a text item carrying its string form (recoverable, never fatal).
+
+    Extra keys (the OpenAI-style ``type`` discriminator, provider metadata) are dropped
+    because ``ContentItem`` only takes the content fields it declares.
+    """
+    if isinstance(item, ContentItem):
+        return item
+    if isinstance(item, str):
+        return ContentItem(text=item)
+    if isinstance(item, dict):
+        payload = {k: v for k, v in item.items() if k in _CONTENT_ITEM_FIELDS}
+        try:
+            return ContentItem(**payload)
+        except (TypeError, ValueError):
+            logger.warning('coerce_content_item: unrecognized content dict %s — degrading to text',
+                           str(item)[:160])
+            return ContentItem(text=str(item))
+    return ContentItem(text=getattr(item, 'text', None) or str(item))
+
+
 def format_as_multimodal_message(
     msg: Message,
     add_upload_info: bool,
@@ -622,6 +654,7 @@ def format_as_multimodal_message(
     elif isinstance(msg.content, list):  # if multimodal content
         files = []
         for item in msg.content:
+            item = coerce_content_item(item)
             k, v = item.get_type_and_value()
             if k in ('text', 'image', 'audio', 'video'):
                 content.append(item)

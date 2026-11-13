@@ -26,7 +26,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.compression.handler import CompressionHandler
 from agent_cascade.lifecycle_manager import AgentLifecycleManager
-from agent_cascade.llm.schema import USER, Message
+from agent_cascade.llm.schema import USER, ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.stream_publisher import StreamPublisher
 from agent_cascade.tool_dispatcher import ToolDispatcher
@@ -56,6 +56,15 @@ from agent_cascade.engine.system_agent import SystemAgentMixin
 from agent_cascade.engine.turn_setup import TurnSetupMixin
 from agent_cascade.engine.token_budget import TokenBudgetMixin
 from agent_cascade.engine.tool_execution import ToolExecMixin
+
+
+def _content_item_text(item) -> str:
+    """Text of one content item: ``ContentItem``, legacy dict, or bare string."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(item.get('text') or '')
+    return str(getattr(item, 'text', None) or '')
 
 
 class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryHintMixin, TokenBudgetMixin,
@@ -352,7 +361,13 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
         return False, None, None, text or ''
 
     def _append_system_notification(self, messages: List[Message], guard_prefix: str, notification_text: str):
-        """Append a system notification to the last message, preventing duplicates."""
+        """Append a system notification to the last message, preventing duplicates.
+
+        List content is a ``List[ContentItem]`` (multimodal message — e.g. a user turn
+        carrying an attached image). The notification must therefore be appended as a
+        ``ContentItem``; a raw ``{'type': 'text', ...}`` dict breaks every LLM adapter
+        downstream, which calls ``item.get_type_and_value()`` on every content item.
+        """
         if not messages:
             return
 
@@ -364,7 +379,7 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                 new_content = content + f"\n\n{notification_text}"
                 msg_set(last_msg, 'content', new_content)
         elif isinstance(content, list):
-            has_notification = any((isinstance(item, dict) and guard_prefix in str(item.get('text', ''))) or
-                                   (isinstance(item, str) and guard_prefix in item) for item in content)
+            has_notification = any(
+                guard_prefix in _content_item_text(item) for item in content)
             if not has_notification:
-                content.append({'type': 'text', 'text': notification_text})
+                content.append(ContentItem(text=notification_text))
