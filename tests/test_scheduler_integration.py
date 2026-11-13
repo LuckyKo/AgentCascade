@@ -301,11 +301,33 @@ class SchedulerFIFOWaiterSetup:
             t.join(timeout=timeout)
 
 
-def sequential_open_gates(gates: List[threading.Event], ready_events: List[threading.Event], names: List[str]):
-    """Open gates one at a time, confirming each waiter has started acquiring before opening the next."""
+def _wait_until_enqueued(pool: SlotPool, name: str, timeout: float = 5.0):
+    """Wait until ``name`` is actually in the pool's wait queue (or already granted).
+
+    ``ready`` is set immediately before ``pool.acquire`` inserts the ticket, so a
+    waiter preempted between the two can let the next gate's waiter enqueue first.
+    Waiting for the real queue insertion makes FIFO order independent of OS thread
+    scheduling (which is perturbed under parallel xdist load).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = pool.get_status()
+        queued = {w['instance_name'] for w in status['waiters']}
+        running = {h['instance_name'] for h in status['holders']}
+        if name in queued or name in running:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"{name} did not enqueue within {timeout}s")
+
+
+def sequential_open_gates(gates: List[threading.Event], ready_events: List[threading.Event], names: List[str],
+                          pool: Optional[SlotPool] = None):
+    """Open gates one at a time, confirming each waiter has enqueued before opening the next."""
     for i in range(len(names)):
         gates[i].set()
         assert ready_events[i].wait(timeout=2), f"{names[i]} should have started acquiring"
+        if pool is not None:
+            _wait_until_enqueued(pool, names[i])
 
 
 def sequential_open_gates_with_delay(gates: List[threading.Event], ready_events: List[threading.Event],
@@ -777,7 +799,7 @@ class TestProceduralBruteForce:
         pool = SlotPool(key='cancel_test', capacity=1)
         holder_a = pool.create_held_slot('A')
 
-        n_waiters = 30
+        n_waiters = STRESS_TEST_WAITERS
         granted_order: List[str] = []
         lock = threading.Lock()
         names = [f"W{i}" for i in range(n_waiters)]
@@ -801,7 +823,7 @@ class TestProceduralBruteForce:
         for t in threads:
             t.start()
 
-        sequential_open_gates(gates, ready, names)
+        sequential_open_gates(gates, ready, names, pool=pool)
 
         to_cancel = rng.sample([f"W{i}" for i in range(1, n_waiters)], k=n_waiters // 3)
         with lock:
