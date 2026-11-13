@@ -7,6 +7,7 @@ from agent_cascade.async_shell_pkg import constants  # noqa: F401  (re-export)
 from agent_cascade.async_shell_pkg import task  # noqa: F401  (re-export)
 from agent_cascade.async_shell_pkg import tracker  # noqa: F401  (re-export)
 from agent_cascade.async_shell_pkg import windows  # noqa: F401  (re-export)
+from agent_cascade.async_shell_pkg.cli_agent_tracker import CliAgentTracker  # noqa: F401
 
 __all__ = [
     'AsyncShellTracker',
@@ -14,4 +15,5 @@ __all__ = [
     '_elapsed_for_task',
     'ON_WINDOWS',
     'KILL_WAIT_TIMEOUT',
+    'CliAgentTracker',
 ]

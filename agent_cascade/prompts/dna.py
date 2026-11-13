@@ -901,6 +901,19 @@ TOOL_METADATA = {
                 'description':
                     'Optional model to request from the CLI. Falls back to the pool\'s per-harness cli_agent_models default; if neither is set the CLI uses its own default. Harnesses without a documented model flag ignore it.'
             },
+            'execution_mode': {
+                'type':
+                    'string',
+                'enum': ['sync', 'async'],
+                'description':
+                    '"sync" (default) blocks and returns the CLI output inline. "async" launches the container in the background and returns immediately with a Tool ID; the completion is delivered later, and you can check it with call_cli_agent(tool_id=N, execution_mode="async", task="__status") or kill it with task="__kill". Async runs notify on completion only (no heartbeats).'
+            },
+            'tool_id': {
+                'type':
+                    'integer',
+                'description':
+                    'With execution_mode="async": the Tool ID of a previously-launched background run. Pass task="__status" to get its status/output or task="__kill" to terminate it. Omit to launch a new run.'
+            },
         },
         'required': [],
     },

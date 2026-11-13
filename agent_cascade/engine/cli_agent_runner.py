@@ -56,6 +56,30 @@ class CliAgentResult:
     requested_posture: str  # posture the caller requested (adapters may resolve to different argv)
 
 
+@dataclass
+class PreparedCliAgentRun:
+    """Post-gate spawn body for one ``call_cli_agent`` run, shared by the synchronous
+    :func:`run_cli_agent` and the async :class:`CliAgentTracker` background path.
+
+    ``prepare_cli_agent_run`` runs the per-harness ENABLE gate, auth-env injection, model
+    resolution, and extra-RO-mount logic ONCE; both callers then consume this record so
+    that logic is never duplicated. When ``early_result`` is non-None the run was decided
+    WITHOUT spawning (today only the harness-disabled exit-126 case) — the caller returns
+    it directly and must not read the spawn fields. When it is None, ``docker_cmd`` /
+    ``container_name`` / ``clean_env`` are ready to launch and ``cap`` is the concurrency
+    cap the caller must hold around the actual ``Popen``/``subprocess.run``.
+    """
+
+    early_result: Optional[CliAgentResult]
+    docker_cmd: list[str]
+    container_name: str
+    clean_env: dict
+    cap: int
+    harness: str
+    caller_name: str
+    requested_posture: str
+
+
 def _get_semaphore(cap: int) -> threading.Semaphore:
     """Return the shared concurrency semaphore, sized to ``cap`` (rebuilt only on change)."""
     global _CLI_SEMAPHORE, _CLI_SEMAPHORE_SIZE
@@ -227,27 +251,29 @@ def _persist_log(*, caller_name: str, harness: str, exit_code: int, timed_out: b
         return '<persist-failed>'
 
 
-def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
-                  workspace: str, permission_posture: str, timeout: int, pool,
-                  caller_name: str, model: Optional[str] = None) -> CliAgentResult:
-    """Spawn ONE external CLI as a one-shot Docker container, block, capture stdout+exit.
+def format_cli_result_message(harness: str, result: CliAgentResult) -> str:
+    """Render a CliAgentResult into the handler's user-facing result string. Shared by the
+    synchronous handler and the async early-completion path so both present an identical shape
+    (the universal _UNTRUSTED_TOOLS wrap site still wraps the returned string)."""
+    header = (f"call_cli_agent harness={harness} "
+              f"exit={result.exit_code} posture={result.requested_posture} "
+              f"timed_out={result.timed_out} full_output={result.log_path}")
+    return f"{header}\n\n=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}"
 
-    Raises HarnessNotFoundError if ``harness`` is unregistered or its preflight (presence
-    probe) fails. Always strips AC credential env vars from the child env before spawn.
-    Always kills the container (whole process tree) on wall-clock timeout. The concurrency
-    slot is released on every exit path via the ``with`` below.
 
-    Args:
-        adapter: already-resolved, already-preflighted RuntimeAdapter — the normal handler path
-            passes this so the runner does not re-resolve or re-probe (probe happens exactly once).
-        harness: optional registry key. Used only by the defensive direct path (when ``adapter``
-            is None) to resolve + preflight, and for log attribution; defaults to ``adapter.harness``.
-        task: prompt handed to the CLI as a single positional token (no shell → no injection).
-        workspace: already-validated host path to run in (mounted RW at /workspace).
-        permission_posture: already-authorized posture ('acceptEdits' in Phase 0).
-        timeout: hard wall-clock seconds.
-        pool: AgentPool (for settings; also the defensive-path preflight when adapter is None).
-        caller_name: calling agent instance name (log attribution).
+def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
+                          workspace: str, permission_posture: str, pool,
+                          caller_name: str, model: Optional[str] = None) -> PreparedCliAgentRun:
+    """Resolve the adapter, run the per-harness ENABLE/auth/model/RO gates, and build the
+    one-shot ``docker run`` argv — WITHOUT spawning.
+
+    Shared by :func:`run_cli_agent` (synchronous) and the async ``CliAgentTracker`` so the ENABLE
+    gate, auth-key injection, model resolution, and extra-RO-mount logic are written exactly once.
+    Returns a :class:`PreparedCliAgentRun`; when its ``early_result`` is non-None (today only the
+    harness-disabled exit-126 case) the caller returns it directly and must not read the spawn
+    fields. The concurrency semaphore is deliberately NOT acquired here: the caller holds it only
+    around the actual spawn, so a disabled harness never occupies a slot, and in async mode the
+    slot is held across the whole background run rather than released the instant launch returns.
     """
     if adapter is None:
         # Defensive direct-runner path: caller supplied only a harness name. The handler path
@@ -261,8 +287,8 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
     harness = harness or adapter.harness
 
     # (A) Per-harness ENABLE gate (D6: every harness defaults OFF until explicitly enabled in
-    # pool_settings). When off, return exit 126 "disabled" WITHOUT acquiring the semaphore or
-    # spawning a container. Placed before `cap`/`sem` so a disabled harness never occupies a slot.
+    # pool_settings). When off, return exit 126 "disabled" WITHOUT spawning a container. Placed
+    # before any semaphore so a disabled harness never occupies a slot.
     _settings = getattr(pool, 'settings', None)
     _enabled_map = (getattr(_settings, 'cli_agent_enabled', None) or {}) if _settings is not None else {}
     if not _enabled_map.get(harness, False):
@@ -270,8 +296,11 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
         log_path = _persist_log(caller_name=caller_name, harness=harness, exit_code=126,
                                 timed_out=False, stdout='', stderr=msg,
                                 requested_posture=permission_posture)
-        return CliAgentResult(stdout='', stderr=msg, exit_code=126, timed_out=False,
-                              log_path=log_path, requested_posture=permission_posture)
+        return PreparedCliAgentRun(
+            early_result=CliAgentResult(stdout='', stderr=msg, exit_code=126, timed_out=False,
+                                        log_path=log_path, requested_posture=permission_posture),
+            docker_cmd=[], container_name='', clean_env={}, cap=2,
+            harness=harness, caller_name=caller_name, requested_posture=permission_posture)
 
     # (B) Auth key: inject the single native env var the harness reads, via docker -e (never a
     # secrets.json bind-mount). Skipped for key-less harnesses (adapter.auth_env_var is None).
@@ -306,17 +335,53 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
                                       'container': f'{EXTRA_RO_MOUNT_PREFIX}{_i}'})
 
     cap = getattr(pool.settings, 'max_cli_agent_children', 2)
-    sem = _get_semaphore(cap)
+    container_name = f'cli_agent_{uuid.uuid4().hex[:12]}'
+    harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
+                                           posture=permission_posture, model=_model)
+    image = _cli_agent_image(harness, pool)
+    docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
+                                   harness_cmd=harness_cmd, image=image,
+                                   env_vars=_env_vars, extra_ro_mounts=_extra_ro)
+    clean_env = adapter.child_env(os.environ.copy())
+    return PreparedCliAgentRun(early_result=None, docker_cmd=docker_cmd,
+                               container_name=container_name, clean_env=clean_env, cap=cap,
+                               harness=harness, caller_name=caller_name,
+                               requested_posture=permission_posture)
 
+
+def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
+                  workspace: str, permission_posture: str, timeout: int, pool,
+                  caller_name: str, model: Optional[str] = None) -> CliAgentResult:
+    """Spawn ONE external CLI as a one-shot Docker container, block, capture stdout+exit.
+
+    Raises HarnessNotFoundError if ``harness`` is unregistered or its preflight (presence
+    probe) fails. Always strips AC credential env vars from the child env before spawn.
+    Always kills the container (whole process tree) on wall-clock timeout. The concurrency
+    slot is released on every exit path via the ``with`` below.
+
+    Args:
+        adapter: already-resolved, already-preflighted RuntimeAdapter — the normal handler path
+            passes this so the runner does not re-resolve or re-probe (probe happens exactly once).
+        harness: optional registry key. Used only by the defensive direct path (when ``adapter``
+            is None) to resolve + preflight, and for log attribution; defaults to ``adapter.harness``.
+        task: prompt handed to the CLI as a single positional token (no shell → no injection).
+        workspace: already-validated host path to run in (mounted RW at /workspace).
+        permission_posture: already-authorized posture ('acceptEdits' in Phase 0).
+        timeout: hard wall-clock seconds.
+        pool: AgentPool (for settings; also the defensive-path preflight when adapter is None).
+        caller_name: calling agent instance name (log attribution).
+    """
+    prepared = prepare_cli_agent_run(
+        adapter=adapter, harness=harness, task=task, workspace=workspace,
+        permission_posture=permission_posture, pool=pool, caller_name=caller_name, model=model)
+    if prepared.early_result is not None:
+        return prepared.early_result
+
+    sem = _get_semaphore(prepared.cap)
     with sem:  # release guaranteed on every path from here to return
-        container_name = f'cli_agent_{uuid.uuid4().hex[:12]}'
-        harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
-                                               posture=permission_posture, model=_model)
-        image = _cli_agent_image(harness, pool)
-        docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
-                                       harness_cmd=harness_cmd, image=image,
-                                       env_vars=_env_vars, extra_ro_mounts=_extra_ro)
-        clean_env = adapter.child_env(os.environ.copy())
+        container_name = prepared.container_name
+        docker_cmd = prepared.docker_cmd
+        clean_env = prepared.clean_env
 
         timed_out = False
         stdout = stderr = ''

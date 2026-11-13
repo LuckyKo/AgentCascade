@@ -270,7 +270,8 @@ class ToolDispatcher:
         universal `_UNTRUSTED_TOOLS` wrap site (tool_execution._wrap_untrusted) trusts it.
         """
         from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
-        from agent_cascade.engine.cli_agent_runner import cli_agent_status, run_cli_agent
+        from agent_cascade.engine.cli_agent_runner import (
+            cli_agent_status, run_cli_agent, prepare_cli_agent_run, format_cli_result_message, CliAgentResult)
         import json
 
         # Status/introspection short-circuit: never spawns, ignores harness/task, returns a
@@ -278,6 +279,29 @@ class ToolDispatcher:
         # required=[]) does not trip the harness/task validation below.
         if resolved.get('status'):
             return json.dumps(cli_agent_status(self.pool), indent=2)
+
+        # Background-run control: a launched run addressed by tool_id. Routed BEFORE the
+        # harness/task validation because control calls carry no harness — the verb travels in
+        # 'task' (__status / __kill). Results are returned to the dispatcher and trust-wrapped
+        # there, so the tracker's get_status/kill_task deliberately do NOT wrap them.
+        tool_id = resolved.get('tool_id')
+        if tool_id is not None:
+            tracker = getattr(self.pool, '_cli_agent_tracker', None)
+            if tracker is None:
+                return 'Error: no background call_cli_agent runs are available to control.'
+            try:
+                tid = int(tool_id)
+            except (TypeError, ValueError):
+                return "Error: 'tool_id' must be an integer Tool ID from a launched run."
+            verb = (resolved.get('task') or '').strip().lower()
+            if verb == '__kill':
+                res = tracker.kill_task(instance.instance_name, tid)
+                return res if res is not None else f"Shell kill requested for tool_id {tid}."
+            if verb == '__status':
+                res = tracker.get_status(instance.instance_name, tid)
+                return res if res is not None else f"Status requested for tool_id {tid}."
+            return ("Guidance: when 'tool_id' is set, 'task' must be '__status' (check status/output) "
+                    "or '__kill' (terminate the run). To launch a new run, omit 'tool_id'.")
 
         harness = resolved.get('harness')
         task = resolved.get('task')
@@ -330,6 +354,49 @@ class ToolDispatcher:
                 description=f"Run external CLI '{harness}' one-shot in workspace '{ws_path}'.")
             if not approved:
                 return f"User denied call_cli_agent: {reason}"
+
+        # 7. Async launch: run the shared post-gate prep, then hand to the background tracker.
+        #    The gates above (registry/nesting/workspace/posture/timeout/preflight/approval)
+        #    have already been evaluated synchronously, so async and sync share identical
+        #    authorization. Only the actual spawn differs (background vs. blocking).
+        execution_mode = resolved.get('execution_mode') or 'sync'
+        if execution_mode == 'async':
+            tracker = getattr(self.pool, '_cli_agent_tracker', None)
+            if tracker is None:
+                return 'Error: async execution is unavailable (no cli agent tracker on this pool).'
+            try:
+                prepared = prepare_cli_agent_run(adapter=adapter, harness=harness, task=task,
+                                                 workspace=ws_path, permission_posture=posture,
+                                                 pool=self.pool, caller_name=instance.instance_name,
+                                                 model=resolved.get('model'))
+            except HarnessNotFoundError as e:  # preflight race / direct-runner edge
+                return f"Error: {e}"
+            except Exception as e:  # noqa: BLE001
+                logger.exception('call_cli_agent async prepare failed for %s', harness)
+                return f"Error: call_cli_agent ({harness}) failed to prepare: {e}"
+            if prepared.early_result is not None:  # decided without spawning (e.g. harness disabled)
+                return format_cli_result_message(harness, prepared.early_result)
+            try:
+                tool_id, pid, completed_early, rc, log_path, early_out = tracker.launch(
+                    agent_name=instance.instance_name, docker_cmd=prepared.docker_cmd,
+                    container_name=prepared.container_name, clean_env=prepared.clean_env,
+                    timeout=timeout, caller_name=instance.instance_name, harness=harness,
+                    requested_posture=posture, cap=prepared.cap)
+            except ValueError as e:  # per-agent async-run cap reached (inherited launch guard)
+                return f"Error: {e}"
+            except Exception as e:  # noqa: BLE001
+                logger.exception('call_cli_agent async launch failed for %s', harness)
+                return f"Error: call_cli_agent ({harness}) failed to launch: {e}"
+            if completed_early:  # finished inside the launch poll window — deliver inline
+                result = CliAgentResult(stdout='\n'.join(early_out or []), stderr='',
+                                        exit_code=rc if rc is not None else 0, timed_out=False,
+                                        log_path=log_path, requested_posture=posture)
+                return format_cli_result_message(harness, result)
+            return (f"⟨call_cli_agent launched⟩ Tool ID: {tool_id}\n"
+                    f"harness={harness} PID={pid or 'pending'} — running in the background "
+                    f"(completion-only, no heartbeats).\n"
+                    f"Check: call_cli_agent(execution_mode=\"async\", tool_id={tool_id}, task=\"__status\"). "
+                    f"Kill: same with task=\"__kill\".")
 
         # 8-10. Spawn one-shot, capture, persist, return (runner owns timeout/teardown).
         try:

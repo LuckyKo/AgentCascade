@@ -243,4 +243,8 @@ class MessageQueueMixin:
         if hasattr(self, '_async_shell_tracker') and self._async_shell_tracker:
             if self._async_shell_tracker.has_active_tasks(instance_name):
                 return True
+        # Also check background call_cli_agent runs (docker one-shot containers).
+        if hasattr(self, '_cli_agent_tracker') and self._cli_agent_tracker:
+            if self._cli_agent_tracker.has_active_tasks(instance_name):
+                return True
         return False

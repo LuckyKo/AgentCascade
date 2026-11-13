@@ -231,6 +231,11 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── Async Shell Infrastructure (background shell_cmd support) ────────
         from agent_cascade.async_shell import AsyncShellTracker
         self._async_shell_tracker = AsyncShellTracker(pool=self)
+        # Background (async) execution for call_cli_agent: a SEPARATE tracker instance so its
+        # tool_id namespace is isolated from shell_cmd's, and docker-kill teardown + completion-only
+        # notification apply only to CLI runs.
+        from agent_cascade.async_shell_pkg import CliAgentTracker
+        self._cli_agent_tracker = CliAgentTracker(pool=self)
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()  # M3 fix: stopped flag for emergency shutdown

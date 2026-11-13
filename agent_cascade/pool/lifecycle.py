@@ -297,6 +297,15 @@ class LifecycleMixin:
             except Exception as e:
                 logger.debug(f"Killing async shells for {instance_name} failed (non-critical): {e}")
 
+        # Kill all background call_cli_agent containers for this agent
+        if hasattr(self, '_cli_agent_tracker'):
+            try:
+                killed = self._cli_agent_tracker.kill_all(instance_name)
+                if killed:
+                    logger.debug(f"Killed {killed} call_cli_agent run(s) for {instance_name}")
+            except Exception as e:
+                logger.debug(f"Killing background call_cli_agent runs for {instance_name} failed (non-critical): {e}")
+
         # Clear message queue to prevent stale messages from being processed
         with self._queue_lock:
             if instance_name in self.message_queues:
