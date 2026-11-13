@@ -139,8 +139,9 @@ class ToolDispatcher:
         """Effective call_cli_agent wall-clock timeout (seconds), shared by the DMS marker (bound) and
         the handler (enforced timeout) so the two can never drift. Mirrors the original `or` semantics:
         a falsy/omitted 'timeout' falls back to settings.cli_agent_timeout. Returns (value, ok); ok is
-        False only when a present, non-falsy 'timeout' is non-numeric (the value then falls back to the
-        settings default — the handler rejects the call; the marker just uses value as a safe bound)."""
+        False when a present, non-falsy 'timeout' is non-numeric OR ints to a value < 1 (the value then
+        falls back to the settings default — the handler rejects the call; the marker just uses value as
+        a safe bound)."""
         default = getattr(self.pool.settings, 'cli_agent_timeout', 1800)
         raw = resolved.get('timeout') or default
         try:
