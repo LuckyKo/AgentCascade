@@ -914,7 +914,7 @@ TOOL_METADATA = {
                     'string',
                 'enum': ['sync', 'async'],
                 'description':
-                    '"sync" (default) blocks and returns the CLI output inline. "async" launches the container in the background and returns immediately with a Tool ID; the completion is delivered later, and you can check it with call_cli_agent(tool_id=N, execution_mode="async", task="__status") or kill it with task="__kill". Async runs notify on completion only (no heartbeats).'
+                    '"async" (default) launches the container in the background and returns immediately with a Tool ID; the completion is delivered later, and you can check it with call_cli_agent(tool_id=N, execution_mode="async", task="__status") or kill it with task="__kill". "sync" blocks and returns the CLI output inline (pass it to run in the foreground). Async runs notify on completion only (no heartbeats).'
             },
             'tool_id': {
                 'type':

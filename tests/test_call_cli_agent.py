@@ -144,7 +144,8 @@ class TestDispatchSkipsSlot:
         dispatcher = ToolDispatcher(pool)
         engine = MagicMock()
         engine._resolve_placeholders.return_value = {
-            'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws'}
+            'harness': 'claude_code', 'task': 'do it', 'workspace': '/resolved/ws',
+            'execution_mode': 'sync'}
         engine._cache_tool_args = MagicMock()
         dispatcher.set_engine(engine)
         dispatcher._run_child_sync = MagicMock(return_value='SYNC_ROUTED')
@@ -156,7 +157,8 @@ class TestDispatchSkipsSlot:
         inst = _make_instance('Maine')
         pool.instances['Maine'] = inst
         out = dispatcher.execute_tool(inst, 'call_cli_agent',
-                                      {'harness': 'claude_code', 'task': 'do it'}, [],
+                                      {'harness': 'claude_code', 'task': 'do it',
+                                       'execution_mode': 'sync'}, [],
                                       function_id='1')
 
         runner.assert_called_once()  # went through the dedicated handler
@@ -180,7 +182,8 @@ class TestResultShape:
         dispatcher, _ = _make_handler(
             pool, monkeypatch, runner_result=_fake_result(exit_code=3, stdout='boom'))
         out = dispatcher.handle_call_cli_agent(
-            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
+            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws',
+             'execution_mode': 'sync'},
             pool.get_instance('Maine'))
         assert 'exit=3' in out
 
@@ -189,7 +192,8 @@ class TestResultShape:
         dispatcher, _ = _make_handler(
             pool, monkeypatch, runner_result=_fake_result(timed_out=True))
         out = dispatcher.handle_call_cli_agent(
-            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
+            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws',
+             'execution_mode': 'sync'},
             pool.get_instance('Maine'))
         assert 'timed_out=True' in out
 
@@ -211,6 +215,29 @@ class TestResultShape:
         msg = cli_agent_runner.format_cli_result_message('claude_code', result)
         assert '=== STDOUT ===\nshort output' in msg
         assert 'chars omitted' not in msg
+
+    def test_omitting_execution_mode_defaults_to_async(self, monkeypatch):
+        # Default is async: omitting execution_mode must route to the background tracker
+        # (a Tool ID is returned) and NOT call the sync runner.
+        pool = FakePool(instances={'Maine': _make_instance('Maine')})
+        pool._cli_agent_tracker = MagicMock()
+        pool._cli_agent_tracker.launch.return_value = (7, 4321, False, None, '/logs/x.jsonl', [])
+        dispatcher, runner_spy = _make_handler(pool, monkeypatch)
+        prepared = MagicMock()
+        prepared.early_result = None
+        prepared.docker_cmd = ['docker', 'run']
+        prepared.container_name = 'c'
+        prepared.clean_env = {}
+        prepared.cap = 2
+        # prepare_cli_agent_run is imported inside handle_call_cli_agent, so patch the source.
+        monkeypatch.setattr(cli_agent_runner, 'prepare_cli_agent_run', lambda **kw: prepared)
+        out = dispatcher.handle_call_cli_agent(
+            {'harness': 'claude_code', 'task': 't', 'workspace': '/resolved/ws'},
+            pool.get_instance('Maine'))
+        assert 'Tool ID: 7' in out
+        assert 'running in the background' in out
+        pool._cli_agent_tracker.launch.assert_called_once()
+        runner_spy.assert_not_called()  # the sync runner must not be touched
 
 
 # ──────────────────────────────────────────────────────────────────────────────

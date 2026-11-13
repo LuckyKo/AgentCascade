@@ -374,7 +374,10 @@ class ToolDispatcher:
         #    The gates above (registry/nesting/workspace/posture/timeout/preflight/approval)
         #    have already been evaluated synchronously, so async and sync share identical
         #    authorization. Only the actual spawn differs (background vs. blocking).
-        execution_mode = resolved.get('execution_mode') or 'sync'
+        #    Default is async: external CLIs are background-friendly, so a launch returns a
+        #    Tool ID immediately and the completion is auto-delivered (pass execution_mode="sync"
+        #    to block inline).
+        execution_mode = resolved.get('execution_mode') or 'async'
         if execution_mode == 'async':
             tracker = getattr(self.pool, '_cli_agent_tracker', None)
             if tracker is None:
