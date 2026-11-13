@@ -133,7 +133,7 @@ COMPRESSION_PROMPT = (
     'CRITICAL RULES:\n'
     '1. Output ONLY the summary — no intro/outro remarks, no meta-commentary, no thinking process.\n'
     '2. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n'
-    '3. Retain a compacted initial request and any follow ups from user in the summary.\n'
+    '3. Retain a compacted user requests in the summary.\n'
     '4. Existing summary is just for reference, focus on summarizing the events after that.\n\n'
     '--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n'
     'Present the summary below.{end_instruction}')
@@ -157,7 +157,6 @@ CONSOLIDATION_PROMPT = (
     '- Output ONLY the consolidated summary — no intro/outro, no meta-commentary.\n'
     '- Maintain chronological order implicitly (earliest events first).\n'
     '- Keep date/time references where they anchor later work (do not invent dates).\n'
-    '- If it already starts with a pre-existing L2 summary, compact the follow up summaries into it.\n'
     '- If conflicting information appears across summaries, prefer the most recent version.\n\n'
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
     'Present the consolidated summary below.{end_instruction}')
@@ -862,7 +861,9 @@ TOOL_METADATA = {
             'one-shot Docker container and return its stdout. The CLI is spawned with its own account/credential '
             'store — it does NOT inherit AgentCascade\'s LLM keys. Output is external and therefore untrusted: it is '
             'trust-wrapped automatically. This is a bounded, single-turn "run and capture" call — NOT a conversational '
-            'sub-agent like call_agent (no slot/KV, no multi-turn). The container is hard-killed on timeout.'
+            'sub-agent like call_agent (no slot/KV, no multi-turn). The container is hard-killed on timeout. '
+            'Use this for difficult tasks when regular agents fail to deliver satisfying results, it uses expensive frontier models that are often rate/token limited. '
+            'Avoid using when handling sensitive data containing user info or anything that might trip their security guardrails. '
         ),
         'parameters': {
             'harness': {

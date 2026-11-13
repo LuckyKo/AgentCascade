@@ -7,7 +7,7 @@ triggers:
   - "project memory frontmatter"
   - "before delivering final result"
   - "memory line numbers stale"
-version: "2.0.0"
+version: 1.1.2
 ---
 
 # Project Memory Writing Guide
@@ -97,3 +97,4 @@ Root-cause analysis completed, architecture decision made, or non-obvious behavi
 - Negative findings are high-value memories and need their proof method recorded: "field X appears **zero** times in file.cpp (whole-file grep)" is re-checkable; "the format does not support X" is not.
 - Link a memory to the report file it feeds, so the full analysis is reachable from the atomic fact and vice versa.
 - `status:` and `confidence:` are orthogonal: a memory can be `status: active` + `confidence: deprecated` (the fact was true but is now outdated, still hinted so agents know) or `status: superseded` + `confidence: verified` (the fact was solid, but a better memory replaced it, de-indexed).
+- **Vault frontmatter is NOT strict-YAML on purpose.** `related:`/`superseded_by:`/`supersedes:` use Obsidian `[[...]]` backlinks, and the schema's inline `#` comments are also not strict-YAML; both fail `yaml.safe_load` but the AC memory indexer parses them correctly. If a self-check `yaml.safe_load` on a memory file raises a parse error pointing at a `[[...]]` or `#`-comment line, that is the **existing** vault syntax, not a defect you introduced — do NOT quote/escape it to "fix" it, which breaks the indexer's link extraction. Compare against an unmodified backup to confirm the offending line pre-exists your edit, and validate only the lines YOU added (e.g. a new `contributors:` block) for well-formedness.
