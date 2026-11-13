@@ -953,6 +953,32 @@ class RunLoopMixin:
                 f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}"
             )
 
+        self._finalize_state_transition(instance, preserve)
+
+
+    def _finalize_state_transition(self, instance, preserve: bool) -> None:
+        """Move the instance to IDLE/SLEEPING at the end of a run (shared-state tail of _run_finalize).
+
+        BUG_0308 (fix B) generation gate: a DMS-wedged root's engine thread can be left abandoned
+        while parked inside a blocking tool (``terminate_instance`` abandons it un-joined — BUG_0244)
+        and reach run finalization only AFTER the instance was terminated and re-armed by a FRESH run.
+        That fresh run bumped ``pool._run_generation`` (run_agent_unified.py bumps it before a fresh
+        run reaches re-arm — "signal old threads they've been superseded... exit when it changes") and
+        now OWNS the instance. If this thread's generation no longer matches the pool's, writing
+        IDLE/SLEEPING here would clobber the live run's RUNNING state and let a later message start a
+        genuinely concurrent run through the ``_run_preflight`` L1 guard. A superseded thread must never
+        mutate shared run state — exactly the contract ``_is_terminal_stop`` already enforces for the run
+        body. Inert otherwise: a fresh ExecutionEngine is built per invocation (runner.py) so a live
+        run's generation always matches. Terminate does not bump generation, so an abandoned terminated
+        thread's own finalize stays gen-match; and the Stop handler force-transitions active instances to
+        IDLE BEFORE bumping generation, so on the Stop path the instance is already IDLE and the
+        transition is a no-op in both old and new code. Byte-identical for normal, terminated, and Stop
+        runs.
+        """
+        if self._my_generation != self.pool._run_generation:
+            logger.debug('EXIT - %s: superseded (gen %s != %s); leaving shared state to the live run',
+                         instance.instance_name, self._my_generation, self.pool._run_generation)
+            return
         with instance._state_lock:
             current_state = instance.state
             if current_state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):

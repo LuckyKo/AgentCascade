@@ -39,6 +39,12 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
     while the instance is already IDLE. Acceptable because re-arm only fires on a
     user-initiated run with no in-flight thread for that instance.
 
+    BUG_0308 exception to the above: a DMS wedge-termination (``_terminated_reason`` carrying the
+    ``dms-wedge:`` marker) can leave its engine.run() thread parked (abandoned un-joined), so this
+    helper re-arms such a reason ONLY when ``_in_blocking_tool is None`` (the parked thread has
+    unwound). While it is still parked the re-arm is deferred (returns False); a later user message
+    retries. Loop-detector reasons and reason-less terminations are unaffected by this gate.
+
     Args:
         pool: The AgentPool (provides ``get_instance``, ``terminated_instances``,
             ``_pool_lock``).
@@ -66,6 +72,32 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
     # Only loop-terminations are recoverable; dismissals/teardowns/Stop leave this unset.
     reason = getattr(inst, '_terminated_reason', None)
     if not isinstance(reason, str) or not reason:
+        return False
+
+    # BUG_0308: a DMS wedge-termination records a recoverable reason, but the wedged root's
+    # engine.run() thread may still be PARKED inside its blocking tool (terminate_instance abandons
+    # it WITHOUT joining — BUG_0244). Re-arming TERMINATED->IDLE while that thread lives re-introduces
+    # the double-transition / orphaned-permit race the precondition above exists to prevent.
+    #
+    # QUIESCENCE GATE (defense-in-depth): a wedge reason re-arms only once the parked thread has
+    # unwound. The dispatch-boundary `finally` (tool_dispatcher.py) sets _in_blocking_tool=None on
+    # unwind, so None proves the thread is no longer stuck in the blocking primitive.
+    #
+    # The DURABLE protection is elsewhere and does NOT rely on is_instance_terminated (which this
+    # re-arm itself clears below): a fresh run bumped pool._run_generation BEFORE reaching this re-arm
+    # (run_agent_unified.py bumps _run_generation; fresh ExecutionEngine per call at runner.py), so the stale thread
+    # is generation-superseded and _finalize_state_transition (run_loop.py) refuses to let it touch the
+    # live run's shared state. The two gates are complementary: quiescence defers re-arm while the
+    # thread is parked; the generation gate closes the residual window where the marker is already
+    # cleared but the thread has not yet finalized. A reason-LESS termination (Stop/dismissal) already
+    # returned above, so the "TERMINATED stays dead" contract is unchanged. A genuinely forever-stuck
+    # thread correctly stays dead (reviving it would double-run).
+    from agent_cascade.pool.idle_manager import is_dms_wedge_reason
+    if is_dms_wedge_reason(reason) and getattr(inst, '_in_blocking_tool', None) is not None:
+        logger.warning(
+            f"[REARM] '{instance_name}' wedge re-arm DEFERRED: parked thread still in blocking tool "
+            f"(origin={origin}); will re-arm once it unwinds."
+        )
         return False
 
     # Per-instance lock first, released BEFORE the pool lock (never nested — Gotcha 3).

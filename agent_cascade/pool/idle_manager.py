@@ -53,6 +53,27 @@ def _blocking_tool_bound(tool_name):
     return None
 
 
+def _resolve_wedge_marker(inst):
+    """Return ``(tool_name, start_mono, resolved_bound)`` for a well-formed ``_in_blocking_tool``
+    marker, or ``None`` when there is no usable marker.
+
+    SINGLE SOURCE for the marker decode + bound resolution. Both ``_marker_shield_state`` (the
+    shield/past decision) and the BUG_0308 wedge-reason builder in ``_run_holder_dms`` go through
+    here so the two callers can never disagree on which bound was in effect for a wedged marker.
+    Resolution mirrors the historical behaviour: ``carried_bound`` wins when present, else the
+    tool's registered bound (``None`` when the tool declares none → the marker maps to 'past').
+    """
+    if inst is None:
+        return None
+    marker = getattr(inst, '_in_blocking_tool', None)
+    if not (isinstance(marker, tuple) and len(marker) >= 2):
+        return None
+    tool_name, start_mono = marker[0], marker[1]
+    carried_bound = marker[2] if len(marker) > 2 else None
+    bound = carried_bound if carried_bound is not None else _blocking_tool_bound(tool_name)
+    return tool_name, start_mono, bound
+
+
 def _marker_shield_state(inst, now) -> str:
     """Return 'none' | 'shielded' | 'past' for the instance's ``_in_blocking_tool`` marker.
 
@@ -71,17 +92,48 @@ def _marker_shield_state(inst, now) -> str:
                      maps to 'past' (NO shield) — fail safe toward termination, exactly the old
                      ``bound is not None and start_mono is not None`` short-circuit.
     """
-    if inst is None:
+    resolved = _resolve_wedge_marker(inst)
+    if resolved is None:
         return 'none'
-    marker = getattr(inst, '_in_blocking_tool', None)
-    if not (isinstance(marker, tuple) and len(marker) >= 2):
-        return 'none'
-    tool_name, start_mono = marker[0], marker[1]
-    carried_bound = marker[2] if len(marker) > 2 else None
-    bound = carried_bound if carried_bound is not None else _blocking_tool_bound(tool_name)
+    _tool_name, start_mono, bound = resolved
     if bound is None or start_mono is None:
         return 'past'  # no resolvable bound → no shield, fail safe toward termination
     return 'shielded' if (now - start_mono) < bound else 'past'
+
+
+#: Marker prefix for a recoverable DMS wedge-termination reason (BUG_0308). Deliberately distinct
+#: from the loop-detector format (``engine/llm_call.py::_build_loop_termination_reason`` →
+#: "exhausted loop-recovery budget …; pattern: …"), so neither ``child_runner._termination_reason``
+#: nor the re-arm helper can mislabel a wedge as a loop-termination. The re-arm helper keys its
+#: parked-thread quiescence gate on this prefix via ``is_dms_wedge_reason``.
+_DMS_WEDGE_REASON_PREFIX = 'dms-wedge:'
+
+
+def _build_dms_wedge_reason(name: str, tool_name, bound) -> str:
+    """Machine-readable reason written to ``inst._terminated_reason`` when the holder-DMS ROOT pass
+    terminates a wedged ROOT (BUG_0308).
+
+    Makes a DMS wedge-termination recoverable: ``utils/termination_recovery.rearm_terminated_instance``
+    re-arms any root carrying a non-empty ``_terminated_reason``, so without this marker a wedge kill
+    leaves the pool permanently IDLE (the only re-arm path is reason-gated). The format is distinguishable
+    from the loop-detector reason (see ``_DMS_WEDGE_REASON_PREFIX``) and is consumed ONCE by the re-arm
+    helper (which clears it). ``bound`` may be ``None`` (a tool that declared no bound); the text records
+    that honestly.
+    """
+    bound_txt = f'past bound {bound:g}s' if isinstance(bound, (int, float)) else 'with no resolvable bound'
+    return (
+        f'{_DMS_WEDGE_REASON_PREFIX} root {name!r} wedged in tool {tool_name!r} '
+        f'with no turn-progress {bound_txt} (recoverable)'
+    )
+
+
+def is_dms_wedge_reason(reason) -> bool:
+    """True iff ``reason`` was produced by ``_build_dms_wedge_reason``.
+
+    Single source of the prefix so consumers (the re-arm helper) never hard-code the marker string and
+    drift from the producer.
+    """
+    return isinstance(reason, str) and reason.startswith(_DMS_WEDGE_REASON_PREFIX)
 
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids circular import of core.py
@@ -312,6 +364,10 @@ class IdleManager:
                 return
 
         to_terminate = []
+        # Provenance for BUG_0308 fix B: name -> inst for ROOT-pass wedges only. The act loop tags
+        # only these with the recoverable wedge reason; holder-pass names (already in to_terminate) are
+        # excluded, so holders keep the existing child_runner/dismissal recovery path unchanged.
+        root_wedges: dict = {}
 
         # ── Holder pass: conc=0 / capacity==1 slot holders resolved from the scheduler's pool
         # registry. Needs api_router → scheduler → _pools; a missing scheduler merely SKIPS this
@@ -352,9 +408,23 @@ class IdleManager:
                 continue
             if self._is_wedged_root(name, inst, now, window, pending_names):
                 to_terminate.append(name)
+                root_wedges[name] = inst  # BUG_0308: tag recoverable reason at act time
 
         # ── Act only after ALL reads are done and NO locks are held (plan §3.3 MAJOR). ──
         for name in to_terminate:
+            # BUG_0308 (fix B): a wedged ROOT gets a machine-readable recoverable reason IMMEDIATELY
+            # before terminate_instance, so the user-message re-arm (utils/termination_recovery) can
+            # rescue it instead of leaving the pool permanently IDLE. The marker is read here (no locks
+            # held — same discipline as terminate) via the shared _resolve_wedge_marker, so it reflects
+            # the same decode as guard #7; if the parked thread unwinds in between, the reason degrades
+            # to 'no resolvable bound' (harmless, diagnostic only). Holders are not in root_wedges, so
+            # this is inert for holder terminations.
+            wedge_inst = root_wedges.get(name)
+            if wedge_inst is not None:
+                resolved = _resolve_wedge_marker(wedge_inst)
+                tool_name = resolved[0] if resolved else '?'
+                bound = resolved[2] if resolved else None
+                wedge_inst._terminated_reason = _build_dms_wedge_reason(name, tool_name, bound)
             logger.warning(f"[holder_dms] Terminating wedged instance '{name}': no turn-progress "
                            f"(last_activity) for >= {window:.0f}s while not in a bounded operation.")
             try:
