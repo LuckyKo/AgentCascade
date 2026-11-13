@@ -290,6 +290,18 @@ class TestModelPlumbing:
         assert with_model == base  # model_flag None -> byte-identical
         assert '--model' not in with_model
 
+    def test_antigravity_prompt_attached_via_equals_and_last(self):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        ad = get_adapter('antigravity')
+        cmd = ad.build_launch_cmd(task='do the thing', workspace='/w', posture='acceptEdits')
+        # agy's -p is greedy: the prompt MUST be attached via '=' and be the final token, with
+        # --mode placed before it (a bare '-p <task>' would swallow --mode as the prompt value).
+        assert cmd[0] == 'agy'
+        assert cmd[-1] == '-p=do the thing'
+        assert '-p' not in cmd[:-1]  # no bare -p flag anywhere in the argv
+        assert cmd.index('--mode') < cmd.index('-p=do the thing')
+        assert 'do the thing' not in cmd[:-1]  # prompt only appears in the -p= token
+
 
 # ── dispatcher: status short-circuits and never spawns ──────────────────────────
 

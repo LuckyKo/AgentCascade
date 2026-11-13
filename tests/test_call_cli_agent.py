@@ -522,11 +522,16 @@ class TestAdapterArgv:
 
     def test_antigravity_argv(self):
         cmd = AntigravityAdapter().build_launch_cmd(task='add tests', workspace='/ws', posture='acceptEdits')
-        assert cmd == ['agy', '-p', '--mode', 'accept-edits', '--output-format', 'text',
-                       '--print-timeout', '600', 'add tests']
+        # agy's -p is greedy: prompt attached via '=' and placed last, --mode before it.
+        assert cmd == ['agy', '--mode', 'accept-edits', '--output-format', 'text',
+                       '--print-timeout', '600', '-p=add tests']
 
     def test_leading_dash_task_guarded(self):
-        # The flag-injection guard is shared by all adapters — assert it for every one.
-        for adapter in (ClaudeCodeAdapter(), OpencodeAdapter(), AntigravityAdapter()):
+        # The flag-injection guard is shared by the positional-task adapters — assert it there.
+        for adapter in (ClaudeCodeAdapter(), OpencodeAdapter()):
             cmd = adapter.build_launch_cmd(task='-r', workspace='/ws', posture='acceptEdits')
             assert '--' in cmd and cmd[-1] == '-r', f'{adapter.harness}: guard missing'
+        # antigravity attaches the prompt to -p via '=' (a value, not a flag), so a leading-dash
+        # task is inherently guarded; a '--' separator would be wrong there.
+        agy = AntigravityAdapter().build_launch_cmd(task='-r', workspace='/ws', posture='acceptEdits')
+        assert agy[-1] == '-p=-r' and '--' not in agy

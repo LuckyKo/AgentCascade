@@ -27,7 +27,7 @@ import shutil
 from typing import Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
-    append_task_guarded, resolve_posture_flags, strip_ac_credentials)
+    resolve_posture_flags, strip_ac_credentials)
 
 
 class AntigravityAdapter:
@@ -57,21 +57,23 @@ class AntigravityAdapter:
 
     def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
                          model: Optional[str] = None) -> list[str]:
-        """Build the one-shot argv: ``agy -p [--mode accept-edits] --print-timeout N -- <task>``.
+        """Build the one-shot argv: ``agy [--mode accept-edits] --output-format text --print-timeout N -p=<task>``.
 
-        ``workspace`` is unused here — set by the runner's ``docker run -w``. The task is a
-        single positional token guarded with ``--`` via the shared ``append_task_guarded``.
-        ``model`` is accepted for protocol parity but never emitted (``model_flag`` is None —
-        agy has no documented model flag), so a requested model is silently ignored (byte-safe).
+        ``workspace`` is unused here — set by the runner's ``docker run -w``. The prompt is
+        attached to ``-p`` via ``=`` and placed LAST because agy's ``-p`` is greedy: a bare
+        ``-p <task>`` would let it consume the following flag (e.g. ``--mode``) as its prompt
+        value (agy 1.5.3, verified live). ``model`` is accepted for protocol parity but never
+        emitted (``model_flag`` is None — agy has no documented model flag), so a requested model
+        is silently ignored (byte-safe).
         """
         cmd = [
-            self.binary, '-p', *resolve_posture_flags(self._POSTURE_FLAGS, posture),
+            self.binary, *resolve_posture_flags(self._POSTURE_FLAGS, posture),
             '--output-format', self.output_format,
             '--print-timeout', str(self._PRINT_TIMEOUT_SEC),
         ]
         if model and self.model_flag:
             cmd += [self.model_flag, model]
-        append_task_guarded(cmd, task)
+        cmd += [f'-p={task}']
         return cmd
 
     def child_env(self, base_env: dict[str, str]) -> dict[str, str]:
