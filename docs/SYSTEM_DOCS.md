@@ -1202,17 +1202,18 @@ Clients handle both types transparently — full snapshots replace the current v
 
 ### Source Style & Guards
 
-`web_ui/*.js` is **space-indented with 2 spaces** — a single style file-wide, because a
-tab-indented region makes the indent unit ambiguous at any edit site: a line-only insertion
-can then re-base a neighbouring block's leading whitespace and land whitespace-only
-`+`/`-` pairs in an otherwise additive diff. That ambiguity is invisible to
-`node --check` / `syntax_check` (JS parses identically regardless of leading whitespace).
+`web_ui/*.js` (the browser bundle) and `tests/*.js` (the node regression harnesses that
+extract fragments of it) are **space-indented with 2 spaces** — a single style per file,
+because a tab-indented region makes the indent unit ambiguous at any edit site: a
+line-only insertion can then re-base a neighbouring block's leading whitespace and land
+whitespace-only `+`/`-` pairs in an otherwise additive diff. That ambiguity is invisible
+to `node --check` / `syntax_check` (JS parses identically regardless of leading whitespace).
 
 | Layer | File | Role |
 |-------|------|------|
-| Editor hint | `.editorconfig` | `indent_style = space`, 2 for `web_ui/*.js` (4 for `*.py`) |
+| Editor hint | `.editorconfig` | `indent_style = space`, 2 for `web_ui/*.js` + `tests/*.js` (4 for `*.py`) |
 | Pre-commit | `scripts/check_js_indentation.py` | Fails the commit on any tab-indented line |
-| Test (CI) | `tests/test_web_ui_indentation.py` | Same analyzer applied to every `web_ui/*.js` |
+| Test (CI) | `tests/test_js_indentation.py` | Same analyzer applied to every guarded `*.js` |
 
 Both entry points import the shared analyzer `tests/_js_indent_check.py`, so the rule has a
 single implementation.

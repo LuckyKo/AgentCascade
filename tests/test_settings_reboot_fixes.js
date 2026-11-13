@@ -60,13 +60,13 @@ function extractFunction(name) {
   throw new Error(`Unbalanced braces for ${name}`);
 }
 
-	const MAP_SRC = extractConstArray('POOL_SETTINGS_MAP');
-	const SYNC_SRC = extractFunction('syncPoolSettings');
-	const GETCFG_SRC = extractFunction('getGenerateCfg');
-	const SAVE_SRC = extractFunction('saveSettings');
-	const LOADSRC = extractFunction('loadSettings');
-	const LOADUIPREFS_SRC = extractFunction('loadUiPrefs');
-	const SAVEUIPREFS_SRC = extractFunction('saveUiPrefs');
+const MAP_SRC = extractConstArray('POOL_SETTINGS_MAP');
+const SYNC_SRC = extractFunction('syncPoolSettings');
+const GETCFG_SRC = extractFunction('getGenerateCfg');
+const SAVE_SRC = extractFunction('saveSettings');
+const LOADSRC = extractFunction('loadSettings');
+const LOADUIPREFS_SRC = extractFunction('loadUiPrefs');
+const SAVEUIPREFS_SRC = extractFunction('saveUiPrefs');
 
 // ── Minimal DOM / browser stubs ───────────────────────────────────────────────
 function makeDom(ids) {
@@ -147,26 +147,26 @@ function buildSandbox({ dom, saveSettingsSpy }) {
     .map((id) => ({ input: dom.elements['#' + id] || null, output: null }))
     .filter((r) => r.input);
 
-	  sandbox.saveSettings = saveSettingsSpy || (() => {});
-	  const ctx = vm.createContext(sandbox);
-	  // UI_PREFS_KEY and UI_PREFS_ALLOWLIST are consts referenced by loadUiPrefs/saveUiPrefs.
-	  const UIPREFS_CONSTS = APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/s)
-	    ? APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/)[0] + '\n'
-	    : '';
-	  const ALLOWLIST_MATCH = APP_JS.match(/const UI_PREFS_ALLOWLIST\s*=\s*new Set\(\[([^\]]*)\]\)/s);
-	  const ALLOWLIST_SRC = ALLOWLIST_MATCH
-	    ? `const UI_PREFS_ALLOWLIST = new Set([${ALLOWLIST_MATCH[1]}]);`
-	    : 'const UI_PREFS_ALLOWLIST = new Set();';
-	  vm.runInContext(UIPREFS_CONSTS + '\n' + ALLOWLIST_SRC, ctx, { filename: 'ui_prefs_consts.js' });
-	  vm.runInContext(MAP_SRC, ctx, { filename: 'POOL_SETTINGS_MAP.js' });
-	  vm.runInContext(SYNC_SRC, ctx, { filename: 'syncPoolSettings.js' });
-	  vm.runInContext(GETCFG_SRC, ctx, { filename: 'getGenerateCfg.js' });
-	  vm.runInContext(LOADUIPREFS_SRC, ctx, { filename: 'loadUiPrefs.js' });
-	  vm.runInContext(SAVEUIPREFS_SRC, ctx, { filename: 'saveUiPrefs.js' });
-	  vm.runInContext(SAVE_SRC, ctx, { filename: 'saveSettings.js' });
-	  vm.runInContext(LOADSRC, ctx, { filename: 'loadSettings.js' });
-	  return { sandbox, ctx, localStorageData };
-	}
+  sandbox.saveSettings = saveSettingsSpy || (() => {});
+  const ctx = vm.createContext(sandbox);
+  // UI_PREFS_KEY and UI_PREFS_ALLOWLIST are consts referenced by loadUiPrefs/saveUiPrefs.
+  const UIPREFS_CONSTS = APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/s)
+    ? APP_JS.match(/const UI_PREFS_KEY\s*=\s*'[^']+'/)[0] + '\n'
+    : '';
+  const ALLOWLIST_MATCH = APP_JS.match(/const UI_PREFS_ALLOWLIST\s*=\s*new Set\(\[([^\]]*)\]\)/s);
+  const ALLOWLIST_SRC = ALLOWLIST_MATCH
+    ? `const UI_PREFS_ALLOWLIST = new Set([${ALLOWLIST_MATCH[1]}]);`
+    : 'const UI_PREFS_ALLOWLIST = new Set();';
+  vm.runInContext(UIPREFS_CONSTS + '\n' + ALLOWLIST_SRC, ctx, { filename: 'ui_prefs_consts.js' });
+  vm.runInContext(MAP_SRC, ctx, { filename: 'POOL_SETTINGS_MAP.js' });
+  vm.runInContext(SYNC_SRC, ctx, { filename: 'syncPoolSettings.js' });
+  vm.runInContext(GETCFG_SRC, ctx, { filename: 'getGenerateCfg.js' });
+  vm.runInContext(LOADUIPREFS_SRC, ctx, { filename: 'loadUiPrefs.js' });
+  vm.runInContext(SAVEUIPREFS_SRC, ctx, { filename: 'saveUiPrefs.js' });
+  vm.runInContext(SAVE_SRC, ctx, { filename: 'saveSettings.js' });
+  vm.runInContext(LOADSRC, ctx, { filename: 'loadSettings.js' });
+  return { sandbox, ctx, localStorageData };
+}
 
 // The element ids referenced by getGenerateCfg for the 7 LLM-gen params (FIX 5).
 const GEN_PARAM_IDS = [
@@ -174,7 +174,7 @@ const GEN_PARAM_IDS = [
   '#setting-repeat-penalty', '#setting-presence-penalty', '#setting-frequency-penalty',
 ];
 
-	// ── Test 2: the max-rollbacks entry maps to the key getGenerateCfg/saveSettings write ─
+// ── Test 2: the max-rollbacks entry maps to the key getGenerateCfg/saveSettings write ─
 test('FIX 2a: #setting-max-rollbacks maps to the underscore key getGenerateCfg/saveSettings write', () => {
   const domAll = makeDom([]);
   const { ctx } = buildSandbox({ dom: domAll, saveSettingsSpy: () => {} });
@@ -231,16 +231,16 @@ test('FIX 2b/3: server value applies to #setting-max-rollbacks when no local pre
   );
 });
 
-	// ── Test 5: the max-rollbacks control reaches the server as a cfg delta ─
-	test('FIX 2b: getGenerateCfg builds cfg.max_auto_rollbacks from #setting-max-rollbacks', () => {
-	  // Source invariant: the DOM value is read into the cfg object that saveSettings forwards
-	  // through queueSettingChange. Server-backed keys never reach the ui-prefs store, so there
-	  // is no s['max_auto_rollbacks'] localStorage write anymore.
-	  assert(GETCFG_SRC.includes("cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar"),
+// ── Test 5: the max-rollbacks control reaches the server as a cfg delta ─
+test('FIX 2b: getGenerateCfg builds cfg.max_auto_rollbacks from #setting-max-rollbacks', () => {
+  // Source invariant: the DOM value is read into the cfg object that saveSettings forwards
+  // through queueSettingChange. Server-backed keys never reach the ui-prefs store, so there
+  // is no s['max_auto_rollbacks'] localStorage write anymore.
+  assert(GETCFG_SRC.includes("cfg.max_auto_rollbacks = Number.isNaN(_mar) ? 3 : _mar"),
     'getGenerateCfg() must build cfg.max_auto_rollbacks from #setting-max-rollbacks');
-	  assert(GETCFG_SRC.includes('#setting-max-rollbacks'),
+  assert(GETCFG_SRC.includes('#setting-max-rollbacks'),
     'getGenerateCfg() must read from #setting-max-rollbacks');
-	});
+});
 
 // ── Test 6: getGenerateCfg empty #setting-max-rollbacks → 3 (not NaN/null) ─
 test('FIX 3: getGenerateCfg empty #setting-max-rollbacks → max_auto_rollbacks === 3', () => {
@@ -353,15 +353,15 @@ test('FIX 4: loadSettings does not assign null into range sliders / max_tokens /
 });
 
 // ── Test 11: loadSettings still restores VALID numeric values (no over-correction) ─
-	test('FIX 4: loadSettings reads class-D keys from agent-cascade-ui-prefs (not the old blob)', () => {
-	  // Source invariant: loadSettings must call loadUiPrefs (the ui-prefs reader),
-	  // and must NOT reference the legacy agent-cascade-settings blob.
-	  assert(LOADSRC.includes('loadUiPrefs'),
-	    'loadSettings must call loadUiPrefs() for class-D keys');
-	  assert(!LOADSRC.includes("agent-cascade-settings"),
-	    'loadSettings must NOT read from the legacy agent-cascade-settings blob');
-	  // loadUiPrefs must exist and be callable (extracted and in the VM).
-	  const { ctx } = buildSandbox({ dom: makeDom([]), saveSettingsSpy: () => {} });
-	  const prefs = vm.runInContext('loadUiPrefs()', ctx);
-	  assert(prefs && typeof prefs === 'object', 'loadUiPrefs() must return an object');
-	});
+test('FIX 4: loadSettings reads class-D keys from agent-cascade-ui-prefs (not the old blob)', () => {
+  // Source invariant: loadSettings must call loadUiPrefs (the ui-prefs reader),
+  // and must NOT reference the legacy agent-cascade-settings blob.
+  assert(LOADSRC.includes('loadUiPrefs'),
+    'loadSettings must call loadUiPrefs() for class-D keys');
+  assert(!LOADSRC.includes("agent-cascade-settings"),
+    'loadSettings must NOT read from the legacy agent-cascade-settings blob');
+  // loadUiPrefs must exist and be callable (extracted and in the VM).
+  const { ctx } = buildSandbox({ dom: makeDom([]), saveSettingsSpy: () => {} });
+  const prefs = vm.runInContext('loadUiPrefs()', ctx);
+  assert(prefs && typeof prefs === 'object', 'loadUiPrefs() must return an object');
+});

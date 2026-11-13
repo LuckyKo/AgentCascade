@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone CLI: flag tab-indented lines in the WebUI JavaScript bundle.
+"""Standalone CLI: flag tab-indented lines in the JS sources we edit.
 
 Usage:
-    python scripts/check_js_indentation.py                # scan web_ui/*.js
+    python scripts/check_js_indentation.py                # scan web_ui/*.js + tests/*.js
     python scripts/check_js_indentation.py <file|dir> ...  # scan explicit paths
 
 Exit codes:
@@ -10,10 +10,10 @@ Exit codes:
     1 = violations found
     2 = usage/IO error
 
-The WebUI bundle is space-indented (2 spaces, see .editorconfig). This reuses the
-same analyzer as tests/test_web_ui_indentation.py (single source of truth); it is
-also wired as a pre-commit hook so a tab-indented region cannot land in the first
-place.
+The browser bundle and its node regression harnesses are space-indented (2 spaces,
+see .editorconfig). This reuses the same analyzer as tests/test_js_indentation.py
+(single source of truth); it is also wired as a pre-commit hook so a tab-indented
+region cannot land in the first place.
 """
 
 import sys
@@ -25,7 +25,7 @@ _TESTS_DIR = _SCRIPT_DIR.parent / 'tests'
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from _js_indent_check import WEB_UI_DIR, find_js_files, find_tab_indented_lines  # noqa: E402
+from _js_indent_check import find_guarded_js_files, find_js_files, find_tab_indented_lines  # noqa: E402
 
 
 def _expand(paths):
@@ -45,7 +45,7 @@ def _expand(paths):
 
 def main(argv=None) -> int:
     paths = sys.argv[1:] if argv is None else argv
-    files = _expand(paths) if paths else find_js_files(WEB_UI_DIR)
+    files = _expand(paths) if paths else find_guarded_js_files()
     if files is None:
         return 2
     if not files:

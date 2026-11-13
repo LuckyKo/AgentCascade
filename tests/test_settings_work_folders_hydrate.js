@@ -264,7 +264,7 @@ test('syncPoolSettings skips the actively-focused textarea (no mid-edit stomp)',
     'focused textarea must not be overwritten by a server frame');
   assert.equal(dom.elements['#workAccessFoldersRO'].value, '/mnt/ro',
     'unfocused textarea must still be hydrated from the snapshot');
-	});
+});
 
 test('settings-applied (import_settings) broadcast updates work-folder controls without a page reload', () => {
   // The "load saved settings" (import_settings) broadcast applies the imported settings to the
