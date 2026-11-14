@@ -873,6 +873,36 @@ SKILL_PRECISION_K: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_K', '1
 # rare-but-correct skills that are rarely topical and so never accumulate enough hints).
 SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.35'))
 
+# ── Skill-hint Thompson-Sampling bandit (self-adapting value ranking) ──────────
+# A ranking-only layer that REPLACES Gate-4's precision demote re-rank when enabled,
+# at the same slot (memory_hint/manager.py). Default OFF (weight 0.0) ⇒ the existing
+# Gate-4 path runs ⇒ deploy-time behaviour is byte-identical to today; rollout is an
+# env-var A/B. See plans/skill-hint-self-adapting_DIG.md.
+# SKILL_BANDIT_WEIGHT: master toggle + modulation blend in [0,1]. 0.0 = OFF (default);
+#   1.0 = full Thompson-Sampling value re-rank; 0<W<1 ramps from raw order to full.
+#   The path is taken iff weight > 0.0 (a true predicate, not merely "is the setting set").
+#   NOTE: any weight > 0.0 turns on BOTH the value re-rank AND the bounded θ_min admission
+#   bar (which arms the fire-rate controller) — a small weight is NOT a "rank-only" mode;
+#   the bar still seeds at 0.0 (admit-all) and only drifts once the controller sees turns.
+SKILL_BANDIT_WEIGHT: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_WEIGHT', '0.0'))
+# SKILL_BANDIT_PRIOR_MASS: prior mass m₀ of the base-rate-centred informed prior
+#   Beta(m₀·p̄ + s, m₀·(1−p̄) + f). Small m₀ = aggressive dormancy exploration; large =
+#   conservative. p̄ is the running global action-rate learned from the ledger, so a
+#   dormant skill's posterior mean is p̄ (eligible) rather than 0.5 (which would mass-spam).
+SKILL_BANDIT_PRIOR_MASS: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_PRIOR_MASS', '3.0'))
+# SKILL_BANDIT_TARGET_FIRE: outcome target — the fraction of processed skill-hint turns
+#   that should render ≥1 skill. The in-memory controller drifts the admission bar θ_min
+#   to hold this; it is a target, not a hand-tuned threshold. 0.10 = fire on ~10% of turns.
+SKILL_BANDIT_TARGET_FIRE: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_TARGET_FIRE', '0.10'))
+# SKILL_BANDIT_GAIN: per-turn controller drift cap (η). Bounds how fast θ_min moves, which
+#   damps oscillation alongside the EWMA damping (SKILL_EWMA_ALPHA reused for the fire EWMA).
+SKILL_BANDIT_GAIN: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_GAIN', '0.02'))
+# SKILL_BANDIT_THETA_MAX: hard ceiling on the admission bar θ_min ∈ [0, θ_max]. Since θ_max
+#   < 1 and every skill's posterior mean is centred on p̄ > 0, mass-suppression is
+#   structurally impossible: the bar can never reach 1, so a candidate set is never all
+#   dropped by the bandit. 0.0 (the seed / safe state) = admit-all = rank-only identity.
+SKILL_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_THETA_MAX', '0.6'))
+
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

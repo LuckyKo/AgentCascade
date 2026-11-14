@@ -22,6 +22,7 @@ this path is swallowed (best-effort, logged at debug) — hints are non-critical
 """
 
 import queue
+import random
 import threading
 import time
 from pathlib import Path
@@ -32,7 +33,10 @@ from agent_cascade import settings
 from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_CALL,
                                     SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
                                     SKILL_PRECISION_WEIGHT, SKILL_PRECISION_K,
-                                    SKILL_PRECISION_FLOOR)
+                                    SKILL_PRECISION_FLOOR,
+                                    SKILL_BANDIT_WEIGHT, SKILL_BANDIT_PRIOR_MASS,
+                                    SKILL_BANDIT_TARGET_FIRE, SKILL_BANDIT_GAIN,
+                                    SKILL_BANDIT_THETA_MAX)
 
 from .matcher import MemoryMatcher
 from .skill_gate import describe_dropped, filter_stopword_only_names
@@ -187,6 +191,25 @@ skill_autoload_failed_by_reason: Dict[str, int] = {
 _AUTOLOAD_FAILURE_LOCK = threading.Lock()
 
 
+def _bandit_posterior(loads: int, hints: int, pbar: float, m0: float) -> tuple:
+    """Beta posterior ``(a, b)`` for a skill from its ledger pair (plan §2.1).
+
+    ``successes`` are CLIPPED to trials: ``s = min(loads, hints)``. This clip is mandatory —
+    ``total_loads`` is a SUPERSET of hint-driven loads (it also counts init AUTO + advisor +
+    explicit ``load_skill`` loads), so an unclipped ``hints - loads`` can go negative and
+    yield a malformed Beta with ``b < 0`` (observed on-disk: loads≈205 / hints=73).
+    With the clip ``b = m0·(1−p̄) + (hints − s) ≥ m0·(1−p̄) ≥ 0`` (degenerate ``b = 0`` only
+    when ``p̄ = 1.0`` and loads ≥ hints, where ``_sample_beta`` returns the posterior mean).
+
+    The prior is the base-rate-centred informed prior with mass ``m0``: a never-seen skill
+    (loads=hints=0) gets ``(m0·p̄, m0·(1−p̄))`` → posterior mean ``p̄`` (eligible), NOT 0.5,
+    which is what keeps dormancy from mass-spamming the head (plan §5.3).
+    """
+    s = loads if loads < hints else hints          # successes = min(L, H), clipped to trials
+    f = hints - s                                  # failures (≥ 0 by construction)
+    return (m0 * pbar + s, m0 * (1.0 - pbar) + f)
+
+
 class MemoryHintManager:
     """Owns the daemon worker, job queue, vault indexes and hint delivery."""
 
@@ -227,6 +250,15 @@ class MemoryHintManager:
         # threshold. In-memory only (re-seeds per process), exactly like the memory floor.
         self._skill_adaptive_floor = SKILL_FLOOR_SEED
         self._skill_floor_lock = threading.Lock()
+
+        # Self-adapting skill-hint bandit (Thompson Sampling) — IN-MEMORY ONLY, re-seeds
+        # per process, exactly like the skill EWMA floor above: never persisted, recomputed
+        # from the durable ledger on boot. These drive the value re-rank that replaces Gate-4.
+        self._skill_bandit_bar = 0.0            # θ_min admission bar; 0.0 = admit-all = safe seed
+        self._skill_fire_p = SKILL_BANDIT_TARGET_FIRE   # EWMA of fired-indicator, seeded at target
+        self._skill_bandit_pbar = None          # cached base-rate p̄; None = not yet derived
+        self._skill_bandit_lock = threading.Lock()
+        self._skill_bandit_rng = random.Random()        # per-instance sampler (drawn under the bandit lock)
 
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
@@ -563,6 +595,92 @@ class MemoryHintManager:
                 SKILL_EWMA_ALPHA * norm + (1.0 - SKILL_EWMA_ALPHA) * self._skill_adaptive_floor
             )
 
+    # ── Self-adapting skill-hint bandit (Thompson Sampling) ──────────────────
+    # Value ranking that replaces Gate-4's demote re-rank when SKILL_BANDIT_WEIGHT > 0.
+    # All state is in-memory only (like the floor above); all entry points are best-effort
+    # — any failure degrades to the raw score order, never blanks a hint, never raises into
+    # _process_job. The bandit is O(1)/skill over the ≤10 post-gate candidates; the only
+    # corpus-wide read (p̄) is derived once and cached, never re-scanned per turn (plan §9.2).
+
+    def _bandit_pbar(self, metrics: dict) -> float:
+        """Running global action-rate ``p̄ = Σ min(loads, hints) / Σ hints`` over the ledger.
+
+        Excludes the synthetic ``self-augmentation`` key (≈708 init-AUTO loads against ~4
+        hints would otherwise inflate the base rate) and skills with ``hints <= 0``. A cached
+        NON-ZERO base-rate is authoritative and returned verbatim — a single ledger scan, O(1)
+        on every later turn, which is what keeps per-turn bandit cost independent of corpus
+        size (plan §9.2). A 0.0 result (empty/cold/corrupt ledger) is NOT cached: the ledger
+        may simply not be loaded on the very first bandit-on turn, so we re-derive until a real
+        base-rate appears (plan §5.4) rather than permanently neutralising value ranking.
+        Scanning an empty ledger is trivial, so steady state stays O(1)/skill. Callers treat
+        ``p̄ ≤ ε`` as "no value signal" (neutral multiplier 1.0), so a cold corpus neither
+        crashes nor collapses.
+        """
+        with self._skill_bandit_lock:
+            cached = self._skill_bandit_pbar
+        if cached is not None and cached > 0.0:   # real base-rate → authoritative, no re-scan
+            return cached
+        num = den = 0
+        try:
+            for nm, entry in metrics.items():
+                if nm == 'self-augmentation' or not isinstance(entry, dict):
+                    continue
+                hints = int(entry.get('hints', 0) or 0)
+                if hints <= 0:
+                    continue
+                loads = int(entry.get('total_loads', 0) or 0)
+                num += loads if loads < hints else hints   # clip to trials, same as posterior
+                den += hints
+        except Exception as e:  # noqa: BLE001 — best-effort: unreadable ledger → neutral
+            logger.debug('[MEMORY_HINT] bandit p̄ derive failed: %s', e)
+            den = 0
+        pbar = (num / den) if den > 0 else 0.0
+        if pbar > 0.0:                             # lock in only a real base-rate; 0.0 re-derives
+            with self._skill_bandit_lock:
+                self._skill_bandit_pbar = pbar
+        return pbar
+
+    def _sample_beta(self, a: float, b: float) -> float:
+        """One ``Beta(a, b)`` draw via two ``Gamma(·, 1)`` samples. A degenerate side (a≤0 or
+        b≤0) returns the posterior mean so the sampler NEVER raises — the value signal is
+        best-effort; under the clip the posterior is well-formed (a, b ≥ 0), degenerate only
+        in the ``p̄ = 1.0`` edge. The two draws run under the bandit lock so the shared RNG
+        stays atomic when a harness drives the worker from multiple threads (CPython's
+        ``random.Random`` is not thread-safe)."""
+        if a <= 0.0 or b <= 0.0:
+            tot = a + b
+            return (a / tot) if tot > 0.0 else 0.0
+        with self._skill_bandit_lock:
+            x = self._skill_bandit_rng.gammavariate(a, 1.0)
+            y = self._skill_bandit_rng.gammavariate(b, 1.0)
+        tot = x + y
+        return (x / tot) if tot > 0.0 else (a / (a + b))
+
+    def _get_skill_bandit_bar(self) -> float:
+        """Thread-safe read of the admission bar θ_min (in-memory controller state)."""
+        with self._skill_bandit_lock:
+            return self._skill_bandit_bar
+
+    def _update_skill_fire_rate(self, fired: bool) -> None:
+        """Feed one processed skill-hint turn's fired-indicator to the fire-rate controller.
+
+        Drifts the admission bar θ_min toward holding ``SKILL_BANDIT_TARGET_FIRE`` (plan §6.3):
+        over-firing (fire EWMA > target) raises the bar (suppress more); under-firing lowers it
+        (admit more). θ_min is bounded to ``[0, θ_max]`` (θ_max < 1) so mass-suppression is
+        structurally impossible; θ_min = 0 (the seed) = admit-all = rank-only identity. Mirrors
+        the EWMA floor: in-memory only, re-seeds per process, never persisted. Best-effort.
+        """
+        try:
+            with self._skill_bandit_lock:
+                alpha = SKILL_EWMA_ALPHA        # reuse the floor's per-turn damping constant
+                self._skill_fire_p = (alpha * (1.0 if fired else 0.0)
+                                      + (1.0 - alpha) * self._skill_fire_p)
+                new_bar = (self._skill_bandit_bar
+                           + SKILL_BANDIT_GAIN * (self._skill_fire_p - SKILL_BANDIT_TARGET_FIRE))
+                self._skill_bandit_bar = max(0.0, min(SKILL_BANDIT_THETA_MAX, new_bar))
+        except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
+            logger.debug('[MEMORY_HINT] bandit fire-rate update failed: %s', e)
+
     # ── Worker loop ──────────────────────────────────────────────────────────
 
     def _run(self) -> None:
@@ -630,6 +748,14 @@ class MemoryHintManager:
 
         # ── Skill sub-pipeline (NEW independent gate; returns skill names) ──
         skill_names = self._match_skills_for_hint(job, settings, inst)
+
+        # Self-adapting bandit: feed THIS processed skill-hint turn's fired-indicator to the
+        # in-memory fire-rate controller, so the admission bar θ_min drifts to hold TARGET_FIRE.
+        # Sees the final skill result regardless of which upstream gate caused a skip. Runs ONLY
+        # when the bandit is on (default OFF ⇒ zero extra work, byte-identical to today). Best-
+        # effort inside _update_skill_fire_rate — it never raises into the hint path.
+        if SKILL_BANDIT_WEIGHT > 0.0:
+            self._update_skill_fire_rate(bool(skill_names))
 
         if not memory_bare and not skill_names:
             return
@@ -1023,20 +1149,85 @@ class MemoryHintManager:
             logger.debug('[MEMORY_HINT] %s: content gate left no skill hint', name)
             return []
 
-        # ── Gate 4: PRECISION re-rank (BUG_0189 #5) ──────────────────────────────
+        # ── Gate 4: VALUE re-rank — Thompson-Sampling bandit (primary) or
+        # precision demote (legacy fallback) ────────────────────────────────────
         # RANKING ONLY — the junk guard, adaptive floor, EWMA feed, noise denominator
         # and content gate above are byte-identical to the pre-fix behaviour (mirrors
-        # BUG_0226's "scorer untouched" precedent). Placed AFTER the content gate (so
-        # it sees only names that will actually render) and BEFORE the cap (so the
-        # survivors compete for the N slots on precision, not raw topicality):
-        #   w(s) = max(FLOOR, min(1.0, (loads+K)/(hints+K)))   # demote-only multiplier
-        #   sort to_hint by (score * w(s)) desc                # stable; ties keep order
-        # loads/hints come from the SAME durable store (agents/global/skills-metrics.json)
-        # via get_metrics(); missing fields read as 0, so a fresh store, an unavailable
-        # ledger, or a MagicMock pool yields w==1.0 and no suppression ⇒ byte-identical
-        # to the pre-fix score-descending order. Precision off ⇒ to_hint untouched by
-        # construction (see settings.py). A demoted skill is never buried below FLOOR.
-        if SKILL_PRECISION_WEIGHT:
+        # BUG_0226's "scorer untouched" precedent). Placed AFTER the content gate (so it
+        # sees only names that will actually render) and BEFORE the cap, so survivors
+        # compete for the N slots on VALUE, not raw topicality. Exactly one branch runs:
+        #   • bandit (SKILL_BANDIT_WEIGHT > 0.0): Thompson Sampling value re-rank with a
+        #     bounded θ_min admission bar (default OFF; see _bandit_pbar / _sample_beta).
+        #   • precision (SKILL_PRECISION_WEIGHT): the legacy BUG_0189 #5 demote re-rank,
+        #     preserved VERBATIM below, so default behaviour is byte-identical to today.
+        # Both share the best-effort get_metrics() guard: metrics unavailable / mock /
+        # malformed ⇒ no re-rank (raw score order), never raise, never blank the hint.
+        if SKILL_BANDIT_WEIGHT > 0.0:
+            # ── Thompson-Sampling value re-rank (self-adapting) ──
+            # Per candidate: posterior Beta(m0·p̄ + s, m0·(1−p̄) + f) with s = min(loads, hints)
+            # CLIPPED to trials (total_loads is a superset → unclipped β can go negative —
+            # enforced in _bandit_posterior). Draw θ once, modulate relevance by a base-rate-
+            # centred multiplier M(θ) = clamp(θ/p̄, M_FLOOR, 1/M_FLOOR), blend by W = min(1,
+            # weight), admit only θ ≥ θ_min (θ_min = 0 ⇒ admit-all ⇒ rank-only identity).
+            # O(1)/skill over ≤10; p̄ cached; corpus-size-independent. self-augmentation is
+            # never value-ranked (synthetic key). If every candidate is admitted-out, keep the
+            # raw order — the hint is never blanked by the bandit.
+            try:
+                metrics = sm.get_metrics()
+            except Exception as e:                         # never break the memory path
+                logger.debug('[MEMORY_HINT] %s: bandit metrics unavailable: %s', name, e)
+                metrics = {}
+            if not isinstance(metrics, dict):              # mock / exotic double → no-op
+                metrics = {}
+            scores = {n: s for n, s in strong}             # to_hint ⊆ strong
+            pbar = self._bandit_pbar(metrics)
+            try:
+                theta_min = self._get_skill_bandit_bar()
+            except Exception:                              # best-effort: admit-all on bar-read failure
+                theta_min = 0.0
+            m0 = SKILL_BANDIT_PRIOR_MASS
+            m_floor = SKILL_PRECISION_FLOOR                # reuse demote floor (0.35) — demote-only
+            m_max = 1.0 / m_floor if m_floor > 0.0 else 1.0  # promote band mirrors demote band
+            w = min(1.0, max(0.0, SKILL_BANDIT_WEIGHT))    # 0 ⇒ raw order, 1 ⇒ full TS re-rank
+
+            def _bandit_effective(nm):
+                if nm == 'self-augmentation':              # synthetic key: neutral, never value-ranked
+                    return scores.get(nm, 0.0)
+                rel = scores.get(nm, 0.0)
+                if pbar <= 1e-9:                           # cold start / empty ledger → no value signal
+                    return rel
+                entry = metrics.get(nm)
+                if not isinstance(entry, dict):            # corrupt/mock ROW → prior (0, 0)
+                    entry = {}
+                try:
+                    loads = int(entry.get('total_loads', 0) or 0)
+                    hints = int(entry.get('hints', 0) or 0)
+                except (TypeError, ValueError):            # malformed field → prior (0, 0)
+                    loads = hints = 0
+                a, b = _bandit_posterior(loads, hints, pbar, m0)
+                try:
+                    theta = self._sample_beta(a, b)
+                except Exception:                          # sampler failure → posterior mean (no raise)
+                    theta = (a / (a + b)) if (a + b) > 0.0 else pbar
+                if theta_min > 0.0 and theta < theta_min:  # bounded bar (θ_min=0 ⇒ admit-all)
+                    return None
+                mult = theta / pbar
+                if mult < m_floor:
+                    mult = m_floor
+                elif mult > m_max:
+                    mult = m_max
+                return rel * (1.0 + w * (mult - 1.0))      # blend: W=0 raw, W=1 ⇒ plan §2.2
+
+            admitted = []
+            for nm in to_hint:
+                eff = _bandit_effective(nm)
+                if eff is None:                            # below admission bar → skip candidate
+                    continue
+                admitted.append((nm, eff))
+            if admitted:                                   # all filtered ⇒ keep raw order (never blank)
+                admitted.sort(key=lambda t: t[1], reverse=True)
+                to_hint = [nm for nm, _eff in admitted]
+        elif SKILL_PRECISION_WEIGHT:                       # legacy Gate-4 fallback (default today)
             try:
                 metrics = sm.get_metrics()
             except Exception as e:                         # plan §D6 — never break the memory path
