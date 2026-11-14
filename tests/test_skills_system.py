@@ -4157,9 +4157,9 @@ class TestGetAllMetadataDisabledResurface:
     walking the whole corpus via _servable_skill_names() first. These pin the plan §1.5b
     edge-case contract: what gets re-surfaced, and what must stay skipped."""
 
-    def test_disabled_skill_with_servable_file_is_resurfaced(self):
+    def test_disabled_skill_with_servable_file_is_resurfaced(self, tmp_path):
         """Case 1: disabled + file present + absent from registry → re-surfaced with metadata."""
-        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case1')
+        m = make_hermetic_skill_manager(tmp_path)
         root = Path(m._pending_dir).parent / 'skills'
         _write_skill_file(root, 'alpha', version='2.3.4')
         m._cache_ttl = 0.0
@@ -4177,9 +4177,9 @@ class TestGetAllMetadataDisabledResurface:
         assert entry['version'] == '2.3.4'
         assert entry['description']  # frontmatter was re-parsed from disk
 
-    def test_disabled_skill_with_deleted_file_is_skipped(self):
+    def test_disabled_skill_with_deleted_file_is_skipped(self, tmp_path):
         """Case 2: disabled + SKILL.md DELETED → skipped gracefully, no exception."""
-        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case2')
+        m = make_hermetic_skill_manager(tmp_path)
         root = Path(m._pending_dir).parent / 'skills'
         path = _write_skill_file(root, 'beta')
         m._cache_ttl = 0.0
@@ -4193,10 +4193,10 @@ class TestGetAllMetadataDisabledResurface:
         metas = m.get_all_metadata(include_active_only=False)  # must not raise
         assert 'beta' not in [x['name'] for x in metas]
 
-    def test_on_disk_not_disabled_not_resurfaced(self):
+    def test_on_disk_not_disabled_not_resurfaced(self, tmp_path):
         """Case 3: on disk, NOT disabled, absent from registry → NOT re-surfaced here.
         Active skills come from the registry branch; the disabled loop must not leak them."""
-        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case3')
+        m = make_hermetic_skill_manager(tmp_path)
         root = Path(m._pending_dir).parent / 'skills'
         _write_skill_file(root, 'gamma')
         # Simulate a registry-absent but undisabled skill: drop it from the registry after
@@ -4209,9 +4209,9 @@ class TestGetAllMetadataDisabledResurface:
         metas = m.get_all_metadata(include_active_only=False)
         assert 'gamma' not in [x['name'] for x in metas]
 
-    def test_disabled_name_case_mismatch_still_resurfaced(self):
+    def test_disabled_name_case_mismatch_still_resurfaced(self, tmp_path):
         """Case 4: _disabled_names holds a different case → lowercased comparison still matches."""
-        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case4')
+        m = make_hermetic_skill_manager(tmp_path)
         root = Path(m._pending_dir).parent / 'skills'
         _write_skill_file(root, 'delta')
         m._cache_ttl = 0.0
@@ -4223,9 +4223,9 @@ class TestGetAllMetadataDisabledResurface:
         metas = m.get_all_metadata(include_active_only=False)
         assert 'delta' in [x['name'] for x in metas]
 
-    def test_disabled_and_still_in_registry_not_duplicated(self):
+    def test_disabled_and_still_in_registry_not_duplicated(self, tmp_path):
         """Case 7: disabled AND still in registry → surfaced exactly once (registry branch)."""
-        m = make_hermetic_skill_manager(Path(__file__).parent / '_tmp_p_case7')
+        m = make_hermetic_skill_manager(tmp_path)
         root = Path(m._pending_dir).parent / 'skills'
         _write_skill_file(root, 'epsilon')
         m._cache_ttl = 0.0
