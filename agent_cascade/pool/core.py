@@ -312,7 +312,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # defaults). Guarantees migration on first 1.3-aware startup; manual re-runs go
         # through POST /api/skills/migrate. Never blocks pool init.
         try:
-            self.skill_manager._migrate_metrics_to_v13()
+            with boot_timing.Phase('migrate_metrics_v13'):
+                self.skill_manager._migrate_metrics_to_v13()
         except Exception as e:  # noqa: BLE001 — never block pool init on the migration
             logger.warning(f"Skill metrics migration to schema 1.3 failed (non-critical): {e}")
 
