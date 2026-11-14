@@ -20,6 +20,22 @@ from agent_cascade.llm.base import ModelServiceError
 from agent_cascade.retry_policy import classify_error
 from agent_cascade.utils.streaming import watch_stream
 
+# Fakes below intentionally block forever to exercise the watchdog. They leave the daemon
+# watch_stream-reader parked inside OUR own next() — production cannot interrupt a blocked
+# read (see streaming.py docstring). By the time a test finishes its pytest.raises the
+# watchdog has already tripped, so releasing these events lets the reader unwind and
+# reclaim the thread instead of leaking across the run (BUG_0318 D1). Assertions run before
+# teardown, so coverage is unchanged.
+_BLOCKING_STREAMS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _release_blocking_streams():
+    yield
+    for ev in _BLOCKING_STREAMS:
+        ev.set()
+    _BLOCKING_STREAMS.clear()
+
 
 # ---------------------------------------------------------------------------
 # Hermetic fakes
@@ -37,6 +53,7 @@ class _StallingIter:
         self.n = n
         self.delay = delay
         self._never_set = threading.Event()
+        _BLOCKING_STREAMS.append(self._never_set)
 
     def __iter__(self):
         for i in range(self.n):
@@ -78,6 +95,7 @@ class _EndlessSlowIter:
     def __init__(self, interval):
         self.interval = interval
         self._stop = threading.Event()
+        _BLOCKING_STREAMS.append(self._stop)
 
     def __iter__(self):
         i = 0
@@ -215,6 +233,7 @@ class _StallingResp:
     def __init__(self, chunks=1):
         self.chunks = chunks
         self._never = threading.Event()
+        _BLOCKING_STREAMS.append(self._never)
 
     def _iter_events(self):
         for _ in range(self.chunks):

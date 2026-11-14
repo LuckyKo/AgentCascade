@@ -525,6 +525,54 @@ def _stop_real_agent_pools():
                         pass
 
 
+@pytest.fixture(autouse=True)
+def _stop_real_memory_hint_managers():
+    """Stop every real MemoryHintManager constructed during this test.
+
+    `_stop_real_agent_pools` above only reaches managers that live on a real AgentPool,
+    because that pool's .stopped setter is what calls manager.stop(). Managers built
+    directly against a MagicMock pool — e.g. tests/memory_hint/test_memory_hint_e2e.py
+    (:155-158) — leak their daemon 'memory-hint-worker', since a fake pool never signals
+    shutdown. This mirrors that fixture at the manager level: capture instances via
+    __init__, then on teardown stop() (enqueues the exit sentinel the worker observes in
+    its 0.5s get()) + a bounded join so the worker is reclaimed before the next test.
+    Mirrors the sentinel double-stop safety: stop() is safe to call twice. Best-effort and
+    bounded — it must never fail or hang a test.
+    """
+    import threading
+
+    created: list = []
+    try:
+        from agent_cascade.memory_hint.manager import MemoryHintManager
+    except Exception:
+        # Manager not importable in this worker — nothing to clean up; no-op fixture.
+        yield
+        return
+
+    original_init = MemoryHintManager.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    MemoryHintManager.__init__ = _tracking_init
+    try:
+        yield
+    finally:
+        MemoryHintManager.__init__ = original_init
+        for mgr in created:
+            try:
+                mgr.stop()  # sentinel → worker breaks out of _run within its 0.5s poll
+            except Exception:
+                pass
+            worker = getattr(mgr, '_worker', None)
+            if isinstance(worker, threading.Thread) and worker.is_alive():
+                try:
+                    worker.join(timeout=2.0)
+                except Exception:
+                    pass
+
+
 # ---------------------------------------------------------------------------
 # Diagnostic: per-test live-thread counter (gated by AC_TRACE_HANDLES=1)
 # ---------------------------------------------------------------------------
@@ -676,6 +724,27 @@ def pytest_runtest_logreport(report):
         pass  # instrumentation must never break a test run
 
 
+# Threads legitimately alive at session end — created once, never accumulate, or are
+# transient per-test timers. Anything NOT matching these is reported as a possible leak
+# by the soft-warn guard in pytest_sessionfinish below. Deliberately NOT allowlisted:
+# accumulating background threads this guard is meant to catch (watch_stream-reader,
+# memory-hint-worker, IdleAgentChecker, skill-rebalance, skill-candidate-eval,
+# state-restore_*).
+_THREAD_LEAK_GUARD_ALLOW = frozenset({'MainThread', 'code-interpreter-watchdog'})
+_THREAD_LEAK_GUARD_ALLOW_PREFIXES = ('pytest_timeout',)
+
+
+def _thread_leak_guard_counts():
+    """Counter of non-allowlisted live thread names (the leak report). Best-effort."""
+    import threading
+    from collections import Counter
+    return Counter(
+        t.name for t in threading.enumerate()
+        if t.name not in _THREAD_LEAK_GUARD_ALLOW
+        and not t.name.startswith(_THREAD_LEAK_GUARD_ALLOW_PREFIXES)
+    )
+
+
 def pytest_sessionfinish(session, exitstatus):
     """One-line thread summary so any run's log carries peak + dominant names."""
     state = _thread_leak_state
@@ -698,6 +767,30 @@ def pytest_sessionfinish(session, exitstatus):
         except Exception:
             pass
         print('\n' + summary)
+    except Exception:
+        pass
+
+    # BUG_0318 D1 — leak visibility guard. Records leaked non-allowlisted threads and
+    # soft-warns at session end so a thread-leak regression is visible in any run's log.
+    # Best-effort BY DESIGN: it MUST NOT hard-fail (a hard-fail would make the guard
+    # itself a flake source); promoting it to a real gate is a later follow-up.
+    try:
+        counts = _thread_leak_guard_counts()
+        leaked_total = sum(counts.values())
+        if leaked_total:
+            leaked_str = ', '.join(f"{name}x{n}" for name, n in counts.most_common(8))
+            guard_line = (f"[thread-leak-GUARD] leaked_threads={leaked_total} "
+                          f"top=[{leaked_str}]")
+            log_path = _thread_leak_log_path()
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_path, 'a', buffering=1) as f:
+                    f.write(guard_line + '\n')
+            except Exception:
+                pass
+            import logging
+            logging.warning(guard_line)
+            print('\n' + guard_line)
     except Exception:
         pass
 

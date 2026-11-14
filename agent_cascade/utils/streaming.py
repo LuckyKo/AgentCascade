@@ -48,12 +48,12 @@ def watch_stream(
          The pre-first-item (TTFB) window is governed by the total limit alone, so slow
          reasoning models can still take a long time to produce their first token.
 
-    Residual risk (documented, accepted): on a watchdog trip or a forwarded exception,
-    the reader thread may remain blocked in its socket read until the transport-level
-    ``AGENT_CASCADE_HTTP_READ_TIMEOUT`` fires (or the server closes the connection).
-    It may also be parked in a blocking ``q.put`` if the consumer stops draining (backpressure).
-    Either way the thread is a daemon, so it never blocks process exit; the leak is bounded by
-    concurrent stalled streams.
+    Residual risk (documented): on a watchdog trip or forwarded exception the reader may
+    still be blocked inside the underlying iterator's ``next()`` until the transport-level
+    ``AGENT_CASCADE_HTTP_READ_TIMEOUT`` fires (or the server closes the connection) — a
+    blocked read cannot be interrupted from here. It can NO LONGER be parked indefinitely
+    in ``q.put`` once the consumer stops draining: ``_closed`` is set and the reader
+    abandons its pending put (BUG_0318 D1). Such daemon threads never block process exit.
 
     Args:
         stream: The underlying iterator to wrap.
@@ -70,51 +70,76 @@ def watch_stream(
     """
     prefix = f"{error_message_prefix}: " if error_message_prefix else ''
     q: queue.Queue = queue.Queue(maxsize=1)
+    # _closed is set by the consumer (generator finally) the moment it stops draining —
+    # normal end, watchdog trip, forwarded error, or generator close/GC. The reader polls
+    # it so an ORPHANED reader never parks forever on a full queue: the documented BUG_0026
+    # "residual risk" (thread held until the socket read-timeout) is cut short (BUG_0318 D1).
+    # threading.Event.set() is idempotent + thread-safe, so there is no double-stop hazard.
+    _closed = threading.Event()
+    _PUT_POLL = 0.1  # max block before re-checking _closed on a backpressured put
+
+    def _put(item) -> None:
+        # Backpressure put that yields to abandonment: delivers as soon as the queue has
+        # room (immediate for a draining consumer → zero added latency on the hot path),
+        # and gives up once the consumer has stopped, so the daemon reader can exit.
+        while not _closed.is_set():
+            try:
+                q.put(item, timeout=_PUT_POLL)
+                return
+            except queue.Full:
+                continue
 
     def _reader():
         try:
             for item in stream:
-                q.put(item)                       # blocking put = backpressure
+                _put(item)
+                if _closed.is_set():       # consumer stopped while we still had items
+                    return
         except BaseException as exc:              # noqa: BLE001 - must forward everything
-            q.put(_Err(exc))
+            _put(_Err(exc))
         finally:
-            q.put(_SENTINEL)                      # blocking: ALWAYS delivered, never dropped
+            _put(_SENTINEL)                       # skipped only if consumer already gone
 
     threading.Thread(target=_reader, daemon=True, name='watch_stream-reader').start()
 
     stream_start = time.monotonic()
     last_item_time = None
-    while True:
-        now = time.monotonic()
-        total_left = max_total_seconds - (now - stream_start)
-        # Before the first item only the TOTAL limit applies (TTFB exemption).
-        budget = total_left if last_item_time is None else min(max_silence_seconds, total_left)
-        try:
-            item = q.get(timeout=max(budget, 0.01))
-        except queue.Empty:
-            is_total = last_item_time is None or total_left <= max_silence_seconds
-            kind = 'total' if is_total else 'silence'
-            limit = max_total_seconds if is_total else max_silence_seconds
-            silence = (now - last_item_time) if last_item_time is not None else (now - stream_start)
-            # Drain any pending error BEFORE raising the stall: the reader may have put an
-            # _Err into the queue moments before the timeout fired (e.g. a transport error
-            # arriving at the same instant the watchdog budget expired). Without this, the
-            # original exception is silently lost and the caller sees a generic retryable
-            # stream_stalled instead of the real cause.
+    try:
+        while True:
+            now = time.monotonic()
+            total_left = max_total_seconds - (now - stream_start)
+            # Before the first item only the TOTAL limit applies (TTFB exemption).
+            budget = total_left if last_item_time is None else min(max_silence_seconds, total_left)
             try:
-                pending = q.get_nowait()
-                if isinstance(pending, _Err):
-                    raise pending.exc
+                item = q.get(timeout=max(budget, 0.01))
             except queue.Empty:
-                pass
-            raise StreamStalledError(
-                f"{prefix}stream_stalled: no data for {silence:.1f}s ({kind} limit={limit:.1f}s)")
-        # Dispatch order is load-bearing: _Err BEFORE _SENTINEL. The reader's finally
-        # enqueues the sentinel AFTER an error, so checking the sentinel first would
-        # report a clean end-of-stream on a failed stream.
-        if isinstance(item, _Err):
-            raise item.exc
-        if item is _SENTINEL:
-            return
-        last_item_time = time.monotonic()
-        yield item
+                is_total = last_item_time is None or total_left <= max_silence_seconds
+                kind = 'total' if is_total else 'silence'
+                limit = max_total_seconds if is_total else max_silence_seconds
+                silence = (now - last_item_time) if last_item_time is not None else (now - stream_start)
+                # Drain any pending error BEFORE raising the stall: the reader may have put an
+                # _Err into the queue moments before the timeout fired (e.g. a transport error
+                # arriving at the same instant the watchdog budget expired). Without this, the
+                # original exception is silently lost and the caller sees a generic retryable
+                # stream_stalled instead of the real cause.
+                try:
+                    pending = q.get_nowait()
+                    if isinstance(pending, _Err):
+                        raise pending.exc
+                except queue.Empty:
+                    pass
+                raise StreamStalledError(
+                    f"{prefix}stream_stalled: no data for {silence:.1f}s ({kind} limit={limit:.1f}s)")
+            # Dispatch order is load-bearing: _Err BEFORE _SENTINEL. The reader's finally
+            # enqueues the sentinel AFTER an error, so checking the sentinel first would
+            # report a clean end-of-stream on a failed stream.
+            if isinstance(item, _Err):
+                raise item.exc
+            if item is _SENTINEL:
+                return
+            last_item_time = time.monotonic()
+            yield item
+    finally:
+        # Any exit path (normal end, watchdog trip, forwarded error, generator close/GC)
+        # signals the reader to stop its backpressured put so it can exit promptly.
+        _closed.set()
