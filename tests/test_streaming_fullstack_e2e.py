@@ -1337,9 +1337,11 @@ def _assert_message_stack_sync(frontend_messages, pool, instance_name):
 def test_fullstack_streaming(fullstack_server):
     """Drive the full real stack and assert incremental streaming per turn + loop cycle.
 
-    Runs in the default (xdist) suite. The mock LLM is a real HTTP server on localhost and
-    the fixture is module-scoped, so the in-process state (emit/request logs) is shared with
-    this test within a single xdist worker — no cross-worker boundary is crossed.
+    EXCLUDED from the default run (the `fullstack_e2e` marker is deselected in `pytest.ini`);
+    run it explicitly, single-process only. The mock LLM is a real HTTP server on localhost and
+    the fixture is module-scoped, so in-process state (emit/request logs) is shared within one
+    process. A fixed AC-server port (default 8123) plus module-scope `os.environ` writes make it
+    unsafe under `-n auto` (port collision + env leakage into sibling tests) — xdist is disallowed.
 
     CAVEAT: this is a live-server, multi-turn streaming E2E test whose capture window is
     derived from wall-clock chunk timing (~114s at the defaults). Under parallel load it is
