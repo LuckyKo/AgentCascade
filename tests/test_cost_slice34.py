@@ -250,11 +250,14 @@ def _slice4_call(inst, telemetry):
 
 def test_system_info_budget_block_present_when_configured():
     inst = _SIInst('me', _current_turn=3, max_turns=50, token_budget=100000, budget_unit='tokens')
-    telem = _FakeTelemetry(totals={'me': 42190}, cost={'me': 0.012345})
+    # total >> generated: the block must read the completion-only view (the same
+    # signal the tokens-mode budget uses), never the prompt-inclusive total.
+    telem = _FakeTelemetry(totals={'me': 200000}, generated={'me': 42190}, cost={'me': 0.012345})
     out = _slice4_call(inst, telem)
 
     assert 'Budget / Cost:' in out
-    assert 'consumed: 42,190 tokens' in out
+    assert 'generated: 42,190 tokens' in out
+    assert 'consumed:' not in out
     assert 'budget: 100,000 tokens (budget_unit=tokens)' in out
     assert 'remaining: 57,810 tokens' in out
     assert 'cost: $0.012345' in out
@@ -262,11 +265,11 @@ def test_system_info_budget_block_present_when_configured():
 
 def test_system_info_budget_block_priced_only_no_remaining():
     inst = _SIInst('me', _current_turn=2, max_turns=50, token_budget=0)
-    telem = _FakeTelemetry(totals={'me': 700}, cost={'me': 0.001})
+    telem = _FakeTelemetry(totals={'me': 5000}, generated={'me': 700}, cost={'me': 0.001})
     out = _slice4_call(inst, telem)
 
     assert 'Budget / Cost:' in out
-    assert 'consumed: 700 tokens' in out
+    assert 'generated: 700 tokens' in out
     assert 'cost: $0.001' in out
     # No token budget -> no budget/remaining lines.
     assert 'budget:' not in out

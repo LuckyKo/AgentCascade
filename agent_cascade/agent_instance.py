@@ -272,16 +272,16 @@ class AgentInstance:
     is_terminated: bool = False  # Set when terminate_instance() is called on this instance (Fix Bug41)
     restricted_shell: bool = False  # Set True in _create_system_agent; shell_cmd hard-rejects non-read-only commands (no user approval for system agents)
     max_turns: Optional[int] = None  # Per-instance turn limit (None = use default 50)
-    # Cost/token-budget Slice 2: additive per-instance budget on TOTAL (prompt+
-    # completion) tokens. 0 = disabled (default OFF) so turns-mode is unchanged. Set by
-    # call_agent (gated on enable_agent_budgeting) and read by run_loop tokens mode.
+    # Cost/token-budget Slice 2: additive per-instance budget on GENERATED
+    # (completion-only) tokens. 0 = disabled (default OFF) so turns-mode is unchanged.
+    # Set by call_agent (gated on enable_agent_budgeting) and read by run_loop tokens mode.
     token_budget: int = 0
     budget_unit: str = 'turns'  # 'turns' | 'tokens'; carried for child budget mode display/intent
     # Cost/token-budget Slice 2 runtime state: set by run_loop only when token_budget > 0.
     # Declared as fields so AgentInstance's __slots__ accepts them (slotted dataclass);
     # default OFF → turns-mode path is byte-identical when token_budget == 0.
     _token_budget: int = 0  # Effective token budget for the current run (resolved value)
-    _token_baseline: int = 0  # Session token accumulator at run start (per-run baseline)
+    _token_baseline: int = 0  # Generated-token accumulator at run start (per-run baseline)
     _token_warned_50: bool = False  # 50% token warning already emitted this run
     _token_warned_90: bool = False  # 90% token warning already emitted this run
     _token_final_fired: bool = False  # Final token-budget cut already fired this run

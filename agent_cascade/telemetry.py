@@ -159,20 +159,21 @@ class TelemetryCollector:
         # Additive: session-global llm_cache_hits/misses are unchanged.
         self._cache_stats: Dict[str, Dict] = {}
 
-        # Per-instance TOTAL-token accumulator (cost/token-budget Slice 2).
+        # Per-instance token accumulators (cost/token-budget Slice 2).
         # Session-lifetime, keyed by instance name; updated at the single
         # record_llm_call_end choke point (under _telemetry_lock). Backs the
-        # tokens-mode budget warnings (run_loop) and the per-instance "budget
-        # consumed" reads that Slices 3 & 4 use. TOTAL (prompt+completion) —
-        # distinct from the per-class `tokens_generated` counter, which is
-        # completion-only. Each value tracks:
-        #   total_tokens : prompt+completion consumed, summed session-lifetime
-        #                  over every call (prompt is the server ground-truth
-        #                  once classified, else the char estimate)
-        #   cost         : Σ tokens_to_cost over CACHE-CLASSIFIED priced calls,
-        #                  accumulated with the identical usage tuple + gate as
-        #                  session_cost, so get_instance_cost ties out with it
-        #   priced       : True once any cache-classified priced call was seen
+        # tokens-mode budget warnings (run_loop, GENERATED view) and the
+        # per-instance reads that Slices 3 & 4 use. Each value tracks:
+        #   total_tokens     : prompt+completion consumed, summed session-lifetime
+        #                      over every call (prompt is the server ground-truth
+        #                      once classified, else the char estimate) — the
+        #                      context/throughput view, NOT the budget unit
+        #   generated_tokens : completion-only, same calls — the tokens-mode BUDGET
+        #                      unit (mirrors the per-class `tokens_generated`)
+        #   cost             : Σ tokens_to_cost over CACHE-CLASSIFIED priced calls,
+        #                      accumulated with the identical usage tuple + gate as
+        #                      session_cost, so get_instance_cost ties out with it
+        #   priced           : True once any cache-classified priced call was seen
         self._instance_usage: Dict[str, Dict[str, float]] = {}
 
         # Per-agent-class aggregates for the "Agent Class Usage" table.
@@ -1006,12 +1007,15 @@ class TelemetryCollector:
             if not call.get('cache_classified'):
                 self._session_stats['llm_cache_unknown'] += 1
 
-            # ── Per-instance TOTAL-token accumulator (Slice 2) ───────────────────
-            # "Budget consumed" for tokens-mode = prompt+completion summed session-
-            # lifetime over EVERY call, so the budget still advances on calls the
-            # server never classified. The $ cost is NOT accumulated here — it is
-            # attributed in the cache-waste block above, so it matches session_cost
-            # exactly. Read via get_instance_total_tokens() / get_instance_cost().
+            # ── Per-instance token accumulators (Slice 2) ───────────────────────
+            # Both views come from the SAME call record: `total_tokens` is
+            # prompt+completion (the context/throughput view) and `generated_tokens`
+            # is completion-only (the tokens-mode BUDGET view). Both accumulate
+            # session-lifetime over EVERY call, so the budget still advances on
+            # calls the server never classified. The $ cost is NOT accumulated
+            # here — it is attributed in the cache-waste block above, so it matches
+            # session_cost exactly. Read via get_instance_total_tokens() /
+            # get_instance_generated_tokens() / get_instance_cost().
             _iu = self._ensure_instance_usage(instance_name)
             _iu['total_tokens'] = _iu['total_tokens'] + int(call['input_tokens_est'] or 0) + int(actual_output or 0)
             _iu['generated_tokens'] = _iu['generated_tokens'] + int(actual_output or 0)
@@ -1082,10 +1086,12 @@ class TelemetryCollector:
     def get_instance_total_tokens(self, instance) -> int:
         """Total tokens (prompt+completion, Σ over calls) consumed by one instance.
 
-        Read-only view of the session-lifetime per-instance accumulator — the
-        "budget consumed" signal used by tokens-mode warnings (run_loop) and
-        Slices 3 & 4. Named TOTAL to avoid colliding with the per-class
-        ``tokens_generated`` counter, which is completion-only. Returns 0 unknown.
+        Read-only view of the session-lifetime per-instance accumulator: the
+        context/throughput signal (how much was re-read), NOT the tokens-mode
+        budget signal — that budget counts generated (completion-only) tokens via
+        ``get_instance_generated_tokens``. Named TOTAL to avoid colliding with the
+        per-class ``tokens_generated`` counter, which is completion-only. Returns 0
+        unknown.
         """
         with _telemetry_lock:
             rec = self._instance_usage.get(self._resolve_instance_key(instance))

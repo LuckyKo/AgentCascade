@@ -925,9 +925,9 @@ class TestSystemInfoContentIndentation:
     def test_indent_block_nests_substructures_deeper(self):
         """_indent_block shifts every content line by the prefix, preserving blank
         lines and relative nesting (so budget sub-items land 2 deeper than parent)."""
-        block = 'Budget / Cost:\n  consumed: 10 tokens\n  cost: $0.001\n\nnext'
+        block = 'Budget / Cost:\n  generated: 10 tokens\n  cost: $0.001\n\nnext'
         assert SystemInfo._indent_block(block) == (
-            '  Budget / Cost:\n    consumed: 10 tokens\n    cost: $0.001\n\n  next')
+            '  Budget / Cost:\n    generated: 10 tokens\n    cost: $0.001\n\n  next')
 
 
 class _FakeRouter:

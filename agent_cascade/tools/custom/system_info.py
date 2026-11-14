@@ -76,11 +76,12 @@ class SystemInfo(BaseTool):
         default (no-``help``) output by default — no placeholder. Shown only when
         this instance carries a ``token_budget`` OR its endpoint is priced.
 
-        ``consumed`` is this instance's OWN session-lifetime spend
-        (``get_instance_total_tokens``) — the descendant-inclusive subtree total
-        belongs to the ``call_agent`` completion message (Slice 3), not here.
-        ``$`` is rendered only when ``get_instance_cost`` returns a value; ``None``
-        (unpriced) never renders a misleading ``$0``.
+        ``generated`` is this instance's OWN session-lifetime generation
+        (``get_instance_generated_tokens``: completion-only, the same signal the
+        tokens-mode budget is measured on) — the descendant-inclusive subtree
+        total belongs to the ``call_agent`` completion message (Slice 3), not
+        here. ``$`` is rendered only when ``get_instance_cost`` returns a value;
+        ``None`` (unpriced) never renders a misleading ``$0``.
         """
         telem = getattr(self.agent_pool, 'telemetry', None)
         if telem is None:
@@ -94,15 +95,15 @@ class SystemInfo(BaseTool):
         if token_budget <= 0 and cost is None:
             return ''
         try:
-            consumed = int(telem.get_instance_total_tokens(inst))
+            generated = int(telem.get_instance_generated_tokens(inst))
         except Exception:
-            consumed = 0
+            generated = 0
         lines = ['Budget / Cost:']
-        lines.append(f"  consumed: {consumed:,} tokens")
+        lines.append(f"  generated: {generated:,} tokens")
         if token_budget > 0:
             unit = getattr(inst, 'budget_unit', 'tokens') or 'tokens'
             lines.append(f"  budget: {token_budget:,} tokens (budget_unit={unit})")
-            lines.append(f"  remaining: {max(0, token_budget - consumed):,} tokens")
+            lines.append(f"  remaining: {max(0, token_budget - generated):,} tokens")
         if cost is not None:
             lines.append(f"  cost: ${cost:.6f}")
         return '\n'.join(lines)
@@ -617,7 +618,7 @@ class SystemInfo(BaseTool):
         under flush-left ``--- Section ---`` headers (consistency pass), without
         touching wording or the data shown. Blank lines and the trailing newline
         are preserved, and multi-line sub-structures nested by the renderer (e.g.
-        the ``  - ...`` folder items, or the ``  consumed:`` budget sub-items)
+        the ``  - ...`` folder items, or the ``  generated:`` budget sub-items)
         shift to ``prefix``+existing indent — i.e. 2 spaces deeper than their
         parent line, exactly as intended.
         """

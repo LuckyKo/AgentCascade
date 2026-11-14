@@ -36,13 +36,14 @@ SOFT_TURN_LIMIT_ABSOLUTE_MAX: int = int(
     os.getenv('AGENT_CASCADE_SOFT_TURN_LIMIT_ABSOLUTE_MAX',
               1000))  # Hard ceiling for soft mode (effectuated turns per run)
 # ── Token budget (cost/token-budget feature, Slice 2) ─────────────────────────
-# Optional, ADDITIVE per-instance cap on TOTAL tokens (prompt+completion),
-# a second mode of the turn budget. 0 (default) = disabled: turns-mode stays
+# Optional, ADDITIVE per-instance cap on GENERATED tokens (completion-only), a
+# second mode of the turn budget. 0 (default) = disabled: turns-mode stays
 # byte-for-byte unchanged and no token logic runs. When > 0, the run-loop budget
-# warnings are driven by the cumulative total-token accumulator (telemetry
-# ``get_instance_total_tokens``) instead of the turn count, and the hard-cut toggle
-# (``soft_turn_limit``) is reused — no new toggle. The ``$`` shown alongside is
-# only rendered when the serving endpoint is priced (Slice 1 ``cost.py``).
+# warnings are driven by the cumulative generated-token accumulator (telemetry
+# ``get_instance_generated_tokens``) instead of the turn count, so re-sent prompt
+# context never spends the budget. The hard-cut toggle (``soft_turn_limit``) is
+# reused — no new toggle. The ``$`` shown alongside is only rendered when the
+# serving endpoint is priced (Slice 1 ``cost.py``).
 DEFAULT_TOKEN_BUDGET: int = int(os.getenv('AGENT_CASCADE_DEFAULT_TOKEN_BUDGET', 0))
 SECURITY_AGENT_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_SECURITY_AGENT_MAX_TURNS',
                                               10))  # Turn limit for system-launched Security advisor

@@ -103,9 +103,11 @@ class RunLoopMixin:
             if _token_budget > 0:
                 _tel = self._telemetry()
                 # Per-run baseline: this run's budget is measured from its own start,
-                # not the whole session (the accumulator is session-lifetime).
+                # not the whole session (the accumulator is session-lifetime). The
+                # budget counts COMPLETION-ONLY tokens, so the baseline is the
+                # generated-token view (prompt re-reads must not spend the budget).
                 instance._token_budget = _token_budget
-                instance._token_baseline = _tel.get_instance_total_tokens(inst_name) if _tel is not None else 0
+                instance._token_baseline = _tel.get_instance_generated_tokens(inst_name) if _tel is not None else 0
                 instance._token_warned_50 = False
                 instance._token_warned_90 = False
                 instance._token_final_fired = False
@@ -320,17 +322,31 @@ class RunLoopMixin:
                     suppress_budget_warnings)
         return _RunAction.PROCEED, max_turns, turns_available, suppress_budget_warnings
 
+    def _tokens_consumed_this_run(self, instance: AgentInstance) -> int:
+        """Completion-only (generated) tokens produced by this run so far.
+
+        The token budget bounds what the agent PRODUCES, so it is measured on the
+        ``generated_tokens`` accumulator (session-lifetime, hence the per-run
+        baseline subtraction captured at run start). Prompt/input tokens are
+        deliberately excluded: every turn re-sends the whole context, so charging
+        them would let a large context exhaust the budget before the agent
+        generated anything meaningful. Returns 0 when telemetry is unavailable.
+        """
+        tel = self._telemetry()
+        generated = tel.get_instance_generated_tokens(instance.instance_name) if tel is not None else 0
+        return int(generated) - int(getattr(instance, '_token_baseline', 0) or 0)
+
     def _run_token_budget_warnings(self, instance: AgentInstance, llm_messages: List[Message],
                                    soft_turn_limit: bool) -> Tuple[bool, int]:
-        """Tokens-mode budget warnings, driven by the total-token accumulator.
+        """Tokens-mode budget warnings, driven by the generated-token accumulator.
 
         Mirrors ``_run_budget_warnings`` (50%/90%/final/soft-overage, same hard-cut
-        toggle via ``soft_turn_limit``) but counts TOTAL tokens (prompt+completion)
-        for this run (accumulator minus per-run baseline) instead of turns. Wording
-        comes from ``budget_message`` with ``unit='tokens'``; the ``$`` overlay is
-        shown only when the instance's endpoint is priced (``get_instance_cost``
-        returns it). Only reached when ``token_budget`` is set, so the turns path
-        is untouched.
+        toggle via ``soft_turn_limit``) but counts GENERATED (completion-only)
+        tokens for this run (accumulator minus per-run baseline) instead of turns.
+        Wording comes from ``budget_message`` with ``unit='tokens'``; the ``$``
+        overlay is shown only when the instance's endpoint is priced
+        (``get_instance_cost`` returns it). Only reached when ``token_budget`` is
+        set, so the turns path is untouched.
         """
         final_turn_tools_disabled = False
         last_warn_past = getattr(instance, '_token_last_warn_past', 0)
@@ -340,7 +356,7 @@ class RunLoopMixin:
 
         tel = self._telemetry()
         name = instance.instance_name
-        consumed = (tel.get_instance_total_tokens(name) if tel is not None else 0) - int(getattr(instance, '_token_baseline', 0) or 0)
+        consumed = self._tokens_consumed_this_run(instance)
         remaining = budget - consumed
         cost = tel.get_instance_cost(name) if tel is not None else None
         tok_50 = int(budget * 0.5)
