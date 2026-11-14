@@ -2791,127 +2791,104 @@ class TestSkillInvalidationRebalance:
         yield
 
     def test_rebalance_target_clamp_min_and_max(self):
-        """Eviction is floored at MIN_CAP (never evict below it) and ceiling-bounded at MAX_CAP.
+        """Value-driven target: the floor sub-case evicts the USELESS junk down to raw(25); the
+        ceiling sub-case honors max_cap=200 even when every skill is valuable.
 
-        min_cap is a LOWER BOUND ON EVICTION, not a force-enable floor: a tiny corpus can sit far
-        below min_cap without being pruned or padded up to 20. Each metrics entry needs a real
-        on-disk file (orphan prune) and the store must be at schema 1.3 before we inject qualified
-        entries — so: create files, migrate once, then inject. rebalance's internal migration is
-        then a no-op that won't clobber our data.
+        The active count now floats with N_valuable (BUG_0314): raw = round(k × n_valuable), and the
+        eviction threshold is max(min_cap, min(max_cap, raw)). min_cap is a LOWER BOUND ON EVICTION,
+        not a force-enable floor. A floor corpus of 25 USEFUL + 5 USELESS has n_valuable=25 (only the
+        USEFUL count), so the cap retires the 5 USELESS (the absolute gate selects the same 5). The
+        ceiling corpus of 300 USEFUL forces 100 evictions purely to honor max_cap, proving the ceiling
+        applies even when nothing is junk. Aged fixtures via _bump_to(200) so the classes hold.
         """
-        # Eviction floor: min_cap is a LOWER BOUND ON EVICTION, not a force-enable mandate. Here
-        # 30 active with only 25 qualified (loads≥1) → raw=round(1.0×25)=25 ≥ min_cap(20), so
-        # evict_threshold = max(min_cap, min(max_cap, raw)) = 25 (the ACTIVE count to evict DOWN TO).
-        # The 5 unqualified skills (no loads, no ratings) are USELESS once past the fair window and
-        # get evicted by the absolute gate; the cap budget (active_before - threshold = 30 - 25 = 5)
-        # independently selects the same 5 worst-ranked. A tiny corpus can still sit far below min_cap
-        # without being pruned or padded up; min_cap only stops us from evicting below it.
-        # fair_window_turns=1 keeps every skill non-PROTECTED (aged past a 1-turn window).
+        # Floor: 30 active = 25 USEFUL + 5 USELESS. n_valuable=25 → raw=25 ≥ min_cap(20) →
+        # evict_threshold = 25 (the active count to evict DOWN TO). The 5 USELESS are absolute-gate
+        # evicted and the cap budget independently selects the same 5 worst-ranked.
         floor_tmp = self.tmp / 'floor'
         floor_names = [f'f{i}' for i in range(30)]
         m = _rebalance_manager(floor_tmp, floor_names)
-        _migrate_once(m)
+        _bump_to(m, 200)  # counter=200 ⇒ A=200 ≥ fair_window(50) ⇒ all aged (none PROTECTED)
         entries = {}
         for nm in floor_names[:25]:
-            # Qualified (loads≥1) → counts toward N_qualified. Rated n=2 (UNPROVEN) so the gate is silent.
-            entries[nm] = {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                           'ratings': {'count': 2, 'sum': 3.0}}
+            entries[nm] = _aged_entry(10, 9.0)   # USEFUL (valuable)
         for nm in floor_names[25:]:
-            # Unqualified (no loads, no ratings) → USELESS past the window → absolute-gate evicted.
-            entries[nm] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
+            entries[nm] = _aged_entry(0, None)   # no loads/ratings → USELESS (absolute gate)
         _set_metrics(m, entries)
-        _age_out_all(m)  # age past the fair window so the cap/gate may evict (not PROTECTED)
-        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, fair_window_turns=1)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
         assert s['n_qualified'] == 25
+        assert s['n_valuable'] == 25             # only the 25 USEFUL are valuable (USELESS not)
         assert s['raw'] == 25
-        assert s['evict_threshold'] == 25  # raw(25) ≥ min_cap → threshold = raw (clamped into [min,max])
-        assert len(s['evicted']) == 5      # evict down to 25 (active_before - threshold = 30 - 25)
-        assert s['target'] == 25           # post-pass active count
+        assert s['evict_threshold'] == 25        # raw(25) ≥ min_cap → threshold = raw (clamped into [min,max])
+        assert len(s['evicted']) == 5            # retire the 5 USELESS junk (gate ∩ cap budget = 5)
+        assert s['target'] == 25                 # post-pass active count
 
-        # Ceiling: N_qualified=300, k=1.0 → raw=300 > max_cap(200) → evict_threshold==200 (ceiling).
-        # Isolated to its own subdir so the floor sub-case's on-disk files don't leak into this
-        # corpus (the shared self.tmp skills dir would otherwise inflate n_servable + metrics).
-        # All UNPROVEN-rated (n=2) so only the count-cap evicts — no absolute-gate interference.
-        # max_evictions_per_pass raised to 1000 so the D-SAFE cap doesn't truncate the 100 evictions
-        # this sub-case is meant to exercise (the default of 25 would bound it).
+        # Ceiling: N_valuable=300, k=1.0 → raw=300 > max_cap(200) → evict_threshold==200 (ceiling).
+        # Isolated to its own subdir so the floor sub-case's on-disk files don't leak into this corpus
+        # (the shared self.tmp skills dir would otherwise inflate n_servable + metrics). max_evictions
+        # raised to 1000 so the D-SAFE cap doesn't truncate the 100 ceiling evictions this exercises.
+        # All USEFUL → the 100 evictions are pure cap-budget (max_cap ceiling), no absolute-gate.
         ceiling_tmp = self.tmp / 'ceiling'
         ceiling_names = [f's{i}' for i in range(300)]
         m2 = _rebalance_manager(ceiling_tmp, ceiling_names)
-        _migrate_once(m2)
-        _set_metrics(m2, {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                               'ratings': {'count': 2, 'sum': 3.0}} for nm in ceiling_names})
-        _age_out_all(m2)
+        _bump_to(m2, 200)
+        _set_metrics(m2, {nm: _aged_entry(10, 9.0) for nm in ceiling_names})  # all USEFUL (valuable)
         s2 = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
         assert s2['n_qualified'] == 300
+        assert s2['n_valuable'] == 300           # all USEFUL
         assert s2['raw'] == 300
-        assert s2['evict_threshold'] == 200  # ceiling-bounded at max_cap
-        assert len(s2['evicted']) == 100     # evict down to 200 (300 - 200)
+        assert s2['evict_threshold'] == 200      # ceiling-bounded at max_cap
+        assert len(s2['evicted']) == 100         # honor max_cap: 300 - 200 (all valuable, none gate)
         assert s2['target'] == 200
 
     def test_rebalance_evicts_over_cap(self):
-        """Over-cap: evict exactly (active - threshold) lowest-ranked; highest-scored survive.
-
-        Phase C: 40 active with only 30 qualified (loads≥1) → raw=round(1.0×30)=30,
-        evict_threshold=max(min_cap,min(max_cap,raw))=30 (the ACTIVE count to evict DOWN TO). The
-        10 unqualified skills (no loads, no ratings) are USELESS past the fair window and get
-        evicted by the absolute gate; the cap budget (active_before - threshold = 40 - 30 = 10)
-        independently selects the same 10 worst-ranked. All 30 qualified survive.
-        fair_window_turns=1 keeps every skill non-PROTECTED (aged past a 1-turn window).
-        """
+        """Over-cap by value: 30 USEFUL (valuable) + 10 USELESS (junk) → raw=30; the cap retires the
+        10 USELESS (the gate selects the same 10) and every USEFUL survives active."""
         names = [f's{i:02d}' for i in range(40)]
         m = _rebalance_manager(self.tmp, names)
-        # 30 qualified (survive), 10 unqualified (evicted). N_qualified=30.
+        _bump_to(m, 200)  # aged so classes hold (USEFUL survive, USELESS gate-evicted)
+        # 30 USEFUL (valuable, survive), 10 USELESS junk (evicted).
         entries = {}
         for i in range(30):
-            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
-                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0 → q̂≈6.14, S>0
+            entries[names[i]] = _aged_entry(10, 9.0)   # USEFUL (valuable)
         for i in range(30, 40):
-            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}  # USELESS
+            entries[names[i]] = _aged_entry(0, None)   # USELESS junk (no loads/ratings → gate)
         _set_metrics(m, entries)
-        _age_out_all(m)
 
-        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, fair_window_turns=1)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 30
+        assert s['n_valuable'] == 30          # only the USEFUL are valuable
+        assert s['raw'] == 30
         # raw=30 ≥ min_cap(20) → evict_threshold = 30 (the ACTIVE count to evict DOWN TO).
-        # Items removed = active_before - threshold = 40 - 30 = 10: the 10 unqualified (USELESS, worst).
         assert s['evict_threshold'] == 30
         assert s['active_before'] == 40
-        assert len(s['evicted']) == 10  # evict the 10 lowest-ranked (unqualified) down to threshold 30
-        # The qualified (higher-scored) skills all survive.
+        assert len(s['evicted']) == 10  # retire the 10 USELESS junk (gate ∩ cap budget = 10)
+        # The valuable (USEFUL) skills all survive.
         for nm in names[:30]:
             assert _status_of(m, nm) == 'active'
         for nm in s['evicted']:
             assert _status_of(m, nm) == 'inactive'
-        # Exactly 30 active remain (the qualified corpus the cap evicts down to).
+        # Exactly 30 active remain (the valuable corpus the cap evicts down to).
         assert len(_active_names(m)) == 30
 
     def test_rebalance_reenables_under_cap(self):
-        """Under-cap: re-enable highest-ranked servable inactive skills up to target."""
+        """Under-cap re-enable admits VALUABLE inactive skills (§3.4): 3 active USEFUL + 2 disabled
+        USEFUL (d,e) → reenable_target=5 refills to 5 by re-enabling BOTH valuable inactives."""
         names = ['a', 'b', 'c', 'd', 'e']
         m = _rebalance_manager(self.tmp, names)  # all 5 files exist → d/e not pruned as orphans
-        _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
-
-        # Set ranking fields (loads/ratings). All 5 are qualified → N_qualified=5 → target=min_cap=5.
-        # Phase C: every skill is rated n=2 (UNPROVEN — out of the absolute gate) so nothing is
-        # evicted by the quality gate; only the cap budget and re-enable logic run.
-        entries = {
-            'a': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
-            'b': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
-            'c': {'total_loads': 1, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
-            'd': {'total_loads': 2, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 18.0}},
-            'e': {'total_loads': 5, 'by_version': {}, 'status': 'active', 'ratings': {'count': 2, 'sum': 3.0}},
-        }
+        _bump_to(m, 200)
+        # All 5 are USEFUL (valuable). a,b,c stay active; d,e are disabled → inactive servable
+        # re-enable candidates. Every one being USEFUL (not UNPROVEN) is what makes BOTH d,e eligible
+        # under §3.4 — only VALUABLE inactive skills are re-enable candidates.
+        entries = {nm: _aged_entry(10, 9.0) for nm in names}
         _set_metrics(m, entries)
-        _age_out_all(m)
-        # Deactivate d and e via the public API (post-migration → survives rebalance's no-op
-        # migration). They are now inactive servable re-enable candidates.
         _disable_after_migration(m, 'd')
         _disable_after_migration(m, 'e')
 
         s = m.rebalance_active_skills(k=1.0, min_cap=5, max_cap=200)
+        assert s['n_valuable'] == 5              # 3 active USEFUL + 2 servable-inactive USEFUL
         assert s['target'] == 5
         assert s['active_before'] == 3
-        # Re-enable the best inactive (d: rated 9.0) then next (e) to reach target 5.
+        # Both valuable inactives (d, e) are re-enabled to reach reenable_target=5.
         assert set(s['reenabled']) == {'d', 'e'}
         assert _status_of(m, 'd') == 'active'
         assert _status_of(m, 'e') == 'active'
@@ -2920,17 +2897,15 @@ class TestSkillInvalidationRebalance:
     def test_rebalance_min_cap_floor(self):
         """min_cap is a LOWER BOUND ON EVICTION, not a force-enable floor.
 
-        With a tiny corpus (1 active, N_qualified=1 → raw=1 < min_cap=20), the pass must NOT
-        pad the active count up to 20 — there are no inactive candidates anyway, so nothing is
-        re-enabled. min_cap only matters when evicting: it stops us from pruning below it.
+        A tiny corpus (1 active USEFUL, raw=1 < min_cap=20) must NOT be padded up to 20 — there are
+        no inactive candidates anyway, so nothing is re-enabled. min_cap only matters when evicting.
         """
         m = _rebalance_manager(self.tmp, ['a'])
-        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so nothing is evicted.
-        _set_metrics(m, {'a': {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                               'ratings': {'count': 2, 'sum': 3.0}}})
-        _age_out_all(m)
+        _bump_to(m, 200)
+        _set_metrics(m, {'a': _aged_entry(10, 9.0)})  # USEFUL (valuable)
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 1
+        assert s['n_valuable'] == 1            # the lone USEFUL is valuable
         assert s['raw'] == 1
         # Eviction is floored at min_cap (never evict below 20), but re-enable is bounded by the
         # servable corpus (n_servable=1) and raw(1) — so we never force-enable up to 20.
@@ -2941,24 +2916,18 @@ class TestSkillInvalidationRebalance:
         assert s['target'] == 1  # post-pass active count stays at the real corpus size
 
     def test_rebalance_tiny_corpus_not_forced_to_min_cap(self):
-        """Regression: a 2-skill corpus must NOT be padded to min_cap=20 nor pruned.
+        """Regression: a 2-skill USEFUL corpus must NOT be padded to min_cap=20 nor pruned.
 
-        This directly encodes "min_cap is a lower bound on eviction, not a force-enable cap":
-        with only 2 active skills and no inactive candidates, the pass must be a complete no-op
-        even though min_cap(20) >> corpus size. The OLD floor-as-mandate math would have tried to
-        re-enable up to 20 (impossible here, but it also set target=20); the new math leaves the
-        active count exactly where it is.
+        min_cap is a lower bound on eviction, not a force-enable cap: 2 active USEFUL with no
+        inactive candidates is a complete no-op even though min_cap(20) >> corpus size.
         """
         m = _rebalance_manager(self.tmp, ['a', 'b'])
-        _migrate_once(m)
-        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so nothing is evicted.
-        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                        'ratings': {'count': 2, 'sum': 3.0}} for nm in ('a', 'b')}
-        _set_metrics(m, entries)
-        _age_out_all(m)
+        _bump_to(m, 200)
+        _set_metrics(m, {nm: _aged_entry(10, 9.0) for nm in ('a', 'b')})  # both USEFUL (valuable)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
         assert s['n_qualified'] == 2
+        assert s['n_valuable'] == 2            # both USEFUL are valuable
         assert s['raw'] == 2
         # evict_threshold floored at min_cap(20), but active_before(2) < 20 → nothing evicted.
         assert s['evict_threshold'] == 20
@@ -2970,65 +2939,61 @@ class TestSkillInvalidationRebalance:
         assert s['target'] == 2        # post-pass active count stays at the real corpus size
 
     def test_rebalance_full_corpus_no_ratchet(self):
-        """Deactivating a batch must not shrink N_qualified → target stays stable."""
+        """Value no-ratchet (Q4): deactivating a valuable skill must NOT lower n_valuable, so the
+        target stays stable. (Also satisfies the headline value-no-ratchet requirement, new test #6.)"""
         names = [f's{i:02d}' for i in range(30)]
         m = _rebalance_manager(self.tmp, names)
-        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so only the cap evicts.
-        entries = {nm: {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                        'ratings': {'count': 2, 'sum': 3.0}} for nm in names}
-        _set_metrics(m, entries)
-        _age_out_all(m)
+        _bump_to(m, 200)
+        _set_metrics(m, {nm: _aged_entry(10, 9.0) for nm in names})  # 30 USEFUL (all valuable)
 
-        s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
-        # N_qualified=30, k=0.5 → raw=15. Eviction is floored at min_cap(20): we evict down to 20
-        # (not to raw=15), so the corpus never drops below min_cap. The 10 just-evicted skills are
-        # inactive+servable re-enable candidates, but remaining_after_evict(20) is already >=
-        # reenable_target(min(max_cap,raw,n_servable)=15), so nothing is re-enabled — the pass
-        # settles at the eviction floor of 20.
-        assert s1['n_qualified'] == 30
-        assert s1['raw'] == 15
-        assert s1['evict_threshold'] == 20
-        assert len(s1['evicted']) == 10
-        assert s1['reenabled'] == []
-        assert s1['target'] == 20
+        s1 = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200, max_evictions_per_pass=1000)
+        # All 30 valuable → raw=30; there is no junk to retire, so the pass is a no-op at 30.
+        assert s1['n_valuable'] == 30
+        assert s1['raw'] == 30
+        assert s1['evicted'] == []
+        assert s1['target'] == 30
 
-        # Second run on the same store: inactive skills still count in N_qualified (no ratchet),
-        # and the pass is a no-op (already at 20, which equals evict_threshold → nothing to do).
-        s2 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
-        assert s2['n_qualified'] == 30, 'N_qualified must not ratchet down after eviction'
-        assert s2['evicted'] == [] and s2['reenabled'] == []
-        assert s2['target'] == s1['target'] == 20
+        # Deactivate one valuable skill (it stays servable+valuable on disk). n_valuable must NOT
+        # ratchet down: serve_names = active ∪ servable-inactive, so the deactivated skill still counts.
+        _disable_after_migration(m, 's00')
+        s2 = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200, max_evictions_per_pass=1000)
+        assert s2['n_valuable'] == 30, 'n_valuable must not ratchet down after deactivating a valuable skill'
+        assert s2['raw'] == 30
+        assert s2['evicted'] == []
+        # The deactivated valuable skill is re-enabled back toward raw(30) → the count settles at 30.
+        assert s2['target'] == 30
 
     def test_rebalance_deterministic_ordering(self):
-        """Ties (equal rating/loads/last_used) resolve by name; identical on re-run.
+        """Value-driven determinism: 20 USELESS junk + 20 USEFUL valuable (all tied) → the raw target
+        equals the 20 VALUABLE (NOT the min_cap floor), so the 20 USELESS are evicted deterministically
+        and the 20 USEFUL survive. Identical on re-run.
 
-        40 fully-tied active skills, k=0.5 → N_qualified=40, target=round(0.5×40)=20 → evict 20.
-        Since the rank key is a complete tie except for name, the 20 lexicographically smallest
-        names are evicted (worst-first ascending). A second identical run must produce the same set.
+        The raw target is 20 while min_cap is 5, so the threshold comes from RAW, not the floor — the
+        eviction count is genuinely value-driven (non-coincidental), unlike the old floor-pinned case.
         """
-        names = [f's{i:02d}' for i in range(40)]
-        m = _rebalance_manager(self.tmp, names)  # all 40 files exist → no orphan pruning
-        _migrate_once(m)  # schema 1.3 so rebalance's internal migration is a no-op
-        # Phase C: rated n=2 (UNPROVEN — out of the absolute gate) so only the cap evicts.
-        entries = {nm: {'total_loads': 5, 'by_version': {}, 'status': 'active',
-                        'last_used': '2026-01-01T00:00:00+00:00',
-                        'ratings': {'count': 2, 'sum': 3.0}} for nm in names}
+        u_names = [f'u{i:02d}' for i in range(20)]   # USELESS junk (tied)
+        g_names = [f'g{i:02d}' for i in range(20)]   # USEFUL valuable (tied)
+        names = u_names + g_names
+        m = _rebalance_manager(self.tmp, names)      # all 40 files exist → no orphan pruning
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(3, 5.0) for nm in u_names}          # USELESS (non-valuable, tied)
+        entries.update({nm: _aged_entry(10, 9.0) for nm in g_names})   # USEFUL (valuable, tied)
         _set_metrics(m, entries)
-        # last_used is far past (2026-01-01) → wall-clock A > fair window even if the turns clock
-        # is 0 → nothing is PROTECTED; all 40 are cap candidates.
-        s1 = m.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
-        assert s1['n_qualified'] == 40
-        assert s1['target'] == 20
-        # Worst-first ascending by name → evict the 20 lexicographically smallest names.
-        expected_evicted = sorted(names)[:20]
-        assert s1['evicted'] == expected_evicted
+
+        s1 = m.rebalance_active_skills(k=1.0, min_cap=5, max_cap=200, max_evictions_per_pass=1000)
+        # n_valuable=20 → raw=20 (≠ min_cap=5, so the threshold comes from RAW, not the floor →
+        # non-coincidental). The cap retires the 20 USELESS (the only non-valuable candidates).
+        assert s1['n_valuable'] == 20
+        assert s1['raw'] == 20
+        assert s1['evict_threshold'] == 20
+        assert s1['evicted'] == sorted(u_names)      # the 20 USELESS, name-ascending (worst-first)
+        assert s1['target'] == 20                    # the 20 USEFUL survive
 
         # Re-run on an identical fresh store must yield the exact same evicted set.
         m2 = _rebalance_manager(self.tmp, names)
-        _migrate_once(m2)
+        _bump_to(m2, 200)
         _set_metrics(m2, entries)
-        # Same far-past last_used as the first run → same (non-PROTECTED) classification.
-        s2 = m2.rebalance_active_skills(k=0.5, min_cap=20, max_cap=200)
+        s2 = m2.rebalance_active_skills(k=1.0, min_cap=5, max_cap=200, max_evictions_per_pass=1000)
         assert s2['evicted'] == s1['evicted']
 
     def test_unrated_ranks_before_rated(self):
@@ -3051,33 +3016,35 @@ class TestSkillInvalidationRebalance:
         assert _status_of(m, 'zero') == 'active'
 
     def test_da_non_servable_counts_in_qualified_but_not_reenabled(self):
-        """D-A: an INACTIVE/-located skill counts in N_qualified but is never auto-re-enabled."""
+        """D-A: a non-servable INACTIVE/-located skill counts in N_qualified but is excluded from the
+        SERVE set (so it neither counts in n_valuable nor is auto-re-enabled — it needs a file move)."""
         m = SkillManager()
         m._metrics_file = self.tmp / 'skills-metrics.json'
         with m._metrics_lock:
             m._metrics = {}
-        # Same clock leak as _rebalance_manager: __init__ read the real production store, so
-        # reset the leaked counter to 0 (this test ages out via _age_out_all, which needs a frozen clock).
+        # Same clock leak as _rebalance_manager: __init__ read the real production store, so reset
+        # the leaked counter before we age fixtures out via _bump_to + _aged_entry stamps.
         m._global_activity_turns = 0
         root = self.tmp / 'skills'
-        _write_skill_file(root, 'servable-a')                 # one-level → servable
+        _write_skill_file(root, 'servable-a')                    # one-level → servable
         _write_skill_file(root, 'retired-b', subdir='INACTIVE')  # deeper → non-servable
         m._cache_ttl = 0.0
         m.discover([root])
 
-        # Phase C: servable-a rated n=2 (UNPROVEN — out of the absolute gate) so it isn't evicted.
+        _bump_to(m, 200)  # counter=200 ⇒ servable-a (last_activity_turn=0) is aged → USEFUL
         entries = {
-            'servable-a': {'total_loads': 1, 'by_version': {}, 'status': 'active',
-                           'ratings': {'count': 2, 'sum': 3.0}},
-            'retired-b': {'total_loads': 1, 'by_version': {}, 'status': 'inactive'},
+            'servable-a': _aged_entry(10, 9.0),  # USEFUL (valuable)
+            'retired-b': {'total_loads': 1, 'by_version': {}, 'status': 'inactive'},  # non-servable
         }
         _set_metrics(m, entries)
-        _age_out_all(m)
 
         s = m.rebalance_active_skills(k=1.0, min_cap=2, max_cap=200)
-        # N_qualified counts BOTH (full corpus, incl. the non-servable retired-b) → 2 → raw=2.
+        # N_qualified counts BOTH (full corpus, incl. the non-servable retired-b) → 2.
         assert s['n_qualified'] == 2
-        assert s['raw'] == 2
+        # n_valuable counts only SERVE-candidate skills → servable-a USEFUL only (retired-b non-servable
+        # is absent from serve_names) → 1 → raw=1. This is the BUG_0314 distinction over n_qualified.
+        assert s['n_valuable'] == 1
+        assert s['raw'] == 1
         # Only servable-a is at a servable location (n_servable=1); reenable_target is bounded by
         # n_servable so the pass can never push the active count above what's actually servable.
         assert s['n_servable'] == 1
@@ -3132,19 +3099,18 @@ class TestSkillInvalidationRebalance:
         assert _status_of(m, 'a') == 'active'
 
     def test_compute_rebalance_preview_matches_and_is_side_effect_free(self):
-        """compute_rebalance_preview returns the SAME threshold math as a real rebalance pass AND
+        """compute_rebalance_preview returns the SAME value-driven math as a real rebalance pass AND
         mutates nothing (no status flips, no _disabled_names change, no metrics flush to disk)."""
         names = [f's{i:02d}' for i in range(30)]
         m = _rebalance_manager(self.tmp, names)
-        # 15 rated high (qualified), 15 unrated → N_qualified=15, raw=round(1.0*15)=15 < min_cap(20).
+        _bump_to(m, 200)  # counter=200 ⇒ A=200 ≥ fair_window(50) ⇒ all aged (none PROTECTED)
+        # 15 USEFUL (valuable) + 15 USELESS junk (no loads/ratings) → n_valuable=15, raw=15 < min_cap(20).
         entries = {}
         for i in range(15):
-            entries[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
-                                 'ratings': {'count': 2, 'sum': 18.0}}  # avg 9.0
+            entries[names[i]] = _aged_entry(10, 9.0)     # USEFUL (valuable)
         for i in range(15, 30):
-            entries[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
+            entries[names[i]] = _aged_entry(0, None)     # USELESS (no loads/ratings → gate)
         _set_metrics(m, entries)
-        _age_out_all(m)
 
         # Snapshot state BEFORE the preview so we can prove it is side-effect-free.
         with m._metrics_lock:
@@ -3156,12 +3122,13 @@ class TestSkillInvalidationRebalance:
         # READ-ONLY preview (no migration, no mutation).
         p = m.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200)
         assert p['ok'] is True and 'error' not in p
-        assert p['n_qualified'] == 15
+        assert p['n_qualified'] == 15            # informational touched-count (only the USEFUL are loaded)
+        assert p['n_valuable'] == 15             # only the 15 USEFUL are valuable (USELESS not)
         assert p['raw'] == 15
-        assert p['evict_threshold'] == 20   # floored at min_cap (not raw=15)
-        assert p['reenable_target'] == 15   # min(max_cap, raw, n_servable)=min(200,15,30)=15
+        assert p['evict_threshold'] == 20        # floored at min_cap (not raw=15)
+        assert p['reenable_target'] == 15        # min(max_cap, raw, n_servable)=min(200,15,30)=15
         assert p['n_servable'] == 30
-        assert p['active_count'] == 30      # all 30 start active
+        assert p['active_count'] == 30           # all 30 start active
 
         # Prove the preview left EVERYTHING untouched (the core "read-only" guarantee).
         with m._metrics_lock:
@@ -3171,18 +3138,18 @@ class TestSkillInvalidationRebalance:
         store_after = store_file.read_text(encoding='utf-8') if store_file.exists() else None
         assert store_after == store_before              # no flush to disk
 
-        # Now run a REAL pass on an identical fresh manager and confirm the preview's numbers
-        # match exactly what rebalance_active_skills would compute (the "always matches" guarantee).
+        # Real pass on an identical fresh manager → preview numbers match exactly (the "always
+        # matches" guarantee). The value driver n_valuable is part of the parity now.
         m2 = _rebalance_manager(self.tmp / 'real', names)
+        _bump_to(m2, 200)
         entries2 = {}
         for i in range(15):
-            entries2[names[i]] = {'total_loads': 3, 'by_version': {}, 'status': 'active',
-                                  'ratings': {'count': 2, 'sum': 18.0}}
+            entries2[names[i]] = _aged_entry(10, 9.0)
         for i in range(15, 30):
-            entries2[names[i]] = {'total_loads': 0, 'by_version': {}, 'status': 'active'}
+            entries2[names[i]] = _aged_entry(0, None)
         _set_metrics(m2, entries2)
-        _age_out_all(m2)
         s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_valuable'] == p['n_valuable'] == 15
         assert s['n_qualified'] == p['n_qualified']
         assert s['raw'] == p['raw']
         assert s['evict_threshold'] == p['evict_threshold']
@@ -3656,7 +3623,7 @@ class TestSkillScoringRebalance:
         }
         _set_metrics(m, entries)
         s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
-        assert s['n_qualified'] == 2 and s['raw'] == 2
+        assert s['n_qualified'] == 2 and s['n_valuable'] == 1 and s['raw'] == 1  # only 'good' USEFUL is valuable
         assert s['evict_threshold'] == 20          # min_cap floor ⇒ cap budget = 0
         assert s['evicted'] == ['bad']             # absolute gate, not the cap
         assert s['evicted_absolute_gate'] == ['bad']
@@ -4580,3 +4547,198 @@ class TestSkillHintLedger:
         assert m2._metrics['x'].get('total_loads', 0) == 5, 'load-side field must be preserved'
         m2.bump_skill_hints(['x'])
         assert m2._metrics['x']['hints'] == 1, 'a legacy record must accept a fresh bump'
+# ===========================================================================
+# BUG_0314 — value-driven active-count cap (raw = round(k × n_valuable))
+# ===========================================================================
+
+class TestValueDrivenCap:
+    """BUG_0314: the active-count target now floats with N_valuable (PROTECTED ∪ USEFUL over the
+    serve-candidate set), not the touched count. Pins the value/no-ratchet/headroom/UNPROVEN policy."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    # #1 headline: with identical N_qualified, raw floats with value.
+    def test_target_floats_with_value(self):
+        """30 USEFUL → raw=30 (threshold 30); 30 USELESS → raw=0 (threshold floored to min_cap=20).
+        Both corpora have n_qualified=30, but only the valuable one lifts the target above the floor."""
+        a_names = [f'a{i:02d}' for i in range(30)]
+        b_names = [f'b{i:02d}' for i in range(30)]
+        m_a = _rebalance_manager(self.tmp / 'A', a_names)
+        _bump_to(m_a, 200)
+        _set_metrics(m_a, {nm: _aged_entry(10, 9.0) for nm in a_names})  # 30 USEFUL (valuable)
+        pa = m_a.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+
+        m_b = _rebalance_manager(self.tmp / 'B', b_names)
+        _bump_to(m_b, 200)
+        _set_metrics(m_b, {nm: _aged_entry(3, 5.0) for nm in b_names})  # 30 USELESS junk (qualified)
+        pb = m_b.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+
+        # Same touched-count for both ...
+        assert pa['n_qualified'] == pb['n_qualified'] == 30
+        # ...but the VALUE target diverges: raw tracks n_valuable, not the touched count.
+        assert pa['n_valuable'] == 30 and pb['n_valuable'] == 0
+        assert pa['raw'] == 30 and pb['raw'] == 0
+        assert pa['raw'] != pb['raw']
+        assert pa['evict_threshold'] == 30   # raw-driven, NOT pinned to max_cap
+        assert pb['evict_threshold'] == 20   # raw=0 → floored at min_cap
+        assert pa['evict_threshold'] != pb['evict_threshold']
+
+    # #2 evict_threshold always within [min_cap, max_cap]; reenable never exceeds n_servable.
+    def test_threshold_bounded_by_min_and_max_cap(self):
+        """n_valuable=0 → threshold floored at min_cap; n_valuable>max_cap → threshold capped at max_cap."""
+        low_names = [f'l{i:02d}' for i in range(30)]
+        low = _rebalance_manager(self.tmp / 'low', low_names)
+        _bump_to(low, 200)
+        _set_metrics(low, {nm: _aged_entry(3, 5.0) for nm in low_names})  # 30 USELESS (n_valuable=0)
+        pl = low.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+        assert pl['n_valuable'] == 0
+        assert pl['evict_threshold'] == 20                       # floored at min_cap
+        assert pl['reenable_target'] <= pl['n_servable']
+
+        high_names = [f'h{i:03d}' for i in range(300)]
+        high = _rebalance_manager(self.tmp / 'high', high_names)
+        _bump_to(high, 200)
+        _set_metrics(high, {nm: _aged_entry(10, 9.0) for nm in high_names})  # 300 USEFUL
+        ph = high.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+        assert ph['n_valuable'] == 300
+        assert ph['evict_threshold'] == 200                       # capped at max_cap
+        assert ph['reenable_target'] == 200 <= ph['n_servable']
+
+    # #3 re-enable admits valuable inactive only — never the junk it just evicted.
+    def test_reenable_does_not_refill_with_low_value(self):
+        """§3.4: re-enable refills freed slots with VALUABLE inactive skills; an inactive USELESS stays
+        inactive and is never used to top up the corpus."""
+        names = ['u_useful', 'u_useless', 'i_useful', 'i_useless']
+        m = _rebalance_manager(self.tmp / 'refill', names)
+        _bump_to(m, 200)
+        entries = {
+            'u_useful': _aged_entry(10, 9.0),   # USEFUL (valuable), active
+            'u_useless': _aged_entry(0, None),  # USELESS (junk), active → gate-evicted
+            'i_useful': _aged_entry(10, 9.0),   # USEFUL (valuable), disabled → inactive servable
+            'i_useless': _aged_entry(0, None),  # USELESS (junk), disabled → inactive servable
+        }
+        _set_metrics(m, entries)
+        _disable_after_migration(m, 'i_useful')
+        _disable_after_migration(m, 'i_useless')
+        s = m.rebalance_active_skills(k=1.0, min_cap=1, max_cap=200)
+        assert 'i_useful' in s['reenabled']         # valuable inactive refills the freed slot
+        assert 'i_useless' not in s['reenabled']    # junk never refills
+        assert 'u_useless' in s['evicted']          # active USELESS gate-evicted
+        assert _status_of(m, 'i_useful') == 'active'
+        assert _status_of(m, 'i_useless') == 'inactive'
+
+    # #7 preview parity includes the new n_valuable driver.
+    def test_preview_parity_includes_n_valuable(self):
+        """Preview == real pass including n_valuable, on identical fresh managers (isolated subdirs)."""
+        u_names = [f'u{i:02d}' for i in range(10)]   # USELESS active
+        g_names = [f'g{i:02d}' for i in range(20)]   # USEFUL active
+        i_names = [f'i{i:02d}' for i in range(5)]    # USEFUL disabled-inactive
+        names = u_names + g_names + i_names
+
+        m1 = _rebalance_manager(self.tmp / 'pv', names)
+        _bump_to(m1, 200)
+        entries = {nm: _aged_entry(10, 9.0) for nm in g_names + i_names}  # USEFUL (valuable)
+        entries.update({nm: _aged_entry(0, None) for nm in u_names})      # USELESS junk
+        _set_metrics(m1, entries)
+        for nm in i_names:
+            _disable_after_migration(m1, nm)
+        p = m1.compute_rebalance_preview(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+
+        m2 = _rebalance_manager(self.tmp / 'pr', names)
+        _bump_to(m2, 200)
+        entries2 = {nm: _aged_entry(10, 9.0) for nm in g_names + i_names}
+        entries2.update({nm: _aged_entry(0, None) for nm in u_names})
+        _set_metrics(m2, entries2)
+        for nm in i_names:
+            _disable_after_migration(m2, nm)
+        s = m2.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+
+        assert p['raw'] == s['raw']
+        assert p['n_valuable'] == s['n_valuable'] == 25   # 20 USEFUL active + 5 USEFUL inactive
+        assert p['evict_threshold'] == s['evict_threshold']
+        assert p['reenable_target'] == s['reenable_target']
+        assert p['n_servable'] == s['n_servable']
+
+    # #8 always-protected counts VALUABLE and is immune to both gates.
+    def test_always_protected_counts_valuable_and_is_never_evicted(self):
+        """A forced always-protected skill counts VALUABLE (PROTECTED ∈ _VALUE_CLASSES) and is immune
+        to both gates even when every other skill is junk under a tight cap."""
+        m = _rebalance_manager(self.tmp / 'prot', ['meta', 'j1', 'j2', 'j3'])
+        m._always_protected_set = lambda: frozenset({'meta'})  # per-instance; no restore needed
+        _bump_to(m, 200)
+        entries = {'meta': _aged_entry(0, None)}  # would be USELESS, forced PROTECTED (valuable)
+        for nm in ('j1', 'j2', 'j3'):
+            entries[nm] = _aged_entry(3, 5.0)     # USELESS junk
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=0, max_cap=1)
+        assert 'meta' not in s['evicted']
+        assert s['n_valuable'] == 1               # meta is PROTECTED → valuable
+        assert set(s['evicted']) == {'j1', 'j2', 'j3'}
+        assert _status_of(m, 'meta') == 'active'
+        assert s['class_counts'][CLASS_PROTECTED] == 1
+
+    # #9 composition (OD-6): retire ALL junk, refill with ALL valuable inactive, zero residue.
+    def test_composition_retires_all_junk_refills_valuable(self):
+        """OD-6 worked example: 200 active (48 USEFUL + 152 USELESS) + 8 valuable inactive → the pass
+        retires all 152 junk, refills with all 8 valuable inactives, lands on 56 with zero junk residue."""
+        use_names = [f'us{i:03d}' for i in range(48)]    # USEFUL active (valuable)
+        junk_names = [f'ju{i:03d}' for i in range(152)]  # USELESS active (junk, no loads/ratings)
+        inact_names = [f'in{i:02d}' for i in range(8)]   # USEFUL disabled-inactive (valuable)
+        all_names = use_names + junk_names + inact_names  # 208 on-disk files, isolated subdir
+        m = _rebalance_manager(self.tmp / 'comp', all_names)
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(10, 9.0) for nm in use_names + inact_names}  # USEFUL
+        entries.update({nm: _aged_entry(0, None) for nm in junk_names})         # USELESS junk
+        _set_metrics(m, entries)
+        for nm in inact_names:
+            _disable_after_migration(m, nm)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+        assert s['n_valuable'] == 56                       # 48 USEFUL active + 8 USEFUL inactive
+        assert s['raw'] == 56
+        assert len(s['evicted']) == 152                    # all USELESS retired
+        assert set(s['evicted']) == set(junk_names)
+        assert not (set(s['evicted_cap_only']) & set(use_names))  # no valuable evicted by the cap
+        assert len(s['reenabled']) == 8                    # all valuable inactives refilled
+        assert s['target'] == 56
+        active = _active_names(m)
+        assert len(active) == 56
+        assert not (set(junk_names) & active)              # zero junk residue
+
+    # #10 steady-state decay (OD-5).
+    def test_steady_state_decays_to_rated_core(self):
+        """OD-5: as evidence ages out, raw decays from corpus-size toward the rated USEFUL core. With
+        29 UNPROVEN + 1 USEFUL, raw=1 < min_cap(20) → the cap evicts 10 UNPROVEN (down to the min_cap
+        floor) and the single USEFUL survives. UNPROVEN is cap-evictable but NEVER gate-evicted."""
+        unproven = [f'u{i:02d}' for i in range(29)]
+        m = _rebalance_manager(self.tmp / 'decay', unproven + ['good'])  # isolated subdir
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(2, 1.5) for nm in unproven}  # UNPROVEN (n<5, q̂=4.0)
+        entries['good'] = _aged_entry(10, 9.0)                 # USEFUL (valuable)
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1000)
+        assert s['n_valuable'] == 1                            # only the USEFUL is valuable
+        assert s['raw'] == 1
+        assert s['evict_threshold'] == 20                      # raw(1) floored to min_cap(20)
+        assert len(s['evicted']) == 10                         # 30 - min_cap(20) cap-evictions
+        assert s['evicted_absolute_gate'] == []                # UNPROVEN never gate-evicted
+        assert s['target'] == 20                               # settles at the min_cap floor
+        assert _status_of(m, 'good') == 'active'               # rated USEFUL survives
+
+    # #11 UNPROVEN policy pin (OD-4=a): cap-evictable, never gate-evicted.
+    def test_unproven_is_cap_evictable_never_gate_evicted(self):
+        """OD-4=a policy pin: UNPROVEN is NON-valuable (so the cap CAN evict it to honor min_cap), but
+        it is NEVER in the absolute gate. 25 UNPROVEN, raw=0 → 5 cap-evictions, 0 gate-evictions."""
+        names = [f'u{i:02d}' for i in range(25)]
+        m = _rebalance_manager(self.tmp / 'unproven', names)
+        _bump_to(m, 200)
+        _set_metrics(m, {nm: _aged_entry(2, 1.5) for nm in names})  # 25 UNPROVEN
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_valuable'] == 0
+        assert s['raw'] == 0
+        assert s['evict_threshold'] == 20
+        assert len(s['evicted']) == 5
+        assert s['evicted_absolute_gate'] == []
+        assert len(s['evicted_cap_only']) == 5

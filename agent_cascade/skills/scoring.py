@@ -63,6 +63,12 @@ def skill_classify(n: int, avg, A: int, *,
     Precedence: BAD > PROTECTED > {USEFUL, USELESS} > UNPROVEN. A demonstrably harmful skill
     (n>=n_min and clearly below baseline) is evicted even if young; the fair window shields only
     the unproven from retirement. Keys off ``q̂``, ``n`` and ``A`` — NOT off the raw score.
+
+    BUG_0314 (OD-4=a): UNPROVEN is still outside the ABSOLUTE GATE here — the gate never mass-evicts
+    it. But the value-driven active-count CAP (manager._VALUE_CLASSES = {PROTECTED, USEFUL}) treats
+    UNPROVEN as non-valuable, so an unproven skill is cap-evictable once its fair window closes. The
+    gate is "keep for exploration"; the cap is "not valuable enough to hold a slot". Update both
+    views together if this policy ever changes.
     """
     qhat = _shrinkage_qhat(n, avg, q0, kq)
     if qhat <= q0 - dq and n >= n_min:
@@ -73,7 +79,7 @@ def skill_classify(n: int, avg, A: int, *,
         return CLASS_USEFUL                               # above baseline + meaningfully used
     if abs(qhat - q0) <= dq:
         return CLASS_USELESS                              # neutral quality, not earning its keep
-    return CLASS_UNPROVEN                                 # monitor / keep (exploration)
+    return CLASS_UNPROVEN                                 # monitor / gate keeps it (exploration); cap-evictable under BUG_0314 (OD-4=a)
 
 
 def eviction_rank_key(class_name: str, score: float, name: str):

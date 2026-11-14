@@ -902,7 +902,9 @@ SKILL_WALLCLOCK_SECONDS_PER_TURN: int = int(
     os.getenv('AGENT_CASCADE_SKILL_WALLCLOCK_SECONDS_PER_TURN', '3600'))  # 1h ~ 1 turn
 
 # ── Skill invalidation (adaptive count-cap) ────────────────────────────────
-# Defaults for the startup rebalance pass: target = clamp(K × N_qualified, MIN_CAP, MAX_CAP).
+# Defaults for the startup rebalance pass: raw = round(K × n_valuable); the
+# evict threshold is clamped to [MIN_CAP, MAX_CAP]. n_valuable counts
+# serve-candidates classified PROTECTED/USEFUL (value-driven, not touched-count).
 SKILL_ACTIVE_TARGET_K: float = float(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_TARGET_K', '1.0'))
 SKILL_ACTIVE_MIN_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MIN_CAP', '20'))
 SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', '200'))

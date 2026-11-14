@@ -824,9 +824,11 @@ def _handle_skill_always_protected(ui_cfg: dict, agent_pool: Optional[Any], agen
 
 @register_config_handler('skill_active_target_k')
 def _handle_skill_active_target_k(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Multiplier K: raw target = round(K × N_qualified). Raw is clamped to [MIN_CAP, MAX_CAP]
-    for the eviction threshold (never evict below MIN_CAP); re-enable is bounded by the servable
-    corpus. Clamped to [0.1, 5.0]."""
+    """Multiplier K: raw target = round(K × n_valuable), where n_valuable is the count of servable
+    skills classified PROTECTED or USEFUL (BUG_0314; was round(K × N_qualified) before). raw is
+    clamped to [MIN_CAP, MAX_CAP] for the nominal eviction threshold (never evict below MIN_CAP); the
+    eviction budget itself retires non-valuable actives bounded by [MIN_CAP, MAX_CAP] (§3b), and
+    re-enable is bounded by the servable corpus. Clamped to [0.1, 5.0]."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
             val = float(ui_cfg.get('skill_active_target_k', 1.0))

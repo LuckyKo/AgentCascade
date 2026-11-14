@@ -1618,7 +1618,7 @@ function refreshSkillThreshold() {
     .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
     .then(data => {
       if (data && data.ok) {
-        el.textContent = `Threshold: evict-above ${data.evict_threshold} · ${data.active_count} active / ${data.n_qualified} qualified`;
+        el.textContent = `Threshold: evict-above ${data.evict_threshold} · ${data.active_count} active / ${data.n_valuable} valuable`;
       } else {
         el.textContent = 'Threshold: n/a';
       }

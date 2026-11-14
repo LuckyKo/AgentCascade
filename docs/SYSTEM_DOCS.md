@@ -1415,7 +1415,7 @@ Auto-load is gated by `skill_autoload_enabled` (ON by default) and read live fro
 
 ### 10.4 Invalidation & Rebalance (the lifecycle gate — the key behavior)
 
-`rebalance_active_skills` (`manager.py:755`) is a one-shot pass that classifies every active skill and evicts the losers. It runs in a background thread at startup (`pool/core.py:318-347`), gated by the master switch `skill_auto_invalidate_enabled` (ON by default). It never raises — a failure logs and can never break startup.
+`rebalance_active_skills` is a one-shot pass that classifies every active skill and evicts the losers. It runs in a background thread at startup (`pool/core.py`), gated by the master switch `skill_auto_invalidate_enabled` (ON by default). It never raises — a failure logs and can never break startup.
 
 **Scoring** (`skills/scoring.py`, pure — no I/O). Each skill's score is a bounded product of usage, quality, load-waste, and recency factors:
 
@@ -1433,9 +1433,13 @@ where `u` = saturating usage (`n`=loads), `q̂` = shrinkage quality vs the neutr
 | **USELESS** | `|q̂−q0| ≤ δq` (neutral quality, not earning its keep) | Evicted by the absolute gate **once past the fair window** (while young it is PROTECTED) |
 | **UNPROVEN** | otherwise (below/above baseline but `n < n_min`) | Monitor / keep (exploration) — only cap-eligible |
 
-**Eviction is OR-composed** (`manager.py:776-872`): a skill is removed if **either** the absolute gate catches it (`_ABSOLUTE_GATE_CLASSES = {BAD, USELESS}`, `manager.py:67`) **or** the count-cap budget selects it. PROTECTED skills are excluded from the candidate set entirely. The eviction set is ordered by `eviction_rank_key` (`scoring.py:79`) so `BAD < USELESS < UNPROVEN < USEFUL` evicts first, and bounded by `max_evictions_per_pass` so a bad config can't nuke the corpus. The count target is `raw = round(K × N_qualified)` clamped to `[SKILL_ACTIVE_MIN_CAP=20, SKILL_ACTIVE_MAX_CAP=200]` with `SKILL_ACTIVE_TARGET_K=1.0` (`settings.py:802-804`); `min_cap` is a **lower bound on eviction**, never a force-enable mandate.
+**Eviction is OR-composed** (`rebalance_active_skills`): a skill is removed if **either** the absolute gate catches it (`_ABSOLUTE_GATE_CLASSES = {BAD, USELESS}`) **or** the count-cap budget selects it. PROTECTED skills are excluded from the candidate set entirely. The eviction set is ordered by `eviction_rank_key` (`scoring.py`) so `BAD < USELESS < UNPROVEN < USEFUL` evicts first, and bounded by `max_evictions_per_pass` so a bad config can't nuke the corpus.
 
-**An evicted skill is set `status='inactive'`** and added to `_disabled_names`, then dropped from the discovery cache + registry (`manager.py:883-897`) → it is **no longer servable and no longer hintable**. A later rebalance can re-enable it if its ranking recovers (bounded by the servable corpus).
+The count target is now **value-driven** (BUG_0314, decision OD-4=a): `raw = round(K × n_valuable)`, where `n_valuable` is the count of **SERVE-CANDIDATE** skills (active ∪ servable, non-env-disabled inactive) whose class is in `manager._VALUE_CLASSES = {PROTECTED, USEFUL}`. UNPROVEN is **no longer counted as valuable for the cap** (it still sits outside the absolute eviction *gate* as exploration — only the cap retired it). Counting over the union means deactivating a skill can't ratchet the target down (Q4, no-ratchet). The eviction budget then retires the **NON-valuable actives** bounded by `[min_cap, max_cap]` (composition fix, §3b/OD-6), so a pass never leaves junk occupying slots while valuable inactive skills go orphaned. `min_cap`/`max_cap` are a **hard floor/ceiling on eviction**, never a force-enable mandate; `SKILL_ACTIVE_TARGET_K=1.0` (`settings.py:906`) is an optional multiplier retained for continuity (OD-2). `n_qualified` (the old touched count) is still reported for the UI table but no longer drives the cap.
+
+**An evicted skill is set `status='inactive'`** and added to `_disabled_names`, then dropped from the discovery cache + registry → it is **no longer servable and no longer hintable**. Re-enable is the other half of the pass: it raises the active count back toward `raw` but **only refills with VALUABLE inactive skills** (OD-6), so a pass never re-enables the low-value skills it just evicted. A re-enable therefore only happens for a skill that has become VALUABLE again — rated `USEFUL`, or back inside a fresh `PROTECTED` window. An **unrated** skill never returns: once inactive its activity clock keeps aging, so it cannot regain `PROTECTED` and never enters `_VALUE_CLASSES` (OD-5). Ratings refresh that clock; loads do **not**. This makes the pool's steady state `min_cap` + the rated core. For the UI, `evict_threshold = max(min_cap, min(max_cap, raw))` is the **nominal** clamp of `raw` shown on the threshold card, while `summary['target']` is the **actual** post-pass active count; `compute_rebalance_preview` mirrors the pass read-only.
+
+> **The value bar is the de-facto pool-size knob.** Tuning the value bar (`n_min` / `δq` / `fair_window_turns`, module constants in `skills/scoring.py`) is what sizes the pool: lowering it makes fewer skills VALUABLE → a smaller pool; raising it grows the pool. `SKILL_ACTIVE_MIN_CAP` / `SKILL_ACTIVE_MAX_CAP` are **hard eviction floor/ceiling only** — they constrain what can be evicted, not how large the pool is.
 
 **`prune_stale_metrics`** (`manager.py:351`) then removes the metrics entry for skills that leave the live set entirely (file gone everywhere). Disabled, platform-incompatible, `INACTIVE/`-subfolder, and candidate skills are **kept** (their on-disk artifact still exists). A scan error on an existing root aborts the prune — a partial scan never triggers deletion.
 
@@ -1465,8 +1469,8 @@ Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` trig
 | `skill_auto_invalidate_enabled` | `True` | Master switch for the whole rebalance/invalidate pass (`pool/core.py:319`). |
 | `memory_hint_skill_autoload_threshold` | `3` | Hint-count threshold before auto-loading a repeatedly-hinted skill (`memory_hint/manager.py:382`). |
 | `memory_hint_skill_autoload_enabled` | `True` | On/off for the auto-load above. |
-| `SKILL_ACTIVE_TARGET_K` | `1.0` | Active target = `round(K × N_qualified)` (`settings.py:802`). |
-| `SKILL_ACTIVE_MIN_CAP` / `SKILL_ACTIVE_MAX_CAP` | `20` / `200` | Clamp on the active count (`settings.py:803-804`). |
+| `SKILL_ACTIVE_TARGET_K` | `1.0` | Multiplier for the value-driven target `round(K × n_valuable)` (`settings.py:906`); continuity multiplier (OD-2). |
+| `SKILL_ACTIVE_MIN_CAP` / `SKILL_ACTIVE_MAX_CAP` | `20` / `200` | Hard **eviction** floor/ceiling only (`settings.py:907-908`); they do NOT size the pool — see the value-bar note in §10.4. |
 | `SKILL_PRECISION_WEIGHT` | `1` | Enable the hint re-rank (§10.6); `0` = off (`settings.py:762`). |
 | `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.35` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:766,770`). |
 | `CANDIDATE_MIN_RATINGS` / `CANDIDATE_MAX_PENDING_DAYS` | `5` / `14` | Decision-gate bar for promoting/discarding an update candidate (`settings.py:921-928`). |
