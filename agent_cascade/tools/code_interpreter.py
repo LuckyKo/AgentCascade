@@ -2086,17 +2086,45 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Windows WSL2 overhead where kernel initialization can take 4-6 seconds.
         time.sleep(4)
 
-        # Create client and wait for kernel readiness (shared helper)
-        kc = self._create_kernel_client(host_connection_file, container_id, kernel_id)
+        # Create client and wait for kernel readiness (shared helper). If the kernel
+        # never becomes ready, BUG_0320 has already torn down the client's zmq context
+        # inside _create_kernel_client, but the container is NOT yet registered in
+        # _DOCKER_CONTAINERS (that only happens in call() after this returns), so no
+        # later close()/kill/session cleanup can see it -> orphaned live container.
+        # Tear it down here, reusing the existing startup-failure cleanup idiom from
+        # call() (docker stop + docker rm -f). Wrapped so a teardown hiccup can never
+        # mask the real startup error. No-op if the container is already gone.
+        try:
+            kc = self._create_kernel_client(host_connection_file, container_id, kernel_id)
 
-        # Initialize activity tracking for watchdog (include work_dir + dynamic timeouts)
-        with _KERNEL_LOCK:
-            _KERNEL_ACTIVITY[kernel_id] = {
-                'last_active': time.time(),
-                'work_dir': self.work_dir,
-                'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
-                'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
-            }
+            # Initialize activity tracking for watchdog (include work_dir + dynamic timeouts)
+            with _KERNEL_LOCK:
+                _KERNEL_ACTIVITY[kernel_id] = {
+                    'last_active': time.time(),
+                    'work_dir': self.work_dir,
+                    'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
+                    'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
+                }
+        except Exception:
+            # The container is live (started above) but was never registered in
+            # _DOCKER_CONTAINERS, so call()'s cleanup cannot see it (its container_id
+            # local stays None because the tuple-unpack aborts on this raise). Stop +
+            # force-remove it here with the same idiom; guarded so a cleanup error
+            # cannot replace the original startup exception, then re-raise it.
+            try:
+                subprocess.run(['docker', 'stop', container_id],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
+                subprocess.run(['docker', 'rm', '-f', container_id],
+                               timeout=10,
+                               capture_output=True,
+                               encoding='utf-8',
+                               errors='replace')
+            except Exception as cleanup_err:
+                logger.warning(f"Container stop/rm failed during kernel-start cleanup: {cleanup_err}")
+            raise
 
         return kc, container_id
 
