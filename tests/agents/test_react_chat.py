@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Legacy Qwen library-agent demo (opt-in only: run with `pytest -m extra_examples` against a live local model, AGENT_CASCADE_RUN_LOCAL_TESTS=1)."""
+
 import os
 import shutil
 from pathlib import Path
@@ -22,6 +24,7 @@ from agent_cascade.agents import ReActChat
 from agent_cascade.llm.schema import ContentItem, Message
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_react_chat(local_llm_cfg):
     llm_cfg = dict(local_llm_cfg)
@@ -40,6 +43,7 @@ def test_react_chat(local_llm_cfg):
         f"ReAct response missing expected markers. Content: {content[:200]}"
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_react_chat_with_file(local_llm_cfg):
     if os.path.exists('workspace'):

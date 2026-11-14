@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Legacy Qwen library-agent demo (opt-in only: run with `pytest -m extra_examples` against a live local model, AGENT_CASCADE_RUN_LOCAL_TESTS=1)."""
+
 import json
 import urllib.parse
 
@@ -47,6 +49,7 @@ def init_agent_service(llm_cfg):
     return bot
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_custom_tool_object(local_llm_cfg):
     # Define the agent

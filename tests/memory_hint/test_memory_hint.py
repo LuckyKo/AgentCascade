@@ -997,7 +997,12 @@ class TestManagerSkillHints:
         return mgr, inst, job
 
     def test_skill_hint_fires_on_strong_match(self, tmp_path):
-        """A query whose top skill score ≥ SKILL_HINT_MIN_SCORE delivers a skill hint."""
+        """A skill match scored above the adaptive floor delivers a skill hint.
+
+        The stub score (SKILL_HINT_MIN_SCORE + 0.05) sits comfortably above the adaptive
+        floor; SKILL_HINT_MIN_SCORE is only a legacy AUTO-mode alias, NOT the gate
+        (memory_hint/manager.py:117-121).
+        """
         from agent_cascade.memory_hint import SKILL_HINT_MIN_SCORE
         lessons = [
             ('compression-debug.md', 'Compression Debug',

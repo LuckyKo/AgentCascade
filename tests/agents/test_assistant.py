@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Assistant agent tests against a local LLM server."""
+"""Assistant agent tests against a local LLM server.
+
+Opt-in only: run with `pytest -m extra_examples` against a live local model, AGENT_CASCADE_RUN_LOCAL_TESTS=1.
+"""
 
 import pytest
 
@@ -20,6 +23,7 @@ from agent_cascade.agents import Assistant
 from agent_cascade.llm.schema import ContentItem, Message
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_assistant_system_and_tool(local_llm_cfg):
     """Test assistant with system prompt and tool calling."""
@@ -43,6 +47,7 @@ def test_assistant_system_and_tool(local_llm_cfg):
     assert len(last[-1].content) > 0, 'Final response has no content'
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_assistant_files(local_llm_cfg):
     """Test assistant reading from a file URL."""
@@ -62,6 +67,7 @@ def test_assistant_files(local_llm_cfg):
     assert len(last[-1].content) > 0
 
 
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_assistant_empty_query(local_llm_cfg):
     """Test assistant with no user text — only a file."""
@@ -84,6 +90,7 @@ def test_assistant_empty_query(local_llm_cfg):
 
 
 @pytest.mark.extra_vl
+@pytest.mark.extra_examples
 @pytest.mark.skip_if_no_local
 def test_assistant_vl(local_vl_llm_cfg):
     """Test assistant with vision input."""
