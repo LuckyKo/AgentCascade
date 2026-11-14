@@ -853,8 +853,26 @@ class SkillManager:
         from inside the manager — the master switch ``skill_auto_invalidate_enabled`` gates the
         whole pass at the pool level (pool/core.py). Setting ``max_evictions_per_pass=0`` disables
         BOTH gates (cap-only-off = full no-op; see plan §7 rollback table).
+
+        OD-1 (BUG_0314 follow-up): the evict+apply is now a BOUNDED CONVERGENCE LOOP rather than a
+        single pass, so one boot reaches the value-driven target instead of ~``ceil((A-target)/max_ev)``
+        restarts. The STABLE target quantities (``raw``/``evict_threshold``/``reenable_target``/
+        ``n_valuable``/``n_servable``/``max_ev``) are computed ONCE before the loop — they do not move as
+        non-valuable actives are retired (no-ratchet, Q4). Each iteration re-reads the fresh active set
+        from ``_metrics`` (reflecting prior applies), re-classifies, recomputes the per-iteration
+        ``to_evict`` (still D-SAFE-bounded by ``max_ev``) and ``to_reenable``, then applies. It stops on:
+        convergence (active reached the ``evict_threshold`` floor), no-progress (an iteration that both
+        evicts and re-enables nothing), or the iteration cap
+        (``ceil(max(0, active_before - evict_threshold) / max_ev) + 1`` clamped to ``[1, 12]``) — a
+        pathological tiny ``max_ev`` can never spin. The FINAL state matches the old single pass exactly;
+        near-target/healthy pools (the common case) exit in one iteration (max_ev=0 with a positive
+        re-enable budget takes 2 iterations but the final state is unchanged). The whole loop stays
+        best-effort under the
+        existing ``try/except``: an exception in any iteration is logged and the summary returns with
+        whatever was applied so far.
         """
-        summary = {'evicted': [], 'reenabled': [], 'n_qualified': 0, 'n_valuable': 0, 'target': 0, 'active_before': 0}
+        summary = {'evicted': [], 'reenabled': [], 'n_qualified': 0, 'n_valuable': 0, 'target': 0,
+                   'active_before': 0, 'iterations': 0}
         try:
             # (0) one-time porting + orphan cleanup (post-discover; registry/_skill_paths ready).
             self._migrate_metrics_to_v13()
@@ -872,35 +890,31 @@ class SkillManager:
             # disable/enable flips mutate _disabled_names and invalidate the discovery cache
             # (which removes disabled skills from the registry), so the registry would under-
             # count active skills after any flip. Metrics status is stable across a pass.
-            active_names = [nm for nm, m in metrics_snap.items()
-                            if isinstance(m, dict) and m.get('status') == 'active']
+            active_before = sum(1 for m in metrics_snap.values()
+                                if isinstance(m, dict) and m.get('status') == 'active')
 
-            # (b-pre) Phase C: resolve scoring constants + classify the SERVE-CANDIDATE set ONCE, so
-            # PROTECTED (fair window still open) skills can be excluded from the eviction candidate set
-            # and the value target sees identical per-skill classes. BUG_0314 §3 widens the classify
-            # input to active ∪ servable-inactive so an evicted-but-still-valuable skill keeps counting
-            # toward n_valuable (no-ratchet, Q4). n_qualified (touched count) stays over the FULL
-            # corpus for the UI; the cap's budget is what honors the PROTECTED floor.
+            # (b-pre) Phase C: resolve scoring constants + classify the SERVE-CANDIDATE set ONCE to pin
+            # the STABLE target quantities used by every loop iteration. PROTECTED (fair window open)
+            # skills are excluded from the eviction candidate set and the value target sees identical
+            # per-skill classes. BUG_0314 §3 widens the classify input to active ∪ servable-inactive so
+            # an evicted-but-still-valuable skill keeps counting toward n_valuable (no-ratchet, Q4) —
+            # which is exactly why n_valuable (and therefore raw/evict_threshold/reenable_target) is
+            # STABLE across iterations: retiring non-valuable actives never changes the serve-set tally.
             score_kw = self._scoring_kwargs(q0=q0, kq=kq, n_half=n_half, g_half=g_half, r_floor=r_floor,
                                             tau_turns=tau_turns, dq=dq, n_min=n_min,
                                             fair_window_turns=fair_window_turns)
             now = time.time()
             always_protected = self._always_protected_set()
-            serve_names = list(active_names) + [
+            serve_names = list([nm for nm, m in metrics_snap.items()
+                                if isinstance(m, dict) and m.get('status') == 'active']) + [
                 nm for nm, m in metrics_snap.items()
                 if isinstance(m, dict) and m.get('status') == 'inactive'
                 and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
             info, _ = self._classify_active(metrics_snap, serve_names, global_turns_snap, now, score_kw,
                                             always_protected=always_protected)
-            # class_counts keeps its ACTIVE-ONLY contract (it backs the active-row table + existing
-            # tests); the servable-wide value tally is exposed separately as n_valuable, never merged.
-            class_counts = {cls: 0 for cls in (CLASS_BAD, CLASS_PROTECTED, CLASS_USEFUL,
-                                               CLASS_USELESS, CLASS_UNPROVEN)}
-            for nm in active_names:
-                class_counts[info[nm]['class']] += 1
 
             # (b) informational touched-count over the FULL corpus (kept for the UI table; no longer
-            # drives the cap).
+            # drives the cap). Status flips never touch loads/ratings, so this is stable across iters.
             n_qualified = sum(
                 1 for m in metrics_snap.values()
                 if isinstance(m, dict) and (
@@ -908,7 +922,7 @@ class SkillManager:
             # BUG_0314: the VALUE target replaces the touched target. n_valuable counts servable
             # VALUABLE skills (PROTECTED ∪ USEFUL) across serve_names; k (default 1.0) is an optional
             # multiplier retained for continuity (OD-2). Counted over the union → deactivating a skill
-            # does not lower the target (Q4 no-ratchet).
+            # does not lower the target (Q4 no-ratchet). Stable across the convergence loop (see above).
             n_valuable = sum(1 for nm in serve_names if info[nm]['class'] in _VALUE_CLASSES)
             raw = round(k * n_valuable)
 
@@ -923,66 +937,114 @@ class SkillManager:
             # toward `raw`, and never beyond what can actually be served.
             reenable_target = min(max_cap, raw, n_servable)
 
-            active_before = len(active_names)
-
-            # PROTECTED is immune to ALL eviction (absolute gate + count-cap) — excluded from the
-            # candidate set entirely (§9/§17); it joins ordering only after its window expires.
-            candidates = [nm for nm in active_names if info[nm]['class'] != CLASS_PROTECTED]
-
-            # (b') OR-composition: absolute gate ∪ cap budget, ordered by eviction_rank_key so
-            # BAD(0) < USELESS(1) < UNPROVEN(2) < USEFUL(3) evicts first (research §17).
-            abs_evict = {nm for nm in candidates if info[nm]['class'] in _ABSOLUTE_GATE_CLASSES}
-            # Cap budget, BUG_0314 §3b (OD-6): the eviction budget now counts NON-VALUABLE actives so
-            # we never leave junk occupying slots while valuable inactive skills go orphaned (the
-            # residue that made the next pass a permanent no-op). Bounds [min_cap, max_cap]:
-            #   - never evict below min_cap (the floor),
-            #   - never retire more junk than actually exists (clamp to the junk count),
-            #   - but always honor the hard max_cap ceiling when active_before > max_cap.
-            # (evict_threshold stays the *nominal* clamp of raw that the threshold card displays;
-            # summary['target'] is the actual post-pass active count.)
-            non_valuable_cands = [nm for nm in candidates if info[nm]['class'] not in _VALUE_CLASSES]
-            cap_target = max(active_before - max_cap,                   # honor the hard ceiling
-                             min(len(non_valuable_cands),                # retire the junk
-                                 max(0, active_before - min_cap)))       # never below the floor
-            ordered_cands = sorted(candidates,
-                                   key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
-            cap_evict = set(ordered_cands[:cap_target])  # cap draws worst-first from candidates
-
-            # (b'') D-SAFE: never evict more than max_evictions_per_pass in one pass — the top-N by
-            # rank key survive a bad config. Clamped to [0, 1000] like the Phase E config handler.
+            # (b'') D-SAFE: never evict more than max_evictions_per_pass in one ITERATION — the top-N by
+            # rank key survive a bad config. Clamped to [0, 1000] like the Phase E config handler. Stable
+            # across the convergence loop (it is a config input, not derived from the active set).
             try:
                 max_ev = int(max_evictions_per_pass)
             except (TypeError, ValueError):
                 max_ev = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT
             max_ev = min(max(0, max_ev), 1000)
 
-            to_evict_list = sorted(abs_evict | cap_evict,
-                                   key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
-            to_evict_list = to_evict_list[:max_ev]
-            to_evict = set(to_evict_list)
+            # OD-1 iteration cap (D-SAFE convergence guarantee): ceil(shortfall / per-iter max) + 1 slack
+            # step for the final re-enable/no-op check, clamped to [1, 12]. A default max_ev=25 reaching a
+            # 150-shortfall target needs ceil(150/25)+1 = 7; a pathological tiny max_ev can never spin.
+            _shortfall = max(0, active_before - evict_threshold)
+            max_iterations = max(1, min(12, -(-_shortfall // max(1, max_ev)) + 1))
 
-            # Re-enable ranking stays on the legacy _rank_key, but BUG_0314 §3 item 4 restricts the
-            # candidate pool to VALUABLE inactive skills so a pass never refills slots with the low-value
-            # skills it just evicted. The lookup is GUARDED (info.get(...)): any name outside
-            # serve_names must not raise KeyError, which the blanket except below would swallow into a
-            # silent no-op that still returns a plausible-looking dict.
-            inactive_cands = [nm for nm, m in metrics_snap.items()
-                              if isinstance(m, dict) and m.get('status') == 'inactive'
-                              and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
-            valuable_inactive = [nm for nm in inactive_cands
-                                 if info.get(nm, {}).get('class') in _VALUE_CLASSES]
-            inactive_ranked = sorted(valuable_inactive, key=lambda nm: self._rank_key(metrics_snap[nm], nm), reverse=True)
+            # Aggregators across ALL iterations (union, ordered within each iteration's pass).
+            all_evicted = []
+            all_reenabled = []
+            all_abs_gate = []
+            all_cap_only = []
+            abs_gate_set = set()
+            class_counts = {cls: 0 for cls in (CLASS_BAD, CLASS_PROTECTED, CLASS_USEFUL,
+                                               CLASS_USELESS, CLASS_UNPROVEN)}
+            iterations = 0
+            final_active = active_before
+            info_last = info  # last iteration's fresh classification (for the audit log below)
 
-            remaining_after_evict = active_before - len(to_evict_list)
-            # §3b (OD-6): the re-enable budget is measured against VALUABLE actives that SURVIVED the
-            # eviction, not total survivors, so the slots freed by evicted junk are refilled with
-            # valuable inactive skills (closing the residue gap) instead of left to drift.
-            valuable_active_after = sum(1 for nm in active_names
-                                        if nm not in to_evict and info[nm]['class'] in _VALUE_CLASSES)
-            to_reenable = inactive_ranked[:max(0, reenable_target - valuable_active_after)]
+            for iteration in range(1, max_iterations + 1):
+                iterations = iteration
 
-            # (d) APPLY in bulk under nested locks, then ONE flush + ONE invalidate + ONE re-scan (D-F).
-            if to_evict or to_reenable:
+                # (a-iter) Re-read the FRESH active set + classify so this iteration sees the state the
+                # previous iteration(s) applied. serve_names is status-invariant (active ∪ servable-
+                # inactive), so the value tally is unchanged — only which names are ACTIVE moved.
+                with self._metrics_lock:
+                    metrics_snap = _copy.deepcopy(self._metrics)
+                    global_turns_snap = self._global_activity_turns
+                active_names = [nm for nm, m in metrics_snap.items()
+                                if isinstance(m, dict) and m.get('status') == 'active']
+                active_now = len(active_names)
+                serve_names = list(active_names) + [
+                    nm for nm, m in metrics_snap.items()
+                    if isinstance(m, dict) and m.get('status') == 'inactive'
+                    and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
+                info, _ = self._classify_active(metrics_snap, serve_names, global_turns_snap, now, score_kw,
+                                                always_protected=always_protected)
+                info_last = info
+                # class_counts keeps its ACTIVE-ONLY contract (it backs the active-row table + existing
+                # tests); the servable-wide value tally is n_valuable (computed once, stable) — never merged.
+                class_counts = {cls: 0 for cls in (CLASS_BAD, CLASS_PROTECTED, CLASS_USEFUL,
+                                                   CLASS_USELESS, CLASS_UNPROVEN)}
+                for nm in active_names:
+                    class_counts[info[nm]['class']] += 1
+
+                # PROTECTED is immune to ALL eviction — excluded from the candidate set entirely (§9/§17).
+                candidates = [nm for nm in active_names if info[nm]['class'] != CLASS_PROTECTED]
+
+                # (b') OR-composition: absolute gate ∪ cap budget, ordered by eviction_rank_key so
+                # BAD(0) < USELESS(1) < UNPROVEN(2) < USEFUL(3) evicts first (research §17). Recomputed
+                # from the FRESH active set each iteration (the budget shrinks as junk is retired).
+                abs_evict = {nm for nm in candidates if info[nm]['class'] in _ABSOLUTE_GATE_CLASSES}
+                # Cap budget, BUG_0314 §3b (OD-6): the eviction budget now counts NON-VALUABLE actives so
+                # we never leave junk occupying slots while valuable inactive skills go orphaned (the
+                # residue that made the next pass a permanent no-op). Bounds [min_cap, max_cap]:
+                #   - never evict below min_cap (the floor),
+                #   - never retire more junk than actually exists (clamp to the junk count),
+                #   - but always honor the hard max_cap ceiling when active_now > max_cap.
+                non_valuable_cands = [nm for nm in candidates if info[nm]['class'] not in _VALUE_CLASSES]
+                cap_target = max(active_now - max_cap,                    # honor the hard ceiling
+                                 min(len(non_valuable_cands),              # retire the junk
+                                     max(0, active_now - min_cap)))        # never below the floor
+                ordered_cands = sorted(candidates,
+                                       key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
+                cap_evict = set(ordered_cands[:cap_target])  # cap draws worst-first from candidates
+
+                # D-SAFE: truncate this iteration's eviction union to max_ev.
+                to_evict_list = sorted(abs_evict | cap_evict,
+                                       key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
+                to_evict_list = to_evict_list[:max_ev]
+                to_evict = set(to_evict_list)
+
+                # Re-enable ranking stays on the legacy _rank_key, but BUG_0314 §3 item 4 restricts the
+                # candidate pool to VALUABLE inactive skills so a pass never refills slots with the low-value
+                # skills it just evicted. The lookup is GUARDED (info.get(...)): any name outside
+                # serve_names must not raise KeyError, which the blanket except below would swallow into a
+                # silent no-op that still returns a plausible-looking dict.
+                inactive_cands = [nm for nm, m in metrics_snap.items()
+                                  if isinstance(m, dict) and m.get('status') == 'inactive'
+                                  and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
+                valuable_inactive = [nm for nm in inactive_cands
+                                     if info.get(nm, {}).get('class') in _VALUE_CLASSES]
+                inactive_ranked = sorted(valuable_inactive,
+                                         key=lambda nm: self._rank_key(metrics_snap[nm], nm), reverse=True)
+
+                # §3b (OD-6): the re-enable budget is measured against VALUABLE actives that SURVIVED the
+                # eviction, not total survivors, so the slots freed by evicted junk are refilled with
+                # valuable inactive skills (closing the residue gap) instead of left to drift.
+                valuable_active_after = sum(1 for nm in active_names
+                                            if nm not in to_evict and info[nm]['class'] in _VALUE_CLASSES)
+                to_reenable = inactive_ranked[:max(0, reenable_target - valuable_active_after)]
+
+                # (d) NO-PROGRESS break: nothing to evict AND nothing to re-enable → the pool is settled
+                # (this is the single-iteration exit for healthy / tiny / max_ev=0 / at-target pools).
+                if not to_evict and not to_reenable:
+                    final_active = active_now
+                    break
+
+                # (d) APPLY this iteration in bulk under nested locks, then ONE flush + ONE invalidate +
+                # ONE re-scan (D-F) so the NEXT iteration's snapshot reflects this iteration's mutations.
                 with self._write_lock:
                     for nm in to_evict:
                         self._disabled_names.add(str(nm).lower())
@@ -994,27 +1056,58 @@ class SkillManager:
                         for nm in to_reenable:
                             self._metrics.setdefault(nm, _default_metrics_entry('active'))['status'] = 'active'
                 self._flush_metrics_to_disk()
+                # Registry refresh (invalidate_cache + _ensure_discovered) is DEFERRED to a single
+                # post-loop call below: the convergence loop reads _metrics + the pre-captured
+                # servable set directly each iteration (never the registry), so a per-iteration
+                # re-scan (~1.2s I/O, up to 12x) is redundant I/O (ties into BUG_0310 boot speed).
+
+                # Aggregate this iteration into the union totals (preserving per-pass ordering).
+                all_evicted.extend(to_evict_list)
+                all_reenabled.extend(to_reenable)
+                this_abs = [nm for nm in to_evict_list if nm in abs_evict]
+                all_abs_gate.extend(this_abs)
+                all_cap_only.extend([nm for nm in to_evict_list if nm not in abs_evict])
+                abs_gate_set.update(this_abs)
+                final_active = active_now - len(to_evict_list) + len(to_reenable)
+
+                logger.debug('[SKILLS] Rebalance iter=%d evicted=%d (abs=%d cap=%d) reenabled=%d '
+                             'active_after=%d target=%d',
+                             iteration, len(to_evict_list), len(this_abs),
+                             len(to_evict_list) - len(this_abs), len(to_reenable), final_active, evict_threshold)
+
+                # (d) CONVERGENCE break: the eviction side has reached the value-driven floor; the
+                # per-iteration re-enable keeps it pinned there, so the pool is at the target.
+                if final_active <= evict_threshold:
+                    break
+
+            # (e) ONE deferred registry refresh for the FINAL state only — the convergence loop
+            # read _metrics directly each iteration, so per-iteration rescans were redundant I/O.
+            if all_evicted or all_reenabled:
                 self.invalidate_cache()
-                self._ensure_discovered()  # refresh registry: evicted dropped, re-enabled registered
+                self._ensure_discovered()  # evicted dropped, re-enabled registered (final state only)
 
             summary.update(n_qualified=n_qualified, n_valuable=n_valuable, raw=raw, evict_threshold=evict_threshold,
                            reenable_target=reenable_target, n_servable=n_servable,
-                           target=remaining_after_evict + len(to_reenable), active_before=active_before,
-                           evicted=list(to_evict_list), reenabled=to_reenable,
+                           target=final_active, active_before=active_before, iterations=iterations,
+                           evicted=all_evicted, reenabled=all_reenabled,
                            class_counts=class_counts,
-                           evicted_absolute_gate=[nm for nm in to_evict_list if nm in abs_evict],
-                           evicted_cap_only=[nm for nm in to_evict_list if nm not in abs_evict])
+                           evicted_absolute_gate=all_abs_gate,
+                           evicted_cap_only=all_cap_only)
             logger.info('[SKILLS] Rebalance: N_qualified=%d n_valuable=%d raw=%d evict_threshold=%d reenable_target=%d '
                         'n_servable=%d active_before=%d active_after=%d evicted=%d (abs=%d cap=%d) '
-                        'max_evictions_per_pass=%d reenabled=%d classes=%s',
+                        'max_evictions_per_pass=%d reenabled=%d iterations=%d classes=%s',
                         n_qualified, n_valuable, raw, evict_threshold, reenable_target, n_servable,
-                        active_before, remaining_after_evict + len(to_reenable),
-                        len(to_evict_list), len(summary['evicted_absolute_gate']),
-                        len(summary['evicted_cap_only']), max_ev, len(to_reenable), class_counts)
-            for nm in to_evict_list:  # E2 audit log (now with class + gate attribution)
-                src = 'absolute-gate' if nm in abs_evict else 'count-cap'
-                logger.info("[SKILLS] Auto-inactivated '%s' (%s, %s)", nm, info[nm]['class'], src)
-            for nm in to_reenable:
+                        active_before, final_active,
+                        len(all_evicted), len(all_abs_gate), len(all_cap_only),
+                        max_ev, len(all_reenabled), iterations, class_counts)
+            # E2 audit log with class + gate attribution. info_last is the LAST iteration's fresh
+            # classification; for a servable skill its class is status-invariant (so correct even if it
+            # was evicted in an earlier iteration), and a non-servable skill absent from the final
+            # serve-set falls back to '?' via .get().
+            for nm in all_evicted:
+                src = 'absolute-gate' if nm in abs_gate_set else 'count-cap'
+                logger.info("[SKILLS] Auto-inactivated '%s' (%s, %s)", nm, info_last.get(nm, {}).get('class', '?'), src)
+            for nm in all_reenabled:
                 logger.info("[SKILLS] Auto-activated   '%s' (count-cap)", nm)
         except Exception as e:  # noqa: BLE001 — must NEVER break startup/discovery
             logger.warning('[SKILLS] rebalance_active_skills failed (non-critical): %s', e)
@@ -1029,9 +1122,10 @@ class SkillManager:
                                   max_evictions_per_pass: int = _SKILL_MAX_EVICTIONS_PER_PASS_DEFAULT) -> dict:
         """READ-ONLY preview of what a rebalance pass WOULD compute. Never mutates state.
 
-        Runs the exact same read-only math as :meth:`rebalance_active_skills` (deepcopy snapshot +
-        activity-counter capture under ``_metrics_lock`` + one servable walk + the pure target math)
-        so the displayed numbers always match a real pass — but applies NOTHING: no migration, no
+        Runs the exact same read-only math as the FIRST iteration of :meth:`rebalance_active_skills`
+        (deepcopy snapshot + activity-counter capture under ``_metrics_lock`` + one servable walk +
+        the pure target math) so the target quantities always match a real pass — but applies
+        NOTHING: no migration, no
         ``_disabled_names`` mutation, no metrics flush, no cache invalidation, no re-scan. Safe to
         call at any time and never raises (any internal failure is caught and reported via an
         ``'error'`` key).
@@ -1039,8 +1133,11 @@ class SkillManager:
         Phase C additions: a per-active-skill breakdown (``skills`` rows with class/score/n/L/A),
         aggregate ``class_counts``, and the projected eviction lists — ``would_evict_absolute_gate``
         (BAD / USELESS-past-window), ``would_evict_cap_only`` (cap budget only) and their union
-        ``would_evict`` ordered by ``eviction_rank_key`` and bounded by ``max_evictions_per_pass``
-        — exactly mirroring the real pass's OR-composition so the UI shows what a save+pass would do.
+        ``would_evict`` ordered by ``eviction_rank_key`` and bounded by ``max_evictions_per_pass`` —
+        mirroring the real pass's OR-composition. NOTE (OD-1): the real pass now CONVERGES across up
+        to 12 bounded iterations, so a shortfall larger than ``max_evictions_per_pass`` will evict
+        more than this single-pass projection shows; the projection matches the real pass exactly only
+        when the shortfall fits within one ``max_evictions_per_pass`` budget (the near-target case).
 
         Return keys: ``n_qualified`` (informational), ``n_valuable`` (the value target driver), ``raw``,
         ``evict_threshold``, ``reenable_target``, ``n_servable``, ``active_count``, ``ok`` (plus

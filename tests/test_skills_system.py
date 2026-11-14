@@ -4742,3 +4742,159 @@ class TestValueDrivenCap:
         assert len(s['evicted']) == 5
         assert s['evicted_absolute_gate'] == []
         assert len(s['evicted_cap_only']) == 5
+
+
+# ===========================================================================
+# 9b. BUG_0314 OD-1 — bounded convergence loop in rebalance_active_skills
+# ===========================================================================
+
+class TestConvergenceLoop:
+    """OD-1: one rebalance call now converges the active pool to the value-driven target in a
+    single boot (bounded loop) instead of requiring ~ceil(shortfall/max_ev) restarts. Pins the
+    single-call drain, the per-pass D-SAFE bound that drives iteration count, the no-progress /
+    max_ev=0 / already-at-target exits, and the [1,12] iteration cap."""
+
+    @pytest.fixture(autouse=True)
+    def _tmp(self, tmp_path):
+        self.tmp = tmp_path
+        yield
+
+    def _corpus(self, subdir):
+        """50 USEFUL (valuable) + 150 USELESS (junk) = 200 active, no inactive candidates.
+
+        n_valuable=50 → raw=50 → evict_threshold=50 → a 150-skill shortfall. Aged via _bump_to(200)
+        so no skill is PROTECTED. Every USELESS is absolute-gate junk; no USEFUL is ever evicted.
+        """
+        useful = [f'u{i:03d}' for i in range(50)]
+        junk = [f'j{i:03d}' for i in range(150)]
+        names = useful + junk
+        m = _rebalance_manager(self.tmp / subdir, names)
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(10, 9.0) for nm in useful}      # USEFUL (valuable)
+        entries.update({nm: _aged_entry(0, None) for nm in junk})  # USELESS (junk)
+        _set_metrics(m, entries)
+        return m, useful, junk
+
+    def test_single_call_drains_to_target(self):
+        """HEADLINE: a 200-active pool whose value target is 50 drains to ≈50 in ONE call (was ~6)."""
+        m, useful, junk = self._corpus('drain')
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)  # default max_ev=25
+        assert s['n_valuable'] == 50
+        assert s['raw'] == 50
+        assert s['evict_threshold'] == 50
+        assert s['active_before'] == 200
+        assert s['target'] == 50                       # converged to the value-driven floor
+        assert len(_active_names(m)) == 50             # registry agrees with the summary
+        assert len(s['evicted']) == 150                # all junk retired in one call
+        assert set(s['evicted']) == set(junk)
+        assert not (set(useful) & set(s['evicted']))   # no valuable evicted
+        for nm in useful:
+            assert _status_of(m, nm) == 'active'
+        for nm in junk:
+            assert _status_of(m, nm) == 'inactive'
+        assert s['iterations'] > 1                     # it took multiple bounded iterations
+
+    def test_each_iteration_respects_dsaf_bound(self):
+        """The per-pass D-SAFE bound caps each iteration's evictions; iteration count == ceil(150/25).
+
+        Retiring 150 junk at ≤25/iteration forces exactly ceil(150/25)=6 productive iterations: any
+        iteration evicting >25 is impossible (truncated by max_ev), and fewer than 6 could not reach
+        150. So the iteration count is the direct witness of the per-iteration bound holding.
+        """
+        m, _, _ = self._corpus('bound')
+        max_ev = 25
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=max_ev)
+        total_evicted = len(s['evicted'])
+        iters = s['iterations']
+        assert total_evicted == 150
+        assert iters == -(-150 // max_ev)              # == 6, the bound is the binding constraint
+        # Bound is proven by the CONJUNCTION, not this line alone: iterations == ceil(total/max_ev)
+        # (below) ∧ total evicted == the full shortfall (above) ∧ each iteration is truncated to
+        # max_ev. Fewer iterations can't reach 150 (each caps at max_ev); more would need an
+        # iteration evicting 0 after the target — neither holds, so per-iter eviction stayed ≤ 25.
+        assert total_evicted <= iters * max_ev
+        assert total_evicted > (iters - 1) * max_ev    # so iters is the MINIMUM count: none was wasted
+
+    def test_no_progress_exits_in_one_iteration(self):
+        """Already-at-target / clean pool: iteration 1 finds nothing to evict and nothing to re-enable,
+        so it breaks immediately — single-pass behavior for healthy pools is unchanged."""
+        names = [f'v{i:02d}' for i in range(30)]      # 30 USEFUL, all valuable, no junk
+        m = _rebalance_manager(self.tmp / 'clean', names)
+        _bump_to(m, 200)
+        _set_metrics(m, {nm: _aged_entry(10, 9.0) for nm in names})
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)
+        assert s['n_valuable'] == 30
+        assert s['evict_threshold'] == 30
+        assert s['active_before'] == 30
+        assert s['evicted'] == []
+        assert s['reenabled'] == []
+        assert s['target'] == 30
+        assert s['iterations'] == 1                    # converged on the first no-op iteration
+
+    def test_max_ev_zero_is_a_noop(self):
+        """max_evictions_per_pass=0 disables BOTH gates: iteration 1 evicts 0 → no-progress break,
+        the junk survives, and it took exactly one iteration (the documented single-pass no-op)."""
+        useful = [f'u{i:02d}' for i in range(50)]
+        junk = [f'j{i:02d}' for i in range(25)]
+        names = useful + junk
+        m = _rebalance_manager(self.tmp / 'noev', names)
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(10, 9.0) for nm in useful}       # USEFUL (valuable)
+        entries.update({nm: _aged_entry(0, None) for nm in junk})   # USELESS (would be gate-evicted)
+        _set_metrics(m, entries)
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=0)
+        # With max_ev>0 this corpus (n_valuable=50, raw=50, 25 junk) would evict the 25 USELESS.
+        assert s['evict_threshold'] == 50
+        assert s['evicted'] == []                      # both gates off → nothing evicted
+        assert s['reenabled'] == []
+        assert s['target'] == 75                       # pool unchanged
+        assert s['iterations'] == 1                    # no-progress break at iteration 1
+        assert len(_active_names(m)) == 75
+
+    def test_iteration_cap_terminates_unreachable_target(self):
+        """Pathological tiny max_ev makes the target unreachable in the cap budget; the loop must
+        STOP at the [1,12] iteration cap and return, never spin. max_ev=1 → cap=12, evicts 1/iter."""
+        m, _, _ = self._corpus('cap')
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200, max_evictions_per_pass=1)
+        assert s['iterations'] == 12                   # hits the clamp, does not run to shortfall
+        assert len(s['evicted']) == 12                 # 1 eviction per iteration × 12
+        assert s['target'] == 200 - 12                 # only the capped progress landed
+        # It returned (no hang) and the pool is still mostly intact, far above the unreachable target.
+        assert 1 < s['target'] < s['active_before']
+
+    def test_reenable_and_evict_in_same_run_is_duplicate_free(self):
+        """#10: exercises the re-enable path DURING a multi-iteration convergence run and pins the
+        duplicate-free invariant (a skill that is ever evicted is never also re-enabled), which the
+        reviewer proved analytically but which had no test coverage.
+
+        Corpus: 50 USEFUL active + 150 USELESS active + 1 valuable USEFUL INACTIVE ('r000'). The
+        serve-set is status-invariant, so n_valuable=51 (counting the inactive r000) → raw=51 →
+        evict_threshold=51. With default max_ev=25 the loop drains the 150 junk across several
+        iterations while the re-enable step admits r000 to pin active at the 51 target — so the
+        re-enable and the evictions occur inside the SAME convergence run.
+        """
+        useful = [f'u{i:03d}' for i in range(50)]
+        junk = [f'j{i:03d}' for i in range(150)]
+        reenable = 'r000'
+        names = useful + junk + [reenable]
+        m = _rebalance_manager(self.tmp / 'reenable', names)
+        _bump_to(m, 200)
+        entries = {nm: _aged_entry(10, 9.0) for nm in useful}       # USEFUL (valuable, active)
+        entries[reenable] = _aged_entry(10, 9.0)                    # USEFUL (valuable, to be disabled)
+        entries.update({nm: _aged_entry(0, None) for nm in junk})   # USELESS (junk → gate-evicted)
+        _set_metrics(m, entries)
+        _disable_after_migration(m, reenable)                       # genuinely inactive; survives pass
+        assert _status_of(m, reenable) == 'inactive'
+
+        s = m.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200)   # default max_ev=25
+        # (a) the valuable inactive was re-enabled and is active at the end.
+        assert reenable in s['reenabled']
+        assert _status_of(m, reenable) == 'active'
+        # (b) it happened inside a genuine multi-iteration drain, not a single pass.
+        assert s['iterations'] > 1
+        assert len(s['evicted']) == 150                             # all junk retired
+        # (c) duplicate-free: nothing is BOTH evicted and re-enabled (the reviewer's invariant).
+        assert set(s['evicted']) & set(s['reenabled']) == set()
+        # the pool converged exactly onto the value-driven floor (50 useful actives + the re-enabled one).
+        assert s['evict_threshold'] == 51
+        assert s['target'] == 51
