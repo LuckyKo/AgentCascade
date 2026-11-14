@@ -21,6 +21,30 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_cascade.async_shell import AsyncShellTracker
+from agent_cascade.settings import WAIT_CMD_POLL_INTERVAL
+
+# The tracking thread registers a launched task (its PID + entry in _tasks) asynchronously
+# right after launch() returns. The old tests slept a fixed 0.5s for this — too short on a
+# loaded host (flake) and wasted when registration lands in milliseconds. Instead poll for
+# registration, bounded; the poll interval reuses the repo's shared WAIT_CMD_POLL_INTERVAL
+# knob (agent_cascade/settings.py) rather than introducing a new magic sleep number.
+_PID_READY_TIMEOUT = 5.0
+
+
+def _wait_for_registered(tracker, agent_name, tool_id, timeout=_PID_READY_TIMEOUT):
+    """Return the task once the tracking thread has registered it, or None on timeout.
+
+    Replaces the fixed 0.5s 'let the tracking thread init the task' sleeps so the wait is
+    bounded and returns as soon as the task exists — deterministic on slow and fast hosts.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task = tracker._get_task(agent_name, tool_id)
+        if task is not None:
+            return task
+        time.sleep(WAIT_CMD_POLL_INTERVAL)
+    return tracker._get_task(agent_name, tool_id)
+
 
 # ============================================================================
 # Helpers
@@ -38,7 +62,7 @@ def _make_pool():
     return pool
 
 
-def _platform_long_running_cmd(duration=60):
+def _platform_long_running_cmd(duration=5):
     """Return a long-running command appropriate for this platform."""
     if os.name == 'nt':
         return f'ping -n {duration + 1} 127.0.0.1 >nul 2>&1'
@@ -77,8 +101,9 @@ class TestKilledProcessCleanup:
             )
             assert not completed_early
 
-            # Let tracking thread initialize the task with PID
-            time.sleep(0.5)
+            # Wait (bounded) for the tracking thread to register the task with its PID.
+            assert _wait_for_registered(tracker, 'test_agent', tool_id) is not None, \
+                'tracking thread never registered the task'
 
             # Process should be active before kill
             assert tracker.has_active_tasks('test_agent') is True
@@ -157,7 +182,8 @@ class TestKilledProcessCleanup:
             )
             assert not completed_early
 
-            time.sleep(0.5)
+            assert _wait_for_registered(tracker, 'test_agent', tool_id) is not None, \
+                'tracking thread never registered the task'
 
             task = tracker._get_task('test_agent', tool_id)
             pid = task.pid if task else None
@@ -200,13 +226,14 @@ class TestTimeoutBehavior:
         try:
             tool_id, _, _, completed_early, _ = tracker.launch(
                 agent_name='test_agent',
-                command=_platform_long_running_cmd(duration=60),
+                command=_platform_long_running_cmd(),
                 heartbeat_interval=-1,
                 timeout=2,  # Short timeout
             )
             assert not completed_early
 
-            time.sleep(0.5)
+            assert _wait_for_registered(tracker, 'test_agent', tool_id) is not None, \
+                'tracking thread never registered the task'
             task = tracker._get_task('test_agent', tool_id)
             assert task is not None and not task.completed
 
@@ -241,7 +268,7 @@ class TestTimeoutBehavior:
         try:
             tool_id, _, _, completed_early, _ = tracker.launch(
                 agent_name='test_agent',
-                command=_platform_long_running_cmd(duration=60),
+                command=_platform_long_running_cmd(),
                 heartbeat_interval=-1,
                 timeout=2,
             )
