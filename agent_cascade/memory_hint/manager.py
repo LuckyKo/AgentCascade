@@ -36,7 +36,10 @@ from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_C
                                     SKILL_PRECISION_FLOOR,
                                     SKILL_BANDIT_WEIGHT, SKILL_BANDIT_PRIOR_MASS,
                                     SKILL_BANDIT_TARGET_FIRE, SKILL_BANDIT_GAIN,
-                                    SKILL_BANDIT_THETA_MAX)
+                                     SKILL_BANDIT_THETA_MAX,
+                                     MEMORY_BANDIT_WEIGHT, MEMORY_BANDIT_PRIOR_MASS,
+                                     MEMORY_BANDIT_TARGET_FIRE, MEMORY_BANDIT_GAIN,
+                                     MEMORY_BANDIT_THETA_MAX, MEMORY_BANDIT_M_FLOOR)
 
 from .matcher import MemoryMatcher
 from .skill_gate import describe_dropped, filter_stopword_only_names
@@ -259,6 +262,14 @@ class MemoryHintManager:
         self._skill_bandit_pbar = None          # cached base-rate p̄; None = not yet derived
         self._skill_bandit_lock = threading.Lock()
         self._skill_bandit_rng = random.Random()        # per-instance sampler (drawn under the bandit lock)
+        # Memory-hint bandit state (BUG_0317) — mirrors the skill bandit above. In-memory,
+        # never persisted (re-seeds per process), like the fire-rate controller.
+        self._memory_bandit_bar = 0.0               # θ_min admission bar; 0.0 = admit-all = safe seed
+        self._memory_fire_p = MEMORY_BANDIT_TARGET_FIRE   # EWMA of fired-indicator, seeded at target
+        self._memory_bandit_pbar = None             # cached base-rate p̄ over lesson ledger; None = not yet derived
+        self._memory_bandit_lock = threading.Lock()  # guards bandit state + the merged lesson mirror
+        self._memory_stats = {}                     # merged in-memory lesson ledger mirror (rel → {reads, hints})
+        self._memory_stats_ready = False            # mirror seeded flag; rescan_vaults / first weight>0 clears it
 
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
@@ -397,6 +408,10 @@ class MemoryHintManager:
             # Rescan completion is a meaningful state change (index rebuilt) — INFO.
             logger.info('[MEMORY_HINT] rescan_vaults: %d vault(s), %d lesson(s), changed=%s',
                         len(self._vault_indexes), len(merged), changed)
+            # Invalidate the in-memory lesson ledger mirror (BUG_0317) so the next weight>0
+            # bandit turn rebuilds it from the (possibly changed) per-vault sidecars. Plain
+            # atomic bool store — no lock needed; a benign missed set self-heals next turn.
+            self._memory_stats_ready = False
         except Exception as e:  # noqa: BLE001 — best-effort, never raise
             logger.debug('[MEMORY_HINT] rescan_vaults failed: %s', e)
 
@@ -681,6 +696,194 @@ class MemoryHintManager:
         except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
             logger.debug('[MEMORY_HINT] bandit fire-rate update failed: %s', e)
 
+    def _value_rank(self, candidates, scores, ledger_getter, pbar, theta_min,
+                    w, m_floor, m0, neutral_keys=frozenset()):
+        """Shared base-rate-centred Thompson-Sampling value re-rank (BUG_0316/0317).
+
+        Extracted VERBATIM from the skill Gate-4 bandit so the skill and memory pipelines
+        share one implementation; behaviour is unchanged for skills. For each candidate:
+        posterior ``Beta(m0*pbar + s, m0*(1-pbar) + f)`` with ``s = min(loads_or_reads,
+        hints)`` (the ledger getter supplies both); draw θ once; admit only ``θ >= theta_min``
+        (theta_min=0 ⇒ admit-all); effective = ``relevance * (1 + w*(clamp(θ/pbar, m_floor,
+        1/m_floor) - 1))``; sort descending.
+
+        Never raises / never blanks: ``ledger_getter`` may raise (TypeError/ValueError →
+        prior (0,0)); ``_sample_beta`` failure → posterior mean; ``pbar <= 1e-9`` (cold/empty
+        ledger) ⇒ neutral raw order; if EVERY candidate falls below the bar the raw order is
+        kept (admitted-empty guard). ``neutral_keys`` (e.g. skill ``self-augmentation``) are
+        returned with their raw relevance, never value-ranked. Returns the reordered list
+        (same elements), or ``list(candidates)`` unchanged when nothing admits.
+        """
+        m_max = 1.0 / m_floor if m_floor > 0.0 else 1.0
+
+        def _eff(nm):
+            if nm in neutral_keys:                     # synthetic key: never value-ranked
+                return scores.get(nm, 0.0)
+            rel = scores.get(nm, 0.0)
+            if pbar <= 1e-9:                           # cold start / empty ledger → no value signal
+                return rel
+            try:
+                loads, hints = ledger_getter(nm)
+            except (TypeError, ValueError):            # malformed ledger row → prior (0, 0)
+                loads = hints = 0
+            a, b = _bandit_posterior(loads, hints, pbar, m0)
+            try:
+                theta = self._sample_beta(a, b)
+            except Exception:                          # sampler failure → posterior mean (no raise)
+                theta = (a / (a + b)) if (a + b) > 0.0 else pbar
+            if theta_min > 0.0 and theta < theta_min:  # bounded bar (θ_min=0 ⇒ admit-all)
+                return None
+            mult = theta / pbar
+            if mult < m_floor:
+                mult = m_floor
+            elif mult > m_max:
+                mult = m_max
+            return rel * (1.0 + w * (mult - 1.0))      # blend: W=0 raw, W=1 ⇒ full TS re-rank
+
+        admitted = []
+        for nm in candidates:
+            eff = _eff(nm)
+            if eff is None:                            # below admission bar → skip candidate
+                continue
+            admitted.append((nm, eff))
+        if not admitted:                               # all filtered ⇒ keep raw order (never blank)
+            return list(candidates)
+        admitted.sort(key=lambda t: t[1], reverse=True)
+        return [nm for nm, _eff in admitted]
+
+    def _memory_pbar(self) -> float:
+        """Running global action-rate ``p̄ = Σ min(reads, hints) / Σ hints`` over the merged
+        lesson ledger mirror (memory analogue of :meth:`_bandit_pbar`).
+
+        A cached NON-ZERO base-rate is authoritative and returned verbatim — scanning the
+        (seeded) in-memory mirror keeps per-turn bandit cost independent of corpus size. A
+        0.0 result (cold/empty ledger) is NOT cached so value ranking is never permanently
+        neutralised. Scans ``self._memory_stats`` (seeded by _refresh_memory_stats), not disk.
+        """
+        with self._memory_bandit_lock:
+            cached = self._memory_bandit_pbar
+        if cached is not None and cached > 0.0:        # real base-rate → authoritative, no re-scan
+            return cached
+        num = den = 0
+        try:
+            with self._memory_bandit_lock:
+                stats = dict(self._memory_stats)       # snapshot; arithmetic runs unlocked
+            for entry in stats.values():
+                if not isinstance(entry, dict):        # corrupt/mock ROW → skip (neutral)
+                    continue
+                hints = int(entry.get('hints', 0) or 0)
+                if hints <= 0:
+                    continue
+                reads = int(entry.get('reads', 0) or 0)
+                num += reads if reads < hints else hints   # clip to trials, same as posterior
+                den += hints
+        except Exception as e:  # noqa: BLE001 — best-effort: unreadable ledger → neutral
+            logger.debug('[MEMORY_HINT] memory p̄ derive failed: %s', e)
+            den = 0
+        pbar = (num / den) if den > 0 else 0.0
+        if pbar > 0.0:                                 # lock in only a real base-rate; 0.0 re-derives
+            with self._memory_bandit_lock:
+                self._memory_bandit_pbar = pbar
+        return pbar
+
+    def _refresh_memory_stats(self) -> None:
+        """(Re)build the in-memory merged lesson ledger mirror from the per-vault
+        ``memory_stats.json`` sidecars — the memory analogue of loading metrics once.
+
+        Seeded-once: a no-op once ``_memory_stats_ready`` (steady-state zero disk reads per
+        turn — the ON-mode perf invariant). ``rescan_vaults`` clears the flag so the mirror
+        rebuilds on the next weight>0 turn. First-vault-wins on a rel_path collision (mirrors
+        _display_path). Each vault sidecar is read through ``load_stats`` (which migrates
+        legacy bare-int values). Best-effort.
+        """
+        if self._memory_stats_ready:
+            return
+        merged = {}
+        try:
+            with self._index_lock:
+                roots = list(self._vault_indexes.keys())
+            from .stats import load_stats
+            for root in roots:
+                for rel, entry in load_stats(root).items():
+                    if rel in merged:                  # first vault wins on collision
+                        continue
+                    merged[rel] = {'reads': int(entry.get('reads', 0) or 0),
+                                   'hints': int(entry.get('hints', 0) or 0)}
+        except Exception as e:  # noqa: BLE001 — best-effort: cold/empty ledger is fine
+            logger.debug('[MEMORY_HINT] memory stats refresh failed: %s', e)
+        with self._memory_bandit_lock:
+            self._memory_stats = merged
+            self._memory_bandit_pbar = None            # force p̄ re-derive against the new mirror
+            self._memory_stats_ready = True
+
+    def _bump_memory_mirror_reads(self, rel: str) -> None:
+        """Mirror a lesson read count into the in-memory ledger so p̄ / the posterior see it
+        between turns without a disk re-scan. Best-effort; no-op before the mirror is seeded."""
+        if not self._memory_stats_ready:
+            return
+        with self._memory_bandit_lock:
+            entry = self._memory_stats.setdefault(rel, {'reads': 0, 'hints': 0})
+            entry['reads'] = int(entry.get('reads', 0) or 0) + 1
+
+    def _bump_memory_mirror_hints(self, rel: str) -> None:
+        """Mirror a lesson hint-render count into the in-memory ledger (the bandit reward
+        numerator's per-turn increment). Best-effort; no-op before the mirror is seeded."""
+        if not self._memory_stats_ready:
+            return
+        with self._memory_bandit_lock:
+            entry = self._memory_stats.setdefault(rel, {'reads': 0, 'hints': 0})
+            entry['hints'] = int(entry.get('hints', 0) or 0) + 1
+
+    def _get_memory_bandit_bar(self) -> float:
+        """Thread-safe read of the memory admission bar θ_min (in-memory controller state)."""
+        with self._memory_bandit_lock:
+            return self._memory_bandit_bar
+
+    def _update_memory_fire_rate(self, fired: bool) -> None:
+        """Feed one processed memory-hint turn's fired-indicator to the fire-rate controller.
+
+        Drifts θ_min toward holding ``MEMORY_BANDIT_TARGET_FIRE``: over-firing raises the bar
+        (suppress more); under-firing lowers it. θ_min bounded to ``[0, MEMORY_BANDIT_THETA_MAX]``
+        (θ_max < 1) so mass-suppression is structurally impossible; θ_min = 0 (the seed) =
+        admit-all = rank-only identity. In-memory only, re-seeds per process, never persisted.
+        Best-effort. Mirrors _update_skill_fire_rate; reuses the memory floor's EWMA damping
+        constant ``EWMA_ALPHA`` for the fire EWMA.
+        """
+        try:
+            with self._memory_bandit_lock:
+                alpha = EWMA_ALPHA                     # reuse the floor's per-turn damping constant
+                self._memory_fire_p = (alpha * (1.0 if fired else 0.0)
+                                       + (1.0 - alpha) * self._memory_fire_p)
+                new_bar = (self._memory_bandit_bar
+                           + MEMORY_BANDIT_GAIN * (self._memory_fire_p - MEMORY_BANDIT_TARGET_FIRE))
+                self._memory_bandit_bar = max(0.0, min(MEMORY_BANDIT_THETA_MAX, new_bar))
+        except Exception as e:  # noqa: BLE001 — best-effort, never break the hint path
+            logger.debug('[MEMORY_HINT] memory bandit fire-rate update failed: %s', e)
+
+    def _resolve_vault_root(self, rel: str, roots: Optional[List[Path]] = None):
+        """Resolve a vault-relative lesson path to the vault ROOT that holds it.
+
+        Memory analogue of :meth:`_display_path`'s first-hit-wins walk — walks the candidate
+        vault roots and returns the first root under which ``(root / rel)`` exists as a FILE.
+        Returns ``None`` when no vault holds it (or none exist), which callers treat as "skip
+        the durable per-vault write". Best-effort, never raises. Routes the weight-gated
+        ``hints`` ledger bump to the correct vault sidecar.
+        """
+        rel = str(rel)
+        normalized = rel.replace('\\', '/')
+        try:
+            if roots is not None:
+                candidates = list(roots)
+            else:
+                with self._index_lock:
+                    candidates = list(self._vault_indexes.keys())
+            for root in candidates:
+                if (root / normalized).is_file():
+                    return root
+        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+            logger.debug('[MEMORY_HINT] _resolve_vault_root failed for %s: %s', rel, e)
+        return None
+
     # ── Worker loop ──────────────────────────────────────────────────────────
 
     def _run(self) -> None:
@@ -756,6 +959,8 @@ class MemoryHintManager:
         # effort inside _update_skill_fire_rate — it never raises into the hint path.
         if SKILL_BANDIT_WEIGHT > 0.0:
             self._update_skill_fire_rate(bool(skill_names))
+        if MEMORY_BANDIT_WEIGHT > 0.0:                    # default-OFF ⇒ zero extra work, inert
+            self._update_memory_fire_rate(bool(memory_bare))
 
         if not memory_bare and not skill_names:
             return
@@ -807,6 +1012,24 @@ class MemoryHintManager:
                     _sm.bump_skill_hints(skill_names)
             except Exception as e:  # noqa: BLE001 — best-effort, never break the hint
                 logger.debug('[MEMORY_HINT] %s: hint ledger bump failed: %s', name, e)
+
+        # BUG_0317: credit the memories ACTUALLY rendered to the durable per-lesson `hints`
+        # ledger (the memory bandit's reward denominator), mirroring the skill bump above. Only
+        # weight-gated — the default-OFF deploy writes NOTHING new. memory_bare are the bare
+        # vault-relative identities (post-cooldown, post-cap); resolve each to its vault
+        # sidecar root and bump it (one lock, one atomic write via bump_hint_count). Placed
+        # OUTSIDE inst._compression_lock — bump_hint_count takes only the module _stats_lock,
+        # same discipline as the skill bump above. Best-effort; never breaks the hint path.
+        if MEMORY_BANDIT_WEIGHT > 0.0 and memory_bare:
+            try:
+                from .stats import bump_hint_count
+                for _rel in memory_bare:
+                    _vr = self._resolve_vault_root(_rel)
+                    if _vr is not None:                    # lesson still lives in a known vault
+                        bump_hint_count(_vr, _rel)
+                    self._bump_memory_mirror_hints(_rel)   # in-memory; avoids a disk re-scan
+            except Exception as e:  # noqa: BLE001 — best-effort, never break the hint
+                logger.debug('[MEMORY_HINT] %s: memory hint ledger bump failed: %s', name, e)
 
         # BUG_0263: auto-load a skill that keeps getting hinted but was never loaded. This is
         # a NEW side effect alongside the BUG_0225 recurrence marker (the marker is rendered in
@@ -995,6 +1218,39 @@ class MemoryHintManager:
         # ``strong`` is already score-descending (inherited from matcher.match), so the
         # post-cooldown ``to_hint`` list keeps that order. Cap to the top-N entries
         # BEFORE building the hint text (the cap applies after the cooldown skip).
+        # ── Memory-hint Thompson-Sampling value re-rank (BUG_0317) ──
+        # Ranking-only: multiplies the cosine ``strong`` score by the shared base-rate-centred
+        # multiplier via _value_rank, so it COMPOSES with the EWMA floor instead of re-gating.
+        # Default OFF (MEMORY_BANDIT_WEIGHT=0.0) ⇒ the whole block is SKIPPED ⇒ to_hint flows to
+        # the cap in matcher score-descending order ⇒ deploy-time behaviour byte-identical to
+        # today. Reward = durable per-lesson reads/hints from the seeded _memory_stats mirror.
+        # Never blank: admitted-empty keeps raw order; θ_max<1 precludes mass-suppression.
+        # Runs OUTSIDE inst._compression_lock (the dedup block above is closed) and best-effort.
+        if MEMORY_BANDIT_WEIGHT > 0.0:
+            try:
+                self._refresh_memory_stats()             # seed the merged ledger mirror once
+                pbar = self._memory_pbar()
+                theta_min = self._get_memory_bandit_bar()
+            except Exception as e:                        # best-effort: neutral p̄=0 ⇒ rank-only no-op
+                logger.debug('[MEMORY_HINT] %s: memory bandit ledger/bar unavailable: %s', name, e)
+                pbar = 0.0
+                theta_min = 0.0
+            scores = {p: sc for p, sc in strong}          # to_hint ⊆ strong
+            w = min(1.0, max(0.0, MEMORY_BANDIT_WEIGHT))  # 0 ⇒ raw order, 1 ⇒ full TS re-rank
+            m0 = MEMORY_BANDIT_PRIOR_MASS
+            m_floor = MEMORY_BANDIT_M_FLOOR
+
+            def _memory_ledger(rel):                      # mirror entry → (reads, hints), guarded
+                d = self._memory_stats.get(rel)
+                if not isinstance(d, dict):               # corrupt/mock ROW → prior (0, 0)
+                    d = {}
+                return (int(d.get('reads', 0) or 0), int(d.get('hints', 0) or 0))
+
+            try:
+                to_hint = self._value_rank(to_hint, scores, _memory_ledger, pbar, theta_min,
+                                           w, m_floor, m0)
+            except Exception as e:                        # best-effort: keep raw order, never blank
+                logger.debug('[MEMORY_HINT] %s: memory bandit re-rank failed (raw order): %s', name, e)
         max_entries = settings['max_entries']
         if max_entries > 0:
             to_hint = to_hint[:max_entries]
@@ -1163,15 +1419,12 @@ class MemoryHintManager:
         # Both share the best-effort get_metrics() guard: metrics unavailable / mock /
         # malformed ⇒ no re-rank (raw score order), never raise, never blank the hint.
         if SKILL_BANDIT_WEIGHT > 0.0:
-            # ── Thompson-Sampling value re-rank (self-adapting) ──
-            # Per candidate: posterior Beta(m0·p̄ + s, m0·(1−p̄) + f) with s = min(loads, hints)
-            # CLIPPED to trials (total_loads is a superset → unclipped β can go negative —
-            # enforced in _bandit_posterior). Draw θ once, modulate relevance by a base-rate-
-            # centred multiplier M(θ) = clamp(θ/p̄, M_FLOOR, 1/M_FLOOR), blend by W = min(1,
-            # weight), admit only θ ≥ θ_min (θ_min = 0 ⇒ admit-all ⇒ rank-only identity).
-            # O(1)/skill over ≤10; p̄ cached; corpus-size-independent. self-augmentation is
-            # never value-ranked (synthetic key). If every candidate is admitted-out, keep the
-            # raw order — the hint is never blanked by the bandit.
+            # ── Thompson-Sampling value re-rank (self-adapting) — per-candidate math now
+            # shared with the memory pipeline via _value_rank (BUG_0316/0317); behaviour is
+            # byte-identical to the pre-extraction block. posterior Beta(m0·p̄+s, m0·(1−p̄)+f),
+            # s=min(loads,hints) (clipped: total_loads is a superset). Draw θ once, modulate by
+            # M(θ)=clamp(θ/p̄, M_FLOOR, 1/M_FLOOR), blend W=min(1,weight), admit θ≥θ_min.
+            # self-augmentation neutral (never value-ranked). Admitted-empty ⇒ raw order (never blank).
             try:
                 metrics = sm.get_metrics()
             except Exception as e:                         # never break the memory path
@@ -1187,46 +1440,23 @@ class MemoryHintManager:
                 theta_min = 0.0
             m0 = SKILL_BANDIT_PRIOR_MASS
             m_floor = SKILL_PRECISION_FLOOR                # reuse demote floor (0.35) — demote-only
-            m_max = 1.0 / m_floor if m_floor > 0.0 else 1.0  # promote band mirrors demote band
             w = min(1.0, max(0.0, SKILL_BANDIT_WEIGHT))    # 0 ⇒ raw order, 1 ⇒ full TS re-rank
 
-            def _bandit_effective(nm):
-                if nm == 'self-augmentation':              # synthetic key: neutral, never value-ranked
-                    return scores.get(nm, 0.0)
-                rel = scores.get(nm, 0.0)
-                if pbar <= 1e-9:                           # cold start / empty ledger → no value signal
-                    return rel
+            def _skill_ledger(nm):                         # metric row → (loads, hints), guarded
                 entry = metrics.get(nm)
                 if not isinstance(entry, dict):            # corrupt/mock ROW → prior (0, 0)
                     entry = {}
                 try:
-                    loads = int(entry.get('total_loads', 0) or 0)
-                    hints = int(entry.get('hints', 0) or 0)
+                    return (int(entry.get('total_loads', 0) or 0),
+                            int(entry.get('hints', 0) or 0))
                 except (TypeError, ValueError):            # malformed field → prior (0, 0)
-                    loads = hints = 0
-                a, b = _bandit_posterior(loads, hints, pbar, m0)
-                try:
-                    theta = self._sample_beta(a, b)
-                except Exception:                          # sampler failure → posterior mean (no raise)
-                    theta = (a / (a + b)) if (a + b) > 0.0 else pbar
-                if theta_min > 0.0 and theta < theta_min:  # bounded bar (θ_min=0 ⇒ admit-all)
-                    return None
-                mult = theta / pbar
-                if mult < m_floor:
-                    mult = m_floor
-                elif mult > m_max:
-                    mult = m_max
-                return rel * (1.0 + w * (mult - 1.0))      # blend: W=0 raw, W=1 ⇒ plan §2.2
+                    return 0, 0
 
-            admitted = []
-            for nm in to_hint:
-                eff = _bandit_effective(nm)
-                if eff is None:                            # below admission bar → skip candidate
-                    continue
-                admitted.append((nm, eff))
-            if admitted:                                   # all filtered ⇒ keep raw order (never blank)
-                admitted.sort(key=lambda t: t[1], reverse=True)
-                to_hint = [nm for nm, _eff in admitted]
+            try:
+                to_hint = self._value_rank(to_hint, scores, _skill_ledger, pbar, theta_min,
+                                           w, m_floor, m0, neutral_keys={'self-augmentation'})
+            except Exception as e:                         # best-effort: keep raw order, never blank
+                logger.debug('[MEMORY_HINT] %s: bandit re-rank failed (raw order): %s', name, e)
         elif SKILL_PRECISION_WEIGHT:                       # legacy Gate-4 fallback (default today)
             try:
                 metrics = sm.get_metrics()
@@ -1408,6 +1638,8 @@ class MemoryHintManager:
         try:
             from .stats import bump_read_count
             bump_read_count(vault_root, rel_path)
+            if MEMORY_BANDIT_WEIGHT > 0.0:                # default-OFF ⇒ no mirror touch, no extra work
+                self._bump_memory_mirror_reads(rel_path)
             inst = self._pool.get_instance(instance_name)
             actioned = False
             if inst is not None:

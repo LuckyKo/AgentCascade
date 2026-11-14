@@ -250,15 +250,15 @@ class TestStats:
         bump_read_count(vault, 'compression-debug.md')
         bump_read_count(vault, 'compression-debug.md')
         stats = load_stats(vault)
-        assert stats['compression-debug.md'] == 2
+        assert stats['compression-debug.md'] == {'reads': 2, 'hints': 0}
 
     def test_bump_multiple_paths(self, vault):
         bump_read_count(vault, 'a.md')
         bump_read_count(vault, 'b.md')
         bump_read_count(vault, 'a.md')
         stats = load_stats(vault)
-        assert stats['a.md'] == 2
-        assert stats['b.md'] == 1
+        assert stats['a.md'] == {'reads': 2, 'hints': 0}
+        assert stats['b.md'] == {'reads': 1, 'hints': 0}
 
     def test_load_corrupt_returns_empty(self, vault):
         (vault / 'memory_stats.json').write_text('not json {', encoding='utf-8')
@@ -488,7 +488,7 @@ class TestManagerDedup:
         mgr = MemoryHintManager(pool)
         mgr.on_memory_read('w', v, 'compression-debug.md')
         assert 'compression-debug.md' in inst._memories_read
-        assert load_stats(v).get('compression-debug.md') == 1
+        assert load_stats(v).get('compression-debug.md') == {'reads': 1, 'hints': 0}
 
     def test_submit_most_recent_wins_replaces_pending(self, tmp_path):
         """A second submit REPLACES the still-pending job (most-recent-wins = new wins)."""

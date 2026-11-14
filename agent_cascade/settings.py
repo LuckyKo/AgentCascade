@@ -903,6 +903,46 @@ SKILL_BANDIT_GAIN: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_GAIN', '0
 #   dropped by the bandit. 0.0 (the seed / safe state) = admit-all = rank-only identity.
 SKILL_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_THETA_MAX', '0.6'))
 
+# ── Memory-hint Thompson-Sampling bandit (self-adapting value ranking, BUG_0317) ──
+# A ranking-only layer applied in _match_memories between the dedup/cooldown result
+# and the max_entries cap (memory_hint/manager.py). It multiplies the cosine relevance
+# score by the same scale-agnostic base-rate-centred multiplier the skill bandit uses,
+# so it COMPOSES with the cosine floor rather than re-gating. Default OFF (weight 0.0)
+# ⇒ the block is skipped ⇒ _match_memories returns the matcher's score-descending order
+# ⇒ deploy-time behaviour is byte-identical to today; rollout is an env-var A/B. The
+# reward is the durable per-lesson reads/hints ratio in memory_stats.json (Q4), NOT the
+# session telemetry actioned counter. See plans/bug0317_memory-hint-bandit.md.
+# MEMORY_BANDIT_WEIGHT: master toggle + modulation blend in [0,1]. 0.0 = OFF (default);
+#   1.0 = full Thompson-Sampling value re-rank; 0<W<1 ramps from raw order to full.
+#   The path is taken iff weight > 0.0 (a true predicate). NOTE: any weight > 0.0 turns
+#   on BOTH the value re-rank AND the bounded θ_min admission bar (which arms the
+#   fire-rate controller), AND the render-time `hints` ledger bump — a small weight is
+#   NOT a "rank-only" mode; the bar still seeds at 0.0 (admit-all) and only drifts once
+#   the controller sees turns.
+MEMORY_BANDIT_WEIGHT: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_WEIGHT', '0.0'))
+# MEMORY_BANDIT_PRIOR_MASS: prior mass m₀ of the base-rate-centred informed prior
+#   Beta(m₀·p̄ + s, m₀·(1−p̄) + f), s = min(reads, hints). Small m₀ = aggressive dormancy
+#   exploration; large = conservative. p̄ is the learned base rate, so a never-read lesson's
+#   posterior mean is p̄ (eligible) rather than 0.5 (which would mass-spam).
+MEMORY_BANDIT_PRIOR_MASS: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_PRIOR_MASS', '3.0'))
+# MEMORY_BANDIT_TARGET_FIRE: outcome target — the fraction of processed memory-hint turns
+#   that should render ≥1 lesson. The in-memory controller drifts θ_min to hold this; a
+#   target, not a hand-tuned threshold. 0.10 = fire on ~10% of turns.
+MEMORY_BANDIT_TARGET_FIRE: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_TARGET_FIRE', '0.10'))
+# MEMORY_BANDIT_GAIN: per-turn controller drift cap (η). Bounds how fast θ_min moves,
+#   damping oscillation alongside the EWMA damping (EWMA_ALPHA reused for the fire EWMA).
+MEMORY_BANDIT_GAIN: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_GAIN', '0.02'))
+# MEMORY_BANDIT_THETA_MAX: hard ceiling on the admission bar θ_min ∈ [0, θ_max]. Since θ_max
+#   < 1 and every lesson's posterior mean is centred on p̄ > 0, mass-suppression is
+#   structurally impossible: the bar can never reach 1, so a candidate set is never all
+#   dropped by the bandit. 0.0 (the seed / safe state) = admit-all = rank-only identity.
+MEMORY_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_THETA_MAX', '0.6'))
+# MEMORY_BANDIT_M_FLOOR: promote/demote multiplier band floor (mirrors SKILL_PRECISION_FLOOR).
+#   The effective multiplier is clamped to [M_FLOOR, 1/M_FLOOR], centre-neutral about p̄. A
+#   dedicated knob (memories have no precision-floor setting) avoids coupling memory tuning
+#   to the skill's demote floor; default identical (0.35).
+MEMORY_BANDIT_M_FLOOR: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_M_FLOOR', '0.35'))
+
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

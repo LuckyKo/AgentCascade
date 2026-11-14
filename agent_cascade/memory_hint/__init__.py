@@ -40,7 +40,7 @@ from .skill_gate import (
     matched_term_counts,
 )
 from .vault import VaultIndex, discover_vaults, parse_frontmatter, identity_text, is_under_vault
-from .stats import bump_read_count, load_stats
+from .stats import bump_read_count, bump_hint_count, load_stats
 
 __all__ = [
     'MemoryHintManager',
@@ -74,5 +74,6 @@ __all__ = [
     'identity_text',
     'is_under_vault',
     'bump_read_count',
+    'bump_hint_count',
     'load_stats',
 ]
