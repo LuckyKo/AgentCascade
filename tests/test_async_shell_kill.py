@@ -326,8 +326,8 @@ class TestPollLoopKilledFlag:
         proc_mock.poll.return_value = None  # Never completes naturally
 
         task = _make_running_task(process=proc_mock)
-        t_out = threading.Thread(target=lambda: time.sleep(10), daemon=True)
-        t_err = threading.Thread(target=lambda: time.sleep(10), daemon=True)
+        t_out = threading.Thread(target=lambda: time.sleep(3), daemon=True)
+        t_err = threading.Thread(target=lambda: time.sleep(3), daemon=True)
 
         # Set killed before entering poll loop
         with task._lock:
@@ -471,8 +471,8 @@ class TestKillRaceConditions:
 
         def poll_loop_runner():
             try:
-                t_out = threading.Thread(target=lambda: time.sleep(10), daemon=True)
-                t_err = threading.Thread(target=lambda: time.sleep(10), daemon=True)
+                t_out = threading.Thread(target=lambda: time.sleep(3), daemon=True)
+                t_err = threading.Thread(target=lambda: time.sleep(3), daemon=True)
                 tracker._poll_loop('test_agent', 1, proc_mock, task, t_out, t_err)
             except Exception as e:
                 errors.append(('poll_loop', e))

@@ -53,7 +53,7 @@ def _make_parser(tmp_path) -> SimpleDocParser:
 
 
 def _slow_pdf(path, extract_image=False):
-    time.sleep(8)  # Simulates a multi-minute pathological parse (no real hang)
+    time.sleep(3.0)  # > the 2.0s pdf budget so the timeout still fires; short so the orphan worker lingers briefly
     return [{'page_num': 1, 'content': [{'text': 'late'}]}]
 
 
@@ -95,7 +95,7 @@ def test_non_pdf_type_gets_its_own_budget(tmp_path, monkeypatch):
     monkeypatch.setattr('agent_cascade.settings.WEB_EXTRACTOR_PARSE_TIMEOUT_BY_TYPE', {'html': 1.0})
 
     def _slow_html(path, extract_image=False, base_url=None):
-        time.sleep(5)
+        time.sleep(2.0)  # > the 1.0s html budget so the timeout still fires
         return []
 
     monkeypatch.setattr('agent_cascade.tools.simple_doc_parser.parse_html_bs', _slow_html)
@@ -108,7 +108,7 @@ def test_non_pdf_type_gets_its_own_budget(tmp_path, monkeypatch):
         parser.call({'url': str(html)})
     elapsed = time.time() - start
 
-    # Times out at the 1s html budget (a 5s sleep would NOT time out at the 30s default).
+    # Times out at the 1s html budget (a 2s sleep would NOT time out at the 30s default).
     assert elapsed < 3.0, f'Expected timeout at ~1s html budget, took {elapsed:.1f}s'
     assert 'timed out' in str(ei.value).lower()
 

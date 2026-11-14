@@ -95,21 +95,21 @@ class TestHealthyHolderResets(unittest.TestCase):
         resolver = lambda n: inst
 
         box: Dict[str, Any] = {}
-        # Window is 3s; we keep the holder alive for ~5s (> window) then release.
-        wt = _start_waiter(pool, 'W', timeout=3.0, hard_cap=60.0, resolver=resolver, box=box)
+        # Window is 0.3s (scaled down); we keep the holder alive for ~0.7s (> window) then release.
+        wt = _start_waiter(pool, 'W', timeout=0.3, hard_cap=60.0, resolver=resolver, box=box)
 
         stop = threading.Event()
 
         def _stepper():
             while not stop.is_set():
                 inst.advance(time.monotonic())
-                time.sleep(0.3)
+                time.sleep(0.05)
 
         st = threading.Thread(target=_stepper, daemon=True)
         st.start()
         try:
-            # Outlive the 3s window several times while the holder is alive.
-            time.sleep(5.0)
+            # Outlive the (scaled) 0.3s window several times while the holder is alive.
+            time.sleep(0.7)
             self.assertNotIn('exc', box, f"healthy holder killed the waiter: {box.get('exc')!r}")
             # Now release the holder — the waiter must be granted.
             holder()
@@ -251,19 +251,19 @@ class TestResetPrecedesFailFast(unittest.TestCase):
         inst = _FakeInst(time.monotonic())  # fresh from the start
         resolver = lambda n: inst
         box: Dict[str, Any] = {}
-        wt = _start_waiter(pool, 'W', timeout=3.0, hard_cap=60.0, resolver=resolver, box=box)
+        wt = _start_waiter(pool, 'W', timeout=0.3, hard_cap=60.0, resolver=resolver, box=box)
         stop = threading.Event()
 
         def _stepper():
             while not stop.is_set():
                 inst.advance(time.monotonic())
-                time.sleep(0.4)
+                time.sleep(0.04)
 
         st = threading.Thread(target=_stepper, daemon=True)
         st.start()
         try:
-            # Outlive the 3s window; a healthy holder must survive.
-            time.sleep(4.5)
+            # Outlive the (scaled) 0.3s window; a healthy holder must survive.
+            time.sleep(0.7)
             self.assertNotIn('exc', box, f"reset did not precede fail-fast: {box.get('exc')!r}")
             holder()
             deadline = time.monotonic() + 5.0

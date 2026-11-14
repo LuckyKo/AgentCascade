@@ -81,7 +81,7 @@ class _CountingHandler(BaseHTTPRequestHandler):
         r = self.ref or {}
         # Simulate a hanging connection (client-side read timeout).
         if r.get('timeout'):
-            time.sleep(12.0)
+            time.sleep(5.0)  # just past the client's 4.0s read timeout (requests.post timeout=(2.0, 4.0))
         self._count('posts')
         body = {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
         self.send_response(200)
