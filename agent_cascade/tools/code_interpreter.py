@@ -1889,7 +1889,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         return ports
 
     @staticmethod
-    def _create_kernel_client(host_connection_file: str, container_id: str) -> 'BlockingKernelClient':
+    def _create_kernel_client(host_connection_file: str, container_id: str, kernel_id: str = '') -> 'BlockingKernelClient':
         """Create a Jupyter kernel client, start channels, and wait for readiness.
 
         Shared helper used by both _start_kernel and _warm_restart_kernel to avoid
@@ -1898,6 +1898,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         Args:
             host_connection_file: Path to the host-side connection JSON file.
             container_id: Container ID (used for log retrieval on failure).
+            kernel_id: Kernel identifier (debug-log label for cleanup on a failed
+                readiness wait, BUG_0320).
 
         Returns:
             A ready BlockingKernelClient instance.
@@ -1912,25 +1914,39 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Adaptive backoff: shorter initial timeout, progressively longer if needed.
         # This reduces wasted time on slow hosts (WSL2 overhead) where the kernel
         # may take 4-6s to initialize but responds quickly once ready.
-        timeouts = [3, 5, 10]  # Progressive backoff: fast first, longer if needed
-        max_retries = len(timeouts)
-        for attempt in range(max_retries):
+        try:
+            timeouts = [3, 5, 10]  # Progressive backoff: fast first, longer if needed
+            max_retries = len(timeouts)
+            for attempt in range(max_retries):
+                try:
+                    kc.wait_for_ready(timeout=timeouts[attempt])
+                    logger.info(f"Kernel is ready (attempt {attempt+1}/{max_retries})")
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}, "
+                                       f"timeout={timeouts[attempt]}s), retrying with timeout={timeouts[attempt+1]}s...")
+                        time.sleep(2)
+                    else:
+                        logs = subprocess.run(['docker', 'logs', container_id],
+                                              capture_output=True,
+                                              text=True,
+                                              encoding='utf-8',
+                                              errors='replace')
+                        raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+        except Exception:
+            # BUG_0320: start_channels() above lazily created a real zmq.Context and
+            # left the channels running. If readiness never succeeds we must tear this
+            # half-started client down here, or its owned context leaks and later blocks
+            # in zmq.Context.__del__ -> term(). _shutdown_kernel_client is safe on a
+            # partially-started client (every destructive step is internally guarded) and
+            # runs exactly once on this path (the client is never registered). The cleanup
+            # call is wrapped so a teardown hiccup can never mask the real startup error.
             try:
-                kc.wait_for_ready(timeout=timeouts[attempt])
-                logger.info(f"Kernel is ready (attempt {attempt+1}/{max_retries})")
-                break
+                _shutdown_kernel_client(kc, kernel_id)
             except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}, "
-                                   f"timeout={timeouts[attempt]}s), retrying with timeout={timeouts[attempt+1]}s...")
-                    time.sleep(2)
-                else:
-                    logs = subprocess.run(['docker', 'logs', container_id],
-                                          capture_output=True,
-                                          text=True,
-                                          encoding='utf-8',
-                                          errors='replace')
-                    raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+                logger.debug(f"BUG_0320 cleanup of half-started client failed: {e}")
+            raise
 
         return kc
 
@@ -2071,7 +2087,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         time.sleep(4)
 
         # Create client and wait for kernel readiness (shared helper)
-        kc = self._create_kernel_client(host_connection_file, container_id)
+        kc = self._create_kernel_client(host_connection_file, container_id, kernel_id)
 
         # Initialize activity tracking for watchdog (include work_dir + dynamic timeouts)
         with _KERNEL_LOCK:
@@ -2176,7 +2192,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         time.sleep(2)
 
         # Create client and wait for kernel readiness
-        kc = self._create_kernel_client(host_connection_file, container_id)
+        kc = self._create_kernel_client(host_connection_file, container_id, kernel_id)
 
         # Initialize activity tracking for watchdog (include dynamic timeouts)
         with _KERNEL_LOCK:

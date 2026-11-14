@@ -409,5 +409,176 @@ class TestTempFileCleanup:
             assert not os.path.exists(launch_script), 'Launch script should be removed by close()'
 
 
+class TestCreateKernelClientZmqLeak:
+    """BUG_0320: a half-started kernel client must not leak its owned zmq.Context.
+
+    _create_kernel_client calls start_channels(), which lazily creates a real
+    zmq.Context (jupyter_client _context_default) and leaves the channels running.
+    If the readiness wait then fails, that context must be destroyed deterministically
+    here instead of leaking and blocking later in zmq.Context.__del__ -> term().
+
+    Probed with the BUG_0319 weakref method: instrument zmq.Context.__init__ to record
+    every created context, then after the operation gc.collect() and treat "alive and
+    not closed" as the leak. The harness drives the REAL _create_kernel_client (no Docker),
+    stubbing start_channels() to create the same real owned context AND make
+    channels_running truthy (the __del__ guard that actually causes the leak) without
+    opening sockets — see _stub_start_channels. wait_for_ready, time.sleep, subprocess.run
+    and the best-effort _shutdown_with_timeout are stubbed.
+    """
+
+    @staticmethod
+    def _make_conn_file(path, kernel_id):
+        """Write a host connection JSON with free loopback ports (no kernel behind them)."""
+        import json
+        import socket
+
+        ports = []
+        for _ in range(5):
+            s = socket.socket()
+            s.bind(('127.0.0.1', 0))
+            ports.append(s.getsockname()[1])
+            s.close()
+        port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
+        data = {
+            'ip': '127.0.0.1',
+            'key': 'testkey',
+            'transport': 'tcp',
+            'signature_scheme': 'hmac-sha256',
+            'kernel_name': '',
+        }
+        data.update(dict(zip(port_names, ports)))
+        path.write_text(json.dumps(data))
+        return str(path)
+
+    @staticmethod
+    def _instrument_contexts(monkeypatch):
+        """Patch zmq.Context.__init__ to record every created context (strong refs).
+
+        Strong refs (not weakrefs) are deliberate: the half-started client itself is
+        collected after the failure, and a weakref to its context would then resolve to
+        None and HIDE whether the context was actually destroyed. The defect BUG_0320
+        guards is a zmq.Context left UN-destroyed (pyzmq does not auto-term — that is
+        precisely why an un-destroyed context leaks/blocks, per BUG_0319), so the leak is
+        "a recorded context whose .closed is still False". Holding a strong ref just lets
+        us observe .closed; it does not change what the code under test does.
+        """
+        import gc
+
+        import zmq
+
+        created = []
+        real_init = zmq.Context.__init__
+
+        def _traced(self, *a, **k):
+            rv = real_init(self, *a, **k)
+            created.append(self)  # strong ref: observe .closed after the client is gone
+            return rv
+
+        monkeypatch.setattr(zmq.Context, '__init__', _traced)
+        return created, gc
+
+    @staticmethod
+    def _live_open(created):
+        """Recorded contexts that were never destroyed (still open) — i.e. the leak."""
+        return [c for c in created if not c.closed]
+
+    @staticmethod
+    def _stub_start_channels(monkeypatch):
+        """Reproduce the exact observable that makes jupyter_client leak the context.
+
+        Real start_channels() does two things that matter here:
+          1. Creates the client's OWNED zmq.Context the first time a channel touches
+             self.context (jupyter_client _context_default sets _created_context=True).
+          2. Leaves the channels running, so `channels_running` is truthy.
+
+        jupyter_client KernelClient.__del__ only destroys an owned, still-open context
+        when `channels_running` is FALSE; when it is truthy it logs "Could not destroy zmq
+        context" and LEAVES IT OPEN — that is precisely the leak BUG_0320 fixes. So a stub
+        that only creates the context (channels_running stays False) would let __del__
+        self-clean and MASK the leak. We therefore ALSO make channels_running truthy by
+        planting a live channel, WITHOUT spawning five real channel threads (which would
+        open sockets to dead ports and churn file descriptors / raise 'Too many open files').
+        channels_running is a read-only property: truthy iff any _*_channel is set AND
+        .is_alive() is truthy — so _iopub_channel = MagicMock(is_alive=lambda: True) does it.
+        """
+        from jupyter_client import BlockingKernelClient
+
+        def _start_channels(self, *a, **k):
+            self.context  # first access -> _context_default -> a real zmq.Context is created
+            # Make channels_running truthy -> __del__ refuses to destroy -> leak reproduces.
+            self._iopub_channel = MagicMock(is_alive=lambda: True)
+        monkeypatch.setattr(BlockingKernelClient, 'start_channels', _start_channels)
+
+    def test_failure_path_destroys_owned_zmq_context(self, monkeypatch, tmp_path):
+        """A forced readiness failure must tear the half-started client down (0 leaked contexts)."""
+        from jupyter_client import BlockingKernelClient
+
+        from agent_cascade.tools import code_interpreter as ci
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+
+        created, gc = self._instrument_contexts(monkeypatch)
+        self._stub_start_channels(monkeypatch)
+
+        # Callable side_effect (an exception-instance side_effect is unreliable against
+        # jupyter_client 8.x's run_sync-wrapped wait_for_ready).
+        def _never_ready(*a, **k):
+            raise RuntimeError('never ready')
+
+        monkeypatch.setattr(BlockingKernelClient, 'wait_for_ready', _never_ready)
+        monkeypatch.setattr(ci.time, 'sleep', lambda *a, **k: None)
+        monkeypatch.setattr(ci.subprocess, 'run',
+                            lambda *a, **k: MagicMock(stdout='', stderr='', returncode=0))
+        # Keep the test fast: _shutdown_with_timeout only best-effort-joins kc.shutdown()
+        # (up to 5s). The leak is closed by step 4 (context.destroy) in _shutdown_kernel_client,
+        # which still runs unstubbed — so stubbing the graceful-shutdown join is safe here.
+        monkeypatch.setattr(ci, '_shutdown_with_timeout', lambda *a, **k: None)
+
+        conn = self._make_conn_file(tmp_path / 'kernel_connection_file_bug0320_fail_host.json', 'bug0320_fail')
+
+        with pytest.raises(RuntimeError, match='Kernel failed to start'):
+            CodeInterpreter._create_kernel_client(conn, 'container_id', 'bug0320_fail')
+
+        gc.collect()
+        assert len(created) == 1, \
+            'start_channels() must have created exactly one real zmq.Context (probe exercised the real path)'
+        live = self._live_open(created)
+        assert not live, f'BUG_0320 regression: {len(live)} leaked-open zmq context(s) after a failed kernel start'
+
+    def test_success_path_does_not_teardown_context(self, monkeypatch, tmp_path):
+        """On success the new cleanup must NOT fire; the context persists until explicit shutdown."""
+        from jupyter_client import BlockingKernelClient
+
+        from agent_cascade.tools import code_interpreter as ci
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+
+        created, gc = self._instrument_contexts(monkeypatch)
+        self._stub_start_channels(monkeypatch)
+        monkeypatch.setattr(BlockingKernelClient, 'wait_for_ready', lambda *a, **k: None)
+        # Step 1 of the explicit shutdown below is a best-effort graceful kc.shutdown() that
+        # can't do anything useful without channels; stub it so the daemon thread doesn't emit
+        # an unhandled exception. Step 4 (context.destroy) — what we assert — still runs.
+        monkeypatch.setattr(ci, '_shutdown_with_timeout', lambda *a, **k: None)
+
+        conn = self._make_conn_file(tmp_path / 'kernel_connection_file_bug0320_succ_host.json', 'bug0320_succ')
+        kc = CodeInterpreter._create_kernel_client(conn, 'container_id', 'bug0320_succ')
+        try:
+            gc.collect()
+            assert kc is not None, 'success path must return the client'
+            assert len(created) == 1
+            # The owned context must STILL be open here: had the BUG_0320 failure-path
+            # cleanup fired on success, the context would already be closed (0 live).
+            # 1 live is direct proof the new except block was not entered on the happy path.
+            assert len(self._live_open(created)) == 1, \
+                'BUG_0320: the success path must NOT tear the client down — the context must persist'
+            ci._shutdown_kernel_client(kc, 'bug0320_succ')
+            gc.collect()
+            assert len(self._live_open(created)) == 0, \
+                'explicit shutdown must destroy the owned context'
+        finally:
+            # Always run the real teardown (it is idempotent) so the test never leaves
+            # real channel threads/sockets around, even if an assertion above failed.
+            ci._shutdown_kernel_client(kc, 'bug0320_succ')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
