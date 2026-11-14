@@ -827,18 +827,46 @@ class TestRateLimiting:
         assert name1 in fresh_manager._skills_registry
         assert name2 in fresh_manager._skills_registry
 
-    def test_rate_limit_flag_on_agent_instance(self, fresh_manager):
-        """Verify _auto_skill_proposed flag prevents second proposal."""
-        inst = MagicMock()
-        inst._auto_skill_proposed = False
+    def test_rate_limit_flag_on_agent_instance(self):
+        """BUG_0318 A3: the one-shot ``_auto_skill_proposed`` flag must block the gate.
 
-        inst._auto_skill_proposed = True
-        assert inst._auto_skill_proposed
+        The old body only round-tripped a MagicMock attribute and asserted nothing about
+        production, leaving the True -> blocked path (the one-shot guard at
+        ``engine/auto_skill.py:53-54``) untested. This drives the REAL ``_auto_skill_gates_met``
+        helper: with every other gate satisfied, a flagged instance must return ``False``.
+        The positive control (identical instance, flag False -> ``True``) proves the block is
+        the sole decider, so the assertion is not vacuous.
+        """
+        import threading
+        from unittest.mock import MagicMock
 
-        assert inst._auto_skill_proposed
+        from agent_cascade.agent_instance import PoolSettings
+        from agent_cascade.execution_engine import ExecutionEngine
 
-        inst._auto_skill_proposed = False
-        assert not inst._auto_skill_proposed
+        pool = MagicMock()
+        pool.skill_manager = MagicMock()                       # gate 1: not None
+        ps = PoolSettings()
+        ps.auto_skill_enabled = True                           # gate 2: enabled
+        ps.default_load_skill_mode = 'AUTO'                    # gate 3: not LOAD_SKILL_NONE
+        ps.auto_skill_min_turns = 5                            # gate 4: current_turn 6 > 5
+        pool.settings = ps
+
+        engine = MagicMock(spec=ExecutionEngine)
+        engine.pool = pool
+        # Bind the REAL gate: a bare spec-MagicMock would auto-mock it truthy and bypass
+        # the gate entirely (see .agent_lessons/magicmock-spec-hides-new-methods.md).
+        engine._auto_skill_gates_met = ExecutionEngine._auto_skill_gates_met.__get__(engine, ExecutionEngine)
+
+        class _Inst:
+            def __init__(self, proposed):
+                self._current_turn = 6
+                self._compression_lock = threading.RLock()
+                self._auto_skill_proposed = proposed
+
+        # One-shot guard: a flagged instance blocks the gate.
+        assert engine._auto_skill_gates_met(_Inst(True)) is False
+        # Control: identical instance with the flag clear passes, proving the flag is what blocks.
+        assert engine._auto_skill_gates_met(_Inst(False)) is True
 
     def test_pending_file_cleaned_on_validation_failure(self, fresh_manager):
         """Pending file should be removed when validation fails."""

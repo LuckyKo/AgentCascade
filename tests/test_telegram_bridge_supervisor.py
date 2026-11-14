@@ -305,8 +305,6 @@ def test_crash_contained_bounded_restart_then_give_up(tmp_path, fake_app_patched
     total_attempts = len(fake_app_patched['built'])
     assert total_attempts == 2, f'expected exactly 2 attempts (1 initial + 1 retry), got {total_attempts}'
     assert 'giving up' in sup.status()['error'].lower()
-    # The main test thread was never interrupted — we're still here.
-    assert True
 
 
 def test_config_failure_is_permanent_stop(tmp_path, fake_app_patched):

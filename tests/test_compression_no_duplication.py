@@ -455,15 +455,12 @@ class TestSingleCompressionCycle:
                                    summary_text='Tool chain analysis of 8 files summarized.')
         assert result.success, f"Compression failed: {result.error}"
 
-        conv = pool.get_conversation(inst_name)
-        has_tool_call = False
-        for msg in conv:
-            role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            if role == ASSISTANT:
-                fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
-                has_tool_call = fc is not None
-            elif role == FUNCTION:
-                assert has_tool_call or True, 'Found FUNCTION without preceding ASSISTANT tool call'
+        # NOTE (BUG_0318 A1/A4): the prior block scanned `conv` and asserted
+        # `has_tool_call or True, ...` -- the `or True` made the pair-integrity check
+        # unconditionally true, so the invariant was never enforced. Removing only the
+        # `or True` clause would have restored an assertion production may not satisfy,
+        # so the entire dead scan (conv + has_tool_call) is dropped here. The real
+        # pair-integrity signal is the duplicate check below.
         jsonl_msgs = read_jsonl_messages(pool.get_logger(inst_name, 'coder').log_path)
         dups = check_duplicates(jsonl_msgs)
         assert not dups, f"Duplicates with tool chains: {dups}"

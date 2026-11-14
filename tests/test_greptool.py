@@ -102,7 +102,7 @@ def files_mentioned_in_grep_output(output: str) -> set[str]:
 # ──────────────────────────────────────────────
 
 
-class TestFixture:
+class _FixtureHelper:
     """Creates and manages a temporary test directory structure."""
 
     def __init__(self):
@@ -150,7 +150,7 @@ class TestFixture:
 def test_simple_pattern():
     """Test: Simple pattern 'hello' should find matches in main.py and test_main.py."""
     print("\n--- Test: Simple pattern 'hello' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -178,7 +178,7 @@ def test_simple_pattern():
 def test_case_sensitive_pattern():
     """Test: 'HELLO' with smart_case=False should find nothing (no exact HELLO in files)."""
     print("\n--- Test: Case-sensitive pattern 'HELLO' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -216,7 +216,7 @@ def test_case_sensitive_pattern():
 def test_hidden_directory():
     """Test: 'SECRET_KEY' should find secret.txt in .hidden/ directory."""
     print("\n--- Test: Hidden directory pattern 'SECRET_KEY' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -240,7 +240,7 @@ def test_hidden_directory():
 def test_include_filter():
     """Test: pattern 'def ' with include '*.py' should only find Python files."""
     print("\n--- Test: Include filter 'def ' with include='*.py' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -269,7 +269,7 @@ def test_include_filter():
 def test_exclude_filter():
     """Test: pattern 'hello' with exclude='test*' should not find test files."""
     print("\n--- Test: Exclude filter 'hello' with exclude='test*' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -310,7 +310,7 @@ def test_special_regex_characters():
     metacharacter handling.
     """
     print("\n--- Test: Special regex characters r'def hello_world\\(\\):' ---")
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -334,7 +334,7 @@ def test_special_regex_characters():
 def test_empty_directory():
     """Test: Searching an empty directory should return 'No matches found'."""
     print('\n--- Test: Empty directory search ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -361,7 +361,7 @@ def test_empty_directory():
 def test_non_existent_path():
     """Test: Searching a non-existent path should return an error message."""
     print('\n--- Test: Non-existent path ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -386,7 +386,7 @@ def test_non_existent_path():
 def test_invalid_regex():
     """Test: Invalid regex pattern should return an error message gracefully."""
     print('\n--- Test: Invalid regex pattern ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -411,7 +411,7 @@ def test_invalid_regex():
 def test_context_lines():
     """Test: Context lines mode shows surrounding lines with correct match count."""
     print('\n--- Test: Context lines mode ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -460,7 +460,7 @@ def test_rg_json_lines_bytes_decoded():
 def test_smart_case_behavior():
     """Test: smart_case=True (default) — lowercase pattern is case-insensitive, uppercase is case-sensitive."""
     print('\n--- Test: Smart case behavior ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -489,7 +489,7 @@ def test_smart_case_behavior():
 def test_ignore_vcs_false():
     """Test: ignore_vcs=False should search into .git-like directories."""
     print('\n--- Test: ignore_vcs=False searches VCS dirs ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         from agent_cascade.operation_manager import OperationManager
@@ -535,7 +535,7 @@ def test_rg_cmd_no_bare_replace_flag():
     from agent_cascade.operation_manager import grep as grep_module
     from agent_cascade.operation_manager.grep import GrepMixin
 
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
 
@@ -599,7 +599,7 @@ def test_rg_cmd_includes_text_flag():
     from agent_cascade.operation_manager import grep as grep_module
     from agent_cascade.operation_manager.grep import GrepMixin
 
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
 
@@ -662,7 +662,7 @@ def test_rc2_partial_error_surfaces_matches():
     from agent_cascade.operation_manager import grep as grep_module
     from agent_cascade.operation_manager.grep import GrepMixin
 
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         host = GrepMixin()
@@ -719,7 +719,7 @@ def test_rc2_usage_error_still_falls_back():
     from agent_cascade.operation_manager import grep as grep_module
     from agent_cascade.operation_manager.grep import GrepMixin
 
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         host = GrepMixin()
@@ -774,7 +774,7 @@ def test_binary_nul_match_end_to_end():
         print('  [SKIP] ripgrep not available on this host; end-to-end binary test requires rg')
         return
 
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         # One normal match file + one file whose matching line contains a NUL byte.
@@ -810,7 +810,7 @@ def test_include_glob_does_not_reinclude_git():
     the '!.git/' exclusion is appended last so it always wins over any include glob.
     """
     print('\n--- Test: include glob does not re-include .git/ ---')
-    fixture = TestFixture()
+    fixture = _FixtureHelper()
     try:
         root = fixture.build()
         # Add a .py file inside .git/ that matches the include glob '**/*.py'.
