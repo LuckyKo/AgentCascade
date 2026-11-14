@@ -584,8 +584,13 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
 
         with mock.patch.object(ci, '_build_docker_image', side_effect=_noop):
             with mock.patch('subprocess.run', side_effect=mock_subprocess_run):
-                with self.assertRaises(RuntimeError):
-                    ci._start_kernel(kernel_id)
+                # Simulate "kernel startup failed after path_mapping was written"
+                # without spawning real ZMQ channels (a leaked zmq.Context whose
+                # __del__ -> term() hung the serial suite at ~86%).
+                with mock.patch.object(ci, '_create_kernel_client',
+                                       side_effect=RuntimeError('kernel failed to start')):
+                    with self.assertRaises(RuntimeError):
+                        ci._start_kernel(kernel_id)
 
         # path_mapping file SHOULD exist because docker run succeeded (even though ps check failed)
         mapping_file = os.path.join(self.tmpdir, f'path_mapping_{kernel_id}.json')
