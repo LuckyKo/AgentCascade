@@ -74,6 +74,10 @@ def lazy_connect_dms_bound(timeout_s: Optional[float] = None) -> float:
     teardown margin, so it is always ≥ the real connect worst-case — never shorter, which
     would let the DMS kill a holder mid-connect-tail (the wedging/clobber the directive
     calls out). Mirrors the call_cli_agent _CLI_AGENT_TEARDOWN_MARGIN_S pattern.
+
+    Sized for the direct-connect worst case; the rare waiter-reattempt tail (a holder that
+    parks mid-connect and a waiter then re-attempts) can exceed this bound, and is
+    intentionally not covered.
     """
     if timeout_s is None:
         timeout_s = _lazy_settings().MCP_LAZY_CONNECT_TIMEOUT_S
@@ -511,10 +515,7 @@ class MCPManager:
         _step_timeout = timeout_s if timeout_s is not None else 30.0
         # Strip 'enabled' before hashing — it is a UI concern, not a connection
         # parameter, so the fingerprint stays stable across toggles.
-        conn_config = {k: v for k, v in server_config.items() if k != 'enabled'}
-        _cfg_fingerprint = hashlib.md5(
-            json.dumps(conn_config, sort_keys=True, default=str).encode()
-        ).hexdigest()[:8]
+        conn_config, _cfg_fingerprint = self._conn_config_and_hash(server_config)
         _guard_key = f'{server_name}:{_cfg_fingerprint}'
 
         # Already connected?  Use a prefix scan so a hash mismatch from a
@@ -711,6 +712,7 @@ class MCPManager:
             self._parked_servers = {}
             self._config_disabled = set()
             self._suppressed = set()  # runtime suppressions re-derive on next set_ui_disabled_tools
+            self._tool_server_map.clear()
         for server_name, server in mcp_servers.items():
             if not isinstance(server, dict):
                 continue

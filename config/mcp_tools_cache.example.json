@@ -1,0 +1,12 @@
+{
+  "<server_name>": {
+    "config_hash": "<8-char md5 fingerprint of conn_config, 'enabled' stripped>",
+    "tools": [
+      {
+        "name": "<server_name>-<tool_name>",
+        "description": "<tool description as returned by tools/list>",
+        "parameters": {"type": "object", "properties": {}}
+      }
+    ]
+  }
+}
