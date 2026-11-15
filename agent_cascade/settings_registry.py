@@ -56,13 +56,13 @@ from agent_cascade.settings import (
 # ── Key name lists (the single source of truth for "which keys exist") ─────────
 
 # PoolSettings-backed keys persisted to config/pool_settings.json. This is the
-# historical ``POOL_SETTINGS_KEYS`` (111 keys): the update_config save-trigger set
-# and the pool_settings.json persist set.
+# historical ``POOL_SETTINGS_KEYS``: the update_config save-trigger set and the
+# pool_settings.json persist set. Its size is pinned by ``_POOL_SETTINGS_KEY_COUNT``.
 _POOL_KEYS: Tuple[str, ...] = (
     'allow_parallel_agents', 'approval_timeout_seconds', 'auto_continue', 'auto_rollback_on_loop',
     'auto_skill_enabled', 'auto_skill_extra_turns', 'auto_skill_min_turns', 'auto_skill_mode',
     'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars', 'ci_execution_timeout',
-    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'cli_agent_enabled', 'cli_agent_images', 'cli_agent_models', 'cli_agent_paths_ro', 'cli_agent_timeout', 'code_char_limit', 'completion_classifier_enabled',
+    'ci_stale_container_ttl', 'ci_watchdog_timeout', 'cli_agent_agy_auth_volume', 'cli_agent_enabled', 'cli_agent_images', 'cli_agent_models', 'cli_agent_paths_ro', 'cli_agent_timeout', 'code_char_limit', 'completion_classifier_enabled',
     'compression_context_reserve_tokens', 'compression_force_cooldown', 'compression_force_threshold',
     'compression_max_attempts', 'compression_proactive_threshold', 'compression_timeout',
     'compression_warning_threshold', 'default_load_skill_mode', 'default_workspace',
@@ -539,12 +539,19 @@ def spec(key: str) -> SettingSpec:
     return SETTINGS_REGISTRY[key]
 
 
+#: Drift guard: the pinned sizes of the derived compat key sets. Adding/removing a
+#: persisted key updates these on purpose (a silent size change is a bug).
+_POOL_SETTINGS_KEY_COUNT: int = 112
+_EXTRA_PERSIST_KEY_COUNT: int = 3
+
+
 def validate_registry() -> None:
     """Raise ``AssertionError`` on any internal inconsistency in the table.
 
     Called by the completeness tests. Checks:
       * no duplicate key names across the source lists;
-      * the derived compat sets match their historical sizes (111 / 3);
+      * the derived compat sets match their pinned sizes (a drift guard: adding a key
+        means updating the count on purpose, never by accident);
       * every alias target exists;
       * handler coverage is bidirectional (no spec claims an unregistered handler, no
         handler is registered for an unknown key).
@@ -556,10 +563,12 @@ def validate_registry() -> None:
                 raise AssertionError(f"duplicate registry key: {key}")
             seen.add(key)
 
-    if len(POOL_SETTINGS_KEYS) != 111:
-        raise AssertionError(f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != 111")
-    if len(EXTRA_PERSIST_KEYS) != 3:
-        raise AssertionError(f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != 3")
+    if len(POOL_SETTINGS_KEYS) != _POOL_SETTINGS_KEY_COUNT:
+        raise AssertionError(
+            f"POOL_SETTINGS_KEYS drifted: {len(POOL_SETTINGS_KEYS)} != {_POOL_SETTINGS_KEY_COUNT}")
+    if len(EXTRA_PERSIST_KEYS) != _EXTRA_PERSIST_KEY_COUNT:
+        raise AssertionError(
+            f"EXTRA_PERSIST_KEYS drifted: {len(EXTRA_PERSIST_KEYS)} != {_EXTRA_PERSIST_KEY_COUNT}")
 
     # Every key must carry a default and a py_type: the registry is the source of truth
     # for both, and the snapshot builder falls back to ``spec.default``.

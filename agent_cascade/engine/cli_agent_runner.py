@@ -63,13 +63,13 @@ class PreparedCliAgentRun:
     """Post-gate spawn body for one ``call_cli_agent`` run, shared by the synchronous
     :func:`run_cli_agent` and the async :class:`CliAgentTracker` background path.
 
-    ``prepare_cli_agent_run`` runs the per-harness ENABLE gate, auth-env injection, model
-    resolution, and extra-RO-mount logic ONCE; both callers then consume this record so
-    that logic is never duplicated. When ``early_result`` is non-None the run was decided
-    WITHOUT spawning (today only the harness-disabled exit-126 case) — the caller returns
-    it directly and must not read the spawn fields. When it is None, ``docker_cmd`` /
-    ``container_name`` / ``clean_env`` are ready to launch and ``cap`` is the concurrency
-    cap the caller must hold around the actual ``Popen``/``subprocess.run``.
+    ``prepare_cli_agent_run`` runs the per-harness ENABLE gate, auth-env injection, OAuth-volume
+    gate, model resolution, and extra-RO-mount logic ONCE; both callers then consume this record
+    so that logic is never duplicated. When ``early_result`` is non-None the run was decided
+    WITHOUT spawning (a disabled harness, or an unauthenticated OAuth volume — both exit 126) —
+    the caller returns it directly and must not read the spawn fields. When it is None,
+    ``docker_cmd`` / ``container_name`` / ``clean_env`` are ready to launch and ``cap`` is the
+    concurrency cap the caller must hold around the actual ``Popen``/``subprocess.run``.
     """
 
     early_result: Optional[CliAgentResult]
@@ -116,6 +116,25 @@ _IMAGE_PRESENT_CACHE: dict[str, tuple[float, Optional[bool]]] = {}
 # Short-TTL cache for the binary-presence probe (fail-fast check), same semantics as
 # _IMAGE_PRESENT_CACHE: value is (ts, present: bool | None); None means docker unavailable.
 _BINARY_IN_IMAGE_CACHE: dict[tuple[str, str], tuple[float, Optional[bool]]] = {}
+
+# Short-TTL cache for the OAuth-volume population probe (status + run gate): the value is
+# (ts, populated: bool | None); None means docker was unavailable (indeterminate, never blocks).
+_AGY_AUTH_CACHE_TTL_SECONDS: float = 60.0
+_AGY_AUTH_CACHE: dict[tuple[str, str], tuple[float, Optional[bool]]] = {}
+
+# Candidate credential files inside an OAuth harness's container store. The exact Linux filename
+# is unverified (on Windows the token lives in Credential Manager, DPAPI-bound), so the probe
+# accepts any of these, and falls back to any cred/token/auth-named file in agy's own dir.
+_AGY_AUTH_CREDENTIAL_CANDIDATES: tuple[str, ...] = (
+    '/root/.gemini/antigravity-cli/credentials.json',
+    '/root/.gemini/credentials.json',
+    '/root/.gemini/oauth_creds.json',
+)
+_AGY_AUTH_PROBE_SCRIPT: str = '\n'.join(
+    [f'[ -s {p} ] && exit 0' for p in _AGY_AUTH_CREDENTIAL_CANDIDATES] + [
+        'ls -A /root/.gemini/antigravity-cli 2>/dev/null | grep -qiE "cred|token|auth" && exit 0',
+        'exit 1',
+    ])
 
 
 def _image_present(tag: str) -> Optional[bool]:
@@ -191,6 +210,61 @@ def _binary_in_image(image: str, binary: str) -> Optional[bool]:
         present = None
     _BINARY_IN_IMAGE_CACHE[key] = (now, present)
     return present
+
+
+def _resolve_auth_volume(pool, adapter) -> Optional[str]:
+    """Docker volume name that backs ``adapter``'s OAuth store, or None when no volume applies.
+
+    Applies only to ``auth_type == 'oauth'`` adapters that declare an ``auth_volume_target``.
+    The pool setting wins; absent/non-str (e.g. a MagicMock test double) falls back to the
+    env-backed module constant. ``''`` and ``'0'`` are the documented OFF values.
+    """
+    if getattr(adapter, 'auth_type', 'api_key') != 'oauth':
+        return None
+    if not getattr(adapter, 'auth_volume_target', None):
+        return None
+    raw = getattr(getattr(pool, 'settings', None), 'cli_agent_agy_auth_volume', None)
+    if not isinstance(raw, str):
+        from agent_cascade.settings import CLI_AGENT_AGY_AUTH_VOLUME
+        raw = CLI_AGENT_AGY_AUTH_VOLUME
+    name = raw.strip()
+    return None if (not name or name == '0') else name
+
+
+def _invalidate_agy_auth_cache(volume: Optional[str] = None) -> None:
+    """Drop cached OAuth-volume probe results (all volumes, or one) — called after a login."""
+    if volume is None:
+        _AGY_AUTH_CACHE.clear()
+        return
+    for key in [k for k in _AGY_AUTH_CACHE if k[0] == volume]:
+        del _AGY_AUTH_CACHE[key]
+
+
+def _agy_auth_volume_populated(volume: str, image: str,
+                                target: str = '/root/.gemini') -> Optional[bool]:
+    """True if ``volume`` holds a credential file for the OAuth harness, False if it does not,
+    None if docker was unavailable/timed out (indeterminate). TTL-cached; never raises.
+
+    The check is deliberately tolerant: the Linux credential filename is unverified, so explicit
+    candidates are tried first and then any cred/token/auth-named file in agy's own directory.
+    Only a definitive False may block a run — an indeterminate probe fails open.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    key = (volume, image)
+    cached = _AGY_AUTH_CACHE.get(key)
+    if cached and (now - cached[0]) < _AGY_AUTH_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        r = subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{volume}:{target}', '--entrypoint', 'sh',
+             image, '-c', _AGY_AUTH_PROBE_SCRIPT],
+            capture_output=True, text=True, timeout=60, encoding='utf-8', errors='replace')
+        populated: Optional[bool] = r.returncode == 0
+    except Exception as e:  # noqa: BLE001 — docker unavailable / timeout → indeterminate
+        logger.debug('call_cli_agent auth volume probe failed for %s: %s', volume, e)
+        populated = None
+    _AGY_AUTH_CACHE[key] = (now, populated)
+    return populated
 
 
 def _ensure_image(tag: str, harness: Optional[str] = None, max_age_days: Optional[float] = 7) -> None:
@@ -283,7 +357,8 @@ def _cli_agent_image(harness: Optional[str] = None, pool: Optional[Any] = None) 
 
 def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[str],
                       image: str, env_vars: Optional[dict[str, str]] = None,
-                      extra_ro_mounts: Optional[list[dict]] = None) -> list[str]:
+                      extra_ro_mounts: Optional[list[dict]] = None,
+                      extra_volumes: Optional[list[dict]] = None) -> list[str]:
     """Build the one-shot ``docker run --rm`` argv, reusing the code_interpreter containment recipe.
 
     Same caps/limits/path-normalization as ``code_interpreter`` (imported lazily to keep this
@@ -293,8 +368,10 @@ def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[
 
     Auth keys are injected as ``-e <VAR>=<value>`` flags (NEVER a ``secrets.json`` bind-mount)
     so the container sees only the one native key it needs. ``extra_ro_mounts`` are mounted
-    ``:ro`` when the pool's ``cli_agent_paths_ro`` toggle is on. With both empty the argv is
-    byte-identical to the pre-auto-setup recipe (default OFF = no behavior change).
+    ``:ro`` when the pool's ``cli_agent_paths_ro`` toggle is on. ``extra_volumes`` are named
+    Docker volumes (``{'name', 'target'}``) used to persist an OAuth harness's account store
+    across one-shot runs. With all three empty the argv is byte-identical to the pre-auto-setup
+    recipe (default OFF = no behavior change).
     """
     # Lazy import: same source of truth for limits + path normalization, no copy-paste drift.
     from agent_cascade.tools.code_interpreter import (
@@ -315,6 +392,8 @@ def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[
         cmd += ['-e', f'{_k}={_v}']
     for _m in (extra_ro_mounts or []):
         cmd += ['-v', f"{_m['host']}:{_m['container']}:ro"]
+    for _vol in (extra_volumes or []):
+        cmd += ['-v', f"{_vol['name']}:{_vol['target']}"]
     cmd += [image, *harness_cmd]
     return cmd
 
@@ -392,16 +471,17 @@ def format_cli_result_message(harness: str, result: CliAgentResult) -> str:
 def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
                           workspace: str, permission_posture: str, pool,
                           caller_name: str, model: Optional[str] = None) -> PreparedCliAgentRun:
-    """Resolve the adapter, run the per-harness ENABLE/auth/model/RO gates, and build the
+    """Resolve the adapter, run the per-harness ENABLE/auth/volume/model/RO gates, and build the
     one-shot ``docker run`` argv — WITHOUT spawning.
 
     Shared by :func:`run_cli_agent` (synchronous) and the async ``CliAgentTracker`` so the ENABLE
-    gate, auth-key injection, model resolution, and extra-RO-mount logic are written exactly once.
-    Returns a :class:`PreparedCliAgentRun`; when its ``early_result`` is non-None (today only the
-    harness-disabled exit-126 case) the caller returns it directly and must not read the spawn
-    fields. The concurrency semaphore is deliberately NOT acquired here: the caller holds it only
-    around the actual spawn, so a disabled harness never occupies a slot, and in async mode the
-    slot is held across the whole background run rather than released the instant launch returns.
+    gate, auth-key injection, OAuth-volume gate, model resolution, and extra-RO-mount logic are
+    written exactly once. Returns a :class:`PreparedCliAgentRun`; when its ``early_result`` is
+    non-None (disabled harness, or unauthenticated OAuth volume) the caller returns it directly
+    and must not read the spawn fields. The concurrency semaphore is deliberately NOT acquired
+    here: the caller holds it only around the actual spawn, so a disabled harness never occupies
+    a slot, and in async mode the slot is held across the whole background run rather than
+    released the instant launch returns.
     """
     if adapter is None:
         # Defensive direct-runner path: caller supplied only a harness name. The handler path
@@ -445,6 +525,33 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
         if _key:
             _env_vars[_auth_env_var] = _key
 
+    # (B2) OAuth-volume gate for harnesses without an env-var API key (agy). The credential store
+    # lives in a named Docker volume; an unauthenticated volume would spawn a container, print the
+    # OAuth URL, wait agy's 60 s window and exit — so fail fast with an actionable message
+    # instead. Only a definitive False blocks; None (docker unavailable/indeterminate) fails open.
+    image = _cli_agent_image(harness, pool)
+    _auth_volume = _resolve_auth_volume(pool, adapter)
+    _extra_volumes: list[dict] = []
+    if _auth_volume:
+        if _agy_auth_volume_populated(_auth_volume, image) is False:
+            msg = (f"antigravity OAuth volume '{_auth_volume}' is unauthenticated — click "
+                   f"'Authenticate' in the Web UI (Settings → CLI Agents), or run the one-time "
+                   f"interactive login against that volume. See docs/SYSTEM_DOCS.md "
+                   f"('call_cli_agent' CLI agents).")
+            log_path = _persist_log(caller_name=caller_name, harness=harness, exit_code=126,
+                                    timed_out=False, stdout='', stderr=msg,
+                                    requested_posture=permission_posture)
+            return PreparedCliAgentRun(
+                early_result=CliAgentResult(stdout='', stderr=msg, exit_code=126,
+                                            timed_out=False, log_path=log_path,
+                                            requested_posture=permission_posture),
+                docker_cmd=None, container_name=None, clean_env=None,
+                cap=getattr(_settings, 'max_cli_agent_children', 2),
+                harness=harness, caller_name=caller_name,
+                requested_posture=permission_posture)
+        _extra_volumes.append({'name': _auth_volume,
+                               'target': adapter.auth_volume_target})
+
     # (C) Model: call-level argument wins, else the per-harness default map. Dict-guarded so a
     # MagicMock settings (test doubles) never leaks an auto-attribute into the adapter argv.
     _model = model
@@ -471,7 +578,6 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
     container_name = f'cli_agent_{uuid.uuid4().hex[:12]}'
     harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
                                            posture=permission_posture, model=_model)
-    image = _cli_agent_image(harness, pool)
     # Fail-fast: a present-but-wrong image (e.g. silently failed build or a mis-pinned tag) would
     # otherwise spawn and die with a cryptic in-container module error. Only a definitive False
     # rejects; None (docker unavailable / indeterminate) falls through to the normal spawn path.
@@ -482,7 +588,8 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
             f"(e.g. set cli_agent_images['{harness}'] to a tag that has it).")
     docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
                                    harness_cmd=harness_cmd, image=image,
-                                   env_vars=_env_vars, extra_ro_mounts=_extra_ro)
+                                   env_vars=_env_vars, extra_ro_mounts=_extra_ro,
+                                   extra_volumes=_extra_volumes)
     clean_env = adapter.child_env(os.environ.copy())
     return PreparedCliAgentRun(early_result=None, docker_cmd=docker_cmd,
                                container_name=container_name, clean_env=clean_env, cap=cap,
@@ -556,9 +663,13 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
 def cli_agent_status(pool) -> dict[str, dict]:
     """Per-harness readiness snapshot for the Web UI + ``system_info`` render. Never raises.
 
-    Shape: ``{harness: {enabled, key_configured, image_present, quota_available, model}}``.
+    Shape: ``{harness: {enabled, auth_type, key_configured, image_present, quota_available,
+    model}}`` plus ``authenticated`` for ``auth_type == 'oauth'`` harnesses.
+      * ``auth_type`` is the adapter's declared auth model ('api_key' | 'oauth').
       * ``key_configured`` is ``None`` for key-less harnesses (``adapter.auth_env_var`` is None,
         e.g. antigravity's cached OAuth) and ``bool`` otherwise.
+      * ``authenticated`` (OAuth only) is the TTL-cached credential-volume probe:
+        True/False, or None when docker is unavailable or the volume is disabled.
       * ``image_present`` is a TTL-cached ``docker image inspect`` result (``None`` when docker
         itself is unavailable — indeterminate, not a hard "missing").
       * ``quota_available`` is always ``'unknown'`` in Phase 0; an adapter MAY add a
@@ -576,8 +687,10 @@ def cli_agent_status(pool) -> dict[str, dict]:
         try:
             adapter = get_adapter(h)
             _auth = getattr(adapter, 'auth_env_var', None)
+            auth_type = getattr(adapter, 'auth_type', 'api_key')
             key_configured = None if _auth is None else bool(get_secret(f'cli_{h}_key'))
-            image_present = _image_present_cached(images_map.get(h) or cli_agent_default_image(h))
+            image = images_map.get(h) or cli_agent_default_image(h)
+            image_present = _image_present_cached(image)
             _probe = getattr(adapter, 'probe_quota', None)
             if _probe is None:
                 quota_available = 'unknown'
@@ -586,15 +699,21 @@ def cli_agent_status(pool) -> dict[str, dict]:
                     quota_available = _probe()
                 except Exception:  # noqa: BLE001 — a failing probe is 'unknown', never fatal
                     quota_available = 'unknown'
-            out[h] = {
+            entry = {
                 'enabled': bool(enabled_map.get(h, False)),
+                'auth_type': auth_type,
                 'key_configured': key_configured,
                 'image_present': image_present,
                 'quota_available': quota_available,
                 'model': models_map.get(h),
             }
+            if auth_type == 'oauth':
+                vol = _resolve_auth_volume(pool, adapter)
+                entry['authenticated'] = (_agy_auth_volume_populated(vol, image)
+                                          if vol else None)
+            out[h] = entry
         except Exception as e:  # noqa: BLE001 — status must never crash the caller
             logger.debug('cli_agent_status failed for %s: %s', h, e)
-            out[h] = {'enabled': False, 'key_configured': None, 'image_present': None,
-                      'quota_available': 'unknown', 'model': None}
+            out[h] = {'enabled': False, 'auth_type': 'api_key', 'key_configured': None,
+                      'image_present': None, 'quota_available': 'unknown', 'model': None}
     return out

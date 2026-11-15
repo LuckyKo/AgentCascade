@@ -777,6 +777,12 @@ CLI_AGENT_ANTIGRAVITY_IMAGE: str = 'cli_agent_agy'
 #: (the image is only built when missing).
 CLI_AGENT_IMAGE_MAX_AGE_DAYS: int = int(os.getenv('M6_CLI_AGENT_IMAGE_MAX_AGE_DAYS', '7'))
 
+#: Named Docker volume that persists an OAuth-based CLI's account store across one-shot runs
+#: (consumed when the adapter declares ``auth_type='oauth'`` + ``auth_volume_target``; agy mounts
+#: it at /root/.gemini so a one-time interactive login survives container teardown).
+#: '' or '0' = OFF: no volume is mounted and the user supplies credentials another way.
+CLI_AGENT_AGY_AUTH_VOLUME: str = os.getenv('M6_CLI_AGENT_AGY_AUTH_VOLUME', 'cli_agent_agy_auth')
+
 
 def cli_agent_default_image(harness: str) -> str:
     """Default Docker image tag for a CLI harness. antigravity resolves to its dedicated

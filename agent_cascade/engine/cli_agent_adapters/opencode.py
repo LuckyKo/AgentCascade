@@ -31,6 +31,8 @@ class OpencodeAdapter:
     # from opencode.ai/auth, no interactive `auth login`. Non-Zen providers (e.g. OpenAI) would
     # need a per-provider env-var override (a cli_opencode_key_env follow-up).
     auth_env_var = 'OPENCODE_API_KEY'
+    auth_type = 'api_key'
+    auth_volume_target = None  # key-based auth: no persistent volume needed
     model_flag = '--model'  # opencode run -m/--model provider/model
     # opencode -m requires ``provider/model``. Bare IDs are opencode-hosted (Zen/Go) models, so we
     # auto-prefix them with ``opencode/``; an ID that already carries a provider (contains ``/``)

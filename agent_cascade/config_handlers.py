@@ -533,6 +533,14 @@ def _handle_cli_agent_paths_ro(ui_cfg: dict, agent_pool: Optional[Any], agents: 
         agent_pool.settings.cli_agent_paths_ro = bool(ui_cfg.get('cli_agent_paths_ro', False))
 
 
+@register_config_handler('cli_agent_agy_auth_volume')
+def _handle_cli_agent_agy_auth_volume(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the Docker volume backing agy's OAuth credential store. '' / '0' = no volume mounted."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        v = ui_cfg.get('cli_agent_agy_auth_volume', '')
+        agent_pool.settings.cli_agent_agy_auth_volume = str(v).strip() if v is not None else ''
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

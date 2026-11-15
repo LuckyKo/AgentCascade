@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 0.15.2 (keep in sync with `agent_cascade.__version__`)
-**Last Updated:** 2026-11-11
+**Version:** 0.16.0 (keep in sync with `agent_cascade.__version__`)
+**Last Updated:** 2026-11-15
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -19,6 +19,7 @@
 9. [Memory-Hint System](#9-memory-hint-system)
 10. [Skill System](#10-skill-system)
 11. [Tool System & MCP Discovery](#11-tool-system--mcp-discovery)
+12. [External CLI Agents (`call_cli_agent`)](#12-external-cli-agents-call_cli_agent)
 
 ---
 
@@ -1527,6 +1528,58 @@ The `functions=` array is serialized into the prompt **right after the system pr
 
 ---
 
+## 12. External CLI Agents (`call_cli_agent`)
+
+`call_cli_agent` runs an **external AI coding CLI** as a one-shot sub-agent: `docker run --rm … <image> <argv>`, capture stdout + exit code, return one result. The pipeline is harness-agnostic; only a small **adapter** is per-harness.
+
+### 12.1 Components
+
+| Layer | File | Responsibility |
+|---|---|---|
+| Tool schema | `prompts/dna.py` (`TOOL_METADATA['call_cli_agent']`) | `harness` enum, `task`, `model`, `permission_posture`, `status` |
+| Adapter registry | `engine/cli_agent_adapters/` | Per-harness argv, presence probe, auth metadata, credential strip |
+| Runner | `engine/cli_agent_runner.py` | Enable/OAuth gates, image build+refresh, docker argv, wall-clock timeout + teardown, log persistence, status |
+| Async tracker | `engine/cli_agent_async.py` | Background execution path (`execution_mode='async'`) |
+| OAuth login | `engine/cli_agent_oauth.py` | Interactive sign-in session (URL + pasted code) for key-less harnesses |
+
+Adapters: `claude_code` (`claude -p`), `opencode` (`opencode run`), `antigravity` (`agy -p`). The registry key is the harness name; the binary token may differ (antigravity → `agy`).
+
+### 12.2 Auth models
+
+Two shapes, declared by the adapter:
+
+- **`auth_type = 'api_key'`** (`claude_code`, `opencode`) — the runner injects the single native env var via `docker -e <VAR>=<key>`; the key is read from `secrets.json` (`cli_<harness>_key`) and never enters `pool_settings` or the state broadcast.
+- **`auth_type = 'oauth'`** (`antigravity`) — no env-var key exists. The CLI keeps an account store at `auth_volume_target` inside the container, so the runner mounts a **named Docker volume** there. A host bind-mount cannot work on Windows: the token lives in Credential Manager (`LegacyGeneric:target=gemini:antigravity`, DPAPI-bound) and a Linux container cannot read it.
+
+OAuth volume settings:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `cli_agent_agy_auth_volume` | `cli_agent_agy_auth` (`M6_CLI_AGENT_AGY_AUTH_VOLUME`) | Named volume mounted at `/root/.gemini`. `''` / `'0'` = OFF (no volume). |
+
+Before spawning, the runner probes the volume for a credential file (explicit candidates, then any `cred|token|auth`-named file under `antigravity-cli/`). Results are TTL-cached. Only a **definitive negative** blocks the run — with exit `126` and an actionable message; an indeterminate probe (docker unavailable) fails open.
+
+### 12.3 Permission posture
+
+`permission_posture='acceptEdits'` is the only posture the tool schema exposes; `bypass` exists for a future config opt-in. Because the container has no TTY, an approval prompt is unanswerable — antigravity's `acceptEdits` argv therefore also carries `--dangerously-skip-permissions`. Containment is owned by Docker, not the CLI: `--cap-drop=ALL`, `--security-opt=no-new-privileges`, memory/CPU/PID caps, and only the target workspace RW (plus optional read-only extra paths).
+
+### 12.4 Interactive login (`agy`)
+
+`agy` prints an `accounts.google.com` URL and waits **60 s** for an authorization code pasted on stdin (no localhost callback). The Web UI "Authenticate" button starts a login session (`cli_agent_oauth_start`), opens the URL in the host browser, and asks for the code (`cli_agent_oauth_submit`). A 60 s lapse is reported as *retryable* (`expired`), not as failure: the token store lives in the volume, so a retry just spawns a new one-shot container.
+
+Manual one-time login (no UI, e.g. headless server) — run against the same volume name:
+
+```bash
+docker run -it --rm -v cli_agent_agy_auth:/root/.gemini cli_agent_agy agy -p="hello"
+# open the printed URL, then paste the authorization code when prompted
+```
+
+### 12.5 Status surface
+
+`cli_agent_status(pool)` returns, per harness: `enabled`, `auth_type`, `key_configured`, `image_present`, `quota_available`, `model` — plus `authenticated` (True/False/None) for OAuth harnesses. It spawns nothing and never raises; `system_info` renders the same snapshot.
+
+---
+
 ## Appendix: Quick Reference
 
 ### Configuration Defaults (`PoolSettings`)
@@ -1543,6 +1596,9 @@ The `functions=` array is serialized into the prompt **right after the system pr
 | `compression_max_consolidation_tokens` | 100,000 | Abort consolidation if input summaries exceed this token count |
 | `security_check_timeout` | 120 | Max seconds for Security Advisor response |
 | `max_auto_rollbacks` | 5 | Max loop recovery retries before escalation |
+| `cli_agent_timeout` | 1800 | Hard wall-clock cap per `call_cli_agent` run (seconds) |
+| `max_cli_agent_children` | 2 | Concurrent external-CLI containers |
+| `cli_agent_agy_auth_volume` | `cli_agent_agy_auth` | Docker volume holding agy's OAuth store ('' / '0' = off) |
 
 ### Agent Instance Lifecycle
 

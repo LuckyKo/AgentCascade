@@ -43,6 +43,9 @@ class RuntimeAdapter(Protocol):
                         # exposes the flag — opencode omits it (plain text is already its default)
     auth_env_var: Optional[str]  # container env var this CLI reads for auth; None == not an API-key
                                  # model (e.g. antigravity uses a cached interactive OAuth login)
+    auth_type: str  # 'api_key' (key injected via -e) | 'oauth' (cached account store in a volume)
+    auth_volume_target: Optional[str]  # container dir a persistent Docker volume must back for an
+                                       # 'oauth' harness (e.g. '/root/.gemini'); None == no volume
     model_flag: Optional[str]  # argv flag that selects the model (e.g. '--model'); None == no flag
                                # is emitted even when a model is requested (byte-safe default)
 

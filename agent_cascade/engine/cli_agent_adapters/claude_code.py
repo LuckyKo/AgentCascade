@@ -26,6 +26,8 @@ class ClaudeCodeAdapter:
     binary = 'claude'
     output_format = 'text'  # --output-format text
     auth_env_var = 'ANTHROPIC_API_KEY'  # native key the runner injects via -e when configured
+    auth_type = 'api_key'
+    auth_volume_target = None  # key-based auth: no persistent volume needed
     model_flag = '--model'  # claude accepts --model <name>; appended only when a model resolves
 
     # Posture → argv tokens. 'bypass' is destructive and is never selected by the tool

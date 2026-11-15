@@ -393,12 +393,17 @@ class SystemInfo(BaseTool):
             status = cli_agent_status(self.agent_pool)
             lines = ['External CLI agents (call_cli_agent):']
             for harness, st in sorted(status.items()):
-                lines.append(
+                line = (
                     f'  {harness}: enabled={st.get('enabled')}'
-                    f' key={st.get('key_configured')}'
+                    f' auth={st.get('auth_type', 'api_key')}'
+                    f' key={st.get('key_configured')}')
+                if 'authenticated' in st:
+                    line += f" authenticated={st.get('authenticated')}"
+                line += (
                     f' image={st.get('image_present')}'
                     f' quota={st.get('quota_available')}'
                     f' model={st.get('model')}')
+                lines.append(line)
             return '\n'.join(lines)
         except Exception as e:  # noqa: BLE001 — never degrade the rest of the dump
             logger.debug(f"system_info cli-agents render failed: {e}")

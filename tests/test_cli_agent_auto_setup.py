@@ -32,8 +32,8 @@ if _REPO not in sys.path:
 import agent_cascade.engine.cli_agent_runner as runner  # noqa: E402
 import agent_cascade.settings_registry as registry  # noqa: E402
 from agent_cascade.config_handlers import (  # noqa: E402
-    _handle_cli_agent_enabled, _handle_cli_agent_images, _handle_cli_agent_models,
-    _handle_cli_agent_paths_ro)
+    _handle_cli_agent_agy_auth_volume, _handle_cli_agent_enabled, _handle_cli_agent_images,
+    _handle_cli_agent_models, _handle_cli_agent_paths_ro)
 from agent_cascade.prompts import dna  # noqa: E402
 from agent_cascade.tools.custom.system_info import SystemInfo  # noqa: E402
 from agent_cascade.ws_handlers import WsMessageHandler  # noqa: E402
@@ -70,6 +70,15 @@ class TestConfigHandlers:
         _handle_cli_agent_paths_ro({'cli_agent_paths_ro': True}, pool, [])
         assert pool.settings.cli_agent_paths_ro is True
 
+    def test_agy_auth_volume_str_and_off_state(self):
+        pool = _settings_pool()
+        _handle_cli_agent_agy_auth_volume({'cli_agent_agy_auth_volume': ' vol-x '}, pool, [])
+        assert pool.settings.cli_agent_agy_auth_volume == 'vol-x'
+        # '' and '0' are the documented OFF values — they must be stored verbatim, not defaulted.
+        for off in ('', '0'):
+            _handle_cli_agent_agy_auth_volume({'cli_agent_agy_auth_volume': off}, pool, [])
+            assert pool.settings.cli_agent_agy_auth_volume == off
+
 
 # ── registry invariants ──────────────────────────────────────────────────────
 
@@ -83,6 +92,12 @@ class TestRegistryInvariants:
     def test_all_four_in_pool_keys(self):
         for k in (*_DICT_KEYS, 'cli_agent_paths_ro'):
             assert k in registry._POOL_KEYS, k
+
+    def test_agy_auth_volume_registered_str_default(self):
+        from agent_cascade.settings import CLI_AGENT_AGY_AUTH_VOLUME
+        assert 'cli_agent_agy_auth_volume' in registry._POOL_KEYS
+        assert registry._DEFAULTS['cli_agent_agy_auth_volume'] == CLI_AGENT_AGY_AUTH_VOLUME
+        assert registry.spec('cli_agent_agy_auth_volume').py_type is str
 
 
 # ── secrets writer ───────────────────────────────────────────────────────────
@@ -127,9 +142,109 @@ class TestDockerCmd:
         # image immediately precedes the harness argv (no dangling -v/-e).
         assert base[base.index('i') + 1:] == ['claude', '-p']
 
+    def test_oauth_volume_mounted_before_image(self):
+        cmd = runner._build_docker_cmd(
+            container_name='c', workspace='.', harness_cmd=['agy'], image='cli_agent_agy',
+            extra_volumes=[{'name': 'cli_agent_agy_auth', 'target': '/root/.gemini'}])
+        assert 'cli_agent_agy_auth:/root/.gemini' in cmd
+        assert cmd.index('cli_agent_agy_auth:/root/.gemini') < cmd.index('cli_agent_agy')
+        assert cmd[-1] == 'agy'
+
+
+# ── OAuth volume: resolution, tolerant probe, run gate ───────────────────────
+
+
+class TestOAuthVolume:
+    def _pool(self, volume='vol-1', enabled=True, **extra):
+        return NS(settings=NS(cli_agent_enabled={'antigravity': enabled},
+                              cli_agent_images={}, cli_agent_models={},
+                              cli_agent_paths_ro=False, max_cli_agent_children=2,
+                              cli_agent_agy_auth_volume=volume, **extra))
+
+    def test_resolve_only_for_oauth_adapters(self):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        pool = self._pool()
+        assert runner._resolve_auth_volume(pool, get_adapter('antigravity')) == 'vol-1'
+        for h in ('claude_code', 'opencode'):
+            assert runner._resolve_auth_volume(pool, get_adapter(h)) is None
+
+    def test_resolve_off_values_and_mock_settings(self):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        ad = get_adapter('antigravity')
+        for off in ('', '0', '   '):
+            assert runner._resolve_auth_volume(self._pool(volume=off), ad) is None
+        # A MagicMock settings double must not leak a fake volume name into docker argv.
+        assert runner._resolve_auth_volume(NS(settings=MagicMock()), ad) is not None
+
+    def test_probe_tolerant_candidates_and_cache_invalidation(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return MagicMock(stdout='', stderr='', returncode=1)
+
+        monkeypatch.setattr(runner, '_AGY_AUTH_CACHE', {})
+        monkeypatch.setattr(runner.subprocess, 'run', fake_run)
+        assert runner._agy_auth_volume_populated('v', 'img') is False
+        # candidate paths + the name-grep fallback are all in the probe script
+        script = calls[0][calls[0].index('-c') + 1]
+        for candidate in runner._AGY_AUTH_CREDENTIAL_CANDIDATES:
+            assert candidate in script
+        assert 'grep' in script
+        # cached -> no second docker call; invalidation forces a re-probe
+        runner._agy_auth_volume_populated('v', 'img')
+        assert len(calls) == 1
+        runner._invalidate_agy_auth_cache('v')
+        runner._agy_auth_volume_populated('v', 'img')
+        assert len(calls) == 2
+
+    def test_probe_docker_unavailable_is_indeterminate(self, monkeypatch):
+        monkeypatch.setattr(runner, '_AGY_AUTH_CACHE', {})
+        monkeypatch.setattr(runner.subprocess, 'run',
+                            lambda cmd, **kw: (_ for _ in ()).throw(OSError('no docker')))
+        assert runner._agy_auth_volume_populated('v', 'img') is None
+
+    def test_gate_blocks_unauthenticated_volume(self, monkeypatch, tmp_path):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        monkeypatch.setattr(runner, '_LOGS_DIR', tmp_path)
+        monkeypatch.setattr(runner, '_agy_auth_volume_populated', lambda vol, img: False)
+        prepared = runner.prepare_cli_agent_run(
+            adapter=get_adapter('antigravity'), task='t', workspace=str(tmp_path),
+            permission_posture='acceptEdits', pool=self._pool(), caller_name='c')
+        assert prepared.early_result is not None
+        assert prepared.early_result.exit_code == 126
+        assert 'vol-1' in prepared.early_result.stderr
+        assert 'Authenticate' in prepared.early_result.stderr
+        assert prepared.docker_cmd is None  # nothing spawned
+
+    def test_gate_indeterminate_fails_open_and_mounts_volume(self, monkeypatch, tmp_path):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        monkeypatch.setattr(runner, '_LOGS_DIR', tmp_path)
+        monkeypatch.setattr(runner, '_agy_auth_volume_populated', lambda vol, img: None)
+        monkeypatch.setattr(runner, '_cli_agent_image', lambda h, p: 'cli_agent_agy')
+        monkeypatch.setattr(runner, '_binary_in_image', lambda image, binary: True)
+        prepared = runner.prepare_cli_agent_run(
+            adapter=get_adapter('antigravity'), task='t', workspace=str(tmp_path),
+            permission_posture='acceptEdits', pool=self._pool(), caller_name='c')
+        assert prepared.early_result is None
+        assert 'vol-1:/root/.gemini' in prepared.docker_cmd
+
+    def test_no_volume_mount_for_key_harness(self, monkeypatch, tmp_path):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        monkeypatch.setattr(runner, '_LOGS_DIR', tmp_path)
+        monkeypatch.setattr(runner, '_cli_agent_image', lambda h, p: 'cli_agent:all')
+        monkeypatch.setattr(runner, '_binary_in_image', lambda image, binary: True)
+        pool = NS(settings=NS(cli_agent_enabled={'claude_code': True}, cli_agent_images={},
+                              cli_agent_models={}, cli_agent_paths_ro=False,
+                              max_cli_agent_children=2, cli_agent_agy_auth_volume='vol-1'))
+        prepared = runner.prepare_cli_agent_run(
+            adapter=get_adapter('claude_code'), task='t', workspace=str(tmp_path),
+            permission_posture='acceptEdits', pool=pool, caller_name='c')
+        assert prepared.early_result is None
+        assert not any('vol-1' in str(x) for x in prepared.docker_cmd)
+
 
 # ── image auto-build ─────────────────────────────────────────────────────────
-
 
 def test_ensure_image_builds_once_and_memoizes(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, '_BUILD_OK', {})
@@ -169,16 +284,36 @@ def test_cli_agent_status_shape(monkeypatch):
     monkeypatch.setattr(sl, 'get_secret',
                         lambda name: 'stored' if name == 'cli_claude_code_key' else None)
     monkeypatch.setattr(runner, '_image_present_cached', lambda tag: True)
+    monkeypatch.setattr(runner, '_agy_auth_volume_populated', lambda vol, image: True)
     pool = NS(settings=NS(cli_agent_enabled={'claude_code': True}, cli_agent_images={},
-                          cli_agent_models={'opencode': 'm-x'}, cli_agent_paths_ro=False))
+                          cli_agent_models={'opencode': 'm-x'}, cli_agent_paths_ro=False,
+                          cli_agent_agy_auth_volume='vol-1'))
     st = runner.cli_agent_status(pool)
     assert set(st.keys()) == {'claude_code', 'opencode', 'antigravity'}
-    assert st['claude_code'] == {'enabled': True, 'key_configured': True,
+    assert st['claude_code'] == {'enabled': True, 'auth_type': 'api_key', 'key_configured': True,
                                  'image_present': True, 'quota_available': 'unknown',
                                  'model': None}
     # antigravity has no API-key auth -> key_configured must be None (invariant #3).
     assert st['antigravity']['key_configured'] is None
+    assert st['antigravity']['auth_type'] == 'oauth'
+    assert st['antigravity']['authenticated'] is True
+    # key-based harnesses carry no `authenticated` field at all.
+    assert 'authenticated' not in st['opencode']
     assert st['opencode']['model'] == 'm-x'
+
+
+def test_cli_agent_status_oauth_volume_off_is_indeterminate(monkeypatch):
+    """Volume disabled ('' / '0') -> authenticated is None; no docker probe is run."""
+    import config.secrets_loader as sl
+    monkeypatch.setattr(sl, 'get_secret', lambda name: None)
+    monkeypatch.setattr(runner, '_image_present_cached', lambda tag: True)
+    probe = MagicMock()
+    monkeypatch.setattr(runner, '_agy_auth_volume_populated', probe)
+    for off in ('', '0'):
+        pool = NS(settings=NS(cli_agent_enabled={}, cli_agent_images={}, cli_agent_models={},
+                              cli_agent_paths_ro=False, cli_agent_agy_auth_volume=off))
+        assert runner.cli_agent_status(pool)['antigravity']['authenticated'] is None
+    probe.assert_not_called()
 
 
 # ── system_info render ───────────────────────────────────────────────────────
@@ -281,14 +416,25 @@ class TestModelPlumbing:
         none_model = ad.build_launch_cmd(task='t', workspace='/w', posture='acceptEdits', model=None)
         assert none_model == base  # no flag appended when model is None
 
-    def test_antigravity_ignores_model(self):
+    def test_antigravity_emits_model(self):
         from agent_cascade.engine.cli_agent_adapters import get_adapter
         ad = get_adapter('antigravity')
-        assert ad.model_flag is None  # invariant #3 (agy flag undocumented)
+        # agy 1.5.8 documents --model; a requested model is emitted (no model -> byte-identical).
+        assert ad.model_flag == '--model'
         base = ad.build_launch_cmd(task='t', workspace='/w', posture='acceptEdits')
         with_model = ad.build_launch_cmd(task='t', workspace='/w', posture='acceptEdits', model='gemini-x')
-        assert with_model == base  # model_flag None -> byte-identical
-        assert '--model' not in with_model
+        i = with_model.index('--model')
+        assert with_model[i + 1] == 'gemini-x'
+        assert '--model' not in base
+        assert with_model[-1] == '-p=t'  # prompt stays last (agy's -p is greedy)
+
+    def test_antigravity_accept_edits_skips_permissions(self):
+        """No TTY in the container: acceptEdits must auto-approve tools as well as edits."""
+        from agent_cascade.engine.cli_agent_adapters import get_adapter
+        ad = get_adapter('antigravity')
+        for posture in ('acceptEdits', 'bypass', 'unknown-posture'):
+            cmd = ad.build_launch_cmd(task='t', workspace='/w', posture=posture)
+            assert '--dangerously-skip-permissions' in cmd, posture
 
     def test_antigravity_prompt_attached_via_equals_and_last(self):
         from agent_cascade.engine.cli_agent_adapters import get_adapter
