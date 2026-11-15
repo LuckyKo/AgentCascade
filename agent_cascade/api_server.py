@@ -663,6 +663,170 @@ def _list_backend_config_stems(section_key: str, default_dir_parts: tuple):
     return _list_sdcpp_configs(cfg_dir)
 
 
+def build_skills_router(agent_pool) -> 'APIRouter':
+    """Build the skill-invalidation route family as a module-level APIRouter.
+
+    Pure move out of `create_app`. Closes over ONLY its `agent_pool`
+    parameter plus module globals (`SKILL_SCORE_SETTINGS`,
+    `clamp_skill_setting`). `Request` and `JSONResponse` are
+    `create_app` factory-locals, so they are lazily imported here (same
+    trap the media_gen config helpers avoid). No `session` /
+    `api_sessions` / event-loop / send-queue / `broadcast` closure.
+
+    Routes (behavior-identical to the removed inline definitions):
+      GET  /api/skills             list skills + active/inactive status
+      GET  /api/skills/threshold   read-only rebalance-threshold preview
+      POST /api/skills/toggle      toggle one skill's status
+      POST /api/skills/migrate     (re)run schema-1.3 metrics migration
+    """
+    from fastapi import APIRouter, Request
+    from fastapi.responses import JSONResponse
+
+    router = APIRouter()
+
+    @router.get('/api/skills')
+    async def api_list_skills():
+        """List all skills with their active/inactive status (schema 1.3)."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        return {'skills': sm.list_skills_with_status()}
+
+    @router.get('/api/skills/threshold')
+    async def api_skill_threshold(request: Request):
+        """READ-ONLY preview of the current rebalance threshold. No apply/mutation.
+
+        Reads k/min_cap/max_cap from ``agent_pool.llm_cfg`` (same keys/defaults as pool/core.py),
+        but accepts optional ``?k=&min_cap=&max_cap=`` overrides so the UI can preview live as the
+        user types. Overrides are clamped EXACTLY like the config handlers (k→[0.1,5],
+        min_cap→[1,200], max_cap→[min_cap,1000]) so a displayed number always matches what a real
+        save+pass would compute. Returns the preview dict directly (200) or 503 if no skill_manager.
+        """
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        cfg = (agent_pool.llm_cfg or {}) if hasattr(agent_pool, 'llm_cfg') else {}
+
+        # Base values from the server-side config (same defaults as pool/core.py L238-240).
+        try:
+            k = float(cfg.get('skill_active_target_k', 1.0))
+        except (TypeError, ValueError):
+            k = 1.0
+        try:
+            min_cap = int(cfg.get('skill_active_min_cap', 20))
+        except (TypeError, ValueError):
+            min_cap = 20
+        try:
+            max_cap = int(cfg.get('skill_active_max_cap', 200))
+        except (TypeError, ValueError):
+            max_cap = 200
+
+        # Optional unsaved overrides from the input boxes — parse only if present.
+        qp = request.query_params
+        if 'k' in qp:
+            try:
+                k = float(qp['k'])
+            except (TypeError, ValueError):
+                pass
+        if 'min_cap' in qp:
+            try:
+                min_cap = int(qp['min_cap'])
+            except (TypeError, ValueError):
+                pass
+        if 'max_cap' in qp:
+            try:
+                max_cap = int(qp['max_cap'])
+            except (TypeError, ValueError):
+                pass
+
+        # Clamp identically to config_handlers so out-of-range input matches a real save+pass.
+        k = min(max(0.1, k), 5.0)
+        min_cap = min(max(1, min_cap), 200)
+        max_cap = min(max(min_cap, max_cap), 1000)
+
+        # Phase C scoring constants: base values from llm_cfg (same keys/defaults as pool/core.py),
+        # optional ?q0=&kq=&... overrides for live preview. Each is clamped IDENTICALLY to the
+        # Phase E config handlers via the single source-of-truth table (settings.SKILL_SCORE_SETTINGS)
+        # so a displayed number always matches what a real save+pass would compute. Out-of-range typed
+        # values are bounded exactly as they would be after saving.
+        def _cfg_float(key: str, default: float) -> float:
+            try:
+                return float(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        # (llm_cfg key, formula kwarg name) for the 10 scoring settings — single source of truth.
+        _score_kwarg_names = {
+            'skill_score_q0': 'q0',
+            'skill_score_kq': 'kq',
+            'skill_score_nhalf': 'nhalf',
+            'skill_score_ghalf': 'ghalf',
+            'skill_score_rflood': 'rflood',
+            'skill_score_tau_turns': 'tau_turns',
+            'skill_score_dq': 'dq',
+            'skill_score_nmin': 'nmin',
+            'skill_fair_window_turns': 'fair_window_turns',
+            'skill_max_evictions_per_pass': 'max_evictions_per_pass',
+        }
+        # Base value from llm_cfg (typed via the table), then clamped to [lo, hi] from the table.
+        score_overrides = {}
+        for cfg_key, kwarg in _score_kwarg_names.items():
+            spec = SKILL_SCORE_SETTINGS[cfg_key]
+            val = _cfg_float(cfg_key, spec['default']) if spec['type'] is float else _cfg_int(cfg_key, spec['default'])
+            score_overrides[kwarg] = (clamp_skill_setting(cfg_key, val), spec['lo'], spec['hi'])
+
+        # Optional unsaved overrides from the input boxes — parse only if present + parseable.
+        for key, (val, lo, hi) in score_overrides.items():
+            if key in qp:
+                try:
+                    val = float(qp[key]) if '.' in qp[key] else int(qp[key])
+                except (TypeError, ValueError):
+                    pass  # keep the cfg value on unparseable input
+            score_overrides[key] = (min(max(lo, val), hi), lo, hi)
+
+        return sm.compute_rebalance_preview(
+            k=k, min_cap=min_cap, max_cap=max_cap,
+            q0=score_overrides['q0'][0], kq=score_overrides['kq'][0],
+            n_half=score_overrides['nhalf'][0], g_half=score_overrides['ghalf'][0],
+            r_floor=score_overrides['rflood'][0], tau_turns=score_overrides['tau_turns'][0],
+            dq=score_overrides['dq'][0], n_min=score_overrides['nmin'][0],
+            fair_window_turns=score_overrides['fair_window_turns'][0],
+            max_evictions_per_pass=score_overrides['max_evictions_per_pass'][0])
+
+    @router.post('/api/skills/toggle')
+    async def api_toggle_skill(data: dict):
+        """Toggle one skill's status. Body: {"name": str, "status": "active"|"inactive"}."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        name = (data or {}).get('name')
+        status = (data or {}).get('status')          # "active" | "inactive"
+        if not name or status not in ('active', 'inactive'):
+            return JSONResponse(status_code=400, content={'message': "'name' and 'status' (active|inactive) required"})
+        ok, msg = sm.enable_skill(name) if status == 'active' else sm.disable_skill(name)
+        code = 200 if ok else 404
+        return JSONResponse(status_code=code, content={'ok': ok, 'name': name, 'status': status if ok else None, 'message': msg})
+
+    @router.post('/api/skills/migrate')
+    async def api_migrate_skills():
+        """Manually (re)run the one-time metrics migration to schema 1.3 (idempotent)."""
+        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
+        if not sm:
+            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
+        try:
+            sm._migrate_metrics_to_v13()
+            return {'ok': True, 'message': 'metrics migrated to schema 1.3 (idempotent)'}
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=500, content={'ok': False, 'message': str(e)})
+    return router
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     """
     Create the FastAPI application.
@@ -1839,146 +2003,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # ── Skill invalidation endpoints (feature: skill_invalidation, Phase 1) ──
 
-    @app.get('/api/skills')
-    async def api_list_skills():
-        """List all skills with their active/inactive status (schema 1.3)."""
-        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
-        if not sm:
-            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
-        return {'skills': sm.list_skills_with_status()}
-
-    @app.get('/api/skills/threshold')
-    async def api_skill_threshold(request: Request):
-        """READ-ONLY preview of the current rebalance threshold. No apply/mutation.
-
-        Reads k/min_cap/max_cap from ``agent_pool.llm_cfg`` (same keys/defaults as pool/core.py),
-        but accepts optional ``?k=&min_cap=&max_cap=`` overrides so the UI can preview live as the
-        user types. Overrides are clamped EXACTLY like the config handlers (k→[0.1,5],
-        min_cap→[1,200], max_cap→[min_cap,1000]) so a displayed number always matches what a real
-        save+pass would compute. Returns the preview dict directly (200) or 503 if no skill_manager.
-        """
-        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
-        if not sm:
-            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
-        cfg = (agent_pool.llm_cfg or {}) if hasattr(agent_pool, 'llm_cfg') else {}
-
-        # Base values from the server-side config (same defaults as pool/core.py L238-240).
-        try:
-            k = float(cfg.get('skill_active_target_k', 1.0))
-        except (TypeError, ValueError):
-            k = 1.0
-        try:
-            min_cap = int(cfg.get('skill_active_min_cap', 20))
-        except (TypeError, ValueError):
-            min_cap = 20
-        try:
-            max_cap = int(cfg.get('skill_active_max_cap', 200))
-        except (TypeError, ValueError):
-            max_cap = 200
-
-        # Optional unsaved overrides from the input boxes — parse only if present.
-        qp = request.query_params
-        if 'k' in qp:
-            try:
-                k = float(qp['k'])
-            except (TypeError, ValueError):
-                pass
-        if 'min_cap' in qp:
-            try:
-                min_cap = int(qp['min_cap'])
-            except (TypeError, ValueError):
-                pass
-        if 'max_cap' in qp:
-            try:
-                max_cap = int(qp['max_cap'])
-            except (TypeError, ValueError):
-                pass
-
-        # Clamp identically to config_handlers so out-of-range input matches a real save+pass.
-        k = min(max(0.1, k), 5.0)
-        min_cap = min(max(1, min_cap), 200)
-        max_cap = min(max(min_cap, max_cap), 1000)
-
-        # Phase C scoring constants: base values from llm_cfg (same keys/defaults as pool/core.py),
-        # optional ?q0=&kq=&... overrides for live preview. Each is clamped IDENTICALLY to the
-        # Phase E config handlers via the single source-of-truth table (settings.SKILL_SCORE_SETTINGS)
-        # so a displayed number always matches what a real save+pass would compute. Out-of-range typed
-        # values are bounded exactly as they would be after saving.
-        def _cfg_float(key: str, default: float) -> float:
-            try:
-                return float(cfg.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        def _cfg_int(key: str, default: int) -> int:
-            try:
-                return int(cfg.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        # (llm_cfg key, formula kwarg name) for the 10 scoring settings — single source of truth.
-        _score_kwarg_names = {
-            'skill_score_q0': 'q0',
-            'skill_score_kq': 'kq',
-            'skill_score_nhalf': 'nhalf',
-            'skill_score_ghalf': 'ghalf',
-            'skill_score_rflood': 'rflood',
-            'skill_score_tau_turns': 'tau_turns',
-            'skill_score_dq': 'dq',
-            'skill_score_nmin': 'nmin',
-            'skill_fair_window_turns': 'fair_window_turns',
-            'skill_max_evictions_per_pass': 'max_evictions_per_pass',
-        }
-        # Base value from llm_cfg (typed via the table), then clamped to [lo, hi] from the table.
-        score_overrides = {}
-        for cfg_key, kwarg in _score_kwarg_names.items():
-            spec = SKILL_SCORE_SETTINGS[cfg_key]
-            val = _cfg_float(cfg_key, spec['default']) if spec['type'] is float else _cfg_int(cfg_key, spec['default'])
-            score_overrides[kwarg] = (clamp_skill_setting(cfg_key, val), spec['lo'], spec['hi'])
-
-        # Optional unsaved overrides from the input boxes — parse only if present + parseable.
-        for key, (val, lo, hi) in score_overrides.items():
-            if key in qp:
-                try:
-                    val = float(qp[key]) if '.' in qp[key] else int(qp[key])
-                except (TypeError, ValueError):
-                    pass  # keep the cfg value on unparseable input
-            score_overrides[key] = (min(max(lo, val), hi), lo, hi)
-
-        return sm.compute_rebalance_preview(
-            k=k, min_cap=min_cap, max_cap=max_cap,
-            q0=score_overrides['q0'][0], kq=score_overrides['kq'][0],
-            n_half=score_overrides['nhalf'][0], g_half=score_overrides['ghalf'][0],
-            r_floor=score_overrides['rflood'][0], tau_turns=score_overrides['tau_turns'][0],
-            dq=score_overrides['dq'][0], n_min=score_overrides['nmin'][0],
-            fair_window_turns=score_overrides['fair_window_turns'][0],
-            max_evictions_per_pass=score_overrides['max_evictions_per_pass'][0])
-
-    @app.post('/api/skills/toggle')
-    async def api_toggle_skill(data: dict):
-        """Toggle one skill's status. Body: {"name": str, "status": "active"|"inactive"}."""
-        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
-        if not sm:
-            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
-        name = (data or {}).get('name')
-        status = (data or {}).get('status')          # "active" | "inactive"
-        if not name or status not in ('active', 'inactive'):
-            return JSONResponse(status_code=400, content={'message': "'name' and 'status' (active|inactive) required"})
-        ok, msg = sm.enable_skill(name) if status == 'active' else sm.disable_skill(name)
-        code = 200 if ok else 404
-        return JSONResponse(status_code=code, content={'ok': ok, 'name': name, 'status': status if ok else None, 'message': msg})
-
-    @app.post('/api/skills/migrate')
-    async def api_migrate_skills():
-        """Manually (re)run the one-time metrics migration to schema 1.3 (idempotent)."""
-        sm = getattr(agent_pool, 'skill_manager', None) if agent_pool else None
-        if not sm:
-            return JSONResponse(status_code=503, content={'message': 'Skill system unavailable'})
-        try:
-            sm._migrate_metrics_to_v13()
-            return {'ok': True, 'message': 'metrics migrated to schema 1.3 (idempotent)'}
-        except Exception as e:  # noqa: BLE001
-            return JSONResponse(status_code=500, content={'ok': False, 'message': str(e)})
+    app.include_router(build_skills_router(agent_pool))
 
     @app.get('/api/state')
     async def api_get_state():
