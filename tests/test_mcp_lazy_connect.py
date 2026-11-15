@@ -260,6 +260,136 @@ class TestAllDisabledOff:
         assert 'srv-click' in tpl.function_map
         assert getattr(tpl.function_map['srv-click'], '_mcp_stub', False) is True
 
+    def test_all_disabled_live_server_disconnects(self):
+        """apply_ui_disabled must LIVE-disconnect a CONNECTED server whose tools are all
+        disabled (mcp_manager.py apply_ui_disabled: ``if self._is_connected(server):
+        disconnect_server(...)``). test_all_disabled_off only covers a parked server (no
+        disconnect); this reaches that live branch. The real disconnect_server runs (so the
+        server is genuinely removed from _connected_servers) while a spy records the call."""
+        mgr = _make_mgr()
+        # Live, not parked: present in _connected_servers with a known tool set so
+        # _server_fully_disabled sees a non-empty tool set for 'srv'.
+        mgr._connected_servers['srv:deadbeef'] = 'srv_cid'
+        mgr._tool_server_map = {'srv-click': 'srv', 'srv-snap': 'srv'}
+        mgr._server_tools['srv'] = [_live_tool('srv-click'), _live_tool('srv-snap')]
+        pool = _FakePool(
+            {'assistant': _FakeTpl(), 'coder': _FakeTpl()},
+            disabled_map={'assistant': {'srv-click', 'srv-snap'},
+                          'coder': {'srv-click', 'srv-snap'}},
+        )
+        real_disconnect = mgr.disconnect_server
+        with patch.object(mgr, 'disconnect_server',
+                          side_effect=lambda s, t: real_disconnect(s, t)) as spy:
+            mgr.apply_ui_disabled(pool)
+        spy.assert_called_once()
+        assert spy.call_args.args[0] == 'srv'
+        assert 'srv' in mgr._suppressed
+        assert mgr._connected_servers == {}  # disconnect_server actually cleared the live entry
+
+
+class TestConcurrentSingleFlight:
+    def test_concurrent_first_use_connects_once(self):
+        """N threads race ensure_connected('srv') on one parked server. A barrier-gated fake
+        connect_server makes every thread hit the guard at the same instant, so the WAITER
+        branch (``ev.wait``) actually executes rather than every thread silently re-connecting.
+
+        The point of the test: the owner's ``finally`` (mcp_manager.ensure_connected) pops
+        ``_connecting[server]`` AND calls ``claim.set()`` on BOTH success and failure. If that
+        ``claim.set()`` were broken/removed, the owner still returns True (it captured ``ok``
+        before the finally) and still records the connection, so 'exactly once' + 'all True'
+        would stay green — but every waiter would block the full ``ev.wait(2*timeout_s + margin)``
+        (~7s here) instead of returning the instant the owner finishes (~0.1s). That divergence
+        is what the wall-clock bound below turns into a failing assertion, so this test genuinely
+        fails if the finally-claim.set() is broken.
+        """
+        n = 8
+        mgr = _make_mgr()
+        pool = _FakePool({'assistant': _FakeTpl()})
+        mgr._parked_servers['srv'] = {'command': 'cmd'}
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+
+        def _fake_connect(server_name, server_config, templates, timeout_s=None):
+            with calls_lock:
+                calls.append(server_name)
+            # Hold the _connecting guard open so the other n-1 threads reliably observe it
+            # set and enter ev.wait() (the waiter path) before the owner records a connection.
+            time.sleep(0.1)
+            mgr._connected_servers[f'{server_name}:deadbeef'] = server_name + '_cid'
+            return True
+
+        results = [None] * n
+        barrier = threading.Barrier(n)
+
+        def _worker(i):
+            barrier.wait(timeout=5)
+            results[i] = mgr.ensure_connected('srv', pool=pool, timeout_s=1.0)
+
+        # The patch must be live while the threads run: all n workers share mgr, so
+        # self.connect_server resolves to _fake_connect inside every thread. Without this
+        # wrap, ensure_connected calls the REAL connect_server (which errors on loop=None and
+        # returns fast), so multiple threads become owners — not the single-flight path.
+        with patch.object(mgr, 'connect_server', side_effect=_fake_connect):
+            threads = [threading.Thread(target=_worker, args=(i,), name=f'ensure-srv-{i}')
+                       for i in range(n)]
+            start = time.perf_counter()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=15)
+            elapsed = time.perf_counter() - start
+
+        # single-flight: exactly one connect despite n racing first-use callers
+        assert len(calls) == 1, f'connect_server called {len(calls)} times, expected exactly 1'
+        # every caller sees success: the owner connects, waiters blocked on the Event and re-checked
+        assert results == [True] * n, results
+        # waiters were RELEASED by claim.set() — not left to hit their ~7s timeouts
+        assert elapsed < 3.0, (
+            f'waiters not released promptly (elapsed {elapsed:.2f}s); a broken owner '
+            'finally-claim.set() would block ~7s each')
+        assert mgr._connecting == {}  # guard cleaned up: no stale Event, no leaked waiter
+        assert not any(t.is_alive() for t in threads)
+
+
+class TestLazyConnectBounds:
+    def test_waiter_bounded_when_owner_hangs(self):
+        """A waiter's ev.wait is time-bounded: even if the owner's connect_server hangs
+        forever, a concurrent ensure_connected does NOT wedge — it returns within its own
+        bound (2*timeout_s + teardown margin, twice) and degrades to False. This is the lazy
+        path's runtime wall-clock guarantee (the analogue of connect_server's .result(timeout=)):
+        a hung owner can never wedge every first-use caller of that server.
+        """
+        mgr = _make_mgr()
+        pool = _FakePool({'assistant': _FakeTpl()})
+        mgr._parked_servers['srv'] = {'command': 'cmd'}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _hanging_connect(server_name, server_config, templates, timeout_s=None):
+            entered.set()
+            release.wait(timeout=20)  # owner parks in connect_server → claim never set
+            return False
+
+        timeout_s = 0.05
+        # Zero the teardown margin so the bounded waits are fast without changing the bound logic.
+        with patch.object(mgr, 'connect_server', side_effect=_hanging_connect), \
+             patch('agent_cascade.tools.mcp_manager._MCP_CONNECT_TEARDOWN_MARGIN_S', 0.0):
+            owner = threading.Thread(
+                target=lambda: mgr.ensure_connected('srv', pool=pool, timeout_s=timeout_s),
+                name='owner')
+            owner.start()
+            assert entered.wait(timeout=5), 'owner never entered connect_server'
+            start = time.perf_counter()
+            got = mgr.ensure_connected('srv', pool=pool, timeout_s=timeout_s)  # this thread is the waiter
+            elapsed = time.perf_counter() - start
+            release.set()
+            owner.join(timeout=5)
+
+        # 2 attempts × (2*timeout_s + margin=0) + slack — far below the 20s hang the owner held.
+        bound = 2 * (2 * timeout_s) + 1.0
+        assert got is False, f'waiter should degrade to False when owner hangs, got {got!r}'
+        assert elapsed < bound, f'waiter not bounded: {elapsed:.3f}s >= {bound}s'
+
 
 class TestColdCacheBackground:
     def test_cold_cache_background(self):
