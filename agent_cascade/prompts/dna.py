@@ -526,7 +526,7 @@ TOOL_METADATA = {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content':
-                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode. When copying from read_file output, strip the "NNN:\\t" line-number prefix (everything up to and including the first TAB) to get the raw content.',
+                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode — pass an empty string (\'\') there, as the field is required by the schema but ignored; use `range` to select the lines to delete. When copying from read_file output, strip the "NNN:\\t" line-number prefix (everything up to and including the first TAB) to get the raw content.',
             'new_content':
                 'The exact literal text to replace old_content with. For match_mode=\'delete_and_insert\' it is inserted VERBATIM at the range — there is no anchor concept in that mode, so do NOT repeat the preceding/surrounding line inside new_content unless you want a duplicate line (the range, not new_content, decides what is deleted). Inserted lines are written verbatim — the caller is responsible for supplying correct indentation. For exact/heuristic modes, include the anchor line exactly once as part of the replaced text. For delete_and_insert, an empty string means delete-only.',
             'match_mode':

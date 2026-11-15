@@ -1213,6 +1213,7 @@ def test_delete_and_insert_preserves_whitespace_via_tool_pipeline():
         # Simulate what the LLM would send: JSON string with new_content containing tabs/indentation
         params_json_str = json.dumps({
             'path': 'test_indent.py',
+            'old_content': '',  # BUG_0325: schema now requires old_content; ignored in delete_and_insert mode
             'match_mode': 'delete_and_insert',
             'range': '3:3',  # replace line 3 (the "pass" line)
             'new_content': indented_code,

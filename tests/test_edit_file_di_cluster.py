@@ -75,10 +75,16 @@ def _d_and_i(om, f, new_content, range_param, agent='coder'):
 # ── BUG_0110: leaked ChatML parameter tag absorbed new_content ──────────────
 
 
-def test_edit_file_missing_new_content_names_leaked_tag():
-    """A justification carrying `</parameter=new_content>` (the field the model folded
-    new_content into) must error loudly, name the tag, echo the received keys, and
-    never reach the filesystem. Mirrors the real grammar-constrained reproduction."""
+def test_edit_file_missing_new_content_is_rejected_by_schema():
+    """BUG_0325: new_content is now schema-required. A payload where new_content was
+    lost (e.g. folded into another field via a leaked ChatML parameter tag) is now
+    intercepted by the required-parameter validator BEFORE the BUG_0110 leaked-tag
+    branch can run, so the call is rejected loudly, never reaches the filesystem,
+    echoes the received keys, and names the exact key (new_content) to re-issue with.
+
+    Kept the tag-fragment in the justification to mirror the real grammar leak, but
+    the actionable signal is now the schema-required error, not the leaked-tag string.
+    """
     from agent_cascade.tools.custom.file_ops import EditFile
     om = _RecordingOM()
     t = _tool(EditFile, om)
@@ -89,9 +95,9 @@ def test_edit_file_missing_new_content_names_leaked_tag():
         'justification': 'set the value</parameter=new_content>\nvalue = 42\n</function>',
     }
     result = t.call(payload)
-    assert om.edit is None, f"leaked-tag payload was forwarded to the filesystem: {om.edit!r}"
+    assert om.edit is None, f"missing-new_content payload was forwarded to the filesystem: {om.edit!r}"
     assert 'ERROR' in result, f"expected an error, got: {result!r}"
-    assert '</parameter' in result, f"error must name the leaked tag: {result!r}"
+    assert 'new_content' in result, f"error must name the missing required key: {result!r}"
     assert 'justification' in result, f"error must echo the received keys: {result!r}"
 
 

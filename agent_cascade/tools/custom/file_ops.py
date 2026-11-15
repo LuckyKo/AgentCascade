@@ -1596,7 +1596,7 @@ class EditFile(BaseTool, PathResolutionMixin):
                 'description': 'Why you need to edit this file'
             }
         },
-        'required': ['path'],
+        'required': ['path', 'old_content', 'new_content'],
     }
 
     def __init__(self, cfg=None, **kwargs):
