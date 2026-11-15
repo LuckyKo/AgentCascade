@@ -632,7 +632,7 @@ TOOL_METADATA = {
             'Entries you created in this session are auto-approved; any entry not owned by the current agent requires user approval.'),
         'parameters': {
             'path':
-                "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). At least one path is required.",
+                "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). A string is ONE path: do not comma-join several paths (\"a.md,b.md\" is rejected) — pass a list. At least one path is required.",
             'include':
                 "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
             'justification':

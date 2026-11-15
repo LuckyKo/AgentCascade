@@ -2016,6 +2016,38 @@ class Grep(BaseTool):
             spill_file_path=spill_file_path)
 
 
+def _looks_like_one_path(fragment: str) -> bool:
+    """True when a comma-split fragment of a scalar ``path`` reads as a path or file name.
+
+    Used only to recognise a caller that joined several paths into one string. A fragment
+    qualifies when it carries a path separator (``a/b``, ``C:\\tmp\\a``) or ends in a short
+    file extension (``a.md``).
+    """
+    if '\\' in fragment or '/' in fragment:
+        return True
+    stem, dot, ext = fragment.rpartition('.')
+    if not dot or not stem or not 1 <= len(ext) <= 10:
+        return False
+    return all(ch.isalnum() or ch in '_-' for ch in ext)
+
+
+def _comma_joined_path_parts(raw: str) -> Optional[list]:
+    """Return the comma-split fragments when ``raw`` looks like SEVERAL paths in one string.
+
+    ``None`` means "treat it as one literal path". The test is deliberately conservative so a
+    legitimate comma inside a name still works: every fragment must be non-empty and look like a
+    path/file name (see :func:`_looks_like_one_path`), e.g. ``a.md,b.md`` or
+    ``C:\\w\\a.diff,C:\\w\\b.diff``. ``a,b.txt`` does not qualify (``a`` has neither a separator
+    nor an extension), so a file named ``a,b.txt`` is untouched.
+    """
+    if ',' not in raw:
+        return None
+    parts = [p.strip() for p in raw.split(',')]
+    if len(parts) < 2 or not all(parts):
+        return None
+    return parts if all(_looks_like_one_path(p) for p in parts) else None
+
+
 @register_tool('delete_file', allow_overwrite=True)
 class DeleteFile(BaseTool):
     """Delete a file or directory — auto-approved for agent-owned files, otherwise requires user approval. Creates a timestamped backup before deletion."""
@@ -2069,9 +2101,11 @@ class DeleteFile(BaseTool):
 
         'path' accepts a single string OR a list of strings. A list is moved to
         the (hidden) 'paths' kwarg; non-string entries in a list are dropped so
-        the strict oneOf schema (array of strings) validates cleanly. Returns
-        (normalized_params, error_message); error_message is set for invalid
-        scalar types instead of surfacing a raw jsonschema ValidationError.
+        the strict oneOf schema (array of strings) validates cleanly. A scalar
+        string that looks like several comma-joined paths is rejected (a string
+        is one path). Returns (normalized_params, error_message); error_message
+        is set for invalid input instead of surfacing a raw jsonschema
+        ValidationError.
         """
         if isinstance(params, str):
             try:
@@ -2105,6 +2139,18 @@ class DeleteFile(BaseTool):
             return params, None
         if not isinstance(raw, str):
             return params, "ERROR: 'path' must be a string or a list of strings."
+        # A scalar string is ONE path. Several paths joined by commas ("a.md,b.md") would
+        # otherwise resolve as one literal name and silently delete nothing ("0 of 1
+        # requested"), so reject it loudly and name the array form. Detection is conservative
+        # (see _comma_joined_path_parts), and a genuine comma-in-name still has an escape
+        # hatch: pass it as a one-element array, which is never re-split.
+        parts = _comma_joined_path_parts(raw)
+        if parts:
+            return params, (
+                f"ERROR: 'path' looks like {len(parts)} paths joined by commas, which is ONE "
+                'path, so nothing was deleted. Pass a list instead: '
+                "path=[\"a.md\", \"b.md\"]. If the comma is part of a single file name, pass "
+                "it as a one-element list: path=[\"a,b.md\"].")
         return params, None
 
     def call(self, params: str, **kwargs) -> str:

@@ -778,6 +778,60 @@ class TestDeleteFileCall:
         assert call['kwargs']['paths'] is None, \
             f"strings input must not set paths, got {call['kwargs'].get('paths')!r}"
 
+    def test_comma_joined_string_is_rejected_loudly(self):
+        """BUG_0322: several paths in ONE string must not silently no-op.
+
+        Before: the joined string reached the op-manager as 1 literal path, so the
+        caller saw "No files matched (0 of 1 requested)" and nothing was deleted.
+        After: zero op-manager calls and an explicit error naming the list form.
+        """
+        tool, om = _make_tool()
+        joined = ','.join([r'N:\work\wd\_scratch_0317_settings.diff',
+                           r'N:\work\wd\_scratch_0317_stats.diff',
+                           r'N:\work\wd\_scratch_0317_manager.diff',
+                           r'N:\work\wd\_scratch_0317_tests.diff'])
+        res = tool.call({'path': joined, 'justification': 'cleanup'})
+        assert res.startswith('ERROR'), \
+            f"comma-joined path must be rejected, got: {res!r}"
+        assert '4 paths joined by commas' in res, \
+            f"error must state how many paths were detected: {res!r}"
+        assert 'path=["a.md", "b.md"]' in res, \
+            f"error must show the list form to use: {res!r}"
+        assert not om.calls, \
+            f"no op-manager call may occur (before fix: 1 requested, 0 deleted); got {om.calls}"
+
+    def test_comma_joined_relative_names_are_rejected(self):
+        """The same defect with plain relative names ('a.md,b.md'): 2 logical targets, 1 path."""
+        tool, om = _make_tool()
+        res = tool.call({'path': 'a.md,b.md', 'justification': 'cleanup'})
+        assert res.startswith('ERROR'), f"comma-joined names must be rejected, got: {res!r}"
+        assert '2 paths joined by commas' in res, f"error must count the parts: {res!r}"
+        assert not om.calls, f"no op-manager call may occur; got {om.calls}"
+
+    def test_comma_inside_a_single_filename_is_still_one_path(self):
+        """A genuine comma-in-name must not be mistaken for a joined list.
+
+        'a,b.txt' splits to 'a' (no separator, no extension) + 'b.txt', which does not look
+        like several paths, so it stays a single literal path.
+        """
+        tool, om = _make_tool()
+        res = tool.call({'path': 'a,b.txt', 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"a comma-in-name must not be rejected: {res}"
+        call = om.calls[-1]
+        assert call['path'] == 'a,b.txt', f"path must stay literal, got {call['path']!r}"
+        assert call['kwargs']['paths'] is None, \
+            f"single path must not set paths, got {call['kwargs'].get('paths')!r}"
+
+    def test_one_element_list_escapes_a_comma_containing_name(self):
+        """Documented escape hatch: a one-element array is never re-split or rejected."""
+        tool, om = _make_tool()
+        res = tool.call({'path': ['a,b.md', 'c.md'], 'justification': 'cleanup'})
+        assert not res.startswith('ERROR'), f"list input must not be rejected: {res}"
+        call = om.calls[-1]
+        assert call['path'] is None, f"list input must forward as paths, got {call['path']!r}"
+        assert call['kwargs']['paths'] == ['a,b.md', 'c.md'], \
+            f"comma-in-name entries must survive intact, got {call['kwargs'].get('paths')!r}"
+
     def test_empty_path_errors(self):
         tool, om = _make_tool()
         res = tool.call({'justification': 'cleanup'})
