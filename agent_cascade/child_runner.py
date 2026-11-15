@@ -34,6 +34,9 @@ def _format_elapsed(elapsed_s: float) -> str:
 def _sum_subtree_tokens_and_cost(pool, inst) -> tuple[int, float]:
     """Sum generated (completion-only) tokens + cost over *inst* + every descendant.
 
+    ``inst`` may be an instance object OR an instance-name string — both resolve to
+    the same subtree root name, so a pre-run baseline can be captured by name.
+
     Returns ``(generated_tokens, total_cost)``. Walks the per-instance
     ``_child_instances`` tree (names) resolved via the pool, cycle-safe (``seen``
     guard). Exact when no descendant is dismissed mid-run: dismissal prunes the
@@ -46,7 +49,7 @@ def _sum_subtree_tokens_and_cost(pool, inst) -> tuple[int, float]:
     telem = getattr(pool, 'telemetry', None) if pool is not None else None
     if telem is None:
         return (0, 0.0)
-    root = getattr(inst, 'instance_name', '') or ''
+    root = inst if isinstance(inst, str) else (getattr(inst, 'instance_name', '') or '')
     if not root:
         return (0, 0.0)
     generated = 0
@@ -336,6 +339,11 @@ def run_child_core(
         force_fresh = _determine_force_fresh(agent_class)
 
     _child_start = time.monotonic()  # Slice 3: elapsed for the completion message
+    # BUG_0326: capture the pre-run subtree baseline so the completion tag reports
+    # the PER-CALL delta (this call's generated tokens/cost), not the instance's
+    # lifetime total (call_agent reuses instances by name, so the accumulator
+    # persists across calls). Fresh instances read 0 here.
+    baseline_generated, baseline_cost = _sum_subtree_tokens_and_cost(pool, instance_name)
     try:
         inst, conv = engine._create_and_run_agent(
             agent_class,
@@ -392,7 +400,9 @@ def run_child_core(
     # Slice 3: enrich the completion tag with elapsed time, the child's generated
     # (completion-only) tokens and total cost — INCLUDING all sub-agents (walked
     # recursively via _child_instances).
-    generated_tokens, total_cost = _sum_subtree_tokens_and_cost(pool, inst)
+    _after_generated, _after_cost = _sum_subtree_tokens_and_cost(pool, instance_name)
+    generated_tokens = max(0, _after_generated - baseline_generated)
+    total_cost = max(0.0, _after_cost - baseline_cost)
     elapsed_s = time.monotonic() - _child_start
     return _format_result(
         instance_name=instance_name,

@@ -88,6 +88,20 @@ class _FakeEngine:
         return self._inst, self._conv
 
 
+class _MutatingEngine(_FakeEngine):
+    """Engine stand-in that applies a mutation in ``_create_and_run_agent`` before
+    returning, simulating the child run accumulating generated tokens (the
+    per-instance lifetime accumulator advancing during the call)."""
+
+    def __init__(self, inst, conv, on_run):
+        super().__init__(inst, conv)
+        self._on_run = on_run
+
+    def _create_and_run_agent(self, *args, **kwargs):
+        self._on_run()
+        return self._inst, self._conv
+
+
 # ── Slice 3 — elapsed formatting ────────────────────────────────────────────
 
 
@@ -197,11 +211,18 @@ def test_run_child_core_includes_subagent_tokens(monkeypatch):
     child = _FakeInst('code_worker', children=['sub1'])
     sub1 = _FakeInst('sub1', children=['sub2'])
     sub2 = _FakeInst('sub2', children=[])
+    # Fresh instance: the run itself generates the subtree total (mutates the
+    # accumulator inside _create_and_run_agent), so the per-call delta (BUG_0326)
+    # equals the full child + descendants sum.
+    gen = {'code_worker': 0, 'sub1': 0, 'sub2': 0}
     pool = _FakePool(
         {'code_worker': child, 'sub1': sub1, 'sub2': sub2},
-        _FakeTelemetry(totals={'code_worker': 1000, 'sub1': 2190, 'sub2': 0}),
+        _FakeTelemetry(generated=gen),
     )
-    engine = _FakeEngine(child, [{'role': 'assistant', 'content': 'done'}])
+    engine = _MutatingEngine(
+        child, [{'role': 'assistant', 'content': 'done'}],
+        lambda: gen.update({'code_worker': 1000, 'sub1': 2190, 'sub2': 0}),
+    )
     monkeypatch.setattr(child_runner_mod, 'extract_instance_output', lambda *a, **k: 'done')
 
     out = run_child_core(engine, pool, 'coder', 'code_worker', {}, 'Main', 1)
@@ -209,6 +230,37 @@ def test_run_child_core_includes_subagent_tokens(monkeypatch):
     assert out.startswith("[Agent 'code_worker' Completed in ")
     # 1000 + 2190 + 0 (sub2) = 3190 generated, thousands-separated.
     assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 3,190\]:\ndone$', out), out
+
+
+def test_call_agent_generated_is_per_call_delta(monkeypatch):
+    """BUG_0326: a REUSED instance's completion tag reports only this call's
+    increment (post-run total - pre-run baseline), not the lifetime accumulator."""
+    monkeypatch.setattr(child_runner_mod, 'extract_instance_output', lambda *a, **k: 'done')
+
+    # Reused instance: telemetry already holds a prior lifetime total of 4000.
+    gen = {'worker1': 4000}
+    inst = _FakeInst('worker1')
+    pool = _FakePool({'worker1': inst}, _FakeTelemetry(generated=gen))
+    # The run generates 500 more -> lifetime total becomes 4500.
+    engine = _MutatingEngine(inst, [{'role': 'assistant', 'content': 'done'}],
+                             lambda: gen.__setitem__('worker1', 4500))
+
+    out = run_child_core(engine, pool, 'coder', 'worker1', {}, 'parent', 1)
+
+    assert out.startswith("[Agent 'worker1' Completed in ")
+    # The per-call DELTA (4500 - 4000 = 500), NOT the lifetime total (4,500).
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 500\]:\ndone$', out), out
+    assert '4,500' not in out
+
+    # Fresh instance: no prior accumulator entry -> baseline 0 -> reports its full total.
+    gen_fresh = {}
+    inst_fresh = _FakeInst('fresh1')
+    pool_fresh = _FakePool({'fresh1': inst_fresh}, _FakeTelemetry(generated=gen_fresh))
+    engine_fresh = _MutatingEngine(inst_fresh, [{'role': 'assistant', 'content': 'done'}],
+                                   lambda: gen_fresh.__setitem__('fresh1', 700))
+
+    out_fresh = run_child_core(engine_fresh, pool_fresh, 'coder', 'fresh1', {}, 'parent', 1)
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 700\]:\ndone$', out_fresh), out_fresh
 
 
 # ── Slice 4 — system_info Budget/Cost self-info ─────────────────────────────
