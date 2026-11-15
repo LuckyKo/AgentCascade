@@ -533,6 +533,136 @@ def _empty_skill_evolution_slice() -> dict:
     }
 
 
+def _coerce_timeout_int(raw, label: str):
+    """Coerce a timeout value to int, rejecting floats (int() would truncate).
+
+    Accepts an int or a numeric string. Returns ``(parsed_int, None)`` on
+    success, or ``(None, JSONResponse-400)`` on failure; ``label`` drives the
+    400 message. Shared by the top-level and sdcpp-block timeout checks.
+
+    Module-level and pure: only references the lazily-imported ``JSONResponse``
+    and ``int``. ``JSONResponse`` is imported locally here because the
+    factory-scoped fastapi import (inside ``create_app``) is not a module global.
+    """
+    from fastapi.responses import JSONResponse
+    if isinstance(raw, float):
+        return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
+
+
+def _validate_image_gen_config(data: dict) -> tuple:
+    """Validate a posted image_gen config body and build the config dict to persist.
+
+    Pure (no factory-local closure): references only module-global timeout
+    bounds, ``_coerce_timeout_int``, and a lazily-imported ``JSONResponse``.
+    Returns ``(config_dict, None)`` on success, or ``(None, JSONResponse-400)``
+    on the first validation failure. The ``@app.post('/api/image_gen')`` route
+    parses the body and hands the dict to this function; the file write and
+    cache-bust stay in the route (it owns the factory-local config path).
+
+    Type-conditional: for ``type='sdcpp'`` the ``url`` is not required and the
+    top-level 30-600s timeout range check is skipped (F2) — the ``sdcpp`` block
+    carries its own 30-1800s timeout, which is validated here.
+    """
+    from fastapi.responses import JSONResponse
+
+    gen_type = data.get('type', 'comfyui')
+    is_sdcpp = (gen_type == 'sdcpp')
+
+    # Validate URL (must start with http:// or https://). Not required for sdcpp.
+    url = data.get('url', '')
+    if not is_sdcpp:
+        if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
+            return None, JSONResponse(status_code=400, content={'message': 'url must start with http:// or https://'})
+
+    # Validate top-level timeout. Accept int or numeric string; reject floats
+    # (int() would silently truncate e.g. 180.5 → 180). For sdcpp the 30-600s
+    # range is skipped (F2) — the sdcpp block carries its own 30-1800s timeout.
+    timeout, err = _coerce_timeout_int(data.get('timeout', 180), 'timeout')
+    if err is not None:
+        return None, err
+    if not is_sdcpp and not (TIMEOUT_MIN_S <= timeout <= TIMEOUT_MAX_S):
+        return None, JSONResponse(status_code=400, content={'message': f'timeout must be between {TIMEOUT_MIN_S} and {TIMEOUT_MAX_S} seconds'})
+
+    config = {
+        'type': gen_type,
+        'url': url,
+        'workflow_dir': data.get('workflow_dir', ''),
+        'timeout': timeout,
+        'default_workflow': data.get('default_workflow', ''),
+    }
+
+    # sdcpp block: pass through + validate. The block is optional — when absent
+    # the sdcpp backend is a no-op (see image_gen.py). F2: sdcpp.timeout is
+    # validated at 30-1800s, independent of the top-level 30-600s check.
+    sdcpp = data.get('sdcpp')
+    if sdcpp is not None:
+        if not isinstance(sdcpp, dict):
+            return None, JSONResponse(status_code=400, content={'message': 'sdcpp block must be a JSON object'})
+        sdcpp_cfg = dict(sdcpp)
+        sdcpp_timeout = sdcpp_cfg.get('timeout')
+        if sdcpp_timeout is not None:
+            coerced, err = _coerce_timeout_int(sdcpp_timeout, 'sdcpp.timeout')
+            if err is not None:
+                return None, err
+            sdcpp_cfg['timeout'] = coerced
+            if not (TIMEOUT_MIN_S <= sdcpp_cfg['timeout'] <= SDCPP_TIMEOUT_MAX_S):
+                return None, JSONResponse(status_code=400, content={'message': f'sdcpp.timeout must be between {TIMEOUT_MIN_S} and {SDCPP_TIMEOUT_MAX_S} seconds'})
+        binary = sdcpp_cfg.get('binary')
+        if binary is not None and (not isinstance(binary, str) or not binary):
+            return None, JSONResponse(status_code=400, content={'message': 'sdcpp.binary must be a non-empty string'})
+        config_dir = sdcpp_cfg.get('config_dir')
+        if config_dir is not None and (not isinstance(config_dir, str) or not config_dir):
+            return None, JSONResponse(status_code=400, content={'message': 'sdcpp.config_dir must be a non-empty string'})
+        config['sdcpp'] = sdcpp_cfg
+
+    return config, None
+
+
+def _merge_media_gen_config(existing: dict, posted: dict) -> dict:
+    """Merge-preserve two levels deep and return the merged config to persist.
+
+    The UI posts only the fields it renders, so anything else must survive the
+    save — backend blocks the UI has no tab for (e.g. a newly added backend),
+    and keys inside a posted block that the UI does not expose (media_types
+    ownership lists, backend-only keys). A naive overwrite used to drop exactly
+    those (see the settings-save audit / BUG_0093).
+
+    Pure (no factory-local closure): only dict/``setdefault``. Mutates ``posted``
+    in place and returns it, matching the route's original write target.
+    """
+    if isinstance(existing, dict):
+        for block_key, old_block in existing.items():
+            if block_key not in posted:
+                posted[block_key] = old_block
+            elif isinstance(posted[block_key], dict) and isinstance(old_block, dict):
+                for key, value in old_block.items():
+                    posted[block_key].setdefault(key, value)
+    return posted
+
+
+def _list_backend_config_stems(section_key: str, default_dir_parts: tuple):
+    """List config-file stems for a media_gen backend section.
+
+    Reads the section's ``config_dir`` from the media_gen config, falling back
+    to ``default_dir_parts`` (resolved relative to the package parent) when it
+    is unset, then returns the stems via ``_list_sdcpp_configs``. Shared by the
+    sdcpp and TTS config-listing routes. Pure — lazy tool imports and
+    ``Path(__file__)`` (identical at module scope) move with it.
+    """
+    from agent_cascade.tools.image_gen import _list_sdcpp_configs
+    from agent_cascade.tools.media_gen import _get_media_gen_config
+    cfg = _get_media_gen_config()
+    section = cfg.get(section_key) or {}
+    cfg_dir = section.get('config_dir', '') if isinstance(section, dict) else ''
+    if not cfg_dir:
+        cfg_dir = str(Path(__file__).resolve().parent.parent.joinpath(*default_dir_parts))
+    return _list_sdcpp_configs(cfg_dir)
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     """
     Create the FastAPI application.
@@ -2457,20 +2587,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         from agent_cascade.tools.image_gen import _get_image_gen_config
         return _get_image_gen_config()
 
-    def _coerce_timeout_int(raw, label: str):
-        """Coerce a timeout value to int, rejecting floats (int() would truncate).
-
-        Accepts an int or a numeric string. Returns ``(parsed_int, None)`` on
-        success, or ``(None, JSONResponse-400)`` on failure; ``label`` drives the
-        400 message. Shared by the top-level and sdcpp-block timeout checks.
-        """
-        if isinstance(raw, float):
-            return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
-        try:
-            return int(raw), None
-        except (TypeError, ValueError):
-            return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
-
     @app.post('/api/image_gen')
     async def save_image_gen_config(request: Request):
         """Save image gen config. Validates URL format and timeout range.
@@ -2487,55 +2603,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={'message': 'Body must be a JSON object'})
 
-        gen_type = data.get('type', 'comfyui')
-        is_sdcpp = (gen_type == 'sdcpp')
-
-        # Validate URL (must start with http:// or https://). Not required for sdcpp.
-        url = data.get('url', '')
-        if not is_sdcpp:
-            if not isinstance(url, str) or not (url.startswith('http://') or url.startswith('https://')):
-                return JSONResponse(status_code=400, content={'message': 'url must start with http:// or https://'})
-
-        # Validate top-level timeout. Accept int or numeric string; reject floats
-        # (int() would silently truncate e.g. 180.5 → 180). For sdcpp the 30-600s
-        # range is skipped (F2) — the sdcpp block carries its own 30-1800s timeout.
-        timeout, err = _coerce_timeout_int(data.get('timeout', 180), 'timeout')
+        config, err = _validate_image_gen_config(data)
         if err is not None:
             return err
-        if not is_sdcpp and not (TIMEOUT_MIN_S <= timeout <= TIMEOUT_MAX_S):
-            return JSONResponse(status_code=400, content={'message': f'timeout must be between {TIMEOUT_MIN_S} and {TIMEOUT_MAX_S} seconds'})
-
-        config = {
-            'type': gen_type,
-            'url': url,
-            'workflow_dir': data.get('workflow_dir', ''),
-            'timeout': timeout,
-            'default_workflow': data.get('default_workflow', ''),
-        }
-
-        # sdcpp block: pass through + validate. The block is optional — when absent
-        # the sdcpp backend is a no-op (see image_gen.py). F2: sdcpp.timeout is
-        # validated at 30-1800s, independent of the top-level 30-600s check.
-        sdcpp = data.get('sdcpp')
-        if sdcpp is not None:
-            if not isinstance(sdcpp, dict):
-                return JSONResponse(status_code=400, content={'message': 'sdcpp block must be a JSON object'})
-            sdcpp_cfg = dict(sdcpp)
-            sdcpp_timeout = sdcpp_cfg.get('timeout')
-            if sdcpp_timeout is not None:
-                coerced, err = _coerce_timeout_int(sdcpp_timeout, 'sdcpp.timeout')
-                if err is not None:
-                    return err
-                sdcpp_cfg['timeout'] = coerced
-                if not (TIMEOUT_MIN_S <= sdcpp_cfg['timeout'] <= SDCPP_TIMEOUT_MAX_S):
-                    return JSONResponse(status_code=400, content={'message': f'sdcpp.timeout must be between {TIMEOUT_MIN_S} and {SDCPP_TIMEOUT_MAX_S} seconds'})
-            binary = sdcpp_cfg.get('binary')
-            if binary is not None and (not isinstance(binary, str) or not binary):
-                return JSONResponse(status_code=400, content={'message': 'sdcpp.binary must be a non-empty string'})
-            config_dir = sdcpp_cfg.get('config_dir')
-            if config_dir is not None and (not isinstance(config_dir, str) or not config_dir):
-                return JSONResponse(status_code=400, content={'message': 'sdcpp.config_dir must be a non-empty string'})
-            config['sdcpp'] = sdcpp_cfg
 
         try:
             _image_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2619,25 +2689,16 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
         try:
             _media_gen_config_path.parent.mkdir(parents=True, exist_ok=True)
-            # Merge-preserve, two levels deep: the UI posts only the fields it renders,
-            # so anything else must survive the save — backend blocks the UI has no tab
-            # for (e.g. a newly added backend), and keys inside a posted block that the
-            # UI does not expose (media_types ownership lists, backend-only keys).
-            # A naive overwrite used to drop exactly those (see the settings-save audit).
+            # Merge-preserve so fields the UI does not render survive the save
+            # (see the pure module-level _merge_media_gen_config / BUG_0093).
             existing = {}
             try:
                 with open(_media_gen_config_path, 'r', encoding='utf-8') as f:
                     existing = json.load(f)
             except (OSError, ValueError):
                 existing = {}
-            if isinstance(existing, dict):
-                for block_key, old_block in existing.items():
-                    if block_key not in data:
-                        data[block_key] = old_block
-                    elif isinstance(data[block_key], dict) and isinstance(old_block, dict):
-                        for key, value in old_block.items():
-                            data[block_key].setdefault(key, value)
-            atomic_write_json(_media_gen_config_path, data, backup=False)
+            merged = _merge_media_gen_config(existing, data)
+            atomic_write_json(_media_gen_config_path, merged, backup=False)
         except OSError as e:
             return JSONResponse(status_code=500, content={'message': f"Failed to write config: {e}"})
 
@@ -2674,23 +2735,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 if isinstance(names, list):
                     grouped[mtype] = [n for n in names if isinstance(n, str)]
         return grouped
-
-    def _list_backend_config_stems(section_key: str, default_dir_parts: tuple):
-        """List config-file stems for a media_gen backend section.
-
-        Reads the section's ``config_dir`` from the media_gen config, falling back
-        to ``default_dir_parts`` (resolved relative to the package parent) when it
-        is unset, then returns the stems via ``_list_sdcpp_configs``. Shared by the
-        sdcpp and TTS config-listing routes.
-        """
-        from agent_cascade.tools.image_gen import _list_sdcpp_configs
-        from agent_cascade.tools.media_gen import _get_media_gen_config
-        cfg = _get_media_gen_config()
-        section = cfg.get(section_key) or {}
-        cfg_dir = section.get('config_dir', '') if isinstance(section, dict) else ''
-        if not cfg_dir:
-            cfg_dir = str(Path(__file__).resolve().parent.parent.joinpath(*default_dir_parts))
-        return _list_sdcpp_configs(cfg_dir)
 
     @app.get('/api/media_gen/sdcpp_configs')
     async def list_media_gen_sdcpp_configs():
