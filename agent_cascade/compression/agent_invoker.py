@@ -19,7 +19,7 @@ from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.prompts.dna import (COMPACTION_REVIEWER_PROMPT, COMPRESSION_END_MARKER, COMPRESSION_PROMPT,
                                        CONSOLIDATION_PROMPT)
 from agent_cascade.settings import (COMPACTION_REVIEWER_MAX_TURNS, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES,
-                                    COMPRESSOR_AGENT_MAX_TURNS)
+                                    COMPRESSION_REVIEW_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS)
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from security_handler.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import yield_caller_slot
@@ -136,7 +136,7 @@ def _parse_compression_output(raw: str) -> Tuple[str, str]:
 
 
 def _parse_compaction_verdict(raw: str) -> tuple[bool, list[str]]:
-    """Parse the CompressionReviewer's [PASS] / [LOSS: items] verdict.
+    """Parse the compaction reviewer's [PASS] / [LOSS: items] verdict.
 
     Mirrors the multi-fallback discipline of security_handler._parse_verdict: it normalizes
     thinking blocks and the [END] token, strips markdown bold, then picks the verdict token that
@@ -395,7 +395,8 @@ def _execute_compressor_and_extract_summary(
         caller_name: Name of the calling agent instance.
         timeout_label: Label for timeout error messages ("Compression" or "Consolidation").
         agent_class: Agent class for the telemetry call record (defaults to 'Compressor'; the
-            reviewer passes 'CompressionReviewer'). Run mechanics are identical.
+            compaction reviewer also passes 'Compressor' — it is a separate instance, not a soul).
+            Run mechanics are identical.
 
     Returns:
         A 2-tuple ``(summary, caption)`` — summary with thinking blocks and end marker
@@ -960,7 +961,8 @@ def _generate_reviewer_instance_name() -> str:
     """Generate a unique instance name for a compaction-reviewer launch.
 
     Uses its own counter (prefix 'CompressionReviewer_') so reviewer names never collide with
-    compressor names in the logger cache key (instance_name, agent_class). Thread-safe via _lock.
+    compressor names in the logger cache key (instance_name, agent_class) — the reviewer now runs
+    as a separate Compressor instance. Thread-safe via _lock.
     """
     with _lock:
         global _reviewer_invocation_counter
@@ -968,28 +970,8 @@ def _generate_reviewer_instance_name() -> str:
         return f'CompressionReviewer_{_reviewer_invocation_counter}'
 
 
-def _ensure_reviewer_loaded(agent_pool) -> None:
-    """Ensure the CompressionReviewer agent template is loaded in the pool.
-
-    Mirrors _ensure_compressor_loaded. Relies on BUG_0235's mtime-based template invalidation so a
-    newly added soul is picked up at runtime via the on-demand load path.
-
-    Raises:
-        RuntimeError: If the reviewer cannot be loaded or is unavailable.
-    """
-    if not agent_pool.get_agent('CompressionReviewer'):
-        try:
-            agent_pool.load_agent('CompressionReviewer')
-        except Exception as e:
-            raise RuntimeError(f"Could not load CompressionReviewer: {e}") from e
-
-    rv_agent = agent_pool.get_agent('CompressionReviewer')
-    if not rv_agent:
-        raise RuntimeError('CompressionReviewer is None after loading')
-
-
 def _configure_reviewer_instance(rv_instance: Any) -> None:
-    """Force a CompressionReviewer instance to be fully tool-less (output-only).
+    """Force the reviewer's Compressor instance to be fully tool-less (output-only).
 
     The reviewer is a single-shot diff-check that must never call a tool. Every known tool is
     disabled here, using the same known-tool union the disabled_tools resolver filters against
@@ -1012,11 +994,16 @@ def invoke_compaction_reviewer(
     outgoing_summary: str,
     caller_name: str,
 ) -> Tuple[bool, list]:
-    """Launch the CompressionReviewer to audit one consolidated summary for data loss.
+    """Launch a Compressor instance to audit one consolidated summary for data loss.
 
-    Single-shot (max_turns=1), tool-less, fresh instance per launch, acquired via the same
-    _create_system_agent / yield_caller_slot / _execute_compressor_and_extract_summary plumbing as
-    the Compressor (no save_fn — compaction rewrites the caller's context).
+    Runs as a SEPARATE Compressor instance (same class/launch path as the system Compressor) with
+    ALL tools disabled — there is no dedicated reviewer soul. Single-shot (max_turns=1), fresh
+    instance per launch, acquired via the same _create_system_agent / yield_caller_slot /
+    _execute_compressor_and_extract_summary plumbing as the Compressor (no save_fn — compaction
+    rewrites the caller's context).
+
+    The review role + verdict contract live in COMPACTION_REVIEWER_PROMPT (dna.py) because the
+    Compressor soul is summarizer-oriented.
 
     Returns a parsed scalar verdict. An ambiguous reviewer output (no verdict token) resolves to
     PASS. Launch/infra failures raise RuntimeError so the CALLER's gate fail-opens — this function
@@ -1038,7 +1025,7 @@ def invoke_compaction_reviewer(
     if not agent_pool:
         raise RuntimeError('agent_pool not connected')
 
-    _ensure_reviewer_loaded(agent_pool)
+    _ensure_compressor_loaded(agent_pool)
 
     reviewer_key = _generate_reviewer_instance_name()
 
@@ -1047,6 +1034,7 @@ def invoke_compaction_reviewer(
     review_prompt = COMPACTION_REVIEWER_PROMPT.format(
         incoming_summaries=incoming_summaries.strip(),
         outgoing_summary=outgoing_summary.strip(),
+        max_retries=COMPRESSION_REVIEW_MAX_RETRIES,
         end_instruction=end_instruction,
     )
 
@@ -1055,7 +1043,7 @@ def invoke_compaction_reviewer(
         from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
         rv_instance = engine._create_system_agent(
-            agent_class='CompressionReviewer',
+            agent_class='Compressor',
             instance_name=reviewer_key,
             task=review_prompt,
             caller=caller_name,
@@ -1069,7 +1057,7 @@ def invoke_compaction_reviewer(
         verdict_text, _ = _execute_compressor_and_extract_summary(
             agent_pool, engine, rv_instance, reviewer_key, caller_name,
             timeout_label='Compaction review',
-            agent_class='CompressionReviewer',
+            agent_class='Compressor',
         )
 
         return _parse_compaction_verdict(verdict_text)

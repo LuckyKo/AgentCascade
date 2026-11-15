@@ -368,18 +368,19 @@ COMPRESSION_CONSOLIDATION_THRESHOLD: int = int(os.getenv('AGENT_CASCADE_COMPRESS
 COMPRESSION_MAX_CONSOLIDATION_TOKENS: int = int(os.getenv('AGENT_CASCADE_COMPRESSION_MAX_CONSOLIDATION_TOKENS',
                                                           100000))  # Max tokens for consolidation input before aborting
 
-# Post-consolidation data-integrity validation gate (CompressionReviewer, L2 hop only).
-# Advisory-on-failure: a validation failure never blocks compaction nor turns a successful
-# compaction into a failure. COMPRESSION_REVIEWER_ENABLED=False disables the gate entirely,
-# making consolidation byte-identical to the pre-gate behavior.
+# Post-consolidation data-integrity validation gate (L2 hop only). The reviewer is a separate,
+# tool-less Compressor instance (no dedicated soul). Advisory-on-failure: a validation failure never
+# blocks compaction nor turns a successful compaction into a failure.
+# COMPRESSION_REVIEWER_ENABLED=False disables the gate entirely, making consolidation byte-identical
+# to the pre-gate behavior.
 COMPRESSION_REVIEWER_ENABLED: bool = os.getenv('AGENT_CASCADE_COMPRESSION_REVIEWER_ENABLED',
                                                'true').lower() in ('1', 'true', 'yes',
-                                                   'on')  # Run the CompressionReviewer gate on each L2 consolidation hop (default ON)
+                                                   'on')  # Run the compaction-reviewer gate on each L2 consolidation hop (default ON)
 COMPRESSION_REVIEW_MAX_RETRIES: int = int(
     os.getenv('AGENT_CASCADE_COMPRESSION_REVIEW_MAX_RETRIES',
               2))  # Extra consolidation attempts on a LOSS verdict (re-pays 2 LLM calls each; small bound on purpose)
 
-# The CompressionReviewer is a single-shot diff-check: it must never iterate. Its max_turns is
+# The compaction reviewer is a single-shot diff-check: it must never iterate. Its max_turns is
 # deliberately NOT tied to COMPRESSOR_AGENT_MAX_TURNS so a future bump of the Compressor budget
 # cannot silently grant the reviewer multi-turn tool loops. Keep this at 1.
 COMPACTION_REVIEWER_MAX_TURNS: int = int(os.getenv('AGENT_CASCADE_COMPACTION_REVIEWER_MAX_TURNS', 1))  # Single-shot reviewer turn budget (decoupled from the Compressor).

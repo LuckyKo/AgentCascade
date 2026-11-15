@@ -588,6 +588,20 @@ After consolidation:
    - **Preserve all raw message segments** between markers — only marker messages are removed/replaced.
 6. Update via `rebuild_conversation()` (atomic).
 
+**Post-consolidation data-integrity review (advisory, L2 only):** When
+`COMPRESSION_REVIEWER_ENABLED` is on (default), the Phase-2 summary is audited before it is spliced.
+The auditor is a **separate Compressor agent instance** — not a dedicated soul — launched through the
+same system-agent path as consolidation, with **all tools disabled** and `max_turns=1`
+(`COMPACTION_REVIEWER_MAX_TURNS`). Its review role and `[PASS]` / `[LOSS: itemA, itemB, ...]` verdict
+contract are carried in `COMPACTION_REVIEWER_PROMPT` (`dna.py`) because the Compressor soul is
+summarizer-oriented. On `[LOSS: ...]` the gate re-runs consolidation up to
+`COMPRESSION_REVIEW_MAX_RETRIES` times (default **2**), pinning the flagged items verbatim
+(`preserve_items`) and keeping the best-so-far (fewest flagged items; ties → latest). The gate is
+**advisory/fail-open**: a reviewer launch error, a malformed verdict, or retry exhaustion never
+blocks compaction — the best available summary is spliced (exhaustion logs an error + telemetry).
+`COMPRESSION_REVIEWER_ENABLED=False` disables the gate entirely, making consolidation byte-identical
+to the pre-gate path.
+
 **JSONL sync (non-fatal, best-effort):**
 After pool mutation succeeds, `_consolidate_markers_in_jsonl()` is called (outside the compression lock):
 1. Reads the full JSONL file from disk.

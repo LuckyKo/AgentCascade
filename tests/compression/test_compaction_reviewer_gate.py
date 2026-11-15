@@ -1,6 +1,6 @@
 """BUG_0309 — post-L2-compaction data-integrity validation gate tests.
 
-Covers the CompressionReviewer validation gate added to the L2 consolidation hop:
+Covers the post-L2-compaction validation gate (run by a separate tool-less Compressor instance):
 - _parse_compaction_verdict (scalar [PASS]/[LOSS: ...] parsing, fail-open on ambiguity)
 - _validate_and_reconsolidate (bounded retry, best-so-far, fail-open on every error class)
 - _consolidate_markers integration (gate wired between Phase 2 and Phase 3; knob disables it)
@@ -383,6 +383,86 @@ class TestReviewerToolLess:
             offered_without_sentinel = order_offered_tool_names(
                 func_map, disabled - {'__all_mcp_tools__'}, instance=disc_inst)
         assert fake_mcp in offered_without_sentinel
+
+
+class TestReviewerUsesCompressorInstance:
+    """The reviewer is a separate, fully tool-less Compressor instance — not a dedicated soul.
+
+    Exercises the real ``invoke_compaction_reviewer`` wiring: it must load/create the ``Compressor``
+    agent class, launch a fresh instance with every tool disabled, carry the review contract in the
+    run prompt, and still parse the verdict (the gate's bounded-retry/fail-open tests above cover
+    the consumer side).
+    """
+
+    @staticmethod
+    def _invoke(verdict='[PASS]', retries=2):
+        from agent_cascade.compression import agent_invoker as ai
+
+        captured = {}
+        rv = MagicMock()
+
+        def fake_create(**kwargs):
+            captured['create'] = kwargs
+            return rv
+
+        fake_engine = MagicMock()
+        fake_engine._create_system_agent.side_effect = fake_create
+        pool = MagicMock()
+        pool.get_agent.return_value = MagicMock()  # _ensure_compressor_loaded short-circuits
+
+        with patch.object(ai, '_execute_compressor_and_extract_summary',
+                          return_value=(verdict, '')) as execute, \
+                patch.object(ai, 'COMPRESSION_REVIEW_MAX_RETRIES', retries), \
+                patch('agent_cascade.execution_engine.ExecutionEngine', return_value=fake_engine):
+            result = ai.invoke_compaction_reviewer(pool, 'INCOMING', 'OUTGOING', 'Caller')
+
+        return result, captured, rv, execute, pool
+
+    def test_launches_compressor_agent_class(self):
+        _, captured, _, execute, pool = self._invoke()
+        assert captured['create']['agent_class'] == 'Compressor'
+        assert execute.call_args.kwargs['agent_class'] == 'Compressor'
+        # Loaded through the Compressor path (no CompressionReviewer soul involvement).
+        pool.get_agent.assert_any_call('Compressor')
+        pool.load_agent.assert_not_called()
+
+    def test_reviewer_instance_has_all_tools_disabled(self):
+        from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+        from agent_cascade.settings import COMPACTION_REVIEWER_MAX_TURNS
+        from agent_cascade.tools.base import TOOL_REGISTRY
+
+        _, _, rv, _, _ = self._invoke()
+        disabled = set(rv._generate_cfg_override['disabled_tools'])
+        assert set(TOOL_REGISTRY) <= disabled
+        assert set(RUNTIME_REGISTERED_TOOLS) <= disabled
+        assert '__all_mcp_tools__' in disabled
+        assert rv.max_turns == COMPACTION_REVIEWER_MAX_TURNS
+
+    def test_run_prompt_carries_review_contract(self):
+        _, captured, _, _, _ = self._invoke(retries=3)
+        prompt = captured['create']['task']
+        assert 'DATA-INTEGRITY REVIEWER' in prompt
+        assert '[PASS]' in prompt and '[LOSS:' in prompt
+        assert 'best available summary is accepted' in prompt  # fail-open on exhaustion
+        assert 'at most 3 extra attempts' in prompt  # non-default value proves the knob is substituted, not hardcoded
+
+    def test_verdict_still_parsed_after_switch(self):
+        result, _, _, _, _ = self._invoke(verdict='[LOSS: BUG_0324, core.py:200]')
+        assert result == (False, ['BUG_0324', 'core.py:200'])
+
+    def test_infra_failure_raises_for_caller_fail_open(self):
+        from agent_cascade.compression import agent_invoker as ai
+
+        pool = MagicMock()
+        pool.get_agent.return_value = MagicMock()
+        fake_engine = MagicMock()
+        fake_engine._create_system_agent.return_value = MagicMock()
+
+        with patch.object(ai, '_execute_compressor_and_extract_summary',
+                          side_effect=RuntimeError('endpoint down')), \
+                patch('agent_cascade.execution_engine.ExecutionEngine', return_value=fake_engine):
+            with pytest.raises(RuntimeError, match='Compaction review failed'):
+                ai.invoke_compaction_reviewer(pool, 'IN', 'OUT', 'Caller')
 
 
 class TestPreserveItemsPrompt:

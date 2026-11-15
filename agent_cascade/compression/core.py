@@ -196,10 +196,10 @@ def _validate_and_reconsolidate(
 ) -> str:
     """Post-consolidation data-integrity gate. ADVISORY-ON-FAILURE.
 
-    Reviews the Phase-2 consolidated summary with the tool-less CompressionReviewer. On a LOSS
-    verdict it re-runs consolidation up to COMPRESSION_REVIEW_MAX_RETRIES times, pinning the
-    flagged items verbatim, and keeps the best-so-far (fewest flagged items; ties resolve to the
-    latest attempt). Returns the summary to splice into the pool.
+    Reviews the Phase-2 consolidated summary with a separate, tool-less Compressor reviewer
+    instance. On a LOSS verdict it re-runs consolidation up to COMPRESSION_REVIEW_MAX_RETRIES
+    times, pinning the flagged items verbatim, and keeps the best-so-far (fewest flagged items;
+    ties resolve to the latest attempt). Returns the summary to splice into the pool.
 
     SAFETY (non-negotiable): this function NEVER raises into _consolidate_markers and NEVER blocks
     compaction. A first-review reviewer error returns initial_summary; a re-consolidation failure

@@ -161,12 +161,17 @@ CONSOLIDATION_PROMPT = (
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
     'Present the consolidated summary below.{end_instruction}')
 
-# Post-consolidation data-integrity audit (CompressionReviewer). The reviewer is a diff-check:
-# it compares the summaries that went INTO a consolidation hop against the one that came OUT, and
-# returns a single scalar verdict. The DROP-OK wording mirrors CONSOLIDATION_PROMPT's own contract
-# so the reviewer does not flag content the consolidation is explicitly allowed to discard.
+# Post-consolidation data-integrity audit. The reviewer runs as a separate, tool-less Compressor
+# instance (NOT a dedicated soul), so this task prompt must fully carry the review role + output
+# contract — the Compressor soul would otherwise bias the model toward summarizing. The reviewer is
+# a diff-check: it compares the summaries that went INTO a consolidation hop against the one that
+# came OUT and returns a single scalar verdict. The DROP-OK wording mirrors CONSOLIDATION_PROMPT's
+# own contract so the reviewer does not flag content the consolidation is explicitly allowed to
+# discard. `max_retries` documents the bounded retry (COMPRESSION_REVIEW_MAX_RETRIES) the gate runs;
+# on exhaustion the best-so-far summary is kept (advisory fail-open), never blocking compaction.
 COMPACTION_REVIEWER_PROMPT = (
-    'You are auditing a memory-consolidation step for DATA LOSS.\n\n'
+    'You are a Compressor agent acting as a DATA-INTEGRITY REVIEWER for a memory-consolidation step.\n'
+    'Do NOT summarize, rewrite, or improve anything — you are a DIFF-CHECK, not a re-summarizer.\n\n'
     'The input summaries below were merged into a single consolidated summary. Determine whether the\n'
     'consolidated summary dropped, contradicted, or invented anything that was genuinely important in\n'
     'the inputs and should have survived the hop.\n\n'
@@ -179,8 +184,14 @@ COMPACTION_REVIEWER_PROMPT = (
     'supervisor instruction, key decisions and architectural choices, bug-ticket numbers / file paths /\n'
     'file:line references / instance names, explicit user instructions and constraints, temporal anchors\n'
     '(dates/timestamps) that anchor later work, and task outcomes a later turn would need.\n\n'
-    'End your output with exactly ONE verdict line and nothing after it except the required end marker:\n'
-    '`[PASS]` if nothing important was lost, or `[LOSS: itemA, itemB, ...]` naming each lost item.'
+    'Output contract (strict): end with exactly ONE final verdict line on its own line, and nothing\n'
+    'after it except the required end marker:\n'
+    '  `[PASS]` — nothing important was lost.\n'
+    '  `[LOSS: itemA, itemB, ...]` — short comma-separated labels for each genuinely lost item.\n'
+    'No preamble, no summary of your own, no meta-commentary. A [LOSS] verdict pins the named items\n'
+    'verbatim into a bounded re-consolidation retry (at most {max_retries} extra attempts). Retries are\n'
+    'bounded: if loss persists the best available summary is accepted and compaction continues\n'
+    '(advisory fail-open). When in doubt whether something is genuinely important, prefer [PASS].'
     '{end_instruction}')
 
 # --- Security Advisor ---

@@ -1,6 +1,6 @@
 """Shared fixtures for the compression test suite.
 
-BUG_0309 added a post-L2-compaction CompressionReviewer gate inside ``_consolidate_markers``
+BUG_0309 added a post-L2-compaction reviewer gate inside ``_consolidate_markers``
 that is ON by default. The legacy consolidation suites
 (``test_memory_consolidation.py``, ``test_l2_multiday_timestamps.py``,
 ``test_last_task_in_marker.py``) call ``_consolidate_markers`` directly with a ``MagicMock``
