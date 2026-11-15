@@ -93,6 +93,12 @@ FIND_FILE_MAX_DEPTH = 12
 # browser may push in one multipart request. Single source of truth.
 MAX_MEDIA_UPLOAD_BYTES = 100 * 1024 * 1024
 
+# Timeout validation bounds (seconds) for the image-gen config route. Single source
+# of truth for the top-level (30-600s) and the sdcpp block (30-1800s) checks.
+TIMEOUT_MIN_S = 30
+TIMEOUT_MAX_S = 600
+SDCPP_TIMEOUT_MAX_S = 1800
+
 # ── Idle status heartbeat (BUG_0142) ─────────────────────────────────────────
 # The frontend's `state.generating` is a one-way latch: it goes true on every
 # stream_update and is only lowered by a full `state`/`done` frame or an `error`
@@ -137,7 +143,6 @@ def _minimal_state(instance_name: Optional[str] = None,
     fallback, so the two can never drift on required keys (revisions, pool_settings,
     session/instance name).
     """
-    from agent_cascade.runtime_state import state as _runtime_state
     from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 
     name = instance_name or DEFAULT_SESSION_NAME
@@ -164,29 +169,6 @@ def _minimal_state(instance_name: Optional[str] = None,
         'endpoints_revision': _runtime_state.endpoints_revision,
         'pool_settings': pool_settings if pool_settings is not None else {},
     }
-
-
-def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
-    """Validate disabled_tools in a generate_cfg dict against the tool registry.
-
-    Extracted to eliminate duplicate validation blocks in both 'message' and
-    'continue' WebSocket handlers (Fix #5 from second review).
-
-    Args:
-        ui_cfg: The ``generate_cfg`` dictionary from the client message.
-    """
-    from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
-    from agent_cascade.tools.base import TOOL_REGISTRY
-    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
-
-    if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
-        dt = ui_cfg['disabled_tools']
-        known = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
-        if isinstance(dt, dict):
-            for tools in dt.values():
-                validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
-        else:
-            validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
 
 
 # serialize_message imported from agent_cascade.api_integration (unified version)
@@ -552,8 +534,6 @@ def _empty_skill_evolution_slice() -> dict:
 
 
 def create_app(agents, agent_pool, config=None, auto_security=True):
-    from agent_cascade.log import install_uvicorn_log_bridge, logger
-
     """
     Create the FastAPI application.
 
@@ -564,6 +544,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         auto_security:  Whether to start with Auto-Ask Security mode enabled.
                         Defaults to True (enabled by default for safety).
     """
+    from agent_cascade.log import install_uvicorn_log_bridge, logger
+
     from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse
@@ -2055,7 +2037,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if agent_pool:
             agent_pool.set_auto_security(enabled)
         else:
-            from agent_cascade.runtime_state import state as _runtime_state
             _runtime_state.set_auto_security(enabled)
         await _broadcast_state()
         return {'status': 'ok', 'auto_security': enabled}
@@ -2093,7 +2074,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             payload.get('message'), payload.get('mode'))
 
         # BUG_0029 Phase 2 Step 5: read live state for the response (not OM instance)
-        from agent_cascade.runtime_state import state as _runtime_state
         await _broadcast_state()
         return {
             'status': 'ok',
@@ -2477,6 +2457,20 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         from agent_cascade.tools.image_gen import _get_image_gen_config
         return _get_image_gen_config()
 
+    def _coerce_timeout_int(raw, label: str):
+        """Coerce a timeout value to int, rejecting floats (int() would truncate).
+
+        Accepts an int or a numeric string. Returns ``(parsed_int, None)`` on
+        success, or ``(None, JSONResponse-400)`` on failure; ``label`` drives the
+        400 message. Shared by the top-level and sdcpp-block timeout checks.
+        """
+        if isinstance(raw, float):
+            return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
+        try:
+            return int(raw), None
+        except (TypeError, ValueError):
+            return None, JSONResponse(status_code=400, content={'message': f'{label} must be an integer'})
+
     @app.post('/api/image_gen')
     async def save_image_gen_config(request: Request):
         """Save image gen config. Validates URL format and timeout range.
@@ -2505,15 +2499,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # Validate top-level timeout. Accept int or numeric string; reject floats
         # (int() would silently truncate e.g. 180.5 → 180). For sdcpp the 30-600s
         # range is skipped (F2) — the sdcpp block carries its own 30-1800s timeout.
-        timeout = data.get('timeout', 180)
-        if isinstance(timeout, float):
-            return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
-        try:
-            timeout = int(timeout)
-        except (TypeError, ValueError):
-            return JSONResponse(status_code=400, content={'message': 'timeout must be an integer'})
-        if not is_sdcpp and not (30 <= timeout <= 600):
-            return JSONResponse(status_code=400, content={'message': 'timeout must be between 30 and 600 seconds'})
+        timeout, err = _coerce_timeout_int(data.get('timeout', 180), 'timeout')
+        if err is not None:
+            return err
+        if not is_sdcpp and not (TIMEOUT_MIN_S <= timeout <= TIMEOUT_MAX_S):
+            return JSONResponse(status_code=400, content={'message': f'timeout must be between {TIMEOUT_MIN_S} and {TIMEOUT_MAX_S} seconds'})
 
         config = {
             'type': gen_type,
@@ -2533,14 +2523,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             sdcpp_cfg = dict(sdcpp)
             sdcpp_timeout = sdcpp_cfg.get('timeout')
             if sdcpp_timeout is not None:
-                if isinstance(sdcpp_timeout, float):
-                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be an integer'})
-                try:
-                    sdcpp_cfg['timeout'] = int(sdcpp_timeout)
-                except (TypeError, ValueError):
-                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be an integer'})
-                if not (30 <= sdcpp_cfg['timeout'] <= 1800):
-                    return JSONResponse(status_code=400, content={'message': 'sdcpp.timeout must be between 30 and 1800 seconds'})
+                coerced, err = _coerce_timeout_int(sdcpp_timeout, 'sdcpp.timeout')
+                if err is not None:
+                    return err
+                sdcpp_cfg['timeout'] = coerced
+                if not (TIMEOUT_MIN_S <= sdcpp_cfg['timeout'] <= SDCPP_TIMEOUT_MAX_S):
+                    return JSONResponse(status_code=400, content={'message': f'sdcpp.timeout must be between {TIMEOUT_MIN_S} and {SDCPP_TIMEOUT_MAX_S} seconds'})
             binary = sdcpp_cfg.get('binary')
             if binary is not None and (not isinstance(binary, str) or not binary):
                 return JSONResponse(status_code=400, content={'message': 'sdcpp.binary must be a non-empty string'})
@@ -2687,29 +2675,32 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     grouped[mtype] = [n for n in names if isinstance(n, str)]
         return grouped
 
-    @app.get('/api/media_gen/sdcpp_configs')
-    async def list_media_gen_sdcpp_configs():
-        """List sdcpp per-model config stems (mirrors /api/image_gen/sdcpp_configs)."""
+    def _list_backend_config_stems(section_key: str, default_dir_parts: tuple):
+        """List config-file stems for a media_gen backend section.
+
+        Reads the section's ``config_dir`` from the media_gen config, falling back
+        to ``default_dir_parts`` (resolved relative to the package parent) when it
+        is unset, then returns the stems via ``_list_sdcpp_configs``. Shared by the
+        sdcpp and TTS config-listing routes.
+        """
         from agent_cascade.tools.image_gen import _list_sdcpp_configs
         from agent_cascade.tools.media_gen import _get_media_gen_config
         cfg = _get_media_gen_config()
-        sdcpp = cfg.get('sdcpp') or {}
-        cfg_dir = sdcpp.get('config_dir', '') if isinstance(sdcpp, dict) else ''
+        section = cfg.get(section_key) or {}
+        cfg_dir = section.get('config_dir', '') if isinstance(section, dict) else ''
         if not cfg_dir:
-            cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'sdcpp')
+            cfg_dir = str(Path(__file__).resolve().parent.parent.joinpath(*default_dir_parts))
         return _list_sdcpp_configs(cfg_dir)
+
+    @app.get('/api/media_gen/sdcpp_configs')
+    async def list_media_gen_sdcpp_configs():
+        """List sdcpp per-model config stems (mirrors /api/image_gen/sdcpp_configs)."""
+        return _list_backend_config_stems('sdcpp', ('config', 'sdcpp'))
 
     @app.get('/api/media_gen/tts_configs')
     async def list_media_gen_tts_configs():
         """List TTS voice-config stems (kokoro_default, outetts_default, ...)."""
-        from agent_cascade.tools.image_gen import _list_sdcpp_configs
-        from agent_cascade.tools.media_gen import _get_media_gen_config
-        cfg = _get_media_gen_config()
-        tts = cfg.get('kobold_tts') or {}
-        cfg_dir = tts.get('config_dir', '') if isinstance(tts, dict) else ''
-        if not cfg_dir:
-            cfg_dir = str(Path(__file__).resolve().parent.parent / 'config' / 'media_gen' / 'tts')
-        return _list_sdcpp_configs(cfg_dir)
+        return _list_backend_config_stems('kobold_tts', ('config', 'media_gen', 'tts'))
 
     # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
     def start_gen(history, runner, gen_id, loop, target=None):
@@ -2930,7 +2921,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             if len(data) > MAX_MEDIA_UPLOAD_BYTES:
                 return JSONResponse(
                     status_code=413,
-                    content={'message': 'Media too large (max 100 MB).'},
+                    content={'message': f'Media too large (max {MAX_MEDIA_UPLOAD_BYTES // (1024 * 1024)} MB).'},
                 )
             modality, ext_hint = _classify_upload(file)
             # Server-generated, traversal-safe filename (user filename is a hint
