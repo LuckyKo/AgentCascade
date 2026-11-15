@@ -794,6 +794,12 @@ CLI_AGENT_OAUTH_SUBMIT_WAIT_SECONDS: int = 30
 #: Idle lifetime of a login session before the lazy reaper kills its container (seconds).
 CLI_AGENT_OAUTH_SESSION_TTL_SECONDS: int = 180
 
+#: Minimum spacing between STARTS of one-shot runs for the SAME harness (seconds). Some providers
+#: ban an account that receives fast automated bursts, so a burst of call_cli_agent calls is
+#: spread out: each caller waits for its own start slot instead of firing back-to-back.
+#: 0 = OFF (no spacing — every call starts as soon as the concurrency cap allows).
+CLI_AGENT_RATE_LIMIT_SECONDS: float = float(os.getenv('AGENT_CASCADE_CLI_AGENT_RATE_LIMIT_SECONDS', '5'))
+
 
 def cli_agent_default_image(harness: str) -> str:
     """Default Docker image tag for a CLI harness. antigravity resolves to its dedicated

@@ -803,6 +803,10 @@
                           <span title="When ON, the shared read-only extra_work_folders_ro are bind-mounted into CLI-agent containers. OFF by default (inherited only when needed).">Mount extra paths (read-only)</span>
                           <input autocomplete="off" type="checkbox" id="setting-cli-paths-ro" />
                         </label>
+                        <label class="setting-field" style="margin-bottom:6px;">
+                          <span title="Minimum seconds between STARTS of two runs of the same harness. Some providers ban an account that receives fast automated bursts, so extra calls wait their turn instead of firing back-to-back. 0 = off.">Min gap between runs (s)</span>
+                          <input autocomplete="off" type="number" min="0" step="0.5" id="setting-cli-rate-limit" />
+                        </label>
                         <div class="cli-agent-harness">
                           <label class="setting-field toggle-field">
                             <span>claude_code</span>

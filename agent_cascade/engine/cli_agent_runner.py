@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -229,6 +230,74 @@ def _resolve_auth_volume(pool, adapter) -> Optional[str]:
         raw = CLI_AGENT_AGY_AUTH_VOLUME
     name = raw.strip()
     return None if (not name or name == '0') else name
+
+
+# Rate limiting: a minimum spacing between STARTS of one-shot runs, keyed by harness. Some
+# providers ban an account that receives fast automated bursts, so a burst is spread out instead of
+# fired back-to-back. Process-global (one Docker host == one provider account), and enforced at the
+# spawn site, so a gated/disabled/early-exit run never consumes a provider request or a window.
+# A caller RESERVES its own start instant under the lock and sleeps outside it, so several callers
+# queue deterministically (t, t+interval, t+2*interval, ...) rather than racing for one slot.
+_RATE_LOCK = threading.Lock()
+_LAST_START_AT: dict[str, float] = {}
+# Waits at or above this are logged, so an operator can see a queued burst (seconds).
+_RATE_LIMIT_LOG_WAIT_SECONDS: float = 1.0
+
+
+def _rate_limit_interval(settings) -> float:
+    """Minimum spacing between run starts for one harness (seconds; ``<= 0`` = off).
+
+    Non-numeric values (e.g. a MagicMock settings double) fall back to the env-backed module
+    constant, so a misconfigured pool setting can never silently disable the throttle by accident.
+    """
+    from agent_cascade.settings import CLI_AGENT_RATE_LIMIT_SECONDS
+    raw = getattr(settings, 'cli_agent_rate_limit_seconds', None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return CLI_AGENT_RATE_LIMIT_SECONDS
+    return float(raw)
+
+
+def _reserve_start_slot(harness: str, interval: float, *, now: Optional[float] = None) -> float:
+    """Reserve the next allowed start for ``harness``; return the seconds the caller must wait.
+
+    The stamp moves forward even when the caller is already late, which keeps every future caller
+    spaced from the *reserved* instant. ``interval <= 0`` disables throttling (returns 0.0). A
+    reserved-but-abandoned slot idles that window — a deliberate trade: never risk two provider
+    requests inside one interval.
+    """
+    if interval <= 0:
+        return 0.0
+    with _RATE_LOCK:
+        t = time.monotonic() if now is None else now
+        start = max(t, _LAST_START_AT.get(harness, t - interval) + interval)
+        _LAST_START_AT[harness] = start
+        return start - t
+
+
+def _next_start_in(harness: str, interval: float) -> float:
+    """Seconds until another run of ``harness`` may start without waiting (0.0 when ready)."""
+    if interval <= 0:
+        return 0.0
+    with _RATE_LOCK:
+        last = _LAST_START_AT.get(harness)
+        if last is None:
+            return 0.0
+        return max(0.0, last + interval - time.monotonic())
+
+
+def _wait_for_start_slot(harness: str, interval: float, *, _sleep=time.sleep) -> float:
+    """Block until this caller's reserved start slot; return the seconds actually waited.
+
+    Called immediately before spawning a container (sync runner or the async tracking thread), so
+    the wait never holds the tool-call thread in async mode.
+    """
+    wait = _reserve_start_slot(harness, interval)
+    if wait > 0:
+        if wait >= _RATE_LIMIT_LOG_WAIT_SECONDS:
+            logger.info('call_cli_agent rate limit: %s spawn queued for %.1fs (min gap %.1fs)',
+                        harness, wait, interval)
+        _sleep(wait)
+    return wait
 
 
 def _invalidate_agy_auth_cache(volume: Optional[str] = None) -> None:
@@ -634,6 +703,12 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
         timed_out = False
         stdout = stderr = ''
         exit_code = -1
+
+        # Per-harness minimum spacing (provider anti-ban). Held under the concurrency semaphore so
+        # a burst cannot outrun the interval, and skipped entirely when the interval is 0/off.
+        _wait_for_start_slot(prepared.harness,
+                             _rate_limit_interval(getattr(pool, 'settings', None)))
+
         try:
             proc = subprocess.run(docker_cmd, env=clean_env, capture_output=True, text=True,
                                   timeout=timeout, encoding='utf-8', errors='replace')
@@ -674,12 +749,16 @@ def cli_agent_status(pool) -> dict[str, dict]:
         itself is unavailable — indeterminate, not a hard "missing").
       * ``quota_available`` is always ``'unknown'`` in Phase 0; an adapter MAY add a
         ``probe_quota(self) -> str`` ('ok'|'exhausted'|'unknown') and any exception maps to 'unknown'.
+      * ``rate_limit_seconds`` is the configured minimum spacing between starts of this harness
+        (0 = off) and ``next_run_in_seconds`` is how long a new call would wait right now, so a
+        caller can pace itself instead of queuing blind.
     """
     from agent_cascade.engine.cli_agent_adapters import get_adapter, registered_harnesses
     from agent_cascade.settings import cli_agent_default_image
     from config.secrets_loader import get_secret
     out: dict[str, dict] = {}
     _settings = getattr(pool, 'settings', None)
+    _rate_limit = _rate_limit_interval(_settings)
     enabled_map = getattr(_settings, 'cli_agent_enabled', None) or {}
     images_map = getattr(_settings, 'cli_agent_images', None) or {}
     models_map = getattr(_settings, 'cli_agent_models', None) or {}
@@ -706,6 +785,8 @@ def cli_agent_status(pool) -> dict[str, dict]:
                 'image_present': image_present,
                 'quota_available': quota_available,
                 'model': models_map.get(h),
+                'rate_limit_seconds': _rate_limit,
+                'next_run_in_seconds': round(_next_start_in(h, _rate_limit), 1),
             }
             if auth_type == 'oauth':
                 vol = _resolve_auth_volume(pool, adapter)
@@ -715,5 +796,6 @@ def cli_agent_status(pool) -> dict[str, dict]:
         except Exception as e:  # noqa: BLE001 — status must never crash the caller
             logger.debug('cli_agent_status failed for %s: %s', h, e)
             out[h] = {'enabled': False, 'auth_type': 'api_key', 'key_configured': None,
-                      'image_present': None, 'quota_available': 'unknown', 'model': None}
+                      'image_present': None, 'quota_available': 'unknown', 'model': None,
+                      'rate_limit_seconds': _rate_limit, 'next_run_in_seconds': 0.0}
     return out

@@ -23,6 +23,10 @@ The ONLY behavioral differences from shell are:
     acquired inside the spawn path and held until the container exits, so ``launch()`` returning
     early in async mode does not defeat the cap. It is released exactly once in the
     tracking-thread's finally via the ``_record_completed_run`` override.
+  * The per-harness minimum spacing (``pool.settings.cli_agent_rate_limit_seconds``, 5 s default)
+    is applied on the tracking thread just before the container is spawned, so a burst of calls
+    queues invisibly instead of hitting the provider back-to-back and ``launch()`` still returns
+    its Tool ID immediately.
 """
 
 import subprocess
@@ -140,20 +144,42 @@ class CliAgentTracker(AsyncShellTracker):
         ``_PendingSpawn`` placeholder so launch()'s early check does not spin, swaps the real
         ``Popen`` in under ``task._lock``, then starts the shared pipe-drain threads. The
         semaphore is handed to the task and released in :meth:`_record_completed_run`.
+
+        Adapted from the sync runner: the wait happens on the tracking thread, after the
+        concurrency slot is secured, so a burst of calls is spaced out at the provider while the
+        caller has already received its Tool ID. Same reserved-slot semantics as the sync runner,
+        so both execution modes share one per-harness clock.
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
             raise RuntimeError(f"Task {agent_name}/{tool_id} vanished before spawn")
         ctx = self._ctx(task)
 
-        from agent_cascade.engine.cli_agent_runner import _get_semaphore
+        from agent_cascade.engine.cli_agent_runner import (
+            _get_semaphore, _rate_limit_interval, _wait_for_start_slot)
         sem = _get_semaphore(ctx.get('cap', 2))
         sem.acquire()  # blocking is correct here: tracking thread, off launch()'s critical path
 
-        # Publish placeholder immediately; the real Popen runs off-thread and is swapped in.
+        # Publish the placeholder BEFORE any waiting: launch()'s early-completion poll only sleeps
+        # while task.process is None, so publishing here keeps a queued run from blocking launch().
         with task._lock:
             task.pid = 0
             task.process = _PendingSpawn()
+
+        # Minimum spacing between starts of the same harness (provider anti-ban; 0 = off). Runs
+        # before the Popen so the provider never sees two requests inside the interval.
+        _wait_for_start_slot(ctx.get('harness', ''),
+                             _rate_limit_interval(getattr(self._pool, 'settings', None)))
+
+        with task._lock:
+            killed_while_queued = task.killed
+        if killed_while_queued:
+            # Killed while queued: never start a doomed container (that would still be a provider
+            # request). The placeholder keeps _poll_loop's kill handling intact; release the slot
+            # here because it was never handed to the task.
+            sem.release()
+            logger.debug(f"[CliAgent] tool_id={tool_id} killed while rate-limit queued — not spawned")
+            return task
 
         spawn_result = {}
 

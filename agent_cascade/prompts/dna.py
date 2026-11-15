@@ -892,6 +892,7 @@ TOOL_METADATA = {
             'trust-wrapped automatically. This is a bounded, single-turn "run and capture" call — NOT a conversational '
             'sub-agent like call_agent (no slot/KV, no multi-turn). The container is hard-killed on timeout. '
             'Use this for difficult tasks when regular agents fail to deliver satisfying results, it uses expensive frontier models that are often rate/token limited. '
+            'Calls to the same harness are spaced at least cli_agent_rate_limit_seconds apart (default 5s) to avoid provider ban heuristics: a burst of calls queues and still runs in order, so do not fire duplicates to "retry". '
             'Avoid using when handling sensitive data containing user info or anything that might trip their security guardrails. '
         ),
         'parameters': {

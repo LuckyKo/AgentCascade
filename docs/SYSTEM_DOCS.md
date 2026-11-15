@@ -1539,7 +1539,7 @@ The `functions=` array is serialized into the prompt **right after the system pr
 | Tool schema | `prompts/dna.py` (`TOOL_METADATA['call_cli_agent']`) | `harness` enum, `task`, `model`, `permission_posture`, `status` |
 | Adapter registry | `engine/cli_agent_adapters/` | Per-harness argv, presence probe, auth metadata, credential strip |
 | Runner | `engine/cli_agent_runner.py` | Enable/OAuth gates, image build+refresh, docker argv, wall-clock timeout + teardown, log persistence, status |
-| Async tracker | `engine/cli_agent_async.py` | Background execution path (`execution_mode='async'`) |
+| Async tracker | `async_shell_pkg/cli_agent_tracker.py` | Background execution path (`execution_mode='async'`) |
 | OAuth login | `engine/cli_agent_oauth.py` | Interactive sign-in session (URL + pasted code) for key-less harnesses |
 
 Adapters: `claude_code` (`claude -p`), `opencode` (`opencode run`), `antigravity` (`agy -p`). The registry key is the harness name; the binary token may differ (antigravity → `agy`).
@@ -1574,9 +1574,18 @@ docker run -it --rm -v cli_agent_agy_auth:/root/.gemini cli_agent_agy agy -p="he
 # open the printed URL, then paste the authorization code when prompted
 ```
 
-### 12.5 Status surface
+### 12.5 Rate limiting (provider anti-ban)
 
-`cli_agent_status(pool)` returns, per harness: `enabled`, `auth_type`, `key_configured`, `image_present`, `quota_available`, `model` — plus `authenticated` (True/False/None) for OAuth harnesses. It spawns nothing and never raises; `system_info` renders the same snapshot.
+Provider accounts are the scarce resource here: several of them suspend an account that receives fast automated bursts. Every run start is therefore spaced **per harness** by `cli_agent_rate_limit_seconds` (default **5 s**, `0` = off).
+
+- Enforcement point is the **spawn**, not the request: `run_cli_agent` (sync) and `CliAgentTracker._spawn_process` (async) call `_wait_for_start_slot(harness, interval)` immediately before `docker run`/`Popen`, after the concurrency slot is secured. Gated runs (disabled harness, unauthenticated volume) never consume a window.
+- Each caller **reserves** its own start instant under a process-wide lock (`_reserve_start_slot`) and sleeps outside it, so a burst of N calls queues as `t, t+interval, t+2·interval …` instead of racing. A reserved-but-abandoned slot idles that window (never two provider requests inside one interval).
+- Async mode still returns its Tool ID immediately — the wait happens on the tracking thread. The wall-clock timeout is measured from launch (same as a long semaphore wait), so a heavily queued run can consume its budget while waiting.
+- `cli_agent_status` reports `rate_limit_seconds` and `next_run_in_seconds` per harness so a caller can pace itself instead of queuing blind. The rate clock is process-global (one Docker host = one provider account), keyed by harness — two harnesses sharing one provider account are not correlated.
+
+### 12.6 Status surface
+
+`cli_agent_status(pool)` returns, per harness: `enabled`, `auth_type`, `key_configured`, `image_present`, `quota_available`, `model`, `rate_limit_seconds`, `next_run_in_seconds` — plus `authenticated` (True/False/None) for OAuth harnesses. It spawns nothing and never raises; `system_info` renders the same snapshot.
 
 ---
 
@@ -1599,6 +1608,7 @@ docker run -it --rm -v cli_agent_agy_auth:/root/.gemini cli_agent_agy agy -p="he
 | `cli_agent_timeout` | 1800 | Hard wall-clock cap per `call_cli_agent` run (seconds) |
 | `max_cli_agent_children` | 2 | Concurrent external-CLI containers |
 | `cli_agent_agy_auth_volume` | `cli_agent_agy_auth` | Docker volume holding agy's OAuth store ('' / '0' = off) |
+| `cli_agent_rate_limit_seconds` | 5 | Minimum spacing between starts of the same harness (seconds; 0 = off) |
 
 ### Agent Instance Lifecycle
 

@@ -116,6 +116,23 @@ def _restore_runtime_state():
         _approval_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_cli_agent_rate_limit(monkeypatch):
+    """Disable the per-harness call_cli_agent start spacing (default 5 s) for every test.
+
+    Production spaces one-shot run STARTS per harness so a burst cannot trip a provider's ban
+    heuristics. Tests that spawn (real or faked docker) must not sleep, so the env-backed default
+    is zeroed here and the per-harness clock is cleared. Tests that assert the limiter itself set
+    ``cli_agent_rate_limit_seconds`` on their own settings double (which wins over this default).
+    """
+    monkeypatch.setattr('agent_cascade.settings.CLI_AGENT_RATE_LIMIT_SECONDS', 0.0, raising=False)
+    try:
+        from agent_cascade.engine.cli_agent_runner import _LAST_START_AT
+        _LAST_START_AT.clear()
+    except Exception:  # pragma: no cover — runner import is cheap; never fail collection
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Local LLM Auto-Detection — session-scoped probe at test startup
 # ---------------------------------------------------------------------------

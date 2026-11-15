@@ -287,12 +287,14 @@ def test_cli_agent_status_shape(monkeypatch):
     monkeypatch.setattr(runner, '_agy_auth_volume_populated', lambda vol, image: True)
     pool = NS(settings=NS(cli_agent_enabled={'claude_code': True}, cli_agent_images={},
                           cli_agent_models={'opencode': 'm-x'}, cli_agent_paths_ro=False,
-                          cli_agent_agy_auth_volume='vol-1'))
+                          cli_agent_agy_auth_volume='vol-1',
+                          cli_agent_rate_limit_seconds=0.0))
     st = runner.cli_agent_status(pool)
     assert set(st.keys()) == {'claude_code', 'opencode', 'antigravity'}
     assert st['claude_code'] == {'enabled': True, 'auth_type': 'api_key', 'key_configured': True,
                                  'image_present': True, 'quota_available': 'unknown',
-                                 'model': None}
+                                 'model': None, 'rate_limit_seconds': 0.0,
+                                 'next_run_in_seconds': 0.0}
     # antigravity has no API-key auth -> key_configured must be None (invariant #3).
     assert st['antigravity']['key_configured'] is None
     assert st['antigravity']['auth_type'] == 'oauth'

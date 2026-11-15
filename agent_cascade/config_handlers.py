@@ -541,6 +541,18 @@ def _handle_cli_agent_agy_auth_volume(ui_cfg: dict, agent_pool: Optional[Any], a
         agent_pool.settings.cli_agent_agy_auth_volume = str(v).strip() if v is not None else ''
 
 
+@register_config_handler('cli_agent_rate_limit_seconds')
+def _handle_cli_agent_rate_limit_seconds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the minimum spacing between call_cli_agent run starts, per harness (0 = off)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        v = ui_cfg.get('cli_agent_rate_limit_seconds', 0)
+        try:
+            seconds = float(v)
+        except (TypeError, ValueError):
+            return  # unparsable value: keep the current spacing rather than resetting it
+        agent_pool.settings.cli_agent_rate_limit_seconds = max(0.0, seconds)
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

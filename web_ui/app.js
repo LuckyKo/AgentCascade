@@ -297,9 +297,11 @@ const POOL_SETTINGS_MAP = [
   // Global default endpoint capability: False makes llm/base.py caption images to text
   // before the call instead of sending them inline.
   { id: '#setting-vision-enabled', prop: 'checked', key: 'vision_enabled' },
-  // CLI Agents: read-only extra-paths mount (bool). Dict-valued fields are hydrated manually
-  // in syncPoolSettings (after the POOL_SETTINGS_MAP loop) because they need per-harness DOM updates.
+  // CLI Agents: read-only extra-paths mount (bool) + per-harness minimum spacing between run
+  // starts (seconds; 0 = off). Dict-valued fields are hydrated manually in syncPoolSettings (after
+  // the POOL_SETTINGS_MAP loop) because they need per-harness DOM updates.
   { id: '#setting-cli-paths-ro', prop: 'checked', key: 'cli_agent_paths_ro' },
+  { id: '#setting-cli-rate-limit', prop: 'value', key: 'cli_agent_rate_limit_seconds' },
 ];
 
 // CLI Agents (call_cli_agent): dict-valued pool maps hydrated from the server snapshot.
@@ -6613,6 +6615,12 @@ function getGenerateCfg() {
   // full map (matches the full-map-replace handler contract).
   cfg.cli_agent_enabled = { ...cliAgentEnabledMap };
   cfg.cli_agent_models = { ...cliAgentModelsMap };
+  // Per-harness minimum spacing between run starts (seconds; 0 = off). Sent as a number so the
+  // config handler can store it; an empty/invalid box keeps the server's current value.
+  if ($('#setting-cli-rate-limit')) {
+    const _gap = parseFloat($('#setting-cli-rate-limit').value);
+    if (Number.isFinite(_gap) && _gap >= 0) cfg.cli_agent_rate_limit_seconds = _gap;
+  }
 
   if (defaultWorkspace && defaultWorkspace.textContent && defaultWorkspace.textContent !== 'Loading...') {
     cfg.default_workspace = defaultWorkspace.textContent.replace(' (Pending restart)', '').trim();
