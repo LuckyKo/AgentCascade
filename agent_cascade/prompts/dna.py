@@ -113,6 +113,13 @@ FUZZY_LOOP_FEEDBACK_MESSAGES: List[str] = [
     'ffs, get your shit together bro',
 ]
 
+# --- External CLI agent login probe -------------------------------------------------
+# Handed to a key-less external CLI (agy) as a one-shot prompt while establishing an OAuth
+# login session. The auth handshake fires before the model is reached, so this only runs a
+# real turn when the credential store is already populated; keep it trivial and side-effect
+# free (no tools, no file writes).
+CLI_AGENT_OAUTH_PROBE_PROMPT = 'Reply with the single word: ok'
+
 # --- Memory Compression ---
 COMPRESSION_MARKER = '--- CONTEXT COMPRESSED'
 COMPRESSION_END_MARKER = '--- END SUMMARY ---'  # Marker compressor must append; validated on output

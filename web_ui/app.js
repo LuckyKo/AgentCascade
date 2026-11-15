@@ -1856,6 +1856,85 @@ for (const btn of document.querySelectorAll('.cli-agent-key-btn')) {
   });
 }
 
+// OAuth login (antigravity): the server spawns a one-shot login container, emits the Google
+// consent URL, and we relay the pasted authorization code back. agy waits ~60s per attempt, so
+// an expiry is retryable: the "Authenticate" button simply starts a fresh session.
+const cliOauthBtn = document.querySelector('.cli-agent-oauth-btn[data-harness="antigravity"]');
+const cliOauthModal = document.getElementById('cli-agent-oauth-modal');
+const cliOauthCode = document.getElementById('cli-agent-oauth-code');
+const cliOauthStatus = document.getElementById('cli-agent-oauth-status');
+const cliOauthLink = document.getElementById('cli-agent-oauth-url');
+const cliOauthHarnessLabel = document.getElementById('cli-agent-oauth-harness');
+let cliOauthSessionId = null;
+let cliOauthHarness = 'antigravity';
+
+function setCliOauthBtn(label, disabled) {
+  if (!cliOauthBtn) return;
+  cliOauthBtn.textContent = label || 'Authenticate';
+  cliOauthBtn.disabled = !!disabled;
+}
+
+function setCliAgentAuthState(harness, authenticated) {
+  const el = document.querySelector('.cli-agent-auth-state[data-harness="' + harness + '"]');
+  if (el) el.textContent = authenticated ? 'authenticated ✓' : '';
+}
+
+function openCliOauthModal(url, windowSeconds) {
+  if (!cliOauthModal) return;
+  if (cliOauthHarnessLabel) cliOauthHarnessLabel.textContent = cliOauthHarness;
+  if (cliOauthLink) {
+    cliOauthLink.textContent = url || '';
+    cliOauthLink.href = url || '#';
+  }
+  if (cliOauthStatus) {
+    cliOauthStatus.textContent = windowSeconds
+      ? 'Waiting for the authorization code (the login window is ~' + windowSeconds +
+        's — if it expires, click Authenticate again).'
+      : 'Waiting for the authorization code.';
+  }
+  if (cliOauthCode) { cliOauthCode.value = ''; }
+  cliOauthModal.style.display = 'block';
+  if (cliOauthCode) cliOauthCode.focus();
+}
+
+function closeCliOauthModal() {
+  if (cliOauthModal) cliOauthModal.style.display = 'none';
+}
+
+if (cliOauthBtn) {
+  cliOauthBtn.addEventListener('click', () => {
+    cliOauthSessionId = null;
+    cliOauthHarness = cliOauthBtn.getAttribute('data-harness') || 'antigravity';
+    setCliOauthBtn('Waiting…', true);
+    send({ type: 'cli_agent_oauth_start', harness: cliOauthHarness });
+  });
+}
+
+if (document.getElementById('cli-agent-oauth-submit')) {
+  document.getElementById('cli-agent-oauth-submit').addEventListener('click', () => {
+    const code = (cliOauthCode && cliOauthCode.value ? cliOauthCode.value : '').trim();
+    if (!cliOauthSessionId) {
+      if (cliOauthStatus) cliOauthStatus.textContent = 'No active login session — click Authenticate again.';
+      return;
+    }
+    if (!code) {
+      if (cliOauthStatus) cliOauthStatus.textContent = 'Paste the authorization code first.';
+      return;
+    }
+    if (cliOauthStatus) cliOauthStatus.textContent = 'Exchanging the code…';
+    send({ type: 'cli_agent_oauth_submit', session_id: cliOauthSessionId, code });
+  });
+}
+
+if (document.getElementById('cli-agent-oauth-cancel')) {
+  document.getElementById('cli-agent-oauth-cancel').addEventListener('click', () => {
+    if (cliOauthSessionId) send({ type: 'cli_agent_oauth_cancel', session_id: cliOauthSessionId });
+    cliOauthSessionId = null;
+    closeCliOauthModal();
+    setCliOauthBtn('Authenticate', false);
+  });
+}
+
 // Two-phase loop detection UI: disable dependent inputs when feature is off
 function updateTwoPhaseInputsEnabled() {
     const enabled = document.getElementById('setting-loop-two-phase');
@@ -2788,6 +2867,52 @@ function handleServerMessage(data) {
       } else {
         showInSystemToastBar(`⚠️ KV ${data.action}: ${data.message}`);
       }
+      break;
+    }
+
+    case 'cli_agent_oauth_url': {
+      cliOauthSessionId = data.session_id || null;
+      cliOauthHarness = data.harness || 'antigravity';
+      setCliOauthBtn('Waiting…', true);
+      openCliOauthModal(data.url, data.window_seconds);
+      break;
+    }
+
+    case 'cli_agent_oauth_success': {
+      cliOauthSessionId = null;
+      closeCliOauthModal();
+      setCliOauthBtn('Authenticated ✓', false);
+      setCliAgentAuthState(data.harness || 'antigravity', true);
+      showInSystemToastBar(data.already_authenticated
+        ? `✅ ${data.harness || 'antigravity'} was already authenticated`
+        : `✅ ${data.harness || 'antigravity'} authenticated`);
+      break;
+    }
+
+    case 'cli_agent_oauth_failed': {
+      const oauthReason = data.reason || 'login failed';
+      const oauthHarness = data.harness || 'antigravity';
+      if (data.retryable) {
+        // agy's own auth window lapsed (or the exchange failed) — the volume is still empty, so
+        // a fresh session is a safe retry.
+        setCliOauthBtn('Retry authentication', false);
+        if (cliOauthStatus) {
+          cliOauthStatus.textContent = '⚠️ ' + oauthReason +
+            ' — click Retry authentication to start a fresh login window.';
+        }
+      } else {
+        cliOauthSessionId = null;
+        closeCliOauthModal();
+        setCliOauthBtn('Authenticate', false);
+        showInSystemToastBar(`⚠️ ${oauthHarness} login: ${oauthReason}`);
+      }
+      break;
+    }
+
+    case 'cli_agent_oauth_cancelled': {
+      cliOauthSessionId = null;
+      closeCliOauthModal();
+      setCliOauthBtn('Authenticate', false);
       break;
     }
 

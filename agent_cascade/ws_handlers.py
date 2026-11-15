@@ -91,6 +91,9 @@ class WsMessageHandler:
             'ask_security': self.handle_ask_security,
             'set_auto_security': self.handle_set_auto_security,
             'set_cli_agent_key': self.handle_set_cli_agent_key,
+            'cli_agent_oauth_start': self.handle_cli_agent_oauth_start,
+            'cli_agent_oauth_submit': self.handle_cli_agent_oauth_submit,
+            'cli_agent_oauth_cancel': self.handle_cli_agent_oauth_cancel,
             'set_afk': self.handle_set_afk,
             'edit_message': self.handle_edit_message,
             'delete_messages': self.handle_delete_messages,
@@ -1470,6 +1473,108 @@ class WsMessageHandler:
         from config.secrets_loader import set_secret
         set_secret(f'cli_{harness}_key', str(data.get('key') or ''))
         await self._broadcast()
+
+    async def _emit_cli_agent_oauth(self, payload: dict) -> None:
+        """Send one OAuth lifecycle event to the connected clients (no-op in unit harnesses)."""
+        broadcast = getattr(self, 'broadcast_fn', None)
+        if broadcast is not None:
+            await broadcast(payload)
+
+    async def _cli_agent_oauth_fail(self, harness: Optional[str], reason: str,
+                                    retryable: bool = False) -> None:
+        await self._emit_cli_agent_oauth({
+            'type': 'cli_agent_oauth_failed', 'harness': harness,
+            'reason': reason, 'retryable': retryable,
+        })
+
+    async def handle_cli_agent_oauth_start(self, data: dict) -> None:
+        """Start an interactive OAuth login (Web UI "Authenticate") for a key-less harness.
+
+        Validates the adapter's auth model and the configured volume, then drives the login
+        manager off the event loop (``start_session`` blocks while it waits for the CLI's URL).
+        Emits `cli_agent_oauth_url` (normal), `cli_agent_oauth_success` (volume already held a
+        valid sign-in) or `cli_agent_oauth_failed` (configuration/spawn problem).
+        """
+        harness = data.get('harness') or 'antigravity'
+        from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
+        try:
+            adapter = get_adapter(harness)
+        except HarnessNotFoundError:
+            await self._cli_agent_oauth_fail(harness, f"unknown harness '{harness}'")
+            return
+        if getattr(adapter, 'auth_type', 'api_key') != 'oauth':
+            await self._cli_agent_oauth_fail(
+                harness, f"'{harness}' authenticates with an API key, not OAuth")
+            return
+        from agent_cascade.engine.cli_agent_runner import _cli_agent_image, _resolve_auth_volume
+        volume = _resolve_auth_volume(self.agent_pool, adapter)
+        if not volume:
+            await self._cli_agent_oauth_fail(
+                harness, 'no OAuth credential volume configured '
+                         '(set cli_agent_agy_auth_volume in Settings → CLI Agents)')
+            return
+        image = _cli_agent_image(harness, self.agent_pool)
+        from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
+        manager = get_oauth_manager()
+        try:
+            session_id, url = await asyncio.to_thread(
+                manager.start_session, harness=harness, volume=volume, image=image)
+        except Exception as e:  # noqa: BLE001 — a failed login must not take down the WS loop
+            await self._cli_agent_oauth_fail(harness, f'could not start login: {e}', retryable=True)
+            return
+        state = manager.session_state(session_id) or {}
+        if state.get('state') == 'success':
+            await self._emit_cli_agent_oauth({
+                'type': 'cli_agent_oauth_success', 'harness': harness,
+                'already_authenticated': True, 'session_id': session_id,
+            })
+            await self._broadcast()
+            return
+        if not url:
+            await self._cli_agent_oauth_fail(
+                harness, state.get('error') or 'the CLI printed no authorization URL',
+                retryable=bool(state.get('retryable')))
+            return
+        from agent_cascade.settings import CLI_AGENT_OAUTH_WINDOW_SECONDS
+        await self._emit_cli_agent_oauth({
+            'type': 'cli_agent_oauth_url', 'harness': harness, 'session_id': session_id,
+            'url': url, 'window_seconds': CLI_AGENT_OAUTH_WINDOW_SECONDS, 'retryable': True,
+        })
+
+    async def handle_cli_agent_oauth_submit(self, data: dict) -> None:
+        """Relay the pasted authorization code; report success / failure / retryable expiry."""
+        session_id = data.get('session_id')
+        if not session_id or not isinstance(session_id, str):
+            return
+        from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
+        manager = get_oauth_manager()
+        ok = await asyncio.to_thread(manager.submit_code, session_id, str(data.get('code') or ''))
+        state = manager.session_state(session_id) or {}
+        harness = state.get('harness') or data.get('harness') or 'antigravity'
+        if ok:
+            await self._emit_cli_agent_oauth({
+                'type': 'cli_agent_oauth_success', 'harness': harness, 'session_id': session_id,
+            })
+            await self._broadcast()
+            return
+        await self._cli_agent_oauth_fail(
+            harness, state.get('error') or 'the authorization code was rejected',
+            retryable=bool(state.get('retryable')) or state.get('state') == 'expired')
+
+    async def handle_cli_agent_oauth_cancel(self, data: dict) -> None:
+        """Cancel an in-flight login (kills its container)."""
+        session_id = data.get('session_id')
+        if not session_id or not isinstance(session_id, str):
+            return
+        from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
+        manager = get_oauth_manager()
+        await asyncio.to_thread(manager.cancel_session, session_id)
+        state = manager.session_state(session_id) or {}
+        await self._emit_cli_agent_oauth({
+            'type': 'cli_agent_oauth_cancelled',
+            'harness': state.get('harness') or data.get('harness') or 'antigravity',
+            'session_id': session_id,
+        })
 
     async def handle_set_afk(self, data: dict) -> None:
         """Handle 'set_afk' — toggle the server-backed AFK flag.

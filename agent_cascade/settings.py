@@ -783,6 +783,17 @@ CLI_AGENT_IMAGE_MAX_AGE_DAYS: int = int(os.getenv('M6_CLI_AGENT_IMAGE_MAX_AGE_DA
 #: '' or '0' = OFF: no volume is mounted and the user supplies credentials another way.
 CLI_AGENT_AGY_AUTH_VOLUME: str = os.getenv('M6_CLI_AGENT_AGY_AUTH_VOLUME', 'cli_agent_agy_auth')
 
+# Interactive OAuth login session timings (UI-driven "Authenticate" for a key-less harness).
+#: agy's own auth wait before it gives up and exits; surfaced to the UI as a countdown hint.
+#: It is NOT configurable in agy (--print-timeout does not extend it) — this is advisory only.
+CLI_AGENT_OAUTH_WINDOW_SECONDS: int = 60
+#: How long start_session blocks waiting for the CLI to print its authorization URL (seconds).
+CLI_AGENT_OAUTH_URL_WAIT_SECONDS: int = 30
+#: How long submit_code waits for the container to exchange the code and exit (seconds).
+CLI_AGENT_OAUTH_SUBMIT_WAIT_SECONDS: int = 30
+#: Idle lifetime of a login session before the lazy reaper kills its container (seconds).
+CLI_AGENT_OAUTH_SESSION_TTL_SECONDS: int = 180
+
 
 def cli_agent_default_image(harness: str) -> str:
     """Default Docker image tag for a CLI harness. antigravity resolves to its dedicated
