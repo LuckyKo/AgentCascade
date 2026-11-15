@@ -661,7 +661,10 @@ class MemoryHintManager:
         best-effort; under the clip the posterior is well-formed (a, b ≥ 0), degenerate only
         in the ``p̄ = 1.0`` edge. The two draws run under the bandit lock so the shared RNG
         stays atomic when a harness drives the worker from multiple threads (CPython's
-        ``random.Random`` is not thread-safe)."""
+        ``random.Random`` is not thread-safe). The MEMORY bandit has no independent sampler —
+        its ``_value_rank`` draws route through this SAME method, so they serialize under this
+        shared ``_skill_bandit_lock``/``_skill_bandit_rng`` too; ``_memory_bandit_lock`` guards
+        the memory bandit's own state (ledger mirror / p̄ / fire-rate bar), NOT sampling."""
         if a <= 0.0 or b <= 0.0:
             tot = a + b
             return (a / tot) if tot > 0.0 else 0.0

@@ -68,12 +68,12 @@ class _FakeInst:
         self._skill_hint_counts = {}
 
 
-def _make_mgr(tmp_path):
+def _make_mgr(tmp_path, skill_manager=None):
     """Build a manager over a real (but irrelevant) vault so construction is valid, then the
     test installs a _StubMatcher and seeds _memory_stats. The vault lessons never compete with
     the stubbed matcher, so only the stub drives the gate."""
     v = tmp_path / 'proj' / '.agent_lessons'
-    v.mkdir(parents=True)
+    v.mkdir(parents=True, exist_ok=True)
     p = v / 'bandit-test.md'
     p.write_text(
         '---\nname: Bandit Test\ndescription: filler\ntags: [test]\n---\nfiller body.\n',
@@ -86,7 +86,7 @@ def _make_mgr(tmp_path):
             'memory_hint_cooldown_seconds': 5.0,
             'memory_hint_query_chars': 1000,
         },
-        skill_manager=None,
+        skill_manager=skill_manager,
         operation_manager=SimpleNamespace(
             base_dir=str(v.parent), extra_work_folders_ro=[], extra_work_folders_rw=[]),
         get_instance=None,
@@ -142,6 +142,24 @@ def _bandit_on(monkeypatch, weight=1.0):
     monkeypatch.setattr(manager_mod, 'MEMORY_BANDIT_WEIGHT', weight)
 
 
+def _settings_skill():
+    """Settings dict for driving the skill sub-pipeline (mirrors test_skill_hint_bandit)."""
+    return {'skill_suggestions': True, 'cooldown_seconds': 5.0, 'skill_threshold': 0.0}
+
+
+def _neutralize_skill_gates(mgr, monkeypatch):
+    """Neutralise the skill adaptive floor / EWMA feed and the content gate so the skill path
+    reaches the Gate-4 bandit block (mirrors test_skill_hint_bandit._neutralize_gates). Used by
+    the _value_rank delegation test, which drives the skill pipeline to prove the shared call
+    site."""
+    mgr._current_skill_floor = lambda threshold=0.0: 0.0
+    mgr._update_skill_floor = lambda *a, **k: None
+    monkeypatch.setattr(manager_mod, 'filter_stopword_only_names',
+                        lambda query, names, sm: list(names))
+    monkeypatch.setattr(manager_mod, 'describe_dropped',
+                        lambda query, kept, candidates, sm: '')
+
+
 def _determinize_sampler(mgr):
     """Make Thompson Sampling deterministic (θ = posterior mean) so ranking tests are
     reproducible. Mirrors _determinize_sampler for the skill bandit (same shared _sample_beta)."""
@@ -171,17 +189,38 @@ def test_default_off_is_raw_score_order_byte_identical(tmp_path, monkeypatch):
     assert out == [LOW, HIGH, BASE], 'bandit OFF must yield the raw score-descending order'
 
 
-def test_default_off_writes_no_hints_field(tmp_path, monkeypatch):
-    """The default-OFF deploy must not touch the new ledger field or the sidecar. The hints
-    bump is weight-gated; with weight=0 nothing renders through it and no hints appear."""
+def test_memory_hint_bump_is_weight_gated(tmp_path, monkeypatch):
+    """The per-lesson `hints` ledger bump is WEIGHT-GATED in ``_process_job`` (the
+    ``if MEMORY_BANDIT_WEIGHT > 0.0 and memory_bare:`` branch).
+    Drive the real deploy path with ``bump_hint_count`` spied: with MEMORY_BANDIT_WEIGHT=0.0 the
+    OFF deploy must NOT bump (the default deploy writes nothing new); with it >0.0 and a real
+    lesson actually rendered, the spy IS called — proving the gate, not merely its absence.
+
+    The stub matcher returns a bare path that EXISTS on disk in the test vault so
+    _resolve_vault_root resolves it and the weight>0 branch reaches bump_hint_count."""
+    from agent_cascade.memory_hint import stats as stats_mod
+    calls = []
+    # bump_hint_count is a function-local import inside _process_job, so patch the module attr
+    # it resolves at call time (not the manager's name).
+    monkeypatch.setattr(stats_mod, 'bump_hint_count', lambda root, rel: calls.append(rel))
+
+    # OFF deploy: a rendered lesson must NOT bump the hints ledger.
     monkeypatch.setattr(manager_mod, 'MEMORY_BANDIT_WEIGHT', 0.0)
-    mgr, inst, _ = _make_mgr(tmp_path)
-    _install_stub(mgr, [('a.md', 0.80), ('b.md', 0.60)])
+    mgr, _inst, _ = _make_mgr(tmp_path)
+    _install_stub(mgr, [('bandit-test.md', 0.80)])   # bare path that exists on disk in the vault
     _neutralize_gates(mgr, monkeypatch)
-    _run_match(mgr, inst)
-    # _bump_memory_mirror_hints only fires from _process_job's gated block; the bandit block
-    # itself never writes the ledger. Confirm the seeded mirror stays empty / unwritten.
-    assert mgr._memory_stats == {} or all(v.get('hints', 0) == 0 for v in mgr._memory_stats.values())
+    mgr._process_job(_job())
+    assert calls == [], 'MEMORY_BANDIT_WEIGHT=0.0 must write nothing to the hints ledger'
+
+    # ON deploy: the same rendered lesson MUST bump. A fresh manager so the OFF run's cooldown
+    # cannot suppress the re-fire (the gate is `MEMORY_BANDIT_WEIGHT > 0.0 and memory_bare`).
+    monkeypatch.setattr(manager_mod, 'MEMORY_BANDIT_WEIGHT', 1.0)
+    mgr2, _inst2, _ = _make_mgr(tmp_path)
+    _install_stub(mgr2, [('bandit-test.md', 0.80)])
+    _neutralize_gates(mgr2, monkeypatch)
+    mgr2._process_job(_job())
+    assert 'bandit-test.md' in calls, ('weight>0.0 with a rendered lesson must bump its '
+                                       'hints ledger via bump_hint_count')
 
 
 # ── (b) Bandit re-rank orders high value first (ACCEPTANCE case) ───────────────
@@ -202,7 +241,6 @@ def test_high_reread_outranks_high_match_low_reread_at_equal_cosine(tmp_path, mo
     out = _run_match(mgr, inst)
     assert out[0] == HIGH, ('acceptance: the high-re-read lesson must outrank the equal-cosine '
                             'low-read one')
-    assert out == [HIGH, LOW, BASE] or out[0] == HIGH, 'bandit must have reordered HIGH above LOW'
 
 
 def test_bandit_promotes_high_value_above_zero_value_same_relevance(tmp_path, monkeypatch):
@@ -369,7 +407,8 @@ def test_bar_at_bound_never_blanks_the_hint(tmp_path, monkeypatch):
     mgr._memory_bandit_bar = manager_mod.MEMORY_BANDIT_THETA_MAX   # extreme bar
     out = _run_match(mgr, inst)
     assert out, 'bandit must never blank the hint at the θ_max bound'
-    assert all(0 <= x <= 3 for x in [len(out)])
+    assert out == [A, B, C], ('admitted-empty at the extreme bar must fall back to the raw '
+                              'score-descending order, never a partial reorder')
 
 
 def test_empty_ledger_degrades_to_raw_order(tmp_path, monkeypatch):
@@ -440,15 +479,52 @@ def test_bandit_knobs_read_from_settings_at_import_defaults(tmp_path):
     assert manager_mod.MEMORY_BANDIT_M_FLOOR == 0.35
 
 
-def test_value_rank_is_shared_with_skill_pipeline():
-    """The memory bandit reuses the SAME _value_rank helper the skill pipeline uses (DRY)."
-    Confirm both the skill and memory call sites are present and share the one implementation."""
-    import inspect
-    src = inspect.getsource(MemoryHintManager._value_rank)
-    # One shared implementation: _value_rank is the single re-rank entry point.
-    mgr = MemoryHintManager.__dict__
-    assert '_value_rank' in mgr
-    assert '_memory_pbar' in mgr and '_refresh_memory_stats' in mgr
+def test_value_rank_delegates_shared_helper_from_both_pipelines(tmp_path, monkeypatch):
+    """The memory and skill pipelines must BOTH delegate to the one shared _value_rank helper,
+    each passing its OWN ``neutral_keys``: the skill pipeline passes ``{'self-augmentation'}``
+    (its synthetic self-improvement skill is never value-ranked) and the memory pipeline passes
+    an EMPTY set (it has no such key). This drives the real call sites through a recording spy,
+    so it FAILS if either pipeline stops delegating — unlike a ``__dict__`` membership check,
+    which a helper the caller never invokes would still pass. (Replaces the prior existence-only
+    test, whose ``src`` binding was dead and which asserted nothing about delegation.)"""
+    real_vr = MemoryHintManager._value_rank
+    seen = []
+
+    def _spy(self, *args, **kwargs):
+        # Effective neutral_keys: the skill site passes it as a kwarg; the memory site relies on
+        # the frozenset() default, so capture both shapes.
+        seen.append(kwargs.get('neutral_keys', frozenset()))
+        return real_vr(self, *args, **kwargs)
+    monkeypatch.setattr(MemoryHintManager, '_value_rank', _spy)
+
+    # ── skill path: must delegate with neutral_keys={'self-augmentation'} ──
+    class _StubSkillManager:
+        def match_skills(self, query):
+            return [('skill-a', 0.55), ('skill-b', 0.45)]   # both clear SKILL_JUNK_MIN=0.0375
+        def get_metrics(self):
+            return {'skill-a': {'total_loads': 20, 'hints': 20},
+                    'skill-b': {'total_loads': 0, 'hints': 20}}
+    sm = _StubSkillManager()
+    monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_WEIGHT', 1.0)
+    mgr_skill, inst_skill, _ = _make_mgr(tmp_path, skill_manager=sm)
+    _neutralize_skill_gates(mgr_skill, monkeypatch)
+    seen.clear()
+    mgr_skill._match_skills_for_hint(_job(), _settings_skill(), inst_skill)
+    assert len(seen) == 1, 'skill pipeline must delegate to _value_rank exactly once'
+    assert seen[0] == {'self-augmentation'}, (
+        "skill pipeline must pass neutral_keys={'self-augmentation'} to the shared helper")
+
+    # ── memory path: must delegate with an EMPTY neutral_keys ──
+    monkeypatch.setattr(manager_mod, 'MEMORY_BANDIT_WEIGHT', 1.0)
+    mgr_mem, inst_mem, _ = _make_mgr(tmp_path)
+    _install_stub(mgr_mem, [('x', 0.80), ('y', 0.60)])
+    _seed_ledger(mgr_mem, {'x': {'reads': 10, 'hints': 10}, 'y': {'reads': 0, 'hints': 10}})
+    _neutralize_gates(mgr_mem, monkeypatch)
+    _determinize_sampler(mgr_mem)
+    seen.clear()
+    _run_match(mgr_mem, inst_mem)
+    assert len(seen) == 1, 'memory pipeline must delegate to _value_rank exactly once'
+    assert not seen[0], 'memory pipeline has no neutral key; neutral_keys must be empty'
 
 
 # ── (h) Sidecar int → dict migration round-trip ───────────────────────────────
