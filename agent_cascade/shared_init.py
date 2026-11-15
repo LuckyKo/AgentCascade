@@ -363,10 +363,32 @@ def initialize_mcp_servers(agent_pool, project_root) -> None:
         # Templates (Assistant/FnCallAgent) carry function_map; AgentInstance does not.
         # Registering into instances instead would raise AttributeError (see memory).
         all_templates = list(agent_pool.templates.values())
+
+        from agent_cascade.tools.mcp_manager import MCPManager
+        from agent_cascade import settings
+
+        if settings.MCP_LAZY_CONNECT:
+            # Lazy mode (BUG_0310 follow-up, directive #1): park every server + register stub
+            # tool objects from the metadata cache, connecting ZERO of them — so the
+            # synchronous `mcp_connect` phase measures ≈0. Any cold/stale server is
+            # interrogated by a background one-shot daemon thread (if cold-interrogation is
+            # enabled), OFF this phase. No mcp_handler needed on this path.
+            with boot_timing.Phase('mcp_connect'):
+                result = MCPManager().init_lazy(mcp_servers, all_templates)
+            logger.info('[INIT] MCP lazy: parked=%d stubs=%d cold=%d connected=0',
+                        result['parked'], result['registered'], len(result['cold']))
+            return
+
+        # Eager path (AGENT_CASCADE_MCP_LAZY_CONNECT=0 kill-switch): the EXACT previous
+        # connect-at-boot behavior, unchanged.
+        mcp_handler = CONFIG_HANDLERS.get('mcpServers')
+        if not mcp_handler:
+            logger.warning('[INIT] No handler registered for "mcpServers" (skipping MCP startup)')
+            return
+
         with boot_timing.Phase('mcp_connect'):
             mcp_handler({'mcpServers': mcp_servers}, agent_pool, all_templates)
 
-        from agent_cascade.tools.mcp_manager import MCPManager
         mcp_mgr = MCPManager()
         if mcp_mgr._connected_servers:
             logger.info('[INIT] MCP servers initialized: %s', list(mcp_mgr._connected_servers.keys()))

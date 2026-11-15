@@ -336,6 +336,23 @@ class ToolSearch(BaseTool):
                 _loaded = set(ranked)
                 for name in [n for n in _unl if n in _loaded]:
                     _unl.remove(name)
+            # Lazy connect (BUG_0310 follow-up, Q1 primary trigger): fire-and-forget pre-warm
+            # of the parked server(s) behind the tools just unlocked, on a background daemon
+            # thread, so THIS call never blocks on connect latency (tool_search itself runs in
+            # the dispatcher's generic branch, so an inline connect would also make it
+            # DMS-vulnerable). The dispatcher pre-flight is the correctness backstop; this is
+            # the latency-hiding path (the server is usually live by the time the agent calls).
+            try:
+                from agent_cascade import settings
+                if settings.MCP_LAZY_CONNECT:
+                    from agent_cascade.tools.mcp_manager import MCPManager
+                    _pool = getattr(kwargs.get('agent_obj'), 'pool', None)
+                    if _pool is not None:
+                        _mgr = MCPManager()
+                        _mgr.ensure_connected_async(
+                            [_mgr.server_for_tool(n) for n in ranked], _pool)
+            except Exception as e:  # noqa: BLE001 — must never break the search envelope
+                logger.debug('tool_search lazy-connect skipped: %s', e)
             message = (f'Unlocked {len(ranked)} MCP tool(s) — available on your NEXT call: '
                        f'{', '.join(ranked)}. Call them directly; you do not need to re-search to use them.')
         else:

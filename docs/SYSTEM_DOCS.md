@@ -1526,6 +1526,47 @@ The `functions=` array is serialized into the prompt **right after the system pr
 
 > **Note:** an earlier plan claimed the "append-only discovered tail preserves the prefix." That is **false** for a prefix-based KV cache — appending to the serialized tool array changes the prefix, so *every* unlock is a full prefill. The deferral win is token savings, not cache preservation.
 
+### 11.4 Lazy / on-use MCP connect (BUG_0310 follow-up)
+
+Historically every enabled MCP server was connected **eagerly at boot** (`shared_init.initialize_mcp_servers`
+→ `MCPManager().initConfig`), so a single slow `npx`/`uvx` spawn added its full connect+handshake to the
+synchronous `mcp_connect` boot phase (~3.7 s warm median for the default two-server config — measured with
+`plans/bug0310_probe.py`). Boot also disconnected nothing on tool-disable, so a fully-disabled server stayed a
+live idle cost.
+
+`AGENT_CASCADE_MCP_LAZY_CONNECT` (default **ON**) changes boot to a **park-at-boot, connect-on-first-use** model:
+
+- **Boot parks every enabled server, connects ZERO.** `MCPManager().init_lazy` registers **stub tool objects** —
+  real name/description/`{type,properties,required}` schema read from `config/mcp_tools_cache.json`, but with a
+  sentinel `client_id` and no live client — into every template's `function_map`. Keeping stubs in the map is
+  required: the deferred-tool universe that `tool_search` ranks/catalogs is `function_map ∩ is_mcp_tool`, so
+  without stubs a parked server's tools would be undiscoverable. The `mcp_connect` phase now measures ≈0.
+  If the cache is cold/stale for a server, boot spawns **one bounded one-shot daemon thread** (connect→
+  `tools/list`→disconnect→park) to populate it *off* the boot thread; suppress with
+  `AGENT_CASCADE_MCP_LAZY_CONNECT_TIMEOUT_S`/`AGENT_CASCADE_MCP_LAZY_COLD_INTERROGATE=0` (the latter is how
+  `bug0310_probe.py` keeps the measured phase free of any real subprocess).
+- **First use connects.** Two triggers: `tool_search` unlock (primary, fires a best-effort **off-thread**
+  pre-warm so the search call never pays connect latency) and a **dispatcher pre-flight** in
+  `tool_dispatcher._maybe_lazy_connect_mcp` (mandatory backstop — a *reloaded* session re-offers previously
+  discovered MCP tools with no `tool_search` this turn). The pre-flight connects the server, whose live tools
+  **overwrite** the stub in `function_map` before `_call_tool` re-reads it (same turn). A per-server
+  `threading.Event` single-flight guard (not `_mcp_lock`, which is a plain non-reentrant `Lock`) makes
+  concurrent first-use share one connect. Connect is bounded (`MCP_LAZY_CONNECT_TIMEOUT_S`, per-step) and
+  best-effort: a failure leaves the stub, which returns the graceful "MCP server disconnected" error instead
+  of wedging the turn. The pre-flight sets its own DMS `_in_blocking_tool` bound from
+  `mcp_manager.lazy_connect_dms_bound` (= 2×timeout + teardown margin, always ≥ the real connect worst-case)
+  so the holder is never DMS-killed mid-connect.
+- **All-disabled → off.** `pool.set_ui_disabled_tools` calls `MCPManager().apply_ui_disabled`: when every tool
+  of a server is disabled for **every** agent (individually, or via the `__all_mcp_tools__` sentinel), the server
+  is suppressed (and disconnected if somehow live) so it is never connected. Re-enabling any of its tools
+  restores it to parked. Config `enabled:false` is a separate, permanent suppression a tool-toggle never
+  revives. v1 reads only the **UI** disable cache; template-config/baseline disables are v2 hardening.
+
+**Kill-switch:** `AGENT_CASCADE_MCP_LAZY_CONNECT=0` restores the exact prior eager connect-at-boot path
+(`shared_init` uses the untouched `mcpServers` handler; the off-hook is gated off), byte-for-byte.
+
+---
+
 ---
 
 ## 12. External CLI Agents (`call_cli_agent`)

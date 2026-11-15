@@ -24,7 +24,8 @@ import threading
 import time
 import uuid
 from contextlib import AsyncExitStack
-from typing import Dict, Optional, Union
+from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -42,6 +43,41 @@ from agent_cascade.utils.media_utils import save_media_to_media, MediaStorageErr
 # failed") — boot continues WITHOUT MCP, no new crash path. The drop is logged loudly so it
 # is never a silent "MCP quietly disabled".
 MCP_CONNECT_TIMEOUT_S: float = float(os.getenv('AGENT_CASCADE_MCP_CONNECT_TIMEOUT_S', 60.0))
+
+
+# BUG_0310 follow-up — lazy / on-use connect. Teardown margin added to the dispatcher's
+# DMS `_in_blocking_tool` bound around an on-use connect (see lazy_connect_dms_bound), so
+# the holder is shielded slightly past the hard connect cap.
+_MCP_CONNECT_TEARDOWN_MARGIN_S: float = 5.0
+
+
+# Canonical location of the lazy tool-metadata cache (config/mcp_tools_cache.json).
+# mcp_manager.py lives at <root>/agent_cascade/tools/, so repo root is grandparent.
+MCP_TOOLS_CACHE_PATH: Path = Path(__file__).resolve().parent.parent.parent / 'config' / 'mcp_tools_cache.json'
+
+
+def _lazy_settings():
+    """Lazy accessor for agent_cascade.settings. Imported inside functions (NOT at module
+    top) because mcp_manager is imported early in agent_cascade's own import chain and a
+    top-level `from agent_cascade import settings` can hit a partially-initialized package."""
+    from agent_cascade import settings as _s
+    return _s
+
+
+def lazy_connect_dms_bound(timeout_s: Optional[float] = None) -> float:
+    """Return the `_in_blocking_tool` bound to wrap an ensure_connected() call so the holder
+    is not DMS-terminated during a legitimately-slow bounded connect.
+
+    connect_server applies its timeout to BOTH the connect handshake AND the tools/list
+    step sequentially, so the calling thread can block up to 2×timeout_s wall-clock. The
+    bound is derived from the SAME knob (settings.MCP_LAZY_CONNECT_TIMEOUT_S) plus a
+    teardown margin, so it is always ≥ the real connect worst-case — never shorter, which
+    would let the DMS kill a holder mid-connect-tail (the wedging/clobber the directive
+    calls out). Mirrors the call_cli_agent _CLI_AGENT_TEARDOWN_MARGIN_S pattern.
+    """
+    if timeout_s is None:
+        timeout_s = _lazy_settings().MCP_LAZY_CONNECT_TIMEOUT_S
+    return 2 * float(timeout_s) + _MCP_CONNECT_TEARDOWN_MARGIN_S
 
 
 class MCPManager:
@@ -70,7 +106,23 @@ class MCPManager:
             self.clients: dict = {}
             self._connected_servers: dict[str, str] = {}  # server_name:config_hash → client_id
             self._server_tools: dict[str, list] = {}  # server_name → cached tools (for re-registration)
-            self._mcp_lock = threading.Lock()  # Guards _connected_servers/_server_tools vs shutdown()
+            self._mcp_lock = threading.Lock()  # Guards _connected_servers/_server_tools/_parked_servers/_connecting/_suppressed/_tool_server_map vs shutdown()
+            # Lazy / on-use connect state (BUG_0310 follow-up). All guarded by _mcp_lock.
+            # _parked_servers: server_name → conn_config (config known, NO live client).
+            # _connecting: server_name → threading.Event; the in-flight single-flight guard
+            #   (Q4: NOT _mcp_lock — that is a plain Lock with no wait/notify).
+            # _suppressed: servers turned off (all tools disabled for every agent, OR
+            #   config enabled:false) — ensure_connected refuses them.
+            # _config_disabled: subset of _suppressed from enabled:false; a tool-toggle can
+            #   never un-suppress these (unlike UI-disable-driven suppressions).
+            # _tool_server_map: register_name → server_name; canonical reverse map so a
+            #   hyphenated server (e.g. chrome-devtools) is resolved correctly (split('-')[0]
+            #   is WRONG for it — Q1 caveat).
+            self._parked_servers: dict[str, dict] = {}
+            self._connecting: dict[str, threading.Event] = {}
+            self._suppressed: set[str] = set()
+            self._config_disabled: set[str] = set()
+            self._tool_server_map: dict[str, str] = {}
             self.loop = asyncio.new_event_loop()
             self.loop_thread = threading.Thread(target=self.start_loop, daemon=True)
             self.loop_thread.start()
@@ -451,9 +503,12 @@ class MCPManager:
         return True
 
     def connect_server(self, server_name: str, server_config: dict,
-                       templates: list) -> bool:
+                       templates: list, timeout_s: Optional[float] = None) -> bool:
         """Connect one MCP server and register its tools with all agent templates.
-        Returns True on success (including if already connected), False on failure."""
+        Returns True on success (including if already connected), False on failure.
+        timeout_s bounds BOTH the connect handshake and the tools/list step; None → 30 s
+        (the value hardcoded before parameterization, so the UI toggle path is unchanged)."""
+        _step_timeout = timeout_s if timeout_s is not None else 30.0
         # Strip 'enabled' before hashing — it is a UI concern, not a connection
         # parameter, so the fingerprint stays stable across toggles.
         conn_config = {k: v for k, v in server_config.items() if k != 'enabled'}
@@ -474,7 +529,7 @@ class MCPManager:
             asyncio.run_coroutine_threadsafe(
                 client.connection_server(
                     mcp_server_name=server_name, mcp_server=conn_config),
-                self.loop).result(timeout=30)
+                self.loop).result(timeout=_step_timeout)
         except Exception as e:
             logger.error("Failed to connect MCP server '%s': %s", server_name, e)
             return False
@@ -487,7 +542,7 @@ class MCPManager:
         try:
             new_tools = asyncio.run_coroutine_threadsafe(
                 self._build_tools_for_client(client, server_name, client_id),
-                self.loop).result(timeout=30)
+                self.loop).result(timeout=_step_timeout)
         except Exception as e:
             logger.error(
                 "Failed to create tools for MCP server '%s': %s", server_name, e)
@@ -498,20 +553,417 @@ class MCPManager:
                 pass
             return False
 
-        # Register tools in all templates.
+        # Register tools in all templates. A lazy stub may already occupy the slot
+        # (register_stubs parked this server with placeholder schema); the LIVE tool MUST
+        # overwrite it — that is the whole point of the on-use connect. Any other
+        # pre-existing (non-stub) entry is left untouched to preserve the original
+        # no-clobbering behavior for name collisions with core tools / another server.
         for template in templates:
             for tool in new_tools:
-                if tool.name not in template.function_map:
+                existing = template.function_map.get(tool.name)
+                if existing is None or getattr(existing, '_mcp_stub', False):
                     template.function_map[tool.name] = tool
 
         with self._mcp_lock:
             self.clients[client_id] = client
             self._connected_servers[_guard_key] = client_id
             self._server_tools[server_name] = new_tools
+            # Keep the canonical name→server reverse map authoritative for live tools too
+            # (stubs populated it; this corrects it whether the server was parked-then-
+            # connected or connected directly).
+            for tool in new_tools:
+                self._tool_server_map[tool.name] = server_name
 
         logger.info("MCP server '%s' connected (%d tools registered).",
                     server_name, len(new_tools))
         return True
+
+    # ── Lazy / on-use connect (BUG_0310 follow-up) ──────────────────────────────
+    # All helpers below must NOT be called with _mcp_lock already held (they acquire it
+    # themselves; _mcp_lock is a plain threading.Lock — non-reentrant).
+
+    def is_parked(self, server_name: str) -> bool:
+        """True iff server_name is registered but NOT connected and NOT mid-connect — i.e.
+        a genuine candidate for a lazy on-use connect."""
+        with self._mcp_lock:
+            return (server_name in self._parked_servers
+                    and self._find_connected_key(server_name) is None
+                    and server_name not in self._connecting)
+
+    def is_suppressed(self, server_name: str) -> bool:
+        """True iff the server is turned off (all tools disabled for every agent, or config
+        enabled:false). ensure_connected refuses suppressed servers."""
+        with self._mcp_lock:
+            return server_name in self._suppressed
+
+    def _is_connected(self, server_name: str) -> bool:
+        with self._mcp_lock:
+            return self._find_connected_key(server_name) is not None
+
+    def server_for_tool(self, tool_name: str) -> Optional[str]:
+        """Resolve the server that owns a registered MCP tool. Uses the canonical
+        _tool_server_map (a name like 'chrome-devtools-click' must NOT be split on '-', so
+        split('-')[0] would wrongly yield 'chrome'). Falls back to the legacy prefix split
+        only when the map has no entry (a tool registered on a path that predates lazy mode)."""
+        with self._mcp_lock:
+            srv = self._tool_server_map.get(tool_name)
+        if srv is not None:
+            return srv
+        return tool_name.split('-')[0] if '-' in tool_name else None
+
+    @staticmethod
+    def _conn_config_and_hash(server: dict) -> tuple:
+        """(conn_config, 8-char fingerprint) — strips 'enabled' so the hash is stable across
+        UI toggles. Mirrors the hashing already done in init_config_async / connect_server."""
+        conn_config = {k: v for k, v in server.items() if k != 'enabled'}
+        h = hashlib.md5(
+            json.dumps(conn_config, sort_keys=True, default=str).encode()
+        ).hexdigest()[:8]
+        return conn_config, h
+
+    def _load_tools_cache(self) -> dict:
+        """Read config/mcp_tools_cache.json (lazy tool-metadata cache). {} if absent/bad."""
+        try:
+            text = MCP_TOOLS_CACHE_PATH.read_text(encoding='utf-8')
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:  # noqa: BLE001 — a corrupt cache must never break boot
+            logger.warning('[MCP-lazy] could not parse %s (%s); treating as cold.',
+                           MCP_TOOLS_CACHE_PATH, e)
+            return {}
+
+    def _save_tools_cache(self, cache: dict) -> None:
+        """Persist the tool-metadata cache (best-effort; boot/interrogation must not crash on
+        a write error — a cold cache just means tools resurface after the next refresh)."""
+        try:
+            MCP_TOOLS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = MCP_TOOLS_CACHE_PATH.with_suffix('.tmp')
+            tmp.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding='utf-8')
+            tmp.replace(MCP_TOOLS_CACHE_PATH)  # atomic-ish on same volume
+        except Exception as e:  # noqa: BLE001
+            logger.warning('[MCP-lazy] could not write %s: %s', MCP_TOOLS_CACHE_PATH, e)
+
+    def create_stub_tool_class(self, register_name: str, tool_desc: str,
+                               tool_parameters: dict):
+        """Build a STUB tool instance for a parked server (lazy mode). Mirrors create_tool_class
+        but carries no live client: real schema (so tool_search can rank/catalog it) + a sentinel
+        client_id so a direct call hits the existing graceful 'MCP server disconnected' path.
+        In practice the dispatcher pre-flight connects + OVERWRITES the stub before _call_tool,
+        so the call path is only reached if a connect failed (best-effort degrade). Adds the name
+        to the deferred-universe set (_registered_tool_names → is_mcp_tool)."""
+        self._registered_tool_names.add(register_name)
+
+        class _StubTool(BaseTool):
+            _mcp_stub = True
+            name = register_name
+            description = tool_desc
+            parameters = tool_parameters
+            client_id = None
+
+            def call(self, params, **kwargs) -> str:
+                return ('Error: MCP server disconnected — this tool is not currently '
+                        'available. (lazy server not connected)')
+
+        _StubTool.__name__ = f'{register_name}_Stub'
+        return _StubTool()
+
+    def register_stubs(self, server_name: str, conn_config: dict, tools: list,
+                       templates: list) -> int:
+        """Materialize stub tool objects for a parked server so its tools stay discoverable
+        (deferred universe = function_map ∩ is_mcp_tool) WITHOUT a live connection (Q8).
+        `tools` is a list of {'name' (full register_name), 'description', 'parameters'} in the
+        cleaned {type,properties,required} schema shape (H4 — raw MCP inputSchema would yield
+        empty candidate docs). Idempotent; NEVER overwrites a live (non-stub) tool. Returns the
+        number of stubs newly registered."""
+        registered = 0
+        for meta in tools:
+            register_name = meta.get('name')
+            if not register_name:
+                continue
+            parameters = meta.get('parameters') or {'type': 'object', 'properties': {}, 'required': []}
+            stub = self.create_stub_tool_class(register_name, meta.get('description', ''), parameters)
+            with self._mcp_lock:
+                self._tool_server_map[register_name] = server_name
+            for template in templates:
+                existing = getattr(template, 'function_map', {}).get(register_name)
+                if existing is not None and not getattr(existing, '_mcp_stub', False):
+                    continue  # live (or foreign) tool present — leave it alone
+                template.function_map[register_name] = stub
+            registered += 1
+        return registered
+
+    def init_lazy(self, mcp_servers: dict, templates: list) -> dict:
+        """Lazy boot registration (BUG_0310, directive #1). Park every server, register STUBS
+        from the metadata cache, connect NOTHING — so the synchronous `mcp_connect` boot phase
+        measures ≈0. Per server:
+          · enabled:false → hard-disabled: added to _config_disabled + _suppressed, NO stubs.
+          · enabled + cache fresh (config_hash matches + has tools) → register stubs, park.
+          · enabled + cache cold/stale → park (still connectable by config); collect for
+            background interrogation (if enabled) which registers stubs once metadata lands.
+        Rebuilds the lazy registries (runtime UI suppressions re-derive via set_ui_disabled_tools).
+        Returns {'registered': int, 'parked': int, 'cold': [server names]}."""
+        cache = self._load_tools_cache()
+        cold: List[tuple] = []
+        registered = 0
+        with self._mcp_lock:
+            self._parked_servers = {}
+            self._config_disabled = set()
+            self._suppressed = set()  # runtime suppressions re-derive on next set_ui_disabled_tools
+        for server_name, server in mcp_servers.items():
+            if not isinstance(server, dict):
+                continue
+            conn_config, cfg_hash = self._conn_config_and_hash(server)
+            if not server.get('enabled', True):
+                with self._mcp_lock:
+                    self._config_disabled.add(server_name)
+                    self._suppressed.add(server_name)
+                logger.info("[MCP-lazy] '%s' disabled in config — parked OFF (no stubs).",
+                            server_name)
+                continue
+            with self._mcp_lock:
+                self._parked_servers[server_name] = conn_config
+            cached = cache.get(server_name)
+            if cached and cached.get('config_hash') == cfg_hash and cached.get('tools'):
+                registered += self.register_stubs(server_name, conn_config, cached['tools'], templates)
+            else:
+                cold.append((server_name, conn_config, cfg_hash))
+        if cold:
+            if _lazy_settings().MCP_LAZY_COLD_INTERROGATE:
+                self.refresh_tools_cache_background(cold, templates)
+            else:
+                logger.info('[MCP-lazy] cold-interrogation disabled — %d server(s) park without '
+                            'stubs until next cold refresh/boot: %s',
+                            len(cold), [s[0] for s in cold])
+        logger.info('[MCP-lazy] boot parked %d server(s) (stubs=%d, cold=%d, connected=0).',
+                    len(self._parked_servers), registered, len(cold))
+        return {'registered': registered, 'parked': len(self._parked_servers),
+                'cold': [s[0] for s in cold]}
+
+    def _interrogate_one(self, server_name: str, conn_config: dict, cfg_hash: str,
+                         templates: list) -> Optional[list]:
+        """Cold-cache harvest (Q8): return the live tool objects for server_name (for caching),
+        or None if it could not be interrogated right now (launch failure, or another connect
+        owns it — neither is worth fighting; the caller skips and it is retried next cold
+        refresh). Parks the server back if THIS call connected it (Q2: parked = schema known,
+        no live client); leaves it connected if a user already connected it (we just harvest).
+        Holds the per-server _connecting Event for the WHOLE connect→list→park window so a
+        concurrent ensure_connected waits (and re-connects after we park) instead of spawning a
+        second subprocess. Returns None and logs loudly on launch failure (a server that cannot
+        start is NOT wrongly marked connected and NOT stubbed)."""
+        claim = threading.Event()
+        with self._mcp_lock:
+            if self._find_connected_key(server_name) is not None:
+                return list(self._server_tools.get(server_name, []))  # user live; harvest
+            if self._connecting.get(server_name) is not None:
+                return None  # another connect owns it right now; skip
+            self._connecting[server_name] = claim
+        try:
+            if not self.connect_server(server_name, conn_config, templates,
+                                       timeout_s=_lazy_settings().MCP_LAZY_CONNECT_TIMEOUT_S):
+                logger.warning("[MCP-lazy] cold interrogation could not connect '%s' — leaving it "
+                               'unregistered (retried next cold refresh/boot).', server_name)
+                return None
+            with self._mcp_lock:
+                tools = list(self._server_tools.get(server_name, []))
+            self.disconnect_server(server_name, templates)  # Q2: park back after interrogation
+            return tools
+        finally:
+            with self._mcp_lock:
+                self._connecting.pop(server_name, None)
+            claim.set()  # wake any waiter that raced us (they re-check + take over)
+
+    def refresh_tools_cache_background(self, cold_servers: list, templates: list) -> None:
+        """Spawn ONE bounded one-shot daemon thread to populate the tool-metadata cache for
+        cold/stale servers (connect→tools/list→disconnect, Q8), then register stubs. Runs OFF
+        the boot thread so the synchronous `mcp_connect` phase stays ≈0. Sequential (not
+        parallel) so a cold boot never multi-spawns npx/uvx children at once. Mirrors the
+        proven rescan_vaults_background one-shot daemon precedent. Best-effort: one server's
+        failure logs + moves on; the thread is daemon so it cannot block process exit."""
+        if not cold_servers:
+            return
+
+        def _run():
+            cache = self._load_tools_cache()
+            wrote = False
+            for server_name, conn_config, cfg_hash in cold_servers:
+                try:
+                    tools = self._interrogate_one(server_name, conn_config, cfg_hash, templates)
+                    if tools is None:
+                        continue
+                    cache[server_name] = {
+                        'config_hash': cfg_hash,
+                        'tools': [{'name': t.name, 'description': t.description,
+                                   'parameters': t.parameters} for t in tools],
+                    }
+                    self.register_stubs(server_name, conn_config,
+                                        cache[server_name]['tools'], templates)
+                    wrote = True
+                except Exception as e:  # noqa: BLE001 — one server must not abort the others
+                    logger.warning("[MCP-lazy] cold interrogation for '%s' failed: %s",
+                                   server_name, e)
+            if wrote:
+                self._save_tools_cache(cache)
+
+        t = threading.Thread(target=_run, name='mcp-lazy-cold-cache', daemon=True)
+        try:
+            t.start()
+        except Exception as e:  # noqa: BLE001 — thread-spawn failure must not break boot
+            logger.debug('[MCP-lazy] could not spawn cold-cache thread: %s', e)
+
+    def _server_tool_names(self, server_name: str) -> set:
+        """Union of every tool name attributed to a server: stubs (via _tool_server_map) ∪
+        live tools (via _server_tools) — correct whether the server is parked or connected."""
+        with self._mcp_lock:
+            from_map = {n for n, s in self._tool_server_map.items() if s == server_name}
+            live = {t.name for t in self._server_tools.get(server_name, [])}
+        return from_map | live
+
+    def _server_fully_disabled(self, server_name: str, pool, templates_map: dict) -> bool:
+        """True iff EVERY tool of server_name is disabled for EVERY agent template — either
+        individually (all its tools in that agent's disabled set) or via the __all_mcp_tools__
+        sentinel. Only then is a live server pure idle cost. Uses the UI-cache resolver
+        (get_ui_disabled_tools_for_agent) — v1 scope per Q5/H3: template-config/baseline
+        disables are a separate v2 hardening. Conservative: an empty tool set or an
+        unavailable resolver returns False (never suppress on uncertainty)."""
+        names = self._server_tool_names(server_name)
+        if not names:
+            return False
+        get = getattr(pool, 'get_ui_disabled_tools_for_agent', None)
+        if not callable(get):
+            return False
+        for agent_name, tpl in templates_map.items():
+            agent_type = getattr(tpl, 'agent_type', '') or ''
+            disabled = get(agent_name, agent_type) or set()
+            if '__all_mcp_tools__' in disabled:
+                continue
+            if names <= disabled:
+                continue
+            return False  # this agent can still use at least one of the server's tools
+        return True
+
+    def _re_park_server(self, server_name: str, templates: list) -> None:
+        """Restore a previously-suppressed server to parked-with-stubs (re-enable path in the
+        off-hook): reads its conn_config from _parked_servers and its cached schema, and
+        re-registers stubs (the earlier disconnect dropped them). No-op if config/cache missing."""
+        with self._mcp_lock:
+            conn_config = self._parked_servers.get(server_name)
+        if conn_config is None:
+            return
+        entry = self._load_tools_cache().get(server_name)
+        if entry and entry.get('tools'):
+            self.register_stubs(server_name, conn_config, entry['tools'], templates)
+
+    def apply_ui_disabled(self, pool) -> None:
+        """Recompute per-server all-disabled→off state after a UI disabled_tools change
+        (BUG_0310 directive #3). A server is turned off (suppressed + disconnected if live) iff
+        every one of its tools is disabled for every agent template (or __all_mcp_tools__ is
+        active for every template). A suppressed server no longer fully disabled is restored to
+        parked (stubs re-registered) so it can connect on next use. Config-level enabled:false
+        servers stay permanently suppressed. MUST NOT be called with _mcp_lock held."""
+        if pool is None:
+            return
+        templates_map = getattr(pool, 'templates', None) or {}
+        templates = list(templates_map.values())
+        with self._mcp_lock:
+            servers = (set(self._parked_servers)
+                       | {k.split(':', 1)[0] for k in self._connected_servers}
+                       | set(self._suppressed))
+            config_disabled = set(self._config_disabled)
+        for server in servers:
+            if server in config_disabled:
+                continue  # permanent off; tool toggles never revive a config-disabled server
+            fully = self._server_fully_disabled(server, pool, templates_map)
+            with self._mcp_lock:
+                suppressed = server in self._suppressed
+            if fully and not suppressed:
+                if self._is_connected(server):
+                    self.disconnect_server(server, templates)
+                with self._mcp_lock:
+                    self._suppressed.add(server)
+                logger.info("[MCP-off] '%s': all tools disabled for every agent — turned off.",
+                            server)
+            elif not fully and suppressed:
+                with self._mcp_lock:
+                    self._suppressed.discard(server)
+                self._re_park_server(server, templates)
+                logger.info("[MCP-on] '%s': re-enabled — restored to parked.", server)
+
+    def ensure_connected(self, server_name: str, pool=None,
+                         timeout_s: Optional[float] = None) -> bool:
+        """Connect a parked MCP server on first use (lazy mode, directive #2). Single-flight per
+        server (Q4): the first caller connects; concurrent callers WAIT on the owner's
+        threading.Event (NOT on _mcp_lock, which is a plain Lock with no wait/notify) rather
+        than each spawning a subprocess. Honours _suppressed. Bounded + best-effort: NEVER
+        raises — returns False on failure so the caller degrades to the stub's graceful
+        'MCP server disconnected' error. A waiter that finds the owner re-parked the server
+        (cold interrogation) takes over rather than returning False.
+        MUST NOT be called with _mcp_lock already held."""
+        if timeout_s is None:
+            timeout_s = _lazy_settings().MCP_LAZY_CONNECT_TIMEOUT_S
+        templates = list(pool.templates.values()) if pool is not None else []
+        for _attempt in range(2):
+            with self._mcp_lock:
+                if self._find_connected_key(server_name) is not None:
+                    return True
+                if server_name in self._suppressed:
+                    logger.debug('[MCP-lazy] %r suppressed — not connecting.', server_name)
+                    return False
+                cfg = self._parked_servers.get(server_name)
+                if cfg is None:
+                    logger.warning('[MCP-lazy] %r is not parked — cannot lazy-connect.', server_name)
+                    return False
+                ev = self._connecting.get(server_name)
+                if ev is not None:
+                    owner = False
+                else:
+                    claim = threading.Event()
+                    self._connecting[server_name] = claim
+                    owner = True
+            if not owner:
+                # Owner (a user connect OR the cold interrogation) is in flight; wait it out,
+                # then re-check on the next iteration (they may have parked it back).
+                ev.wait(2 * timeout_s + _MCP_CONNECT_TEARDOWN_MARGIN_S)
+                continue
+            # Owner performs the connect OUTSIDE the lock (connect_server acquires it itself).
+            ok = False
+            try:
+                ok = self.connect_server(server_name, cfg, templates, timeout_s=timeout_s)
+            except Exception as e:  # noqa: BLE001 — best-effort lazy connect, never propagate
+                logger.error("[MCP-lazy] connect for '%s' raised: %s", server_name, e)
+                ok = False
+            finally:
+                with self._mcp_lock:
+                    self._connecting.pop(server_name, None)
+                claim.set()  # wake waiters on both success and failure
+            return ok
+        # Exhausted retries (a cold interrogation re-parked it mid-wait and a third party holds
+        # the guard again) — best-effort: degrade to the stub error rather than looping forever.
+        return self._is_connected(server_name)
+
+    def ensure_connected_async(self, server_names, pool) -> None:
+        """Fire-and-forget lazy pre-warm for the tool_search unlock trigger (Q1 primary).
+        Runs the (bounded, single-flight) connects on ONE one-shot daemon thread so tool_search
+        never blocks on connect latency nor is DMS-vulnerable to it. Best-effort; exceptions
+        swallowed (the dispatcher pre-flight is the correctness backstop)."""
+        names = [s for s in dict.fromkeys(server_names) if s]  # de-dup, preserve order
+        if not names or pool is None:
+            return
+
+        def _run():
+            for s in names:
+                try:
+                    if self.is_parked(s):  # already connected/connecting/suppressed → skip
+                        self.ensure_connected(s, pool=pool)
+                except Exception as e:  # noqa: BLE001 — pre-warm is best-effort
+                    logger.debug('[MCP-lazy] background pre-warm of %r failed: %s', s, e)
+
+        t = threading.Thread(target=_run, name='mcp-lazy-prewarm', daemon=True)
+        try:
+            t.start()
+        except Exception as e:  # noqa: BLE001 — thread-spawn failure must not break tool_search
+            logger.debug('[MCP-lazy] could not spawn pre-warm thread: %s', e)
 
     def shutdown(self):
         futures = []
@@ -523,6 +975,12 @@ class MCPManager:
         with self._mcp_lock:
             self._connected_servers.clear()
             self._server_tools.clear()
+            # Lazy-connect state — clear so a reboot re-derives cleanly from config/cache.
+            self._parked_servers.clear()
+            self._connecting.clear()
+            self._tool_server_map.clear()
+            self._suppressed.clear()
+            self._config_disabled.clear()
         time.sleep(1)  # Wait for the graceful cleanups, otherwise fall back
 
         # fallback

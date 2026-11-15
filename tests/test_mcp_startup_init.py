@@ -47,7 +47,8 @@ def test_registers_tool_into_template_function_map(tmp_path):
 
     # Both config_handlers._handle_mcp_servers and initialize_mcp_servers import
     # MCPManager from this module at call time, so patching the module attribute drives both.
-    with patch('agent_cascade.tools.mcp_manager.MCPManager', return_value=fake_mgr):
+    with patch('agent_cascade.tools.mcp_manager.MCPManager', return_value=fake_mgr), \
+         patch('agent_cascade.settings.MCP_LAZY_CONNECT', False):
         initialize_mcp_servers(pool, project_root)
 
     assert pool.templates['coder'].function_map.get('fake__do_thing') is fake_tool
@@ -97,7 +98,8 @@ def test_handler_exception_is_swallowed(tmp_path):
     pool = _make_pool()
     raising = MagicMock(side_effect=RuntimeError('MCP server exploded'))
 
-    with patch.dict(CONFIG_HANDLERS, {'mcpServers': raising}):
+    with patch.dict(CONFIG_HANDLERS, {'mcpServers': raising}), \
+         patch('agent_cascade.settings.MCP_LAZY_CONNECT', False):
         initialize_mcp_servers(pool, project_root)  # must return normally, not raise
 
     raising.assert_called_once()

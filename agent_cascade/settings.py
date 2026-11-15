@@ -86,6 +86,34 @@ UNLOAD_UNUSED_TOOLS_POST_COMPRESSION: bool = os.getenv(
     'AGENT_CASCADE_UNLOAD_UNUSED_TOOLS_POST_COMPRESSION', '0'
 ).strip().lower() in ('1', 'true')
 
+# ── Lazy / on-use MCP server connect (BUG_0310 follow-up) ────────────────────
+# Default ON. Boot PARKS every enabled MCP server — it registers stub tool objects carrying
+# real schema (read from config/mcp_tools_cache.json) into every template's function_map and
+# connects ZERO of them, removing the synchronous `mcp_connect` boot phase (warm median
+# ≈3.7 s; see [[bug0310-boot-baselines-mcp-is-hot-skill-scan-is-not]]). A parked server
+# connects lazily on first use of one of its tools (tool_search unlock + a dispatcher
+# pre-flight backstop) under a per-server single-flight guard. If ALL of a server's tools
+# become disabled for every agent it is turned off (disconnected + suppressed); re-enabling
+# restores connectability. Set AGENT_CASCADE_MCP_LAZY_CONNECT=0 to restore the exact previous
+# eager connect-at-boot path (kill-switch). Tests patch this module attribute. See
+# [[ac-mcp-lazy-connect-gotchas]].
+MCP_LAZY_CONNECT: bool = os.getenv('AGENT_CASCADE_MCP_LAZY_CONNECT', '1').strip().lower() not in ('0', 'false', '')
+# Per-step wall-clock cap (connect handshake AND tools/list, applied to each) for the lazy
+# on-use connect. Default 30.0 — matches the value connect_server hardcoded before it was
+# parameterized, so enabling lazy mode does not silently make connects more likely to time
+# out. The dispatcher's DMS `_in_blocking_tool` bound around a connect is derived from THIS
+# value (mcp_manager.lazy_connect_dms_bound = 2× this + teardown margin), so a legitimately
+# slow connect is never DMS-terminated in its tail.
+MCP_LAZY_CONNECT_TIMEOUT_S: float = float(os.getenv('AGENT_CASCADE_MCP_LAZY_CONNECT_TIMEOUT_S', 30.0))
+# When the tool-metadata cache is cold/stale for a parked server, boot spawns ONE bounded
+# one-shot daemon thread that does connect→tools/list→disconnect to populate
+# config/mcp_tools_cache.json off the boot thread (so the synchronous `mcp_connect` phase
+# still measures ≈0). Set AGENT_CASCADE_MCP_LAZY_COLD_INTERROGATE=0 to suppress it — e.g.
+# the BUG_0310 boot probe (plans/bug0310_probe.py), which must not spawn a real chrome-devtools
+# child to measure the stub-registration-only phase. Off ⇒ a cold cache simply stays cold;
+# tools surface once metadata is cached (next boot with the flag on).
+MCP_LAZY_COLD_INTERROGATE: bool = os.getenv('AGENT_CASCADE_MCP_LAZY_COLD_INTERROGATE', '1').strip().lower() not in ('0', 'false', '')
+
 # ── AFK nudge mode (basic | admin) ─────────────────────────────────────────────
 # 'basic' keeps the current AFK behavior (auto-reject + canned idle nudge). 'admin'
 # spawns a read-only Admin agent that reviews the idle session and hands back the

@@ -680,6 +680,22 @@ class ConfigPersistMixin:
             return
         with self._ui_disabled_tools_lock:
             self._ui_disabled_tools = dict(disabled_tools_dict)
+        # Lazy-MCP all-disabled→off hook (BUG_0310 directive #3): if every tool of an MCP
+        # server is now disabled for EVERY agent, turn that server off — suppress it so it
+        # will not connect (and disconnect it if somehow live). Re-enabling any of its tools
+        # restores connectability (handled inside apply_ui_disabled). Gated on
+        # MCP_LAZY_CONNECT so the eager kill-switch stays byte-for-byte (the old eager path
+        # never auto-disconnected a server on tool-disable). v1 scope = UI disables only
+        # (Q5/H3): apply_ui_disabled reads the UI cache resolver, not template-config or
+        # baseline disables (v2 hardening).
+        from agent_cascade import settings
+        if settings.MCP_LAZY_CONNECT:
+            try:
+                from agent_cascade.tools.mcp_manager import MCPManager
+                MCPManager().apply_ui_disabled(self)
+            except Exception as e:
+                from agent_cascade.log import logger
+                logger.debug('[tool_assignment] MCP all-disabled→off hook failed: %s', e)
 
     def get_ui_disabled_tools_for_agent(self, agent_name: str, agent_type: str = '') -> set:
         """Get current disabled tools for a specific agent class from live UI config.

@@ -263,6 +263,15 @@ class ToolDispatcher:
             if resolved is None:
                 return f"Error: Invalid JSON arguments for tool '{tool_name}'."
 
+            # ── Lazy MCP on-use connect (BUG_0310 follow-up): connect a parked server BEFORE its
+            # tool is invoked. _call_tool re-reads function_map, so replacing the stub with the
+            # live tool here is picked up in THIS same call. This is the mandatory correctness
+            # backstop: a session reload re-offers previously discovered MCP tools with NO
+            # tool_search this session, so the tool_search unlock trigger alone is insufficient.
+            # Self-gated on the knob + best-effort: a failed/timeout connect leaves the stub, which
+            # returns the graceful 'disconnected' error (no wedge, no turn kill).
+            self._maybe_lazy_connect_mcp(instance, tool_name)
+
             # ── Holder-DMS bounded-tool exclusion (t292): SINGLE WRITER at the dispatch boundary ──
             # Every generic sync tool flows through this one branch. Mark the holder as mid a
             # legitimately-bounded sync tool so the holder-side DMS excludes it while
@@ -295,6 +304,46 @@ class ToolDispatcher:
                 self.pool._mark_activity(instance.instance_name)
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
+
+    def _maybe_lazy_connect_mcp(self, instance, tool_name: str) -> None:
+        """Pre-flight for lazy MCP connect (BUG_0310 follow-up, directive #2 backstop).
+
+        If `tool_name` is an MCP tool whose server is currently PARKED, connect that server
+        (bounded, single-flight via MCPManager.ensure_connected) before `_call_tool` runs, so
+        the live tool replaces the stub in function_map in this same call (fncall_agent
+        re-reads function_map at call time). Wrapped in its OWN `_in_blocking_tool` bound,
+        derived from the SAME connect timeout (mcp_manager.lazy_connect_dms_bound) so the
+        holder is never DMS-terminated mid-connect-tail — that would wedge the turn (the
+        coupling the directive calls out). Self-gated on settings.MCP_LAZY_CONNECT: with the
+        kill-switch off this is a no-op, so the eager path is untouched.
+
+        Best-effort: NEVER raises into the dispatcher — any failure leaves the stub in place,
+        and `_call_tool` returns the graceful 'MCP server disconnected' error instead of
+        killing the turn.
+        """
+        from agent_cascade import settings
+        if not settings.MCP_LAZY_CONNECT:
+            return
+        from agent_cascade.tools.mcp_manager import MCPManager, lazy_connect_dms_bound
+        try:
+            if not MCPManager.is_mcp_tool(tool_name):
+                return
+            mgr = MCPManager()
+            server = mgr.server_for_tool(tool_name)
+            if server is None or not mgr.is_parked(server):
+                return  # not an MCP tool / unknown server / already connected/connecting/off
+            bound = lazy_connect_dms_bound()
+            prev = instance._in_blocking_tool
+            instance._in_blocking_tool = (f'mcp:{server}', time.monotonic(), bound)
+            try:
+                connected = mgr.ensure_connected(server, pool=self.pool)
+            finally:
+                instance._in_blocking_tool = prev
+                self.pool._mark_activity(instance.instance_name)
+            if not connected:
+                logger.debug('[lazy-mcp] on-use connect of %r failed (degrading to stub error)', server)
+        except Exception as e:  # noqa: BLE001 — pre-flight must never break the tool call
+            logger.debug('[lazy-mcp] pre-flight connect for %r failed: %s', tool_name, e)
 
     # ── call_cli_agent Handler ───────────────────────────────────────────────
 
