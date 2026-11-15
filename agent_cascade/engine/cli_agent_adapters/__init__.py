@@ -71,6 +71,12 @@ class RuntimeAdapter(Protocol):
     # treats its absence (or any exception) as ``'unknown'`` so a 4th adapter gets a
     # working status surface with zero extra code and no run is ever blocked.
 
+    # Optional interactive-login argv: ``build_interactive_cmd(self) -> list[str]`` returning the
+    # argv to launch this CLI in a REAL TTY for a manual OAuth login. OAuth adapters get the
+    # default (just ``[self.binary]``) free by inheriting ``InteractiveLoginAdapter`` below; it is
+    # NOT a Protocol stub because the headless ``build_launch_cmd`` always appends a one-shot flag
+    # and can never produce the interactive form. Key-based adapters simply omit it.
+
     def child_env(self, base_env: dict[str, str]) -> dict[str, str]:
         """Return a copy of ``base_env`` with AC-owned credentials stripped."""
         ...
@@ -78,6 +84,20 @@ class RuntimeAdapter(Protocol):
     def project(self, *, workspace: str, skills, guidance) -> None:
         """Phase-2 insertion point: project skills/guidance into ``workspace``. NO-OP in Phase 0."""
         ...
+
+
+class InteractiveLoginAdapter:
+    """Optional shared base providing the default interactive-login argv for an OAuth harness.
+
+    The interactive form is just the CLI binary in a real terminal — the human drives the OAuth
+    handshake (e.g. ``agy``). The headless one-shot argv built by ``build_launch_cmd`` always
+    appends a ``-p``/``run`` flag and must never be reused for interactive login. OAuth adapters
+    that need a manual login inherit this default (antigravity); key-based adapters don't.
+    """
+
+    def build_interactive_cmd(self) -> list[str]:
+        """Return the argv to launch this CLI interactively for a manual login (just the binary)."""
+        return [self.binary]
 
 
 def strip_ac_credentials(base_env: dict[str, str]) -> dict[str, str]:

@@ -1858,83 +1858,71 @@ for (const btn of document.querySelectorAll('.cli-agent-key-btn')) {
   });
 }
 
-// OAuth login (antigravity): the server spawns a one-shot login container, emits the Google
-// consent URL, and we relay the pasted authorization code back. agy waits ~60s per attempt, so
-// an expiry is retryable: the "Authenticate" button simply starts a fresh session.
+// Manual OAuth login (antigravity): agy's sign-in URL is TTY-bound, so the user runs a one-time
+// `docker run -it` command in a real terminal; the token lands in the shared auth volume and later
+// one-shot runs are zero-touch. "Log in" asks the server for that copyable command; "Re-check auth"
+// refreshes the auth state afterward (a recheck also fires on tab-open, see ws.onopen).
 const cliOauthBtn = document.querySelector('.cli-agent-oauth-btn[data-harness="antigravity"]');
+const cliOauthRecheckBtn = document.querySelector('.cli-agent-oauth-recheck-btn[data-harness="antigravity"]');
 const cliOauthModal = document.getElementById('cli-agent-oauth-modal');
-const cliOauthCode = document.getElementById('cli-agent-oauth-code');
+const cliOauthCmd = document.getElementById('cli-agent-oauth-cmd');
 const cliOauthStatus = document.getElementById('cli-agent-oauth-status');
-const cliOauthLink = document.getElementById('cli-agent-oauth-url');
 const cliOauthHarnessLabel = document.getElementById('cli-agent-oauth-harness');
-let cliOauthSessionId = null;
 let cliOauthHarness = 'antigravity';
-
-function setCliOauthBtn(label, disabled) {
-  if (!cliOauthBtn) return;
-  cliOauthBtn.textContent = label || 'Authenticate';
-  cliOauthBtn.disabled = !!disabled;
-}
 
 function setCliAgentAuthState(harness, authenticated) {
   const el = document.querySelector('.cli-agent-auth-state[data-harness="' + harness + '"]');
   if (el) el.textContent = authenticated ? 'authenticated ✓' : '';
 }
 
-function openCliOauthModal(url, windowSeconds) {
+function openCliOauthModal(command) {
   if (!cliOauthModal) return;
   if (cliOauthHarnessLabel) cliOauthHarnessLabel.textContent = cliOauthHarness;
-  if (cliOauthLink) {
-    cliOauthLink.textContent = url || '';
-    cliOauthLink.href = url || '#';
-  }
-  if (cliOauthStatus) {
-    cliOauthStatus.textContent = windowSeconds
-      ? 'Waiting for the authorization code (the login window is ~' + windowSeconds +
-        's — if it expires, click Authenticate again).'
-      : 'Waiting for the authorization code.';
-  }
-  if (cliOauthCode) { cliOauthCode.value = ''; }
+  if (cliOauthCmd) cliOauthCmd.value = command || '';
+  if (cliOauthStatus) cliOauthStatus.textContent = '';
   cliOauthModal.style.display = 'block';
-  if (cliOauthCode) cliOauthCode.focus();
+  if (cliOauthCmd) { cliOauthCmd.focus(); cliOauthCmd.select(); }
 }
 
 function closeCliOauthModal() {
   if (cliOauthModal) cliOauthModal.style.display = 'none';
 }
 
+function recheckCliAgentAuth(harness) {
+  send({ type: 'cli_agent_oauth_recheck', harness: harness || 'antigravity' });
+}
+
 if (cliOauthBtn) {
   cliOauthBtn.addEventListener('click', () => {
-    cliOauthSessionId = null;
     cliOauthHarness = cliOauthBtn.getAttribute('data-harness') || 'antigravity';
-    setCliOauthBtn('Waiting…', true);
-    send({ type: 'cli_agent_oauth_start', harness: cliOauthHarness });
+    send({ type: 'cli_agent_oauth_manual_cmd', harness: cliOauthHarness });
   });
 }
 
-if (document.getElementById('cli-agent-oauth-submit')) {
-  document.getElementById('cli-agent-oauth-submit').addEventListener('click', () => {
-    const code = (cliOauthCode && cliOauthCode.value ? cliOauthCode.value : '').trim();
-    if (!cliOauthSessionId) {
-      if (cliOauthStatus) cliOauthStatus.textContent = 'No active login session — click Authenticate again.';
-      return;
-    }
-    if (!code) {
-      if (cliOauthStatus) cliOauthStatus.textContent = 'Paste the authorization code first.';
-      return;
-    }
-    if (cliOauthStatus) cliOauthStatus.textContent = 'Exchanging the code…';
-    send({ type: 'cli_agent_oauth_submit', session_id: cliOauthSessionId, code });
+if (cliOauthRecheckBtn) {
+  cliOauthRecheckBtn.addEventListener('click', () => {
+    recheckCliAgentAuth(cliOauthRecheckBtn.getAttribute('data-harness') || 'antigravity');
   });
 }
 
-if (document.getElementById('cli-agent-oauth-cancel')) {
-  document.getElementById('cli-agent-oauth-cancel').addEventListener('click', () => {
-    if (cliOauthSessionId) send({ type: 'cli_agent_oauth_cancel', session_id: cliOauthSessionId });
-    cliOauthSessionId = null;
-    closeCliOauthModal();
-    setCliOauthBtn('Authenticate', false);
+if (document.getElementById('cli-agent-oauth-copy')) {
+  document.getElementById('cli-agent-oauth-copy').addEventListener('click', () => {
+    if (!cliOauthCmd || !cliOauthCmd.value) return;
+    const done = () => {
+      if (cliOauthStatus) cliOauthStatus.textContent = 'Copied — paste it into a terminal on this machine.';
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cliOauthCmd.value).then(done, () => {
+        cliOauthCmd.select(); document.execCommand('copy'); done();
+      });
+    } else {
+      cliOauthCmd.select(); document.execCommand('copy'); done();
+    }
   });
+}
+
+if (document.getElementById('cli-agent-oauth-close')) {
+  document.getElementById('cli-agent-oauth-close').addEventListener('click', closeCliOauthModal);
 }
 
 // Two-phase loop detection UI: disable dependent inputs when feature is off
@@ -2001,6 +1989,10 @@ function connect() {
         localStorage.setItem('_settings_migrated_v1', '1');
       }
     }
+
+    // Re-check OAuth auth on connect so the CLI-agents panel shows the current "authenticated ✓"
+    // state on load, without the user having to click "Re-check auth" first.
+    send({ type: 'cli_agent_oauth_recheck', harness: 'antigravity' });
   };
 
   ws.onclose = () => {
@@ -2872,49 +2864,29 @@ function handleServerMessage(data) {
       break;
     }
 
-    case 'cli_agent_oauth_url': {
-      cliOauthSessionId = data.session_id || null;
+    case 'cli_agent_oauth_manual_cmd': {
       cliOauthHarness = data.harness || 'antigravity';
-      setCliOauthBtn('Waiting…', true);
-      openCliOauthModal(data.url, data.window_seconds);
+      openCliOauthModal(data.command);
       break;
     }
 
-    case 'cli_agent_oauth_success': {
-      cliOauthSessionId = null;
-      closeCliOauthModal();
-      setCliOauthBtn('Authenticated ✓', false);
-      setCliAgentAuthState(data.harness || 'antigravity', true);
-      showInSystemToastBar(data.already_authenticated
-        ? `✅ ${data.harness || 'antigravity'} was already authenticated`
-        : `✅ ${data.harness || 'antigravity'} authenticated`);
-      break;
-    }
-
-    case 'cli_agent_oauth_failed': {
-      const oauthReason = data.reason || 'login failed';
-      const oauthHarness = data.harness || 'antigravity';
-      if (data.retryable) {
-        // agy's own auth window lapsed (or the exchange failed) — the volume is still empty, so
-        // a fresh session is a safe retry.
-        setCliOauthBtn('Retry authentication', false);
-        if (cliOauthStatus) {
-          cliOauthStatus.textContent = '⚠️ ' + oauthReason +
-            ' — click Retry authentication to start a fresh login window.';
-        }
-      } else {
-        cliOauthSessionId = null;
-        closeCliOauthModal();
-        setCliOauthBtn('Authenticate', false);
-        showInSystemToastBar(`⚠️ ${oauthHarness} login: ${oauthReason}`);
+    case 'cli_agent_oauth_status': {
+      const statusHarness = data.harness || 'antigravity';
+      setCliAgentAuthState(statusHarness, !!data.authenticated);
+      // Reflect the result inside the login dialog only when it is open (tab-open recheck has no dialog).
+      if (cliOauthStatus && cliOauthModal && cliOauthModal.style.display !== 'none') {
+        cliOauthStatus.textContent = data.authenticated
+          ? '✅ Authenticated — you can close this dialog.'
+          : '⚠️ Not authenticated yet. Finish the login in the terminal, then Re-check auth.';
       }
       break;
     }
 
-    case 'cli_agent_oauth_cancelled': {
-      cliOauthSessionId = null;
-      closeCliOauthModal();
-      setCliOauthBtn('Authenticate', false);
+    case 'cli_agent_oauth_failed': {
+      const oauthHarness = data.harness || 'antigravity';
+      const oauthReason = data.reason || 'login unavailable';
+      showInSystemToastBar(`⚠️ ${oauthHarness} login: ${oauthReason}`);
+      if (cliOauthStatus) cliOauthStatus.textContent = '⚠️ ' + oauthReason;
       break;
     }
 

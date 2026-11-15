@@ -91,9 +91,8 @@ class WsMessageHandler:
             'ask_security': self.handle_ask_security,
             'set_auto_security': self.handle_set_auto_security,
             'set_cli_agent_key': self.handle_set_cli_agent_key,
-            'cli_agent_oauth_start': self.handle_cli_agent_oauth_start,
-            'cli_agent_oauth_submit': self.handle_cli_agent_oauth_submit,
-            'cli_agent_oauth_cancel': self.handle_cli_agent_oauth_cancel,
+            'cli_agent_oauth_manual_cmd': self.handle_cli_agent_oauth_manual_cmd,
+            'cli_agent_oauth_recheck': self.handle_cli_agent_oauth_recheck,
             'set_afk': self.handle_set_afk,
             'edit_message': self.handle_edit_message,
             'delete_messages': self.handle_delete_messages,
@@ -1487,93 +1486,44 @@ class WsMessageHandler:
             'reason': reason, 'retryable': retryable,
         })
 
-    async def handle_cli_agent_oauth_start(self, data: dict) -> None:
-        """Start an interactive OAuth login (Web UI "Authenticate") for a key-less harness.
+    async def handle_cli_agent_oauth_manual_cmd(self, data: dict) -> None:
+        """Build the one-time manual login command for an OAuth harness (Web UI "Log in").
 
-        Validates the adapter's auth model and the configured volume, then drives the login
-        manager off the event loop (``start_session`` blocks while it waits for the CLI's URL).
-        Emits `cli_agent_oauth_url` (normal), `cli_agent_oauth_success` (volume already held a
-        valid sign-in) or `cli_agent_oauth_failed` (configuration/spawn problem).
+        agy's OAuth URL is TTY-bound, so the user runs this in a real terminal once; the token
+        lands in the shared auth volume and every later one-shot run is zero-touch. Emits
+        `cli_agent_oauth_manual_cmd` with the command, or `cli_agent_oauth_failed` on a lookup or
+        configuration problem.
         """
         harness = data.get('harness') or 'antigravity'
-        from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
-        try:
-            adapter = get_adapter(harness)
-        except HarnessNotFoundError:
-            await self._cli_agent_oauth_fail(harness, f"unknown harness '{harness}'")
-            return
-        if getattr(adapter, 'auth_type', 'api_key') != 'oauth':
-            await self._cli_agent_oauth_fail(
-                harness, f"'{harness}' authenticates with an API key, not OAuth")
-            return
-        from agent_cascade.engine.cli_agent_runner import _cli_agent_image, _resolve_auth_volume
-        volume = _resolve_auth_volume(self.agent_pool, adapter)
-        if not volume:
-            await self._cli_agent_oauth_fail(
-                harness, 'no OAuth credential volume configured '
-                         '(set cli_agent_agy_auth_volume in Settings → CLI Agents)')
-            return
-        image = _cli_agent_image(harness, self.agent_pool)
         from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
-        manager = get_oauth_manager()
         try:
-            session_id, url = await asyncio.to_thread(
-                manager.start_session, harness=harness, volume=volume, image=image)
-        except Exception as e:  # noqa: BLE001 — a failed login must not take down the WS loop
-            await self._cli_agent_oauth_fail(harness, f'could not start login: {e}', retryable=True)
+            command = await asyncio.to_thread(
+                get_oauth_manager().build_manual_command, harness, pool=self.agent_pool)
+        except Exception as e:  # noqa: BLE001 — a config error must not take down the WS loop
+            await self._cli_agent_oauth_fail(harness, str(e))
             return
-        state = manager.session_state(session_id) or {}
-        if state.get('state') == 'success':
-            await self._emit_cli_agent_oauth({
-                'type': 'cli_agent_oauth_success', 'harness': harness,
-                'already_authenticated': True, 'session_id': session_id,
-            })
-            await self._broadcast()
-            return
-        if not url:
-            await self._cli_agent_oauth_fail(
-                harness, state.get('error') or 'the CLI printed no authorization URL',
-                retryable=bool(state.get('retryable')))
-            return
-        from agent_cascade.settings import CLI_AGENT_OAUTH_WINDOW_SECONDS
         await self._emit_cli_agent_oauth({
-            'type': 'cli_agent_oauth_url', 'harness': harness, 'session_id': session_id,
-            'url': url, 'window_seconds': CLI_AGENT_OAUTH_WINDOW_SECONDS, 'retryable': True,
+            'type': 'cli_agent_oauth_manual_cmd', 'harness': harness, 'command': command,
         })
 
-    async def handle_cli_agent_oauth_submit(self, data: dict) -> None:
-        """Relay the pasted authorization code; report success / failure / retryable expiry."""
-        session_id = data.get('session_id')
-        if not session_id or not isinstance(session_id, str):
-            return
-        from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
-        manager = get_oauth_manager()
-        ok = await asyncio.to_thread(manager.submit_code, session_id, str(data.get('code') or ''))
-        state = manager.session_state(session_id) or {}
-        harness = state.get('harness') or data.get('harness') or 'antigravity'
-        if ok:
-            await self._emit_cli_agent_oauth({
-                'type': 'cli_agent_oauth_success', 'harness': harness, 'session_id': session_id,
-            })
-            await self._broadcast()
-            return
-        await self._cli_agent_oauth_fail(
-            harness, state.get('error') or 'the authorization code was rejected',
-            retryable=bool(state.get('retryable')) or state.get('state') == 'expired')
+    async def handle_cli_agent_oauth_recheck(self, data: dict) -> None:
+        """Re-check whether the OAuth volume is authenticated after a manual login.
 
-    async def handle_cli_agent_oauth_cancel(self, data: dict) -> None:
-        """Cancel an in-flight login (kills its container)."""
-        session_id = data.get('session_id')
-        if not session_id or not isinstance(session_id, str):
-            return
+        Invalidates the cached volume probe, re-reads it, and emits a dedicated
+        `cli_agent_oauth_status` message ({harness, authenticated}) — NOT folded into the
+        pool-settings broadcast. Fired by the "Re-check auth" button and on tab-open.
+        """
+        harness = data.get('harness') or 'antigravity'
+        from agent_cascade.log import logger
         from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
-        manager = get_oauth_manager()
-        await asyncio.to_thread(manager.cancel_session, session_id)
-        state = manager.session_state(session_id) or {}
+        try:
+            authenticated = await asyncio.to_thread(
+                get_oauth_manager().recheck_auth, harness, pool=self.agent_pool)
+        except Exception as e:  # noqa: BLE001 — an indeterminate probe must not crash the loop
+            logger.debug('cli_agent_oauth recheck failed for %s: %s', harness, e)
+            authenticated = False
         await self._emit_cli_agent_oauth({
-            'type': 'cli_agent_oauth_cancelled',
-            'harness': state.get('harness') or data.get('harness') or 'antigravity',
-            'session_id': session_id,
+            'type': 'cli_agent_oauth_status', 'harness': harness, 'authenticated': authenticated,
         })
 
     async def handle_set_afk(self, data: dict) -> None:

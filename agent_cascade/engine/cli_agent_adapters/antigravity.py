@@ -39,11 +39,15 @@ import shutil
 from typing import Optional
 
 from agent_cascade.engine.cli_agent_adapters import (
-    resolve_posture_flags, strip_ac_credentials)
+    InteractiveLoginAdapter, resolve_posture_flags, strip_ac_credentials)
 
 
-class AntigravityAdapter:
-    """One-shot ``agy -p`` invocation (headless; response on stdout)."""
+class AntigravityAdapter(InteractiveLoginAdapter):
+    """One-shot ``agy -p`` invocation (headless; response on stdout).
+
+    Inherits ``build_interactive_cmd()`` (interactive form is just ``agy``) from the shared base;
+    the headless ``build_launch_cmd`` always appends ``-p`` and is never used for interactive login.
+    """
 
     harness = 'antigravity'
     binary = 'agy'  # NOT 'antigravity' — see module docstring (verified deviation)

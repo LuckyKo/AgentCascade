@@ -1581,7 +1581,7 @@ live idle cost.
 | Adapter registry | `engine/cli_agent_adapters/` | Per-harness argv, presence probe, auth metadata, credential strip |
 | Runner | `engine/cli_agent_runner.py` | Enable/OAuth gates, image build+refresh, docker argv, wall-clock timeout + teardown, log persistence, status |
 | Async tracker | `async_shell_pkg/cli_agent_tracker.py` | Background execution path (`execution_mode='async'`) |
-| OAuth login | `engine/cli_agent_oauth.py` | Interactive sign-in session (URL + pasted code) for key-less harnesses |
+| OAuth login | `engine/cli_agent_oauth.py` | Manual `docker run -it` login command + auth re-check for key-less (OAuth) harnesses |
 
 Adapters: `claude_code` (`claude -p`), `opencode` (`opencode run`), `antigravity` (`agy -p`). The registry key is the harness name; the binary token may differ (antigravity → `agy`).
 
@@ -1606,13 +1606,22 @@ Before spawning, the runner probes the volume for a credential file (explicit ca
 
 ### 12.4 Interactive login (`agy`)
 
-`agy` prints an `accounts.google.com` URL and waits **60 s** for an authorization code pasted on stdin (no localhost callback). The Web UI "Authenticate" button starts a login session (`cli_agent_oauth_start`), opens the URL in the host browser, and asks for the code (`cli_agent_oauth_submit`). A 60 s lapse is reported as *retryable* (`expired`), not as failure: the token store lives in the volume, so a retry just spawns a new one-shot container.
+`agy`'s OAuth URL is **TTY-bound** — it is printed only in a real terminal — so it cannot be driven
+from a piped one-shot container. The login is therefore **manual + re-check**:
 
-Manual one-time login (no UI, e.g. headless server) — run against the same volume name:
+- The Web UI **"Log in"** button asks the server for the one-time command (`cli_agent_oauth_manual_cmd`)
+  and shows it in a copyable dialog. Run it in a real terminal: `docker run -it -v <volume>:/root/.gemini
+  <image> agy`, complete the Google sign-in there, and the token is written into the shared volume. This
+  is one-time; every later one-shot run mounts that volume and is zero-touch.
+- After logging in, click **"Re-check auth"** (`cli_agent_oauth_recheck`), or just reload the panel — a
+  recheck also fires on tab-open. It invalidates the cached volume probe, re-reads it, and emits a
+  dedicated `cli_agent_oauth_status` message (`{harness, authenticated}`) that updates the "authenticated ✓" label.
+
+Manual one-time login (headless server) — run against the same volume name:
 
 ```bash
-docker run -it --rm -v cli_agent_agy_auth:/root/.gemini cli_agent_agy agy -p="hello"
-# open the printed URL, then paste the authorization code when prompted
+docker run -it -v cli_agent_agy_auth:/root/.gemini cli_agent_agy agy
+# complete the Google sign-in in the terminal; the token lands in the cli_agent_agy_auth volume
 ```
 
 ### 12.5 Rate limiting (provider anti-ban)
