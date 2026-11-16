@@ -204,8 +204,9 @@ def test_call_cli_agent_launch_status_control_anyof():
     assert _is_valid(schema, {'tool_id': 5, 'task': '__status', 'execution_mode': 'async'})
     # (a) launch
     assert _is_valid(schema, {'harness': 'claude_code', 'task': 'build the thing'})
-    # (a) permission_posture still accepted (deprecated constant, kept for back-compat)
-    assert _is_valid(schema, {
+    # (a) permission_posture was removed from the LLM-facing schema (was a deprecated constant);
+    #     it is now an unknown key → rejected (additionalProperties:false).
+    assert not _is_valid(schema, {
         'harness': 'claude_code', 'task': 'x', 'permission_posture': 'acceptEdits',
     })
     # (b) launch missing task → rejected (no branch matches)
@@ -214,7 +215,7 @@ def test_call_cli_agent_launch_status_control_anyof():
     assert not _is_valid(schema, {'tool_id': 5})
     # (b) empty → rejected
     assert not _is_valid(schema, {})
-    # deprecated constant still single-valued: a different posture is rejected
+    # the posture argument no longer exists in the schema: any value is rejected
     assert not _is_valid(schema, {
         'harness': 'claude_code', 'task': 'x', 'permission_posture': 'bypass',
     })

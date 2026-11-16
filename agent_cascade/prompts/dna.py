@@ -926,13 +926,6 @@ TOOL_METADATA = {
                 'description':
                     'Host path the CLI runs in (mounted read-write at /workspace). Must be the agent\'s default workspace or one of its extra read-write paths — a read-only path or any path outside the agent\'s allowed base is rejected. Defaults to the caller\'s default workspace.'
             },
-            'permission_posture': {
-                'type':
-                    'string',
-                'enum': ['acceptEdits'],
-                'description':
-                    'DEPRECATED constant: always "acceptEdits". This posture is fixed (the only one exposed) and applied by default, so callers should OMIT it; passing "acceptEdits" is still accepted for backward compatibility. A full bypass is config-gated OFF and not selectable here.'
-            },
             'timeout': {
                 'type':
                     'integer',

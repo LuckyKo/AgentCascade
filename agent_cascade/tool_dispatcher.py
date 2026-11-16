@@ -412,10 +412,11 @@ class ToolDispatcher:
         except ValueError as e:
             return f"Error: workspace not permitted: {e}"
 
-        # 4. Posture + timeout (Phase 0: only the default-safe 'acceptEdits' posture).
-        posture = resolved.get('permission_posture') or 'acceptEdits'
-        if posture != 'acceptEdits':
-            return f"Error: posture '{posture}' is not available in Phase 0 (only 'acceptEdits')."
+        # 4. Posture + timeout (Phase 0: only the default-safe 'acceptEdits' posture). The posture
+        #    is a fixed constant — the deprecated caller-facing 'permission_posture' argument was
+        #    removed from the LLM-facing schema (token waste); internal posture→flags resolution
+        #    (resolve_posture_flags) is unchanged.
+        posture = 'acceptEdits'
         timeout, timeout_ok = self._resolve_cli_timeout(resolved)
         if not timeout_ok:
             return "Error: 'timeout' must be a positive integer (seconds)."
