@@ -66,10 +66,11 @@ def _dead_shell_message(agent_name: str, tool_id: int) -> str:
 
     The shell has completed or crashed and its task entry is gone. The message must
     stay unambiguously terminal so agents do not misread it as transient and re-poll
-    in a loop (see reports/async_shell_polling_bug_status.md). The leading
-    "No running shell found" substring is asserted by tests and must be kept.
+    in a loop (see reports/async_shell_polling_bug_status.md). The "No running shell
+    found" substring is asserted by tests and must be kept; the message is prefixed
+    with "ERROR: " to match the tool-result error convention.
     """
-    return (f"No running shell found for agent '{agent_name}' with tool_id {tool_id} — "
+    return (f"ERROR: No running shell found for agent '{agent_name}' with tool_id {tool_id} — "
             f"TERMINAL: this shell has completed or crashed and its record was cleaned up. "
             f"Do NOT poll again; the result is unobtainable from here (any completion message "
             f"was already queued). Continue without it.")

@@ -1323,7 +1323,7 @@ class TestLabelHookByteIdentity:
 
     # Captured from the pre-change AsyncShellTracker output.
     PARENT_DEAD = (
-        "No running shell found for agent 'agentX' with tool_id 99999 \u2014 TERMINAL: "
+        "ERROR: No running shell found for agent 'agentX' with tool_id 99999 \u2014 TERMINAL: "
         'this shell has completed or crashed and its record was cleaned up. Do NOT poll '
         'again; the result is unobtainable from here (any completion message was already '
         'queued). Continue without it.'
@@ -1358,7 +1358,7 @@ class TestLabelHookByteIdentity:
 
     # Captured from the pre-change CliAgentTracker output.
     CLI_DEAD = (
-        "No running call_cli_agent run found for agent 'agentX' with tool_id 99999 \u2014 "
+        "ERROR: No running call_cli_agent run found for agent 'agentX' with tool_id 99999 \u2014 "
         'TERMINAL: this run has completed or crashed and its record was cleaned up. Do NOT '
         'poll again; the result is unobtainable from here (any completion message was already '
         'queued). Continue without it.'

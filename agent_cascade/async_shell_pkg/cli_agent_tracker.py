@@ -301,7 +301,7 @@ class CliAgentTracker(AsyncShellTracker):
         """Terminal message for a reaped run. Overrides the parent's whole string (not a
         substring rewrite) so shell wording never leaks — structurally independent from the
         parent template on purpose (BUG_0305 E5)."""
-        return (f"No running call_cli_agent run found for agent '{agent_name}' with tool_id "
+        return (f"ERROR: No running call_cli_agent run found for agent '{agent_name}' with tool_id "
                 f"{tool_id} — TERMINAL: this run has completed or crashed and its record was "
                 f"cleaned up. Do NOT poll again; the result is unobtainable from here (any "
                 f"completion message was already queued). Continue without it.")
