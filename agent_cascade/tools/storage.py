@@ -39,6 +39,7 @@ class Storage(BaseTool):
                     'The type of data operation: "put" (save data), "get" (read data), "delete" (remove data), or "scan" (list/read multiple items).',
                 'type':
                     'string',
+                'enum': ['put', 'get', 'delete', 'scan'],
             },
             'key': {
                 'description':

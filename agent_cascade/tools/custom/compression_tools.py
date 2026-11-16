@@ -33,6 +33,7 @@ class CompressContext(BaseTool):
             'mode': {
                 'type': 'string',
                 'enum': ['auto', 'manual'],
+                'default': 'auto',
                 'description': TOOL_METADATA['compress_context']['parameters']['mode']
             },
             'summary_text': {

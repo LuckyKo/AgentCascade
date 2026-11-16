@@ -52,6 +52,7 @@ class Retrieval(BaseTool):
             'files': {
                 'description': TOOL_METADATA['retrieval']['parameters']['files'],
                 'type': 'array',
+                'minItems': 1,
                 'items': {
                     'type': 'string'
                 }

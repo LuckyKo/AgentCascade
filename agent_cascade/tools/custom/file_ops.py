@@ -1614,7 +1614,8 @@ class EditFile(BaseTool, PathResolutionMixin):
             'occurrence': {
                 'type': 'integer',
                 'minimum': -1,
-                'description': TOOL_METADATA['edit_file']['parameters']['occurrence']
+                'description': TOOL_METADATA['edit_file']['parameters']['occurrence'],
+                'oneOf': [{'const': -1}, {'type': 'integer', 'minimum': 1}]
             },
             'justification': {
                 'type': 'string',
@@ -1932,18 +1933,22 @@ class Grep(BaseTool):
             },
             'ignore_vcs': {
                 'type': 'boolean',
+                'default': True,
                 'description': TOOL_METADATA['grep']['parameters']['ignore_vcs']
             },
             'context': {
                 'type': 'integer',
+                'default': 0,
                 'description': TOOL_METADATA['grep']['parameters']['context']
             },
             'smart_case': {
                 'type': 'boolean',
+                'default': True,
                 'description': TOOL_METADATA['grep']['parameters']['smart_case']
             },
             'literal': {
                 'type': 'boolean',
+                'default': False,
                 'description': TOOL_METADATA['grep']['parameters']['literal']
             },
             'count_only': {

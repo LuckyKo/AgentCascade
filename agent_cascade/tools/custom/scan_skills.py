@@ -43,6 +43,7 @@ class ScanSkills(BaseTool):
             },
             'active': {
                 'type': 'boolean',
+                'default': False,
                 'description': TOOL_METADATA['scan_skills']['parameters']['active'],
             },
             'preview': {

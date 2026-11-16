@@ -27,10 +27,12 @@ class ReadLogs(BaseTool):
         'properties': {
             'log_file': {
                 'type': 'string',
+                'minLength': 1,
                 'description': TOOL_METADATA['read_logs']['parameters']['log_file']
             },
             'max_chars_per_message': {
                 'type': 'integer',
+                'minimum': 1,
                 'default': 1000,
                 'description': TOOL_METADATA['read_logs']['parameters']['max_chars_per_message']
             },

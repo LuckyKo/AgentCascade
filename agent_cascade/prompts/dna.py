@@ -627,7 +627,8 @@ TOOL_METADATA = {
             'context':
                 'Number of lines to show before/after each match (like -C N). Default: 0',
             'smart_case':
-                'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.',
+                'When True (default), case-insensitive unless the pattern contains uppercase letters. '
+                'Set False for always case-sensitive.',
             'literal':
                 'When True, treat the pattern as a literal string (no regex interpretation). Useful for searching paths containing backslashes (e.g., Windows paths) or other regex metacharacters. Default: False.',
             'count_only':
@@ -642,7 +643,10 @@ TOOL_METADATA = {
             'path':
                 "Path(s) to delete — a single string or a list of strings, absolute or relative to the workspace root (e.g., 'temp/scratch.py' or ['a.md', 'b.md']). A string is ONE path: do not comma-join several paths (\"a.md,b.md\" is rejected) — pass a list. At least one path is required.",
             'include':
-                "Optional glob pattern(s) to keep, applied within the base directory of each path. Single pattern ('*.md') or comma-separated ('*.py,*.js'). Simple globs only; '**' not supported. Mirrors list_dir semantics.",
+                'Optional glob pattern(s) restricting which entries are deleted. Applied within the '
+                'base directory of each path. A path is one target; a directory is expanded and only '
+                'matching files (and directories, when a name filter is given) are deleted. '
+                "Single pattern or comma-separated ('*.md' or '*.py,*.js'); '**' is not supported.",
             'justification':
                 'Why you need to delete these file(s)'
         }
@@ -750,7 +754,8 @@ TOOL_METADATA = {
     },
     'image_gen': {
         'description': ('⚠ DEPRECATED — use media_gen instead, which supports image/video/music/TTS with an '
-                        'this tool still works and is kept for backward compatibility. '
+                        'explicit backend selector (run media_gen with prompt=__help to list options). '
+                        'This tool still works and is kept for backward compatibility. '
                         'Generate an image from a text prompt (via ComfyUI or the local '
                         'stable-diffusion.cpp backend), or render SVG code to an image.'),
         'parameters': {
@@ -952,6 +957,8 @@ TOOL_METADATA = {
                 'type':
                     'string',
                 'enum': ['sync', 'async'],
+                'default':
+                    'async',
                 'description':
                     '"async" (default) launches the container in the background and returns immediately with a Tool ID; the completion is delivered later, and you can check it with call_cli_agent(tool_id=N, execution_mode="async", task="__status") or kill it with task="__kill". "sync" blocks and returns the CLI output inline (pass it to run in the foreground). Async runs notify on completion only (no heartbeats).'
             },
@@ -1045,6 +1052,8 @@ TOOL_METADATA = {
                 },
                 'limit': {
                     'type': 'integer',
+                    'minimum': 1,
+                    'default': 5,
                     'description': 'Optional maximum number of tools to unlock. Default: 5.',
                 },
             },
