@@ -114,7 +114,9 @@ class SystemInfo(BaseTool):
         Computed from ``self.agent_pool.telemetry`` (the same getters the
         ``/api/telemetry`` endpoint uses) — never raises; degrades to a clear
         message if telemetry is unavailable. Excludes per-event detail
-        (``recent_events``) to stay compact; raw JSONL is at /api/telemetry/export.
+        (``recent_events``) to stay compact; the full raw JSONL (all events) is the
+        collector's on-disk file, pointed to at the top of this dump (also available
+        via /api/telemetry/export).
         """
         telem = getattr(self.agent_pool, 'telemetry', None)
         if not telem:
@@ -131,6 +133,11 @@ class SystemInfo(BaseTool):
             )
 
             lines = ['--- AC Telemetry Dump (live) ---']
+            # Point to the full on-disk JSONL (all events for this session) for deeper
+            # inspection — this dump is a compact aggregate view, not the raw stream.
+            log_path = getattr(telem, 'log_path', None)
+            if log_path:
+                lines.append(f"Full raw telemetry (all events): {log_path}  (inspect with read_logs)")
 
             # ── Session totals ──
             lines.append('')

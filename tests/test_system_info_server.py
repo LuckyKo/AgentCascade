@@ -370,6 +370,24 @@ class TestSystemInfoTelemetryDump:
         # Export pointer
         assert '/api/telemetry/export' in out
 
+    def test_dump_points_to_on_disk_jsonl(self):
+        """The dump points to the collector's on-disk JSONL (all events) for deep
+        inspection, alongside the /api/telemetry/export endpoint pointer."""
+        class _WithLogPath(_FakeTelemetry):
+            log_path = 'N:/work/WD/AgentWorkspace/telemetry/telemetry_20261117_000000.jsonl'
+
+        out = self._tool_with(_WithLogPath()).call('{"help": "telemetry"}')
+        assert 'Full raw telemetry (all events):' in out
+        assert 'telemetry_20261117_000000.jsonl' in out
+        assert 'read_logs' in out
+
+    def test_dump_omits_jsonl_pointer_when_no_log_path(self):
+        """A collector without log_path (e.g. a minimal mock) skips the pointer line
+        gracefully (the getattr guard) without breaking the rest of the dump."""
+        out = self._tool_with(_FakeTelemetry()).call('{"help": "telemetry"}')
+        assert 'Full raw telemetry (all events):' not in out
+        assert 'AC Telemetry Dump' in out
+
     def test_waste_cost_shown_only_when_priced(self):
         """wasted_cost=$ renders only when the session summary carries the key (MODEL_PRICING set)."""
         class _Priced(_FakeTelemetry):
