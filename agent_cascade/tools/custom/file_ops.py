@@ -146,6 +146,12 @@ class ReadFile(BaseTool, PathResolutionMixin):
             'limit': {
                 'type': 'integer',
                 'description': TOOL_METADATA['read_file']['parameters']['limit']
+            },
+            'mode': {
+                'type': 'string',
+                'description': TOOL_METADATA['read_file']['parameters']['mode'],
+                'enum': ['numbered', 'raw', 'whitespace'],
+                'default': 'numbered'
             }
         },
         'required': ['path'],
@@ -221,6 +227,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
         wild_truncation: int = 0,
         char_threshold: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
         read_char_trip: int = DEFAULT_READ_FILE_MAX_CHARS,
+        mode: str = 'numbered',
     ) -> str:
         """Read a text file using streaming line-by-line iteration.
 
@@ -262,7 +269,18 @@ class ReadFile(BaseTool, PathResolutionMixin):
                     break
 
                 stripped = raw_line.rstrip('\n\r')
-                formatted = f"{line_num}:\t{stripped}\n"
+                if mode == 'raw':
+                    formatted = stripped + '\n'
+                elif mode == 'whitespace':
+                    # Reveal invisible whitespace: tab -> \t, trailing space -> ·.
+                    # (CRLF is normalised away by the text-mode read, so it is not revealed;
+                    # these markers are a debug aid, not a faithful byte dump.)
+                    body = stripped.replace('\t', '\\t')
+                    core = body.rstrip(' ')
+                    body = core + '·' * (len(body) - len(core))
+                    formatted = f"{line_num}:{body}\n"
+                else:
+                    formatted = f"{line_num}:{stripped}\n"
 
                 # Per-line memory guard: truncate pathological lines (>100KB)
                 if len(formatted) > MAX_SINGLE_LINE_CHARS:
@@ -478,6 +496,12 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         limit = params.get('limit')
 
+        # mode: 'numbered' (default, NNN: prefix), 'raw' (verbatim, no prefix),
+        # or 'whitespace' (reveal tabs as \t, trailing spaces as ·).
+        # The schema enum enforces the value set; an invalid value is rejected by
+        # _verify_json_format_args (base.py) as a friendly ValueError, caught above.
+        mode = params.get('mode', 'numbered')
+
         # Wild-read truncation uses two distinct values:
         #   - char_threshold (trip threshold): tool_result_max_chars (~6k, BUG_0189) — the high-water mark.
         #   - wild_truncation (cut point): wild_read_truncation_chars (~2k).
@@ -533,6 +557,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 wild_truncation=wild_truncation,
                 char_threshold=char_threshold,
                 read_char_trip=read_char_trip,
+                mode=mode,
             )
 
         except ValueError as e:

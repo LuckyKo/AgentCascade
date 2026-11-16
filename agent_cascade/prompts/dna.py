@@ -456,10 +456,12 @@ TOOL_METADATA = {
         'description': ('Reads and returns the content of a specified file. If the file is large, '
                         'the content will be truncated. For binary files, displays a '
                         'hex dump of the first N bytes with ASCII representation. '
-                        'Each line is prefixed with its line number followed by a TAB '
-                        '(e.g. "42:\\tcontent"). To transcribe lines into edit_file, '
-                        'strip everything up to and including the first TAB — the '
-                        'remaining text preserves original indentation exactly.'),
+                        'By default (mode="numbered") each line is prefixed with its 1-based line '
+                        'number (e.g. "42:content"); strip the "NNN:" prefix to transcribe lines '
+                        'into edit_file — the remaining text preserves original indentation exactly. '
+                        'Set mode="raw" for verbatim content with no line-number prefix (for exact '
+                        'transcription), or mode="whitespace" to reveal invisible whitespace '
+                        '(tabs as \\t, trailing spaces as ·).'),
         'parameters': {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'D:/data/input.csv').",
@@ -468,7 +470,9 @@ TOOL_METADATA = {
                  "'start_line', not 'offset'. Supports negative values (-1 = last line, -3 = "
                  'third-to-last). Default: 1.'),
             'limit':
-                "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
+                "Optional: For text files, maximum number of lines to read. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files.",
+            'mode':
+                "Optional: rendering mode. 'numbered' (default) prefixes each line with its 1-based line number (NNN:). 'raw' returns verbatim content with no line-number prefix — use it when you need to transcribe content exactly (e.g. as edit_file old_content) without stripping a prefix. 'whitespace' reveals invisible whitespace (tabs as \\t, trailing spaces as ·) for debugging indentation issues — a debug aid, not a faithful byte dump."
         }
     },
     'view_image': {
@@ -526,7 +530,7 @@ TOOL_METADATA = {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content':
-                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode — pass an empty string (\'\') there, as the field is required by the schema but ignored; use `range` to select the lines to delete. When copying from read_file output, strip the "NNN:\\t" line-number prefix (everything up to and including the first TAB) to get the raw content.',
+                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode — pass an empty string (\'\') there, as the field is required by the schema but ignored; use `range` to select the lines to delete. When copying from read_file output, strip the "NNN:" line-number prefix (line number + colon) to get the raw content — or call read_file with mode="raw" for verbatim content with no prefix to strip.',
             'new_content':
                 'The exact literal text to replace old_content with. For match_mode=\'delete_and_insert\' it is inserted VERBATIM at the range — there is no anchor concept in that mode, so do NOT repeat the preceding/surrounding line inside new_content unless you want a duplicate line (the range, not new_content, decides what is deleted). Inserted lines are written verbatim — the caller is responsible for supplying correct indentation. For exact/heuristic modes, include the anchor line exactly once as part of the replaced text. For delete_and_insert, an empty string means delete-only.',
             'match_mode':

@@ -116,5 +116,5 @@ def test_content_unchanged_at_eof(file_266_lines):
     assert len(lines) == 14
     for i, line in enumerate(lines):
         expected_num = 252 + i
-        assert f"{expected_num}:\t" in line, f"line {i} missing prefix {expected_num}:"
+        assert f"{expected_num}:" in line, f"line {i} missing prefix {expected_num}:"
         assert f"LINE_{expected_num:04d}" in line

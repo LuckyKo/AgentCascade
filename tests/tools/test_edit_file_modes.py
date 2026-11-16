@@ -1479,11 +1479,11 @@ def test_delete_and_insert_missing_new_content():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# BUG_0158 / BUG_0170: read_file tab separator enables correct transcription
+# BUG_0158 / BUG_0170: read_file NNN: prefix enables correct transcription
 # ──────────────────────────────────────────────────────────────────────────
 
-def test_read_file_tab_separator_enables_exact_edit():
-    """BUG_0158/BUG_0170: verify that read_file's tab-separated line prefix
+def test_read_file_colon_prefix_enables_exact_edit():
+    """BUG_0158/BUG_0170: verify that read_file's NNN: line prefix
     allows agents to correctly transcribe indented lines (including markdown
     inline code) into edit_file old_content for exact matching.
 
@@ -1521,15 +1521,17 @@ def test_read_file_tab_separator_enables_exact_edit():
         last_fence = out.rindex('\n```')
         raw_block = out[first_fence:last_fence]
 
-        # Parse lines: each is "NNN:\t{content}"
+        # Parse lines: each is "NNN:{content}"
         lines = raw_block.split('\n')
         parsed = {}
         for line in lines:
             if not line.strip():
                 continue
-            tab_idx = line.index('\t')
-            line_num = int(line[:tab_idx].rstrip(':'))
-            content = line[tab_idx + 1:]  # everything after the tab is the raw content
+            colon = line.find(':')
+            if colon <= 0 or not line[:colon].isdigit():
+                continue
+            line_num = int(line[:colon])
+            content = line[colon + 1:]  # everything after "NNN:" is the raw content
             parsed[line_num] = content
 
         # Verify we got the expected lines
@@ -1561,9 +1563,9 @@ def test_read_file_tab_separator_enables_exact_edit():
         assert 'INFERRED (needs deterministic repro)' not in updated
 
 
-def test_read_file_tab_separator_preserves_zero_indent():
+def test_read_file_colon_prefix_preserves_zero_indent():
     """Lines with NO leading whitespace should transcribe correctly too
-    (tab separator must not add or remove spaces from unindented content)."""
+    (the NNN: prefix must not add or remove spaces from unindented content)."""
     from agent_cascade.tools.custom.file_ops import ReadFile
     from agent_cascade.operation_manager import OperationManager
 
@@ -1583,8 +1585,10 @@ def test_read_file_tab_separator_preserves_zero_indent():
         for line in raw_block.split('\n'):
             if not line.strip():
                 continue
-            tab_idx = line.index('\t')
-            parsed[int(line[:tab_idx].rstrip(':'))] = line[tab_idx + 1:]
+            colon = line.find(':')
+            if colon <= 0 or not line[:colon].isdigit():
+                continue
+            parsed[int(line[:colon])] = line[colon + 1:]
 
         # Line 1: no leading whitespace
         assert parsed[1] == 'hello world'

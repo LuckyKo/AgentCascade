@@ -2093,7 +2093,8 @@ class FileOpsMixin:
 
     # ─── Read file ────────────────────────────────────────────────────────
 
-    def read_file(self, path: str, start_line: int = 1, limit: Optional[int] = None) -> str:
+    def read_file(self, path: str, start_line: int = 1, limit: Optional[int] = None,
+                  mode: str = 'numbered') -> str:
         """Read a file. Uses line-by-line iteration for memory efficiency when range is specified.
 
         If *limit* is not provided, falls back to ``DEFAULT_READ_FILE_MAX_LINES`` from settings.
@@ -2145,7 +2146,16 @@ class FileOpsMixin:
             if hit_end:
                 header += ' [TRUNCATED]'
 
-            content = ''.join([f"{start_line + i}:\t{lines[i]}" for i in range(len(lines))])
+            if mode == 'raw':
+                content = '\n'.join(lines)
+            elif mode == 'whitespace':
+                def _ws(line: str) -> str:
+                    body = line.replace('\t', '\\t')
+                    core = body.rstrip(' ')
+                    return core + '·' * (len(body) - len(core))
+                content = '\n'.join(f"{start_line + i}:{_ws(lines[i])}" for i in range(len(lines)))
+            else:  # 'numbered' (default)
+                content = '\n'.join(f"{start_line + i}:{lines[i]}" for i in range(len(lines)))
             result = f"{header}\n```\n{content}\n```"
 
             # Compact pagination footer when truncated

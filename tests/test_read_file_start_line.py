@@ -156,14 +156,14 @@ def test_invalid_json_string_errors_cleanly():
 
 
 def test_read_file_preserves_leading_whitespace_bytes():
-    """BUG_0176: read_file is byte-correct — the content after the NNN:\\t separator is exactly
+    """BUG_0176: read_file is byte-correct — the content after the NNN: prefix is exactly
     the file's bytes, with NO extra indentation added for fenced/indented blocks.
 
-    The BUG_0176 hazard is a *transcription* artifact: the \\t separator renders as a leading tab
-    of indentation, so a line whose content has no leading whitespace (e.g. 'for attempt:') looks
-    like it has one. This test pins the render side: for every content line, the bytes after the
-    first TAB must equal the file's bytes — for both no-leading-whitespace and 4-space-indented
-    lines inside a markdown fence.
+    The BUG_0176 hazard is a *transcription* artifact: the NNN: prefix can mislead about
+    indentation, so a line whose content has no leading whitespace (e.g. 'for attempt:') must
+    render with its bytes preserved exactly. This test pins the render side: for every content
+    line, the bytes after the "NNN:" prefix must equal the file's bytes — for both
+    no-leading-whitespace and 4-space-indented lines inside a markdown fence.
     """
     body = (
         '# Title\n'
@@ -184,15 +184,43 @@ def test_read_file_preserves_leading_whitespace_bytes():
     file_lines = body.split('\n')
     checked = 0
     for line in out.split('\n'):
-        if '\t' not in line:
+        colon = line.find(':')
+        if colon <= 0 or not line[:colon].isdigit():
             continue  # header / closing fence
-        num_str, content = line.split('\t', 1)
-        # The prefix is "NNN:" (line number + colon); strip the colon before parsing.
-        if not num_str.endswith(':') or not num_str[:-1].isdigit():
-            continue
-        n = int(num_str[:-1])
+        n = int(line[:colon])
+        content = line[colon + 1:]  # everything after "NNN:" is the raw content
         assert content == file_lines[n - 1], f"line {n}: {content!r} != {file_lines[n - 1]!r}"
         checked += 1
 
     expected = sum(1 for _ in open(p, 'r', encoding='utf-8'))
     assert checked == expected, f"rendered {checked} content lines, file has {expected}"
+
+
+def test_read_file_raw_mode_has_no_line_prefix():
+    """mode='raw' returns verbatim content with NO NNN: line-number prefix."""
+    body = '# Title\n\nfor attempt in range(3):\n    pass\n'
+    p = _ws_file('raw_mode.md', body)
+    out = ReadFile().call({'path': str(p), 'mode': 'raw'})
+    assert not out.startswith('ERROR'), out
+    assert '1:# Title' not in out, out  # no numbered prefix
+    assert 'for attempt in range(3):' in out, out
+    assert '    pass' in out, out  # indentation preserved verbatim
+
+
+def test_read_file_whitespace_mode_reveals_invisible_ws():
+    """mode='whitespace' shows tabs as a visible \\t and trailing spaces as ·."""
+    body = 'a\tb\ntrailing   \n'
+    p = _ws_file('ws_mode.md', body)
+    out = ReadFile().call({'path': str(p), 'mode': 'whitespace'})
+    assert not out.startswith('ERROR'), out
+    assert '\t' not in out, out  # the real tab is gone
+    assert '\\t' in out, out  # shown as the two-char backslash-t marker
+    assert '·' in out, out  # trailing spaces revealed
+
+
+def test_read_file_unknown_mode_errors_cleanly():
+    """An unrecognised mode returns a friendly ERROR string (schema enum), not a crash."""
+    p = _ws_file('bad_mode.md', 'hello\n')
+    out = ReadFile().call({'path': str(p), 'mode': 'bogus'})
+    assert out.startswith('ERROR'), out
+    assert 'mode' in out, out

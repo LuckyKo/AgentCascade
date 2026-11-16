@@ -70,7 +70,7 @@ def _mk(n, ch='y', pad=60):
     return '\n'.join(f"line {i} " + ch * pad for i in range(1, n + 1)) + '\n'
 
 
-# Bodies sized against _read_text_file's ``NNN:\t`` rendering (~70 chars/line):
+# Bodies sized against _read_text_file's ``NNN:`` rendering (~69 chars/line):
 _OVER = _mk(70)   # ~4900 rendered -> exceeds the 4000 no-limit default
 _UNDER = _mk(40)  # ~2800 rendered -> under 4000, stays intact
 _HUGE = _mk(430)  # ~30k rendered -> exceeds the 25k global net / 4000 window
@@ -81,7 +81,7 @@ class TestReadFileCharTrip:
         """A no-limit read whose body >4000 is cut to whole lines <4000 + [TRUNCATED],
         NOT the unbound-read warning, with a continue footer."""
         full = set(
-            f"{i}:\tline {i} " + 'y' * 60 for i in range(1, 71)
+            f"{i}:line {i} " + 'y' * 60 for i in range(1, 71)
         )
         out = _read(_OVER)  # no limit -> no-limit read
         assert out.startswith('OK:'), out

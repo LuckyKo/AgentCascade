@@ -75,8 +75,10 @@ def test_tab_prefix_below_line_one_reports_whitespace():
             'next line',
         )
         f = _owned_file(om, d, 'notes.md', file_content)
-        # Simulates copying read_file's "NNN:\t" prefix plus the content's
-        # own indentation: tab + 2 spaces → 6 spaces after normalization.
+        # Defensive: a stray tab sneaks into old_content (e.g. an agent copying a
+        # tab-indented line) plus the content's own 2-space indent. read_file no
+        # longer emits a tab (it uses an NNN: prefix), so this pins the matcher
+        # reporting it as a whitespace diff at the real line, not line 1.
         old_content = '\t  - item\nnext line\n'
 
         result = om.edit_file(str(f), 'coder', old_content=old_content,
