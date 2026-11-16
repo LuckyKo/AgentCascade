@@ -154,6 +154,28 @@ SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPR
 # from the approval name: that path holds no lock, so it must not share one warm object.
 SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_skilladvisor')
 
+# ── Compressor agent warm reuse ───────────────────────────────────────────────
+# BUG_0330: reuse one warm Compressor (+ one warm CompressorReview) across compressions/
+# consolidations/reviews so the stable conversation[0] prefix hits the server-side KV cache
+# instead of a fresh Compressor_<n> / CompressionReviewer_<n> per op. Default OFF for staged
+# rollout; flip AGENT_CASCADE_COMPRESSOR_REUSE=1 to enable. With the flag OFF, behavior is
+# byte-identical to today (fresh name per op; the warm names are never created or matched).
+COMPRESSOR_REUSE_ENABLED: bool = os.getenv('AGENT_CASCADE_COMPRESSOR_REUSE',
+                                           '0').strip().lower() not in ('0', 'false', 'off', 'no')
+# Fixed instance name for the warm Compressor (L1 compression + L2 consolidation share it: same
+# soul, same prefix; they already share the Compressor_<n> name space today). A fixed name is
+# REQUIRED for the cache win — a per-op name changes the prompt bytes every op.
+COMPRESSOR_WARM_NAME: str = os.getenv('AGENT_CASCADE_COMPRESSOR_WARM_NAME', 'Compressor_warm')
+# Fixed name for the warm compaction reviewer. Deliberately distinct from the summarizer warm
+# name: the reviewer runs the Compressor class with a different task prompt and config
+# (tool-less, max_turns=1), and a distinct claim keeps a held summarizer from blocking a review.
+COMPRESSOR_REVIEWER_WARM_NAME: str = os.getenv(
+    'AGENT_CASCADE_COMPRESSOR_REVIEWER_WARM_NAME', 'CompressorReviewer_warm')
+# Insurance cap (defense-in-depth): N > 0 retires + re-seeds the warm instances after N
+# successful reuses. Default 0 = off, matching Security's uncapped warm behavior. Revisit only
+# if telemetry shows a prompt-DNA drift signal (start at N=100 then).
+COMPRESSOR_REUSE_MAX_REUSES: int = int(os.getenv('AGENT_CASCADE_COMPRESSOR_REUSE_MAX_REUSES', 0))
+
 # ── System-launched advisor toolset ───────────────────────────────────────────
 # Disabled tools for SYSTEM-LAUNCHED advisors (the Security guard and the Skill Advisor).
 # Deliberately separate from the UI per-agent disabled_tools map: the UI setting governs
