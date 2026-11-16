@@ -298,6 +298,19 @@ class TestEngineWarmAcquireCompressor:
         assert warm._state_label is None                    # warm-KV [STATE_RESTORE_SKIP] branch
         assert warm.max_turns is None and warm._generate_cfg_override is None  # caller re-applies
 
+    def test_warm_hit_sets_restricted_shell_pinned(self):
+        # Plan §3b caveat, ACCEPT-AND-PIN (build review F-2): the reuse reset sets
+        # inst.restricted_shell = True unconditionally (engine/system_agent.py), so a warm
+        # Compressor inherits this Security-only flag. It is INERT for the tool-less Compressor
+        # (it never builds a shell/tool registry), so the plan's recommendation is to accept it;
+        # pinned here so any future change to that line is a deliberate, test-visible decision.
+        warm = _make_warm_compressor()
+        assert warm.restricted_shell is False  # fresh instances start unrestricted
+        engine = _make_engine(_make_pool(warm))
+        got = _acquire(engine, task='T')
+        assert got is not None and got[1] is True           # warm hit
+        assert warm.restricted_shell is True
+
 
 # ── 4. Invoker wiring (Phase 1) ──────────────────────────────────────────────
 
@@ -774,6 +787,111 @@ class TestRemintReuses:
                 engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', 'r3')
             assert (got[0], got[1], got[2]) == (fresh, False, COMPRESSOR_WARM_NAME)
             compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r3')
+
+
+# ── 8. Gate-level claim release across all exit paths (build review F-3) ─────
+
+from agent_cascade import settings as _settings  # noqa: E402
+from agent_cascade.agent_pool import AgentPool as _AgentPool  # noqa: E402
+from agent_cascade.compression import core as _core  # noqa: E402
+from agent_cascade.compression.core import _consolidate_markers  # noqa: E402
+
+
+def _target_inst(name):
+    """Real AgentInstance with enough history that the patched marker indices are valid."""
+    inst = _make_warm_compressor(name=name)
+    for i in range(8):
+        inst.append_message(Message(role=USER, content='msg%d' % i))
+    return inst
+
+
+def _real_session(pool, rid='f3_rid'):
+    """Real WarmCompressorSession riding REAL claim-registry state (never a bare MagicMock:
+    auto-attrs would fake the held/released distinction). engine._continue_... returns False
+    so gate refines degrade to the fresh-respawn branch without LLM plumbing."""
+    warm = _make_warm_compressor()
+    assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+    engine = MagicMock()
+    engine._continue_reusable_system_agent_turn.return_value = False
+    return compressor_reuse.WarmCompressorSession(
+        warm, COMPRESSOR_WARM_NAME, rid, engine, pool, 'Caller')
+
+
+class TestConsolidateMarkersClaimRelease:
+    """F-3: the ONE finally in _consolidate_markers Phase 2 (core.py) must release a live
+    warm claim on every exit: gate pass / retry exhaustion / agent_pool.stopped / exception."""
+
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def _drive(self, *, target, review_fn, cons_exc=None, stopped=False):
+        """Run one _consolidate_markers end-to-end with a live held session claim."""
+        pool = _invoker_pool()
+        pool.stopped = stopped
+        pool.get_instance.return_value = _target_inst(target)
+        session = _real_session(pool)
+        held = []  # observed claim-holder while the gate actually ran
+        real_release = compressor_reuse.release_claim  # capture before patching (no recursion)
+        def _review(**kw):
+            held.append(compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME))
+            return review_fn(**kw)
+        with patch.object(compressor_reuse, 'acquire_warm_consolidation', return_value=session), \
+                patch.object(_settings, 'COMPRESSION_CONSOLIDATION_THRESHOLD', 3), \
+                patch.object(_core, 'select_markers_for_consolidation',
+                             return_value=([2, 5], 8)), \
+                patch.object(_core, 'extract_summary_from_marker',
+                             return_value='S1'), \
+                patch.object(_core, 'get_marker_time_range',
+                             return_value=(0.0, 1.0)), \
+                patch.object(_AgentPool, 'find_all_marker_indices', return_value=[2, 5, 8]), \
+                patch.object(compressor_reuse, 'release_claim',
+                             side_effect=real_release) as rel, \
+                patch('agent_cascade.compression.agent_invoker.invoke_consolidation_agent',
+                      side_effect=cons_exc if cons_exc is not None
+                      else (lambda **kw: ('CONSOLIDATED', ''))) as mc, \
+                patch('agent_cascade.compression.core.COMPRESSION_REVIEWER_ENABLED', True), \
+                patch('agent_cascade.compression.core.COMPRESSION_REVIEW_MAX_RETRIES', 2), \
+                patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
+                      side_effect=_review):
+            _consolidate_markers(pool, target)
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None  # THE point: no wedge
+        assert compressor_reuse.claim_holder(REVIEWER_WARM) is None
+        rel.assert_called_once_with(COMPRESSOR_WARM_NAME, 'f3_rid')  # released exactly once
+        return session, held, mc
+
+    def test_pass_path_releases(self):
+        session, held, mc = self._drive(
+            target='t_pass', review_fn=lambda **kw: (True, []))
+        assert held and all(h == 'f3_rid' for h in held)  # claim stayed live during the gate
+        session.release()  # idempotent: second release must not raise or cross-free
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+    def test_retry_exhaustion_releases(self):
+        session, held, mc = self._drive(
+            target='t_exhaust', review_fn=lambda **kw: (False, ['x']))
+        assert len(held) == 3  # initial + both retries (== MAX_RETRIES bound)
+        assert all(h == 'f3_rid' for h in held)
+        session.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+    def test_pool_stopped_releases(self):
+        session, held, mc = self._drive(
+            target='t_stopped', review_fn=lambda **kw: (False, ['x']), stopped=True)
+        assert len(held) == 1  # initial review only — retry loop bails on pool.stopped
+        session.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+    def test_consolidation_exception_releases(self):
+        session, held, mc = self._drive(
+            target='t_exc', review_fn=lambda **kw: (True, []),
+            cons_exc=RuntimeError('boom'))
+        assert held == []          # never reached the gate
+        assert mc.call_count == 1  # single Phase-2 attempt, then early return
+        session.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
 
 
 if __name__ == '__main__':

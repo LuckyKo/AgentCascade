@@ -941,8 +941,8 @@ def invoke_consolidation_agent(
     # Retry path (preserve_items) appends the "MUST retain verbatim" wording to the end
     # instruction, keeping the base CONSOLIDATION_PROMPT byte-identical for the no-retry case.
     # Shared builder with the warm-session open path (§3f single source of truth).
-    consolidation_prompt = _build_consolidation_prompt(
-        marker_summaries, marker_time_ranges, preserve_items)
+    # Built lazily below: the warm-session branch never uses it (the session primed the
+    # task with a byte-identical prompt when it opened).
 
     try:
         logger.info(
@@ -965,6 +965,8 @@ def invoke_consolidation_agent(
             comp_instance, comp_state_key = warm_session.instance, warm_session.actual_name
             reuse_name = None
         else:
+            consolidation_prompt = _build_consolidation_prompt(
+                marker_summaries, marker_time_ranges, preserve_items)
             comp_instance, _reused, comp_state_key = compressor_reuse.acquire_compressor_agent(
                 engine, 'Compressor', reuse_name, comp_state_key, consolidation_prompt, caller_name, rid)
 

@@ -254,6 +254,7 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
     """
     if not COMPRESSOR_REUSE_ENABLED:
         return None
+    rid = ''
     try:
         import uuid
         from agent_cascade.execution_engine import ExecutionEngine
@@ -271,5 +272,9 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
             _note_warm_reuse(engine, actual_name)
         return WarmCompressorSession(inst, actual_name, rid, engine, agent_pool, caller_name)
     except Exception as e:  # noqa: BLE001 — warm path is best-effort
+        # If the engine acquired (claim HELD) and a later step threw, the claim would
+        # otherwise wedge the warm name for the process lifetime — no session object
+        # exists, so no release() will ever fire. rid-guarded no-op if never acquired.
+        release_claim(COMPRESSOR_WARM_NAME, rid)
         logger.warning('[COMPRESSOR_REUSE] warm consolidation session unavailable: %s', e)
         return None
