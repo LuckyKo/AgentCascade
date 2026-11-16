@@ -2852,6 +2852,8 @@ class FileOpsMixin:
             tool_args = {'path': path, 'range': range_param, 'new_content': new_content, 'match_mode': match_mode}
         else:
             tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
+        if occurrence is not None:
+            tool_args['occurrence'] = occurrence  # BUG_0334: approver must see the value it validated
         tool_args['justification'] = justification
 
         if pre_approved:

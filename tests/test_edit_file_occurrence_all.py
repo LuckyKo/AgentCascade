@@ -170,3 +170,83 @@ def test_occurrence_non_numeric_string_errors():
         res = _edit(om, f, old='a', new='X', occurrence='abc')
         assert res.startswith('ERROR'), f"expected an error, got: {res!r}"
         assert 'positive integer or -1' in res, f"error must explain valid values: {res!r}"
+
+
+# ── BUG_0334: approver must SEE the occurrence value it validated ────────────
+#
+# Root cause: edit_file() builds the approval `tool_args` dict (file_operations.py
+# ~2851) WITHOUT the `occurrence` value, so the security approver reads a
+# justification that mentions occurrence but cannot find the key in the args and
+# spuriously rejects. Fix: add `occurrence` to tool_args when it is not None.
+
+
+def _capture_approval_args(om):
+    """Force edit_file onto the approval path and capture the `tool_args` it
+    shows the approver. Patches `_is_auto_approved` to False and stubs
+    `request_user_approval` to record its args and approve. Returns the capture
+    list (one dict per approval request)."""
+    captured = []
+
+    def _never_auto(*args, **kwargs):
+        return False
+
+    def _approve_and_record(*args, **kwargs):
+        captured.append(kwargs.get('tool_args', {}))
+        return (True, 'approved by test spy')
+
+    om._is_auto_approved = _never_auto
+    om.request_user_approval = _approve_and_record
+    return captured
+
+
+def test_occurrence_visible_in_approval_tool_args():
+    """BUG_0334 positive: on a non-auto-approved file, exact-mode edit_file with
+    occurrence=-1 and a 2× pattern must route to the approver with `occurrence`
+    present in the tool_args it receives (the value the approver must validate)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        content = 'foo\nbar\nfoo\n'  # 'foo' byte-identical at 2 sites
+        f = _owned_file(om, d, 'f.txt', content)
+        captured = _capture_approval_args(om)
+        res = _edit(om, f, old='foo', new='FOO', occurrence=-1)
+        assert captured, 'the approval path must have been reached'
+        tool_args = captured[0]
+        assert 'occurrence' in tool_args, f"approver must see occurrence, got {tool_args!r}"
+        assert tool_args['occurrence'] == -1, f"occurrence must be -1, got {tool_args.get('occurrence')!r}"
+        assert res.startswith('OK'), f"expected success after approval, got {res!r}"
+
+
+def test_multi_match_without_occurrence_still_guarded():
+    """BUG_0334 negative control: with occurrence OMITTED (None) and a 2× pattern,
+    edit_file must still hit the multi-match guard at file_operations.py:2413 and
+    return the disambiguation error BEFORE reaching the approver. This proves the
+    new occurrence-in-tool_args change did not bypass the guard. The test fails if
+    the guard is removed: the edit would proceed to the (captured) approver."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        content = 'foo\nbar\nfoo\n'
+        f = _owned_file(om, d, 'f.txt', content)
+        captured = _capture_approval_args(om)
+        res = om.edit_file(str(f), 'coder', old_content='foo', new_content='FOO',
+                           match_mode='exact')  # occurrence omitted (None)
+        assert res.startswith('ERROR'), f"expected multi-match guard error, got {res!r}"
+        assert 'found 2 times' in res, f"guard must report 2 matches: {res!r}"
+        assert not captured, f"guard must reject BEFORE any approval request, got {captured!r}"
+        assert f.read_text(encoding='utf-8') == content, 'file must be unchanged on guard rejection'
+
+
+def test_delete_and_insert_tool_args_has_no_occurrence():
+    """BUG_0334 regression: the range-based delete_and_insert branch passes
+    occurrence=None, so its approval tool_args must NOT gain an 'occurrence' key
+    (proves the added branch is gated on `is not None`, not unconditional)."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        content = 'a\nb\nc\nd\ne\n'
+        f = _owned_file(om, d, 'f.txt', content)
+        captured = _capture_approval_args(om)
+        res = om.edit_file(str(f), 'coder', old_content='', new_content='X\nY\n',
+                           match_mode='delete_and_insert', range_param='2:3')
+        assert captured, 'delete_and_insert must still route to the approver'
+        assert 'occurrence' not in captured[0], \
+            f"delete_and_insert args must omit occurrence, got {captured[0]!r}"
+        assert res.startswith('OK'), f"expected success after approval, got {res!r}"
