@@ -158,10 +158,18 @@ SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE
 # Disabled tools for SYSTEM-LAUNCHED advisors (the Security guard and the Skill Advisor).
 # Deliberately separate from the UI per-agent disabled_tools map: the UI setting governs
 # user- and agent-called sub-agents, while system advisors use this fixed set so a UI edit
-# cannot widen or narrow their capabilities. Default = DEFAULT_SECURITY_DISABLED_TOOLS minus
-# shell_cmd, because system agents keep read-only shell access via restricted_shell=True.
+# cannot widen or narrow their capabilities.
+#
+# The default is the 18-tool set the Security guard was actually running with (mirrors the
+# live config/pool_settings.json "Security" entry, 2026-11-16): the seed
+# (DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd'}) with scan_skills dropped and
+# image_gen / tool_search / send_message / media_gen / call_cli_agent / view_image added.
+# System agents keep read-only shell via restricted_shell=True, so shell_cmd stays out.
 # Comma-separated tool names; empty string disables nothing (0 = no restrictions).
-_ADVISOR_DISABLED_TOOLS_DEFAULT = ','.join(sorted(DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd'}))
+_ADVISOR_DISABLED_TOOLS_DEFAULT = ','.join(sorted(
+    (DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd', 'scan_skills'})
+    | {'image_gen', 'tool_search', 'send_message', 'media_gen', 'call_cli_agent', 'view_image'}
+))
 ADVISOR_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset(
     t.strip() for t in os.getenv('AGENT_CASCADE_ADVISOR_DISABLED_TOOLS',
                                  _ADVISOR_DISABLED_TOOLS_DEFAULT).split(',') if t.strip())
