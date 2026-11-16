@@ -13,6 +13,7 @@ No network, no real LLM. Stubs bind the REAL ``AgentPool.inject_skill`` so the l
 exercised here is the same one ``load_skill`` and the memory-hint auto-loader share.
 """
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -122,6 +123,23 @@ def test_a5_inject_failure_swallowed():
     # Must NOT raise despite the failing inject_skill (best-effort by design).
     mgr._maybe_autoload_skills(inst, 'Main', ['skill-a'], {'skill-a': 3}, set(), ON)
     assert enq == []  # nothing enqueued (inject_skill raised before enqueue)
+
+
+def test_a6_below_threshold_emits_debug_log(caplog):
+    """BUG_0263 observability: the below-threshold skip (the common 'hinted N×, 0 loads'
+    case) now logs WHY it did not fire. Functionality-neutral: inject_skill NOT called."""
+    inst = _inst()
+    enq = []
+    mgr = _mgr_for(_make_inject_pool(inst, enq))
+    # Root-level DEBUG (no `logger=` kwarg) — the emitter is the shared
+    # `agent_cascade.log.logger`, so scoping by module name would be a no-op.
+    with caplog.at_level(logging.DEBUG):
+        mgr._maybe_autoload_skills(inst, 'Main', ['skill-a'], {'skill-a': 2}, set(), ON)
+    assert enq == []  # below threshold (2 < 3) -> no auto-load, behavior unchanged
+    assert inst._loaded_skill_names is None
+    skip = [r.getMessage() for r in caplog.records if 'not auto-loading' in r.getMessage()]
+    assert len(skip) == 1, skip
+    assert 'skill-a' in skip[0] and 'hints=2' in skip[0] and 'threshold=3' in skip[0]
 
 
 # ── T2: "Most-missed hinted skills" telemetry ───────────────────────────────

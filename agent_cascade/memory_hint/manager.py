@@ -1091,6 +1091,13 @@ class MemoryHintManager:
         threshold = settings.get('skill_autoload_threshold', 3)
         for n in skill_names:
             if skill_counts.get(n, 0) < threshold or n.lower() in loaded:
+                # BUG_0263 observability: the below-threshold / already-loaded skip was
+                # silent — record WHY a hinted skill was NOT auto-loaded so the
+                # "hinted N×, 0 loads" root-cause question is closable. DEBUG = no
+                # production (INFO) noise. Pure logging: `continue` + counters unchanged.
+                logger.debug('[MEMORY_HINT] %s: not auto-loading skill %r '
+                             '(hints=%d, threshold=%d, loaded=%s)',
+                             name, n, skill_counts.get(n, 0), threshold, n.lower() in loaded)
                 continue
             try:
                 status, _re_enabled = self._pool.inject_skill(name, n)
