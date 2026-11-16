@@ -8,8 +8,10 @@ import logging
 import re
 import threading
 import time as _time
+import uuid
 from typing import Any, List, Tuple
 
+from agent_cascade import compressor_reuse
 from agent_cascade.agent_instance import AgentState
 # Import shared broadcast helper (replaces duplicated inline broadcast loops)
 from agent_cascade.api_integration import broadcast_stream_update
@@ -19,7 +21,8 @@ from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.prompts.dna import (COMPACTION_REVIEWER_PROMPT, COMPRESSION_END_MARKER, COMPRESSION_PROMPT,
                                        CONSOLIDATION_PROMPT)
 from agent_cascade.settings import (COMPACTION_REVIEWER_MAX_TURNS, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES,
-                                    COMPRESSION_REVIEW_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS)
+                                    COMPRESSION_REVIEW_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS, COMPRESSOR_REUSE_ENABLED,
+                                    COMPRESSOR_REVIEWER_WARM_NAME, COMPRESSOR_WARM_NAME)
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from security_handler.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import yield_caller_slot
@@ -692,6 +695,13 @@ def invoke_compression_agent(
 
     comp_state_key = _generate_compressor_instance_name()
 
+    # BUG_0330: with warm reuse ON, the fixed-name warm Compressor is tried first and the fresh
+    # per-op name above becomes the fallback (and the instance_state/finally key is re-pointed to
+    # whichever name was actually used). With the flag OFF, reuse_name is None → the warm path is
+    # never attempted and behavior is identical to today.
+    reuse_name = COMPRESSOR_WARM_NAME if COMPRESSOR_REUSE_ENABLED else None
+    rid = uuid.uuid4().hex
+
     # Build the history text for the summary prompt
     history_text = _format_messages_for_summary(target_messages)
 
@@ -722,34 +732,34 @@ def invoke_compression_agent(
     from agent_cascade.execution_engine import ExecutionEngine
     engine = ExecutionEngine(agent_pool)
 
-    # Create the compressor instance ONCE — reused across retries
-    comp_instance = engine._create_system_agent(
-        agent_class='Compressor',
-        instance_name=comp_state_key,
-        task=summary_prompt,
-        caller=caller_name,
-    )
-
-    _configure_compressor_instance(agent_pool, comp_instance, caller_name)
-
-    # Bound the system-launched Compressor with its own turn budget (decoupled from the caller's limit).
-    comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS
-
-    # Capture the initial conversation state ([system_msg, task_msg]) for retry resets.
-    # After engine.run() completes, the conversation will contain the assistant's
-    # (bad) response. On retry we reset back to this initial state so the LLM sees
-    # a clean [system, user_task] prompt — a true "resend the original prompt" retry.
-    # Deep copy ensures message objects are not shared with the live conversation,
-    # preventing stale/mutated state (timestamps, cache markers) from leaking into retries.
-    with comp_instance._compression_lock:
-        initial_conversation = copy.deepcopy(list(comp_instance.conversation))
-
     max_retries = COMPRESSION_MAX_RETRIES
     if max_retries < 1:
         raise RuntimeError(f"COMPRESSION_MAX_RETRIES must be >= 1, got {max_retries}")
 
     try:
         logger.info('Compression agent invoked via engine-based execution')
+
+        # Acquire the compressor ONCE — reused across retries. Warm fixed-name instance when
+        # reuse is enabled, fresh per-op spawn otherwise. This lives INSIDE the try so the
+        # finally below always releases the warm claim (the engine hands off ownership on a
+        # successful warm acquire).
+        comp_instance, _reused, comp_state_key = compressor_reuse.acquire_compressor_agent(
+            engine, 'Compressor', reuse_name, comp_state_key, summary_prompt, caller_name, rid)
+
+        _configure_compressor_instance(agent_pool, comp_instance, caller_name)
+
+        # Bound the system-launched Compressor with its own turn budget (decoupled from the caller's limit).
+        # Re-applied unconditionally: the warm-hit reset nulls max_turns/_generate_cfg_override.
+        comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS
+
+        # Capture the initial conversation state ([system_msg, task_msg]) for retry resets.
+        # After engine.run() completes, the conversation will contain the assistant's
+        # (bad) response. On retry we reset back to this initial state so the LLM sees
+        # a clean [system, user_task] prompt — a true "resend the original prompt" retry.
+        # Deep copy ensures message objects are not shared with the live conversation,
+        # preventing stale/mutated state (timestamps, cache markers) from leaking into retries.
+        with comp_instance._compression_lock:
+            initial_conversation = copy.deepcopy(list(comp_instance.conversation))
 
         for attempt in range(1, max_retries + 1):
             # Stop-check before each retry: after a user Stop, do not re-invoke
@@ -821,6 +831,9 @@ def invoke_compression_agent(
                         pass
         except Exception as cleanup_err:
             logger.error(f"Compression cleanup failed for '{comp_state_key}': {cleanup_err}", exc_info=True)
+        # Release the warm claim LAST, after instance_state cleanup (BUG_0330). rid-guarded
+        # no-op when the flag was OFF or the acquire fell back to a fresh spawn.
+        compressor_reuse.release_claim(reuse_name, rid)
 
 
 def _format_summaries_with_spans(
@@ -893,6 +906,11 @@ def invoke_consolidation_agent(
 
     comp_state_key = _generate_compressor_instance_name()
 
+    # BUG_0330 warm reuse (see invoke_compression_agent): fixed-name warm Compressor first when
+    # enabled; the fresh per-op name is the fallback. OFF → reuse_name None → identical to today.
+    reuse_name = COMPRESSOR_WARM_NAME if COMPRESSOR_REUSE_ENABLED else None
+    rid = uuid.uuid4().hex
+
     # Format input as numbered summaries, annotated with each window's start timestamp.
     summaries_text = _format_summaries_with_spans(marker_summaries, marker_time_ranges)
 
@@ -922,19 +940,17 @@ def invoke_consolidation_agent(
         if caller_name is None:
             caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
 
-        # Create proper AgentInstance via _create_system_agent()
+        # Acquire proper AgentInstance: warm fixed-name instance when reuse enabled, fresh
+        # per-op spawn otherwise (byte-identical to the pre-BUG_0330 path).
         from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
-        comp_instance = engine._create_system_agent(
-            agent_class='Compressor',
-            instance_name=comp_state_key,
-            task=consolidation_prompt,
-            caller=caller_name,
-        )
+        comp_instance, _reused, comp_state_key = compressor_reuse.acquire_compressor_agent(
+            engine, 'Compressor', reuse_name, comp_state_key, consolidation_prompt, caller_name, rid)
 
         _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 
         # Bound the system-launched Compressor with its own turn budget (decoupled from the caller's limit).
+        # Re-applied unconditionally: the warm-hit reset nulls max_turns/_generate_cfg_override.
         comp_instance.max_turns = COMPRESSOR_AGENT_MAX_TURNS
 
         summary, caption = _execute_compressor_and_extract_summary(
@@ -947,14 +963,22 @@ def invoke_consolidation_agent(
     except Exception as e:
         raise RuntimeError(f"Consolidation failed: {e}") from e
     finally:
-        # Always clean up consolidation agent state when done
-        with agent_pool._execution._state_lock:
-            if comp_state_key in agent_pool.instance_state:
-                agent_pool.instance_state[comp_state_key]['active'] = False
-                try:
-                    agent_pool.active_stack_remove(comp_state_key)
-                except Exception:
-                    pass
+        # Always clean up consolidation agent state when done. Defensive wrapper mirrors the
+        # compression invoker: a cleanup error must never skip the warm-claim release below
+        # (a leaked claim wedges reuse for the process lifetime — BUG_0330).
+        try:
+            with agent_pool._execution._state_lock:
+                if comp_state_key in agent_pool.instance_state:
+                    agent_pool.instance_state[comp_state_key]['active'] = False
+                    try:
+                        agent_pool.active_stack_remove(comp_state_key)
+                    except Exception:
+                        pass
+        except Exception as cleanup_err:
+            logger.error(f"Consolidation cleanup failed for '{comp_state_key}': {cleanup_err}", exc_info=True)
+        # Release the warm claim LAST, after cleanup (BUG_0330). rid-guarded no-op when the
+        # flag was OFF or the acquire fell back to a fresh spawn.
+        compressor_reuse.release_claim(reuse_name, rid)
 
 
 def _generate_reviewer_instance_name() -> str:

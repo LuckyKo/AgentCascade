@@ -830,7 +830,13 @@ class SystemAgentMixin:
         REUSE path (no find_or_create_instance / initialize_conversation there); only the seed branch
         calls ``_create_system_agent``.
         """
-        from agent_cascade.security_reuse import try_claim, release_claim
+        # Registry selection (BUG_0330): Compressor warm instances use the sibling compressor_reuse
+        # registry so a held Compressor claim never interacts with Security's warm instances (and
+        # vice versa). The claim/release CONTRACT is identical — exactly one owner at a time.
+        if (agent_class or '').lower() == 'compressor':
+            from agent_cascade.compressor_reuse import try_claim, release_claim
+        else:
+            from agent_cascade.security_reuse import try_claim, release_claim
         from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
         # Gate 1 — claim. The single atomic safety property: exactly one owner at a time.

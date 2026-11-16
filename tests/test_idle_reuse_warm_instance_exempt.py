@@ -25,6 +25,7 @@ from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.llm.schema import Message
 from agent_cascade.pool.idle_manager import IdleManager
 from agent_cascade.settings import (
+    COMPRESSOR_WARM_NAME,
     SECURITY_REUSE_APPROVAL_NAME,
     SECURITY_REUSE_SKILL_ADVISOR_NAME,
 )
@@ -64,6 +65,7 @@ class TestWarmReuseNamesNeverIdle:
     @pytest.mark.parametrize('reuse_name', [
         SECURITY_REUSE_APPROVAL_NAME,
         SECURITY_REUSE_SKILL_ADVISOR_NAME,
+        COMPRESSOR_WARM_NAME,  # BUG_0330: warm Compressor must never cold-reseed via idle reaper
     ])
     def test_warm_reuse_name_never_idle_beyond_timeout(self, reuse_name):
         inst = _idle_eligible(reuse_name)

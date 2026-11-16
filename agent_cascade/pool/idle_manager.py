@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
+    COMPRESSOR_WARM_NAME,
     SECURITY_REUSE_APPROVAL_NAME,
     SECURITY_REUSE_SKILL_ADVISOR_NAME,
 )
@@ -269,7 +270,9 @@ class IdleManager:
 
         # Warm-reuse instances are reserved for prefix-cache reuse; never reclaim them via
         # idle-dismissal or every gap > SYSTEM_AGENT_IDLE_TIMEOUT forces a cold re-seed (BUG_0265).
-        if instance_name in (SECURITY_REUSE_APPROVAL_NAME, SECURITY_REUSE_SKILL_ADVISOR_NAME):
+        # BUG_0330 adds the warm Compressor (matched only when reuse is ON and it has been seeded).
+        if instance_name in (SECURITY_REUSE_APPROVAL_NAME, SECURITY_REUSE_SKILL_ADVISOR_NAME,
+                             COMPRESSOR_WARM_NAME):
             return False
 
         # Must have exceeded the idle timeout threshold
