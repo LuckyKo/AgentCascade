@@ -158,7 +158,6 @@ def acquire_compressor_agent(engine, agent_class: str, reuse_name: Optional[str]
             got = engine._acquire_reusable_system_agent(
                 agent_class=agent_class, instance_name=reuse_name, task=task, caller=caller, rid=rid)
         except Exception as _e:  # noqa: BLE001 — reuse is best-effort; never break the caller
-            from agent_cascade.log import logger
             logger.warning('[COMPRESSOR_REUSE] acquire raised %s — falling back to fresh spawn', _e)
             got = None
 
@@ -208,7 +207,6 @@ class WarmCompressorSession:
             from agent_cascade.compression.agent_invoker import (
                 _execute_compressor_and_extract_summary, _preserve_items_instruction,
                 _reset_terminated_compressor_for_retry)
-            from agent_cascade.log import logger
             from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
 
             # Correction task reuses the exact single-source preserve wording so the fresh-respawn
