@@ -383,7 +383,6 @@ class TestMusicEndToEndView:
               patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
             result = tool.call({'prompt': 'synth', 'backend': 'comfyui',
                                 'config': r'C:\workflows\yue2_full.json',
-                                'media_type': 'audio',
                                 'overrides': {'style': 'synth', 'lyrics': '[verse]\nla'}})
 
         # The real _comfyui_generate_to_file runs (no _gen mock), so no 'run' marker
@@ -429,7 +428,6 @@ class TestMusicVRAM:
               patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
             result = tool.call({'prompt': 'synth', 'backend': 'comfyui',
                                 'config': r'C:\workflows\yue2_full.json',
-                                'media_type': 'audio',
                                 'overrides': {'style': 'synth', 'lyrics': '[verse]\nla'}})
 
         assert order == ['save', 'unload', 'run', 'restore']

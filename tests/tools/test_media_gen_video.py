@@ -387,8 +387,7 @@ class TestVideoVRAM:
               patch('agent_cascade.state_ops.unload_all_models', side_effect=_unload), \
               patch('agent_cascade.state_ops.restore_instance_state', side_effect=_restore):
             result = tool.call({'prompt': 'orbit the face', 'backend': 'comfyui',
-                                'config': r'C:\workflows\video_wan2_2_14B_i2v.json',
-                                'media_type': 'video'})
+                                'config': r'C:\workflows\video_wan2_2_14B_i2v.json'})
 
         assert order == ['save', 'unload', 'run', 'restore']
         assert result[0].video == '/tmp/media/v.mp4'
