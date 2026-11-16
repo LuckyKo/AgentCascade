@@ -30,6 +30,14 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, Optional, Tuple
 
+from agent_cascade.log import logger
+from agent_cascade.settings import (
+    COMPRESSOR_REUSE_ENABLED,
+    COMPRESSOR_REUSE_MAX_REUSES,
+    COMPRESSOR_REVIEWER_WARM_NAME,
+    COMPRESSOR_WARM_NAME,
+)
+
 # Guards _CLAIMS. An RLock so a nested claim/release on the same name (e.g. a test helper)
 # cannot self-deadlock; matches security_reuse.py's ownership style.
 CLAIM_LOCK = threading.RLock()
@@ -86,10 +94,44 @@ def claim_holder(name: str) -> Optional[str]:
         return _CLAIMS.get(name)
 
 
+# instance_name -> warm reuses served since the last (re-)seed. Cleared on seed and on
+# retirement. Only read/written while CLAIM_LOCK is held.
+_REUSE_COUNTS: Dict[str, int] = {}
+
+
+def _note_warm_reuse(engine: Any, name: str) -> None:
+    """BUG_0330 Phase 3 re-mint: count one completed warm reuse. After
+    COMPRESSOR_REUSE_MAX_REUSES consecutive reuses the warm instance is retired (dropped
+    from pool.instances), so the next acquire re-seeds a brand-new one under the same
+    fixed name — a bounded cap on prefix staleness / conversation drift.
+
+    0 (the default) disables re-minting entirely. Retirement only drops the pool slot:
+    the in-flight caller keeps its reference and still releases the claim in its own
+    finally (rid-guarded), so a live claim is never freed here."""
+    if COMPRESSOR_REUSE_MAX_REUSES <= 0:
+        return
+    with CLAIM_LOCK:
+        n = _REUSE_COUNTS.get(name, 0) + 1
+        if n < COMPRESSOR_REUSE_MAX_REUSES:
+            _REUSE_COUNTS[name] = n
+            return
+        _REUSE_COUNTS.pop(name, None)
+    try:
+        instances = getattr(getattr(engine, 'pool', None), 'instances', None)
+        if instances is not None:
+            instances.pop(name, None)
+        logger.info('[COMPRESSOR_REUSE] retired %s after %d reuses '
+                    '(COMPRESSOR_REUSE_MAX_REUSES=%d) — next op re-seeds',
+                    name, n, COMPRESSOR_REUSE_MAX_REUSES)
+    except Exception as e:  # noqa: BLE001 — retirement bookkeeping is never fatal
+        logger.warning('[COMPRESSOR_REUSE] retirement bookkeeping for %s failed: %s', name, e)
+
+
 def _clear_all() -> None:
-    """Test-only helper: drop every claim. Never called from production code."""
+    """Test-only helper: drop every claim and reuse counter. Never called from production code."""
     with CLAIM_LOCK:
         _CLAIMS.clear()
+        _REUSE_COUNTS.clear()
 
 
 def acquire_compressor_agent(engine, agent_class: str, reuse_name: Optional[str],
@@ -122,7 +164,14 @@ def acquire_compressor_agent(engine, agent_class: str, reuse_name: Optional[str]
 
         # Shape guard. Only the real 3-tuple is a hit (see docstring).
         if isinstance(got, tuple) and len(got) == 3 and got[0] is not None:
-            return got[0], bool(got[1]), (got[2] or reuse_name)
+            inst, reused, actual = got[0], bool(got[1]), (got[2] or reuse_name)
+            if reused:
+                _note_warm_reuse(engine, actual)
+            else:
+                # A fresh seed under the fixed name starts the re-mint counter over.
+                with CLAIM_LOCK:
+                    _REUSE_COUNTS.pop(actual, None)
+            return inst, reused, actual
 
     instance = engine._create_system_agent(
         agent_class=agent_class, instance_name=fallback_name, task=task, caller=caller)
@@ -203,8 +252,6 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
     session already holds the claim and the consolidation task is already appended as the warm
     instance's conversation task message, so the first run is a plain engine.run() underneath.
     """
-    from agent_cascade.log import logger
-    from agent_cascade.settings import COMPRESSOR_REUSE_ENABLED, COMPRESSOR_WARM_NAME
     if not COMPRESSOR_REUSE_ENABLED:
         return None
     try:
@@ -220,6 +267,8 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
         if not (isinstance(got, tuple) and len(got) == 3 and got[0] is not None):
             return None
         inst, _reused, actual_name = got
+        if _reused:
+            _note_warm_reuse(engine, actual_name)
         return WarmCompressorSession(inst, actual_name, rid, engine, agent_pool, caller_name)
     except Exception as e:  # noqa: BLE001 — warm path is best-effort
         logger.warning('[COMPRESSOR_REUSE] warm consolidation session unavailable: %s', e)

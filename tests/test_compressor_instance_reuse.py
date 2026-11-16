@@ -486,5 +486,295 @@ class TestInvokerReviewerWiring:
             compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r_other')
 
 
+# ── 6. §3f warm consolidation session — no-drop re-interrogation ─────────────
+
+from agent_cascade.compressor_reuse import (  # noqa: E402
+    WarmCompressorSession, acquire_warm_consolidation)
+from agent_cascade.compression.agent_invoker import (  # noqa: E402
+    _build_consolidation_prompt, _preserve_items_instruction)
+from agent_cascade.compression.core import _validate_and_reconsolidate  # noqa: E402
+from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION  # noqa: E402
+from agent_cascade.settings import COMPRESSION_REVIEW_MAX_RETRIES  # noqa: E402
+
+_GATE_KW = dict(
+    agent_pool=None,  # per-test MagicMock(stopped=False)
+    target_agent_name='Target',
+    summaries_to_consolidate=['S1', 'S2'],
+    summary_spans=[(None, None), (None, None)],
+    initial_summary='INITIAL',
+)
+
+
+class TestWarmSessionRefine:
+    """(a) No-drop retention through the REAL engine continuation method."""
+
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def test_refine_appends_only_keeps_full_context(self):
+        warm = _make_warm_compressor()
+        warm.append_message(Message(role=USER, content='ORIG_CONSOLIDATION_TASK'))
+        warm.append_message(Message(role=ASSISTANT, content='REJECTED_SUMMARY'))
+        assert len(warm.conversation) == 3  # sys + task + rejected answer
+        task0, rejected0 = warm.conversation[1], warm.conversation[2]
+
+        pool = _make_pool(warm)
+        rid = 'r_sess'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        engine = _make_engine(pool)
+        sess = WarmCompressorSession(warm, COMPRESSOR_WARM_NAME, rid, engine, pool, 'Maine')
+        # AgentInstance is slotted (instance attrs read-only) → spy at class level.
+        with patch.object(agent_invoker, '_execute_compressor_and_extract_summary',
+                          return_value=('FIXED_SUMMARY', 'cap')) as x, \
+                patch.object(agent_invoker, '_reset_terminated_compressor_for_retry'), \
+                patch.object(AgentInstance, 'reset_conversation', autospec=True) as resetm, \
+                patch.object(AgentInstance, 'rebuild_conversation', autospec=True) as rebuildm:
+            res = sess.refine(['BUG_0330'])
+        assert res == ('FIXED_SUMMARY', 'cap')
+        # Append-only: original task + rejected summary still present, one new user turn.
+        assert len(warm.conversation) == 4
+        assert warm.conversation[1] is task0 and warm.conversation[2] is rejected0
+        assert warm.conversation[-1].role == USER
+        corr = warm.conversation[-1].content
+        assert 'BUG_0330' in corr and 'MUST retain them verbatim' in corr
+        assert END_MARKER_INSTRUCTION in corr  # output contract preserved (§3f F-3)
+        # No reset on the correction path; system prompt frozen; claim kept for the session.
+        assert resetm.call_count == 0 and rebuildm.call_count == 0
+        assert warm._system_prompt_frozen is True
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == rid
+        x.assert_called_once()
+        assert x.call_args.args[0] is pool and x.call_args.args[2] is warm
+        assert x.call_args.args[3] == COMPRESSOR_WARM_NAME
+
+    def test_refine_refused_after_claim_lost(self):
+        # A session whose claim was freed (e.g. stale finally) must not mutate the instance.
+        warm = _make_warm_compressor()
+        warm.append_message(Message(role=USER, content='TASK'))
+        warm.append_message(Message(role=ASSISTANT, content='ANSWER'))
+        before = list(warm.conversation)
+        rid = 'r_lost'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, rid)  # externally wedged loose
+        engine = _make_engine(_make_pool(warm))
+        sess = WarmCompressorSession(warm, COMPRESSOR_WARM_NAME, rid, engine, _make_pool(warm), 'Maine')
+        assert sess.refine(['x']) is None
+        assert warm.conversation == before
+
+    def test_release_is_idempotent(self):
+        rid = 'r_rel'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        sess = WarmCompressorSession(object(), COMPRESSOR_WARM_NAME, rid, None, None, 'Maine')
+        sess.release()
+        sess.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+        assert sess.refine(['x']) is None  # refined after release → refused
+
+
+class _CountingSession:
+    """Explicit-method stub (never MagicMock: auto-attrs would fake the session protocol)."""
+
+    def __init__(self, outputs=None):
+        self._outputs = list(outputs or [])
+        self.refines = 0
+
+    def refine(self, preserve_items):
+        self.refines += 1
+        if self._outputs:
+            return self._outputs.pop(0)
+        return ('ROUND' + str(self.refines), '')
+
+
+class TestGateWarmSessionLoop:
+    """(b) loop bound + best-so-far semantics with a warm session, (c) flag-OFF identity."""
+
+    def _run(self, *, warm_session, review_fn, retries=2, cons_return=('CONSOLIDATED', '')):
+        pool = MagicMock(stopped=False)
+        with patch('agent_cascade.compression.core.COMPRESSION_REVIEWER_ENABLED', True), \
+                patch('agent_cascade.compression.core.COMPRESSION_REVIEW_MAX_RETRIES', retries), \
+                patch('agent_cascade.compression.agent_invoker.invoke_consolidation_agent',
+                      return_value=cons_return) as mc, \
+                patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
+                      side_effect=review_fn) as mr:
+            result = _validate_and_reconsolidate(
+                **{**_GATE_KW, 'agent_pool': pool, 'warm_session': warm_session})
+        return result, mc, mr
+
+    def test_warm_refine_respects_loop_bound_and_beats_fresh_path(self):
+        sess = _CountingSession()
+        # INITIAL: 3 flagged; warm rounds: 2 then 2 (tie → latest wins the best-so-far slot).
+        def review(**kwargs):
+            counts = {'INITIAL': 3, 'ROUND1': 2, 'ROUND2': 2}
+            return (False, ['i%d' % n for n in range(counts[kwargs['outgoing_summary']])])
+        result, mc, mr = self._run(warm_session=sess, review_fn=review)
+        assert result == 'ROUND2'                 # best-so-far semantics unchanged (ties → latest)
+        assert sess.refines == 2                  # == COMPRESSION_REVIEW_MAX_RETRIES, not exceeded
+        assert mc.call_count == 0                 # warm healthy → fresh-respawn never used
+        assert mr.call_count == 3                 # INITIAL + both warm rounds reviewed
+
+    def test_bound_matches_production_setting(self):
+        sess = _CountingSession()
+        result, mc, mr = self._run(warm_session=sess, review_fn=lambda **kw: (False, ['x']),
+                                   retries=COMPRESSION_REVIEW_MAX_RETRIES)
+        assert sess.refines == COMPRESSION_REVIEW_MAX_RETRIES
+
+    def test_warm_degrade_falls_back_to_fresh_respawn(self):
+        # First refine unusable → this AND remaining retries take the byte-identical fresh path.
+        class _DeadSession(_CountingSession):
+            def refine(self, preserve_items):
+                self.refines += 1
+                return None
+        sess = _DeadSession()
+        seen = []
+
+        def cons(**kwargs):
+            seen.append(kwargs.get('preserve_items'))
+            return ('FRESH_ROUND', '')
+        pool = MagicMock(stopped=False)
+        with patch('agent_cascade.compression.core.COMPRESSION_REVIEWER_ENABLED', True), \
+                patch('agent_cascade.compression.core.COMPRESSION_REVIEW_MAX_RETRIES', 2), \
+                patch('agent_cascade.compression.agent_invoker.invoke_consolidation_agent',
+                      side_effect=cons) as mc, \
+                patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
+                      side_effect=lambda **kw: (False, ['a'])) as mr:
+            result = _validate_and_reconsolidate(
+                **{**_GATE_KW, 'agent_pool': pool, 'warm_session': sess})
+        assert result == 'FRESH_ROUND'            # best-so-far updated by fresh round (tie→latest)
+        assert sess.refines == 1                  # degrades permanently after first failure
+        assert mc.call_count == 2                 # both retries take the fresh branch
+        assert seen == [['a'], ['a']]             # fresh path pins preserve_items as before
+
+    def test_flag_off_acquire_returns_none_and_gate_takes_fresh_branch(self):
+        # (c) Kill-switch OFF: session open short-circuits before touching the registry, and the
+        # gate behaves exactly like the pre-BUG_0330 code (fresh respawn with preserve_items).
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', False):
+            assert acquire_warm_consolidation(MagicMock(), ['S1'], 'Caller') is None
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None  # registry untouched
+        seen = []
+
+        def cons(**kwargs):
+            seen.append(kwargs.get('preserve_items'))
+            return ('FRESH', '')
+        pool = MagicMock(stopped=False)
+        with patch('agent_cascade.compression.core.COMPRESSION_REVIEWER_ENABLED', True), \
+                patch('agent_cascade.compression.core.COMPRESSION_REVIEW_MAX_RETRIES', 1), \
+                patch('agent_cascade.compression.agent_invoker.invoke_consolidation_agent',
+                      side_effect=cons) as mc, \
+                patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
+                      side_effect=lambda **kw: (False, ['z'])):
+            result = _validate_and_reconsolidate(**{**_GATE_KW, 'agent_pool': pool})  # no session
+        assert result == 'FRESH'
+        assert mc.call_count == 1 and seen == [['z']]
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+    def test_shared_builders_are_deterministic_and_pinned(self):
+        # Single-source prompt builders (§3f): byte-identical repeats + preserve wording in both.
+        p1 = _build_consolidation_prompt(['S1', 'S2'], None)
+        p2 = _build_consolidation_prompt(['S1', 'S2'], None)
+        assert p1 == p2 and 'MUST retain them verbatim' not in p1
+        p3 = _build_consolidation_prompt(['S1'], None, ['KEEP_ME'])
+        assert p3 != p1 and 'MUST retain them verbatim' in p3 and 'KEEP_ME' in p3
+        assert _preserve_items_instruction([]) == '' and _preserve_items_instruction(None) == ''
+        assert 'KEEP_ME' in _preserve_items_instruction([' KEEP_ME '])
+
+
+class TestSessionAcquireForeignClaim:
+    """(d) A foreign held claim must not wedge warm consolidation — no-drop never starves."""
+
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def test_foreign_claim_held_returns_none_foreign_kept_instance_untouched(self):
+        warm = _make_warm_compressor()
+        warm.append_message(Message(role=USER, content='TASK'))
+        warm.append_message(Message(role=ASSISTANT, content='ANSWER'))
+        before = list(warm.conversation)
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'foreign_rid')
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True):
+            sess = acquire_warm_consolidation(_make_pool(warm), ['S1', 'S2'], 'Caller',
+                                              marker_time_ranges=[(None, None), (None, None)])
+        assert sess is None                       # caller degrades to today's fresh path
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == 'foreign_rid'  # no cross-free
+        assert warm.conversation == before        # never mutated by the loser
+        # No wedge: once the foreign owner releases, the very next call opens a session.
+        compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'foreign_rid')
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True):
+            sess2 = acquire_warm_consolidation(_make_pool(warm), ['S1'], 'Caller')
+        assert sess2 is not None and sess2.actual_name == COMPRESSOR_WARM_NAME
+        sess2.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+    def test_flag_off_never_touches_registry_or_engine(self):
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', False):
+            assert acquire_warm_consolidation(MagicMock(), ['S'], 'C') is None
+        # (registry untouched == nothing claimable was ever recorded)
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+
+# ── 7. Re-mint on COMPRESSOR_REUSE_MAX_REUSES (Phase 3) ──────────────────────
+
+from agent_cascade.settings import COMPRESSOR_REUSE_MAX_REUSES  # noqa: E402
+
+
+class TestRemintReuses:
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def test_default_is_off(self):
+        assert COMPRESSOR_REUSE_MAX_REUSES == 0
+
+    def test_max_reuses_zero_never_retires(self):
+        warm = _make_warm_compressor()
+        engine = _make_engine(_make_pool(warm))
+        pool = engine.pool
+        pool.instances[COMPRESSOR_WARM_NAME] = warm
+        for i in range(4):
+            got = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', f'r{i}')
+            assert got[1] is True
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, f'r{i}')
+        assert COMPRESSOR_WARM_NAME in pool.instances  # no retirement at 0
+
+    def test_re_mints_after_n_reuses(self):
+        warm = _make_warm_compressor()
+        engine = _make_engine(_make_pool(None))   # empty pool → first call seeds
+        pool = engine.pool
+        engine._create_system_agent = MagicMock(return_value=warm)
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_MAX_REUSES', 2):
+            # Seed (not counted) + simulate the registration the real _create_system_agent does.
+            got = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', 'r0')
+            assert (got[0], got[1], got[2]) == (warm, False, COMPRESSOR_WARM_NAME)
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r0')
+            pool.instances[COMPRESSOR_WARM_NAME] = warm
+            # Reuse 1 < 2: kept.
+            got = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', 'r1')
+            assert got[1] is True
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r1')
+            assert COMPRESSOR_WARM_NAME in pool.instances
+            # Reuse 2 == 2: retire the pool slot.
+            got = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', 'r2')
+            assert got[1] is True
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r2')
+            assert COMPRESSOR_WARM_NAME not in pool.instances
+            # Next op re-seeds a brand-new warm instance under the same fixed name.
+            fresh = _make_warm_compressor()
+            engine._create_system_agent = MagicMock(return_value=fresh)
+            got = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', COMPRESSOR_WARM_NAME, 'Compressor_x', 't', 'Maine', 'r3')
+            assert (got[0], got[1], got[2]) == (fresh, False, COMPRESSOR_WARM_NAME)
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r3')
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q']))
