@@ -82,6 +82,9 @@ config/api_endpoints.json.bak
 config/api_endpoints.zip
 config/secrets.json
 
+# Investigation probe configs (local scratch, e.g. BUG_0310 endpoint probes — not shared)
+config/*probe*.json
+
 # Pool settings (runtime-generated, user-specific)
 config/pool_settings*.json
 
