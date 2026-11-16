@@ -869,12 +869,38 @@ def _format_summaries_with_spans(
     return '\n\n'.join(parts)
 
 
+def _preserve_items_instruction(preserve_items) -> str:
+    """Single source for the 'MUST retain verbatim' correction wording (BUG_0330 §3f). Used as
+    the prompt suffix on a fresh respawn retry AND as the body of a warm-session correction
+    turn, so both paths carry byte-identical instructions. Empty string when nothing to keep."""
+    if not preserve_items:
+        return ''
+    _items = ', '.join(str(i).strip() for i in preserve_items if str(i).strip())
+    if not _items:
+        return ''
+    return (f"\n\nThe previous attempt DROPPED the following required items — you "
+            f"MUST retain them verbatim in the consolidated summary: {_items}.")
+
+
+def _build_consolidation_prompt(marker_summaries, marker_time_ranges=None, preserve_items=None) -> str:
+    """Shared consolidation prompt builder (BUG_0330): used by invoke_consolidation_agent AND
+    the warm-session open path so the priming task and any fresh task are byte-identical."""
+    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
+    summaries_text = _format_summaries_with_spans(marker_summaries, marker_time_ranges)
+    end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
+    return CONSOLIDATION_PROMPT.format(
+        summaries_text=summaries_text.strip(),
+        end_instruction=end_instruction + _preserve_items_instruction(preserve_items)
+    )
+
+
 def invoke_consolidation_agent(
     agent_pool: Any,
     marker_summaries: List[str],
     caller_name: str | None = None,
     marker_time_ranges: List[Tuple[float | None, float | None]] | None = None,
     preserve_items: List[str] | None = None,
+    warm_session: Any | None = None,
 ) -> Tuple[str, str]:
     """Invoke Compressor to consolidate multiple existing summaries into one.
 
@@ -912,23 +938,11 @@ def invoke_consolidation_agent(
     rid = uuid.uuid4().hex
 
     # Format input as numbered summaries, annotated with each window's start timestamp.
-    summaries_text = _format_summaries_with_spans(marker_summaries, marker_time_ranges)
-
-    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
-    end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
-
-    # Retry path only: re-run with the items the reviewer flagged as dropped. Appending to
-    # end_instruction keeps the base CONSOLIDATION_PROMPT untouched (and the no-retry prompt
-    # byte-identical). Single source of truth for the "MUST retain verbatim" wording.
-    if preserve_items:
-        _items = ', '.join(str(i).strip() for i in preserve_items if str(i).strip())
-        if _items:
-            end_instruction += (f"\n\nThe previous attempt DROPPED the following required items — you "
-                                f"MUST retain them verbatim in the consolidated summary: {_items}.")
-
-    consolidation_prompt = CONSOLIDATION_PROMPT.format(
-        summaries_text=summaries_text.strip(), end_instruction=end_instruction
-    )
+    # Retry path (preserve_items) appends the "MUST retain verbatim" wording to the end
+    # instruction, keeping the base CONSOLIDATION_PROMPT byte-identical for the no-retry case.
+    # Shared builder with the warm-session open path (§3f single source of truth).
+    consolidation_prompt = _build_consolidation_prompt(
+        marker_summaries, marker_time_ranges, preserve_items)
 
     try:
         logger.info(
@@ -944,8 +958,15 @@ def invoke_consolidation_agent(
         # per-op spawn otherwise (byte-identical to the pre-BUG_0330 path).
         from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
-        comp_instance, _reused, comp_state_key = compressor_reuse.acquire_compressor_agent(
-            engine, 'Compressor', reuse_name, comp_state_key, consolidation_prompt, caller_name, rid)
+        if warm_session is not None:
+            # Warm consolidation session (§3f): claim + task message are owned by the session;
+            # the consolidation task was already appended when it opened. Do NOT touch the
+            # claim here — reuse_name stays None so the finally's release is a no-op.
+            comp_instance, comp_state_key = warm_session.instance, warm_session.actual_name
+            reuse_name = None
+        else:
+            comp_instance, _reused, comp_state_key = compressor_reuse.acquire_compressor_agent(
+                engine, 'Compressor', reuse_name, comp_state_key, consolidation_prompt, caller_name, rid)
 
         _configure_compressor_instance(agent_pool, comp_instance, caller_name)
 

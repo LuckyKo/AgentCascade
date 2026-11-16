@@ -1093,6 +1093,45 @@ class SystemAgentMixin:
             if not _success_returned:
                 release_claim(instance_name, rid)
 
+    def _continue_reusable_system_agent_turn(self, inst, task: str, caller: str,
+                                             context: str = '', rid: str = '') -> Optional[bool]:
+        """Append-only continuation turn on an already-acquired warm system instance (BUG_0330 §3f).
+
+        Used by the warm consolidation session's re-interrogation: the same instance — still
+        holding system prefix + original task + the summary under review — must be asked to
+        re-issue with the reviewer-flagged items retained. A reset-based re-acquire would destroy
+        exactly that carried context (and the warm KV), so this method performs NO reset.
+
+        Preconditions, all required (else returns None, caller degrades gracefully):
+          * ``rid`` matches the current claim holder for ``inst.instance_name`` — a session that
+            lost its claim must never mutate a now-foreign instance.
+          * instance state is IDLE — a running instance gets no new turn.
+
+        Deliberately absent (load-bearing): reset_conversation / rebuild_conversation, the
+        DELTA/config-reset block, _boot_system_agent, any claim take/release, restricted_shell.
+        The claim stays with the session across every refine() turn.
+        """
+        from agent_cascade.compressor_reuse import claim_holder
+        name = inst.instance_name
+        if not rid or claim_holder(name) != rid:
+            logger.warning('[COMPRESSOR_REUSE] continuation turn refused for %s: claim not held by rid=%s',
+                           name, rid)
+            return None
+        with inst._state_lock:
+            if inst.state != AgentState.IDLE:
+                logger.warning('[COMPRESSOR_REUSE] continuation turn skipped for %s: state=%s',
+                               name, inst.state)
+                return None
+            # Same shared task-message builder as every warm append (conversation[1] shape parity).
+            task_msg = self._build_system_task_message(inst, {'task': task, 'context': context}, caller)
+        # append_message updates cached lists atomically on its own; outside the state lock.
+        inst.append_message(task_msg)
+        # Drop the stale cached serialization/version so the next run re-serializes the grown
+        # conversation (paired eviction, same rationale as the acquire path).
+        from agent_cascade.api_integration_pkg.cache import _cache_mgr
+        _cache_mgr.evict_instance(name)
+        return True
+
     def _update_webui_state(self,
                             instance_name: str,
                             agent_class: str,

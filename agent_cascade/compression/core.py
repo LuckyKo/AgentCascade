@@ -193,6 +193,7 @@ def _validate_and_reconsolidate(
     summaries_to_consolidate: list,
     summary_spans: list,
     initial_summary: str,
+    warm_session=None,
 ) -> str:
     """Post-consolidation data-integrity gate. ADVISORY-ON-FAILURE.
 
@@ -254,18 +255,28 @@ def _validate_and_reconsolidate(
                 stopped_break = True
                 break
             attempts += 1
-            try:
-                new_summary, _ = invoke_consolidation_agent(
-                    agent_pool=agent_pool,
-                    marker_summaries=summaries_to_consolidate,
-                    marker_time_ranges=summary_spans,
-                    caller_name=target_agent_name,
-                    preserve_items=missing,
-                )
-            except Exception as e:
-                logger.error(f"Re-consolidation attempt failed for '{target_agent_name}' "
-                             f"(retry {retry + 1}): {e}")
-                continue
+            # BUG_0330 §3f: with a warm session, re-interrogate the SAME instance (append-only)
+            # so the correction carries the carried context and cannot silently re-drop items.
+            # Session degrades to None on the first unusable refine → every remaining retry takes
+            # the byte-identical fresh-respawn path below.
+            _res = warm_session.refine(missing) if warm_session is not None else None
+            if warm_session is not None and _res is None:
+                warm_session = None
+            if warm_session is not None:
+                new_summary = _res[0]
+            else:
+                try:
+                    new_summary, _ = invoke_consolidation_agent(
+                        agent_pool=agent_pool,
+                        marker_summaries=summaries_to_consolidate,
+                        marker_time_ranges=summary_spans,
+                        caller_name=target_agent_name,
+                        preserve_items=missing,
+                    )
+                except Exception as e:
+                    logger.error(f"Re-consolidation attempt failed for '{target_agent_name}' "
+                                 f"(retry {retry + 1}): {e}")
+                    continue
 
             if not new_summary or not new_summary.strip():
                 continue
@@ -401,34 +412,49 @@ def _consolidate_markers(
 
         # ── Phase 2: LLM call OUTSIDE lock (long-running) ──
         from agent_cascade.compression.agent_invoker import invoke_consolidation_agent
+        from agent_cascade import compressor_reuse
+        # Warm consolidation session (BUG_0330 §3f): holds the Compressor claim across Phase 2
+        # and the Phase-2.5 review retries so corrections carry the full context (no-drop).
+        # None (flag OFF / claim held / not seeded / any error) = byte-identical fresh-spawn path.
+        warm_session = compressor_reuse.acquire_warm_consolidation(
+            agent_pool, summaries_to_consolidate, target_agent_name,
+            marker_time_ranges=summary_spans)
         try:
-            consolidated_summary, _consolidation_caption = invoke_consolidation_agent(
+            try:
+                consolidated_summary, _consolidation_caption = invoke_consolidation_agent(
+                    agent_pool=agent_pool,
+                    marker_summaries=summaries_to_consolidate,
+                    marker_time_ranges=summary_spans,
+                    caller_name=target_agent_name,
+                    warm_session=warm_session,
+                )
+            except RuntimeError as e:
+                logger.error(f"Consolidation agent failed for '{target_agent_name}': {e}")
+                return  # Non-fatal; normal compression succeeded
+
+            if not consolidated_summary or not consolidated_summary.strip():
+                logger.error(f"Empty consolidation result for '{target_agent_name}' — aborting")
+                return
+
+            logger.info(f"Consolidation summary generated for '{target_agent_name}': "
+                        f"{len(consolidated_summary)} chars from {len(summaries_to_consolidate)} summaries")
+
+            # ── Phase 2.5: Post-consolidation data-integrity validation gate ──
+            # Advisory-on-failure. Runs OUTSIDE target_inst._compression_lock, like the Phase-2 LLM
+            # call. Must never raise or block; the accepted summary below is what gets spliced.
+            consolidated_summary = _validate_and_reconsolidate(
                 agent_pool=agent_pool,
-                marker_summaries=summaries_to_consolidate,
-                marker_time_ranges=summary_spans,
-                caller_name=target_agent_name,
+                target_agent_name=target_agent_name,
+                summaries_to_consolidate=summaries_to_consolidate,
+                summary_spans=summary_spans,
+                initial_summary=consolidated_summary,
+                warm_session=warm_session,
             )
-        except RuntimeError as e:
-            logger.error(f"Consolidation agent failed for '{target_agent_name}': {e}")
-            return  # Non-fatal; normal compression succeeded
-
-        if not consolidated_summary or not consolidated_summary.strip():
-            logger.error(f"Empty consolidation result for '{target_agent_name}' — aborting")
-            return
-
-        logger.info(f"Consolidation summary generated for '{target_agent_name}': "
-                    f"{len(consolidated_summary)} chars from {len(summaries_to_consolidate)} summaries")
-
-        # ── Phase 2.5: Post-consolidation data-integrity validation gate ──
-        # Advisory-on-failure. Runs OUTSIDE target_inst._compression_lock, like the Phase-2 LLM
-        # call. Must never raise or block; the accepted summary below is what gets spliced.
-        consolidated_summary = _validate_and_reconsolidate(
-            agent_pool=agent_pool,
-            target_agent_name=target_agent_name,
-            summaries_to_consolidate=summaries_to_consolidate,
-            summary_spans=summary_spans,
-            initial_summary=consolidated_summary,
-        )
+        finally:
+            # Release the warm claim exactly once, whatever path this took — including the
+            # early returns above (§3f F-4: a held claim must never wedge the warm instance).
+            if warm_session is not None:
+                warm_session.release()
 
         # ── Phase 3: Re-read + rebuild under lock (defensive against concurrent changes) ──
         with target_inst._compression_lock:

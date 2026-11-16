@@ -127,3 +127,100 @@ def acquire_compressor_agent(engine, agent_class: str, reuse_name: Optional[str]
     instance = engine._create_system_agent(
         agent_class=agent_class, instance_name=fallback_name, task=task, caller=caller)
     return instance, False, fallback_name
+
+
+class WarmCompressorSession:
+    """Owns one warm Compressor claim across a consolidation + all its review-retry correction
+    turns (BUG_0330 §3f). The claim is held for the whole session lifetime — refine() never
+    re-acquires (claims are non-reentrant; a per-turn re-acquire would wedge every correction
+    into a fresh respawn that re-drops preserve_items). refine() is APPEND-ONLY so the instance
+    carries system prefix + original task + the summary under review into every correction.
+    """
+
+    __slots__ = ('instance', 'actual_name', 'rid', 'engine', 'agent_pool', 'caller_name', '_released')
+
+    def __init__(self, instance, actual_name: str, rid: str, engine, agent_pool, caller_name: str):
+        self.instance = instance
+        self.actual_name = actual_name
+        self.rid = rid
+        self.engine = engine
+        self.agent_pool = agent_pool
+        self.caller_name = caller_name
+        self._released = False
+
+    def refine(self, preserve_items):
+        """Ask the same warm instance to re-issue the consolidated summary retaining
+        ``preserve_items``. Returns ``(summary, caption)`` or None — None means the session is
+        no longer usable (claim lost / instance not IDLE / execution error); the caller degrades
+        to the byte-identical fresh-respawn path for this and any remaining retries."""
+        if self._released:
+            return None
+        try:
+            from agent_cascade.compression.agent_invoker import (
+                _execute_compressor_and_extract_summary, _preserve_items_instruction,
+                _reset_terminated_compressor_for_retry)
+            from agent_cascade.log import logger
+            from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
+
+            # Correction task reuses the exact single-source preserve wording so the fresh-respawn
+            # and warm-correction prompts carry the same instruction, plus the end-marker contract
+            # so the output parser applies unchanged (§3f F-3).
+            correction_task = ('Your previous consolidated summary DROPPED required items. Re-issue '
+                               'the consolidated summary now, correcting that loss.'
+                               + _preserve_items_instruction(preserve_items) + ' ' + END_MARKER_INSTRUCTION)
+            # A run that ended on max_turns leaves TERMINATED; engine.run() would trip the L1 race
+            # guard. No-op unless TERMINATED (same helper as the compression retry path).
+            _reset_terminated_compressor_for_retry(self.agent_pool, self.instance, self.actual_name)
+            if self.engine._continue_reusable_system_agent_turn(
+                    self.instance, correction_task, self.caller_name, rid=self.rid) is None:
+                logger.info('[COMPRESSOR_REUSE] warm refine unavailable for %s — degrading to fresh respawn',
+                            self.actual_name)
+                return None
+            return _execute_compressor_and_extract_summary(
+                self.agent_pool, self.engine, self.instance, self.actual_name, self.caller_name,
+                timeout_label='Consolidation')
+        except Exception as e:  # noqa: BLE001 — warm path is best-effort; degrade, never escalate
+            from agent_cascade.log import logger
+            logger.warning('[COMPRESSOR_REUSE] warm refine failed for %s: %s — degrading to fresh respawn',
+                           self.actual_name, e)
+            return None
+
+    def release(self) -> None:
+        """Give the warm claim back. Idempotent — safe to call unconditionally in a finally."""
+        if not self._released:
+            self._released = True
+            release_claim(self.actual_name, self.rid)
+
+
+def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
+                               marker_time_ranges=None):
+    """Open a warm consolidation session (BUG_0330 §3f), or None to signal "run today's path".
+
+    Returns None when reuse is OFF (claim registry never touched), when the warm acquire misses
+    (claim held / not seeded / ineligible), or on any error — in every case the caller's
+    byte-identical fresh-spawn path proceeds. Unlike acquire_compressor_agent there is NO fresh
+    spawn fallback here: an un-ran orphan fresh instance would leak. On success the returned
+    session already holds the claim and the consolidation task is already appended as the warm
+    instance's conversation task message, so the first run is a plain engine.run() underneath.
+    """
+    from agent_cascade.log import logger
+    from agent_cascade.settings import COMPRESSOR_REUSE_ENABLED, COMPRESSOR_WARM_NAME
+    if not COMPRESSOR_REUSE_ENABLED:
+        return None
+    try:
+        import uuid
+        from agent_cascade.execution_engine import ExecutionEngine
+        from agent_cascade.compression.agent_invoker import _build_consolidation_prompt
+        rid = uuid.uuid4().hex
+        prompt = _build_consolidation_prompt(marker_summaries, marker_time_ranges)
+        engine = ExecutionEngine(agent_pool)
+        got = engine._acquire_reusable_system_agent(
+            agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
+            task=prompt, caller=caller_name, rid=rid)
+        if not (isinstance(got, tuple) and len(got) == 3 and got[0] is not None):
+            return None
+        inst, _reused, actual_name = got
+        return WarmCompressorSession(inst, actual_name, rid, engine, agent_pool, caller_name)
+    except Exception as e:  # noqa: BLE001 — warm path is best-effort
+        logger.warning('[COMPRESSOR_REUSE] warm consolidation session unavailable: %s', e)
+        return None
