@@ -1147,15 +1147,23 @@ class TelemetryCollector:
         truncated: bool = False,
         error: str = '',
         is_call_agent: bool = False,
+        latency_ms: Optional[float] = None,
     ):
-        """Mark the end of a tool execution."""
+        """Mark the end of a tool execution.
+
+        ``latency_ms`` overrides the measured start→end elapsed time. Grouped callers that
+        execute several members before emitting their results (the multi-edit batch) pass
+        the real per-member duration here instead of using the surrounding start/end pair.
+        ``None`` (default) measures from ``record_tool_call_start`` as before.
+        """
         with _telemetry_lock:
             key = f"{instance_name}:{tool_name}"
             call = self._active_tool_calls.pop(key, None)
-            if not call:
+            if call is None and latency_ms is None:
                 return
 
-            latency_ms = (time.perf_counter() - call['start_time']) * 1000
+            if latency_ms is None:
+                latency_ms = (time.perf_counter() - call['start_time']) * 1000
 
             event = {
                 'type': 'tool_call',

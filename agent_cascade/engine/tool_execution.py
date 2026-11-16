@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -213,7 +214,7 @@ class ToolExecMixin:
                             self._emit_synthetic_fn_msg(
                                 instance, turn_output[_m], _m,
                                 f'Error: edit_file execution failed: {_batch_err}',
-                                executed_tools, _already_emitted, response)
+                                executed_tools, _already_emitted, response, inst_name=inst_name)
                     used_any_tool = True
                     continue
 
@@ -1009,26 +1010,35 @@ class ToolExecMixin:
         return groups
 
     def _emit_synthetic_fn_msg(self, instance, out, idx, result_str, executed_tools,
-                               already_emitted, response) -> None:
+                               already_emitted, response, *, inst_name,
+                               latency_ms: float = 0.0) -> None:
         """Emit one FUNCTION result for a grouped edit_file call, mirroring the per-call
         ``fn_msg`` construction (role/name/content/extra + append/log + response stream +
         bookkeeping). The leader uses it for both successes and rollbacks so the batch emits
         exactly ``N`` results.
 
+        Also records exactly one ``tool_call`` telemetry event per emitted member (the grouped
+        path never reaches the per-call start/end hooks in the dispatch loop). Success comes
+        from the SAME result-string heuristic that sets ``extra['tool_success']``, so the
+        message flag and the telemetry counter can never disagree. ``latency_ms`` is the real
+        per-member duration captured by the batch; paths that never ran an edit (reject,
+        malformed batch, emit failure) default to 0.
+
         Exception-safe by construction: the result message is always appended to
         ``response`` and the bookkeeping (``executed_tools`` / ``already_emitted``) always
-        runs, even if building the message or appending it to the conversation log fails.
-        Marking ``already_emitted`` unconditionally is what stops the batch's error handler
-        from re-attempting (and re-failing on) the same member — a per-member emit failure
-        can never abort the run or crash the dispatch loop. A best-effort "execution failed"
-        result stands in when the real message cannot be built."""
+        runs, even if building the message, appending it to the conversation log, or the
+        telemetry call fails. Marking ``already_emitted`` unconditionally is what stops the
+        batch's error handler from re-attempting (and re-failing on) the same member — a
+        per-member emit failure can never abort the run or crash the dispatch loop. A
+        best-effort "execution failed" result stands in when the real message cannot be
+        built."""
         extra = getattr(out, 'extra', None) or {}
         function_id = extra.get('function_id')
+        result_chars = len(result_str) if isinstance(result_str, str) else 0
+        success, tool_error = True, ''
         try:
             if isinstance(result_str, str):
-                success, _ = self._detect_tool_result_failure(result_str)
-            else:
-                success = True
+                success, tool_error = self._detect_tool_result_failure(result_str)
             fn_msg = Message(
                 role=FUNCTION,
                 name='edit_file',
@@ -1042,6 +1052,7 @@ class ToolExecMixin:
             # The real result message couldn't be built; emit a minimal failure result so
             # this call still gets a response and the batch keeps moving.
             logger.error(f'grouped edit_file result build failed (idx={idx}): {format_crash(build_err)}')
+            success, tool_error = False, format_crash(build_err)
             fn_msg = Message(
                 role=FUNCTION,
                 name='edit_file',
@@ -1049,6 +1060,21 @@ class ToolExecMixin:
                                         f'Error: edit_file execution failed: {format_crash(build_err)}'),
                 extra={'function_id': function_id or '1', 'tool_success': False},
             )
+        # Telemetry must never break the batch: log-and-swallow like the per-call hooks.
+        try:
+            tel = self._telemetry()
+            if tel is not None:
+                tel.record_tool_call_start(inst_name, 'edit_file')
+                tel.record_tool_call_end(
+                    inst_name,
+                    'edit_file',
+                    success=success,
+                    result_chars=result_chars,
+                    error=tool_error,
+                    latency_ms=latency_ms,
+                )
+        except Exception as tel_err:
+            logger.debug(f'grouped edit_file telemetry failed (idx={idx}): {format_crash(tel_err)}')
         # A conversation-log append error must not stop the result from reaching the
         # response stream or the bookkeeping, so it is logged and swallowed.
         try:
@@ -1126,6 +1152,9 @@ class ToolExecMixin:
 
             approval_reason = ''
             approved = True
+            # Real per-member duration (ms) for telemetry; 0 for members that never ran an
+            # edit (reject / batch aborted before this member).
+            member_latency_ms = [0.0] * n
             if not op_manager._is_auto_approved(path_str, inst_name):
                 approved, reason = op_manager.request_user_approval(
                     agent_name=inst_name, tool_name='edit_file',
@@ -1137,10 +1166,16 @@ class ToolExecMixin:
             if approved:
                 # Apply each member serially through the single-edit path. pre_approved=True
                 # skips only the per-member approval gate the group decision already cleared.
-                results = [op_manager.edit_file(path=path_str, agent_name=inst_name,
+                results = []
+                for i, (oc, nc, mode) in enumerate(specs):
+                    started = time.perf_counter()
+                    try:
+                        results.append(op_manager.edit_file(
+                            path=path_str, agent_name=inst_name,
                             old_content=oc, new_content=nc, match_mode=mode,
-                            justification=justification, pre_approved=True)
-                           for (oc, nc, mode) in specs]
+                            justification=justification, pre_approved=True))
+                    finally:
+                        member_latency_ms[i] = (time.perf_counter() - started) * 1000
             # Surface the approver's (security guard's) decision on the lead result so the
             # model sees WHY the batch was approved, not just the caller's justification.
             if results and approval_reason:
@@ -1148,11 +1183,12 @@ class ToolExecMixin:
 
             if not isinstance(results, (list, tuple)) or len(results) != n:
                 results = [str(results)] * n  # defensive; every path above sets exactly N
-            for idx, res in zip(group_indices, results):
+            for idx, res, latency_ms in zip(group_indices, results, member_latency_ms):
                 if idx in already_emitted:
                     continue
                 self._emit_synthetic_fn_msg(instance, turn_output[idx], idx, res,
-                                            executed_tools, already_emitted, response)
+                                            executed_tools, already_emitted, response,
+                                            inst_name=inst_name, latency_ms=latency_ms)
         except Exception as e:
             summary = format_crash(e)
             logger.error(f'Grouped edit_file batch failed for {inst_name}: {summary}')
@@ -1164,4 +1200,4 @@ class ToolExecMixin:
                 self._emit_synthetic_fn_msg(
                     instance, turn_output[idx], idx,
                     f'Error: edit_file execution failed: {summary}',
-                    executed_tools, already_emitted, response)
+                    executed_tools, already_emitted, response, inst_name=inst_name)

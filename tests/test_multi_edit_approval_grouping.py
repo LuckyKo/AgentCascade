@@ -96,6 +96,9 @@ class _BatchHarness(ToolExecMixin):
     def __init__(self, om):
         self.pool = SimpleNamespace(operation_manager=om)
 
+    def _telemetry(self):
+        return getattr(self.pool, 'telemetry', None)
+
     def _detect_tool(self, out):
         return (True, out['name'], out['args'], '')
 

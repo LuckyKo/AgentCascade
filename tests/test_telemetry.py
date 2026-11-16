@@ -768,6 +768,23 @@ class TestToolCallLifecycle:
         collector.record_tool_call_end('a', 'ghost_tool')
         assert collector.get_session_summary()['total_tool_calls'] == 0
 
+    def test_explicit_latency_override(self, collector):
+        """Grouped callers pass the real per-member duration (BUG_0331) instead of the
+        start→end span measured around the result emission."""
+        collector.record_tool_call_start('a', 'edit_file')
+        collector.record_tool_call_end('a', 'edit_file', success=True, latency_ms=12.5)
+        eff = collector.get_session_summary()['tool_effectiveness']['edit_file']
+        assert eff['total'] == 1
+        assert eff['avg_latency_ms'] == 12.5
+
+    def test_explicit_latency_does_not_require_start(self, collector):
+        """An explicit latency is self-contained: the event is recorded even when no
+        start context is active (the stale-start guard only applies to measured latency)."""
+        collector.record_tool_call_end('a', 'edit_file', success=False, error='boom',
+                                       latency_ms=3.0)
+        eff = collector.get_session_summary()['tool_effectiveness']['edit_file']
+        assert eff['total'] == 1 and eff['failures'] == 1
+
 
 # ---------------------------------------------------------------------------
 # H. Agent instance call

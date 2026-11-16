@@ -56,6 +56,9 @@ class _Harness(ToolExecMixin):
         self._append_and_log_impl = append_and_log or _default_append
 
     # ── overridden collaborators (side effects / unrelated machinery) ──
+    def _telemetry(self):
+        return getattr(self.pool, 'telemetry', None)
+
     def _detect_tool(self, out):
         fc = out.get('function_call')
         if not fc:
@@ -110,8 +113,9 @@ def _edit_calls(n, path='f.txt', **member_kwargs):
     return calls
 
 
-def _drive(operation_manager, turn_output, append_and_log=None):
+def _drive(operation_manager, turn_output, append_and_log=None, telemetry=None):
     harness = _Harness(operation_manager, append_and_log=append_and_log)
+    harness.pool.telemetry = telemetry
     # Witness: we drive the production grouping body, not a test-local copy.
     assert harness._execute_detected_tools.__func__ is ToolExecMixin._execute_detected_tools
     response = []
@@ -153,6 +157,31 @@ def test_group_three_members_emits_three_results_with_one_approval():
     assert op.edit_file.call_count == n                         # N serial applications
     assert all(c.kwargs.get('pre_approved') is True for c in op.edit_file.call_args_list)
     assert harness.dispatcher_calls == []                       # members absorbed, not re-dispatched
+
+
+# ── telemetry (BUG_0331): one start/end pair per emitted member ────────────────
+
+def test_grouped_batch_records_one_telemetry_event_per_member():
+    """The grouped path bypasses the per-call telemetry hooks, so each emitted member must
+    still yield exactly one start/end pair, carrying ITS OWN success/error."""
+    n = 3
+    op = _op(auto_approve=True)
+    op.edit_file = Mock(side_effect=['OK: Edited', 'ERROR: old_content not found', 'OK: Edited'])
+    tel = Mock()
+
+    _, used_any, response = _drive(op, _edit_calls(n), telemetry=tel)
+
+    assert used_any is True
+    assert len(response) == n
+    assert tel.record_tool_call_start.call_count == n
+    assert tel.record_tool_call_end.call_count == n
+    assert all(c.args == ('coder', 'edit_file')
+               for c in tel.record_tool_call_start.call_args_list)
+    ends = [c.kwargs for c in tel.record_tool_call_end.call_args_list]
+    assert [e['success'] for e in ends] == [True, False, True]      # per-member, not one flag
+    assert ends[1]['error']                                        # failure keeps its error
+    assert ends[0]['result_chars'] == len('OK: Edited')
+    assert all(e['latency_ms'] >= 0.0 for e in ends)
 
 
 # ── approval field-assignment (Major #5): no justification= kwarg ──────────────
@@ -207,13 +236,17 @@ def test_batch_truncates_oversized_field_with_marker():
 def test_reject_yields_rejected_result_for_every_member():
     n = 3
     op = _op(auto_approve=False, reject=True)   # gate entered; user declines
-    harness, used_any, response = _drive(op, _edit_calls(n))
+    tel = Mock()
+    harness, used_any, response = _drive(op, _edit_calls(n), telemetry=tel)
 
     assert used_any is True
     assert len(response) == n
     for m in response:
         assert str(m.content).startswith('REJECTED:')
     op.edit_file.assert_not_called()                        # nothing edited on reject
+    # Reject still reports N failed tool calls (one per member), not zero and not one.
+    ends = [c.kwargs for c in tel.record_tool_call_end.call_args_list]
+    assert len(ends) == n and all(e['success'] is False for e in ends)
 
 
 # ── op_manager missing -> all N get "execution failed", no crash ──────────────
@@ -221,11 +254,14 @@ def test_reject_yields_rejected_result_for_every_member():
 def test_missing_operation_manager_emits_error_for_all_members():
     n = 2
     # pool.operation_manager = None -> batch raises immediately -> inner handler fills N.
-    harness, used_any, response = _drive(None, _edit_calls(n))
+    tel = Mock()
+    harness, used_any, response = _drive(None, _edit_calls(n), telemetry=tel)
     assert used_any is True
     assert len(response) == n
     for m in response:
         assert 'execution failed' in str(m.content)
+    ends = [c.kwargs for c in tel.record_tool_call_end.call_args_list]
+    assert len(ends) == n and all(e['success'] is False for e in ends)
 
 
 # ── malformed member -> all N get a result, loop does not crash ───────────────
@@ -240,12 +276,15 @@ def test_malformed_member_emits_result_for_all_members():
     bad['old_content'] = ['not', 'a', 'string']
     calls[1]['function_call']['arguments'] = json.dumps(bad)
 
-    harness, used_any, response = _drive(op, calls)
+    tel = Mock()
+    harness, used_any, response = _drive(op, calls, telemetry=tel)
     assert used_any is True
     assert len(response) == n
     for m in response:
         assert 'execution failed' in str(m.content)
     op.edit_file.assert_not_called()                        # whole batch aborted before any edit
+    ends = [c.kwargs for c in tel.record_tool_call_end.call_args_list]
+    assert len(ends) == n and all(e['success'] is False for e in ends)
 
 
 # ── Major #6: deterministic per-member log-append failure must not crash or abort ─
@@ -258,11 +297,30 @@ def test_log_append_failure_still_emits_every_member():
     def _boom(instance, message):
         raise OSError('simulated log I/O error')        # deterministic, every member
 
-    harness, used_any, response = _drive(op, _edit_calls(n), append_and_log=_boom)
+    tel = Mock()
+    harness, used_any, response = _drive(op, _edit_calls(n), append_and_log=_boom,
+                                         telemetry=tel)
     # The crash hole is closed: the loop completed, and every member still got a result.
     assert used_any is True
     assert len(response) == n
     assert op.edit_file.call_count == n
+    ends = [c.kwargs for c in tel.record_tool_call_end.call_args_list]
+    assert len(ends) == n and all(e['success'] is True for e in ends)
+
+
+# ── telemetry failure must not break emission (telemetry is best-effort) ───────
+
+def test_telemetry_failure_still_emits_every_member():
+    n = 2
+    op = _op(auto_approve=True)
+    op.edit_file = Mock(return_value='OK: Edited')
+    tel = Mock()
+    tel.record_tool_call_start.side_effect = RuntimeError('telemetry down')
+
+    harness, used_any, response = _drive(op, _edit_calls(n), telemetry=tel)
+    assert used_any is True
+    assert len(response) == n
+    assert all('OK: Edited' in str(m.content) for m in response)
 
 
 # ── cross-file separation: two different paths -> two independent approvals ─────
