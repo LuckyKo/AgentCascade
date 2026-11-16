@@ -346,7 +346,8 @@ class TestInvokerCompressionWiring:
         compressor_reuse._clear_all()
 
     def test_flag_off_never_touches_warm_path(self):
-        # Kill-switch OFF (the default): no warm attempt at all; fresh name per op exactly today.
+        # Kill-switch OFF (explicit fallback via AGENT_CASCADE_COMPRESSOR_REUSE=0; no longer the
+        # default): no warm attempt at all; fresh name per op, exactly as pre-feature.
         pool = _invoker_pool()
         with patch.object(agent_invoker, 'COMPRESSOR_REUSE_ENABLED', False), \
                 patch.object(agent_invoker, '_ensure_compressor_loaded'), \

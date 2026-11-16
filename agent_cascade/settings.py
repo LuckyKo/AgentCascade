@@ -157,11 +157,11 @@ SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE
 # ── Compressor agent warm reuse ───────────────────────────────────────────────
 # BUG_0330: reuse one warm Compressor (+ one warm CompressorReview) across compressions/
 # consolidations/reviews so the stable conversation[0] prefix hits the server-side KV cache
-# instead of a fresh Compressor_<n> / CompressionReviewer_<n> per op. Default OFF for staged
-# rollout; flip AGENT_CASCADE_COMPRESSOR_REUSE=1 to enable. With the flag OFF, behavior is
-# byte-identical to today (fresh name per op; the warm names are never created or matched).
+# instead of a fresh Compressor_<n> / CompressionReviewer_<n> per op. Default ON; set
+# AGENT_CASCADE_COMPRESSOR_REUSE=0 (or false/off/no) to fall back to the legacy per-op
+# fresh-name behavior (byte-identical to pre-feature: the warm names are never created).
 COMPRESSOR_REUSE_ENABLED: bool = os.getenv('AGENT_CASCADE_COMPRESSOR_REUSE',
-                                           '0').strip().lower() not in ('0', 'false', 'off', 'no')
+                                           '1').strip().lower() not in ('0', 'false', 'off', 'no')
 # Fixed instance name for the warm Compressor (L1 compression + L2 consolidation share it: same
 # soul, same prefix; they already share the Compressor_<n> name space today). A fixed name is
 # REQUIRED for the cache win — a per-op name changes the prompt bytes every op.
