@@ -41,10 +41,10 @@ class CodeMap(BaseTool):
         try:
             abs_path = resolve_tool_path(rel_path, mode='ro', agent_pool=self.agent_pool)
         except ValueError as e:
-            return f"Error: {str(e)}"
+            return f"ERROR: {str(e)}"
 
         if not abs_path.exists():
-            return f"Error: File not found at {rel_path}"
+            return f"ERROR: File not found at {rel_path}"
 
         try:
             with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:

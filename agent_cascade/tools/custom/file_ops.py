@@ -523,7 +523,7 @@ class ReadFile(BaseTool, PathResolutionMixin):
             resolved = self._resolve_path(path)
 
             if not resolved.exists():
-                return f"File not found: {path}"
+                return f"ERROR: File not found: {path}"
 
             # Check it's actually a file (not a directory or special file)
             if not resolved.is_file():

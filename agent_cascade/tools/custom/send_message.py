@@ -49,9 +49,9 @@ class SendMessage(BaseTool):
         message = str(parsed.get('message', '')).strip()
 
         if not destination:
-            return 'Failed: Destination cannot be empty.'
+            return 'ERROR: Destination cannot be empty.'
         if not message:
-            return 'Failed: Message content cannot be empty.'
+            return 'ERROR: Message content cannot be empty.'
 
         # Handle user destination
         if destination == 'user':
@@ -124,19 +124,19 @@ class SendMessage(BaseTool):
 
         # Self-message guard
         if destination == sender:
-            return 'Failed: Cannot send a message to yourself.'
+            return 'ERROR: Cannot send a message to yourself.'
 
         # Thread-safe access: acquire pool lock while checking instance + state
         with pool._pool_lock:
             target_instance = pool.instances.get(destination)
             if target_instance is None:
-                return f"Failed: No agent instance named '{destination}' exists."
+                return f"ERROR: No agent instance named '{destination}' exists."
 
             # Use direct .state field (AgentState enum), not get_state() which doesn't exist
             current_state = target_instance.state
             if current_state not in ACTIVE_STATES:
                 state_name = current_state.name
-                return f"Failed: Agent '{destination}' is currently {state_name}. Messages are only delivered to actively running agents."
+                return f"ERROR: Agent '{destination}' is currently {state_name}. Messages are only delivered to actively running agents."
 
         # Tag message with sender for agent-to-agent context
         tagged_message = f"[MESSAGE from {sender}]: {message}"

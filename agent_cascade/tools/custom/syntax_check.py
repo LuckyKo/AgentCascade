@@ -107,13 +107,13 @@ def _check_yaml(content: str, _path: str) -> str:
     try:
         import yaml
     except ImportError:
-        return 'Error: PyYAML is not installed. Cannot validate YAML.'
+        return 'ERROR: PyYAML is not installed. Cannot validate YAML.'
     try:
         yaml.safe_load(content)
         return 'Valid'
     except yaml.YAMLError as e:
         error_str = str(e).splitlines()[0] if str(e).splitlines() else str(e)
-        return f"YAML Error: {error_str}"
+        return f"ERROR: YAML parse error: {error_str}"
 
 
 def _check_toml(content: str, _path: str) -> str:
@@ -124,13 +124,13 @@ def _check_toml(content: str, _path: str) -> str:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
-            return "Error: No TOML parser available (requires Python 3.11+ or 'tomli' package)."
+            return "ERROR: No TOML parser available (requires Python 3.11+ or 'tomli' package)."
     try:
         tomllib.loads(content)
         return 'Valid'
     except Exception as e:
         error_msg = str(e).splitlines()[0] if str(e).splitlines() else str(e)
-        return f"TOML Error: {error_msg}"
+        return f"ERROR: TOML parse error: {error_msg}"
 
 
 def _check_xml(content: str, _path: str) -> str:

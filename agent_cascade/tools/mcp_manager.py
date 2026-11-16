@@ -1233,7 +1233,7 @@ class MCPClient:
             if texts:
                 return '\n\n'.join(texts)
             else:
-                return 'execute error'
+                return 'ERROR: execute error'
 
     async def cleanup(self):
         await self.exit_stack.aclose()

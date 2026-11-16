@@ -759,4 +759,4 @@ class ProposeSkill(BaseTool):
         else:
             error_detail = '; '.join(errors) if errors else 'Unknown error'
             action = 'update' if is_update else 'register'
-            return f"Failed to {action} skill '{proposed_name}': {error_detail}"
+            return f"ERROR: Failed to {action} skill '{proposed_name}': {error_detail}"

@@ -254,13 +254,13 @@ class ScanSkills(BaseTool):
                 logger.debug('[SKILLS] preview: failed to parse %s: %s', file_path, e)
 
         if not file_path:
-            return f"Skill '{display_name}' not found or not loadable."
+            return f"ERROR: Skill '{display_name}' not found or not loadable."
 
         try:
             content = Path(file_path).read_text(encoding='utf-8')
         except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
             logger.debug('[SKILLS] preview: failed to read %s: %s', file_path, e)
-            return f"Skill '{display_name}' not found or not loadable."
+            return f"ERROR: Skill '{display_name}' not found or not loadable."
 
         # Fence widening: the raw markdown may itself contain backtick runs, so size the
         # fence one longer than the longest run of backticks inside the content (min 3) to

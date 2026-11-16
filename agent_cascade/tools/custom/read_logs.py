@@ -436,13 +436,13 @@ class ReadLogs(BaseTool):
         mode = params.get('mode', 'trim_tools')
         valid_modes = ('trim_tools', 'trim_all', 'none')
         if mode not in valid_modes:
-            return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
+            return f"ERROR: Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}."
 
         # Parse and validate output format
         fmt = params.get('format', 'simple')
         valid_formats = ('raw', 'simple')
         if fmt not in valid_formats:
-            return f"Error: Invalid format '{fmt}'. Must be one of: {', '.join(valid_formats)}."
+            return f"ERROR: Invalid format '{fmt}'. Must be one of: {', '.join(valid_formats)}."
 
         # Validate log_file input
         if not log_file or not isinstance(log_file, str) or not log_file.strip():
@@ -497,10 +497,10 @@ class ReadLogs(BaseTool):
             try:
                 file_path = resolve_tool_path(log_file, mode='ro', agent_pool=self.agent_pool)
             except ValueError as e:
-                return f"Error: {str(e)}"
+                return f"ERROR: {str(e)}"
 
         if not file_path.exists() or not file_path.is_file():
-            return f"Error: Log file '{log_file}' not found."
+            return f"ERROR: Log file '{log_file}' not found."
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -582,7 +582,7 @@ class ReadLogs(BaseTool):
                     filter_pattern, use_regex,
                     self._as_bool(params.get('filter_case_sensitive', False)))
             except ValueError as e:
-                return f"Error: {e}"
+                return f"ERROR: {e}"
             filter_label = f'/{filter_pattern}/' if use_regex else f"'{filter_pattern}'"
 
         match_total = None  # number of entries matching the filter (None = no filter)

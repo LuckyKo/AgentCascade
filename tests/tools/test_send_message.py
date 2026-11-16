@@ -94,25 +94,25 @@ class TestSendMessageInputValidation:
         """Empty destination string returns a clear error."""
         params = json.dumps({'destination': '', 'message': 'hello'})
         result = send_message_tool.call(params)
-        assert 'Failed' in result and 'Destination cannot be empty' in result
+        assert 'ERROR' in result and 'Destination cannot be empty' in result
 
     def test_whitespace_only_destination_returns_error(self, send_message_tool):
         """Whitespace-only destination is treated as empty."""
         params = json.dumps({'destination': '   ', 'message': 'hello'})
         result = send_message_tool.call(params)
-        assert 'Failed' in result and 'Destination cannot be empty' in result
+        assert 'ERROR' in result and 'Destination cannot be empty' in result
 
     def test_empty_message_returns_error(self, send_message_tool):
         """Empty message content returns a clear error."""
         params = json.dumps({'destination': 'user', 'message': ''})
         result = send_message_tool.call(params)
-        assert 'Failed' in result and 'Message content cannot be empty' in result
+        assert 'ERROR' in result and 'Message content cannot be empty' in result
 
     def test_whitespace_only_message_returns_error(self, send_message_tool):
         """Whitespace-only message is treated as empty."""
         params = json.dumps({'destination': 'user', 'message': '   \t\n  '})
         result = send_message_tool.call(params)
-        assert 'Failed' in result and 'Message content cannot be empty' in result
+        assert 'ERROR' in result and 'Message content cannot be empty' in result
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ class TestSendMessageAgentToAgent:
         params = json.dumps({'destination': 'agentA', 'message': 'hello me'})
         result = send_message_tool.call(params)
 
-        assert 'Failed' in result and 'yourself' in result.lower()
+        assert 'ERROR' in result and 'yourself' in result.lower()
         # No message should be queued
         assert agent_pool_with_agents.drain_queue('agentA') == []
 
@@ -161,7 +161,7 @@ class TestSendMessageAgentToAgent:
         params = json.dumps({'destination': 'nonexistent', 'message': 'hello'})
         result = send_message_tool.call(params)
 
-        assert 'Failed' in result and "'nonexistent'" in result and 'exists' in result.lower()
+        assert 'ERROR' in result and "'nonexistent'" in result and 'exists' in result.lower()
 
     def test_supervisor_log_filename_still_rejected(self, send_message_tool):
         """BUG_0094 regression: the metadata fix must NOT loosen the resolver.
@@ -177,7 +177,7 @@ class TestSendMessageAgentToAgent:
         })
         result = send_message_tool.call(params)
 
-        assert 'Failed' in result and 'orchestrator_Maine_20261019_031621.jsonl' in result
+        assert 'ERROR' in result and 'orchestrator_Maine_20261019_031621.jsonl' in result
         assert 'exists' in result.lower()
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
@@ -192,7 +192,7 @@ class TestSendMessageAgentToAgent:
         params = json.dumps({'destination': 'agentB', 'message': 'hello'})
         result = send_message_tool.call(params)
 
-        assert 'Failed' in result and 'IDLE' in result
+        assert 'ERROR' in result and 'IDLE' in result
 
 
 # ---------------------------------------------------------------------------

@@ -283,7 +283,7 @@ class SystemInfo(BaseTool):
 
         except Exception as e:
             logger.warning(f"system_info telemetry dump failed: {e}")
-            return f"system_info telemetry dump unavailable: {e}"
+            return f"ERROR: system_info telemetry dump unavailable: {e}"
 
     def _render_missed_skills(self, top_n: int = 5) -> str:
         """Aggregate "Most-missed hinted skills" across all pool instances (BUG_0263).
@@ -415,10 +415,10 @@ class SystemInfo(BaseTool):
             import yaml
             path = _help_file_path()
             if not path.is_file():
-                return f"system_info help file not found at {path}"
+                return f"ERROR: system_info help file not found at {path}"
             data = yaml.safe_load(path.read_text(encoding='utf-8'))
             if not isinstance(data, dict):
-                return f"system_info help unavailable: YAML root is not a mapping\n(Help file: {path})"
+                return f"ERROR: system_info help unavailable: YAML root is not a mapping\n(Help file: {path})"
 
             # Available sections = top-level keys NOT starting with '_'
             sections = [k for k in data if not str(k).startswith('_')]
@@ -501,7 +501,7 @@ class SystemInfo(BaseTool):
                 path_str = str(_help_file_path())
             except Exception:
                 path_str = '<unknown>'
-            return f"system_info help unavailable: {e}\n(Help file: {path_str})"
+            return f"ERROR: system_info help unavailable: {e}\n(Help file: {path_str})"
 
     def _render_agents(self) -> str:
         """Render agent classes (name, tagline, active tools) plus live instances.
@@ -516,11 +516,11 @@ class SystemInfo(BaseTool):
         """
         pool = getattr(self, 'agent_pool', None)
         if not pool:
-            return 'system_info agents list unavailable: no agent pool attached to this tool.'
+            return 'ERROR: system_info agents list unavailable: no agent pool attached to this tool.'
         try:
             names = list(pool.list_agents())
         except Exception as e:
-            return f'system_info agents list unavailable: {e}'
+            return f'ERROR: system_info agents list unavailable: {e}'
 
         lines = ['--- AC Agent Classes (live) ---']
         if names:

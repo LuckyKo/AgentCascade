@@ -101,7 +101,7 @@ class TestReadLogsFilter:
 
             result = _read(p, filter='(', filter_regex=True)
 
-            assert result.startswith('Error: invalid filter regex'), result
+            assert result.startswith('ERROR: invalid filter regex'), result
             assert 'filter_regex=false' in result
 
     def test_filter_matches_text_hidden_by_preview_truncation(self):
