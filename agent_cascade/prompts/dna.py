@@ -1045,6 +1045,7 @@ TOOL_METADATA = {
         # jsonschema), so it is full OpenAI JSON-Schema form — unlike the simple {param: desc} mappings.
         'parameters': {
             'type': 'object',
+            'additionalProperties': False,
             'properties': {
                 'query': {
                     'type': 'string',

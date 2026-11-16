@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Union
 import agent_cascade.settings as settings
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.storage import KeyNotExistsError, Storage
 from agent_cascade.utils.str_processing import rm_cid, rm_continuous_placeholders, rm_hexadecimal
 from agent_cascade.utils.tokenization_qwen import count_tokens
@@ -808,16 +809,15 @@ def get_plain_doc(doc: list):
 @register_tool('simple_doc_parser')
 class SimpleDocParser(BaseTool):
     description = f"Extract the content of a document. Supported types include: {' / '.join(PARSER_SUPPORTED_FILE_TYPES)}"
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'url': {
                 'description': 'The path to the file to be extracted, which can be a local path or a downloadable http(s) link.',
                 'type': 'string',
             }
         },
-        'required': ['url'],
-    }
+        required=['url'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

@@ -20,6 +20,7 @@ import json5
 
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.search_tools.keyword_search import WORDS_TO_IGNORE, string_tokenizer
 from agent_cascade.tools.simple_doc_parser import SimpleDocParser
 from agent_cascade.tools.storage import KeyNotExistsError, Storage
@@ -28,9 +29,8 @@ from agent_cascade.tools.storage import KeyNotExistsError, Storage
 @register_tool('extract_doc_vocabulary')
 class ExtractDocVocabulary(BaseTool):
     description = 'Extract the vocabulary of the document.'
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'files': {
                 'description': 'A list of file paths, supporting local file paths or downloadable http(s) links.',
                 'type': 'array',
@@ -39,8 +39,8 @@ class ExtractDocVocabulary(BaseTool):
                 },
             }
         },
-        'required': ['files'],
-    }
+        required=['files'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

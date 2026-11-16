@@ -44,6 +44,7 @@ from agent_cascade.log import logger
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.code_path_resolver import build_path_resolution_notice, resolve_code_paths, set_active_mappings
 from agent_cascade.utils.utils import (append_signal_handler, extract_code, has_chinese_chars, json_loads,
                                        print_traceback)
@@ -852,9 +853,8 @@ logger.info(f"Code interpreter watchdog started (timeout={CONTAINER_WATCHDOG_TIM
 @register_tool('code_interpreter')
 class CodeInterpreter(BaseToolWithFileAccess):
     description = TOOL_METADATA['code_interpreter']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'code': {
                 'description': TOOL_METADATA['code_interpreter']['parameters']['code'],
                 'type': 'string',
@@ -883,8 +883,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 'default': 30,
             }
         },
-        'required': ['code'],
-    }
+        required=['code'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

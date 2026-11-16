@@ -19,6 +19,7 @@ from typing import Dict, Optional, Union
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 
 # BUG_0180: the evaluator is a single-expression ``eval``, so a statement block is a compile
 # error, not a runtime one. The old handler forwarded the raw SyntaxError and quoted the whole
@@ -53,16 +54,15 @@ def _is_statement_block(expr: str) -> bool:
 @register_tool('calculate')
 class Calculate(BaseTool):
     description = TOOL_METADATA['calculate']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'expression': {
                 'description': TOOL_METADATA['calculate']['parameters']['expression'],
                 'type': 'string',
             }
         },
-        'required': ['expression'],
-    }
+        required=['expression'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

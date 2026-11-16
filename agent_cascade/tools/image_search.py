@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.utils import extract_images_from_messages
 
 SERPAPI_IMAGE_SEARCH_KEY = os.getenv('SERPAPI_IMAGE_SEARCH_KEY', '')
@@ -143,16 +144,15 @@ def serper_search(image_url: str,
 class ImageSearch(BaseTool):
     name = 'image_search'
     description = 'Image search engine, input the image and search for similar images with image information.'
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'img_idx': {
                 'type': 'number',
                 'description': 'The index of the image (starting from 0)'
             }
         },
-        'required': ['img_idx']
-    }
+        required=['img_idx'],
+    )
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
         params = self._verify_json_format_args(params)

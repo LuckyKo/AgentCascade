@@ -25,6 +25,7 @@ from PIL import Image
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.utils import extract_images_from_messages
 
 
@@ -32,9 +33,8 @@ from agent_cascade.utils.utils import extract_images_from_messages
 class ImageZoomInToolQwen3VL(BaseToolWithFileAccess):
 
     description = 'Zoom in on a specific region of an image by cropping it based on a bounding box (bbox) and an optional object label'
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'bbox_2d': {
                 'type':
                     'array',
@@ -57,8 +57,8 @@ class ImageZoomInToolQwen3VL(BaseToolWithFileAccess):
                 'description': 'The index of the zoomed-in image (starting from 0)'
             }
         },
-        'required': ['bbox_2d', 'label', 'img_idx']
-    }
+        required=['bbox_2d', 'label', 'img_idx'],
+    )
 
     # Image resizing functions (copied from qwen-vl-utils)
     def round_by_factor(self, number: int, factor: int) -> int:

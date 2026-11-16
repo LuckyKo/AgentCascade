@@ -28,6 +28,7 @@ import regex
 from tqdm import tqdm
 
 from agent_cascade.tools.base import BaseTool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.utils import extract_code
 
 
@@ -95,16 +96,15 @@ def _check_deps_for_python_executor():
 class PythonExecutor(BaseTool):
     name = 'python_executor'
     description = 'Executes Python code DIRECTLY on the host machine (NOT sandboxed). Use this ONLY when you need to access host-side services on 127.0.0.1 that Docker cannot reach. Highly dangerous, use with caution.'
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'code': {
                 'description': 'The python code.',
                 'type': 'string',
             }
         },
-        'required': ['code'],
-    }
+        required=['code'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         _check_deps_for_python_executor()

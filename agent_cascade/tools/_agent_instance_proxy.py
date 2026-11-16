@@ -31,14 +31,15 @@ def _build_schema_from_metadata(tool_name: str, metadata_entry: dict) -> dict:
             # Simple string description — infer type as string
             properties[key] = {'type': 'string', 'description': value}
 
+    from agent_cascade.tools.schema_common import tool_params
+
     return {
         'name': tool_name,
         'description': metadata_entry['description'],
-        'parameters': {
-            'type': 'object',
-            'properties': properties,
-            'required': metadata_entry.get('required', list(properties.keys())),
-        },
+        'parameters': tool_params(
+            properties=properties,
+            required=metadata_entry.get('required', list(properties.keys())),
+        ),
     }
 
 

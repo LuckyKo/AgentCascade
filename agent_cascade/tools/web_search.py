@@ -30,6 +30,7 @@ import requests
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.custom.ddg_search import search_duckduckgo
 from config.secrets_loader import get_secret
 
@@ -75,16 +76,15 @@ class WebSearch(BaseTool):
 
     name = 'web_search'
     description = TOOL_METADATA['web_search']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'query': {
                 'type': 'string',
                 'description': TOOL_METADATA['web_search']['parameters']['query']
             }
         },
-        'required': ['query'],
-    }
+        required=['query'],
+    )
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
         """Execute a web search using configured backend priority.

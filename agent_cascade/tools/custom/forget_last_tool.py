@@ -7,6 +7,7 @@ from agent_cascade.compression import rebuild_working_set
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT, DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import JUSTIFICATION_PROP, tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +28,8 @@ class ForgetLast(BaseTool):
     """
     name = 'forget_last'
     description = TOOL_METADATA['forget_last']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'count': {
                 'type': 'integer',
                 'description': TOOL_METADATA['forget_last']['parameters']['count'],
@@ -37,13 +37,10 @@ class ForgetLast(BaseTool):
                 'maximum': 100,  # Guardrail against runaway truncation
                 'default': 1,
             },
-            'justification': {
-                'type': 'string',
-                'description': TOOL_METADATA['forget_last']['parameters']['justification'],
-            },
+            'justification': {**JUSTIFICATION_PROP, 'description': TOOL_METADATA['forget_last']['parameters']['justification']},
         },
-        'required': [],
-    }
+        required=[],
+    )
 
     def __init__(self, cfg: dict = None):
         super().__init__(cfg)

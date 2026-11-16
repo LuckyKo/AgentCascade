@@ -17,6 +17,7 @@ from typing import Dict, Optional, Union
 
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.utils import read_text_from_file, save_text_to_file
 
 
@@ -31,9 +32,8 @@ class Storage(BaseTool):
     Allows agents to save, read, delete, and scan information using key-value pairs.
     """
     description = 'A tool for storing and retrieving data.'
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'operate': {
                 'description':
                     'The type of data operation: "put" (save data), "get" (read data), "delete" (remove data), or "scan" (list/read multiple items).',
@@ -54,8 +54,8 @@ class Storage(BaseTool):
                 'type': 'string',
             },
         },
-        'required': ['operate'],
-    }
+        required=['operate'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

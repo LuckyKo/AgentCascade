@@ -4,6 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 
 logger = logging.getLogger(__name__)
 from agent_cascade.agent_instance import ACTIVE_STATES
@@ -21,9 +22,8 @@ class SendMessage(BaseTool):
 
     name = 'send_message'
     description = TOOL_METADATA['send_message']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'destination': {
                 'type': 'string',
                 'description': TOOL_METADATA['send_message']['parameters']['destination']
@@ -33,8 +33,8 @@ class SendMessage(BaseTool):
                 'description': TOOL_METADATA['send_message']['parameters']['message']
             }
         },
-        'required': ['destination', 'message']
-    }
+        required=['destination', 'message'],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)

@@ -14,6 +14,7 @@ from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIME
                                     WAIT_CMD_POLL_INTERVAL)
 from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -234,13 +235,11 @@ class ShellCmd(BaseTool):
 
     name = 'shell_cmd'
     description = TOOL_METADATA['shell_cmd']['description']
-    parameters = {
-        'type': 'object',
+    parameters = tool_params(
         # BUG_0024: reject unknown keys loudly (e.g. the legacy 'async_mode' after the
         # execution_mode rename) instead of silently running with defaults. BaseTool
         # converts the rejection into a friendly "unknown parameter(s) ..." ValueError.
-        'additionalProperties': False,
-        'properties': {
+        properties={
             'command': {
                 'type': 'string',
                 'description': TOOL_METADATA['shell_cmd']['parameters']['command']
@@ -275,8 +274,8 @@ class ShellCmd(BaseTool):
                 'description': TOOL_METADATA['shell_cmd']['parameters']['tool_id']
             }
         },
-        'required': ['command'],
-    }
+        required=['command'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:

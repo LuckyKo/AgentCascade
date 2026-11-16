@@ -19,6 +19,7 @@ import json5
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import DEFAULT_MAX_REF_TOKEN, DEFAULT_PARSER_PAGE_SIZE, DEFAULT_RAG_SEARCHERS
 from agent_cascade.tools.base import TOOL_REGISTRY, BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.doc_parser import DocParser, Record
 
 
@@ -42,9 +43,8 @@ def _check_deps_for_rag():
 @register_tool('retrieval')
 class Retrieval(BaseTool):
     description = TOOL_METADATA['retrieval']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'query': {
                 'description': TOOL_METADATA['retrieval']['parameters']['query'],
                 'type': 'string',
@@ -58,8 +58,8 @@ class Retrieval(BaseTool):
                 }
             },
         },
-        'required': ['query', 'files'],
-    }
+        required=['query', 'files'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

@@ -12,6 +12,7 @@ from pathlib import Path
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.skills.manager import rating_sort_key
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,8 @@ class ScanSkills(BaseTool):
 
     name = 'scan_skills'
     description = TOOL_METADATA['scan_skills']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'query': {
                 'type': 'string',
                 'description': TOOL_METADATA['scan_skills']['parameters']['query'],
@@ -51,8 +51,8 @@ class ScanSkills(BaseTool):
                 'description': TOOL_METADATA['scan_skills']['parameters']['preview'],
             },
         },
-        'required': [],
-    }
+        required=[],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)

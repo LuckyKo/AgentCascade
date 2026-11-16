@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_REF_TOKEN, DEFAULT_PARSER_PAGE_SIZE, DEFAULT_WORKSPACE
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.simple_doc_parser import PARAGRAPH_SPLIT_SYMBOL, SimpleDocParser, get_plain_doc
 from agent_cascade.tools.storage import KeyNotExistsError, Storage
@@ -57,16 +58,15 @@ class Record(BaseModel):
 @register_tool('doc_parser')
 class DocParser(BaseTool):
     description = TOOL_METADATA['doc_parser']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'url': {
                 'description': TOOL_METADATA['doc_parser']['parameters']['url'],
                 'type': 'string',
             }
         },
-        'required': ['url'],
-    }
+        required=['url'],
+    )
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)

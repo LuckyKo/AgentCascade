@@ -18,6 +18,12 @@ import requests
 from PIL import Image
 
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tools.schema_common import (
+    JUSTIFICATION_PROP,
+    PATH_PROP,
+    STRING_OR_STRING_ARRAY,
+    tool_params,
+)
 from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_CHARS, DEFAULT_READ_FILE_MAX_LINES,
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
                                     IMAGE_MAX_SHORT_SIDE)
@@ -127,13 +133,11 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
     name = 'read_file'
     description = TOOL_METADATA['read_file']['description']
-    parameters = {
-        'type': 'object',
+    parameters = tool_params(
         # BUG_0022: reject unknown keys loudly (e.g. the model's 'offset' habit) instead of
         # silently dropping them and reading from line 1. BaseTool converts the rejection
         # into a friendly "unknown parameter(s) ..." ValueError naming the valid params.
-        'additionalProperties': False,
-        'properties': {
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['read_file']['parameters']['path']
@@ -154,8 +158,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
                 'default': 'numbered'
             }
         },
-        'required': ['path'],
-    }
+        required=['path'],
+    )
 
     def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
         try:
@@ -600,9 +604,8 @@ class ViewImage(BaseTool, PathResolutionMixin):
 
     name = 'view_image'
     description = TOOL_METADATA['view_image']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['view_image']['parameters']['path']
@@ -612,8 +615,8 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 'description': TOOL_METADATA['view_image']['parameters']['crop_region']
             }
         },
-        'required': ['path'],
-    }
+        required=['path'],
+    )
 
     def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
         try:
@@ -1027,9 +1030,8 @@ class ViewMedia(BaseTool, PathResolutionMixin):
 
     name = 'view_media'
     description = TOOL_METADATA['view_media']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['view_media']['parameters']['path']
@@ -1051,8 +1053,8 @@ class ViewMedia(BaseTool, PathResolutionMixin):
                 'description': TOOL_METADATA['view_media']['parameters']['audio_track']
             },
         },
-        'required': ['path'],
-    }
+        required=['path'],
+    )
 
     def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
         try:
@@ -1469,9 +1471,8 @@ class WriteFile(BaseTool, PathResolutionMixin):
 
     name = 'write_file'
     description = TOOL_METADATA['write_file']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['write_file']['parameters']['path']
@@ -1485,8 +1486,8 @@ class WriteFile(BaseTool, PathResolutionMixin):
                 'description': TOOL_METADATA['write_file']['parameters']['justification']
             }
         },
-        'required': ['path', 'content'],
-    }
+        required=['path', 'content'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -1586,9 +1587,8 @@ class EditFile(BaseTool, PathResolutionMixin):
 
     name = 'edit_file'
     description = TOOL_METADATA['edit_file']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['edit_file']['parameters']['path']
@@ -1622,8 +1622,8 @@ class EditFile(BaseTool, PathResolutionMixin):
                 'description': 'Why you need to edit this file'
             }
         },
-        'required': ['path', 'old_content', 'new_content'],
-    }
+        required=['path', 'old_content', 'new_content'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -1638,16 +1638,24 @@ class EditFile(BaseTool, PathResolutionMixin):
         try:
             if isinstance(params, str):
                 p = json_loads(params)
-                if 'old_string' in p and 'old_content' not in p:
-                    p['old_content'] = p['old_string']
-                if 'new_string' in p and 'new_content' not in p:
-                    p['new_content'] = p['new_string']
+                if 'old_string' in p:
+                    if 'old_content' not in p:
+                        p['old_content'] = p['old_string']
+                    del p['old_string']
+                if 'new_string' in p:
+                    if 'new_content' not in p:
+                        p['new_content'] = p['new_string']
+                    del p['new_string']
                 params = json.dumps(p)
             elif isinstance(params, dict):
-                if 'old_string' in params and 'old_content' not in params:
-                    params['old_content'] = params['old_string']
-                if 'new_string' in params and 'new_content' not in params:
-                    params['new_content'] = params['new_string']
+                if 'old_string' in params:
+                    if 'old_content' not in params:
+                        params['old_content'] = params['old_string']
+                    del params['old_string']
+                if 'new_string' in params:
+                    if 'new_content' not in params:
+                        params['new_content'] = params['new_string']
+                    del params['new_string']
         except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             pass
 
@@ -1744,9 +1752,8 @@ class ListDir(BaseTool):
 
     name = 'list_dir'
     description = TOOL_METADATA['list_dir']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['list_dir']['parameters']['path']
@@ -1820,8 +1827,8 @@ class ListDir(BaseTool):
                 'description': TOOL_METADATA['list_dir']['parameters']['skip_vcs']
             }
         },
-        'required': ['path'],
-    }
+        required=['path'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -1912,9 +1919,8 @@ class Grep(BaseTool):
 
     name = 'grep'
     description = TOOL_METADATA['grep']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'pattern': {
                 'type': 'string',
                 'description': TOOL_METADATA['grep']['parameters']['pattern']
@@ -1965,8 +1971,8 @@ class Grep(BaseTool):
                     5.0
             }
         },
-        'required': ['pattern'],
-    }
+        required=['pattern'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -2085,25 +2091,9 @@ class DeleteFile(BaseTool):
     name = 'delete_file'
     description = TOOL_METADATA['delete_file']['description']
 
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'path': {
-                # oneOf (not type: ['string','array']) for maximum LLM-API
-                # compatibility — mirrors the load_skill tool's pattern.
-                'oneOf': [
-                    {
-                        'type': 'string'
-                    },
-                    {
-                        'type': 'array',
-                        'items': {
-                            'type': 'string'
-                        }
-                    },
-                ],
-                'description': TOOL_METADATA['delete_file']['parameters']['path']
-            },
+    parameters = tool_params(
+        properties={
+            'path': {**STRING_OR_STRING_ARRAY, 'description': TOOL_METADATA['delete_file']['parameters']['path']},
             'include': {
                 'type': 'string',
                 'description': TOOL_METADATA['delete_file']['parameters']['include']
@@ -2115,7 +2105,8 @@ class DeleteFile(BaseTool):
         },
         # 'path' (string or list) is required — enforced in call() so the error
         # message can name the missing input rather than failing schema validation.
-    }
+        required=[],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -2190,6 +2181,9 @@ class DeleteFile(BaseTool):
         params, err = self._normalize_path(params)
         if err:
             return err
+        # 'paths' is a hidden internal arg injected by _normalize_path for list input;
+        # it is not a schema property, so validate a copy without it, then reuse it below.
+        hidden_paths = params.pop('paths', None) if isinstance(params, dict) else None
         try:
             params = self._verify_json_format_args(params)
         except (ValueError, jsonschema.ValidationError) as e:
@@ -2204,7 +2198,7 @@ class DeleteFile(BaseTool):
         # list inputs legitimately omit it, so presence is checked here instead.
         raw = params.get('path')
         path = (raw or None) if isinstance(raw, str) else None
-        paths = params.get('paths') or None  # hidden legacy arg, still accepted
+        paths = hidden_paths  # hidden legacy arg from _normalize_path (list input)
         if not path and not paths:
             return "ERROR: Provide at least one of 'path' (string or list)."
         justification = params.get('justification', '')
@@ -2224,24 +2218,14 @@ class CopyFile(BaseTool):
 
     name = 'copy_file'
     description = TOOL_METADATA['copy_file']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'source': {
-                'type': 'string',
-                'description': TOOL_METADATA['copy_file']['parameters']['source']
-            },
-            'destination': {
-                'type': 'string',
-                'description': TOOL_METADATA['copy_file']['parameters']['destination']
-            },
-            'justification': {
-                'type': 'string',
-                'description': 'Why you need to copy this file'
-            }
+    parameters = tool_params(
+        properties={
+            'source': {**PATH_PROP, 'description': TOOL_METADATA['copy_file']['parameters']['source']},
+            'destination': {**PATH_PROP, 'description': TOOL_METADATA['copy_file']['parameters']['destination']},
+            'justification': {**JUSTIFICATION_PROP, 'description': 'Why you need to copy this file'},
         },
-        'required': ['source', 'destination'],
-    }
+        required=['source', 'destination'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:
@@ -2266,9 +2250,8 @@ class ReIndent(BaseTool):
 
     name = 're_indent'
     description = TOOL_METADATA['re_indent']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['re_indent']['parameters']['path']
@@ -2297,8 +2280,8 @@ class ReIndent(BaseTool):
                 'description': 'Why you need to re-indent this file'
             }
         },
-        'required': ['path', 'lines', 'indent', 'indent_type'],
-    }
+        required=['path', 'lines', 'indent', 'indent_type'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:

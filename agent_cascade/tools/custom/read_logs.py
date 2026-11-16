@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,8 @@ class ReadLogs(BaseTool):
 
     name = 'read_logs'
     description = TOOL_METADATA['read_logs']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'log_file': {
                 'type': 'string',
                 'minLength': 1,
@@ -72,8 +72,8 @@ class ReadLogs(BaseTool):
                 'description': TOOL_METADATA['read_logs']['parameters']['filter_case_sensitive']
             }
         },
-        'required': ['log_file'],
-    }
+        required=['log_file'],
+    )
 
     def __init__(self, cfg=None, **kwargs):
         try:

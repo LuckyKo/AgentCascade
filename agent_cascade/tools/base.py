@@ -133,7 +133,9 @@ def is_tool_schema(obj: dict) -> bool:
         assert isinstance(obj['description'], str)
         assert isinstance(obj['parameters'], dict)
 
-        assert set(obj['parameters'].keys()) == {'type', 'properties', 'required'}
+        # Superset check, not exact equality: tool_params adds 'additionalProperties'
+        # (and Increment B may add anyOf/allOf). Only the three core keys must be present.
+        assert {'type', 'properties', 'required'} <= set(obj['parameters'].keys())
         assert obj['parameters']['type'] == 'object'
         assert isinstance(obj['parameters']['properties'], dict)
         assert isinstance(obj['parameters']['required'], list)

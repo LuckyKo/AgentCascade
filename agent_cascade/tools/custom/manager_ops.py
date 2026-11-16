@@ -1,4 +1,5 @@
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 
@@ -14,10 +15,10 @@ class ListAgents(BaseTool):
 
     name = 'list_agents'
     description = TOOL_METADATA['list_agents']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {},
-    }
+    parameters = tool_params(
+        properties={},
+        required=[],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)

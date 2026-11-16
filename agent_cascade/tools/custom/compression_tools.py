@@ -11,6 +11,7 @@ from agent_cascade.compression import compress_context, rebuild_working_set
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,8 @@ class CompressContext(BaseTool):
 
     name = 'compress_context'
     description = TOOL_METADATA['compress_context']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'fraction': {
                 'type': 'number',
                 'description': TOOL_METADATA['compress_context']['parameters']['fraction'],
@@ -49,8 +49,8 @@ class CompressContext(BaseTool):
                     'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
             }
         },
-        'required': ['fraction'],
-    }
+        required=['fraction'],
+    )
 
     def __init__(self, agent_pool=None, agent_name=None, **kwargs):
         super().__init__(**kwargs)

@@ -15,6 +15,7 @@
 from typing import Optional, Union
 
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.simple_doc_parser import SimpleDocParser, DocParserError
 
@@ -22,9 +23,8 @@ from agent_cascade.tools.simple_doc_parser import SimpleDocParser, DocParserErro
 @register_tool('web_extractor')
 class WebExtractor(BaseTool):
     description = TOOL_METADATA['web_extractor']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'url': {
                 'description': TOOL_METADATA['web_extractor']['parameters']['url'],
                 'type': 'string',
@@ -35,8 +35,8 @@ class WebExtractor(BaseTool):
                 'default': True,
             }
         },
-        'required': ['url'],
-    }
+        required=['url'],
+    )
 
     def __init__(self, cfg: Optional[dict] = None):
         super().__init__(cfg)

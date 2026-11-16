@@ -10,6 +10,7 @@ from agent_cascade import __version__ as AC_VERSION
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.settings import DEFAULT_MAX_TURNS, DEFAULT_WORKSPACE
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.utils.utils import get_history_stats
 
 logger = logging.getLogger(__name__)
@@ -42,16 +43,15 @@ class SystemInfo(BaseTool):
 
     name = 'system_info'
     description = TOOL_METADATA['system_info']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'help': {
                 'type': 'string',
                 'description': TOOL_METADATA['system_info']['parameters']['help'],
             },
         },
-        'required': [],
-    }
+        required=[],
+    )
 
     def __init__(self, agent_pool=None, agent_name=None, **kwargs):
         super().__init__(**kwargs)

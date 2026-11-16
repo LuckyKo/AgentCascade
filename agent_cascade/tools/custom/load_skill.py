@@ -12,6 +12,7 @@ import re
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
@@ -22,13 +23,12 @@ class LoadSkill(BaseTool):
     """Tool to load skill instructions into the current agent's context at runtime."""
     name = 'load_skill'
     description = TOOL_METADATA['load_skill']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'skill_names': TOOL_METADATA['load_skill']['parameters']['skill_names'],
         },
-        'required': ['skill_names'],
-    }
+        required=['skill_names'],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)

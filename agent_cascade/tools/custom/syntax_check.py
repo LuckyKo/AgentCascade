@@ -9,6 +9,7 @@ from typing import Dict, Union
 
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import PATH_PROP, tool_params
 from agent_cascade.tools.custom import cpp_lex
 
 # ── Extension → language mapping ───────────────────────────────────────────────
@@ -642,20 +643,16 @@ class SyntaxCheck(BaseTool):
 
     name = 'syntax_check'
     description = TOOL_METADATA['syntax_check']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'path': {
-                'type': 'string',
-                'description': TOOL_METADATA['syntax_check']['parameters']['path']
-            },
+    parameters = tool_params(
+        properties={
+            'path': {**PATH_PROP, 'description': TOOL_METADATA['syntax_check']['parameters']['path']},
             'force_as': {
                 'type': 'string',
                 'description': TOOL_METADATA['syntax_check']['parameters']['force_as']
             }
         },
-        'required': ['path'],
-    }
+        required=['path'],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)
