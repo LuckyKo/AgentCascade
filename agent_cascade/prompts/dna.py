@@ -17,7 +17,7 @@ from typing import List, Set
 # It is deliberately EXCLUDED from PROMPT_HASH so that bumping the version alone
 # does not perturb the content hash; PROMPT_HASH tracks content, DNA_VERSION
 # tracks declared intent.
-DNA_VERSION: str = '1.0.0'
+DNA_VERSION: str = '1.1.0'
 
 # ── Available Tools Registry ────────────────────────────────────────────────
 # Master list of ALL tools that agents can use. Toggle True/False to enable/disable
@@ -378,6 +378,15 @@ AFK_ADMIN_PROMPT = (
     'online for ideas to improve AC from similar projects, and leave notes to the user on '
     'what we could do (build on / do not duplicate prior research notes). This tier is '
     'always actionable, so there is always a concrete next step.\n\n'
+    '## Recurring monitors (do in ADDITION to the ladder walk, every AFK window)\n'
+    'These are periodic checks, NOT ladder tiers: perform them, then still walk the ladder '
+    'above to choose the primary TASK.\n'
+    '- DNA-telemetry accumulation: read the state note `dna-telemetry-accumulation.md` in '
+    'the workspace root. It tracks the current prompt_hash cohort and its session count. '
+    'If the current cohort has reached N>=5-10 sessions, load the '
+    '`dna-telemetry-ab-aggregation` skill, run its pooler over workspace/telemetry/, and '
+    'append the resulting A/B comparison to the note. ALWAYS update the note\'s "last '
+    'checked" timestamp and current status (even if still accumulating).\n\n'
     '## Guardrails (what you may NOT instruct autonomously)\n'
     '- Major / architectural changes require USER approval. In an AFK window do NOT '
     'instruct {root_name} to make one — record it as a recommendation for the user in a '
@@ -1224,7 +1233,7 @@ def _compute_prompt_hash() -> str:
     forgotten version bump).
 
     Validation (current DNA content, v0.x): 19 uppercase string constants +
-    28 AVAILABLE_TOOLS entries -> PROMPT_HASH == "95b8ed5461391997" (stable and
+    28 AVAILABLE_TOOLS entries -> PROMPT_HASH == "a5b97507cbce60e0" (stable and
     reproducible across runs).
     """
     parts = [
