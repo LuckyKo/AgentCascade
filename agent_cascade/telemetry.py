@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 
 from agent_cascade.cost import tokens_to_cost
 from agent_cascade.log import _AppLoggerProxy
+from agent_cascade.prompts import dna  # DNA_VERSION / PROMPT_HASH for the parallel DNA bin (BUG_0337)
 
 # Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy).
 # A plain ``logging.getLogger('agent_cascade.telemetry')`` is a SIBLING of the
@@ -180,6 +181,15 @@ class TelemetryCollector:
         # Keyed by agent_class (one model can serve multiple classes now that the
         # fingerprint is model-only), so this is a separate accumulator from _config_stats.
         self._agent_class_stats: Dict[str, Dict] = {}
+
+        # Per-DNA-version aggregates (BUG_0337 Phase 1) — a PARALLEL bin to the
+        # model-only _config_stats, keyed by dna.DNA_VERSION. Additive: it does
+        # NOT re-key or affect the model-only A/B rows or the cache attribution.
+        # Fed only from record_turn_start (runs) and record_turn_end (per-turn
+        # counters flushed from the active-turn dict), so no record_* method
+        # changes are needed. Read with .get(...,0) in consumers so rows
+        # persisted before this field still work.
+        self._dna_stats: Dict[str, Dict] = {}
 
         # Per-skill usage aggregates for the "Skill Usage" table.
         # Keyed by skill name; each entry tracks how many times it was injected
@@ -343,6 +353,34 @@ class TelemetryCollector:
             }
         return self._cache_stats.get(cache_key)
 
+    def _ensure_dna_stats(self, dna_version: str):
+        """Ensure the per-DNA-version bucket exists for *dna_version* (BUG_0337).
+
+        Additive parallel bin: keyed by the DNA label, NOT the model-only
+        fingerprint. Caller must hold ``_telemetry_lock``. Returns the (created or
+        existing) bucket so callers can subscript it directly. Carries only the
+        counters that are already tracked on the active-turn dict (see
+        ``record_turn_start``); per-model fields like streamed_output_tokens /
+        config_description are intentionally NOT duplicated here.
+        """
+        if dna_version and dna_version not in self._dna_stats:
+            self._dna_stats[dna_version] = {
+                'dna_version': dna_version,
+                'prompt_hash': dna.PROMPT_HASH,
+                'runs': 0,
+                'llm_calls': 0,
+                'tool_calls': 0,
+                'input_tokens_est': 0,
+                'output_tokens_est': 0,
+                'total_duration_ms': 0.0,
+                'total_llm_latency_ms': 0.0,
+                'total_ttft_ms': 0.0,
+                'loops_detected': 0,
+                'retries': 0,
+                'total_compressions': 0,
+            }
+        return self._dna_stats.get(dna_version)
+
     # ── Event Recording (all thread-safe via _telemetry_lock) ──────────────
 
     def record_turn_start(
@@ -379,6 +417,7 @@ class TelemetryCollector:
                 'config_fingerprint': config_fingerprint,
                 'config_description': config_description or {},
                 'agent_class': agent_class,
+                'dna_version': dna.DNA_VERSION,  # BUG_0337: carried to turn_end for the DNA bin
                 'llm_calls': 0,
                 'tool_calls': 0,
                 'tool_calls_detail': [],
@@ -405,6 +444,11 @@ class TelemetryCollector:
                 self._config_stats[config_fingerprint]['runs'] += 1
             if agent_class:
                 self._ensure_agent_class_stats(agent_class)['runs'] += 1
+
+            # Per-DNA-version run count (BUG_0337, additive parallel bin).
+            dna_ver = dna.DNA_VERSION
+            if dna_ver:
+                self._ensure_dna_stats(dna_ver)['runs'] += 1
 
         event = {
             'type': 'turn_start',
@@ -483,6 +527,25 @@ class TelemetryCollector:
                     self._ensure_config_stats(credit_fp, turn.get('config_description'))
                 cs = self._config_stats[credit_fp]
                 cs['total_duration_ms'] += duration_ms
+
+            # Per-DNA-version aggregation (BUG_0337, additive parallel bin). The
+            # per-turn counters were accumulated live onto the active-turn dict by
+            # the record_* methods, so we flush them here once — no record_* method
+            # is touched and nothing double-counts (each turn is flushed exactly
+            # once, on the pop at the top of this method).
+            dna_ver = turn.get('dna_version') or ''
+            if dna_ver:
+                ds = self._ensure_dna_stats(dna_ver)
+                ds['llm_calls'] += turn['llm_calls']
+                ds['tool_calls'] += turn['tool_calls']
+                ds['input_tokens_est'] += turn['input_tokens_est']
+                ds['output_tokens_est'] += turn['output_tokens_est']
+                ds['total_duration_ms'] += duration_ms
+                ds['total_llm_latency_ms'] += turn['llm_latency_ms']
+                ds['total_ttft_ms'] += turn['ttft_ms']
+                ds['loops_detected'] += turn['loops_detected']
+                ds['retries'] += turn['retries']
+                ds['total_compressions'] += turn['compressions']
 
             # Update per-agent-class stats — same live-accumulation rule as above;
             # only total_time_ms is flushed here (duration known at end).
@@ -1743,6 +1806,40 @@ class TelemetryCollector:
         result.sort(key=lambda r: (-(r['cache_hits'] + r['cache_misses']), r['cache_key']))
         return result
 
+    def get_dna_comparison(self) -> List[Dict]:
+        """Per-DNA-version stats for A/B DNA comparison (BUG_0337 Phase 1).
+
+        A PARALLEL view to ``get_config_comparison`` (which groups by model only).
+        Rows are keyed by ``dna_version`` and carry the counters that were flushed
+        at turn boundaries. Same ghost-row filter as ``get_config_comparison``:
+        rows with ``llm_calls == 0`` are hidden from the VIEW (a run that
+        terminated before any LLM call); the raw ``_dna_stats`` still retains them
+        for reconciliation. Read numeric fields with ``.get(..., 0)``.
+        """
+        with _telemetry_lock:
+            result = []
+            for dna_ver, ds in self._dna_stats.items():
+                if ds.get('llm_calls', 0) == 0:
+                    continue
+                total_tokens = ds['input_tokens_est'] + ds['output_tokens_est']
+                result.append({
+                    'dna_version': ds['dna_version'],
+                    'prompt_hash': ds['prompt_hash'],
+                    'runs': ds['runs'],
+                    'llm_calls': ds['llm_calls'],
+                    'tool_calls': ds['tool_calls'],
+                    'input_tokens_est': ds['input_tokens_est'],
+                    'output_tokens_est': ds['output_tokens_est'],
+                    'total_tokens': total_tokens,
+                    'total_duration_sec': round(ds['total_duration_ms'] / 1000, 1),
+                    'total_llm_latency_sec': round(ds['total_llm_latency_ms'] / 1000, 1),
+                    'total_ttft_sec': round(ds['total_ttft_ms'] / 1000, 1),
+                    'loops_detected': ds['loops_detected'],
+                    'retries': ds['retries'],
+                    'compressions': ds['total_compressions'],
+                })
+        return result
+
     def get_agent_class_summary(self) -> List[Dict]:
         """Get per-agent-class usage stats for the "Agent Class Usage" table.
 
@@ -1872,6 +1969,7 @@ class TelemetryCollector:
             # model row's hit ratio recovers once last-endpoint misses are booked
             # to their own resolved endpoint.
             cache_attribution = self.get_cache_attribution()
+            dna_comparison = self.get_dna_comparison()   # BUG_0337 Phase 1
 
         event = {
             'type': 'session_end',
@@ -1882,6 +1980,7 @@ class TelemetryCollector:
             'cache_attribution': cache_attribution,
             'agent_class_comparison': agent_class_comparison,
             'skill_usage': skill_usage,
+            'dna_comparison': dna_comparison,           # BUG_0337 Phase 1 (additive)
         }
         try:
             self._write_critical_event(event)
@@ -1907,6 +2006,15 @@ class TelemetryCollector:
             raise_on_error: If True, raises on I/O failure (for critical events like session_end).
                            If False, logs warning and increments write_failures counter.
         """
+        # BUG_0337 Phase 1 (additive): stamp every telemetry record with the DNA
+        # version that produced it. Module constants, read once per record; both the
+        # JSONL line and the in-memory events buffer get the fields (the fields land
+        # here, not in the model-only fingerprint — the DNA label is threaded
+        # separately and never touches fingerprint_config's params). Set-if-absent so
+        # a caller that already set an explicit value wins.
+        event.setdefault('dna_version', dna.DNA_VERSION)
+        event.setdefault('prompt_hash', dna.PROMPT_HASH)
+
         line = json.dumps(event, ensure_ascii=False, default=str) + '\n'
 
         try:

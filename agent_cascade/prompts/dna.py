@@ -2,7 +2,22 @@
 # Centralizing all strings for easy A-B testing and consistency.
 # -*- coding: utf-8 -*-
 
+import hashlib
+
 from typing import List, Set
+
+# ── DNA Version (single source of truth for the A/B DNA label) ───────────────
+# Semantic version of the DNA prompt/instruction content defined in this module.
+# Bump convention (keep it meaningful — see ac-codebase-conventions versioning):
+#   MAJOR  = breaking DNA restructure (incompatible prompt layout / contract)
+#   MINOR  = additive instruction changes (new prompt rules, new AVAILABLE_TOOLS
+#            entries) — the normal change made when doing an A/B DNA comparison
+#   PATCH  = wording-only tweaks (typos, phrasing) with no behavioral change
+# DNA_VERSION is the human grouping key surfaced in telemetry (dna_version bin).
+# It is deliberately EXCLUDED from PROMPT_HASH so that bumping the version alone
+# does not perturb the content hash; PROMPT_HASH tracks content, DNA_VERSION
+# tracks declared intent.
+DNA_VERSION: str = '1.0.0'
 
 # ── Available Tools Registry ────────────────────────────────────────────────
 # Master list of ALL tools that agents can use. Toggle True/False to enable/disable
@@ -1187,3 +1202,41 @@ Do not try to output <tool_call> or <tools> XML tags manually; the system handle
 
 # Alias kept for backward compat with nous_fncall_prompt.py import.
 FN_CALL_TEMPLATE_WITH_CI = FN_CALL_TEMPLATE
+
+
+# ── DNA content fingerprint ──────────────────────────────────────────────────
+def _compute_prompt_hash() -> str:
+    """Deterministic sha256 of the DNA prompt content (first 16 hex chars).
+
+    Input is the canonical (sorted) serialization of this module's public
+    uppercase **string** constants (the DNA prompt strings) plus the
+    AVAILABLE_TOOLS registry — i.e. the DNA block's own content. This is
+    deliberately NOT the assembled ``conversation[0]`` system prompt: that
+    embeds the per-agent soul body (soul_loader) and per-run session metadata
+    (engine/helpers._build_session_metadata), so it is neither run-stable nor a
+    pure function of DNA content. Hashing the DNA registry gives a value that is
+    (1) deterministic per DNA content, (2) identical across every agent and run,
+    (3) cheap — computed once at import, cached as a module constant.
+
+    DNA_VERSION and this module's own PROMPT_HASH name are excluded so the hash
+    is a pure content fingerprint: editing any prompt string or the tool registry
+    changes it, while bumping DNA_VERSION alone does not (drift detector for a
+    forgotten version bump).
+
+    Validation (current DNA content, v0.x): 19 uppercase string constants +
+    28 AVAILABLE_TOOLS entries -> PROMPT_HASH == "95b8ed5461391997" (stable and
+    reproducible across runs).
+    """
+    parts = [
+        f'{name}={globals()[name]}'
+        for name in globals()
+        if name.isupper()
+        and isinstance(globals()[name], str)
+        and name != 'DNA_VERSION'
+        and name != 'PROMPT_HASH'
+    ]
+    parts.append('AVAILABLE_TOOLS=' + ','.join(AVAILABLE_TOOLS))
+    return hashlib.sha256('\n'.join(sorted(parts)).encode('utf-8')).hexdigest()[:16]
+
+
+PROMPT_HASH: str = _compute_prompt_hash()

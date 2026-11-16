@@ -19,6 +19,7 @@ import pytest
 
 import agent_cascade.log as log_mod
 from agent_cascade.log import _AppLoggerProxy
+from agent_cascade.prompts import dna
 from agent_cascade.telemetry import TelemetryCollector
 
 
@@ -1270,6 +1271,72 @@ class TestFingerprintModelOnly:
         # Documented first-seen behaviour; the UI must not advertise it as T=.
         assert stats[fp]['config_description']['temperature'] == 0.1
 
+    def test_dna_label_does_not_change_model_only_fingerprint(self, collector):
+        """DNA labeling must NOT re-key the model-only bin: same model -> one row,
+        fingerprint still sha256(model)[:12]."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        assert len(fp) == 12
+        collector.record_turn_start('inst', config_fingerprint=fp)
+        collector.record_turn_end('inst')
+        assert list(collector._config_stats) == [fp]   # still model-only keyed
+
+
+# ---------------------------------------------------------------------------
+# I-iter-a. DNA version identity + parallel bin (BUG_0337 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class TestDnaVersionIdentity:
+
+    def test_dna_version_is_semver_string(self):
+        assert isinstance(dna.DNA_VERSION, str)
+        parts = dna.DNA_VERSION.split('.')
+        assert len(parts) == 3 and all(p.isdigit() for p in parts)
+
+    def test_prompt_hash_is_stable_16hex(self):
+        """prompt_hash is deterministic, 16 hex chars, and independent of DNA_VERSION."""
+        h = dna.PROMPT_HASH
+        assert isinstance(h, str) and len(h) == 16
+        assert all(c in '0123456789abcdef' for c in h)
+        assert dna._compute_prompt_hash() == h  # idempotent recompute (exercises the != 'PROMPT_HASH' guard)
+
+    def test_prompt_hash_pinned_value(self):
+        """Pin the content hash: catches any unintended DNA prompt/registry edit that
+        silently shifts the fingerprint. DNA_VERSION is excluded, so bumping the
+        version string alone leaves this value unchanged (drift detector)."""
+        assert dna.PROMPT_HASH == '95b8ed5461391997'
+
+
+class TestDnaComparisonBin:
+
+    def test_dna_bin_aggregates_turn(self, collector):
+        """Two turns -> one DNA row with runs=2 and flushed per-turn counters.
+        Requires at least one LLM call so the row survives the get_dna_comparison
+        ghost-row filter (same convention as get_config_comparison)."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        for _ in range(2):
+            collector.record_turn_start('inst', config_fingerprint=fp)
+            collector.record_llm_call_start('inst')   # drives llm_calls > 0
+            collector.record_llm_call_end('inst')
+            collector.record_turn_end('inst')
+        rows = collector.get_dna_comparison()
+        assert [r['dna_version'] for r in rows] == [dna.DNA_VERSION]
+        assert rows[0]['runs'] == 2
+        assert rows[0]['llm_calls'] == 2
+        assert rows[0]['prompt_hash'] == dna.PROMPT_HASH
+        # Raw bucket exists even when the view would filter (documented ghost rule):
+        assert dna.DNA_VERSION in collector._dna_stats
+
+    def test_zero_llm_call_run_is_filtered_from_dna_view(self, collector):
+        """Mirror of BUG_0273 ghost-row convention: a 0-LLM-call run stays in
+        raw _dna_stats but is hidden from get_dna_comparison()."""
+        collector.record_turn_start('inst')
+        collector.record_turn_end('inst')
+        assert collector.get_dna_comparison() == []
+        assert dna.DNA_VERSION in collector._dna_stats
+        assert collector._dna_stats[dna.DNA_VERSION]['runs'] == 1
+        assert collector._dna_stats[dna.DNA_VERSION]['llm_calls'] == 0
+
 
 # ---------------------------------------------------------------------------
 # I-ter. Agent class usage summary
@@ -1716,6 +1783,19 @@ class TestEventLog:
             assert isinstance(e, dict)
             assert 'type' in e
             assert 'timestamp' in e
+
+    def test_every_record_carries_dna_label(self, collector):
+        """BUG_0337 Phase 1: dna_version + prompt_hash stamped on every record
+        (session_start, turn_start, turn_end, …) via the _write_to_file choke point."""
+        collector.record_turn_start('inst')
+        collector.record_tool_call_start('inst', 'read_file')
+        collector.record_tool_call_end('inst', 'read_file', success=True)
+        collector.record_turn_end('inst')
+        events = collector.get_recent_events(count=50)
+        assert len(events) >= 4
+        for e in events:
+            assert e.get('dna_version') == dna.DNA_VERSION
+            assert e.get('prompt_hash') == dna.PROMPT_HASH
 
     def test_get_recent_events_respects_count(self, collector):
         for _ in range(5):
