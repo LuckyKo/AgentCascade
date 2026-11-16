@@ -9,15 +9,23 @@ while ``content`` is a ``str``; when the last message is multimodal, ``content``
 ``AttributeError: 'dict' object has no attribute 'get_type_and_value'`` on every retry
 (and again inside fallback compression), producing a post-compression stall loop.
 
-These tests pin:
-1. ``_append_system_notification`` appends a ``ContentItem`` (never a dict) to list
-   content, and de-duplicates against ContentItem-borne notifications.
-2. The result survives the real serialization funnel
+The context warning now rides the shared system-notification queue (``_tool_warnings``)
+instead of mutating the last message, so that specific crash vector is gone; these tests
+still pin:
+1. The context warning is queued (deduped) and drains as a ``[SYSTEM NOTIFICATIONS]``
+   block, never by mutating the multimodal last message.
+2. ``_append_system_notification`` (a general helper) appends a ``ContentItem`` (never a
+   dict) to list content, and de-duplicates against ContentItem-borne notifications.
+3. The result survives the real serialization funnel
    (``format_as_multimodal_message`` / ``format_as_text_message``).
-3. ``coerce_content_item`` is a safety net for any legacy dict that still reaches a
+4. ``coerce_content_item`` is a safety net for any legacy dict that still reaches a
    content list: it coerces instead of raising, so one bad item cannot kill a turn.
 """
 
+from threading import RLock
+from types import SimpleNamespace
+
+from agent_cascade.compression.handler import CompressionHandler
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.base import _format_as_text_messages
 from agent_cascade.llm.schema import USER, ContentItem, Message
@@ -82,23 +90,52 @@ class TestAppendSystemNotification:
 
 
 class TestInjectCompressionWarning:
+    """The 90% context warning rides the shared system-notification queue."""
 
-    def test_warning_on_multimodal_last_message_does_not_poison_content(self):
+    @staticmethod
+    def _engine_and_instance():
+        inst = SimpleNamespace(instance_name='ctx', _tool_warnings=[], _compression_lock=RLock())
+        engine = _engine()
+        engine.pool = SimpleNamespace(
+            get_instance=lambda name: inst if name == inst.instance_name else None)
+        return engine, inst
+
+    def test_warning_is_queued_not_mutating_the_multimodal_message(self):
+        engine, inst = self._engine_and_instance()
         msgs = [_multimodal_message()]
+        original_content = list(msgs[-1].content)
 
-        _engine()._inject_compression_warning(msgs, usage_pct=92.1,
-                                              current_tokens=110506, max_tokens=120000)
+        engine._inject_compression_warning(inst, usage_pct=92.1,
+                                           current_tokens=110506, max_tokens=120000)
 
-        content = msgs[-1].content
-        assert isinstance(content, list)
-        assert all(isinstance(item, ContentItem) for item in content)
-        assert any(GUARD in (item.text or '') for item in content)
+        assert len(inst._tool_warnings) == 1
+        assert GUARD in inst._tool_warnings[0]
+        # The multimodal last message is untouched (no inline content mutation).
+        assert msgs[-1].content == original_content
+        assert all(isinstance(item, ContentItem) for item in msgs[-1].content)
+        assert not any(GUARD in (item.text or '') for item in msgs[-1].content)
 
-        # The real pre-processing funnel every adapter runs before calling
-        # item.get_type_and_value() must accept the message.
-        assert format_as_multimodal_message(
-            msgs[-1], add_upload_info=False, add_multimodel_upload_info=False,
-            add_audio_upload_info=False) is not None
+    def test_duplicate_warning_is_deduped_in_the_queue(self):
+        engine, inst = self._engine_and_instance()
+
+        for _ in range(2):
+            engine._inject_compression_warning(inst, usage_pct=92.1,
+                                               current_tokens=110506, max_tokens=120000)
+
+        assert len(inst._tool_warnings) == 1
+
+    def test_queue_drains_as_system_notifications_block(self):
+        engine, inst = self._engine_and_instance()
+        engine._inject_compression_warning(inst, usage_pct=92.1,
+                                           current_tokens=110506, max_tokens=120000)
+
+        handler = CompressionHandler.__new__(CompressionHandler)
+        assembled = handler._drain_tool_warnings(inst, 'OK: tool output')
+
+        assert assembled.startswith('OK: tool output')
+        assert '[SYSTEM NOTIFICATIONS]' in assembled
+        assert GUARD in assembled
+        assert inst._tool_warnings == []      # drained exactly once
 
 
 class TestLegacyDictSafetyNet:

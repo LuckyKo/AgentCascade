@@ -777,7 +777,7 @@ class CompressionHandler:
                     instance.conversation, instance,
                     functions=self.engine._get_active_functions_for_counting(instance))
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
-                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
+                self.engine._inject_compression_warning(instance, usage_pct, current_tokens,
                                                         self.engine._get_effective_limit(instance))
                 return True
 
@@ -859,7 +859,7 @@ class CompressionHandler:
                     instance.conversation, instance,
                     functions=self.engine._get_active_functions_for_counting(instance))
                 # Use the effective (reserve-reduced) limit so the printed A/B matches usage_pct.
-                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens,
+                self.engine._inject_compression_warning(instance, usage_pct, current_tokens,
                                                         self.engine._get_effective_limit(instance))
                 return False  # Explicit: not compressed, keep going
 

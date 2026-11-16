@@ -187,7 +187,7 @@ class CompressionExecMixin:
         if usage_pct > self.pool.settings.compression_warning_threshold:
             # Pass effective_limit (not the raw window) so the printed "A/B" ratio matches
             # usage_pct, which is computed against the reserve-reduced effective limit.
-            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, effective_limit)
+            self._inject_compression_warning(instance, usage_pct, current_tokens, effective_limit)
 
         return False
 
@@ -268,21 +268,25 @@ class CompressionExecMixin:
 
 
     def _inject_compression_warning(
-        self, llm_messages: List[Message], usage_pct: float,
+        self, instance: AgentInstance, usage_pct: float,
         current_tokens: int, max_tokens: int
     ):
-        """Inject a warning message when context is approaching limit.
+        """Queue a context-limit warning on the shared system-notification channel.
 
-        Note: This warning goes directly to the LLM's working set without being persisted
-        to conversation pool or yielded (it's an inline hint, not a system notification).
-        Uses _append_system_notification for simplicity since it doesn't need UI feedback.
+        Rides the canonical ``_tool_warnings`` queue (``_queue_tool_warning``), drained
+        into the next tool result as a trailing ``[SYSTEM NOTIFICATIONS]`` block — the same
+        path as truncation, path-safety, safe-mode, MCP-unload, and memory-hint notices.
+        The warning is therefore delivered to the model AND persisted with the tool result
+        (so it survives a JSONL reload) instead of mutating the last LLM message in place,
+        which was invisible to the conversation log/UI and could be lost on a rebuild.
         """
         warning = (
             f"[SYSTEM WARNING: Context window at {usage_pct:.1f}% capacity "
             f"({current_tokens}/{max_tokens} tokens). "
             f"Consider saving your progress notes before forced compression kicks in.]"
         )
-        self._append_system_notification(llm_messages, '[SYSTEM WARNING: Context', warning)
+        from agent_cascade.operation_manager.path_security import _queue_tool_warning
+        _queue_tool_warning(self.pool, instance.instance_name, warning)
 
 
     def _inline_rollback_and_hint(

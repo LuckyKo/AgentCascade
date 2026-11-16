@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
-**Version:** 0.16.0 (keep in sync with `agent_cascade.__version__`)
-**Last Updated:** 2026-11-15
+**Version:** 0.18.4 (keep in sync with `agent_cascade.__version__`)
+**Last Updated:** 2026-11-16
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -977,6 +977,24 @@ When a real human decision is pending, the system pushes a fire-and-forget notif
 Sub-agent approvals **do** push: a sub-agent's approval is still a real user decision. There is no dedup (approvals are unique events), and the `request_id` is embedded in the message body because the bridge's `instance_name` is log-only. A bridge failure never breaks the approval flow (guarded with a `hasattr` check + `try/except`).
 
 **Auto-Ask Security:** when enabled, the Security Advisor vets each pending approval and auto-applies a verdict, so no human prompt is surfaced and no Telegram push is sent. The `/api/auto_security` control endpoint toggles this.
+
+### 5.8 System Notification Queues
+
+Out-of-band notices that must reach the model (but are not part of the conversation the agent authored) ride **per-instance in-memory queues** on `AgentInstance`. They are drained into the *next tool result*, never injected as extra USER/ASSISTANT turns, which keeps the conversation shape stable and avoids re-ordering messages.
+
+| Queue | Drained as | Producer / purpose |
+|-------|-----------|--------------------|
+| `_tool_warnings` | trailing `[SYSTEM NOTIFICATIONS]` block | Generic advisories: truncation hints, path-security notices, shell safe-mode low-RAM advice, MCP-unload announcements, memory/skill hints, **context-limit warnings** |
+| `_cache_notifications` | leading `[CACHE INFO]` block | Model/endpoint cache notices |
+| `_pending_notifications` | appended after the notifications block | Compression outcomes (completed / failed / deferred) |
+
+**Producer:** `_queue_tool_warning(pool, instance_name, text)` (`operation_manager/path_security.py`) appends to `_tool_warnings` under the instance's re-entrant `_compression_lock`; an exact-duplicate string already queued is skipped. All queue writes take the same lock so tool threads cannot interleave.
+
+**Consumer:** `CompressionHandler._assemble_tool_result` (called from `_postprocess_tool_result` in `engine/tool_execution.py`) drains and clears the queues while assembling every tool result. Assembly order is `[CACHE INFO]` → (possibly truncated) tool body → `[SYSTEM NOTIFICATIONS]` → pending compression notices → `[TRUNCATED]` footer, so notifications are never lost to body truncation. The assembled string is what reaches the LLM, the conversation, the JSONL log, and the UI stream — i.e. notification content is persisted and reloads with the session (unlike the old inline mutation of the last LLM message).
+
+**Delivery is best-effort by design:** the queues are drained only when a tool result follows. If the agent ends its run (or is terminated) before another tool call, queued notices are dropped. This is the accepted trade-off for never perturbing the conversation turn structure — the memory-hint system relies on the same contract. Notices that must be guaranteed to persist use a normal logged message instead.
+
+**Context-limit warnings:** `_inject_compression_warning` (`engine/compression_exec.py`) queues `[SYSTEM WARNING: Context window at N% capacity (A/B tokens)…]` when usage crosses `compression_warning_threshold`. It uses this queue deliberately: mutating the last LLM message in place was invisible to the log/UI and could be lost on a working-set rebuild, whereas the tool-result drain is persisted and user-visible.
 
 ---
 
