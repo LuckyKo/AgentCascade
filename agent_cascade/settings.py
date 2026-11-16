@@ -480,7 +480,7 @@ TOOL_LOOP_DETECTION_ENABLED: bool = os.getenv('AGENT_CASCADE_TOOL_LOOP_DETECTION
 # Tier 2 (fuzzy) similarity floor: minimum difflib SequenceMatcher.ratio() between
 # consecutive near-duplicate cores for a Layer 2 run to chain. Applies to all tools.
 TOOL_LOOP_SIM_THRESHOLD: float = float(os.getenv('AGENT_CASCADE_TOOL_LOOP_SIM_THRESHOLD',
-                                                 '0.95'))  # Default 0.85 (unchanged behavior unless opted in)
+                                                 '0.95'))  # Default 0.95 (unchanged behavior unless opted in)
 AGENT_MAX_NESTING_DEPTH: int = int(os.getenv('AGENT_CASCADE_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
 AGENT_MAX_WORKERS: int = int(os.getenv('AGENT_CASCADE_MAX_WORKERS', 3))  # ThreadPoolExecutor workers
 # DEPRECATED — unused; kept for backward compatibility.
