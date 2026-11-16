@@ -77,7 +77,8 @@ def run_lightweight_advisor(
     from agent_cascade.constants import NON_LLM_KEYS
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.log import logger
-    from agent_cascade.settings import (SECURITY_AGENT_MAX_TURNS, SECURITY_REUSE_ENABLED,
+    from agent_cascade.settings import (ADVISOR_AGENT_DISABLED_TOOLS, SECURITY_AGENT_MAX_TURNS,
+                                        SECURITY_REUSE_ENABLED,
                                         SECURITY_REUSE_SKILL_ADVISOR_NAME)
 
     result = AdvisorResult()
@@ -109,6 +110,12 @@ def run_lightweight_advisor(
     # assignment inside the try; release_permit_on_abandon skips the close when it is None.
     _engine_gen = None
 
+    # Which advisor class this run belongs to. Only the Security-class advisor (the skill
+    # advisor, skills/advisor.py) gets the fixed advisor toolset + warm-reuse name; other
+    # classes — e.g. the AFK Admin reviewer (api_server.py passes 'Admin') — keep their own
+    # template/UI tool baseline.
+    is_security_advisor = agent_class == 'Security'
+
     def _first_yield_timeout_trigger():
         # actual_name is pre-bound to None (above) and assigned after acquire; the timer thread may
         # fire before that assignment completes, in which case it falls back to instance_name — safe.
@@ -130,7 +137,7 @@ def run_lightweight_advisor(
         # (e.g. the AFK 'Admin' mode) are per-call fresh spawns (like call_agent children) and
         # must never seed or collide with the Security warm instance.
         reuse_name = (SECURITY_REUSE_SKILL_ADVISOR_NAME
-                      if (SECURITY_REUSE_ENABLED and agent_class == 'Security') else None)
+                      if (SECURITY_REUSE_ENABLED and is_security_advisor) else None)
         # BUG_0029 Phase 3: acquire_security_agent now returns a 3-TUPLE
         # (instance, is_reuse, actual_name). `actual_name` is the REAL instance name — the
         # fixed reuse name on a reuse/seed hit, the per-call fallback name on a miss. The
@@ -160,11 +167,19 @@ def run_lightweight_advisor(
             instance.max_turns = int(max_turns)
 
         # ── 4. Tool-filtering config ─────────────────────────────────────────
+        # The Security-class advisor's disabled_tools come from the fixed
+        # settings.ADVISOR_AGENT_DISABLED_TOOLS set, NOT from the UI per-agent map, so a UI edit
+        # cannot widen or narrow the reviewer's capabilities. Other advisor classes keep the
+        # caller/template baseline (UI config is authoritative for them). All other LLM keys stay
+        # UI-derived as before.
         ui_cfg = copy.deepcopy(generate_cfg or {})
         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-        if 'disabled_tools' in ui_cfg:
+        if is_security_advisor:
+            llm_safe_cfg['disabled_tools'] = sorted(ADVISOR_AGENT_DISABLED_TOOLS)
+        elif 'disabled_tools' in ui_cfg:
+            # NON_LLM_KEYS strips disabled_tools above; add it back so the tool filter still sees
+            # the caller's UI set (no hardcoded merge — UI config is authoritative here).
             llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
-        # No hardcoded merge — UI config is authoritative (seeded by the one-time migration).
 
         template = pool.get_template(agent_class) if hasattr(pool, 'get_template') else None
         if template is not None and hasattr(template, 'llm'):
@@ -174,6 +189,10 @@ def run_lightweight_advisor(
         else:
             logger.warning("[ADVISOR] Template missing for '%s' — using minimal config", agent_class)
             instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg.get('disabled_tools', [])}
+        if is_security_advisor:
+            # Opt the instance out of the live UI per-agent map (see the gate in
+            # engine/helpers._get_active_functions_from_template).
+            instance._exclusive_disabled_tools = True
 
         # ── 5. First-yield timeout guard (threading.Timer + Event) ───────────
         first_yield_timer = threading.Timer(first_yield_timeout, _first_yield_timeout_trigger)

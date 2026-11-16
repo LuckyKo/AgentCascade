@@ -224,7 +224,16 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
     )
 
     # Check live pool config for real-time tool updates.
-    if pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent'):
+    # System-launched Security advisors (guard / skill advisor) carry _exclusive_disabled_tools, so
+    # their tool set must not be widened by the UI per-agent map — the resolver above already applied
+    # their fixed settings.ADVISOR_AGENT_DISABLED_TOOLS override. All other agents keep live UI
+    # propagation.
+    # This union is the enforcement gate for the OFFERED-TOOL schema. The use-time denial gate
+    # (engine/tool_execution._resolve_tool_policy) never reads the UI map, so it needs no flag; the
+    # Agent._get_active_functions / _get_disabled_tool_names resolvers are display/legacy views
+    # (UI tool list, system_info, fncall path) and are NOT an enforcement path.
+    if (pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent')
+            and not getattr(instance, '_exclusive_disabled_tools', False)):
         live_disabled = pool.get_ui_disabled_tools_for_agent(agent_name, agent_type)
         disabled |= set(live_disabled or [])
 

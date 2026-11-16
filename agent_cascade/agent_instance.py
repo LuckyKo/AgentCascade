@@ -382,6 +382,15 @@ class AgentInstance:
     _generate_cfg_override: Optional[dict] = field(
         default=None)  # Merged into generate_cfg at call time without mutating template
 
+    # True on SYSTEM-launched Security advisors (guard, skill advisor). When set, the offered-tool
+    # schema gate (engine/helpers._get_active_functions_from_template) skips the live UI per-agent
+    # union, so the advisor resolves to ONLY its own _generate_cfg_override (the fixed
+    # settings.ADVISOR_AGENT_DISABLED_TOOLS set). The UI set keeps governing user-/agent-called
+    # sub-agents. Display-only resolvers (Agent._get_*) ignore the flag — they are not enforcement.
+    # MUST be a declared field: this dataclass is slots=True, and a bare write from an undeclared
+    # attribute raises AttributeError at the first advisor spawn.
+    _exclusive_disabled_tools: bool = False
+
     # ── Streaming State (Streaming UI Content Update Fix) ──────────────────
     _streaming_responses: List[Message] = field(
         default_factory=list)  # Partial LLM content during streaming, updated every ~150ms

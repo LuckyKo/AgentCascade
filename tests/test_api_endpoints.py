@@ -2719,7 +2719,8 @@ class TestAfkAdminNudge:
         # max_turns must be explicit (None would apply the Security budget to Admin).
         assert kw['max_turns'] == AFK_ADMIN_MAX_TURNS
         assert kw['first_yield_timeout'] == AFK_ADMIN_FIRST_YIELD_TIMEOUT
-        # generate_cfg=None keeps the read-only tool baseline (a UI cfg disables it).
+        # generate_cfg=None keeps Admin's own read-only baseline — the fixed advisor toolset
+        # applies to Security-class advisors only.
         assert kw['generate_cfg'] is None
 
     def test_admin_mode_timeout_falls_back_to_basic(self, monkeypatch):

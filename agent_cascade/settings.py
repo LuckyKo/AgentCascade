@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal
 
+from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS
+
 # Settings for LLMs
 DEFAULT_MAX_INPUT_TOKENS: int = int(
     os.getenv('AGENT_CASCADE_DEFAULT_MAX_INPUT_TOKENS',
@@ -151,6 +153,27 @@ SECURITY_REUSE_APPROVAL_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_APPR
 # Fixed instance name for the skill-advisor path (advisor_runner.py). Deliberately distinct
 # from the approval name: that path holds no lock, so it must not share one warm object.
 SECURITY_REUSE_SKILL_ADVISOR_NAME: str = os.getenv('AGENT_CASCADE_SECURITY_REUSE_SKILL_ADVISOR_NAME', 'Security_skilladvisor')
+
+# ── System-launched advisor toolset ───────────────────────────────────────────
+# Disabled tools for SYSTEM-LAUNCHED advisors (the Security guard and the Skill Advisor).
+# Deliberately separate from the UI per-agent disabled_tools map: the UI setting governs
+# user- and agent-called sub-agents, while system advisors use this fixed set so a UI edit
+# cannot widen or narrow their capabilities. Default = DEFAULT_SECURITY_DISABLED_TOOLS minus
+# shell_cmd, because system agents keep read-only shell access via restricted_shell=True.
+# Comma-separated tool names; empty string disables nothing (0 = no restrictions).
+_ADVISOR_DISABLED_TOOLS_DEFAULT = ','.join(sorted(DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd'}))
+ADVISOR_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset(
+    t.strip() for t in os.getenv('AGENT_CASCADE_ADVISOR_DISABLED_TOOLS',
+                                 _ADVISOR_DISABLED_TOOLS_DEFAULT).split(',') if t.strip())
+if not ADVISOR_AGENT_DISABLED_TOOLS:
+    # An empty set is a deliberate escape hatch, so we do not refuse to start — but say it loudly:
+    # the SYSTEM-launched Security guard / Skill Advisor would run with no tool restrictions at all.
+    from agent_cascade.log import logger as _advisor_toolset_logger
+    _advisor_toolset_logger.warning(
+        '[ADVISOR-TOOLSET] AGENT_CASCADE_ADVISOR_DISABLED_TOOLS resolved to an EMPTY set — the '
+        'system-launched Security guard / Skill Advisor runs UNGUARDED, with destructive tools '
+        '(write_file, edit_file, delete_file, code_interpreter, call_cli_agent, ...) ENABLED. '
+        'Unset the env var to restore the default protection: %s', _ADVISOR_DISABLED_TOOLS_DEFAULT)
 # ── Security approval cache ───────────────────────────────────────────────────
 # Caches Security-guard verdicts keyed by tool-call signature (tool_name + sha1 of
 # canonical tool_args) so repeated identical guard reviews collapse into one LLM turn.

@@ -682,12 +682,14 @@ class SecurityAdvisorHandler:
                 # Primary bound: turn budget (see top-of-file NOTE for the full design).
                 sec_instance.max_turns = SECURITY_AGENT_MAX_TURNS
 
-                # Configure with UI settings (defense-in-depth tool filtering)
+                # Configure with UI settings (defense-in-depth tool filtering).
+                # disabled_tools is deliberately NOT derived from the UI per-agent map: the Security
+                # guard uses the fixed settings.ADVISOR_AGENT_DISABLED_TOOLS set so a UI edit cannot
+                # widen or narrow its capabilities; the UI set keeps governing user-/agent-called
+                # sub-agents. All other LLM keys stay UI-derived as before.
                 ui_cfg = copy.deepcopy(self.session.get('generate_cfg', {}))
                 llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                if 'disabled_tools' in ui_cfg:
-                    llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
-                # No hardcoded merge — UI config is authoritative (seeded by the one-time migration).
+                llm_safe_cfg['disabled_tools'] = sorted(settings.ADVISOR_AGENT_DISABLED_TOOLS)
 
                 template = self.agent_pool.get_template('Security')
                 if template and hasattr(template, 'llm'):
@@ -696,7 +698,11 @@ class SecurityAdvisorHandler:
                     sec_instance._generate_cfg_override = cfg
                 else:
                     logger.warning(f"[SECURITY] Template missing for '{sec_state_key}'")
-                    sec_instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg.get('disabled_tools', [])}
+                    sec_instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg['disabled_tools']}
+                # Opt the instance out of the live UI per-agent union in the offered-schema gate
+                # (engine/helpers._get_active_functions_from_template), so the guard is offered only
+                # the fixed set above.
+                sec_instance._exclusive_disabled_tools = True
 
                 logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
 

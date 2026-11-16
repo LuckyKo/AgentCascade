@@ -1629,7 +1629,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             caller=instance_name,
             max_turns=AFK_ADMIN_MAX_TURNS,
             first_yield_timeout=AFK_ADMIN_FIRST_YIELD_TIMEOUT,
-            generate_cfg=None,  # keep the read-only tool baseline (a UI cfg disables it)
+            generate_cfg=None,  # Admin keeps its own read-only baseline (fixed advisor toolset is Security-only)
         )
         if not result.ok:
             logger.warning('[AFK-ADMIN] analysis failed for %s: %s', instance_name,

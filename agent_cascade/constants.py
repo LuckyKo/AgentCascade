@@ -25,12 +25,14 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
 })
 
 # ── Agent-class default disabled tools (defense-in-depth) ────────────────────
-# DEPRECATED: These per-class defaults are no longer applied by the resolver (Layer 3 removed).
-# The UI (pool_settings.json → _ui_disabled_tools) is now the single source of truth for
-# per-agent tool restrictions. These constants are retained ONLY for the one-time config
-# migration in pool/config_persist.py (_migrate_class_defaults_to_ui_config) that seeds
-# pool_settings.json on first run after upgrade. Remove them once every deployed instance
-# has been migrated (sentinel `_class_defaults_migrated` present).
+# Not applied by the resolver any more (Layer 3 removed): the UI (pool_settings.json →
+# _ui_disabled_tools) is the single source of truth for per-agent tool restrictions.
+# Two LIVE consumers remain, so these constants must NOT be removed:
+#   * the one-time config migration in pool/config_persist.py
+#     (_migrate_class_defaults_to_ui_config) that seeds pool_settings.json on first run after
+#     upgrade (sentinel `_class_defaults_migrated`), and
+#   * settings.py, which derives the system advisor toolset floor from
+#     DEFAULT_SECURITY_DISABLED_TOOLS below.
 
 # Default disabled tools for Security agent.
 # Security agent performs read-only analysis, so it should not use user-approval tools.
