@@ -218,9 +218,11 @@ def test_read_file_whitespace_mode_reveals_invisible_ws():
     assert '·' in out, out  # trailing spaces revealed
 
 
-def test_read_file_unknown_mode_errors_cleanly():
-    """An unrecognised mode returns a friendly ERROR string (schema enum), not a crash."""
+def test_read_file_unknown_mode_rejected_by_schema():
+    """An unrecognised mode is rejected by schema validation (raw jsonschema
+    ValidationError, consistent with every other tool's enum param)."""
+    import jsonschema
+    import pytest
     p = _ws_file('bad_mode.md', 'hello\n')
-    out = ReadFile().call({'path': str(p), 'mode': 'bogus'})
-    assert out.startswith('ERROR'), out
-    assert 'mode' in out, out
+    with pytest.raises(jsonschema.exceptions.ValidationError):
+        ReadFile().call({'path': str(p), 'mode': 'bogus'})

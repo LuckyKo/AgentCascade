@@ -498,8 +498,8 @@ class ReadFile(BaseTool, PathResolutionMixin):
 
         # mode: 'numbered' (default, NNN: prefix), 'raw' (verbatim, no prefix),
         # or 'whitespace' (reveal tabs as \t, trailing spaces as ·).
-        # The schema enum enforces the value set; an invalid value is rejected by
-        # _verify_json_format_args (base.py) as a friendly ValueError, caught above.
+        # The schema enum enforces the value set; an invalid value is rejected by schema
+        # validation (a raw jsonschema ValidationError, like every other tool's enum param).
         mode = params.get('mode', 'numbered')
 
         # Wild-read truncation uses two distinct values:

@@ -291,15 +291,6 @@ class BaseTool(ABC):
                         msg += (f"  | If you meant to send the value under another name, "
                                 f"re-issue with the exact keys {sorted(missing)}.")
                     raise ValueError(msg) from e
-                # Enum violation (e.g. an invalid 'mode'/'match_mode' value): convert to a
-                # friendly ValueError naming the offending value and the allowed set,
-                # consistent with the additionalProperties/required branches above.
-                if e.validator == 'enum':
-                    param = e.path[-1] if e.path else '(root)'
-                    raise ValueError(
-                        f"invalid value for parameter '{param}' of tool '{self.name}': "
-                        f"{e.instance!r} is not one of {e.validator_value}"
-                    ) from e
                 raise
         else:
             raise ValueError(f"Invalid parameters schema for tool '{self.name}': must be list or dict")
