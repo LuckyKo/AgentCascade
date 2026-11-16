@@ -30,6 +30,7 @@ from agent_cascade.skills.parser import (
     frontmatter_span,
 )
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
@@ -340,9 +341,8 @@ class ProposeSkill(BaseTool):
 
     name = 'propose_skill'
     description = TOOL_METADATA['propose_skill']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'name': {
                 'type': 'string',
                 'description': TOOL_METADATA['propose_skill']['parameters']['name'],
@@ -357,8 +357,17 @@ class ProposeSkill(BaseTool):
             },
             'rating': TOOL_METADATA['propose_skill']['parameters']['rating'],
         },
-        'required': ['name'],
-    }
+        # 'name' is always required. Two valid modes, each a branch of anyOf:
+        #   rate-only   = name + rating (no content)
+        #   create/update = name + skill_content + justification
+        # The in-tool guard in call() enforces exactly this (rating-only needs no content;
+        # create needs both skill_content and justification), so schema and guard agree.
+        required=['name'],
+        anyOf=[
+            {'required': ['name', 'rating']},
+            {'required': ['name', 'skill_content', 'justification']},
+        ],
+    )
 
     def __init__(self, agent_pool=None, **kwargs):
         super().__init__(**kwargs)

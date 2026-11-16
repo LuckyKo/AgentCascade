@@ -530,7 +530,7 @@ TOOL_METADATA = {
             'path':
                 "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content':
-                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode — pass an empty string (\'\') there, as the field is required by the schema but ignored; use `range` to select the lines to delete. When copying from read_file output, strip the "NNN:" line-number prefix (line number + colon) to get the raw content — or call read_file with mode="raw" for verbatim content with no prefix to strip.',
+                'For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode — omit it and use `range` to select the lines to delete. When copying from read_file output, strip the "NNN:" line-number prefix (line number + colon) to get the raw content — or call read_file with mode="raw" for verbatim content with no prefix to strip.',
             'new_content':
                 'The exact literal text to replace old_content with. For match_mode=\'delete_and_insert\' it is inserted VERBATIM at the range — there is no anchor concept in that mode, so do NOT repeat the preceding/surrounding line inside new_content unless you want a duplicate line (the range, not new_content, decides what is deleted). Inserted lines are written verbatim — the caller is responsible for supplying correct indentation. For exact/heuristic modes, include the anchor line exactly once as part of the replaced text. For delete_and_insert, an empty string means delete-only.',
             'match_mode':
@@ -931,7 +931,7 @@ TOOL_METADATA = {
                     'string',
                 'enum': ['acceptEdits'],
                 'description':
-                    'Autonomy posture for the CLI. Phase 0 exposes only "acceptEdits" (default-safe). A full bypass is config-gated OFF and not selectable here.'
+                    'DEPRECATED constant: always "acceptEdits". This posture is fixed (the only one exposed) and applied by default, so callers should OMIT it; passing "acceptEdits" is still accepted for backward compatibility. A full bypass is config-gated OFF and not selectable here.'
             },
             'timeout': {
                 'type':
@@ -970,6 +970,16 @@ TOOL_METADATA = {
             },
         },
         'required': [],
+        # Three valid call modes (jsonschema anyOf — the engine dispatch path is not
+        # jsonschema-validated, this shapes the schema shown to the model):
+        #   introspect = status (harness/task ignored)
+        #   control    = tool_id + task ('__status' / '__kill' on a background run)
+        #   launch     = harness + task
+        'anyOf': [
+            {'required': ['status']},
+            {'required': ['tool_id', 'task']},
+            {'required': ['harness', 'task']},
+        ],
     },
     'dismiss_agent': {
         'description': ("End a sub-agent instance's current task and clear its conversation context. "
@@ -1133,7 +1143,7 @@ TOOL_METADATA = {
                 'type': 'number',
                 'minimum': 0,
                 'maximum': 10,
-                'description': 'Optional quality rating (0-10, 0.5 steps) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
+                'description': 'Optional quality rating (0-10) for an existing skill. Use with `name` for rating-only mode, or alongside `skill_content` to record a rating after registration/update.'
             },
         }
     },

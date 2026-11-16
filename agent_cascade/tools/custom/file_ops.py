@@ -1622,7 +1622,29 @@ class EditFile(BaseTool, PathResolutionMixin):
                 'description': 'Why you need to edit this file'
             }
         },
-        required=['path', 'old_content', 'new_content'],
+        # path + new_content are always required. old_content is required for every mode
+        # except delete_and_insert, which instead requires `range` (line-range surgery).
+        # This allOf lets the schema own the conditional so the '' sentinel for old_content
+        # in delete_and_insert mode is no longer needed.
+        required=['path', 'new_content'],
+        allOf=[
+            {
+                'if': {
+                    'properties': {
+                        'match_mode': {
+                            'const': 'delete_and_insert'
+                        }
+                    },
+                    'required': ['match_mode']
+                },
+                'then': {
+                    'required': ['range']
+                },
+                'else': {
+                    'required': ['old_content']
+                }
+            }
+        ],
     )
 
     def __init__(self, cfg=None, **kwargs):
@@ -1700,10 +1722,12 @@ class EditFile(BaseTool, PathResolutionMixin):
                                 f"the payload. The edit was NOT applied — re-issue it with clean content.")
 
         if match_mode == 'delete_and_insert':
-            # BUG_0096: this schema has no additionalProperties:false, so a replacement text
-            # sent under a wrong key (the model's habit: 'content') is accepted, dropped here,
-            # and the range is deleted with nothing inserted. Name the mistake instead of
-            # deleting quietly — an empty new_content is a legitimate delete-only call.
+            # Defensive backstop: the schema now has additionalProperties:false, so a
+            # replacement sent under a wrong key (the model's habit: 'content', 'text',
+            # 'replacement', 'new_text') is already rejected by jsonschema before it gets
+            # here. The guard below only catches such keys reaching this path in any other
+            # mode, so the mistake is named loudly instead of the range being deleted
+            # silently — an empty new_content is a legitimate delete-only call.
             if not new_content:
                 for _alias in ('content', 'text', 'replacement', 'new_text'):
                     if params_json.get(_alias):

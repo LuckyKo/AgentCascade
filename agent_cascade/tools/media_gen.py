@@ -52,6 +52,7 @@ about.
 """
 
 import json
+import jsonschema
 import os
 import tempfile
 import threading
@@ -68,6 +69,7 @@ from agent_cascade.utils.media_utils import save_media_to_media
 from agent_cascade.tools.media_backends import resolve_backend
 from agent_cascade.tools.media_backends import manifest_ids
 from agent_cascade.tools.media_backends import BACKEND_MANIFEST
+from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.media_backends.base import (
     MEDIA_TYPES, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
     resolve_block_dir, list_voice_samples,
@@ -161,9 +163,8 @@ class MediaGen(BaseTool):
 
     name = 'media_gen'
     description = TOOL_METADATA['media_gen']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
+    parameters = tool_params(
+        properties={
             'prompt': {
                 'type': 'string',
                 'description': TOOL_METADATA['media_gen']['parameters']['prompt'],
@@ -200,13 +201,18 @@ class MediaGen(BaseTool):
                 'description': TOOL_METADATA['media_gen']['parameters']['overrides'],
             },
         },
-        # 'prompt' is intentionally NOT schema-required: text-output backends (output_kind='text',
-        # e.g. voice_to_text) have no text prompt — their required input is reference_file. The
-        # schema is static (cannot be per-backend), so the prompt requirement is enforced at RUNTIME
-        # in call() for every NON-text backend (see the output_kind gate); this only relaxes the
-        # advisory schema hint. No media backend's effective prompt requirement is weakened.
-        'required': [],
-    }
+        # Flat required is empty: 'prompt' is not always required (text-output backends take
+        # reference_file, not a prompt). The anyOf encodes the real rule — backend is required
+        # for generation UNLESS prompt is the '__help' sentinel. The help branch matches
+        # case-insensitively/after strip to mirror call()'s runtime gate, so every previously
+        # valid call passes and backend-less non-help calls (which failed at runtime anyway)
+        # are now rejected earlier and more clearly.
+        required=[],
+        anyOf=[
+            {'required': ['backend']},
+            {'properties': {'prompt': {'pattern': r'(?i)^\s*__help\s*$'}}, 'required': ['prompt']},
+        ],
+    )
 
     def __init__(self, cfg: Optional[dict] = None, **kwargs):
         super().__init__(cfg)
@@ -405,7 +411,7 @@ class MediaGen(BaseTool):
     def call(self, params, **kwargs) -> List[ContentItem]:
         try:
             params = self._verify_json_format_args(params)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, jsonschema.ValidationError) as e:
             return [ContentItem(text=f"ERROR: Invalid media_gen parameters: {e}")]
 
         prompt = params.get('prompt')

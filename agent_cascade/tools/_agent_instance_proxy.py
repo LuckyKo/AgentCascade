@@ -33,12 +33,20 @@ def _build_schema_from_metadata(tool_name: str, metadata_entry: dict) -> dict:
 
     from agent_cascade.tools.schema_common import tool_params
 
+    # Optional conditional constraints (e.g. call_cli_agent's launch/status/control anyOf).
+    # Only forwarded when present, so plain tools (call_agent/dismiss_agent) are unaffected.
+    extra = {}
+    any_of = metadata_entry.get('anyOf')
+    if any_of:
+        extra['anyOf'] = any_of
+
     return {
         'name': tool_name,
         'description': metadata_entry['description'],
         'parameters': tool_params(
             properties=properties,
             required=metadata_entry.get('required', list(properties.keys())),
+            **extra,
         ),
     }
 
