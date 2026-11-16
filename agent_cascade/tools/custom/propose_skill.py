@@ -89,9 +89,9 @@ def _coerce_rating(value):
     try:
         float_val = float(value)
     except (TypeError, ValueError):
-        return None, f"Invalid rating value: {value!r} (expected a number 0-10)"
+        return None, f"ERROR: Invalid rating value: {value!r} (expected a number 0-10)"
     if not (0.0 <= float_val <= 10.0):
-        return None, f"Invalid rating {float_val}: must be between 0 and 10."
+        return None, f"ERROR: Invalid rating {float_val}: must be between 0 and 10."
     return float_val, None
 
 
@@ -396,12 +396,12 @@ class ProposeSkill(BaseTool):
         rating_value = parsed.get('rating')
 
         if not proposed_name:
-            return "The 'name' argument is required for propose_skill."
+            return "ERROR: The 'name' argument is required for propose_skill."
 
         # Get SkillManager from pool
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
         if skill_manager is None:
-            return 'No skills system available. Skills may not have been initialized.'
+            return 'ERROR: No skills system available. Skills may not have been initialized.'
 
         # ── Rating-only mode: name + rating, no content → record and confirm ──
         # This is NOT a content modification, so it skips frontmatter validation, version bump,
@@ -415,7 +415,7 @@ class ProposeSkill(BaseTool):
             existing_meta = skill_manager.get_skill_metadata(proposed_name)
             installed_version = skill_manager.get_installed_version(proposed_name)
             if existing_meta is None and installed_version is None:
-                return f"Cannot rate unknown skill '{proposed_name}'. It is not in the registry."
+                return f"ERROR: Cannot rate unknown skill '{proposed_name}'. It is not in the registry."
             rating_float, err = _coerce_rating(rating_value)
             if err:
                 return err
@@ -431,7 +431,7 @@ class ProposeSkill(BaseTool):
             return f"Recorded rating {rating_value}/10 for skill '{proposed_name}' {version_str}."
 
         if not skill_content:
-            return ('No skill content provided. To create/update a skill include full SKILL.md with '
+            return ('ERROR: No skill content provided. To create/update a skill include full SKILL.md with '
                     'YAML frontmatter (description, triggers) and body. To rate an existing skill, '
                     'provide `rating` as well.')
 
