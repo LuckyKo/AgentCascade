@@ -9,7 +9,6 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 # Re-exports for backward compatibility (Phase 4b refactor)
@@ -169,10 +168,6 @@ class WsMessageHandler:
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, lambda: self.build_state_fn(generating=generating))
         await self.broadcast_fn({'type': ws_type, **state})
-
-    def _is_paused(self) -> bool:
-        """Check if agent pool is currently paused."""
-        return self.agent_pool.is_paused() if self.agent_pool else False
 
     # ── Helper: get active agent runner ───────────────────────────────────
     def _get_agent(self):
@@ -701,7 +696,7 @@ class WsMessageHandler:
         # For the main session: only restart generation if it was actually halted
         if target_instance == self.session['session_name']:
             if is_generating and was_halted:
-                logger.info(f"Main session was still generating — signalling stop before resume.")
+                logger.info('Main session was still generating — signalling stop before resume.')
                 self._signal_stop()
                 self.agent_pool.stopped = True
                 await asyncio.sleep(0.1)
