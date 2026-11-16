@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import base64
 import concurrent.futures
+import copy
 import datetime
 import hashlib
 import json
@@ -374,37 +375,59 @@ class MCPManager:
     async def _build_tools_for_client(self, client, server_name, client_id) -> list:
         """Create tool classes for a connected MCP client.
 
-        Returns the full tool list for one server: the server's own tools (with
-        inputSchema reduced to the OpenAI function-schema subset), plus list_resources
-        and read_resource when the client exposes resources. Must be awaited inside the
-        MCP event loop; connect_server bridges to it via asyncio.run_coroutine_threadsafe.
+        Returns the full tool list for one server: the server's own tools (each inputSchema
+        normalized on a deep copy — required defaulted, description coerced, $defs/
+        additionalProperties/description preserved — then validated before registering),
+        plus list_resources and read_resource when the client exposes resources. Must be
+        awaited inside the MCP event loop; connect_server bridges to it via
+        asyncio.run_coroutine_threadsafe.
         """
+        import jsonschema
+
         tools: list = []
         for tool in client.tools:
             # MCP tool inputSchema example:
             #   {"name": "read_query", "description": "...",
             #    "inputSchema": {"type": "object", "properties": {...}, "required": [...]}}
-            parameters = tool.inputSchema
-            # The 'required' field in inputSchema may be absent and needs to be initialized.
-            if 'required' not in parameters:
-                parameters['required'] = []
-            # Keep only the fields that conform to the standard OpenAI function schema.
-            required_fields = {'type', 'properties', 'required'}
-            missing_fields = required_fields - parameters.keys()
-            if missing_fields:
-                raise ValueError(f'Missing required fields in schema: {missing_fields}')
-            cleaned_parameters = {
-                'type': parameters['type'],
-                'properties': parameters['properties'],
-                'required': parameters['required'],
-            }
             register_name = server_name + '-' + tool.name
+            # Deep-copy before touching anything: the server may cache/reuse this schema
+            # object across reconnects, so editing it in place would corrupt the source.
+            parameters = copy.deepcopy(tool.inputSchema or {})
+            if not isinstance(parameters, dict):
+                logger.warning(
+                    f'Skipping MCP tool {register_name}: inputSchema is not an object '
+                    f'(got {type(parameters).__name__}).')
+                continue
+            # 'required' may be absent; OpenAI function schemas always expect a list.
+            parameters.setdefault('required', [])
+            # A null top-level description must be coerced, not left None: jsonschema treats
+            # 'description' as a string annotation, so None would make the schema invalid.
+            if parameters.get('description') is None and 'description' in parameters:
+                parameters['description'] = ''
+            # Preserve the FULL schema — $defs/definitions/additionalProperties/top-level
+            # description stay. Stripping $defs previously broke $ref validation of the call
+            # args at run time; keeping them lets jsonschema validate MCP tools that use them.
+            # Validate the object-shape invariant + JSON-Schema validity BEFORE registering:
+            # a broken schema would only fail at call time, so warn and skip it rather than
+            # register a tool the model cannot drive.
+            if parameters.get('type') != 'object' or not isinstance(parameters.get('properties'), dict):
+                logger.warning(
+                    f'Skipping MCP tool {register_name}: inputSchema is not a usable object '
+                    f'schema (type={parameters.get('type')!r}, properties='
+                    f'{type(parameters.get('properties')).__name__}).')
+                continue
+            try:
+                jsonschema.Draft202012Validator.check_schema(parameters)
+            except jsonschema.exceptions.SchemaError as e:
+                logger.warning(
+                    f'Skipping MCP tool {register_name}: invalid inputSchema — {e.message}')
+                continue
             agent_tool = self.create_tool_class(
                 register_name=register_name,
                 register_client_id=client_id,
                 tool_name=tool.name,
-                tool_desc=tool.description,
-                tool_parameters=cleaned_parameters)
+                tool_desc=tool.description or '',
+                tool_parameters=parameters)
             tools.append(agent_tool)
 
         if client.resources:
