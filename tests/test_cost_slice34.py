@@ -122,20 +122,20 @@ def test_format_elapsed_minutes():
 
 def test_format_result_completed_enriched():
     out = _format_result('code_worker', 'done', elapsed_s=192.3, generated_tokens=42190)
-    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190 tok]:\ndone"
 
 
 def test_format_result_completed_enriched_with_cost():
     out = _format_result('code_worker', 'done', elapsed_s=192.3,
                          generated_tokens=42190, total_cost=0.0123)
-    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190, cost: $0.0123]:\ndone"
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190 tok, cost: $0.0123]:\ndone"
 
 
 def test_format_result_cost_omitted_when_unpriced():
     # total_cost 0.0 (nothing priced) -> no cost segment, even with generated tokens.
     out = _format_result('code_worker', 'done', elapsed_s=192.3,
                          generated_tokens=42190, total_cost=0.0)
-    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190 tok]:\ndone"
 
 
 def test_format_result_legacy_shape_without_metrics():
@@ -189,7 +189,7 @@ def test_format_result_omits_cost_when_below_display_precision():
     # A priced-but-tiny cost (0.00004) would render "$0" -> omitted, not a misleading zero.
     out = _format_result('code_worker', 'done', elapsed_s=192.3,
                          generated_tokens=42190, total_cost=0.00004)
-    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190]:\ndone"
+    assert out == "[Agent 'code_worker' Completed in 3m 12s, generated: 42,190 tok]:\ndone"
 
 
 def test_sum_subtree_tokens_cycle_safe():
@@ -229,7 +229,7 @@ def test_run_child_core_includes_subagent_tokens(monkeypatch):
 
     assert out.startswith("[Agent 'code_worker' Completed in ")
     # 1000 + 2190 + 0 (sub2) = 3190 generated, thousands-separated.
-    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 3,190\]:\ndone$', out), out
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 3,190 tok\]:\ndone$', out), out
 
 
 def test_call_agent_generated_is_per_call_delta(monkeypatch):
@@ -249,7 +249,7 @@ def test_call_agent_generated_is_per_call_delta(monkeypatch):
 
     assert out.startswith("[Agent 'worker1' Completed in ")
     # The per-call DELTA (4500 - 4000 = 500), NOT the lifetime total (4,500).
-    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 500\]:\ndone$', out), out
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 500 tok\]:\ndone$', out), out
     assert '4,500' not in out
 
     # Fresh instance: no prior accumulator entry -> baseline 0 -> reports its full total.
@@ -260,7 +260,7 @@ def test_call_agent_generated_is_per_call_delta(monkeypatch):
                                    lambda: gen_fresh.__setitem__('fresh1', 700))
 
     out_fresh = run_child_core(engine_fresh, pool_fresh, 'coder', 'fresh1', {}, 'parent', 1)
-    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 700\]:\ndone$', out_fresh), out_fresh
+    assert re.search(r'Completed in (\d+s|\d+m \d+s), generated: 700 tok\]:\ndone$', out_fresh), out_fresh
 
 
 # ── Slice 4 — system_info Budget/Cost self-info ─────────────────────────────

@@ -93,7 +93,7 @@ def _format_result(
 
     When both ``elapsed_s`` and ``generated_tokens`` are supplied (the Completed branch of
     ``run_child_core``), the completion tag is enriched to
-    ``[Agent 'X' Completed in 3m 12s, generated: 4,210, cost: $0.0042]:`` — generated is
+    ``[Agent 'X' Completed in 3m 12s, generated: 4,210 tok, cost: $0.0042]:`` — generated is
     the child's completion-only token total INCLUDING all its sub-agents; cost is the
     summed per-instance cost (omitted when nothing in the subtree was priced). Omitting
     them keeps the legacy bare ``Completed]:`` shape for any other caller.
@@ -105,7 +105,7 @@ def _format_result(
     else:
         suffix = ''
         if elapsed_s is not None and generated_tokens is not None:
-            suffix = f" in {_format_elapsed(elapsed_s)}, generated: {generated_tokens:,}"
+            suffix = f" in {_format_elapsed(elapsed_s)}, generated: {generated_tokens:,} tok"
             if total_cost and total_cost > 0:
                 cost_str = f"${total_cost:,.4f}".rstrip('0').rstrip('.')
                 # A sub-display-precision cost (e.g. $0.00004) would render "$0" —
