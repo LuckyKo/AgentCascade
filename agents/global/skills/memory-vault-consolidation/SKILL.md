@@ -8,7 +8,8 @@ triggers:
   - "supersede lessons"
   - "de-index lessons"
   - "vault triage"
-version: "1.0.0"
+  - "consolidation delta audit"
+version: "1.1.0"
 ---
 
 # Memory Vault Consolidation
@@ -83,23 +84,26 @@ Each leaf gets `hub: <cluster-slug>` in frontmatter (additive; body untouched). 
 
 ### AFK procedure (idempotent, incremental)
 
-**Step 0 — Delta audit (do this FIRST, before any writes):**
-1. Count existing state: `glob('*-hub.md')` per vault = hub count; grep `^hub:` per vault = tagged-leaf count; grep `^status:\s*(superseded|archived)` = de-indexed count.
-2. Compare against the last `clusters.json` (in `logs/`). New files since last run = files on disk not in the previous `clusters.json`. If zero new files and zero new `related:` edges, **skip the run** — report "no delta, nothing to do" and stop.
-3. If there IS a delta (new files, new backlinks, new clusters), proceed to Step 1.
+**Step 0 — Delta audit (do this FIRST, before any writes; use the scripts' self-reported delta, not manual counts):**
+1. Run the pipeline in **dry-run** to read the delta the scripts report themselves:
+   - `python cluster_vaults.py` — recomputes + **overwrites** `logs/clusters.json` (safe, regeneratable).
+   - `python generate_hubs.py` (dry) → read **"hubs newly written: N"** (N=0 → no new clusters) and **"leaves got hub: field: M"**.
+   - `python triage_superseded.py` (dry) → read **"status: superseded added: K"**.
+2. **If N=0 AND K=0 → no delta, stop** (report "no delta, nothing to do"). A nonzero M with N=0 is just re-tagging existing clusters — not a reason to run.
+3. **Do NOT use an mtime / `LastWriteTime` "modified in the last hour" filter to find new hubs.** `generate_hubs.py` bumps `last_validated` on **every** existing hub, so a time-based glob reports ALL hubs (e.g. 72) as new when only N are genuinely new. The true delta = the script's "hubs newly written" counter, **cross-checked by diffing live `*-hub.md` against the pre-run dated backup** (a hub present live but absent from the backup = new).
+4. If there IS a delta, proceed to Step 1.
 
 **Step 1 — Execute (only the delta):**
-1. **Snapshot** the vault dir to a dated backup before any write.
-2. Run clustering → emit updated `clusters.json` (slug → leaf list). Deterministic.
-3. For each **new** cluster (no existing `<slug>-hub.md`): spawn a sub-agent with the cluster's leaf bodies, ask for the hub template. Write with `write_file`.
-4. Set `hub: <cluster-slug>` in each **new** leaf's frontmatter (only if absent — idempotent).
-5. Update `last_validated:` on **all** hubs (cheap touch).
-6. Run smart-action triage on **new** multi-member clusters only (supersede/merge/archive).
+1. **Snapshot** the vault dir(s) to a dated backup before any write (e.g. `logs/lessons-backup-<YYYYMMDD-HHMM>/<vault>/`).
+2. `python cluster_vaults.py` → fresh `clusters.json`.
+3. `python generate_hubs.py --execute` → writes new hubs, refreshes `last_validated` on all hubs, adds `hub:` to untagged leaves.
+4. `python triage_superseded.py --execute` → flips explicitly-declared supersessions (conservative; 0 on a clean tree).
 
 **Verification (always, even on skip):**
-- Spot-check 3 random leaves: `hub:` field present and matches a real hub file.
-- Spot-check 1 hub file: leaf list matches the actual files on disk.
-- Confirm `status: superseded` files are excluded by `_is_deindexed()` (run 1 memory_hint test).
+- **Cross-check every `[[leaf]]` ref in each NEW hub against disk:** regex-extract the `[[slug]]` stems from the new hub files and confirm `<vault>/<slug>.md` exists (expect 0 missing). Stronger than spot-checking one hub.
+- Spot-check a tagged leaf: `hub:` field present and matches a real hub file.
+- Confirm the triage target carries `status: superseded` (de-indexed via `vault.py:_is_deindexed()`).
+- Optionally run 1 memory_hint test to confirm de-indexed files are excluded.
 
 Re-run finds existing hubs, updates only `last_validated`, adds no duplicate links.
 
@@ -125,15 +129,17 @@ Files with a single unambiguous project tag move to that project's vault. **Fram
 
 `matcher.match(query, allowed_scope=None)` — when `allowed_scope` is not None, skip docs whose scope doesn't intersect. Default `None` = no-op. The `project` field on `AgentInstance` is the v2 prerequisite; until then the filter is dark.
 
-## Scripts
+## Scripts (in `AgentWorkspace/scripts/`, stdlib-only, dry-run by default, `--execute` to write)
 
-- `AgentWorkspace/scripts/relocate_lessons.py` — dry-run by default, `--execute` to move
-- `AgentWorkspace/scripts/add_scope_labels.py` — dry-run by default, `--execute` to write
-- `AgentWorkspace/scripts/memory_vault_common.py` — shared vault map, scope/alias maps, parser
+- `cluster_vaults.py` — recomputes full clustering; **overwrites** `logs/clusters.json`; prints a summary (leaf count, clusters ≥3, files covered, size histogram). Always writes (regeneratable artifact).
+- `generate_hubs.py` — writes new `<slug>-hub.md` for new clusters, refreshes `last_validated` on existing hubs, adds `hub:` to untagged leaves. **Self-reports the delta:** "hubs newly written: N", "hubs already existed (refreshed): P", "leaves got hub: field: M".
+- `triage_superseded.py` — conservative + deterministic: flips a lesson to `status: superseded` ONLY if it EXPLICITLY carries `superseded_by: [[X]]` AND X exists in the vaults; adds the reciprocal `supersedes:` on the survivor. **Self-reports:** "declarations validated: D", "status: superseded added: K". Never infers; idempotent (K=0 on re-run).
+- `relocate_lessons.py` / `add_scope_labels.py` — Feature C (relocation/scope), not needed for a routine consolidation.
+- `memory_vault_common.py` — shared VAULTS map (6 vaults: workspace, AgentCascade, llama-autoloader, Strata, llama.cpp, ninfer-all), tolerant frontmatter parser, `list_md`/`read_text`.
 
 ## Invariants
 
 - **Nothing is deleted.** Superseded/archived files stay on disk, greppable.
 - **Hubs are additive.** Deleting a hub reverts to leaf-only hints.
 - **Leaves are never suppressed** by a hub's presence.
-- **Reversible:** remove `status:` line / delete hub file / restore from backup.
+- **Reversible:** remove `status:` line / delete hub file / restore from the dated backup.
