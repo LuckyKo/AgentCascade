@@ -401,5 +401,90 @@ class TestInvokerCompressionWiring:
         rel.assert_called_once()
 
 
+# ── 5. Reviewer warm wiring (Phase 2) ────────────────────────────────────────
+
+
+def _call_reviewer(pool, *, enabled, warm_result=None, exec_side_effect=None, exec_return=('[PASS]', '')):
+    with patch.object(agent_invoker, 'COMPRESSOR_REUSE_ENABLED', enabled), \
+            patch.object(agent_invoker, '_ensure_compressor_loaded'), \
+            patch('agent_cascade.execution_engine.ExecutionEngine'), \
+            patch.object(agent_invoker, '_configure_reviewer_instance') as cfg, \
+            patch.object(agent_invoker, '_execute_compressor_and_extract_summary',
+                         side_effect=exec_side_effect, return_value=exec_return if exec_side_effect is None else None) as x, \
+            patch.object(compressor_reuse, 'acquire_compressor_agent',
+                         return_value=warm_result) as acq, \
+            patch.object(compressor_reuse, 'release_claim') as rel:
+        try:
+            result = agent_invoker.invoke_compaction_reviewer(pool, 'IN', 'OUT', 'Maine')
+        except RuntimeError as e:
+            result = e
+    return result, acq, cfg, x, rel
+
+
+class TestInvokerReviewerWiring:
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def test_flag_on_warm_hit_is_toolless_single_shot(self):
+        pool = _invoker_pool()
+        warm = _make_warm_compressor(name='CompressorReviewer_warm')
+        warm.max_turns = 99                       # stale budget from a previous config
+        warm._generate_cfg_override = {'disabled_tools': []}  # stale: tools enabled
+        result, acq, cfg, x, rel = _call_reviewer(
+            pool, enabled=True, warm_result=(warm, True, 'CompressorReviewer_warm'))
+        assert result == (True, [])               # [PASS] parsed normally
+        assert acq.call_args.args[2] == 'CompressorReviewer_warm'   # distinct warm name
+        cfg.assert_called_once()                   # tool-less config re-applied after reset
+        assert x.call_args.args[2] is warm
+        assert x.call_args.args[3] == 'CompressorReviewer_warm'
+        assert warm.max_turns == agent_invoker.COMPACTION_REVIEWER_MAX_TURNS  # stays 1
+
+    def test_flag_off_spawns_fresh_reviewer_per_launch(self):
+        # Kill-switch OFF (the default): real helper runs, warm path never attempted, fresh
+        # per-launch reviewer name — identical to today.
+        pool = _invoker_pool()
+        with patch.object(agent_invoker, 'COMPRESSOR_REUSE_ENABLED', False), \
+                patch.object(agent_invoker, '_ensure_compressor_loaded'), \
+                patch('agent_cascade.execution_engine.ExecutionEngine') as EE, \
+                patch.object(agent_invoker, '_configure_reviewer_instance'), \
+                patch.object(agent_invoker, '_execute_compressor_and_extract_summary',
+                             return_value=('[PASS]', '')) as x:
+            result = agent_invoker.invoke_compaction_reviewer(pool, 'IN', 'OUT', 'Maine')
+        assert result == (True, [])
+        EE.return_value._acquire_reusable_system_agent.assert_not_called()
+        fresh = EE.return_value._create_system_agent.call_args.kwargs['instance_name']
+        assert fresh != 'CompressorReviewer_warm' and fresh.startswith('CompressionReviewer_')
+        assert x.call_args.args[3] == fresh
+        assert compressor_reuse.claim_holder('CompressorReviewer_warm') is None
+
+    def test_failopen_contract_preserved_and_claim_released(self):
+        # Infra failure still raises RuntimeError (so the caller's gate fail-opens) and the
+        # warm claim is still released in finally.
+        pool = _invoker_pool()
+        result, acq, cfg, x, rel = _call_reviewer(
+            pool, enabled=True, warm_result=(_make_warm_compressor(name='CompressorReviewer_warm'),
+                                             True, 'CompressorReviewer_warm'),
+            exec_side_effect=RuntimeError('reviewer infra down'))
+        assert isinstance(result, RuntimeError) and 'Compaction review failed' in str(result)
+        rel.assert_called_once()
+
+    def test_summarizer_claim_held_does_not_block_reviewer(self):
+        # Distinct claims are the point: compressor warm held + reviewer warm free → the
+        # reviewer wiring uses the reviewer name regardless (registry-level independence is
+        # pinned in TestClaimRegistry; this pins the invoker passes the reviewer name).
+        compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'r_other')
+        try:
+            pool = _invoker_pool()
+            result, acq, cfg, x, rel = _call_reviewer(
+                pool, enabled=True, warm_result=(object(), True, 'CompressorReviewer_warm'))
+            assert acq.call_args.args[2] == 'CompressorReviewer_warm'
+            assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == 'r_other'  # untouched
+        finally:
+            compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'r_other')
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q']))

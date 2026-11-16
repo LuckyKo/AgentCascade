@@ -1053,6 +1053,12 @@ def invoke_compaction_reviewer(
 
     reviewer_key = _generate_reviewer_instance_name()
 
+    # BUG_0330 warm reuse: distinct fixed warm name for the reviewer (different config/prompt from
+    # the summarizer → distinct claim; a held summarizer never blocks a review). OFF → None, and
+    # behavior is identical to today (fresh reviewer per launch).
+    reuse_name = COMPRESSOR_REVIEWER_WARM_NAME if COMPRESSOR_REUSE_ENABLED else None
+    rid = uuid.uuid4().hex
+
     from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
     end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for the review
     review_prompt = COMPACTION_REVIEWER_PROMPT.format(
@@ -1066,16 +1072,13 @@ def invoke_compaction_reviewer(
         # Lazy import to avoid the execution_engine → compression circular dependency.
         from agent_cascade.execution_engine import ExecutionEngine
         engine = ExecutionEngine(agent_pool)
-        rv_instance = engine._create_system_agent(
-            agent_class='Compressor',
-            instance_name=reviewer_key,
-            task=review_prompt,
-            caller=caller_name,
-        )
+        rv_instance, _reused, reviewer_key = compressor_reuse.acquire_compressor_agent(
+            engine, 'Compressor', reuse_name, reviewer_key, review_prompt, caller_name, rid)
 
         _configure_reviewer_instance(rv_instance)
         # Single-shot: decoupled from COMPRESSOR_AGENT_MAX_TURNS so a Compressor budget bump can't
-        # silently give the reviewer a multi-turn tool loop. Must stay 1.
+        # silently give the reviewer a multi-turn tool loop. Must stay 1. Re-applied unconditionally:
+        # the warm-hit reset nulls max_turns/_generate_cfg_override.
         rv_instance.max_turns = COMPACTION_REVIEWER_MAX_TURNS
 
         verdict_text, _ = _execute_compressor_and_extract_summary(
@@ -1105,3 +1108,7 @@ def invoke_compaction_reviewer(
                         pass
         except Exception:
             pass
+        # Release the warm reviewer claim LAST, after cleanup (BUG_0330). rid-guarded no-op when
+        # the flag was OFF or the acquire fell back to a fresh spawn; the fail-open contract of
+        # this function is unchanged — verdicts and RuntimeError wrapping propagate as before.
+        compressor_reuse.release_claim(reuse_name, rid)
