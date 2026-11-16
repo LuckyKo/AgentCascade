@@ -91,6 +91,30 @@ def test_edit_file_old_content_not_flat_required():
     assert set(schema['required']) == {'path', 'new_content'}
 
 
+def test_edit_file_conditional_required_names_field_not_empty_list():
+    """BUG_0329 (Increment B POLISH) base.py regression.
+
+    A conditional (allOf if/then/else) required-miss used to surface as
+    'missing required parameter(s): []' because base.py recomputes `missing` from the
+    FLAT top-level required (both present). It must now name the failing branch field via
+    jsonschema's own message. The flat top-level required path must remain byte-identical.
+    """
+    inst = TOOL_REGISTRY['edit_file'].__new__(TOOL_REGISTRY['edit_file'])  # validation needs no init deps
+
+    # conditional miss: delete_and_insert without 'range' -> names 'range', NOT an empty list
+    with pytest.raises(ValueError) as exc:
+        inst._verify_json_format_args({'path': 'a.txt', 'new_content': 'y', 'match_mode': 'delete_and_insert'})
+    msg = str(exc.value)
+    assert "'range'" in msg and 'required property' in msg, msg
+    assert 'missing required parameter(s)' not in msg, msg
+
+    # flat miss: top-level 'path' absent -> legacy 'missing required parameter(s): [..]' names path
+    with pytest.raises(ValueError) as exc:
+        inst._verify_json_format_args({'new_content': 'y', 'match_mode': 'exact'})
+    msg = str(exc.value)
+    assert 'missing required parameter(s)' in msg and "'path'" in msg, msg
+
+
 # ── media_gen: backend required UNLESS prompt == __help (case-insensitive) ──
 def test_media_gen_backend_or_help_anyof():
     schema = _schema('media_gen')
@@ -143,14 +167,25 @@ def test_propose_skill_rate_or_create_anyof():
     assert _is_valid(schema, {'name': 's', 'skill_content': '...md', 'justification': 'why'})
     # (a) create + rate together
     assert _is_valid(schema, {'name': 's', 'skill_content': '...md', 'justification': 'why', 'rating': 8})
-    # (b) create WITHOUT justification → rejected (guard 427 "justification required")
+    # (b) create WITHOUT justification → rejected by the schema's create/update branch
     assert not _is_valid(schema, {'name': 's', 'skill_content': '...md'})
-    # (b) neither content nor rating → rejected (guard 420 "No skill content")
+    # (b) neither content nor rating → rejected by both anyOf branches
     assert not _is_valid(schema, {'name': 's'})
     # no multipleOf: _coerce_rating enforces only [0,10], not 0.5 steps
     assert 'multipleOf' not in schema['properties']['rating']
     # so a non-half-step rating is still schema-valid (coerce handles range only)
     assert _is_valid(schema, {'name': 's', 'rating': 7.3})
+
+    # FINDING-3 divergence: the anyOf admits {name, skill_content, rating} (no
+    # 'justification') via branch 1 (name+rating), so it is schema-VALID — but a create
+    # needs 'justification', so the authoritative in-tool guard REJECTS it. propose_skill
+    # uses parse_tool_params (not _verify_json_format_args), so the schema is advisory-only.
+    assert _is_valid(schema, {'name': 's', 'skill_content': '...md', 'rating': 8})
+    from types import SimpleNamespace
+    guard_result = TOOL_REGISTRY['propose_skill'](
+        agent_pool=SimpleNamespace(skill_manager=object()),
+    ).call('{"name": "s", "skill_content": "...md", "rating": 8}')
+    assert 'justification' in guard_result and 'required' in guard_result, guard_result
 
 
 # ── call_cli_agent (proxy-built): status OR tool_id+task OR harness+task ──

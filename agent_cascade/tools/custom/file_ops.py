@@ -1722,17 +1722,9 @@ class EditFile(BaseTool, PathResolutionMixin):
                                 f"the payload. The edit was NOT applied — re-issue it with clean content.")
 
         if match_mode == 'delete_and_insert':
-            # Defensive backstop: the schema now has additionalProperties:false, so a
-            # replacement sent under a wrong key (the model's habit: 'content', 'text',
-            # 'replacement', 'new_text') is already rejected by jsonschema before it gets
-            # here. The guard below only catches such keys reaching this path in any other
-            # mode, so the mistake is named loudly instead of the range being deleted
-            # silently — an empty new_content is a legitimate delete-only call.
-            if not new_content:
-                for _alias in ('content', 'text', 'replacement', 'new_text'):
-                    if params_json.get(_alias):
-                        return (f"ERROR: delete_and_insert got no 'new_content' but a replacement was passed under {_alias!r}. "
-                                'The edit was NOT applied — re-issue with new_content.')
+            # An empty new_content is a legitimate delete-only call; jsonschema's
+            # additionalProperties:false already rejects a replacement sent under a wrong
+            # key ('content', 'text', 'replacement', 'new_text'), so no alias guard is needed.
             if new_content is None:
                 new_content = ''
         else:

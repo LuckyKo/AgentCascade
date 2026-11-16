@@ -360,8 +360,12 @@ class ProposeSkill(BaseTool):
         # 'name' is always required. Two valid modes, each a branch of anyOf:
         #   rate-only   = name + rating (no content)
         #   create/update = name + skill_content + justification
-        # The in-tool guard in call() enforces exactly this (rating-only needs no content;
-        # create needs both skill_content and justification), so schema and guard agree.
+        # The in-tool guard in call() is authoritative and slightly stricter than this
+        # schema: call() uses parse_tool_params (not _verify_json_format_args), so the
+        # anyOf is advisory-only (the model-facing subset). Known divergence — e.g.
+        # {name, skill_content, rating} (no 'justification') satisfies anyOf branch 1
+        # (name+rating) so it is schema-valid, but the guard rejects it because a create
+        # needs 'justification'.
         required=['name'],
         anyOf=[
             {'required': ['name', 'rating']},

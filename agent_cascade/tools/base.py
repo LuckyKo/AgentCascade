@@ -271,6 +271,18 @@ class BaseTool(ABC):
                 # ValueError shape so tools can return it as a normal tool result.
                 if e.validator == 'required':
                     missing = [p for p in self.parameters.get('required', []) if p not in params_json]
+                    if not missing:
+                        # Conditional required-miss: a structural branch (allOf/if/then/else
+                        # or anyOf) demands a field that is NOT in the top-level `required`
+                        # list (e.g. edit_file's delete_and_insert -> 'range'), so the
+                        # recomputed `missing` is empty and the message below would read
+                        # "missing required parameter(s): []". Unreachable for any flat
+                        # pre-Increment-B schema (there `missing` is always non-empty), so
+                        # existing tools are unaffected. Surface jsonschema's own message,
+                        # which already names the failing branch field.
+                        raise ValueError(
+                            f"invalid parameters for tool '{self.name}': {e.message}"
+                        ) from e
                     # BUG_0077: make the error self-diagnosing. A model-side tool call
                     # that omits or renames a required key used to fail with only the
                     # missing key, which forced the model to guess ("param ordering").
