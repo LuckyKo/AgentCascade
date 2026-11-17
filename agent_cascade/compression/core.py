@@ -415,7 +415,9 @@ def _consolidate_markers(
         from agent_cascade import compressor_reuse
         # Warm consolidation session (BUG_0330 §3f): holds the Compressor claim across Phase 2
         # and the Phase-2.5 review retries so corrections carry the full context (no-drop).
-        # None (flag OFF / claim held / not seeded / any error) = byte-identical fresh-spawn path.
+        # None (flag OFF / window-expiry / free-claim ineligible / any error) = byte-identical
+        # fresh-spawn path. A HELD claim is bounded-waited for (COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS),
+        # not returned as an immediate None.
         warm_session = compressor_reuse.acquire_warm_consolidation(
             agent_pool, summaries_to_consolidate, target_agent_name,
             marker_time_ranges=summary_spans)

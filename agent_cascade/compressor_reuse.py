@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
+    COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS,
     COMPRESSOR_REUSE_ENABLED,
     COMPRESSOR_REUSE_MAX_REUSES,
     COMPRESSOR_REVIEWER_WARM_NAME,
@@ -161,8 +162,8 @@ def acquire_compressor_agent(engine, agent_class: str, reuse_name: Optional[str]
             logger.warning('[COMPRESSOR_REUSE] acquire raised %s — falling back to fresh spawn', _e)
             got = None
 
-        # Shape guard. Only the real 3-tuple is a hit (see docstring).
-        if isinstance(got, tuple) and len(got) == 3 and got[0] is not None:
+        # Shape guard: only the real 3-tuple is a hit (shared predicate — see _is_acquire_hit).
+        if _is_acquire_hit(got):
             inst, reused, actual = got[0], bool(got[1]), (got[2] or reuse_name)
             if reused:
                 _note_warm_reuse(engine, actual)
@@ -239,14 +240,26 @@ class WarmCompressorSession:
             release_claim(self.actual_name, self.rid)
 
 
+def _is_acquire_hit(got: Any) -> bool:
+    """True iff ``_acquire_reusable_system_agent`` returned our real ``(inst, is_reuse, name)``
+    3-tuple with a non-None instance. Same shape guard acquire_compressor_agent uses inline;
+    anything else — None, an auto-spec MagicMock's auto-attr, a malformed tuple — is a miss."""
+    return isinstance(got, tuple) and len(got) == 3 and got[0] is not None
+
+
 def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
                                marker_time_ranges=None):
     """Open a warm consolidation session (BUG_0330 §3f), or None to signal "run today's path".
 
     Returns None when reuse is OFF (claim registry never touched), when the warm acquire misses
-    (claim held / not seeded / ineligible), or on any error — in every case the caller's
-    byte-identical fresh-spawn path proceeds. Unlike acquire_compressor_agent there is NO fresh
-    spawn fallback here: an un-ran orphan fresh instance would leak. On success the returned
+    for a NON-transient reason (claim free but the instance is not seeded / ineligible), when the
+    bounded held-claim wait below expires, or on any error — in every case the caller's
+    byte-identical fresh-spawn path proceeds. A miss where the claim is HELD by an in-flight op
+    (e.g. a concurrent L1 base compression) is transient: BUG_0340 bounded-polls up to
+    COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS for it to free, then re-acquires, instead of immediately
+    fresh-spawning (which silently drops BUG_0330's KV-cache win). 0 disables the wait (byte-
+    identical to the immediate fresh-spawn fallback). Unlike acquire_compressor_agent there is NO
+    fresh spawn fallback here: an un-ran orphan fresh instance would leak. On success the returned
     session already holds the claim and the consolidation task is already appended as the warm
     instance's conversation task message, so the first run is a plain engine.run() underneath.
     """
@@ -254,6 +267,7 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
         return None
     rid = ''
     try:
+        import time
         import uuid
         from agent_cascade.execution_engine import ExecutionEngine
         from agent_cascade.compression.agent_invoker import _build_consolidation_prompt
@@ -263,9 +277,45 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
         got = engine._acquire_reusable_system_agent(
             agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
             task=prompt, caller=caller_name, rid=rid)
-        if not (isinstance(got, tuple) and len(got) == 3 and got[0] is not None):
+
+        # BUG_0340 bounded claim-wait. _acquire_reusable_system_agent releases its OWN claim on
+        # every internal failure, so after a miss claim_holder is non-None only when a DIFFERENT
+        # op genuinely holds the name (a transient in-flight L1/other run) — those are worth
+        # waiting on. A miss with a FREE claim (None) means the warm instance is ineligible /
+        # empty-after-release (not transient — seeding returns a hit): fall back now, never wait
+        # on it. A failed try_claim holds
+        # nothing, so each missed poll leaks nothing and this loop never releases a claim it did
+        # not acquire; the window is bounded, so a held name can never wedge Compressor_warm for
+        # the process lifetime. With wait disabled `wait_seconds > 0` short-circuits before
+        # touching claim_holder or sleeping — byte-identical to the immediate fallback.
+        wait_seconds = COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS
+        held = (not _is_acquire_hit(got) and wait_seconds > 0
+                and claim_holder(COMPRESSOR_WARM_NAME) is not None)
+        if held:
+            logger.debug('[COMPRESSOR_REUSE] warm claim held — bounded-waiting up to %.1fs '
+                         'for consolidation (rid=%s)', wait_seconds, rid)
+            deadline = time.monotonic() + wait_seconds
+            while not _is_acquire_hit(got):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+                got = engine._acquire_reusable_system_agent(
+                    agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
+                    task=prompt, caller=caller_name, rid=rid)
+                if not _is_acquire_hit(got) and claim_holder(COMPRESSOR_WARM_NAME) is None:
+                    # Holder released but we could not take it (now ineligible): no longer
+                    # transient — stop early rather than burn the remaining window.
+                    break
+            if not _is_acquire_hit(got):
+                logger.info('[COMPRESSOR_REUSE] warm acquire still unavailable after %.1fs '
+                            '(rid=%s) — falling back to fresh spawn for consolidation',
+                            wait_seconds, rid)
+
+        if not _is_acquire_hit(got):
             return None
         inst, _reused, actual_name = got
+        # Defensive: a falsy name would make release_claim('') a no-op and wedge the claim.
+        actual_name = actual_name or COMPRESSOR_WARM_NAME
         if _reused:
             _note_warm_reuse(engine, actual_name)
         return WarmCompressorSession(inst, actual_name, rid, engine, agent_pool, caller_name)

@@ -175,6 +175,13 @@ COMPRESSOR_REVIEWER_WARM_NAME: str = os.getenv(
 # successful reuses. Default 0 = off, matching Security's uncapped warm behavior. Revisit only
 # if telemetry shows a prompt-DNA drift signal (start at N=100 then).
 COMPRESSOR_REUSE_MAX_REUSES: int = int(os.getenv('AGENT_CASCADE_COMPRESSOR_REUSE_MAX_REUSES', 0))
+# Max seconds an L2 consolidation waits for a HELD Compressor_warm claim — e.g. one held by a
+# concurrent in-flight L1 base compression — before falling back to a fresh Compressor_<n>,
+# instead of immediately abandoning KV-cache reuse. Covers only the transient "another op is
+# mid-run" case; a miss on a FREE claim (instance ineligible / empty-after-release) is never waited on.
+# 0 disables the wait entirely (immediate fresh-spawn fallback).
+COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS: float = float(
+    os.getenv('AGENT_CASCADE_COMPRESSOR_REUSE_CLAIM_WAIT', '60'))
 
 # ── System-launched advisor toolset ───────────────────────────────────────────
 # Disabled tools for SYSTEM-LAUNCHED advisors (the Security guard and the Skill Advisor).

@@ -709,7 +709,10 @@ class TestSessionAcquireForeignClaim:
         warm.append_message(Message(role=ASSISTANT, content='ANSWER'))
         before = list(warm.conversation)
         assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'foreign_rid')
-        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True):
+        # BUG_0340 added a bounded held-claim wait; pin it to 0 so this foreign-held test stays
+        # on the immediate fresh-spawn fallback (and does not block for the default window).
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS', 0.0):
             sess = acquire_warm_consolidation(_make_pool(warm), ['S1', 'S2'], 'Caller',
                                               marker_time_ranges=[(None, None), (None, None)])
         assert sess is None                       # caller degrades to today's fresh path
@@ -728,6 +731,110 @@ class TestSessionAcquireForeignClaim:
             assert acquire_warm_consolidation(MagicMock(), ['S'], 'C') is None
         # (registry untouched == nothing claimable was ever recorded)
         assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None
+
+
+# ── 6b. BUG_0340 — bounded held-claim wait for L2 consolidation ──────────────
+
+def _release_after(delay, name, rid):
+    """Background helper: hold-then-release a warm claim to simulate the in-flight op (e.g. an
+    L1 base compression) that frees the claim inside the bounded-wait window."""
+    time.sleep(delay)
+    release_claim(name, rid)
+
+
+class TestConsolidationClaimWait:
+    """BUG_0340: a miss because the warm claim is HELD (transient) is bounded-waited and
+    retried, instead of immediately fresh-spawning. A miss on a FREE claim (ineligible) is
+    never waited on. The claim-leak lesson is honored on every path: success (held-then-
+    release) -> claim clean; window-expiry -> holder's rid intact (no cross-free); free-miss
+    -> clean; post-acquire exception -> the except-block rid-guarded release cleans it."""
+
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    def test_held_claim_released_in_window_reuses_warm(self):
+        # The headline fix: a concurrent op holds the claim, releases inside the window -> the
+        # waiter re-acquires Compressor_warm (KV win preserved) instead of returning None.
+        warm = _make_warm_compressor()
+        pool = _make_pool(warm)
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'holder_rid')  # in-flight op
+        t = threading.Thread(target=_release_after,
+                             args=(0.15, COMPRESSOR_WARM_NAME, 'holder_rid'), daemon=True)
+        t.start()
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS', 3.0):
+            sess = acquire_warm_consolidation(pool, ['S1', 'S2'], 'Caller',
+                                              marker_time_ranges=[(None, None), (None, None)])
+        t.join(timeout=2.0)
+        assert sess is not None and sess.actual_name == COMPRESSOR_WARM_NAME  # reused, not fresh
+        sess.release()
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None  # claim clean after success
+
+    def test_held_claim_past_window_falls_back_bounded(self):
+        # Holder never releases within the window -> None (fresh-spawn signal), but bounded: it
+        # must NOT block for the default 60s and must not cross-free the foreign holder's claim.
+        warm = _make_warm_compressor()
+        warm.append_message(Message(role=USER, content='TASK'))
+        warm.append_message(Message(role=ASSISTANT, content='ANSWER'))
+        before = list(warm.conversation)
+        pool = _make_pool(warm)
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'holder_rid')
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS', 0.3):
+            t0 = time.monotonic()
+            sess = acquire_warm_consolidation(pool, ['S1'], 'Caller')
+            elapsed = time.monotonic() - t0
+        assert sess is None
+        assert elapsed < 2.5                                                 # bounded by the 0.3s window, not the 60s default
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == 'holder_rid'  # no cross-free
+        assert warm.conversation == before                                   # loser never mutates
+        compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'holder_rid')   # cleanup
+
+    def test_free_claim_ineligible_returns_immediately_no_wait(self):
+        # A miss with a FREE claim (the engine released its own on the ineligible instance) is
+        # NOT transient: even a generous window must not be consumed -> immediate fresh-spawn.
+        warm = _make_warm_compressor()
+        warm.agent_class = 'Admin'           # another class owns the fixed name -> ineligible
+        pool = _make_pool(warm)
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS', 5.0):
+            t0 = time.monotonic()
+            sess = acquire_warm_consolidation(pool, ['S1'], 'Caller')
+            elapsed = time.monotonic() - t0
+        assert sess is None
+        assert elapsed < 1.0                                                # far under the 5s window
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None  # engine's own release
+
+    def test_exception_after_acquire_releases_claim(self):
+        # The claim-leak lesson's load-bearing path: acquire SUCCEEDS (claim HELD) then a later
+        # step throws -> the except's rid-guarded release_claim must free the name or it wedges.
+        warm = _make_warm_compressor()
+        pool = _make_pool(warm)
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'WarmCompressorSession',
+                             side_effect=RuntimeError('boom')) as sessm:
+            assert acquire_warm_consolidation(pool, ['S1'], 'Caller') is None
+        sessm.assert_called_once()  # witness: acquire SUCCEEDED (claim held) then the ctor threw
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None  # no wedge after exception
+
+    def test_zero_window_byte_identity_held_claim_immediate_none(self):
+        # COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS = 0 disables the wait: a held claim falls back to
+        # None immediately, no sleep, no claim_holder read, no cross-free (byte-identical to today).
+        warm = _make_warm_compressor()
+        pool = _make_pool(warm)
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'holder_rid')
+        with patch.object(compressor_reuse, 'COMPRESSOR_REUSE_ENABLED', True), \
+                patch.object(compressor_reuse, 'COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS', 0.0):
+            t0 = time.monotonic()
+            sess = acquire_warm_consolidation(pool, ['S1'], 'Caller')
+            elapsed = time.monotonic() - t0
+        assert sess is None
+        assert elapsed < 0.2                                                 # zero window -> no sleep
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == 'holder_rid'  # no cross-free
+        compressor_reuse.release_claim(COMPRESSOR_WARM_NAME, 'holder_rid')   # cleanup
 
 
 # ── 7. Re-mint on COMPRESSOR_REUSE_MAX_REUSES (Phase 3) ──────────────────────
