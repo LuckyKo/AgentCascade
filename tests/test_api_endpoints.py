@@ -2517,6 +2517,11 @@ class _AfkLoopInstance:
     def __init__(self):
         self.conversation = []
         self._compression_lock = threading.Lock()
+        # instance_name is a required AgentInstance field since BUG_0323 S1. create_app's
+        # boot (api_server.py:1074) sets session['session_name'] = existing_root.instance_name,
+        # and the AFK nudge loop feeds that back as the advisor caller; it must equal the test
+        # session root's canonical name 'w1' so caller stays 'w1' (and stays a str).
+        self.instance_name = 'w1'
 
 
 class _AfkLoopOm:

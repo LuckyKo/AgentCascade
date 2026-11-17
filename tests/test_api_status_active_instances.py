@@ -53,6 +53,11 @@ def _fake_pool(instances):
     pool.active_stack = []
     pool.operation_manager = None
     pool.is_instance_halted.return_value = False
+    # Faithful to AgentPool.get_instance (returns None for unknown names): BUG_0323 S1's
+    # create_app boot reads existing_root.instance_name, so a default-MagicMock get_instance
+    # (auto-returns a truthy MagicMock for any name) would corrupt session['session_name']
+    # with a MagicMock, making active_agent non-str. Return the real instance or None instead.
+    pool.get_instance.side_effect = lambda name: instances.get(name)
     return pool
 
 

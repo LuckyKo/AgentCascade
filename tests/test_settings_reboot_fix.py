@@ -85,7 +85,9 @@ class _FakePool:
         self.save_calls += 1
 
     def create_instance(self, *a, **k):
-        return SimpleNamespace(conversation=[])
+        # BUG_0323 S1: the __main__ boot reads root_instance.instance_name
+        # (api_server.py:3194/3222); mirror create_instance('Maine', ...) resolving to 'Maine'.
+        return SimpleNamespace(instance_name='Maine', conversation=[])
 
     def start(self):
         return None
