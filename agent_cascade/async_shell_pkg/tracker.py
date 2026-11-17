@@ -148,6 +148,34 @@ class AsyncShellTracker:
         """
         return git_autogc_hint_for_output('\n'.join(self._get_combined_output(task)))
 
+    # ── Stall watchdog hooks (BUG_0343) ─────────────────────────────
+    # Defaults are 0 = OFF, so the shell path keeps its historical behavior
+    # (no new poll-loop work, no new status lines, byte-identical output).
+    # A non-shell runner that wants stall detection overrides these.
+    def _stall_warn_seconds(self, task: 'AsyncShellTask') -> float:
+        """Seconds of output silence before __status reports "STALLED" (0 = off)."""
+        return 0.0
+
+    def _stall_kill_seconds(self, task: 'AsyncShellTask') -> float:
+        """Seconds of output silence before the run is terminated (0 = off)."""
+        return 0.0
+
+    def _status_progress_lines(self, task: 'AsyncShellTask', *, elapsed: float,
+                               silent_for: float, has_output: bool) -> List[str]:
+        """Extra status lines describing output progress (default: none).
+
+        Returned lines are appended verbatim to ``get_status`` while the run is still
+        active. The default returns [] so shell status output is unchanged.
+        """
+        return []
+
+    def _stall_header_line(self, task: 'AsyncShellTask', elapsed: float) -> str:
+        """Second line of a stall-kill completion header (only used when stalled=True)."""
+        silent = getattr(task, 'stall_seconds', 0.0) if task is not None else 0.0
+        return (f"Stalled: no new output for {silent:.0f}s ({elapsed:.1f}s total). "
+                f"Process terminated by the stall watchdog.")
+
+
     def _completion_body(self, agent_name: str, tool_id: int, header: str, *,
                         timed_out: bool = False, error: Optional[str] = None) -> str:
         """Turn the completion header into the final delivered body (error route).
@@ -468,35 +496,42 @@ class AsyncShellTracker:
 
         start_wait = time.time()
         while True:
+            pid = 0
+            early_output = None
+            completed_early = False
+            return_code = None
+            process_started = False
             with task._lock:
-                # Wait until process has actually started
-                if task.process is None:
-                    time.sleep(LAUNCH_POLL_INTERVAL)
-                    continue
-
-                # Bounded wait: exit the loop when the timeout elapses. The final
-                # check below (after the lock) re-reads completion, so a process
-                # that finished right at the boundary is still detected here —
-                # mirroring _poll_loop's liveness re-check pattern.
+                # Bounded wait: applies whether or not the process has started yet.
+                # A spawn that never publishes must not spin forever here.
                 if time.time() - start_wait >= timeout:
                     break
 
-                pid = task.pid
-                combined = list(task.stdout_lines) + list(task.stderr_lines)
-                # Filter empty lines, mirroring _format_output_text's logic (returns list here, not joined string)
-                early_output = [l for l in combined if l.strip()] if combined else None
-                completed_early = task.completed
-                return_code = task.return_code
+                # Wait until process has actually started
+                if task.process is not None:
+                    process_started = True
+                    pid = task.pid
+                    combined = list(task.stdout_lines) + list(task.stderr_lines)
+                    # Filter empty lines, mirroring _format_output_text's logic (returns list here, not joined string)
+                    early_output = [l for l in combined if l.strip()] if combined else None
+                    completed_early = task.completed
+                    return_code = task.return_code
 
-                # If already completed, mark it so tracking thread skips all messages.
-                # The caller will return the full result inline instead.
-                if completed_early:
-                    task.completed_at_launch = True
+                    # If already completed, mark it so tracking thread skips all messages.
+                    # The caller will return the full result inline instead.
+                    if completed_early:
+                        task.completed_at_launch = True
 
-                # Update heartbeat position so subsequent heartbeats don't resend
-                # lines already shown in the launch message.
-                if early_output is not None:
-                    task.last_heartbeat_sent_pos = len(combined)
+                    # Update heartbeat position so subsequent heartbeats don't resend
+                    # lines already shown in the launch message.
+                    if early_output is not None:
+                        task.last_heartbeat_sent_pos = len(combined)
+
+            if not process_started:
+                # Sleep OUTSIDE the task lock so a concurrent get_status/__status never
+                # blocks on the launch-time check.
+                time.sleep(LAUNCH_POLL_INTERVAL)
+                continue
 
             # Got process info — if completed, return immediately.
             # If we have output but not completion, keep polling briefly to see if
@@ -756,6 +791,17 @@ class AsyncShellTracker:
         timed_out = False
         last_heartbeat_time = time.time()
 
+        # Stall watchdog (BUG_0343). Both thresholds default to 0 (= off), so the shell
+        # path performs none of this work. The baseline is the last observed output line;
+        # the spawn path seeds task.last_output_at so silence is measured from start.
+        stall_warn = self._stall_warn_seconds(task)
+        stall_kill = self._stall_kill_seconds(task)
+        stall_watched = stall_warn > 0 or stall_kill > 0
+        stall_warned = False
+        with task._lock:
+            last_output_at = task.last_output_at or time.time()
+            output_count = len(task.stdout_lines) + len(task.stderr_lines)
+
         while True:
             # Re-check liveness every iteration (not just at the loop head). A
             # process that exits right after the 0.5s poll sleep must not be
@@ -777,7 +823,37 @@ class AsyncShellTracker:
                 # Just break so it can handle cleanup consistently.
                 break
 
+            # ── Stall watchdog: never break on warn, only on the optional kill limit.
+            # Line counts only grow (status consumption advances a position, it never pops),
+            # so any change means genuinely new output.
+            if stall_watched:
+                with task._lock:
+                    new_count = len(task.stdout_lines) + len(task.stderr_lines)
+                    if new_count != output_count:
+                        output_count = new_count
+                        last_output_at = time.time()
+                        task.last_output_at = last_output_at
+                silent_for = time.time() - last_output_at
+                if stall_kill > 0 and silent_for >= stall_kill:
+                    with task._lock:
+                        task.stall_kill_requested = True
+                        task.stall_seconds = silent_for
+                    # Don't kill here — _track_task is the single owner of termination.
+                    logger.warning(
+                        f"[AsyncShell] Stall watchdog: {self._TOOL_NAME} {agent_name} "
+                        f"tool_id={tool_id} produced no output for {silent_for:.0f}s "
+                        f"(kill threshold {stall_kill:.0f}s) — terminating.")
+                    break
+                if stall_warn > 0 and not stall_warned and silent_for >= stall_warn:
+                    stall_warned = True
+                    logger.warning(
+                        f"[AsyncShell] Stall watchdog: {self._TOOL_NAME} {agent_name} "
+                        f"tool_id={tool_id} produced no output for {silent_for:.0f}s "
+                        f"(warn {stall_warn:.0f}s, kill "
+                        f"{stall_kill:.0f}s = off). Still running.")
+
             # Send heartbeat if interval configured and enough time passed.
+
             # Re-read heartbeat_interval each iteration so __heartbeat=-1 takes effect immediately.
             with task._lock:
                 current_hb_interval = task.heartbeat_interval
@@ -882,6 +958,7 @@ class AsyncShellTracker:
             with task._lock:
                 killed_externally = task.killed
                 kill_in_progress = task.kill_in_progress
+                stall_killed = task.stall_kill_requested
             if killed_externally and not kill_in_progress:
                 # External kill requested but kill_task hasn't started yet (e.g., race).
                 # Only kill main process if still alive; _kill_process_tree handles viewer cleanup.
@@ -891,8 +968,8 @@ class AsyncShellTracker:
                 elif task.viewer_process is not None:
                     # Main process already finished but kill was requested — just kill viewer.
                     self._kill_viewer_process(task)
-            elif timed_out:
-                # Timeout — kill both main process tree and viewer
+            elif timed_out or stall_killed:
+                # Timeout / stall watchdog — kill both main process tree and viewer.
                 self._kill_process_tree(proc, agent_name, tool_id)
                 time.sleep(PROCESS_KILL_SETTLE_DELAY)
             else:
@@ -914,7 +991,8 @@ class AsyncShellTracker:
             if killed_externally:
                 rc = proc.returncode if proc.returncode is not None else -1  # Killed externally
             else:
-                rc = proc.returncode if proc.returncode is not None else (1 if timed_out else 0)
+                rc = proc.returncode if proc.returncode is not None else (
+                    1 if (timed_out or stall_killed) else 0)
             with task._lock:
                 task.completed = True
                 task.return_code = rc
@@ -958,7 +1036,8 @@ class AsyncShellTracker:
                 # (a "final output" message followed by a "completed" message); merging
                 # them avoids the useless duplicate and keeps everything in one reply.
                 task = self._get_task(agent_name, tool_id)
-                msg = self._build_completion_message(agent_name, tool_id, task, timed_out=timed_out)
+                msg = self._build_completion_message(agent_name, tool_id, task, timed_out=timed_out,
+                                                     stalled=stall_killed)
 
                 # Enqueue the merged message BEFORE the finally block removes the task
                 # from _tasks. Order matters: while the message is in flight the task is
@@ -1385,15 +1464,16 @@ class AsyncShellTracker:
         tool_id: int,
         task: Optional['AsyncShellTask'],
         timed_out: bool = False,
+        stalled: bool = False,
     ) -> str:
         """Build the merged completion message (header + remaining output + hint).
 
         On timeout, if the accumulated output mentions git's "geometric repack"
         (BUG_0139), append an actionable hint: the primary git operation often
         succeeded before auto-gc hung, so the agent should verify state instead of
-        blindly retrying.
+        blindly retrying. ``stalled`` selects the stall-kill header (BUG_0343).
         """
-        header = self._build_completion_header(tool_id, task, timed_out=timed_out)
+        header = self._build_completion_header(tool_id, task, timed_out=timed_out, stalled=stalled)
         remaining_text = self._get_remaining_output_text(agent_name, tool_id)
         msg = header if not remaining_text else f"{header}\n\nOutput:\n{remaining_text}"
         if timed_out and task is not None:
@@ -1409,6 +1489,7 @@ class AsyncShellTracker:
         task: Optional['AsyncShellTask'],
         timed_out: bool = False,
         error: Optional[str] = None,
+        stalled: bool = False,
     ) -> str:
         """Build the two-line completion header (no output) for a finished shell.
 
@@ -1419,10 +1500,14 @@ class AsyncShellTracker:
         Formats (label from ``_TOOL_NAME``; the timeout tail from ``_timeout_header_line``):
           - Normal : "⟨{self._TOOL_NAME} completed⟩ Tool ID: {id}\\nCompleted in {elapsed:.1f} s ({status})."
           - Timeout: "⟨{self._TOOL_NAME} completed⟩ Tool ID: {id}\\n" + _timeout_header_line(timeout, elapsed)
+          - Stall  : "⟨{self._TOOL_NAME} completed⟩ Tool ID: {id}\\n" + _stall_header_line(task, elapsed)
           - Error  : "⟨{self._TOOL_NAME} completed⟩ Tool ID: {id}\\nError: {error} ({elapsed:.1f}s elapsed)."
         """
         elapsed = _elapsed_for_task(task)
 
+        if stalled and not error:
+            return (f"⟨{self._TOOL_NAME} completed⟩ Tool ID: {tool_id}\n"
+                    + self._stall_header_line(task, elapsed))
         if timed_out and not error:
             timeout_val = task.timeout if task else '?'
             return (f"⟨{self._TOOL_NAME} completed⟩ Tool ID: {tool_id}\n"
@@ -1705,9 +1790,11 @@ class AsyncShellTracker:
             completed = task.completed
             return_code = task.return_code
             heartbeat = task.heartbeat_interval
+            last_output_at = task.last_output_at
             # NOTE: computed inline (already holding task._lock above); must NOT use
             # _elapsed_for_task() here as it re-acquires the non-reentrant lock -> deadlock.
-            elapsed = time.time() - task.start_time
+            now = time.time()
+            elapsed = now - task.start_time
 
             # Consume all output since last consumption (same pattern as _send_heartbeat)
             combined = list(task.stdout_lines) + list(task.stderr_lines)
@@ -1724,6 +1811,14 @@ class AsyncShellTracker:
         msg = (f"⟨{self._TOOL_NAME} status⟩ Tool ID: {tool_id}\n"
                f"Status: {status_label}\n"
                f"PID: {pid}\n")
+        # Output-progress / stall verdict (BUG_0343). Only while active: a completed run's
+        # header already says so. Default hook returns [] -> shell status is unchanged.
+        if not completed:
+            silent_for = max(0.0, now - last_output_at) if last_output_at > 0 else elapsed
+            for progress_line in self._status_progress_lines(
+                    task, elapsed=elapsed, silent_for=silent_for,
+                    has_output=last_output_at > 0):
+                msg += f"{progress_line}\n"
         if self._SHOW_HEARTBEAT_LINE:
             msg += f"Heartbeat interval: {heartbeat}s\n"
         if self._SHOW_COMMAND_LINE:

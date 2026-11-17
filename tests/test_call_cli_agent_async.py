@@ -13,12 +13,15 @@ No Docker, no real CLI, no LLM.
 """
 
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_cascade.async_shell_pkg import CliAgentTracker
 from agent_cascade.async_shell_pkg.task import AsyncShellTask
+from agent_cascade.async_shell_pkg.tracker import AsyncShellTracker
+from agent_cascade.engine.tool_execution import _is_pause_exempt_control_call
 from agent_cascade.tool_dispatcher import ToolDispatcher
 from agent_cascade.engine import tool_execution
 
@@ -374,3 +377,191 @@ def test_spawn_error_route_wrapped(monkeypatch):
     assert body.startswith(f'<{TAG}>'), 'error route must be trust-wrapped too'
     assert '⟨call_cli_agent completed⟩' in body
     assert sem._value == 2  # spawn-error release path keeps the slot free
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10) stall watchdog + last-output age (BUG_0343)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _patch_stall(monkeypatch, *, warn, kill):
+    monkeypatch.setattr(
+        'agent_cascade.async_shell_pkg.cli_agent_tracker.CLI_AGENT_STALL_WARN_SECONDS', warn)
+    monkeypatch.setattr(
+        'agent_cascade.async_shell_pkg.cli_agent_tracker.CLI_AGENT_STALL_KILL_SECONDS', kill)
+
+
+def test_status_reports_last_output_age_and_stall(monkeypatch):
+    _patch_stall(monkeypatch, warn=300.0, kill=0.0)
+    tracker = CliAgentTracker(pool=None)
+    task = _running_task(command='run-age')
+    task.process = _FakeProc(finished=False, pid=9999)
+    task.stdout_lines = ['partial']
+    task.last_output_at = time.time() - 400.0
+    _add_task(tracker, task, _ctx())
+
+    status = tracker.get_status('test_agent', 1)
+    assert 'Last output:' in status and 's ago' in status
+    assert 'STALLED' in status
+    assert 'warn threshold 300s' in status
+    assert 'auto-kill off' in status
+
+
+def test_status_reports_no_output_yet(monkeypatch):
+    _patch_stall(monkeypatch, warn=300.0, kill=0.0)
+    tracker = CliAgentTracker(pool=None)
+    task = _running_task(command='run-none')
+    task.process = _FakeProc(finished=False, pid=9999)
+    task.last_output_at = 0.0
+    task.start_time = time.time() - 30.0
+    _add_task(tracker, task, _ctx())
+
+    status = tracker.get_status('test_agent', 1)
+    assert 'Last output: none yet' in status
+    assert 's since start' in status
+
+
+def test_status_recent_output_is_not_stalled(monkeypatch):
+    _patch_stall(monkeypatch, warn=300.0, kill=0.0)
+    tracker = CliAgentTracker(pool=None)
+    task = _running_task(command='run-fresh')
+    task.process = _FakeProc(finished=False, pid=9999)
+    task.last_output_at = time.time() - 1.0
+    _add_task(tracker, task, _ctx())
+
+    status = tracker.get_status('test_agent', 1)
+    assert 'Last output:' in status
+    assert 'STALLED' not in status
+
+
+def test_status_reports_kill_threshold_reached(monkeypatch):
+    _patch_stall(monkeypatch, warn=100.0, kill=200.0)
+    tracker = CliAgentTracker(pool=None)
+    task = _running_task(command='run-killdue')
+    task.process = _FakeProc(finished=False, pid=9999)
+    task.last_output_at = time.time() - 250.0
+    _add_task(tracker, task, _ctx())
+
+    status = tracker.get_status('test_agent', 1)
+    assert 'STALLED' in status
+    assert 'kill threshold 200s' in status
+
+
+def test_stall_watchdog_kills_container_and_reports_stall(monkeypatch):
+    _patch_stall(monkeypatch, warn=0.02, kill=0.05)
+    pool = _RecordingPool()
+    tracker = CliAgentTracker(pool=pool)
+    proc = _FakeProc(finished=False)
+    task = _running_task(command='run-stall')
+    task.timeout = 60
+    task.launch_check_done.set()
+    _add_task(tracker, task, _ctx(container_name='ctr-stall'))
+    with patch('agent_cascade.async_shell_pkg.cli_agent_tracker.subprocess.Popen', return_value=proc), \
+         patch('agent_cascade.engine.cli_agent_runner._kill_container') as kc:
+        tracker._track_task('test_agent', 1, 'run-stall', None)
+
+    kc.assert_called_once_with('ctr-stall')  # stall kill leads with docker kill
+    body = pool.enqueued[0][1]
+    assert 'Stalled:' in body
+    assert 'stall watchdog' in body
+    assert 'Timed out after' not in body
+    assert tracker._get_completed_run('test_agent', 1) is not None
+
+
+def test_stall_warn_only_does_not_kill(monkeypatch):
+    """A warn-only watchdog logs/status-reports but never terminates the run."""
+    _patch_stall(monkeypatch, warn=0.02, kill=0.0)
+    tracker = CliAgentTracker(pool=None)
+    proc = _FakeProc(finished=False)
+    task = _running_task(command='run-warn')
+    task.timeout = 60
+    task.process = proc
+    task.last_output_at = time.time()
+    _add_task(tracker, task, _ctx())
+
+    def _finish_soon():
+        time.sleep(0.15)
+        proc.set_finished()
+
+    feeder = threading.Thread(target=_finish_soon, daemon=True)
+    feeder.start()
+    with patch.object(tracker, '_kill_process_tree') as kill_tree:
+        timed_out = tracker._poll_loop('test_agent', 1, proc, task, None, None)
+        feeder.join(timeout=2)
+
+    assert timed_out is False
+    assert task.stall_kill_requested is False
+    kill_tree.assert_not_called()  # _poll_loop must never kill
+
+
+def test_output_progress_resets_stall_clock(monkeypatch):
+    """Steady output keeps the stall clock fresh, even with a short kill threshold."""
+    _patch_stall(monkeypatch, warn=0.05, kill=0.10)
+    tracker = CliAgentTracker(pool=None)
+    proc = _FakeProc(finished=False)
+    task = _running_task(command='run-busy')
+    task.timeout = 60
+    task.process = proc
+    task.last_output_at = time.time()
+    _add_task(tracker, task, _ctx())
+
+    def _feed_output():
+        for _ in range(8):
+            time.sleep(0.02)
+            with task._lock:
+                task.stdout_lines.append('progress')
+        proc.set_finished()
+
+    feeder = threading.Thread(target=_feed_output, daemon=True)
+    feeder.start()
+    timed_out = tracker._poll_loop('test_agent', 1, proc, task, None, None)
+    feeder.join(timeout=2)
+
+    assert timed_out is False
+    assert task.stall_kill_requested is False
+
+
+def test_get_launch_result_times_out_when_process_never_starts():
+    """A spawn that never publishes must not spin forever in the early-output check."""
+    tracker = CliAgentTracker(pool=None)
+    task = _running_task(command='run-nospawn')
+    task.process = None
+    _add_task(tracker, task, _ctx())
+
+    started = time.time()
+    result = tracker._get_launch_result('test_agent', 1, timeout=0.05)
+    assert result == (0, None, False, None)
+    assert time.time() - started < 2.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11) pause gate: control verbs stay reachable while the pool is paused
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_pause_exempt_control_call_detection():
+    assert _is_pause_exempt_control_call('call_cli_agent', {'task': '__status', 'tool_id': 1})
+    assert _is_pause_exempt_control_call('call_cli_agent', '{"task": "__kill", "tool_id": "2"}')
+    assert _is_pause_exempt_control_call('shell_cmd', {'command': '__ctrl_c', 'tool_id': 3})
+    # __wait blocks by design -> must honor the pause gate.
+    assert not _is_pause_exempt_control_call('call_cli_agent', {'task': '__wait', 'tool_id': 1})
+    # No target run -> it is a launch, not a control call.
+    assert not _is_pause_exempt_control_call('call_cli_agent', {'task': '__status'})
+    assert not _is_pause_exempt_control_call('call_cli_agent', {'task': 'do work', 'tool_id': 1})
+    assert not _is_pause_exempt_control_call('read_file', {'task': '__status', 'tool_id': 1})
+    assert not _is_pause_exempt_control_call('call_cli_agent', 'not-json')
+
+
+def test_shell_status_has_no_stall_lines():
+    """Byte-identity guard: the stall surface is CLI-only; shell __status is unchanged."""
+    tracker = AsyncShellTracker(pool=None)
+    task = AsyncShellTask(tool_id=1, agent_name='test_agent', command='echo x', pid=1)
+    task.process = _FakeProc(finished=False)
+    task.last_output_at = time.time() - 10_000
+    task.start_time = time.time() - 10_000
+    with tracker._lock:
+        tracker._tasks.setdefault('test_agent', {})[1] = task
+
+    status = tracker.get_status('test_agent', 1)
+    assert 'Last output:' not in status
+    assert 'STALLED' not in status

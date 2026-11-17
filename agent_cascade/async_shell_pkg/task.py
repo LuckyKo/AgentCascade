@@ -93,3 +93,12 @@ class AsyncShellTask:
     # queue. Set True only once the completion (or error) message has been handed
     # to the pool; has_active_tasks() treats an undelivered task as still active.
     completion_delivered: bool = False
+
+    # Output-progress tracking for the stall watchdog (BUG_0343). ``last_output_at``
+    # is the epoch time a new stdout/stderr line was last observed, or 0.0 when no
+    # output has been seen yet (the shared poll loop seeds/tracks it). ``stall_seconds``
+    # latches the observed silence when the kill threshold trips; ``stall_kill_requested``
+    # tells ``_track_task`` to terminate the run (the poll loop itself never kills).
+    last_output_at: float = 0.0
+    stall_seconds: float = 0.0
+    stall_kill_requested: bool = False

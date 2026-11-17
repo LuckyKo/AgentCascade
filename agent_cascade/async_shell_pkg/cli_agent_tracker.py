@@ -36,6 +36,7 @@ import uuid
 
 from agent_cascade.async_shell_pkg.constants import SPAWN_PUBLISH_TIMEOUT
 from agent_cascade.async_shell_pkg.tracker import AsyncShellTracker, _PendingSpawn
+from agent_cascade.settings import (CLI_AGENT_STALL_KILL_SECONDS, CLI_AGENT_STALL_WARN_SECONDS)
 from agent_cascade.shell_utils import drain_pipe_lines
 from agent_cascade.log import logger
 
@@ -225,6 +226,9 @@ class CliAgentTracker(AsyncShellTracker):
             task.pid = proc.pid
             task.process = proc
             task._cli_sem = sem
+            # Stall watchdog baseline: silence is measured from container start, not from
+            # task creation (a run queued behind the semaphore/rate limit is not stalled).
+            task.last_output_at = time.time()
 
         logger.debug(f"[CliAgent] Launched tool_id={tool_id} for {agent_name}, PID={proc.pid}")
 
@@ -291,6 +295,46 @@ class CliAgentTracker(AsyncShellTracker):
                              f"tool_id={tool_id}: {e}")
 
     # ────────────────────────────────────────────────────────────────────────
+    def _stall_warn_seconds(self, task) -> float:
+        """Seconds of output silence before __status says STALLED (0 = off)."""
+        return CLI_AGENT_STALL_WARN_SECONDS
+
+    def _stall_kill_seconds(self, task) -> float:
+        """Seconds of output silence before the container is terminated (0 = off)."""
+        return CLI_AGENT_STALL_KILL_SECONDS
+
+    def _status_progress_lines(self, task, *, elapsed: float, silent_for: float,
+                               has_output: bool):
+        """Surface last-output age + a stall verdict in async __status (BUG_0343).
+
+        Without this, a hung container and a slow one look identical: both are just
+        "running (N s elapsed)". The age is measured from the last new stdout/stderr
+        line, so a run that is thinking silently is distinguishable from one that has
+        produced nothing at all.
+        """
+        if has_output:
+            lines = [f"Last output: {silent_for:.0f}s ago"]
+        else:
+            lines = [f"Last output: none yet ({silent_for:.0f}s since start)"]
+
+        warn = self._stall_warn_seconds(task)
+        kill = self._stall_kill_seconds(task)
+        if kill > 0 and silent_for >= kill:
+            lines.append(f"STALLED: no new output for {silent_for:.0f}s "
+                         f"(kill threshold {kill:.0f}s reached; terminating the container)")
+        elif warn > 0 and silent_for >= warn:
+            suffix = f"; auto-kill at {kill:.0f}s" if kill > 0 else ' (auto-kill off)'
+            lines.append(f"STALLED: no new output for {silent_for:.0f}s "
+                         f"(warn threshold {warn:.0f}s{suffix})")
+        return lines
+
+    def _stall_header_line(self, task, elapsed: float) -> str:
+        """Stall-kill completion tail: distinguish it from the wall-clock timeout."""
+        silent = getattr(task, 'stall_seconds', 0.0) if task is not None else 0.0
+        return (f"Stalled: no new output for {silent:.0f}s ({elapsed:.1f}s total). "
+                f"Container terminated by the stall watchdog (not the wall-clock timeout).")
+
+    # ────────────────────────────────────────────────────────────────────────
     def _timeout_header_line(self, timeout_val, elapsed: float) -> str:
         """Timeout tail: report the conventional exit 124 (matching the sync runner) and
         'Container terminated' instead of the shell's 'All child processes terminated'."""
@@ -327,12 +371,13 @@ class CliAgentTracker(AsyncShellTracker):
 
     # ────────────────────────────────────────────────────────────────────────
     def _build_completion_message(self, agent_name: str, tool_id: int, task,
-                                  timed_out: bool = False) -> str:
+                                  timed_out: bool = False, stalled: bool = False) -> str:
         """Merged completion message (header + remaining output + full_output footer), trust-wrapped.
 
         Full stdout/stderr is persisted for ``read_logs`` before the message body is truncated
         for display. Timeout is flagged on the task so ``_record_completed_run`` normalizes the
-        recorded exit code to the conventional 124.
+        recorded exit code to the conventional 124. ``stalled`` reports a stall-watchdog kill
+        (a different cause than the wall-clock timeout).
         """
         # Flag timeout for the completed-run normalization, then persist FULL output (raw lines,
         # read before super()'s display truncation consumes/advances the position — persist is
@@ -352,7 +397,8 @@ class CliAgentTracker(AsyncShellTracker):
                 requested_posture=ctx.get('requested_posture', 'acceptEdits'))
 
         # Parent assembles header + remaining output (no git hint — _timeout_hint returns '').
-        msg = super()._build_completion_message(agent_name, tool_id, task, timed_out=timed_out)
+        msg = super()._build_completion_message(agent_name, tool_id, task, timed_out=timed_out,
+                                                stalled=stalled)
         return self._wrap(f"{msg}\n\nfull_output={log_path}")
 
     # ────────────────────────────────────────────────────────────────────────

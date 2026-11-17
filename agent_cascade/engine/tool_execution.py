@@ -69,8 +69,51 @@ def _wrap_untrusted(tool_name: str, result):
     return f'<{UNTRUSTED_TOOL_OUTPUT_TAG}>\n{result}\n</{UNTRUSTED_TOOL_OUTPUT_TAG}>'
 
 
+# Async control verbs that only inspect or terminate an ALREADY-RUNNING background task.
+# They spawn nothing, consume no LLM/GPU slot, and must stay reachable while the pool is
+# paused — otherwise a paused pool makes a stuck run both unobservable and un-abortable
+# (BUG_0343: a __status call sat in the pause gate for 5 minutes). __wait is deliberately
+# excluded: it blocks by design and should honor the pause.
+_PAUSE_EXEMPT_CONTROL_VERBS: frozenset[str] = frozenset({'__status', '__kill', '__ctrl_c'})
+
+
+def _is_pause_exempt_control_call(tool_name: str, tool_args) -> bool:
+    """True when the call is a status/kill/interrupt control verb for an async task.
+
+    The verb travels in ``task`` for ``call_cli_agent`` and in ``command`` for
+    ``shell_cmd``; both address an existing run via ``tool_id``. Args may be a dict
+    or a JSON object string.
+    """
+    if tool_name not in ('call_cli_agent', 'shell_cmd'):
+        return False
+    args = tool_args
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(args, dict) or args.get('tool_id') is None:
+        return False
+    verb = args.get('task') if tool_name == 'call_cli_agent' else args.get('command')
+    return isinstance(verb, str) and verb.strip().lower() in _PAUSE_EXEMPT_CONTROL_VERBS
+
+
 class ToolExecMixin:
     """Mixin providing tool-execution and image-handling methods."""
+
+    def _wait_until_resumed(self, inst_name: str, tool_name: str, tool_args) -> None:
+        """Cooperatively wait while the pool is paused.
+
+        Status/kill/interrupt control verbs for an already-running async task are exempt:
+        they spawn nothing, use no LLM/GPU slot, and must stay reachable while paused
+        (BUG_0343: a __status call otherwise sat in this gate for five minutes).
+        """
+        if _is_pause_exempt_control_call(tool_name, tool_args):
+            return
+        while self.pool.is_paused():
+            if self._is_terminal_stop(inst_name):
+                break  # Terminal stop — exit pause-wait, will break at next _is_stopped check
+            self.pool.wait_if_paused(timeout=1.0)
 
     def _execute_detected_tools(self, instance: AgentInstance, inst_name: str, turn_output: List[Message],
                                 messages: List[Message], llm_messages: List[Message], response: List[Message]) -> bool:
@@ -151,11 +194,10 @@ class ToolExecMixin:
                 if _out_idx in _already_emitted:
                     continue
 
-                # Cooperatively wait if paused — don't skip tool execution, just wait
-                while self.pool.is_paused():
-                    if self._is_terminal_stop(inst_name):
-                        break  # Terminal stop — exit pause-wait, will break at next _is_stopped check
-                    self.pool.wait_if_paused(timeout=1.0)
+                # Cooperatively wait if paused — don't skip tool execution, just wait.
+                # Status/kill/interrupt control verbs for an already-running async task
+                # are exempt (see _wait_until_resumed).
+                self._wait_until_resumed(inst_name, tool_name, tool_args)
 
                 # Stop/halt check BEFORE tool execution (check before setting
                 # used_any_tool)
