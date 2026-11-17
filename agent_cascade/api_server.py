@@ -206,12 +206,6 @@ def _signal_stop(session: dict) -> None:
         session['stop_requested'] = True
 
 
-def _set_generating_true(session: dict) -> None:
-    """Atomically mark session as generating."""
-    with session_lock:
-        session['generating'] = True
-
-
 # Display length cap for the /api/sessions caption fallback (first USER message). A first
 # user message can be a long prompt or a pasted file, so it is never returned raw. 120 chars
 # is a UI display heuristic — roughly one readable line in the session-list column; not a
@@ -572,7 +566,7 @@ def _validate_image_gen_config(data: dict) -> tuple:
     cache-bust stay in the route (it owns the factory-local config path).
 
     Type-conditional: for ``type='sdcpp'`` the ``url`` is not required and the
-    top-level 30-600s timeout range check is skipped (F2) — the ``sdcpp`` block
+    top-level 30-600s timeout range check is skipped — the ``sdcpp`` block
     carries its own 30-1800s timeout, which is validated here.
     """
     from fastapi.responses import JSONResponse
@@ -588,7 +582,7 @@ def _validate_image_gen_config(data: dict) -> tuple:
 
     # Validate top-level timeout. Accept int or numeric string; reject floats
     # (int() would silently truncate e.g. 180.5 → 180). For sdcpp the 30-600s
-    # range is skipped (F2) — the sdcpp block carries its own 30-1800s timeout.
+    # range is skipped — the sdcpp block carries its own 30-1800s timeout.
     timeout, err = _coerce_timeout_int(data.get('timeout', 180), 'timeout')
     if err is not None:
         return None, err
@@ -604,7 +598,7 @@ def _validate_image_gen_config(data: dict) -> tuple:
     }
 
     # sdcpp block: pass through + validate. The block is optional — when absent
-    # the sdcpp backend is a no-op (see image_gen.py). F2: sdcpp.timeout is
+    # the sdcpp backend is a no-op (see image_gen.py). sdcpp.timeout is
     # validated at 30-1800s, independent of the top-level 30-600s check.
     sdcpp = data.get('sdcpp')
     if sdcpp is not None:
@@ -1151,15 +1145,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             logger.debug(f"Failed to list pending approvals (returning empty): {e}")
             return []
 
-    def _safe_get_telemetry():
-        """Get telemetry summary safely — never crash state serialization."""
-        try:
-            if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
-                return agent_pool.telemetry.get_session_summary()
-        except Exception as e:
-            logger.debug(f"Telemetry fetch failed (non-critical): {e}")
-        return None
-
     async def _broadcast_state(ws_type: str = 'state', generating=None):
         """Broadcast a state update to all WebSocket clients.
 
@@ -1205,7 +1190,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Carry the shared settings + endpoints revisions on every state frame so a
             # (re)connecting client can detect a settings_conflict / stale revision and
             # re-hydrate. `pool_settings` is already set by build_state_from_pool — do NOT
-            # rebuild it here (MAJOR-5: avoid building the settings snapshot twice).
+            # rebuild it here (avoid building the settings snapshot twice).
             result['settings_revision'] = _runtime_state.settings_revision
             result['endpoints_revision'] = _runtime_state.endpoints_revision
 
@@ -1259,69 +1244,6 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 'current_model': current_model,
             })
             return state
-
-        return result
-
-    def build_stream_update(responses, cached_h_stats=None, agent_instances=None, telemetry=None):
-        """Build a lightweight streaming delta (skips re-serializing stable history).
-
-        Delegates to build_stream_update_from_pool which reads from pool.instances.
-        Legacy parameters are accepted but ignored — callers should use the unified path directly.
-        """
-        instance_name = session['session_name']
-
-        result = build_stream_update_from_pool(
-            pool=agent_pool,
-            instance_name=instance_name,
-            responses=responses,
-        )
-
-        # Fallback to minimal state if unified build failed
-        if result is None:
-            approvals = _get_approvals(agent_pool) if agent_pool else []
-            stopped = agent_pool.stopped if agent_pool else False
-
-            # Get current model
-            current_model = 'Unknown'
-            if agents:
-                orch = agents[0]
-                if hasattr(orch, 'llm') and orch.llm:
-                    current_model = getattr(orch.llm, 'model', 'Unknown')
-
-            # Resolve max_tokens via shared helper (same logic as _get_max_tokens_for_instance)
-            orch_inst = agent_pool.get_instance(instance_name) if agent_pool else None
-            stream_max_tokens = _resolve_max_tokens(agent_pool, orch_inst)
-
-            # Build minimal root instance state — frontend reads from agent_instances now
-            serialized_msgs = [serialize_message(m, i) for i, m in enumerate(responses or [])]
-            root_state = {
-                'instance_name': instance_name,
-                'agent_class': 'orchestrator',
-                'active': True,
-                'is_halted': False,
-                'parent_instance': None,
-                'has_queued_messages': False,
-                'messages': serialized_msgs,
-                'history_count': len(responses or []),
-                'is_partial': True,
-                'total_tokens': 0,
-                'total_words': 0,
-                'max_tokens': stream_max_tokens,
-            }
-
-            return {
-                'agent_instances': {instance_name: root_state},
-                'active_stack': [],
-                'approvals': approvals,
-                'generating': True,
-                'total_tokens': 0,
-                'total_words': 0,
-                'max_tokens': stream_max_tokens,
-                'current_model': current_model,
-                'telemetry': None,
-                'stopped': stopped,
-                'paused': agent_pool.is_paused() if agent_pool else False,
-            }
 
         return result
 
@@ -2650,11 +2572,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.post('/api/image_gen')
     async def save_image_gen_config(request: Request):
-        """Save image gen config. Validates URL format and timeout range.
+        """Save image gen config.
 
-        Type-conditional: for ``type='sdcpp'`` the ``url`` is not required and the
-        top-level 30-600s timeout range check is skipped (F2) — the ``sdcpp`` block
-        carries its own 30-1800s timeout, which is validated here.
+        URL format, top-level timeout range, and any sdcpp-block timeout are
+        validated by ``_validate_image_gen_config``; this route only parses the
+        body and delegates to that helper.
         """
         try:
             data = await request.json()
