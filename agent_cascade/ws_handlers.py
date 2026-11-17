@@ -9,11 +9,107 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, ClassVar, Dict, Optional
 
 # Re-exports for backward compatibility (Phase 4b refactor)
 from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.ws_helpers import _clear_caches_safely, _validate_disabled_tools
+
+
+# ── WS message-envelope schema (BUG_0336) ──────────────────────────────────
+# Single source of truth for the ``type`` wire values and the envelope field
+# names, shared by BOTH the dispatch table and the response builders.
+#
+# ``MsgType`` is a ``str``-MIXIN enum so its members ARE their string values:
+# ``json.dumps({'type': MsgType.ERROR})`` is byte-identical to
+# ``{'type': 'error'}`` (wire format unchanged), and a plain string from
+# ``data.get('type')`` still resolves against a ``MsgType``-keyed dict because
+# str hash/eq are inherited (``hash('message') == hash(MsgType.MESSAGE)``).
+# A plain ``Enum`` would break ``dispatch``'s lookup.
+class MsgType(str, Enum):
+    # Incoming dispatch keys (see ``_dispatch_table``).
+    MESSAGE = 'message'
+    CONTINUE = 'continue'
+    STOP = 'stop'
+    KV_STATE = 'kv_state'
+    PAUSE = 'pause'
+    RESUME_ALL = 'resume_all'
+    RESUME = 'resume'
+    TERMINATE_AGENT_INSTANCE = 'terminate_agent_instance'
+    TERMINATE_SUB_AGENT = 'terminate_sub_agent'
+    RETRY = 'retry'
+    RESET = 'reset'
+    REFRESH_SOULS = 'refresh_souls'
+    REFRESH_AGENTS = 'refresh_agents'
+    RESTART_SERVER = 'restart_server'
+    UPDATE_CONFIG = 'update_config'
+    UPDATE_SETTINGS = 'update_settings'
+    SET_WORK_FOLDERS = 'set_work_folders'
+    UPDATE_ENDPOINTS = 'update_endpoints'
+    UPDATE_API_PRIORITIES = 'update_api_priorities'
+    APPROVE = 'approve'
+    REJECT = 'reject'
+    ASK_SECURITY = 'ask_security'
+    SET_AUTO_SECURITY = 'set_auto_security'
+    SET_CLI_AGENT_KEY = 'set_cli_agent_key'
+    CLI_AGENT_OAUTH_MANUAL_CMD = 'cli_agent_oauth_manual_cmd'
+    CLI_AGENT_OAUTH_RECHECK = 'cli_agent_oauth_recheck'
+    SET_AFK = 'set_afk'
+    EDIT_MESSAGE = 'edit_message'
+    DELETE_MESSAGES = 'delete_messages'
+    SELECT_AGENT = 'select_agent'
+    SET_SESSION_NAME = 'set_session_name'
+    LOAD_SESSION = 'load_session'
+    INJECT = 'inject'
+    DISMISS_QUEUE = 'dismiss_queue'
+    EXPORT_SETTINGS = 'export_settings'
+    IMPORT_SETTINGS = 'import_settings'
+    MIGRATE_SETTINGS_LOCAL = 'migrate_settings_local'
+    REQUEST_STATE = 'request_state'
+    # Outgoing-only response types.
+    STATE = 'state'
+    STREAM_UPDATE = 'stream_update'
+    ERROR = 'error'
+    REFRESH_AGENTS_RESULT = 'refresh_agents_result'
+    KV_STATE_RESULT = 'kv_state_result'
+    SETTINGS_APPLIED = 'settings_applied'
+    SETTINGS_CHANGED = 'settings_changed'
+    INFO = 'info'
+    WARNING = 'warning'
+    CLI_AGENT_OAUTH_FAILED = 'cli_agent_oauth_failed'
+    CLI_AGENT_OAUTH_STATUS = 'cli_agent_oauth_status'
+
+
+@dataclass
+class WsEnvelope:
+    """WS envelope field-name constants — the one source of truth for every
+    envelope key a handler reads from ``data`` or emits in a response dict.
+    Each value must stay byte-identical to the original wire literal."""
+    TYPE: ClassVar[str] = 'type'
+    SESSION_NAME: ClassVar[str] = 'session_name'
+    MESSAGE: ClassVar[str] = 'message'
+    ERROR: ClassVar[str] = 'error'
+    INSTANCE_NAME: ClassVar[str] = 'instance_name'
+    STATUS: ClassVar[str] = 'status'
+    GENERATE_CFG: ClassVar[str] = 'generate_cfg'
+    API_ROUTER: ClassVar[str] = 'api_router'
+    # type-specific envelope fields (lower frequency, still envelope keys):
+    INSTANCE: ClassVar[str] = 'instance'
+    HARNESS: ClassVar[str] = 'harness'
+    COMMAND: ClassVar[str] = 'command'
+    AUTHENTICATED: ClassVar[str] = 'authenticated'
+    REASON: ClassVar[str] = 'reason'
+    ACTION: ClassVar[str] = 'action'
+    RETRYABLE: ClassVar[str] = 'retryable'
+    REVISION: ClassVar[str] = 'revision'
+    BASE_REVISION: ClassVar[str] = 'base_revision'
+    SETTINGS: ClassVar[str] = 'settings'
+    MESSAGE_INDEX: ClassVar[str] = 'message_index'
+    # Optional typed shape (documentation; the ClassVars above are load-bearing):
+    type: MsgType = MsgType.STATE
+    session_name: Optional[str] = None
 
 
 def _msg_identity(msg) -> tuple:
@@ -66,50 +162,50 @@ class WsMessageHandler:
     @property
     def _dispatch_table(self) -> Dict[str, Callable]:
         return {
-            'message': self.handle_message,
-            'continue': self.handle_continue,
-            'stop': self.handle_stop,
-            'kv_state': self.handle_kv_state,
-            'pause': self.handle_pause,
-            'resume_all': self.handle_resume_all,
-            'resume': self.handle_resume,
-            'terminate_agent_instance': self.handle_terminate,
-            'terminate_sub_agent': self.handle_terminate,  # Alias
-            'retry': self.handle_retry,
-            'reset': self.handle_reset,
-            'refresh_souls': self.handle_refresh_souls,
-            'refresh_agents': self.handle_refresh_agents,
-            'restart_server': self.handle_restart_server,
-            'update_config': self.handle_update_config,
-            'update_settings': self.handle_update_settings,
-            'set_work_folders': self.handle_set_work_folders,
-            'update_endpoints': self.handle_update_endpoints,
-            'update_api_priorities': self.handle_update_api_priorities,
-            'approve': self.handle_approve,
-            'reject': self.handle_reject,
-            'ask_security': self.handle_ask_security,
-            'set_auto_security': self.handle_set_auto_security,
-            'set_cli_agent_key': self.handle_set_cli_agent_key,
-            'cli_agent_oauth_manual_cmd': self.handle_cli_agent_oauth_manual_cmd,
-            'cli_agent_oauth_recheck': self.handle_cli_agent_oauth_recheck,
-            'set_afk': self.handle_set_afk,
-            'edit_message': self.handle_edit_message,
-            'delete_messages': self.handle_delete_messages,
-            'select_agent': self.handle_select_agent,
-            'set_session_name': self.handle_set_session_name,
-            'load_session': self.handle_load_session,
-            'inject': self.handle_inject,
-            'dismiss_queue': self.handle_dismiss_queue,
-            'export_settings': self.handle_export_settings,
-            'import_settings': self.handle_import_settings,
-            'migrate_settings_local': self.handle_migrate_settings_local,
-            'request_state': self.handle_request_state,
+            MsgType.MESSAGE: self.handle_message,
+            MsgType.CONTINUE: self.handle_continue,
+            MsgType.STOP: self.handle_stop,
+            MsgType.KV_STATE: self.handle_kv_state,
+            MsgType.PAUSE: self.handle_pause,
+            MsgType.RESUME_ALL: self.handle_resume_all,
+            MsgType.RESUME: self.handle_resume,
+            MsgType.TERMINATE_AGENT_INSTANCE: self.handle_terminate,
+            MsgType.TERMINATE_SUB_AGENT: self.handle_terminate,  # Alias
+            MsgType.RETRY: self.handle_retry,
+            MsgType.RESET: self.handle_reset,
+            MsgType.REFRESH_SOULS: self.handle_refresh_souls,
+            MsgType.REFRESH_AGENTS: self.handle_refresh_agents,
+            MsgType.RESTART_SERVER: self.handle_restart_server,
+            MsgType.UPDATE_CONFIG: self.handle_update_config,
+            MsgType.UPDATE_SETTINGS: self.handle_update_settings,
+            MsgType.SET_WORK_FOLDERS: self.handle_set_work_folders,
+            MsgType.UPDATE_ENDPOINTS: self.handle_update_endpoints,
+            MsgType.UPDATE_API_PRIORITIES: self.handle_update_api_priorities,
+            MsgType.APPROVE: self.handle_approve,
+            MsgType.REJECT: self.handle_reject,
+            MsgType.ASK_SECURITY: self.handle_ask_security,
+            MsgType.SET_AUTO_SECURITY: self.handle_set_auto_security,
+            MsgType.SET_CLI_AGENT_KEY: self.handle_set_cli_agent_key,
+            MsgType.CLI_AGENT_OAUTH_MANUAL_CMD: self.handle_cli_agent_oauth_manual_cmd,
+            MsgType.CLI_AGENT_OAUTH_RECHECK: self.handle_cli_agent_oauth_recheck,
+            MsgType.SET_AFK: self.handle_set_afk,
+            MsgType.EDIT_MESSAGE: self.handle_edit_message,
+            MsgType.DELETE_MESSAGES: self.handle_delete_messages,
+            MsgType.SELECT_AGENT: self.handle_select_agent,
+            MsgType.SET_SESSION_NAME: self.handle_set_session_name,
+            MsgType.LOAD_SESSION: self.handle_load_session,
+            MsgType.INJECT: self.handle_inject,
+            MsgType.DISMISS_QUEUE: self.handle_dismiss_queue,
+            MsgType.EXPORT_SETTINGS: self.handle_export_settings,
+            MsgType.IMPORT_SETTINGS: self.handle_import_settings,
+            MsgType.MIGRATE_SETTINGS_LOCAL: self.handle_migrate_settings_local,
+            MsgType.REQUEST_STATE: self.handle_request_state,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
     async def dispatch(self, data: dict) -> None:
         """Route a parsed WebSocket message to the appropriate handler."""
-        msg_type = data.get('type', '')
+        msg_type = data.get(WsEnvelope.TYPE, '')
         handler = self._dispatch_table.get(msg_type)
         if handler is not None:
             await handler(data)
@@ -135,7 +231,7 @@ class WsMessageHandler:
                                                                  _put_stream_update)
         from agent_cascade.log import logger
 
-        instance_name = data.get('instance') or self.session['session_name']
+        instance_name = data.get(WsEnvelope.INSTANCE) or self.session['session_name']
         if not self.agent_pool:
             return
 
@@ -147,7 +243,7 @@ class WsMessageHandler:
                 force_full=True,
             )
             if su is not None and self.send_queue is not None:
-                await _put_stream_update(self.send_queue, {'type': 'stream_update', **su})
+                await _put_stream_update(self.send_queue, {WsEnvelope.TYPE: MsgType.STREAM_UPDATE, **su})
                 # Reset the periodic timer so the next automatic force_full is 60s from now
                 with _last_force_full_lock:
                     _last_force_full[instance_name] = time.monotonic()
@@ -155,7 +251,7 @@ class WsMessageHandler:
             logger.warning(f"request_state failed for {instance_name}: {e}")
 
     # ── Broadcast helper ──────────────────────────────────────────────────
-    async def _broadcast(self, ws_type: str = 'state', generating: Optional[bool] = None) -> None:
+    async def _broadcast(self, ws_type: str = MsgType.STATE, generating: Optional[bool] = None) -> None:
         """Broadcast state update to all WebSocket clients.
 
         Sends a full state snapshot via the broadcast function. The build_state_fn
@@ -167,7 +263,7 @@ class WsMessageHandler:
         """
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, lambda: self.build_state_fn(generating=generating))
-        await self.broadcast_fn({'type': ws_type, **state})
+        await self.broadcast_fn({WsEnvelope.TYPE: ws_type, **state})
 
     # ── Helper: get active agent runner ───────────────────────────────────
     def _get_agent(self):
@@ -210,11 +306,11 @@ class WsMessageHandler:
         """Apply session config updates (agent_index, session_name, generate_cfg)."""
         if 'agent_index' in data:
             self.session['agent_index'] = int(data['agent_index'])
-        if 'session_name' in data:
-            self.session['session_name'] = data['session_name'].strip()
-        if 'generate_cfg' in data:
-            _validate_disabled_tools(data['generate_cfg'])
-            self.session['generate_cfg'] = data['generate_cfg']
+        if WsEnvelope.SESSION_NAME in data:
+            self.session['session_name'] = data[WsEnvelope.SESSION_NAME].strip()
+        if WsEnvelope.GENERATE_CFG in data:
+            _validate_disabled_tools(data[WsEnvelope.GENERATE_CFG])
+            self.session['generate_cfg'] = data[WsEnvelope.GENERATE_CFG]
 
     def _sync_sub_agent_states(self) -> None:
         """Update instance_state for sub-agents after snapshot rollback."""
@@ -361,8 +457,9 @@ class WsMessageHandler:
         because the frontend ``case 'kv_state_result'`` renders ``${data.action}: ${data.message}``
         and the frame-relay test asserts all four fields.
         """
-        return {'status': status, 'action': action, 'instance_name': instance_name,
-                'reason': reason, 'message': message}
+        return {WsEnvelope.STATUS: status, WsEnvelope.ACTION: action,
+                WsEnvelope.INSTANCE_NAME: instance_name,
+                WsEnvelope.REASON: reason, WsEnvelope.MESSAGE: message}
 
     @staticmethod
     def _kv_target(action: str, agent_pool, instance_name: str):
@@ -607,7 +704,7 @@ class WsMessageHandler:
         inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
 
         if inst is None:
-            await self.broadcast_fn({'type': 'error', 'message': 'No agent instance found to continue'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'No agent instance found to continue'})
             return
 
         with inst._compression_lock:
@@ -653,8 +750,8 @@ class WsMessageHandler:
         does NOT call _broadcast('done') — a manual KV op must not disrupt ongoing
         streaming state.
         """
-        action = data.get('action', '')
-        instance_name = data.get('instance_name') or self.session['session_name']
+        action = data.get(WsEnvelope.ACTION, '')
+        instance_name = data.get(WsEnvelope.INSTANCE_NAME) or self.session['session_name']
 
         if action == 'save':
             result = await asyncio.to_thread(
@@ -667,10 +764,10 @@ class WsMessageHandler:
                 action or 'unknown', instance_name, 'failed', 'bad_action',
                 "kv_state requires action 'save' or 'load'")
 
-        result['type'] = 'kv_state_result'
+        result[WsEnvelope.TYPE] = MsgType.KV_STATE_RESULT
         await self.broadcast_fn(result)
         # Refresh instance state (kv_state_capable) after a successful op.
-        if result['status'] == 'ok':
+        if result[WsEnvelope.STATUS] == 'ok':
             await self._broadcast()
 
     async def handle_resume_all(self, data: dict) -> None:
@@ -683,7 +780,7 @@ class WsMessageHandler:
 
     async def handle_resume(self, data: dict) -> None:
         """Handle 'resume' — restore agent pools from logs and restart generation."""
-        target_instance = data.get('instance_name', self.session['session_name'])
+        target_instance = data.get(WsEnvelope.INSTANCE_NAME, self.session['session_name'])
         is_generating = self._is_generating()
 
         was_halted = False
@@ -786,7 +883,7 @@ class WsMessageHandler:
 
     async def handle_terminate(self, data: dict) -> None:
         """Handle 'terminate_agent_instance' / 'terminate_sub_agent'."""
-        instance_name = data.get('instance_name')
+        instance_name = data.get(WsEnvelope.INSTANCE_NAME)
         if instance_name and self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
@@ -942,7 +1039,7 @@ class WsMessageHandler:
         except Exception as e:
             from agent_cascade.log import logger
             logger.error(f"Agent refresh failed: {e}")
-            await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: f'Agent refresh failed: {e}'})
             return
 
         await self._broadcast()
@@ -960,16 +1057,16 @@ class WsMessageHandler:
             from agent_cascade.log import logger
             logger.error(f"Agent refresh failed: {e}")
             await self.send_queue.put({
-                'type': 'refresh_agents_result',
+                WsEnvelope.TYPE: MsgType.REFRESH_AGENTS_RESULT,
                 'agents': [],
-                'error': str(e),
+                WsEnvelope.ERROR: str(e),
             })
-            await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: f'Agent refresh failed: {e}'})
             return
 
         # Return result to caller for programmatic use
         await self.send_queue.put({
-            'type': 'refresh_agents_result',
+            WsEnvelope.TYPE: MsgType.REFRESH_AGENTS_RESULT,
             'agents': agent_names,
         })
 
@@ -981,7 +1078,7 @@ class WsMessageHandler:
         from agent_cascade.log import logger
         from agent_cascade.server_restart import restart_server_process
         logger.warning('Server restart requested via UI')
-        await self.broadcast_fn({'type': 'error', 'message': 'Server is restarting... Please wait.'})
+        await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Server is restarting... Please wait.'})
         restart_server_process()
 
     async def handle_update_config(self, data: dict) -> None:
@@ -995,13 +1092,13 @@ class WsMessageHandler:
         from agent_cascade.config_handlers import ConfigUpdateRouter
         from agent_cascade.settings_registry import ALL_KEYS, EXPORT_IMPORT_ALLOWLIST
 
-        if 'generate_cfg' in data:
+        if WsEnvelope.GENERATE_CFG in data:
             # DEPRECATED legacy full-push path: route through the registry so unknown keys
             # (UI-only cosmetic keys the server has no handler for) are dropped, not applied.
             # New clients should send the 'update_settings' delta message instead.
             # The session stores the FILTERED dict: other readers of session['generate_cfg']
             # (api_server, security_handler) must not see cosmetic UI-only keys.
-            ui_cfg = {k: v for k, v in data['generate_cfg'].items() if k in ALL_KEYS}
+            ui_cfg = {k: v for k, v in data[WsEnvelope.GENERATE_CFG].items() if k in ALL_KEYS}
             self.session['generate_cfg'] = ui_cfg
 
             router = ConfigUpdateRouter(self.agent_pool, self.agents)
@@ -1045,16 +1142,16 @@ class WsMessageHandler:
         from agent_cascade.runtime_state import state as _runtime_state
         from agent_cascade.settings_delta import apply_settings_changes, log_stale_revision
 
-        base_revision = data.get('base_revision')
+        base_revision = data.get(WsEnvelope.BASE_REVISION)
         changes = data.get('changes') or {}
         if not isinstance(changes, dict):
-            await self.broadcast_fn({'type': 'settings_applied',
-                                    'revision': int(_runtime_state.settings_revision),
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.SETTINGS_APPLIED,
+                                    WsEnvelope.REVISION: int(_runtime_state.settings_revision),
                                     'applied': [], 'rejected': {'changes': 'expected an object'}})
             return
 
         # Stale-tab guard (plan §11.3): log a revision mismatch but DO NOT reject the batch.
-        log_stale_revision(base_revision, _runtime_state.settings_revision, 'update_settings')
+        log_stale_revision(base_revision, _runtime_state.settings_revision, MsgType.UPDATE_SETTINGS.value)
 
         applied, rejected, changes_out, revision = await apply_settings_changes(
             self.agent_pool, self.agents, changes, session=self.session)
@@ -1065,10 +1162,10 @@ class WsMessageHandler:
 
         # Both messages go through broadcast_fn (all clients — no per-client send channel):
         # announce applied/rejected, then broadcast the changed state when keys applied.
-        await self.broadcast_fn({'type': 'settings_applied', 'revision': revision,
+        await self.broadcast_fn({WsEnvelope.TYPE: MsgType.SETTINGS_APPLIED, WsEnvelope.REVISION: revision,
                                  'applied': applied, 'rejected': rejected})
         if applied:
-            await self.broadcast_fn({'type': 'settings_changed', 'revision': revision,
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.SETTINGS_CHANGED, WsEnvelope.REVISION: revision,
                                      'changes': changes_out})
 
     async def handle_export_settings(self, data: dict) -> None:
@@ -1080,7 +1177,7 @@ class WsMessageHandler:
         from agent_cascade.log import logger
 
         if not self.agent_pool:
-            await self.broadcast_fn({'type': 'error', 'message': 'Agent pool not available for export'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Agent pool not available for export'})
             return
 
         try:
@@ -1136,12 +1233,12 @@ class WsMessageHandler:
             settings_data['auto_security'] = getattr(self.app, 'current_auto_security', False)
 
             await self.broadcast_fn({
-                'type': 'export_settings',
-                'settings': settings_data,
+                WsEnvelope.TYPE: MsgType.EXPORT_SETTINGS,
+                WsEnvelope.SETTINGS: settings_data,
             })
         except Exception as e:
             logger.error(f"[export_settings] Failed to export settings: {e}")
-            await self.broadcast_fn({'type': 'error', 'message': f'Export failed: {str(e)}'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: f'Export failed: {str(e)}'})
 
     async def handle_import_settings(self, data: dict) -> None:
         """Handle 'import_settings' — validate and apply settings from JSON blob.
@@ -1152,12 +1249,12 @@ class WsMessageHandler:
         from agent_cascade.log import logger
 
         if not self.agent_pool:
-            await self.broadcast_fn({'type': 'error', 'message': 'Agent pool not available for import'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Agent pool not available for import'})
             return
 
-        settings_json = data.get('settings')
+        settings_json = data.get(WsEnvelope.SETTINGS)
         if not isinstance(settings_json, dict):
-            await self.broadcast_fn({'type': 'error', 'message': 'Invalid settings: must be a JSON object'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Invalid settings: must be a JSON object'})
             return
 
         try:
@@ -1172,7 +1269,7 @@ class WsMessageHandler:
             filtered_cfg = {k: v for k, v in settings_json.items() if k in EXPORT_IMPORT_ALLOWLIST}
 
             if not filtered_cfg:
-                await self.broadcast_fn({'type': 'error', 'message': 'No recognized settings found in import data'})
+                await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'No recognized settings found in import data'})
                 return
 
             # Apply each setting through the router (handles validation)
@@ -1194,21 +1291,21 @@ class WsMessageHandler:
                 if self.agent_pool and hasattr(self.agent_pool, 'set_auto_security'):
                     self.agent_pool.set_auto_security(bool(settings_json['auto_security']))
                     await self.broadcast_fn({
-                        'type': 'info',
-                        'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"
+                        WsEnvelope.TYPE: MsgType.INFO,
+                        WsEnvelope.MESSAGE: f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"
                     })
                 else:
                     logger.warning('No agent_pool available during import — auto_security not applied')
 
             await self.broadcast_fn({
-                'type': 'import_settings',
-                'status': 'success',
+                WsEnvelope.TYPE: MsgType.IMPORT_SETTINGS,
+                WsEnvelope.STATUS: 'success',
                 'applied_keys': list(filtered_cfg.keys()),
-                'settings': filtered_cfg,
+                WsEnvelope.SETTINGS: filtered_cfg,
             })
         except Exception as e:
             logger.error(f"[import_settings] Failed to import settings: {e}")
-            await self.broadcast_fn({'type': 'error', 'message': f'Import failed: {str(e)}'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: f'Import failed: {str(e)}'})
 
     async def handle_migrate_settings_local(self, data: dict) -> None:
         """Handle 'migrate_settings_local' — one-time migration from browser localStorage.
@@ -1235,17 +1332,17 @@ class WsMessageHandler:
             SERVER_WINS_KEYS,
         )
 
-        settings = data.get('settings')
+        settings = data.get(WsEnvelope.SETTINGS)
         if not isinstance(settings, dict):
-            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'error',
-                                     'message': 'expected a settings object'})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.MIGRATE_SETTINGS_LOCAL, WsEnvelope.STATUS: 'error',
+                                     WsEnvelope.MESSAGE: 'expected a settings object'})
             return
 
         # Server-side sentinel: the migration is one-time per server. A second client, or
         # a headless run replaying the blob, would otherwise re-apply keys the server
         # deliberately skipped (SERVER_WINS_KEYS) or later changed.
         if is_settings_migrated():
-            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.MIGRATE_SETTINGS_LOCAL, WsEnvelope.STATUS: 'ok',
                                      'applied': [], 'skipped': 'already_migrated'})
             return
 
@@ -1284,7 +1381,7 @@ class WsMessageHandler:
         mark_settings_migrated()
 
         if not missing_keys:
-            await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.MIGRATE_SETTINGS_LOCAL, WsEnvelope.STATUS: 'ok',
                                      'applied': []})
             return
 
@@ -1294,7 +1391,7 @@ class WsMessageHandler:
 
         logger.info('[migrate_settings_local] applied %d key(s): %s (revision=%d)',
                     len(applied), applied, revision)
-        await self.broadcast_fn({'type': 'migrate_settings_local', 'status': 'ok',
+        await self.broadcast_fn({WsEnvelope.TYPE: MsgType.MIGRATE_SETTINGS_LOCAL, WsEnvelope.STATUS: 'ok',
                                  'applied': applied, 'rejected': rejected})
 
     async def handle_set_work_folders(self, data: dict) -> None:
@@ -1369,8 +1466,8 @@ class WsMessageHandler:
         from agent_cascade.log import logger
         from agent_cascade.runtime_state import state as _runtime_state
         from agent_cascade.settings_delta import log_stale_revision
-        base_revision = data.get('base_revision')
-        log_stale_revision(base_revision, _runtime_state.endpoints_revision, 'update_endpoints')
+        base_revision = data.get(WsEnvelope.BASE_REVISION)
+        log_stale_revision(base_revision, _runtime_state.endpoints_revision, MsgType.UPDATE_ENDPOINTS.value)
         if self.agent_pool and hasattr(self.agent_pool, 'api_router'):
             ep_count = len(data.get('endpoints', []))
             ap_count = len(data.get('agent_priorities', {}))
@@ -1402,7 +1499,7 @@ class WsMessageHandler:
     async def handle_reject(self, data: dict) -> None:
         """Handle 'reject' — reject a pending request with reason."""
         rid = data.get('request_id')
-        reason = data.get('reason', 'Rejected by user')
+        reason = data.get(WsEnvelope.REASON, 'Rejected by user')
         if rid and self.agent_pool:
             is_auto = data.get('automated', False)
             from agent_cascade.log import logger
@@ -1454,7 +1551,7 @@ class WsMessageHandler:
         None — e.g. antigravity's cached OAuth) are a no-op: there is nothing to store. The value
         is written by ``secrets_loader.set_secret`` which never logs it.
         """
-        harness = data.get('harness')
+        harness = data.get(WsEnvelope.HARNESS)
         if not harness or not isinstance(harness, str):
             return
         from agent_cascade.engine.cli_agent_adapters import HarnessNotFoundError, get_adapter
@@ -1477,8 +1574,8 @@ class WsMessageHandler:
     async def _cli_agent_oauth_fail(self, harness: Optional[str], reason: str,
                                     retryable: bool = False) -> None:
         await self._emit_cli_agent_oauth({
-            'type': 'cli_agent_oauth_failed', 'harness': harness,
-            'reason': reason, 'retryable': retryable,
+            WsEnvelope.TYPE: MsgType.CLI_AGENT_OAUTH_FAILED, WsEnvelope.HARNESS: harness,
+            WsEnvelope.REASON: reason, WsEnvelope.RETRYABLE: retryable,
         })
 
     async def handle_cli_agent_oauth_manual_cmd(self, data: dict) -> None:
@@ -1489,7 +1586,7 @@ class WsMessageHandler:
         `cli_agent_oauth_manual_cmd` with the command, or `cli_agent_oauth_failed` on a lookup or
         configuration problem.
         """
-        harness = data.get('harness') or 'antigravity'
+        harness = data.get(WsEnvelope.HARNESS) or 'antigravity'
         from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
         try:
             command = await asyncio.to_thread(
@@ -1498,7 +1595,7 @@ class WsMessageHandler:
             await self._cli_agent_oauth_fail(harness, str(e))
             return
         await self._emit_cli_agent_oauth({
-            'type': 'cli_agent_oauth_manual_cmd', 'harness': harness, 'command': command,
+            WsEnvelope.TYPE: MsgType.CLI_AGENT_OAUTH_MANUAL_CMD, WsEnvelope.HARNESS: harness, WsEnvelope.COMMAND: command,
         })
 
     async def handle_cli_agent_oauth_recheck(self, data: dict) -> None:
@@ -1508,7 +1605,7 @@ class WsMessageHandler:
         `cli_agent_oauth_status` message ({harness, authenticated}) — NOT folded into the
         pool-settings broadcast. Fired by the "Re-check auth" button and on tab-open.
         """
-        harness = data.get('harness') or 'antigravity'
+        harness = data.get(WsEnvelope.HARNESS) or 'antigravity'
         from agent_cascade.log import logger
         from agent_cascade.engine.cli_agent_oauth import get_oauth_manager
         try:
@@ -1518,7 +1615,7 @@ class WsMessageHandler:
             logger.debug('cli_agent_oauth recheck failed for %s: %s', harness, e)
             authenticated = False
         await self._emit_cli_agent_oauth({
-            'type': 'cli_agent_oauth_status', 'harness': harness, 'authenticated': authenticated,
+            WsEnvelope.TYPE: MsgType.CLI_AGENT_OAUTH_STATUS, WsEnvelope.HARNESS: harness, WsEnvelope.AUTHENTICATED: authenticated,
         })
 
     async def handle_set_afk(self, data: dict) -> None:
@@ -1528,7 +1625,7 @@ class WsMessageHandler:
         paths cannot drift, then broadcasts updated state.
         """
         WsMessageHandler.apply_afk(
-            self.agent_pool, bool(data.get('enabled', False)), data.get('message'),
+            self.agent_pool, bool(data.get('enabled', False)), data.get(WsEnvelope.MESSAGE),
             data.get('mode'))
         await self._broadcast()
 
@@ -1541,7 +1638,7 @@ class WsMessageHandler:
         """
         idx = data.get('index')
         content = data.get('content', '')
-        target_name = data.get('instance_name') or self.session['session_name']
+        target_name = data.get(WsEnvelope.INSTANCE_NAME) or self.session['session_name']
 
         # Get the conversation from pool instance
         history = []
@@ -1641,7 +1738,7 @@ class WsMessageHandler:
         a normal delete of 1–few messages must never be allowed to drop thousands of
         pre-marker raw messages.
         """
-        target_name = data.get('instance_name') or self.session['session_name']
+        target_name = data.get(WsEnvelope.INSTANCE_NAME) or self.session['session_name']
 
         history = []
         if self.agent_pool:
@@ -1764,7 +1861,7 @@ class WsMessageHandler:
                                                            clear_sub_agents_before_load=True,
                                                            caller_name=caller_name if exclude_caller else None)
         if status.startswith('Error'):
-            await self.broadcast_fn({'type': 'error', 'message': status})
+            await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: status})
             return
 
         # Update session to reflect the loaded instance name
@@ -1772,8 +1869,8 @@ class WsMessageHandler:
         inst = self.agent_pool.get_instance(instance_name)
         if inst is None:
             await self.broadcast_fn({
-                'type': 'warning',
-                'message': f"Instance '{instance_name}' not found in pool after load — session may be empty."
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: f"Instance '{instance_name}' not found in pool after load — session may be empty."
             })
             return
 
@@ -1806,11 +1903,11 @@ class WsMessageHandler:
 
         from agent_cascade.log import logger
 
-        instance_name = data.get('instance_name') or self.session.get('session_name', 'Maine')
+        instance_name = data.get(WsEnvelope.INSTANCE_NAME) or self.session.get('session_name', 'Maine')
         try:
-            message_index = int(data.get('message_index', 0))
+            message_index = int(data.get(WsEnvelope.MESSAGE_INDEX, 0))
         except (ValueError, TypeError):
-            logger.debug(f"Invalid message_index in dismiss_queue: {data.get('message_index')}")
+            logger.debug(f"Invalid message_index in dismiss_queue: {data.get(WsEnvelope.MESSAGE_INDEX)}")
             return
 
         removed = self.agent_pool.dismiss_queue_message(instance_name, message_index)
