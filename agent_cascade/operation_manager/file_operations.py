@@ -2,6 +2,7 @@
 
 import difflib
 import fnmatch
+import inspect
 import json
 import logging
 import os
@@ -1017,6 +1018,38 @@ class EditResult:
     indent_warnings: list = field(default_factory=list)
 
 
+def build_approval_args(executor_params, *, exclude=frozenset(),
+                        drop_none=False, preview=None):
+    """Single source of truth for the security-approver ``tool_args`` (BUG_0335).
+
+    Starts from the FULL set of validated executor params, so a field added to a
+    file tool's signature reaches the approver automatically — a per-tool
+    hand-picked subset can no longer silently drop a param the executor validated
+    (the one known instance was BUG_0334's missing ``occurrence``).
+
+    The approver must see a SUPERSET of what the executor enforces, never less,
+    so the transforms are subtractive only for internal noise, never for real
+    arguments:
+
+    - ``exclude``: drop routing-only params that carry no user-visible meaning
+      (``self``/``agent_name``/``pre_approved``); applied by ``_approval_args``.
+    - ``drop_none``: omit optional params that were not supplied — a defaulted
+      field (``occurrence=None``) is "not applicable", matching the existing
+      contract that an unsupplied option stays out of the approver's view.
+    - ``preview``: an EXPLICIT, named transform applied last, for the rare payload
+      that is deliberately summarized for the UI/audit (``delete_file``'s compact
+      ``count``/``paths_preview``). It receives the derived full-params dict. It
+      may reduce *presentation* but must NEVER remove a parameter the executor
+      enforces — the approver's view must remain a superset of enforcement.
+    """
+    args = {k: v for k, v in executor_params.items() if k not in exclude}
+    if drop_none:
+        args = {k: v for k, v in args.items() if v is not None}
+    if preview is not None:
+        args = preview(args)
+    return args
+
+
 class FileOpsMixin:
     """File operation methods. Expects self to have __init__-set attributes."""
 
@@ -1029,6 +1062,56 @@ class FileOpsMixin:
         also what tool_loop_detect._SECURITY_JUST_RE matches — a single source of truth.
         """
         return f"\n{APPROVER_REASON_LABEL} {approver_reason}"
+
+    # Parameters that are executor routing / internal control, not part of the
+    # user-visible meaning of the call, so they are never handed to the security
+    # approver. Centralized so _approval_args always drops them.
+    _APPROVAL_INTERNAL_PARAMS = frozenset({'self', 'agent_name', 'pre_approved'})
+
+    def _approval_args(self, *, drop_none=False, preview=None):
+        """Derive the security-approver ``tool_args`` from the CALLING file-op
+        method's own parameter signature (BUG_0335 single source of truth).
+
+        Reads the caller's frame so every parameter the executor declared — and
+        received — flows into the approver's view automatically. A schema field
+        added to a file tool later therefore reaches the approver WITHOUT a change
+        at the approval call site, which is the whole point of the fix. Values are
+        taken as they stand NOW (not at method entry), so any pre-approval
+        normalization the executor applied (e.g. edit_file's absorbed/heuristic
+        ``new_content``) is exactly what the approver reviews. Internal params are
+        always excluded; ``drop_none`` / ``preview`` pass through to
+        ``build_approval_args``.
+        """
+        caller = inspect.currentframe().f_back
+        self_obj = caller.f_locals.get('self') if caller is not None else None
+        # Fail loud if the frame-capture invariant is broken. _approval_args must be
+        # called DIRECTLY by a file tool method on THIS instance, so the caller
+        # frame's ``self`` IS this instance. A wrapped/moved frame or a missing
+        # ``self`` would otherwise silently build the approver's view from the wrong
+        # argument dict — worse than a crash for a security payload.
+        if self_obj is not self:
+            raise RuntimeError(
+                "_approval_args called outside its intended frame: the caller's "
+                "'self' is not this instance (frame wrapped/moved, or 'self' "
+                'missing). Refusing to build approval_args from an unknown frame.')
+        func = getattr(type(self_obj), caller.f_code.co_name)
+        # The looked-up method must be the executing caller's code object; a
+        # decorator/wrapper on a tool method would resolve co_name to different code.
+        if getattr(func, '__code__', None) is not caller.f_code:
+            raise RuntimeError(
+                f"_approval_args resolved '{caller.f_code.co_name}' to a code object "
+                'other than its caller frame (decorated/wrapped tool method).')
+        executor_params = {
+            name: caller.f_locals[name]
+            for name in inspect.signature(func).parameters
+            if name in caller.f_locals
+        }
+        return build_approval_args(
+            executor_params,
+            exclude=FileOpsMixin._APPROVAL_INTERNAL_PARAMS,
+            drop_none=drop_none,
+            preview=preview,
+        )
 
     # ─── Backup cleanup (registered via atexit in __init__) ──────────────
 
@@ -2195,11 +2278,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='write_file',
-                tool_args={
-                    'path': path,
-                    'content': content,
-                    'justification': justification
-                },
+                tool_args=self._approval_args(),
                 description=description,
             )
             if not approved:
@@ -2848,13 +2927,6 @@ class FileOpsMixin:
                     f"match_mode='exact' and include surrounding non-blank context in old_content.")
 
         description = f"Surgical edit to: {path} (mode: {match_mode})"
-        if match_mode == 'delete_and_insert':
-            tool_args = {'path': path, 'range': range_param, 'new_content': new_content, 'match_mode': match_mode}
-        else:
-            tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
-        if occurrence is not None:
-            tool_args['occurrence'] = occurrence  # BUG_0334: approver must see the value it validated
-        tool_args['justification'] = justification
 
         if pre_approved:
             # The grouped-batch executor already approved the whole group; the member's
@@ -2865,7 +2937,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='edit_file',
-                tool_args=tool_args,
+                tool_args=self._approval_args(drop_none=True),
                 description=description,
             )
             if not approved:
@@ -3433,20 +3505,12 @@ class FileOpsMixin:
             original_ws_unit = 'unknown'
 
         description = f"Re-indent block in: {path} (lines: {lines}, indent: {indent}, type: {indent_type}, mode: {mode})"
-        tool_args = {
-            'path': path,
-            'lines': lines,
-            'indent': indent,
-            'indent_type': indent_type,
-            'mode': mode,
-            'justification': justification
-        }
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='re_indent',
-                tool_args=tool_args,
+                tool_args=self._approval_args(),
                 description=description,
             )
             if not approved:
@@ -3709,14 +3773,24 @@ class FileOpsMixin:
             paths_preview = [str(t) for t in targets[:5]]
             visible_justification = description if not justification else \
                 f"{description}\nJustification: {justification}"
+
+            def _compact_delete_view(_full_params: dict) -> dict:
+                # BUG_0335: DELIBERATE named transform on top of the derived full
+                # params. A bulk delete must NOT dump the whole resolved path list /
+                # filter set into the approver's payload, so we summarize it to a
+                # bounded count + paths_preview + the composed justification. The
+                # executor still enforces the full filter set itself; the compact
+                # view is UI/audit presentation only (never weakens the gate).
+                return {
+                    'count': len(targets),
+                    'paths_preview': paths_preview,
+                    'justification': visible_justification,
+                }
+
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='delete_file',
-                tool_args={
-                    'count': len(targets),
-                    'paths_preview': paths_preview,
-                    'justification': visible_justification
-                },
+                tool_args=self._approval_args(preview=_compact_delete_view),
                 description=description,
             )
             if not approved:
@@ -4070,11 +4144,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='copy_file',
-                tool_args={
-                    'source': source,
-                    'destination': destination,
-                    'justification': justification
-                },
+                tool_args=self._approval_args(),
                 description=description,
             )
             if not approved:
@@ -4178,11 +4248,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='move_file',
-                tool_args={
-                    'source': source,
-                    'destination': destination,
-                    'justification': justification
-                },
+                tool_args=self._approval_args(),
                 description=description,
             )
             if not approved:
