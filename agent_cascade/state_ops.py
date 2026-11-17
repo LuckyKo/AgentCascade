@@ -679,6 +679,79 @@ def restore_held_slot_state(pool, instance: 'AgentInstance', inst_name: str,
         return False
 
 
+def verify_and_restore_instance_kv(pool, instance: 'AgentInstance', kv_block) -> bool:
+    """Verify + ARM an instance's KV save for D-CONTINUE rehydration (S3). NEVER HTTP.
+
+    The ENGINE performs the real ``state/load`` at the next turn start (it consumes
+    ``_state_label`` + ``_last_endpoint_config``); this function only decides whether
+    the snapshot's KV block is safe to trust and, if so, arms those two fields. It
+    issues NO request — eager loading here would race the engine's own turn-start
+    restore and freeze the endpoint for the whole rehydration. Fail-closed: ANY doubt
+    returns ``False`` and leaves the instance to a message-only cold start.
+
+    All checks must hold before arming:
+      1. ``kv_block`` is a dict with ``capable`` AND ``saved`` True;
+      2. ``label`` is a non-empty str equal to ``instance.instance_name`` — the label
+         is the deterministic KV filename, a mismatch would load ANOTHER instance's KV;
+      3. ``session_digest_endpoint`` is coherent with ``endpoint_cfg`` (a torn block
+         means the save was interrupted between the digest and the endpoint pair).
+         ``_session_digest`` itself may be None — a stale-digest SOFT signal, not a
+         refusal; the endpoint match is the real guard. Both sides normalized with
+         ``_normalize_api_base`` (the STATE_OPS normalizer — same one P5's guard uses;
+         NOT the router's, or the comparison goes inert across the two normalizers);
+      4. the endpoint ``resolve_held_endpoint`` says the engine will USE next still
+         matches the saved ``endpoint_cfg`` — so we arm only where a load would land.
+
+    Only then, under ``instance._state_lock``: set ``_state_label`` (never overwrite an
+    already-pending label) and seed ``_last_endpoint_config`` with ``state_save_enabled``
+    True, so ``_is_streaming``/``_state_capable`` accept the armed label at turn start.
+    """
+    inst_name = getattr(instance, 'instance_name', '')
+    if not isinstance(kv_block, dict):
+        return False
+    if not (kv_block.get('capable') is True and kv_block.get('saved') is True):
+        return False
+    label = kv_block.get('label')
+    if not isinstance(label, str) or not label or label != inst_name:
+        logger.info('[FLEET_RESTORE] %s KV label missing/mismatched (%r), refusing arm', inst_name, label)
+        return False
+    endpoint_cfg = kv_block.get('endpoint_cfg') or {}
+    rec_base = endpoint_cfg.get('api_base', '') or ''
+    rec_model = endpoint_cfg.get('model', '') or ''
+    digest_ep = kv_block.get('session_digest_endpoint')
+    if not isinstance(digest_ep, (list, tuple)) or len(digest_ep) != 2:
+        logger.info('[FLEET_RESTORE] %s KV session_digest_endpoint torn/missing, refusing arm', inst_name)
+        return False
+    norm_rec_base = _normalize_api_base(rec_base)
+    dig_base = _normalize_api_base(digest_ep[0] or '')
+    dig_model = digest_ep[1] or ''
+    if (dig_base, dig_model) != (norm_rec_base, rec_model):
+        logger.info('[FLEET_RESTORE] %s KV digest/endpoint incoherent %s/%s != %s/%s, refusing arm',
+                    inst_name, dig_base, dig_model, norm_rec_base, rec_model)
+        return False
+    held = resolve_held_endpoint(pool, instance)
+    if held is None:
+        logger.info('[FLEET_RESTORE] %s no held endpoint, refusing KV arm (message-only cold start)', inst_name)
+        return False
+    held_base = _normalize_api_base(held.get('api_base', '') or '')
+    held_model = held.get('model', '') or ''
+    if (held_base, held_model) != (norm_rec_base, rec_model):
+        logger.info('[FLEET_RESTORE] %s saved endpoint moved %s/%s != %s/%s, refusing KV arm',
+                    inst_name, held_base, held_model, norm_rec_base, rec_model)
+        return False
+    with instance._state_lock:
+        if instance._state_label is None:
+            instance._state_label = label
+        instance._last_endpoint_config = {
+            'api_base': rec_base,
+            'model': rec_model,
+            'state_save_enabled': True,
+        }
+    logger.info('[FLEET_RESTORE] %s KV armed (label=%s, endpoint=%s/%s)',
+                inst_name, label, norm_rec_base, rec_model)
+    return True
+
+
 def clear_orphaned_state_label(instance: 'AgentInstance', inst_name: str) -> None:
     """Clear a pending _state_label that could not be consumed by a restore.
 

@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 from agent_cascade import settings
 from agent_cascade.agent_identity import (get_display_name, is_birth_stamped,
                                           strip_birth_stamp)
-from agent_cascade.llm.schema import ROLE, SYSTEM, USER, FUNCTION, Message
+from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -661,11 +661,10 @@ class SessionIOMixin:
                 self._dismiss_all_instances()
 
         # --- 4. Filter to valid conversation messages (skip events/metadata) --
-        from agent_cascade.llm.schema import CONTENT as MSG_CONTENT
         cleaned = [
             msg for msg in messages
             if isinstance(msg, dict) and 'event' not in msg
-               and ROLE in msg and MSG_CONTENT in msg
+               and ROLE in msg and CONTENT in msg
         ]
         if not cleaned:
             return 'Error: No valid conversation messages found.'
@@ -674,45 +673,11 @@ class SessionIOMixin:
         agent_class = (metadata.get('agent_class') or 'Orchestrator').strip().lower()
 
         # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
-        # Forward pass — find compression markers and extract summaries
-        def _is_marker(msg):
-            content = msg.get(MSG_CONTENT, '')
-            return (msg.get(ROLE) == USER and isinstance(content, str)
-                    and content.startswith(COMPRESSION_MARKER))
-
-        markers = []
-        last_marker_index = -1
-        for i, msg in enumerate(cleaned):
-            if _is_marker(msg):
-                markers.append(msg)
-                last_marker_index = i
-
-        # Store latest summary in instance_summaries (for UI display) — only need last marker
-        if markers:
-            text = markers[-1].get(MSG_CONTENT, '')
-            start_tag = '<context_summary>'
-            end_tag   = '</context_summary>'
-            s = text.find(start_tag) + len(start_tag)
-            e = text.find(end_tag, s)
-            if s > len(start_tag) - 1 and e > s:
-                self.instance_summaries[instance_name] = text[s:e].strip()
-
-        # Construct working set: [SYS][U0 first user msg][all markers][tail after last marker]
-        system_msg = cleaned[0] if cleaned and cleaned[0].get(ROLE) == SYSTEM else None
-        first_user = next((m for m in cleaned if m.get(ROLE) == USER and not _is_marker(m)), None)
-
-        if markers:
-            # Tail = messages after the last marker; markers are stacked in full
-            tail = cleaned[last_marker_index + 1:]
-            working_set = (
-                ([system_msg] if system_msg else [])
-                + ([first_user] if first_user else [])
-                + markers          # all compression markers, including the last one
-                + tail             # recent messages after the last marker
-            )
-        else:
-            # No compression — full history is the working set
-            working_set = cleaned
+        # Pure extraction lives in _build_working_set (shared with _reattach_instance_log).
+        working_set, _last_marker_index, marker_summary = _build_working_set(cleaned)
+        # Store latest summary in instance_summaries (for UI display) — caller-only side effect.
+        if marker_summary is not None:
+            self.instance_summaries[instance_name] = marker_summary
 
         # --- 6. Convert dicts -> Message objects (skip bad entries gracefully) -
         msg_objects = []
@@ -895,3 +860,127 @@ class SessionIOMixin:
             msg.ts = datetime.datetime.fromisoformat(ts_raw).timestamp()
         except (ValueError, TypeError, OSError):
             logger.debug(f"Could not backfill Message.ts from timestamp={ts_raw!r}")
+
+    def _reattach_instance_log(self, instance: AgentInstance, log_ref: dict,
+                               *, mcp_block: Optional[dict] = None) -> int:
+        """Re-attach an instance to its EXISTING on-disk log in append mode (S3).
+
+        Unlike :meth:`load_session_from_log` this does NOT copy/rewrite the log,
+        dismiss siblings, or recreate the instance. It validates the snapshot's
+        log reference (single source of truth: ``validate_log_reference`` — plan §4),
+        reads the log in place with the SAME parser load-session uses, rebuilds the
+        in-memory conversation via the SAME ``_build_working_set``, and reopens the
+        logger on the same path in append mode (``AgentInstanceLogger`` skips the
+        header when the file already starts with a metadata line — no rewrite).
+
+        Raises :class:`SnapshotIntegrityError` if the referenced log diverged from
+        the snapshot's recorded count/offset. Returns the message count restored.
+        """
+        from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+        from agent_cascade.snapshot import SnapshotIntegrityError, validate_log_reference
+
+        reason = validate_log_reference(log_ref)
+        if reason:
+            raise SnapshotIntegrityError(f'{instance.instance_name}: {reason}')
+
+        path = log_ref['path']
+        messages, metadata = self._parse_json_input(str(path))
+        cleaned = [
+            msg for msg in messages
+            if isinstance(msg, dict) and 'event' not in msg
+               and ROLE in msg and CONTENT in msg
+        ]
+        working_set, _last_marker_index, _marker_summary = _build_working_set(cleaned)
+
+        msg_objects = []
+        for msg_dict in working_set:
+            try:
+                msg = Message(**msg_dict)
+            except Exception as e:
+                logger.warning(f'[FLEET_RESTORE] Skipping malformed message on re-attach: {e}')
+                continue
+            self._backfill_ts_from_dict(msg, msg_dict)
+            msg_objects.append(msg)
+        instance.rebuild_conversation(msg_objects)
+
+        # Reopen the logger on the SAME path (append mode; no copy, no rewrite).
+        agent_class = (metadata.get('agent_class')
+                       or getattr(instance, 'agent_class', '') or 'orchestrator').strip().lower()
+        key = (instance.instance_name, agent_class)
+        log_dir = self._logger.log_dir
+        with self._logger._lock:
+            stale = self._logger._loggers.pop(key, None)
+            if stale is not None:
+                try:
+                    stale.close()
+                except Exception as e:
+                    logger.debug(f'[FLEET_RESTORE] closing stale logger for {instance.instance_name}: {e}')
+            try:
+                self._logger._loggers[key] = AgentInstanceLogger(
+                    agent_class, instance.instance_name, log_dir,
+                    base_metadata=None, log_path=path)
+            except Exception as e:
+                logger.warning(f'[FLEET_RESTORE] logger re-attach failed for {instance.instance_name}: {e}')
+
+        if mcp_block:
+            instance._discovered_mcp_tools = list(mcp_block.get('discovered_mcp_tools') or [])
+            instance._unloaded_mcp_tools = list(mcp_block.get('unloaded_mcp_tools') or [])
+            instance._mcp_unload_seq = int(mcp_block.get('mcp_unload_seq') or 0)
+
+        return len(msg_objects)
+
+
+# ── Pure working-set builder (shared: load_session_from_log + _reattach_instance_log) ──
+# Extracted verbatim from load_session's step-5 block (behavior-preserving); the
+# instance_summaries side effect STAYS in the caller. Single source of truth so the
+# rehydration path and the manual load path can never build the set differently.
+
+
+def _is_compression_marker(msg: dict) -> bool:
+    content = msg.get(CONTENT, '')
+    return (msg.get(ROLE) == USER and isinstance(content, str)
+            and content.startswith(COMPRESSION_MARKER))
+
+
+def _build_working_set(cleaned: List[dict]) -> Tuple[List[dict], int, Optional[str]]:
+    """Reconstruct ``[SYS][U0][markers...][tail]`` from cleaned conversation dicts.
+
+    Returns ``(working_set, last_marker_index, marker_summary)``. ``marker_summary``
+    is the text between ``<context_summary>``/``</context_summary>`` of the LAST
+    marker, or ``None`` if absent/malformed — the caller decides whether to store it.
+    """
+    markers = []
+    last_marker_index = -1
+    for i, msg in enumerate(cleaned):
+        if _is_compression_marker(msg):
+            markers.append(msg)
+            last_marker_index = i
+
+    marker_summary = None
+    if markers:
+        text = markers[-1].get(CONTENT, '')
+        start_tag = '<context_summary>'
+        end_tag = '</context_summary>'
+        s = text.find(start_tag) + len(start_tag)
+        e = text.find(end_tag, s)
+        if s > len(start_tag) - 1 and e > s:
+            marker_summary = text[s:e].strip()
+
+    system_msg = cleaned[0] if cleaned and cleaned[0].get(ROLE) == SYSTEM else None
+    first_user = next(
+        (m for m in cleaned if m.get(ROLE) == USER and not _is_compression_marker(m)), None)
+
+    if markers:
+        # Tail = messages after the last marker; markers are stacked in full
+        tail = cleaned[last_marker_index + 1:]
+        working_set = (
+            ([system_msg] if system_msg else [])
+            + ([first_user] if first_user else [])
+            + markers
+            + tail
+        )
+    else:
+        # No compression — full history is the working set
+        working_set = cleaned
+
+    return working_set, last_marker_index, marker_summary

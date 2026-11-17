@@ -41,6 +41,12 @@ CURRENT_SCHEMA_VERSION = '1.0.0'
 MINIMUM_READABLE_VERSION = '1.0.0'
 
 
+class SnapshotIntegrityError(Exception):
+    """Fail-closed restore refusal: referenced log missing/truncated/mismatched,
+    or envelope structurally unfit for rehydration. Raised ONLY by restore-path
+    validators, never by capture. S4 rollback guard catches this type."""
+
+
 # ── Clock projection (M3) ────────────────────────────────────────────────────
 
 def monotonic_to_wall(value: float, *, now_wall: float, now_mono: float) -> float:
@@ -53,6 +59,18 @@ def monotonic_to_wall(value: float, *, now_wall: float, now_mono: float) -> floa
     if not value:
         return value
     return now_wall - now_mono + value
+
+
+def wall_to_monotonic(value: float, *, now_wall: float, now_mono: float) -> float:
+    """Exact mirror of ``monotonic_to_wall`` (M3 inversion).
+
+    ``mono = now_mono - (now_wall - value)`` — algebraically ``now_mono + (value - now_wall)``.
+    Sentinel parity REQUIRED: falsy input (``0.0`` = "never happened") returns
+    unchanged — otherwise ``0.0`` inverts to a meaningless epoch-relative value.
+    """
+    if not value:
+        return value
+    return now_mono - (now_wall - value)
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────────
@@ -97,6 +115,27 @@ class InstanceSnapshot:
             'kv': self.kv,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict) -> 'InstanceSnapshot':
+        """Reconstruct from a ``to_dict`` payload (exact key mirror)."""
+        if not isinstance(raw, dict):
+            raise TypeError('InstanceSnapshot.from_dict expects a dict')
+        return cls(
+            identity=raw['identity'],
+            clocks=raw['clocks'],
+            log=raw['log'],
+            state=raw['state'],
+            compression=raw['compression'],
+            system_prompt=raw['system_prompt'],
+            token_counters=raw['token_counters'],
+            budget=raw['budget'],
+            loop_detection=raw['loop_detection'],
+            mcp=raw['mcp'],
+            memory_hints=raw['memory_hints'],
+            llm_override=raw['llm_override'],
+            kv=raw.get('kv'),
+        )
+
 
 @dataclass
 class PoolStateSnapshot:
@@ -131,6 +170,24 @@ class PoolStateSnapshot:
             'instance_summaries': self.instance_summaries,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict) -> 'PoolStateSnapshot':
+        """Reconstruct from a ``to_dict`` payload. Declared set-like fields stay
+        ``List[str]`` (restore precomputes ``set(...)`` locally where membership
+        matters) — do not coerce here, or the type contract drifts from ``to_dict``."""
+        if not isinstance(raw, dict):
+            raise TypeError('PoolStateSnapshot.from_dict expects a dict')
+        return cls(
+            active_stack=raw.get('active_stack', []),
+            children=raw.get('children', {}),
+            blocking_calls=raw.get('blocking_calls', []),
+            message_queues=raw.get('message_queues', {}),
+            halted_instances=raw.get('halted_instances', []),
+            compression_halted=raw.get('compression_halted', []),
+            terminated_instances=raw.get('terminated_instances', []),
+            instance_summaries=raw.get('instance_summaries', {}),
+        )
+
 
 @dataclass
 class SnapshotEnvelope:
@@ -151,6 +208,25 @@ class SnapshotEnvelope:
             'instances': {name: snap.to_dict() for name, snap in self.instances.items()},
             'pool_state': self.pool_state.to_dict(),
         }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> 'SnapshotEnvelope':
+        """Reconstruct from a ``to_dict`` payload. Rejects a non-dict ``instances``;
+        ``to_dict`` emits ``schema_version`` but this reader is fed the already
+        version-validated payload, so the version is not re-checked here."""
+        if not isinstance(raw, dict):
+            raise TypeError('SnapshotEnvelope.from_dict expects a dict')
+        instances_raw = raw['instances']
+        if not isinstance(instances_raw, dict):
+            raise TypeError('snapshot instances must be a dict')
+        return cls(
+            snapshot_id=raw['snapshot_id'],
+            stack_id=raw['stack_id'],
+            created_at=raw['created_at'],
+            trigger=raw['trigger'],
+            instances={name: InstanceSnapshot.from_dict(v) for name, v in instances_raw.items()},
+            pool_state=PoolStateSnapshot.from_dict(raw['pool_state']),
+        )
 
 
 def migrate_envelope(raw: dict) -> dict:
@@ -228,6 +304,52 @@ def _capture_log_reference(log_path: Optional[str]) -> Dict[str, Any]:
         ref['message_count'] = 0
         ref['offset'] = 0
     return ref
+
+
+def validate_log_reference(ref: Optional[dict]) -> Optional[str]:
+    """Single source of truth for the log-integrity comparison (refinement 4).
+
+    Re-counts the referenced file with the SAME semantics as capture
+    (:func:`_capture_log_reference`), so gate and capture can never disagree.
+    Returns ``None`` when the reference is intact, else a human-readable reason
+    (no instance-name prefix — callers add that). Rules (fail-closed):
+      - ``ref`` must be a dict with a non-empty string ``path``;
+      - the path must exist on disk (a ref captured against a missing log is still
+        refused at restore — the snapshot is already degraded);
+      - re-counted ``message_count`` == ``ref['message_count']`` AND byte size ==
+        ``ref['offset']`` (strict equality; ANY divergence — truncation OR append —
+        means the log moved under the snapshot → refuse).
+    """
+    if not isinstance(ref, dict):
+        return 'log reference is missing or not a dict'
+    path = ref.get('path')
+    if not isinstance(path, str) or not path:
+        return 'log reference has no usable path'
+    if not os.path.exists(path):
+        return f'referenced log missing: {path}'
+    current = _capture_log_reference(path)
+    expected_count = ref.get('message_count')
+    if current['message_count'] != expected_count:
+        return (f'message_count mismatch for {path}: snapshot {expected_count!r} '
+                f'!= on-disk {current['message_count']!r}')
+    expected_offset = ref.get('offset')
+    if current['offset'] != expected_offset:
+        return (f'byte offset mismatch for {path}: snapshot {expected_offset!r} '
+                f'!= on-disk {current['offset']!r}')
+    return None
+
+
+def validate_envelope_integrity(envelope: SnapshotEnvelope) -> None:
+    """Refinement-4 gate, run BEFORE any pool mutation (all-or-nothing, M2).
+
+    Iterates every instance's captured log reference and refuses on the first
+    mismatch. Raises :class:`SnapshotIntegrityError` naming the offending
+    instance, path, and expected-vs-actual counts; returns ``None`` on success.
+    """
+    for name, snap in envelope.instances.items():
+        reason = validate_log_reference(snap.log)
+        if reason:
+            raise SnapshotIntegrityError(f'{name}: {reason}')
 
 
 def _resolve_instance_log_path(pool, instance_name: str) -> Optional[str]:
@@ -622,3 +744,226 @@ def write_snapshot_to_disk(envelope: SnapshotEnvelope, base_dir: Path) -> Path:
         os.fsync(f.fileno())
     os.replace(tmp_path, final_path)
     return final_path
+
+
+def load_snapshot_from_disk(snapshot_path: Path) -> SnapshotEnvelope:
+    """Validate + migrate + reconstruct a snapshot envelope from disk.
+
+    Fail-closed on EVERY bad input. NOT gated behind ENABLE_STACK_SWAP: this is a
+    pure read-only validator with zero side effects, and its only callers live
+    inside gated swap flows — gating a total function would be dead code (the
+    off-path is a no-op by construction at :func:`restore_fleet_snapshot`).
+
+    1. read_text   -> OSError wrapped into ``ValueError('cannot read snapshot ...')``
+    2. json.loads  -> JSONDecodeError wrapped into ``ValueError('corrupt JSON ...')``
+    3. migrate_envelope -> validates the ``[MINIMUM_READABLE_VERSION, CURRENT_SCHEMA_VERSION]``
+       window; the SINGLE source of truth for the version check — do NOT re-implement.
+    4. SnapshotEnvelope.from_dict -> KeyError/TypeError wrapped into ValueError.
+    """
+    path = Path(snapshot_path)
+    try:
+        text = path.read_text(encoding='utf-8')
+    except OSError as exc:
+        raise ValueError(f'cannot read snapshot {path}: {exc}') from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'corrupt JSON at {path}: {exc}') from exc
+    raw = migrate_envelope(raw)
+    try:
+        return SnapshotEnvelope.from_dict(raw)
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f'snapshot {path} does not match schema: {exc}') from exc
+
+
+def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
+    """D-CONTINUE rehydration — THE ONLY state-mutating S3 entry point (plan §8 gate).
+
+    Phases (fail-closed; nothing touches the pool until Phase 3 passes):
+      1 gate · 2 validate+classify · 3 instantiate+register · 4 topology
+      5 log re-attach + graph re-formation · 6 KV verify/arm · 7 message re-enqueue.
+    Raises :class:`SnapshotIntegrityError` (log gate / name collision) BEFORE any
+    mutation; returns ``None``. NEVER reads or writes ``pool._instance_threads`` or
+    ``_slot_release`` (m2 invariant): the execution graph is re-seeded from captured
+    ORDERING only — no live handle, thread, or Future is resurrected. No I/O runs
+    under a pool lock and no pool lock is nested.
+    """
+    # Phase 1 — the ONLY mutation gate (HARD CONSTRAINT 1). Zero mutation off-path.
+    if not settings.ENABLE_STACK_SWAP:
+        logger.debug('[FLEET_RESTORE] ENABLE_STACK_SWAP off — no-op')
+        return
+
+    ps = envelope.pool_state
+
+    # Phase 2 — validation BEFORE any pool mutation (M2 all-or-nothing).
+    validate_envelope_integrity(envelope)                       # raises SnapshotIntegrityError
+    collisions = set(pool.instances) & set(envelope.instances)  # plain dict read; GIL-safe
+    if collisions:
+        raise SnapshotIntegrityError(
+            f'live instances collide with snapshot: {sorted(collisions)}'
+        )
+
+    # Phase 3 — instantiate fresh AgentInstance objects (no thread/slot touched).
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    from agent_cascade.agent_instance import AgentInstance, AgentState
+
+    for name, snap in envelope.instances.items():
+        created = wall_to_monotonic(
+            snap.clocks['created_at'], now_wall=now_wall, now_mono=now_mono)
+        last_act = wall_to_monotonic(
+            snap.clocks['last_activity'], now_wall=now_wall, now_mono=now_mono)
+        cm = snap.compression
+        tc = snap.token_counters
+        inst = AgentInstance(
+            instance_name=name,                             # identity verbatim — never re-mint
+            agent_class=snap.identity['agent_class'],
+            conversation=[],                                # filled by _reattach_instance_log (5a)
+            max_turns=snap.budget['max_turns'],
+            parent_instance=snap.identity['parent_instance'],
+            display_name=snap.identity['display_name'],
+            created_at=created,
+            last_activity=last_act,
+            compression_summary=cm['compression_summary'],
+            latest_marker_index=-1,                         # not captured; matches load_session default
+        )
+        inst._pool_ref = pool
+        inst._nest_depth = snap.identity['nest_depth']
+        # system_started_at is a wall-clock '%Y-%m-%d %H:%M' string — verbatim, NOT
+        # projected. Capture stores it in the clocks block (snapshot.py:405).
+        inst.system_started_at = snap.clocks.get('system_started_at')
+        inst.state = AgentState[snap.state['state']]        # provisional; refined in 5b
+        inst.is_terminated = bool(snap.state['is_terminated'])
+        inst._terminated_reason = snap.state['terminated_reason']
+        inst.restricted_shell = bool(snap.state.get('restricted_shell', False))
+        # Token counters carried verbatim (ints/bools, no monotonic). _last_actual_token_count
+        # is deliberately NOT set here — Phase 5a's rebuild_conversation zeroes it
+        # (agent_instance.py:756); it is re-applied after re-attach.
+        inst._allocated_max_input_tokens = tc['allocated_max_input_tokens']
+        inst._current_turn = tc['current_turn']
+        inst._turn_consumed = bool(tc['turn_consumed'])
+        # Budget block (max_turns already passed in ctor).
+        inst.token_budget = snap.budget['token_budget']
+        inst.budget_unit = snap.budget['budget_unit']
+        inst._token_warned_50 = bool(snap.budget['token_warned_50'])
+        inst._token_warned_90 = bool(snap.budget['token_warned_90'])
+        inst._token_final_fired = bool(snap.budget['token_final_fired'])
+        # _token_last_warn_past carried RAW, not projected (R5: cadence-only gate;
+        # a stale value only re-fires or delays one warning).
+        inst._token_last_warn_past = snap.budget['token_last_warn_past']
+        # Loop detection carried verbatim (bools/ints).
+        ld = snap.loop_detection
+        inst._loop_rollback_count = ld['loop_rollback_count']
+        inst._suppress_loop_detection_next_turn = bool(ld['suppress_loop_detection_next_turn'])
+        inst._fuzzy_warn_armed = bool(ld['fuzzy_warn_armed'])
+        inst._fuzzy_warn_last_turn = ld['fuzzy_warn_last_turn']
+        inst._fuzzy_escalation_armed = bool(ld['fuzzy_escalation_armed'])
+        # Memory hints.
+        mh = snap.memory_hints
+        inst._memories_read = set(mh['memories_read'])
+        inst._skill_hint_counts = dict(mh['skill_hint_counts'])
+        inst._last_memory_hint_turn = mh['last_memory_hint_turn']
+        inst._last_skill_hint_turn = mh['last_skill_hint_turn']
+        # LLM override + system-prompt frozen state, verbatim.
+        inst._generate_cfg_override = snap.llm_override.get('generate_cfg_override')
+        inst._system_prompt_frozen = bool(snap.system_prompt['system_prompt_frozen'])
+        inst._system_prompt_initialized = bool(snap.system_prompt['system_prompt_initialized'])
+        # Compression counters verbatim + the two projected force-compress clocks.
+        inst._force_compress_count = cm['force_compress_count']
+        inst._force_compress_fail_streak = cm['force_compress_fail_streak']
+        inst._last_force_compress_time = wall_to_monotonic(
+            cm['last_force_compress_time'], now_wall=now_wall, now_mono=now_mono)
+        inst._last_force_compress_fail_at = wall_to_monotonic(
+            cm['last_force_compress_fail_at'], now_wall=now_wall, now_mono=now_mono)
+
+        with pool._pool_lock:
+            pool.instances[name] = inst
+            pool._instances_version += 1
+
+    # Phase 4 — pool topology. NO lock nesting: three separate single-lock passes,
+    # mirroring the authoritative writers (_update_child_relationship / lifecycle),
+    # since children + per-instance child lists are NOT both guarded by _children_lock.
+    with pool._children_lock:
+        for parent, kids in ps.children.items():
+            existing = pool.children.setdefault(parent, [])
+            existing.extend(k for k in kids if k not in existing)
+    for parent, kids in ps.children.items():
+        inst = pool.instances.get(parent)
+        if inst is not None:
+            with inst._state_lock:
+                inst._child_instances = list(kids)
+    terminated_set = set(ps.terminated_instances)            # set-like fields are lists
+    with pool._pool_lock:
+        pool.instance_summaries.update(ps.instance_summaries)
+        pool._halted_instances.update(ps.halted_instances)
+        pool._compression_halted.update(ps.compression_halted)
+        pool.terminated_instances.update(ps.terminated_instances)   # merge, NOT replace
+
+    # Phase 5a — log re-attach (per instance, OUTSIDE all pool locks — this does file I/O).
+    for name, snap in envelope.instances.items():
+        inst = pool.instances[name]
+        pool._reattach_instance_log(inst, snap.log, mcp_block=snap.mcp)
+        # Re-apply after rebuild_conversation (5a) zeroed it (agent_instance.py:756).
+        inst._last_actual_token_count = snap.token_counters['last_actual_token_count']
+
+    # Phase 5b — resume classification (data-level; state writes under each instance lock).
+    for name, snap in envelope.instances.items():
+        inst = pool.instances[name]
+        captured = snap.state['state'] or 'IDLE'
+        with inst._state_lock:
+            if name in terminated_set or snap.state['is_terminated']:
+                inst.state = AgentState.TERMINATED
+                inst.is_terminated = True
+            elif captured == 'COMPLETING':
+                inst.state = AgentState.RUNNING              # transient cleanup state; do not strand
+                logger.info('[FLEET_RESTORE] %s COMPLETING -> RUNNING (no cleanup thread)', name)
+            # else: captured IDLE stays IDLE; captured RUNNING/SLEEPING kept verbatim
+            # (never blanket to IDLE/RUNNING — plan §6 "Never blanket").
+
+    # Phase 5c — re-seed the call graph from captured ORDERING only (m2). active_stack is
+    # a concrete List[tuple] guarded by _execution._state_lock (parallel_manager.py:24-27),
+    # so an in-place slice re-seed under that lock is the only (non-nested) path.
+    stack = pool._execution.active_stack
+    restored_order = [(e[0], e[1]) for e in ps.active_stack if e[0] in pool.instances]
+    missing = [e[0] for e in ps.active_stack if e[0] not in pool.instances]
+    if missing:
+        logger.warning('[FLEET_RESTORE] stack entries absent from snapshot, dropped: %s', missing)
+    with pool._execution._state_lock:
+        stack[:] = restored_order
+
+    # Phase 5d — re-block parents from captured parent->child waiting edges. Edges are used
+    # for STATE SELECTION + validation only, never as a runtime container (no live blocking_calls
+    # field on the pool; adding one = dead code).
+    index = {name: i for i, (name, _d) in enumerate(restored_order)}
+    for edge in ps.blocking_calls:
+        parent, child = edge['parent'], edge['child']
+        if parent not in index or child not in index:
+            logger.warning('[FLEET_RESTORE] blocking edge references non-restored name, skipped: %r', edge)
+            continue
+        if index[parent] >= index[child]:
+            logger.warning('[FLEET_RESTORE] blocking edge order inconsistent with stack, skipped: %r', edge)
+            continue
+        inst = pool.instances[parent]
+        with inst._state_lock:
+            inst.state = AgentState.RUNNING                 # a blocked parent was RUNNING live
+
+    # Phase 6 — KV verify/arm per streaming instance (verify+arm only; plan §5).
+    from agent_cascade import state_ops
+    for name, snap in envelope.instances.items():
+        if snap.kv is None:
+            continue
+        inst = pool.instances[name]
+        if inst.is_terminated:
+            continue
+        if not state_ops.verify_and_restore_instance_kv(pool, inst, snap.kv):
+            logger.info(
+                '[FLEET_RESTORE] %s — KV not restorable, falling back to message-only cold start', name)
+
+    # Phase 7 — message re-enqueue (self-locking, OUTSIDE pool locks). Per-instance FIFO
+    # order is preserved by enqueue; terminated/dead names drop their queued messages.
+    for name, texts in ps.message_queues.items():
+        if name in pool.terminated_instances or name not in pool.instances:
+            logger.debug('[FLEET_RESTORE] dropping queued messages for dead instance %s', name)
+            continue
+        for text in texts:
+            pool.enqueue_message(name, text)                # self-locks _queue_lock; non-blocking
