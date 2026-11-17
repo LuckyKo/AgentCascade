@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
-from typing import TYPE_CHECKING, List, Optional, Tuple
+import threading
+import time
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import requests
 
@@ -41,6 +44,19 @@ _API_TIMEOUT_SECONDS: float = 10.0
 _CANDIDATE_POOL_SIZE: int = 8
 # Max characters of query context forwarded to the decision model.
 _STATE_MAX_CHARS: int = 6000
+# Minimum seconds between repeats of the SAME recurring selector diagnostic, per
+# (subsystem, condition). A persistently-failing endpoint would otherwise emit ~9 lines
+# per minute (BUG_0342: a 7-day 429 was invisible at DEBUG). Cooldown keeps it clearly
+# visible at WARNING without flooding. Env-overridable; malformed OR non-finite/negative
+# value → default 60.0 (a NaN cooldown would silence the WARNING entirely — `elapsed >=
+# nan` is always False — which is precisely the hide-failures failure mode we are fixing).
+try:
+    _cooldown_env = float(os.getenv('AGENT_CASCADE_SKILL_SELECTOR_FAIL_LOG_COOLDOWN', '60.0'))
+except ValueError:
+    _cooldown_env = 60.0
+SKILL_SELECTOR_FAIL_LOG_COOLDOWN: float = (
+    _cooldown_env if math.isfinite(_cooldown_env) and _cooldown_env >= 0.0 else 60.0
+)
 # Model id sent when an endpoint's configured ``model`` is empty. Some decision-model
 # endpoints (e.g. Codiv's /v1/systemone) are configured with a blank model field in
 # api_endpoints.json; without a default the selector would skip them and silently do
@@ -66,6 +82,39 @@ _SKILL_PICK_INSTRUCTIONS = (
     'Select the single most relevant skill to load for this task. '
     "Choose 'none' if no skill is needed."
 )
+
+# ── Recurring-failure log throttle ────────────────────────────────────────────
+# selector.py is invoked from many threads, so the throttle state is guarded by a lock.
+# State is keyed by a stable string (subsystem + condition/endpoint id), so one pair of
+# entries exists per distinct condition and the dicts are bounded (a handful of keys),
+# never per call.
+_fail_log_lock = threading.Lock()
+_fail_log_last: Dict[str, float] = {}
+_fail_log_suppressed: Dict[str, int] = {}
+
+
+def _should_log(key: str) -> Optional[int]:
+    """Throttle a recurring diagnostic, keyed by a stable ``key``.
+
+    Returns the number of occurrences suppressed since the last emitted line (0 on a
+    key's very first emit) when this call SHOULD log, and ``None`` when this occurrence
+    is suppressed because it falls inside ``SKILL_SELECTOR_FAIL_LOG_COOLDOWN`` of the
+    last emitted line for the same key. Thread-safe.
+    """
+    now = time.monotonic()
+    with _fail_log_lock:
+        last = _fail_log_last.get(key)
+        if last is None or (now - last) >= SKILL_SELECTOR_FAIL_LOG_COOLDOWN:
+            suppressed = _fail_log_suppressed.pop(key, 0)
+            _fail_log_last[key] = now
+            return suppressed
+        _fail_log_suppressed[key] = _fail_log_suppressed.get(key, 0) + 1
+        return None
+
+
+def _suppressed_note(suppressed: int) -> str:
+    """Render the 'suppressed N in between' suffix for a throttled WARNING (empty if 0)."""
+    return '' if not suppressed else f' (suppressed {suppressed} in between)'
 
 
 def resolve_endpoints(pool, priority_key: str = 'skill_selector',
@@ -134,8 +183,11 @@ def ask_decision_model(endpoint, model: str, state: str, question_key: str,
             return None
         return str(choice)
     except Exception as e:  # noqa: BLE001 — per-endpoint failure → no opinion
-        logger.debug('[%s] endpoint %s failed: %s', log_prefix,
-                     getattr(endpoint, 'id', '?'), e)
+        ep_id = getattr(endpoint, 'id', '?')
+        suppressed = _should_log(f'{log_prefix}:{ep_id}')
+        if suppressed is not None:
+            logger.warning('[%s] endpoint %s failed: %s%s', log_prefix, ep_id, e,
+                           _suppressed_note(suppressed))
         return None
 
 
@@ -174,12 +226,20 @@ class ApiSelector:
             # directly (NOT match_skills) to avoid re-entering the API-mode dispatch.
             ranked = self._manager._keyword_match(query, include_inactive, cap=None)
             if not ranked:
+                logger.debug('[SKILL-SELECTOR] no keyword candidates; falling back to keyword')
                 return None
             pool_names = [name for name, _ in ranked[:_CANDIDATE_POOL_SIZE]]
             score_by_name = dict(ranked)
 
             endpoints = self._resolve_endpoints()
             if not endpoints:
+                suppressed = _should_log('SKILL-SELECTOR:no-endpoints')
+                if suppressed is not None:
+                    logger.warning(
+                        '[SKILL-SELECTOR] api mode active but no usable skill_selector '
+                        'endpoint resolved (priority list empty / endpoint missing / empty '
+                        'api_base); falling back to keyword%s',
+                        _suppressed_note(suppressed))
                 return None
 
             criteria = self._build_criteria(pool_names)  # noqa: keep call site explicit
@@ -190,12 +250,24 @@ class ApiSelector:
                 # /v1/systemone). Use the module default so such endpoints still work
                 # out of the box; the user can pin a specific release via env.
                 model = getattr(endpoint, 'model', '') or DEFAULT_SKILL_SELECTOR_MODEL
+                t0 = time.monotonic()
                 answer = self._ask_endpoint(endpoint, model, state, criteria)
                 if answer is None:
                     continue  # this endpoint failed/abstained → try the next one
-                return self._map_answer(answer, pool_names, score_by_name)
+                ordered = self._map_answer(answer, pool_names, score_by_name)
+                if ordered is not None:
+                    logger.debug('[SKILL-SELECTOR] endpoint %s picked %r in %dms',
+                                 getattr(endpoint, 'id', '?'), ordered[0][0],
+                                 int((time.monotonic() - t0) * 1000))
+                return ordered
 
             # Every endpoint failed or abstained.
+            suppressed = _should_log('SKILL-SELECTOR:all-failed')
+            if suppressed is not None:
+                logger.warning(
+                    '[SKILL-SELECTOR] all %d endpoint(s) failed or abstained; falling '
+                    'back to keyword%s',
+                    len(endpoints), _suppressed_note(suppressed))
             return None
         except Exception as e:  # noqa: BLE001 — must never propagate to callers
             logger.warning('[SKILL-SELECTOR] API selector failed; falling back to keyword: %s', e)

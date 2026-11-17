@@ -36,9 +36,28 @@ from agent_cascade.api_router_pkg.router import APIRouter  # noqa: E402
 from agent_cascade.engine.core import ExecutionEngine  # noqa: E402
 from agent_cascade.engine.response_pipeline import _last_assistant_text  # noqa: E402
 from agent_cascade.llm.schema import ASSISTANT, Message  # noqa: E402
+from agent_cascade.skills import selector as _sel  # noqa: E402
 from agent_cascade.skills.selector import classify_completion  # noqa: E402
 
 _POST = 'agent_cascade.skills.selector.requests.post'
+
+
+@pytest.fixture(autouse=True)
+def _reset_selector_throttle():
+    """Clear the module-global selector failure-log throttle between tests.
+
+    BUG_0342 elevated the shared ``ask_decision_model`` failure to a throttled WARNING
+    with per-key cooldown state held in module globals. Several tests here trigger the
+    same key (e.g. a failing 'ep1'); without this reset a later test's WARNING would be
+    suppressed inside the cooldown and its log-level assertion would false-fail.
+    """
+    with _sel._fail_log_lock:
+        _sel._fail_log_last.clear()
+        _sel._fail_log_suppressed.clear()
+    yield
+    with _sel._fail_log_lock:
+        _sel._fail_log_last.clear()
+        _sel._fail_log_suppressed.clear()
 
 
 # ── Test doubles (mirror tests/test_skill_selector.py) ────────────────────────
@@ -313,7 +332,9 @@ class TestLogPrefixOwnership:
                 patch.object(sel, 'logger') as mock_logger:
             assert classify_completion(_pool_with_router(router), 'hello') is None
 
-        logged = ' '.join(str(c) for c in mock_logger.debug.call_args_list)
+        # BUG_0342: the shared helper now logs a per-endpoint failure as a throttled
+        # WARNING (was DEBUG). Prefix ownership is unchanged — only the level moved.
+        logged = ' '.join(str(c) for c in mock_logger.warning.call_args_list)
         assert 'COMPLETION-CLASSIFIER' in logged
         assert 'SKILL-SELECTOR' not in logged, 'classifier failure must not be attributed to skill selection'
 
@@ -333,7 +354,7 @@ class TestLogPrefixOwnership:
                 patch.object(sel, 'logger') as mock_logger:
             assert sel.ApiSelector(manager).select('q', False, None) is None
 
-        logged = ' '.join(str(c) for c in mock_logger.debug.call_args_list)
+        logged = ' '.join(str(c) for c in mock_logger.warning.call_args_list)
         assert 'SKILL-SELECTOR' in logged
         assert 'COMPLETION-CLASSIFIER' not in logged
 

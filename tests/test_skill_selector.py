@@ -23,7 +23,26 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from agent_cascade.api_router_pkg.endpoints import APIEndpoint  # noqa: E402
 from agent_cascade.api_router_pkg.router import APIRouter  # noqa: E402
+from agent_cascade.skills import selector as sel  # noqa: E402
 from agent_cascade.skills.manager import SkillManager  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_selector_throttle():
+    """Clear the module-global failure-log throttle state before and after each test.
+
+    Throttle state lives in module globals keyed by (subsystem, condition). Without this
+    reset, a test that triggers a failure WARNING would suppress the NEXT test's WARNING
+    for the same key across the whole 60s cooldown, making the log assertions an
+    order-dependent false-failure. Clearing before the test guarantees a clean slate.
+    """
+    with sel._fail_log_lock:
+        sel._fail_log_last.clear()
+        sel._fail_log_suppressed.clear()
+    yield
+    with sel._fail_log_lock:
+        sel._fail_log_last.clear()
+        sel._fail_log_suppressed.clear()
 
 
 # ── Test doubles ──────────────────────────────────────────────────────────────
@@ -257,3 +276,152 @@ def test_fallback_secondary_used_when_primary_fails():
             result = mgr.match_skills('some query')
     assert result[0][0] == 'gamma'  # chosen by secondary
     assert mock_post.call_count == 2  # tried primary then secondary
+
+
+# ── 6. BUG_0342 observability: degradation paths are visible, not hidden ──────
+#
+# Strategy (three-layer-proof / wrong-shape-double-false-pass): patch the transport
+# (requests.post) and the module logger; drive the REAL select()/ask_decision_model.
+# Every assertion pins the diagnostic text (a WARNING can only exist if the real branch
+# ran) AND an execution witness (post called/not-called), never the shared `None`
+# fallback return that several code paths share.
+
+
+def _log_messages(logger_mock, level: str) -> str:
+    """Join the FORMATTED messages of every ``logger_mock.<level>()`` call.
+
+    A ``MagicMock`` logger records the raw %-args, NOT a rendered string, so the text a
+    user actually sees only exists after ``fmt % args``. Formatting here mirrors what a
+    real logging handler would emit, so the assertions below pin user-visible text.
+    """
+    out = []
+    for c in getattr(logger_mock, level).call_args_list:
+        args = c.args
+        if args and isinstance(args[0], str):
+            if len(args) > 1:
+                try:
+                    out.append(args[0] % args[1:])
+                    continue
+                except (TypeError, ValueError):
+                    pass  # arg/format mismatch → fall back to the raw format string
+            out.append(args[0])
+        if c.kwargs:
+            out.append(str(c.kwargs))
+    return ' '.join(out)
+
+
+def _mgr_with_endpoint(ep_pairs=(('ep1', 'Codiv', 'https://api.codiv.ai/v1/systemone', 'm'),)):
+    router = _make_router(list(ep_pairs), priorities=[eid for eid, *_ in ep_pairs])
+    mgr = _make_manager(mode='api', router=router)
+    _wire_keyword(mgr)
+    return mgr
+
+
+def test_endpoint_failure_warns_not_debug():
+    """(a) A per-endpoint failure now logs WARNING naming prefix+endpoint+exception,
+    NOT the old DEBUG-only line. (The DEBUG-level line is what hid the 7-day 429.)"""
+    mgr = _mgr_with_endpoint()
+    with patch.object(SkillManager, 'get_skill_metadata',
+                      side_effect=lambda n: {'name': n, 'description': '', 'triggers': []}), \
+         patch('agent_cascade.skills.selector.requests.post',
+               side_effect=OSError('boom')) as mock_post, \
+         patch.object(sel, 'logger') as mock_logger:
+        result = mgr.match_skills('some query')
+    assert result == _keyword_results()  # degradation contract unchanged
+    mock_post.assert_called_once()       # execution witness: the real except path ran
+    warn = _log_messages(mock_logger, 'warning')
+    assert 'SKILL-SELECTOR' in warn and 'ep1' in warn and 'boom' in warn
+    debug = _log_messages(mock_logger, 'debug')
+    assert 'boom' not in debug           # the failure must NOT be debug-only anymore
+
+
+def test_no_usable_endpoints_warns():
+    """(b) api mode active but no usable skill_selector endpoint → WARNING + keyword.
+    This is the exact line that would have caught BUG_0342 immediately."""
+    router = APIRouter(default_llm_cfg={})  # no skill_selector priority → no endpoints
+    mgr = _make_manager(mode='api', router=router)
+    _wire_keyword(mgr)
+    with patch('agent_cascade.skills.selector.requests.post') as mock_post, \
+         patch.object(sel, 'logger') as mock_logger:
+        result = mgr.match_skills('some query')
+    assert result == _keyword_results()
+    mock_post.assert_not_called()        # execution witness: the no-endpoints guard ran
+    warn = _log_messages(mock_logger, 'warning')
+    assert 'SKILL-SELECTOR' in warn and 'no usable skill_selector endpoint' in warn
+
+
+def test_all_endpoints_failed_warns():
+    """(c) Every endpoint fails/abstains → WARNING naming the endpoint count + keyword."""
+    mgr = _mgr_with_endpoint(
+        [('ep1', 'P', 'https://a/v1/systemone', 'm'),
+         ('ep2', 'S', 'https://b/v1/systemone', 'm')])
+    with patch.object(SkillManager, 'get_skill_metadata',
+                      side_effect=lambda n: {'name': n, 'description': '', 'triggers': []}), \
+         patch('agent_cascade.skills.selector.requests.post',
+               side_effect=OSError('down')) as mock_post, \
+         patch.object(sel, 'logger') as mock_logger:
+        result = mgr.match_skills('some query')
+    assert result == _keyword_results()
+    assert mock_post.call_count == 2     # execution witness: both endpoints attempted
+    warn = _log_messages(mock_logger, 'warning')
+    assert 'all 2 endpoint(s) failed or abstained' in warn
+
+
+def test_success_logs_debug_pick_with_latency():
+    """(e) A valid pick is confirmable: DEBUG naming endpoint + skill + latency (ms),
+    and the selection result is unchanged."""
+    mgr = _mgr_with_endpoint()
+    with patch.object(SkillManager, 'get_skill_metadata',
+                      side_effect=lambda n: {'name': n, 'description': '', 'triggers': []}), \
+         patch('agent_cascade.skills.selector.requests.post',
+               return_value=_post_ok('beta')), \
+         patch.object(sel, 'logger') as mock_logger:
+        result = mgr.match_skills('some query')
+    # unchanged return: chosen skill first, remainder in keyword order
+    assert [n for n, _ in result] == ['beta', 'alpha', 'gamma']
+    debug = _log_messages(mock_logger, 'debug')
+    assert 'SKILL-SELECTOR' in debug and 'ep1' in debug and 'beta' in debug and 'ms' in debug
+
+
+def test_throttle_suppresses_within_cooldown_and_re_emits():
+    """(d) The _should_log gate emits once, suppresses repeats inside the cooldown,
+    then re-emits after it carrying the number of occurrences suppressed in between."""
+    key = 'TEST:throttle'
+    times = [1000.0]
+    with patch.object(sel, 'time') as mock_time, \
+         patch.object(sel, 'SKILL_SELECTOR_FAIL_LOG_COOLDOWN', 60.0):
+        mock_time.monotonic.side_effect = lambda: times[0]
+        assert sel._should_log(key) == 0          # first emit → 0 suppressed
+        times[0] = 1010.0
+        assert sel._should_log(key) is None       # within cooldown → suppressed
+        times[0] = 1020.0
+        assert sel._should_log(key) is None       # still suppressed
+        times[0] = 1061.0                         # 61s > 60s cooldown → re-emit
+        assert sel._should_log(key) == 2          # carries the two suppressed in between
+        times[0] = 1062.0                         # counter reset → suppressed again
+        assert sel._should_log(key) is None
+
+
+def test_throttle_reemit_warning_names_suppressed_count():
+    """The end-to-end WARNING a throttled persistent failure produces: first emit has
+    no note, the re-emit after cooldown says 'suppressed N in between'."""
+    ep = APIEndpoint(id='ep1', name='E', api_base='https://x/v1/systemone',
+                     api_key='k', model='m')
+    times = [0.0]
+    with patch.object(sel, 'time') as mock_time, \
+         patch.object(sel, 'SKILL_SELECTOR_FAIL_LOG_COOLDOWN', 60.0), \
+         patch.object(sel, 'logger') as mock_logger, \
+         patch('agent_cascade.skills.selector.requests.post',
+               side_effect=OSError('boom')) as mock_post:
+        mock_time.monotonic.side_effect = lambda: times[0]
+        assert sel.ask_decision_model(ep, 'm', 'st', 'pick', 'instr', {'none': ''}) is None
+        times[0] = 5.0
+        assert sel.ask_decision_model(ep, 'm', 'st', 'pick', 'instr', {'none': ''}) is None
+        times[0] = 70.0
+        assert sel.ask_decision_model(ep, 'm', 'st', 'pick', 'instr', {'none': ''}) is None
+    assert mock_post.call_count == 3           # all three hits reached the real except
+    warns = mock_logger.warning.call_args_list
+    assert len(warns) == 2                         # 1st + 3rd emitted, 2nd suppressed
+    rendered = [c.args[0] % c.args[1:] for c in warns]
+    assert 'suppressed' not in rendered[0]         # first emit: no suppressed note
+    assert 'suppressed 1 in between' in rendered[1]
