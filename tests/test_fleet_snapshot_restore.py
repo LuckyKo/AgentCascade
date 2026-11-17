@@ -37,12 +37,12 @@ from agent_cascade.snapshot import (
 from tests._snapshot_fleet_double import (
     CAPABLE_CFG,
     PoolDouble,
+    ROOT,
     make_fleet,
     make_instance,
     write_jsonl,
 )
 
-ROOT = 'Maine_20261115_143022'
 WORKER = 'coder_worker1'
 PARKED = 'coder_parked'
 PLAIN = 'coder_plain'
@@ -75,7 +75,7 @@ def _saver(inst, kv_cfg):
 
 def _write_all(tmp_path, pool, count=4):
     for name, path in [(n, tmp_path / p) for n, p in
-                       [('Maine_20261115_143022', 'maine.jsonl'), (WORKER, 'worker.jsonl'),
+                       [(ROOT, 'maine.jsonl'), (WORKER, 'worker.jsonl'),
                         (PARKED, 'parked.jsonl'), (PLAIN, 'plain.jsonl')]]:
         write_jsonl(path, name, count)
 
@@ -99,7 +99,7 @@ def _dismiss(pool):
 def test_roundtrip_rehydrates_fleet(pool, tmp_path, monkeypatch):
     make_fleet(pool, tmp_path, monkeypatch, streaming_names=(WORKER,))
     pool.instances[WORKER]._last_actual_token_count = 7   # must survive re-attach
-    _write_all(tmp_path, pool, count=12)
+    write_jsonl(tmp_path / 'maine.jsonl', ROOT, 12)
     write_jsonl(tmp_path / 'worker.jsonl', WORKER, 5)
     write_jsonl(tmp_path / 'parked.jsonl', PARKED, 2)
     write_jsonl(tmp_path / 'plain.jsonl', PLAIN, 1)
@@ -323,30 +323,32 @@ def _armed_inst(name):
     return inst
 
 
-def test_kv_verify_arms_on_happy_path(pool, monkeypatch):
+def test_kv_verify_arms_on_happy_path(monkeypatch):
+    # resolve_held_endpoint is patched to ignore its pool arg, so None is passed.
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint',
                         lambda p, i: {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']})
     inst = _armed_inst(WORKER)
-    assert state_ops.verify_and_restore_instance_kv(pool, inst, _kv_block(WORKER)) is True
+    assert state_ops.verify_and_restore_instance_kv(None, inst, _kv_block(WORKER)) is True
     assert inst._state_label == WORKER
     assert inst._last_endpoint_config == {'api_base': CAPABLE_CFG['api_base'],
                                           'model': CAPABLE_CFG['model'], 'state_save_enabled': True}
 
 
-def test_kv_verify_preserves_pre_existing_label(pool, monkeypatch):
+def test_kv_verify_preserves_pre_existing_label(monkeypatch):
     # 9.5(f): the arm guard is "if _state_label is None" — a label already pending
     # (e.g. from an earlier turn) is never clobbered, yet the call still returns True.
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint',
                         lambda p, i: {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']})
     inst = make_instance(WORKER)
     inst._state_label = 'preexisting-label'               # already pending before restore
-    assert state_ops.verify_and_restore_instance_kv(pool, inst, _kv_block(WORKER)) is True
+    assert state_ops.verify_and_restore_instance_kv(None, inst, _kv_block(WORKER)) is True
     assert inst._state_label == 'preexisting-label'        # NOT clobbered
     assert inst._last_endpoint_config == {'api_base': CAPABLE_CFG['api_base'],
                                           'model': CAPABLE_CFG['model'], 'state_save_enabled': True}
 
 
-def test_kv_verify_fail_closed_cases(pool, monkeypatch):
+def test_kv_verify_fail_closed_cases(monkeypatch):
+    # pool arg unused — every resolve_held_endpoint below is patched, so None is passed.
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint',
                         lambda p, i: {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']})
 
@@ -359,7 +361,7 @@ def test_kv_verify_fail_closed_cases(pool, monkeypatch):
     ]
     for name, kv in cases:
         inst = _armed_inst(WORKER)
-        assert state_ops.verify_and_restore_instance_kv(pool, inst, kv) is False, name
+        assert state_ops.verify_and_restore_instance_kv(None, inst, kv) is False, name
         assert inst._state_label is None, name                       # never armed
         assert inst._last_endpoint_config is None, name
 
@@ -367,13 +369,13 @@ def test_kv_verify_fail_closed_cases(pool, monkeypatch):
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint',
                         lambda p, i: {'api_base': CAPABLE_CFG['api_base'], 'model': 'm-moved'})
     inst = _armed_inst(WORKER)
-    assert state_ops.verify_and_restore_instance_kv(pool, inst, _kv_block(WORKER)) is False
+    assert state_ops.verify_and_restore_instance_kv(None, inst, _kv_block(WORKER)) is False
     assert inst._state_label is None
 
     # no held endpoint
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint', lambda p, i: None)
     inst = _armed_inst(WORKER)
-    assert state_ops.verify_and_restore_instance_kv(pool, inst, _kv_block(WORKER)) is False
+    assert state_ops.verify_and_restore_instance_kv(None, inst, _kv_block(WORKER)) is False
     assert inst._state_label is None
 
 
@@ -469,3 +471,21 @@ def test_load_snapshot_from_disk_fail_closed(pool, tmp_path, monkeypatch):
     missing_key = dict(good)
     missing_key.pop('snapshot_id')
     _refuses('bad_d.json', json.dumps(missing_key))
+
+
+def test_load_refuses_null_or_unknown_state(pool, tmp_path, monkeypatch):
+    # Finding #1: a captured ``state`` block whose NAME is null or unknown is refused at
+    # LOAD time (ValueError), so restore's strict ``AgentState[...]`` indexing can never
+    # surface a raw TypeError mid-mutation. Deep-copy via json round-trip to keep `good`
+    # intact across the two cases.
+    make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+    _write_all(tmp_path, pool, count=2)
+    good = capture_fleet_snapshot(pool).to_dict()
+
+    for bad_state in (None, 'NOT_A_STATE'):
+        payload = json.loads(json.dumps(good))
+        payload['instances'][ROOT]['state']['state'] = bad_state
+        path = tmp_path / f'bad_state_{bad_state}.json'
+        path.write_text(json.dumps(payload), encoding='utf-8')
+        with pytest.raises(ValueError):
+            load_snapshot_from_disk(path)

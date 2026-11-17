@@ -120,6 +120,7 @@ class InstanceSnapshot:
         """Reconstruct from a ``to_dict`` payload (exact key mirror)."""
         if not isinstance(raw, dict):
             raise TypeError('InstanceSnapshot.from_dict expects a dict')
+        _validate_state_block(raw['state'])
         return cls(
             identity=raw['identity'],
             clocks=raw['clocks'],
@@ -269,8 +270,26 @@ def _copy_jsonable(value: Any, *, label: str = 'field') -> Any:
     try:
         return json.loads(json.dumps(value))
     except (TypeError, ValueError) as e:
-        logger.warning('snapshot: could not serialize %s (omitting): %s', label, e)
+        logger.warning('[FLEET_SNAPSHOT] could not serialize %s (omitting): %s', label, e)
         return None
+
+
+def _validate_state_block(block) -> None:
+    """Fail-closed guard for a captured ``state`` block (S3 restore contract).
+
+    ``_capture_instance`` always writes ``state.name`` (falling back to ``'IDLE'``),
+    so a missing/None/unknown ``state`` name can only reach here from a corrupt or
+    hand-edited envelope. Refusing it at load keeps :func:`restore_fleet_snapshot`
+    phase-3's strict ``AgentState[snap.state['state']]`` indexing from raising a raw
+    KeyError/TypeError mid-mutation; the load path surfaces it as a ``ValueError``.
+    """
+    from agent_cascade.agent_instance import AgentState
+
+    if not isinstance(block, dict):
+        raise ValueError('snapshot state block is missing or not a dict')
+    name = block.get('state')
+    if not isinstance(name, str) or name not in AgentState.__members__:
+        raise ValueError(f'snapshot state block has invalid/missing state name: {name!r}')
 
 
 def _capture_log_reference(log_path: Optional[str]) -> Dict[str, Any]:
@@ -300,7 +319,7 @@ def _capture_log_reference(log_path: Optional[str]) -> Dict[str, Any]:
         ref['message_count'] = count
         ref['offset'] = os.path.getsize(log_path)
     except OSError as e:
-        logger.warning('Snapshot log reference read failed for %s: %s', log_path, e)
+        logger.warning('[FLEET_SNAPSHOT] log reference read failed for %s: %s', log_path, e)
         ref['message_count'] = 0
         ref['offset'] = 0
     return ref
@@ -367,7 +386,7 @@ def _resolve_instance_log_path(pool, instance_name: str) -> Optional[str]:
                 if path:
                     return str(path)
     except Exception as e:  # noqa: BLE001 — log resolution must never abort capture
-        logger.debug('Snapshot log-path resolution failed for %s: %s', instance_name, e)
+        logger.debug('[FLEET_SNAPSHOT] log-path resolution failed for %s: %s', instance_name, e)
     return None
 
 
@@ -537,7 +556,7 @@ def _save_streaming_kv(instance, kv_cfg: Dict[str, Any]) -> Optional[Dict[str, A
     try:
         saved = bool(save_instance_state(instance, set_label=False))
     except Exception as e:  # noqa: BLE001 — a save failure records saved:false, never aborts capture
-        logger.info('Snapshot KV save failed for %s: %s', instance.instance_name, e)
+        logger.info('[FLEET_SNAPSHOT] KV save failed for %s: %s', instance.instance_name, e)
 
     return {
         'capable': True,
@@ -570,7 +589,7 @@ def _snapshot_string_set(pool, attr: str, *, attempts: int = 3) -> List[str]:
             return sorted(getattr(pool, attr, set()))
         except RuntimeError:
             continue  # concurrent mutation during iteration — retry
-    logger.warning('snapshot: could not snapshot %s after %d attempts (concurrent mutation)', attr, attempts)
+    logger.warning('[FLEET_SNAPSHOT] could not snapshot %s after %d attempts (concurrent mutation)', attr, attempts)
     return []
 
 
@@ -620,7 +639,7 @@ def capture_fleet_snapshot(
             path without a real autoloader; production never passes one.
     """
     if not settings.ENABLE_STACK_SWAP:
-        logger.debug('Fleet snapshot requested but ENABLE_STACK_SWAP is off — no-op')
+        logger.debug('[FLEET_SNAPSHOT] requested but ENABLE_STACK_SWAP is off — no-op')
         return None
 
     now_wall = time.time()
@@ -640,7 +659,7 @@ def capture_fleet_snapshot(
         terminated_instances = sorted(getattr(pool, 'terminated_instances', set()))
         instance_summaries = dict(getattr(pool, 'instance_summaries', {}))
     if not instances:
-        logger.warning('Fleet snapshot requested on an empty pool — writing empty envelope')
+        logger.warning('[FLEET_SNAPSHOT] requested on an empty pool — writing empty envelope')
     children_lock = getattr(pool, '_children_lock', threading.Lock())
     with children_lock:
         children = {k: list(v) for k, v in getattr(pool, 'children', {}).items()}
@@ -776,6 +795,91 @@ def load_snapshot_from_disk(snapshot_path: Path) -> SnapshotEnvelope:
         raise ValueError(f'snapshot {path} does not match schema: {exc}') from exc
 
 
+def _instantiate_instance(
+    snap: InstanceSnapshot, pool, now_wall: float, now_mono: float) -> 'AgentInstance':
+    """Rebuild one fresh ``AgentInstance`` from a captured ``InstanceSnapshot``.
+
+    Split out of :func:`restore_fleet_snapshot` phase 3 so the field mapping is
+    unit-testable in isolation. Every value is carried verbatim EXCEPT the monotonic
+    clocks (``created_at``/``last_activity``/force-compress), which are re-projected
+    from their wall-clock projection onto the restore-time origin (``now_wall`` /
+    ``now_mono``). The returned instance is NOT registered — the caller places it
+    under ``pool._pool_lock``. ``conversation`` stays empty here: phase 5a's
+    ``_reattach_instance_log`` fills it and re-applies ``_last_actual_token_count``
+    (which ``rebuild_conversation`` zeroes), so that counter is deliberately NOT set
+    here.
+    """
+    from agent_cascade.agent_instance import AgentInstance, AgentState
+
+    created = wall_to_monotonic(
+        snap.clocks['created_at'], now_wall=now_wall, now_mono=now_mono)
+    last_act = wall_to_monotonic(
+        snap.clocks['last_activity'], now_wall=now_wall, now_mono=now_mono)
+    cm = snap.compression
+    tc = snap.token_counters
+    inst = AgentInstance(
+        instance_name=snap.identity['instance_name'],        # identity verbatim — never re-mint
+        agent_class=snap.identity['agent_class'],
+        conversation=[],                                     # filled by _reattach_instance_log (5a)
+        max_turns=snap.budget['max_turns'],
+        parent_instance=snap.identity['parent_instance'],
+        display_name=snap.identity['display_name'],
+        created_at=created,
+        last_activity=last_act,
+        compression_summary=cm['compression_summary'],
+        latest_marker_index=-1,                              # not captured; matches load_session default
+    )
+    inst._pool_ref = pool
+    inst._nest_depth = snap.identity['nest_depth']
+    # system_started_at is a wall-clock '%Y-%m-%d %H:%M' string — verbatim, NOT
+    # projected. Capture stores it in the clocks block (snapshot.py:405).
+    inst.system_started_at = snap.clocks.get('system_started_at')
+    inst.state = AgentState[snap.state['state']]            # provisional; refined in 5b
+    inst.is_terminated = bool(snap.state['is_terminated'])
+    inst._terminated_reason = snap.state['terminated_reason']
+    inst.restricted_shell = bool(snap.state['restricted_shell'])
+    # Token counters carried verbatim (ints/bools, no monotonic). _last_actual_token_count
+    # is deliberately NOT set here — Phase 5a's rebuild_conversation zeroes it
+    # (agent_instance.py:756); it is re-applied after re-attach.
+    inst._allocated_max_input_tokens = tc['allocated_max_input_tokens']
+    inst._current_turn = tc['current_turn']
+    inst._turn_consumed = bool(tc['turn_consumed'])
+    # Budget block (max_turns already passed in ctor).
+    inst.token_budget = snap.budget['token_budget']
+    inst.budget_unit = snap.budget['budget_unit']
+    inst._token_warned_50 = bool(snap.budget['token_warned_50'])
+    inst._token_warned_90 = bool(snap.budget['token_warned_90'])
+    inst._token_final_fired = bool(snap.budget['token_final_fired'])
+    # _token_last_warn_past carried RAW, not projected (R5: cadence-only gate;
+    # a stale value only re-fires or delays one warning).
+    inst._token_last_warn_past = snap.budget['token_last_warn_past']
+    # Loop detection carried verbatim (bools/ints).
+    ld = snap.loop_detection
+    inst._loop_rollback_count = ld['loop_rollback_count']
+    inst._suppress_loop_detection_next_turn = bool(ld['suppress_loop_detection_next_turn'])
+    inst._fuzzy_warn_armed = bool(ld['fuzzy_warn_armed'])
+    inst._fuzzy_warn_last_turn = ld['fuzzy_warn_last_turn']
+    inst._fuzzy_escalation_armed = bool(ld['fuzzy_escalation_armed'])
+    # Memory hints.
+    mh = snap.memory_hints
+    inst._memories_read = set(mh['memories_read'])
+    inst._skill_hint_counts = dict(mh['skill_hint_counts'])
+    inst._last_memory_hint_turn = mh['last_memory_hint_turn']
+    inst._last_skill_hint_turn = mh['last_skill_hint_turn']
+    # LLM override + system-prompt frozen state, verbatim.
+    inst._generate_cfg_override = snap.llm_override['generate_cfg_override']
+    inst._system_prompt_frozen = bool(snap.system_prompt['system_prompt_frozen'])
+    inst._system_prompt_initialized = bool(snap.system_prompt['system_prompt_initialized'])
+    # Compression counters verbatim + the two projected force-compress clocks.
+    inst._force_compress_count = cm['force_compress_count']
+    inst._force_compress_fail_streak = cm['force_compress_fail_streak']
+    inst._last_force_compress_time = wall_to_monotonic(
+        cm['last_force_compress_time'], now_wall=now_wall, now_mono=now_mono)
+    inst._last_force_compress_fail_at = wall_to_monotonic(
+        cm['last_force_compress_fail_at'], now_wall=now_wall, now_mono=now_mono)
+    return inst
+
+
 def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
     """D-CONTINUE rehydration — THE ONLY state-mutating S3 entry point (plan §8 gate).
 
@@ -806,76 +910,10 @@ def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
     # Phase 3 — instantiate fresh AgentInstance objects (no thread/slot touched).
     now_wall = time.time()
     now_mono = time.monotonic()
-    from agent_cascade.agent_instance import AgentInstance, AgentState
+    from agent_cascade.agent_instance import AgentState
 
     for name, snap in envelope.instances.items():
-        created = wall_to_monotonic(
-            snap.clocks['created_at'], now_wall=now_wall, now_mono=now_mono)
-        last_act = wall_to_monotonic(
-            snap.clocks['last_activity'], now_wall=now_wall, now_mono=now_mono)
-        cm = snap.compression
-        tc = snap.token_counters
-        inst = AgentInstance(
-            instance_name=name,                             # identity verbatim — never re-mint
-            agent_class=snap.identity['agent_class'],
-            conversation=[],                                # filled by _reattach_instance_log (5a)
-            max_turns=snap.budget['max_turns'],
-            parent_instance=snap.identity['parent_instance'],
-            display_name=snap.identity['display_name'],
-            created_at=created,
-            last_activity=last_act,
-            compression_summary=cm['compression_summary'],
-            latest_marker_index=-1,                         # not captured; matches load_session default
-        )
-        inst._pool_ref = pool
-        inst._nest_depth = snap.identity['nest_depth']
-        # system_started_at is a wall-clock '%Y-%m-%d %H:%M' string — verbatim, NOT
-        # projected. Capture stores it in the clocks block (snapshot.py:405).
-        inst.system_started_at = snap.clocks.get('system_started_at')
-        inst.state = AgentState[snap.state['state']]        # provisional; refined in 5b
-        inst.is_terminated = bool(snap.state['is_terminated'])
-        inst._terminated_reason = snap.state['terminated_reason']
-        inst.restricted_shell = bool(snap.state.get('restricted_shell', False))
-        # Token counters carried verbatim (ints/bools, no monotonic). _last_actual_token_count
-        # is deliberately NOT set here — Phase 5a's rebuild_conversation zeroes it
-        # (agent_instance.py:756); it is re-applied after re-attach.
-        inst._allocated_max_input_tokens = tc['allocated_max_input_tokens']
-        inst._current_turn = tc['current_turn']
-        inst._turn_consumed = bool(tc['turn_consumed'])
-        # Budget block (max_turns already passed in ctor).
-        inst.token_budget = snap.budget['token_budget']
-        inst.budget_unit = snap.budget['budget_unit']
-        inst._token_warned_50 = bool(snap.budget['token_warned_50'])
-        inst._token_warned_90 = bool(snap.budget['token_warned_90'])
-        inst._token_final_fired = bool(snap.budget['token_final_fired'])
-        # _token_last_warn_past carried RAW, not projected (R5: cadence-only gate;
-        # a stale value only re-fires or delays one warning).
-        inst._token_last_warn_past = snap.budget['token_last_warn_past']
-        # Loop detection carried verbatim (bools/ints).
-        ld = snap.loop_detection
-        inst._loop_rollback_count = ld['loop_rollback_count']
-        inst._suppress_loop_detection_next_turn = bool(ld['suppress_loop_detection_next_turn'])
-        inst._fuzzy_warn_armed = bool(ld['fuzzy_warn_armed'])
-        inst._fuzzy_warn_last_turn = ld['fuzzy_warn_last_turn']
-        inst._fuzzy_escalation_armed = bool(ld['fuzzy_escalation_armed'])
-        # Memory hints.
-        mh = snap.memory_hints
-        inst._memories_read = set(mh['memories_read'])
-        inst._skill_hint_counts = dict(mh['skill_hint_counts'])
-        inst._last_memory_hint_turn = mh['last_memory_hint_turn']
-        inst._last_skill_hint_turn = mh['last_skill_hint_turn']
-        # LLM override + system-prompt frozen state, verbatim.
-        inst._generate_cfg_override = snap.llm_override.get('generate_cfg_override')
-        inst._system_prompt_frozen = bool(snap.system_prompt['system_prompt_frozen'])
-        inst._system_prompt_initialized = bool(snap.system_prompt['system_prompt_initialized'])
-        # Compression counters verbatim + the two projected force-compress clocks.
-        inst._force_compress_count = cm['force_compress_count']
-        inst._force_compress_fail_streak = cm['force_compress_fail_streak']
-        inst._last_force_compress_time = wall_to_monotonic(
-            cm['last_force_compress_time'], now_wall=now_wall, now_mono=now_mono)
-        inst._last_force_compress_fail_at = wall_to_monotonic(
-            cm['last_force_compress_fail_at'], now_wall=now_wall, now_mono=now_mono)
-
+        inst = _instantiate_instance(snap, pool, now_wall, now_mono)
         with pool._pool_lock:
             pool.instances[name] = inst
             pool._instances_version += 1
@@ -909,7 +947,7 @@ def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
     # Phase 5b — resume classification (data-level; state writes under each instance lock).
     for name, snap in envelope.instances.items():
         inst = pool.instances[name]
-        captured = snap.state['state'] or 'IDLE'
+        captured = snap.state['state']
         with inst._state_lock:
             if name in terminated_set or snap.state['is_terminated']:
                 inst.state = AgentState.TERMINATED

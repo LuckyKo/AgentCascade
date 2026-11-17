@@ -20,6 +20,9 @@ from agent_cascade.pool.session_io import SessionIOMixin
 # A save-capable endpoint config (state_save_enabled + api_base + model).
 CAPABLE_CFG = {'api_base': 'http://127.0.0.1:1234/v1', 'model': 'm-a', 'state_save_enabled': True}
 
+# Canonical root instance name, shared by make_fleet and the restore suites (S3).
+ROOT = 'Maine_20261115_143022'
+
 
 class LoggerDouble:
     """Stands in for AgentInstanceLogger — capture only reads ``.log_path``."""
@@ -160,21 +163,21 @@ def make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
     """
     import agent_cascade.state_ops as state_ops
 
-    root = make_instance('Maine_20261115_143022', agent_class='orchestrator',
+    root = make_instance(ROOT, agent_class='orchestrator',
                          display='Maine', depth=0, cfg=CAPABLE_CFG)
-    worker = make_instance('coder_worker1', parent='Maine_20261115_143022', depth=1, cfg=CAPABLE_CFG)
-    parked = make_instance('coder_parked', parent='Maine_20261115_143022', depth=1, cfg=CAPABLE_CFG)
-    incapable = make_instance('coder_plain', parent='Maine_20261115_143022', depth=1, cfg=None)
+    worker = make_instance('coder_worker1', parent=ROOT, depth=1, cfg=CAPABLE_CFG)
+    parked = make_instance('coder_parked', parent=ROOT, depth=1, cfg=CAPABLE_CFG)
+    incapable = make_instance('coder_plain', parent=ROOT, depth=1, cfg=None)
     for inst in (root, worker, parked, incapable):
         register(pool, inst)
 
     pool.instance_loggers = {
-        'Maine_20261115_143022': LoggerDouble(str(tmp_path / 'maine.jsonl')),
+        ROOT: LoggerDouble(str(tmp_path / 'maine.jsonl')),
         'coder_worker1': LoggerDouble(str(tmp_path / 'worker.jsonl')),
         'coder_parked': LoggerDouble(str(tmp_path / 'parked.jsonl')),
         'coder_plain': LoggerDouble(str(tmp_path / 'plain.jsonl')),
     }
-    pool.children = {'Maine_20261115_143022': ['coder_worker1', 'coder_parked', 'coder_plain']}
+    pool.children = {ROOT: ['coder_worker1', 'coder_parked', 'coder_plain']}
 
     def fake_held(p, inst):
         if inst.instance_name in streaming_names:

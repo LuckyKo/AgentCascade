@@ -674,7 +674,7 @@ class SessionIOMixin:
 
         # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
         # Pure extraction lives in _build_working_set (shared with _reattach_instance_log).
-        working_set, _last_marker_index, marker_summary = _build_working_set(cleaned)
+        working_set, marker_summary = _build_working_set(cleaned)
         # Store latest summary in instance_summaries (for UI display) — caller-only side effect.
         if marker_summary is not None:
             self.instance_summaries[instance_name] = marker_summary
@@ -890,7 +890,7 @@ class SessionIOMixin:
             if isinstance(msg, dict) and 'event' not in msg
                and ROLE in msg and CONTENT in msg
         ]
-        working_set, _last_marker_index, _marker_summary = _build_working_set(cleaned)
+        working_set, _marker_summary = _build_working_set(cleaned)
 
         msg_objects = []
         for msg_dict in working_set:
@@ -942,12 +942,13 @@ def _is_compression_marker(msg: dict) -> bool:
             and content.startswith(COMPRESSION_MARKER))
 
 
-def _build_working_set(cleaned: List[dict]) -> Tuple[List[dict], int, Optional[str]]:
+def _build_working_set(cleaned: List[dict]) -> Tuple[List[dict], Optional[str]]:
     """Reconstruct ``[SYS][U0][markers...][tail]`` from cleaned conversation dicts.
 
-    Returns ``(working_set, last_marker_index, marker_summary)``. ``marker_summary``
-    is the text between ``<context_summary>``/``</context_summary>`` of the LAST
-    marker, or ``None`` if absent/malformed — the caller decides whether to store it.
+    Returns ``(working_set, marker_summary)``. ``marker_summary`` is the text between
+    ``<context_summary>``/``</context_summary>`` of the LAST marker, or ``None`` if
+    absent/malformed — the caller decides whether to store it. The last-marker index is
+    used only internally to split the tail and is not returned.
     """
     markers = []
     last_marker_index = -1
@@ -983,4 +984,4 @@ def _build_working_set(cleaned: List[dict]) -> Tuple[List[dict], int, Optional[s
         # No compression — full history is the working set
         working_set = cleaned
 
-    return working_set, last_marker_index, marker_summary
+    return working_set, marker_summary

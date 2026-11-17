@@ -706,7 +706,7 @@ def verify_and_restore_instance_kv(pool, instance: 'AgentInstance', kv_block) ->
     already-pending label) and seed ``_last_endpoint_config`` with ``state_save_enabled``
     True, so ``_is_streaming``/``_state_capable`` accept the armed label at turn start.
     """
-    inst_name = getattr(instance, 'instance_name', '')
+    inst_name = instance.instance_name
     if not isinstance(kv_block, dict):
         return False
     if not (kv_block.get('capable') is True and kv_block.get('saved') is True):
