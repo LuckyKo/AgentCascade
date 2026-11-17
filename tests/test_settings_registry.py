@@ -255,6 +255,13 @@ _GOLDEN_CORE = {
 def test_golden_snapshot_core_keys():
     """The historical core pool_settings payload must match the pinned baseline exactly."""
     pool = _make_pool()
+    # Deterministic baseline: the two env-var-sourced idle-timeout keys read
+    # AGENT_CASCADE_IDLE_TIMEOUT / AGENT_CASCADE_SYSTEM_AGENT_IDLE_TIMEOUT at import
+    # time, so an ambient value (the user's live config) would pollute the snapshot.
+    # Pin them to the settings.py code defaults so the golden baseline is
+    # environment-independent.
+    pool.settings.idle_timeout_seconds = 1600.0
+    pool.settings.system_agent_idle_timeout_seconds = 300.0
     snapshot = build_pool_settings_snapshot(pool)
     missing = [k for k in _GOLDEN_CORE if k not in snapshot]
     assert not missing, f"golden core keys missing from snapshot: {missing}"

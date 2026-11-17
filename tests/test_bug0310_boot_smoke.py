@@ -4,7 +4,7 @@ This is a pool-only boot (no uvicorn, no LLM call): it exercises exactly the boo
 BUG_0310 edits touch — ``AgentPool.__init__``'s boot-timing marks, the skill discover phase,
 and the now-BACKGROUNDED memory-hint rescan (R2) — and asserts concrete boot invariants
 rather than merely "no crash":
-  * all 12 agent templates registered (the serving pool is populated);
+  * all 11 agent templates registered (the serving pool is populated);
   * the skill registry is non-empty (skill_discover phase ran).
 
 The R2 deferral (rescan runs off the boot thread, index populates on a non-main daemon
@@ -49,8 +49,16 @@ def booted_pool():
 
 
 def test_all_agent_templates_registered(booted_pool):
-    assert len(booted_pool.templates) == 12, (
-        f'expected 12 agent templates at boot, got {len(booted_pool.templates)}')
+    # The 11 agent templates (CompressionReviewer was consolidated into a tool-less
+    # Compressor instance by BUG_0324, dropping the count from 12 to 11). A set
+    # assertion (not a count) catches both a missing and an unexpected template.
+    expected = {'Admin', 'Compressor', 'Security', 'coder', 'designer', 'generalist',
+                'orchestrator', 'ponytail', 'researcher', 'reviewer', 'writer'}
+    registered = set(booted_pool.templates)
+    missing = expected - registered
+    extra = registered - expected
+    assert not missing, f'agent templates missing at boot: {sorted(missing)}'
+    assert not extra, f'unexpected agent templates at boot: {sorted(extra)}'
 
 
 def test_skill_registry_populated(booted_pool):
