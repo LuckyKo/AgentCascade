@@ -104,6 +104,7 @@ const state = {
   agentIndex: 0,
   viewingAgentIndex: 0,
   sessionName: DEFAULT_SESSION_NAME,
+  rootInstanceName: null,  // Canonical identity of the primary agent (may carry a birth stamp)
   connected: false,
   editingIndex: null,  // Which message index is being edited
   activeSubTab: null,
@@ -740,15 +741,21 @@ function invalidateAllPanelCaches() {
 // The active agent is whichever agent the user is currently viewing,
 // or the session's primary agent if no tab is selected.
 
+// Canonical identity of the session's primary agent. This is the key used by
+// agent_instances / tabs / routing; sessionName is the user-facing display name.
+function getSessionPrimaryInstanceName() {
+  return state.rootInstanceName || state.sessionName;
+}
+
 // Get the name of the currently active (viewed) agent — the one whose tab is selected.
-// Falls back to session name (primary agent) when no tab is selected.
+// Falls back to the session's primary agent when no tab is selected.
 function getActiveAgentName() {
-    if (!state.activeSubTab) return state.sessionName;
+    if (!state.activeSubTab) return getSessionPrimaryInstanceName();
     const prefix = 'sub-';
-    if (!state.activeSubTab.startsWith(prefix)) return state.sessionName;
+    if (!state.activeSubTab.startsWith(prefix)) return getSessionPrimaryInstanceName();
     const name = state.activeSubTab.slice(prefix.length);
     // Guard: 'agent-messages' is a static UI tab, not an agent
-    if (name === AGENT_MESSAGES_TAB_NAME) return state.sessionName;
+    if (name === AGENT_MESSAGES_TAB_NAME) return getSessionPrimaryInstanceName();
     return name;
 }
 
@@ -758,7 +765,7 @@ function getAgentTabId(name) { return 'sub-' + name; }
 // Check if an instance name matches the session's primary agent (was "root").
 // Still needed for legitimate distinctions like supervisor display, session management.
 function isSessionPrimaryAgent(name) {
-  return name === state.sessionName;
+  return name === getSessionPrimaryInstanceName();
 }
 
 // Legacy alias — kept for backward compat during transition.
@@ -2204,8 +2211,9 @@ function handleServerMessage(data) {
   // Capture root agent state transition for 'done' event sound trigger
   let rootCompleted = false;
   if (data.type === 'done' && data.agent_instances) {
-    const rootAgentData = data.agent_instances[state.sessionName];
-    const prevRootState = state.subAgents[state.sessionName]?.agent_state;
+    const rootInstanceName = data.instance_name || getSessionPrimaryInstanceName();
+    const rootAgentData = data.agent_instances[rootInstanceName];
+    const prevRootState = state.subAgents[rootInstanceName]?.agent_state;
     if (rootAgentData && prevRootState === 'RUNNING' && rootAgentData.agent_state === 'IDLE') {
       rootCompleted = true;
     }
@@ -2271,6 +2279,7 @@ function handleServerMessage(data) {
           state._firstAgentLoad = true;
         }
       }
+      if (data.instance_name) state.rootInstanceName = data.instance_name;
       if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; }
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
@@ -2715,7 +2724,7 @@ function handleServerMessage(data) {
         const willSwitchTab = autoTabFocusEnabled && stackChanged && (
           (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] &&
            state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
-          (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(state.sessionName))
+          (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(getSessionPrimaryInstanceName()))
         );
 
         if (!willSwitchTab) {
@@ -2744,7 +2753,7 @@ function handleServerMessage(data) {
               }
             } else {
               // Auto-switch back to session primary agent when stack empties (if user isn't already on it)
-              const primaryTab = getAgentTabId(state.sessionName);
+              const primaryTab = getAgentTabId(getSessionPrimaryInstanceName());
               if (state.activeSubTab !== primaryTab) {
                 switchMainTab(primaryTab);
               }
@@ -3225,7 +3234,7 @@ function applyMsgMeta(bubble, msg) {
 
 function createMessageEl(msg, index, config) {
   // Default to session primary agent config if not provided (backward compatible)
-  if (!config) config = getAgentConfig(state.sessionName);
+  if (!config) config = getAgentConfig(getSessionPrimaryInstanceName());
 
   const div = document.createElement('div');
   div.className = msgClass(msg.role || 'unknown');
@@ -3579,7 +3588,7 @@ function appendStreamingDelta(container, newText) {
 }
 
 function updateBubbleContent(bubble, msg, config) {
-    if (!config) config = getAgentConfig(state.sessionName);
+    if (!config) config = getAgentConfig(getSessionPrimaryInstanceName());
 
     if (!msg) return;
 
@@ -4868,7 +4877,7 @@ function renderSubAgents() {
         closeBtn.onclick = (e) => {
           e.stopPropagation();
           send({ type: 'terminate_agent_instance', instance_name: name });
-          switchMainTab(getAgentTabId(state.sessionName));
+          switchMainTab(getAgentTabId(getSessionPrimaryInstanceName()));
         };
         tabBtn.appendChild(closeBtn);
       }
@@ -4913,8 +4922,9 @@ function renderSubAgents() {
     }
 
     const labelSpan = tabBtn.querySelector('.tab-label');
-    if (labelSpan && labelSpan.textContent !== ` ${name}`) {
-      labelSpan.textContent = ` ${name}`;
+    const tabLabel = agentData?.display_name || name;
+    if (labelSpan && labelSpan.textContent !== ` ${tabLabel}`) {
+      labelSpan.textContent = ` ${tabLabel}`;
     }
 
     // Highlight the active sub-agent's tab
@@ -4967,7 +4977,7 @@ function renderSubAgents() {
   // Use direct DOM activation here instead of switchMainTab() to avoid a second
   // full render of all sub-agent tabs.
   if (!state.activeSubTab && namesArr.length > 0) {
-    const primaryName = state.sessionName;
+    const primaryName = getSessionPrimaryInstanceName();
     const tabName = namesArr.includes(primaryName) ? primaryName : namesArr[0];
     const tabId = 'sub-' + tabName;
     state.activeSubTab = tabId;
@@ -5739,7 +5749,7 @@ function updateGenStats(msgs, isFinal = false) {
   }
 
   // 2. Sub-Agent Tokens (exclude the agent whose msgs were passed as main param)
-  const measuredAgent = state.genStats.measuredAgent || state.sessionName;
+  const measuredAgent = state.genStats.measuredAgent || getSessionPrimaryInstanceName();
   if (state.subAgents) {
     for (const name in state.subAgents) {
       if (name === measuredAgent) continue; // Agent handled via msgs param above
@@ -6672,7 +6682,7 @@ function sendMessage(inputEl) {
       messageText = parsed.cleanedText || text;
     } else {
       // No valid @mention: route to session primary agent (orchestrator)
-      targetAgent = state.sessionName;
+      targetAgent = getSessionPrimaryInstanceName();
     }
 
     // Echo user's reply into the Agent Messages list so conversation thread is visible

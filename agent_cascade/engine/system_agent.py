@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any, List, Optional, Tuple
 
+from agent_cascade.agent_identity import display_label
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.engine.helpers import (_inject_skills_to_system_message, _merge_loaded_skill_names,
@@ -1176,7 +1177,7 @@ class SystemAgentMixin:
             state = {
                 'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
                 'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
-                'agent_name': f"{instance_name} ({agent_class})",
+                'agent_name': f"{display_label(inst, dict(self.pool.instances))} ({agent_class})",
                 'message_count': len(conv),
                 'latest_message_summary': latest_summary,
                 'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),

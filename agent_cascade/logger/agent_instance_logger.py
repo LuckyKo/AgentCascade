@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import strip_birth_stamp
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
@@ -103,6 +105,15 @@ class AgentInstanceLogger:
             # BUG FIX (Bug 3): Re-assert current_log_path after merge so it points to the new copy,
             # not the original file that was overwritten by base_metadata above
             self.data['metadata']['current_log_path'] = self.log_path
+
+        # Display name is persisted alongside the identity so restores and session
+        # listings can show a clean label without re-deriving it. Off by default:
+        # when the flag is off no new key is written (legacy metadata is untouched).
+        display_name = self.data['metadata'].get('display_name')
+        if not display_name and settings.ENABLE_STACK_SWAP:
+            display_name = strip_birth_stamp(instance_name)
+        if display_name:
+            self.data['metadata']['display_name'] = display_name
 
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_cascade import settings
 from agent_cascade.log import logger
 from agent_cascade.settings_registry import SETTINGS_REGISTRY
 
@@ -158,10 +159,17 @@ async def apply_settings_changes(
         new_name = str(accepted['session_name']).strip() or DEFAULT_SESSION_NAME
         if session is not None:
             old_name = session.get('session_name')
-            session['session_name'] = new_name
-            summaries = getattr(pool, 'instance_summaries', None)
-            if old_name and summaries is not None and old_name in summaries:
-                summaries[new_name] = summaries.pop(old_name)
+            if settings.ENABLE_STACK_SWAP:
+                inst = pool.get_instance(old_name) if pool is not None else None
+                if inst is not None and getattr(inst, 'parent_instance', None) is None:
+                    inst.display_name = new_name
+                elif pool is None or old_name not in pool.instances:
+                    session['session_name'] = new_name
+            else:
+                session['session_name'] = new_name
+                summaries = getattr(pool, 'instance_summaries', None)
+                if old_name and summaries is not None and old_name in summaries:
+                    summaries[new_name] = summaries.pop(old_name)
         from agent_cascade.session_state_store import save_session_name
         save_session_name(new_name)
 

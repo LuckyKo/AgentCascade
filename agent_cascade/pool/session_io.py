@@ -13,6 +13,9 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import (get_display_name, is_birth_stamped,
+                                          strip_birth_stamp)
 from agent_cascade.llm.schema import ROLE, SYSTEM, USER, FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
@@ -627,9 +630,27 @@ class SessionIOMixin:
             return 'Error: No valid messages found in log input.'
 
         # --- 2b. Determine instance name early for exclusion check ----------
-        instance_name = self._resolve_instance_name(
-            target_instance if target_instance is not None else metadata.get('instance_name') or 'RecoveredSession'
-        )
+        restore_display_name: Optional[str] = None
+        if settings.ENABLE_STACK_SWAP:
+            persisted_identity = str(metadata.get('instance_name') or '').strip()
+            if target_instance is not None:
+                requested = str(target_instance).strip()
+                if persisted_identity and requested != persisted_identity and \
+                        strip_birth_stamp(requested).lower() == strip_birth_stamp(persisted_identity).lower():
+                    # A display-name target for a stamped log must resolve back to the
+                    # persisted stamp — never mint a new one on restore.
+                    resolved_identity = persisted_identity if is_birth_stamped(persisted_identity) else requested
+                else:
+                    resolved_identity = requested
+            else:
+                resolved_identity = persisted_identity or 'RecoveredSession'
+            restore_display_name = str(metadata.get('display_name') or '').strip() or \
+                strip_birth_stamp(resolved_identity)
+        else:
+            resolved_identity = (target_instance if target_instance is not None
+                                 else metadata.get('instance_name') or 'RecoveredSession')
+            restore_display_name = None
+        instance_name = self._resolve_instance_name(resolved_identity)
 
         # --- 3. Dismiss ALL instances (sub-agents + roots) -------------------
         if clear_sub_agents_before_load:
@@ -731,6 +752,7 @@ class SessionIOMixin:
                 conversation=msg_objects,
                 max_turns=None,
                 parent_instance=None,
+                display_name=restore_display_name,
                 created_at=now,
                 last_activity=now,
                 compression_summary=None,
@@ -800,6 +822,8 @@ class SessionIOMixin:
             # Update metadata for the new session context
             updated_metadata = dict(metadata) if metadata else {}
             updated_metadata['current_log_path'] = new_log_path or original_log_path
+            if settings.ENABLE_STACK_SWAP:
+                updated_metadata['display_name'] = get_display_name(new_inst)
             if new_log_path:
                 updated_metadata['original_log_path'] = str(Path(original_log_path or '').name)
 

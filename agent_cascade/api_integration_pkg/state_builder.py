@@ -5,6 +5,8 @@ Phase 3b pure-move refactor. Imports the SAME ``_cache_mgr`` singleton from cach
 
 from typing import Any, Dict, List, Optional
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import display_label, get_display_name
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.api_integration_pkg.cache import (_PREFIX_CACHE_MAXSIZE, _TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr,
@@ -140,14 +142,24 @@ def _serialize_all_instances(pool: AgentPool,
             include_messages=True,
             streaming=streaming,
             streaming_responses=inst_streaming,
+            all_instances=instance_snapshot,
         )
     return all_instances
 
 
 def _get_session_name(instance_snapshot: Dict[str, Any], fallback: str) -> str:
-    """Derive session name from root instances (first parentless instance)."""
-    root_instances = [name for name, inst in instance_snapshot.items() if inst.parent_instance is None]
-    return root_instances[0] if root_instances else fallback
+    """Derive the UI session name from root instances (first parentless instance).
+
+    When stack-swap is enabled this is the clean display name; the root's birth-
+    stamped identity remains available as ``instance_name`` in the state payload.
+    """
+    root_instances = [(name, inst) for name, inst in instance_snapshot.items()
+                      if inst.parent_instance is None]
+    if not root_instances:
+        return fallback
+    if settings.ENABLE_STACK_SWAP:
+        return get_display_name(root_instances[0][1])
+    return root_instances[0][0]
 
 
 def _get_current_model(pool: AgentPool, instance: AgentInstance) -> str:
@@ -303,6 +315,7 @@ def _serialize_instances_incremental(
                         include_messages=True,
                         streaming=(not full_this_frame),  # False => no tail cut + is_partial from responses
                         streaming_responses=inst_streaming_responses,
+                        all_instances=instance_snapshot_data,
                     )
                     _cache_mgr.stream_versions[name] = current_version
                     _cache_mgr.cached_instances[name] = all_instances[name]
@@ -316,6 +329,7 @@ def _serialize_instances_incremental(
                             include_messages=True,
                             streaming=(not force_full),
                             streaming_responses=inst_streaming_responses,
+                            all_instances=instance_snapshot_data,
                         )
                         _cache_mgr.stream_versions[name] = current_version
                         _cache_mgr.cached_instances[name] = all_instances[name]
@@ -1182,6 +1196,7 @@ def _serialize_instance(
     include_messages: bool = False,
     streaming: bool = False,
     streaming_responses: Optional[List[Message]] = None,
+    all_instances: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Serialize an AgentInstance for UI state display.
 
@@ -1217,6 +1232,8 @@ def _serialize_instance(
         # deliberately NOT gated on the state_kv_save_enabled automatic-checkpoint toggle).
         'kv_state_capable': _kv_capable(inst),
     }
+    if settings.ENABLE_STACK_SWAP:
+        result['display_name'] = display_label(inst, all_instances or dict(pool.instances))
 
     if not include_messages:
         return result

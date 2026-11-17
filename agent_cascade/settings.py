@@ -686,6 +686,14 @@ STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv('AGENT_CASCADE_STREAM_MAX_TOTA
 STREAM_DELTA_ENABLED: bool = os.getenv('AGENT_CASCADE_STREAM_DELTA',
                                        '1').strip().lower() not in ('0', 'false', 'off', 'no')
 
+# Stack-swap / fleet-snapshot prerequisite (BUG_0323 S1). When enabled, root
+# instance identities carry an immutable birth stamp (Maine_20261115_143022) so
+# two stacks can share a display name without colliding on KV labels or log
+# paths. False = off: root identities stay plain (Maine) and legacy behavior is
+# byte-identical.
+ENABLE_STACK_SWAP: bool = os.getenv('AGENT_CASCADE_ENABLE_STACK_SWAP',
+                                    'false').strip().lower() in ('true', '1', 'yes')
+
 
 def _parse_stream_tail() -> int:
     """Defensively parse AGENT_CASCADE_STREAM_TAIL; fall back to 1 on bad values.
@@ -877,6 +885,16 @@ CLI_AGENT_AGY_AUTH_VOLUME: str = os.getenv('M6_CLI_AGENT_AGY_AUTH_VOLUME', 'cli_
 #: spread out: each caller waits for its own start slot instead of firing back-to-back.
 #: 0 = OFF (no spacing — every call starts as soon as the concurrency cap allows).
 CLI_AGENT_RATE_LIMIT_SECONDS: float = float(os.getenv('AGENT_CASCADE_CLI_AGENT_RATE_LIMIT_SECONDS', '5'))
+
+#: Stall watchdog (BUG_0343): seconds with NO new stdout/stderr line before an async CLI run is
+#: reported as "STALLED" in __status and logged once. Warn only — the run keeps going, so a
+#: legitimately silent long step is never killed by this alone. 0 = OFF (no stall verdict).
+CLI_AGENT_STALL_WARN_SECONDS: float = float(os.getenv('AGENT_CASCADE_CLI_AGENT_STALL_WARN_SECONDS', '300'))
+
+#: Stall watchdog hard limit: seconds with NO new stdout/stderr line before the async tracker
+#: terminates the container, independent of the wall-clock cap (which may be much longer).
+#: 0 = OFF (never auto-kill on silence; recovery stays with the wall-clock timeout / __kill).
+CLI_AGENT_STALL_KILL_SECONDS: float = float(os.getenv('AGENT_CASCADE_CLI_AGENT_STALL_KILL_SECONDS', '0'))
 
 
 def cli_agent_default_image(harness: str) -> str:

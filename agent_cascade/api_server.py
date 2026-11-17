@@ -43,6 +43,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import strip_birth_stamp
 from agent_cascade.constants import LLM_CONFIG_KEYS
 from agent_cascade.llm.schema import CONTENT, ROLE, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER  # noqa: F401 (re-export)
@@ -360,7 +362,7 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
                 timestamp = 'Unknown'
 
             st = entry.stat(follow_symlinks=False)
-            sessions.append({
+            session = {
                 'path': str(p),
                 'name': instance_name,
                 'agent': agent_class,
@@ -368,7 +370,13 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
                 'size': st.st_size,
                 'mtime': st.st_mtime,
                 'caption': _read_session_caption(p, mtime=st.st_mtime, size=st.st_size),
-            })
+            }
+            if settings.ENABLE_STACK_SWAP:
+                display_name = strip_birth_stamp(instance_name)
+                session['display_name'] = display_name
+                session['instance_name'] = instance_name
+                session['name'] = display_name
+            sessions.append(session)
         except Exception as e:
             logger.debug(f"Failed to parse session log file info: {e}")
             continue
@@ -977,8 +985,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     def _load_session_history(name, agent_pool):
         """Load session history into the pool from log files.
 
-        Returns True on success, False on failure. The pool already has the data
-        after load_session_from_log(), so returning the tuples is redundant.
+        Returns the loaded root's canonical identity (which may carry a birth
+        stamp), or False on failure. The pool already has the data after
+        load_session_from_log().
         """
         # Skip loading if fresh session requested (e.g., via --fresh CLI flag)
         if config.get('fresh_session'):
@@ -1010,7 +1019,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                 logger.error(f"Failed to load session {name} via pool: {status}")
                 return False
 
-            return True
+            roots = [inst_name for inst_name, inst in agent_pool.instances.items()
+                     if getattr(inst, 'parent_instance', None) is None]
+            return roots[0] if roots else name
         except Exception as e:
             logger.error(f"Failed to load session history: {e}")
         return False
@@ -1036,10 +1047,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     }
     # Initial load — pool is the single source of truth for conversation state (Phase 6)
     if agent_pool:
-        loaded = _load_session_history(default_session_name, agent_pool)
+        loaded_identity = _load_session_history(default_session_name, agent_pool)
+        if loaded_identity:
+            # The loaded root identity may carry a birth stamp; routing must use it.
+            session['session_name'] = loaded_identity
         # Validate partial success: instance exists but has no conversation data beyond system message
-        if loaded:
-            inst = agent_pool.get_instance(default_session_name)
+        if loaded_identity:
+            inst = agent_pool.get_instance(loaded_identity)
             if inst and hasattr(inst, 'conversation'):
                 conv_len = len(inst.conversation)
                 if conv_len <= 1:
@@ -1047,23 +1061,32 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                         f"Session load reported success for '{default_session_name}' "
                         f"but conversation has only {conv_len} message(s) — treating as fresh session"
                     )
-                    loaded = False  # Fall through to fallback creation below
+                    loaded_identity = False  # Fall through to fallback creation below
 
         # If log loading failed, create an empty instance so build_state_from_pool() doesn't return None.
         # This mirrors how the original branch always had session['history'] = [] even on load failure.
-        if not loaded and agent_pool.get_instance(default_session_name) is None:
-            try:
-                # Extract system message from the orchestrator agent (first in agents list)
-                sys_content = _extract_system_message(agents[0]) if agents else ''
-                if sys_content:
-                    create_main_agent_instance(
-                        pool=agent_pool,
-                        instance_name=default_session_name,
-                        system_message_content=sys_content,
-                    )
-            except Exception as e:
-                logger.error(f"Failed to create fallback main agent instance: {e}")
-                logger.warning('Server starting without main agent instance — first user message may fail')
+        if not loaded_identity:
+            existing_root = agent_pool.get_instance(session['session_name'])
+            if existing_root is None and settings.ENABLE_STACK_SWAP:
+                resolved = agent_pool._resolve_instance_name(default_session_name, allow_display=True)
+                existing_root = agent_pool.get_instance(resolved)
+            if existing_root is not None:
+                session['session_name'] = existing_root.instance_name
+            else:
+                try:
+                    # Extract system message from the orchestrator agent (first in agents list)
+                    sys_content = _extract_system_message(agents[0]) if agents else ''
+                    if sys_content:
+                        created = create_main_agent_instance(
+                            pool=agent_pool,
+                            instance_name=default_session_name,
+                            system_message_content=sys_content,
+                        )
+                        if created is not None and getattr(created, 'instance_name', None):
+                            session['session_name'] = created.instance_name
+                except Exception as e:
+                    logger.error(f"Failed to create fallback main agent instance: {e}")
+                    logger.warning('Server starting without main agent instance — first user message may fail')
 
     # ── E2E Encryption State ─────────────────────────────────────────────
     server_private_key = x25519.X25519PrivateKey.generate()
@@ -2253,7 +2276,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         from agent_cascade.instance_id import get_session_log_dir
         log_dir = get_session_log_dir(agent_pool)
         sessions = await asyncio.to_thread(_scan_sessions_sync, log_dir)
-        matches = [s for s in sessions if s.get('name') == name]
+        matches = [s for s in sessions if s.get('name') == name
+                   or (settings.ENABLE_STACK_SWAP and s.get('instance_name') == name)]
         if not matches:
             return JSONResponse(status_code=404, content={'message': f"No session found with name '{name}'"})
         path = matches[0]['path']  # _scan_sessions_sync sorts newest-first
@@ -2264,17 +2288,29 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if isinstance(status, str) and status.startswith('Error'):
             return JSONResponse(status_code=400, content={'message': status})
 
+        # The load path may resolve a display name back to its persisted stamped
+        # identity; routing must use that canonical identity.
+        instance_name = name
+        roots = [inst_name for inst_name, inst in agent_pool.instances.items()
+                 if getattr(inst, 'parent_instance', None) is None]
+        if roots:
+            instance_name = roots[0]
+
         # Mirror WS handle_load_session exactly (_stop_generation + _signal_stop):
         # set generating=False and stop_requested=True, but do NOT bump generation_id.
         with session_lock:
-            session['session_name'] = name
+            session['session_name'] = instance_name
             session['generating'] = False
             session['stop_requested'] = True
         if agent_pool.stopped:
             agent_pool.stopped = False
         _clear_caches_safely()
         await _broadcast_state()
-        return {'status': 'ok', 'session_name': name}
+        response = {'status': 'ok',
+                    'session_name': strip_birth_stamp(instance_name) if settings.ENABLE_STACK_SWAP else instance_name}
+        if settings.ENABLE_STACK_SWAP:
+            response['instance_name'] = instance_name
+        return response
 
     @app.get('/api/sessions')
     async def api_list_sessions():
@@ -3154,8 +3190,8 @@ if __name__ == '__main__':
 
     # Create the root orchestrator instance in the new pool (use lowercase to match template key)
     try:
-        agent_pool.create_instance('Maine', 'orchestrator')
-        logger.debug("Orchestrator instance 'Maine' created")
+        root_instance = agent_pool.create_instance('Maine', 'orchestrator')
+        logger.debug("Orchestrator instance '%s' created", root_instance.instance_name)
     except Exception as e:
         logger.error('[FATAL] Failed to create orchestrator instance: %s', e)
         raise SystemExit(1)
@@ -3183,7 +3219,7 @@ if __name__ == '__main__':
 
     if sys_msg_content:
         from agent_cascade.llm.schema import SYSTEM, Message
-        maine_inst = agent_pool.get_instance('Maine')
+        maine_inst = agent_pool.get_instance(root_instance.instance_name)
         if maine_inst and not maine_inst.conversation:
             # PR3 migration: Use centralized API for system message append at server startup
             maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])

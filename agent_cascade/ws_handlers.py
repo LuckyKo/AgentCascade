@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Callable, ClassVar, Dict, Optional
 
 # Re-exports for backward compatibility (Phase 4b refactor)
+from agent_cascade import settings
 from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.ws_helpers import _clear_caches_safely, _validate_disabled_tools
 
@@ -307,7 +308,17 @@ class WsMessageHandler:
         if 'agent_index' in data:
             self.session['agent_index'] = int(data['agent_index'])
         if WsEnvelope.SESSION_NAME in data:
-            self.session['session_name'] = data[WsEnvelope.SESSION_NAME].strip()
+            value = str(data[WsEnvelope.SESSION_NAME]).strip()
+            if settings.ENABLE_STACK_SWAP and self.agent_pool:
+                # The wire field carries the display name; session['session_name'] is
+                # the routing identity (which may be birth-stamped).
+                resolved = self.agent_pool._resolve_instance_name(value, allow_display=True)
+                if resolved in self.agent_pool.instances:
+                    self.session['session_name'] = resolved
+                elif self.session['session_name'] not in self.agent_pool.instances:
+                    self.session['session_name'] = value
+            else:
+                self.session['session_name'] = value
         if WsEnvelope.GENERATE_CFG in data:
             _validate_disabled_tools(data[WsEnvelope.GENERATE_CFG])
             self.session['generate_cfg'] = data[WsEnvelope.GENERATE_CFG]
@@ -673,11 +684,16 @@ class WsMessageHandler:
                 sys_content = _extract_system_message(self._get_agent())
                 if sys_content:
                     from agent_cascade.api_integration import create_main_agent_instance
-                    create_main_agent_instance(
+                    created = create_main_agent_instance(
                         pool=self.agent_pool,
                         instance_name=instance_name,
                         system_message_content=sys_content,
                     )
+                    if created is not None:
+                        # The root may have been minted with a birth stamp.
+                        instance_name = created.instance_name
+                        if self.session.get('session_name') not in self.agent_pool.instances:
+                            self.session['session_name'] = instance_name
 
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
@@ -1813,9 +1829,22 @@ class WsMessageHandler:
         """Handle 'set_session_name' — rename session and migrate summaries."""
         old_name = self.session['session_name']
         new_name = data.get('name', DEFAULT_SESSION_NAME).strip()
-        self.session['session_name'] = new_name
         # Persist the server-wide active session name so a restart resumes it.
         from agent_cascade.session_state_store import save_session_name
+        if settings.ENABLE_STACK_SWAP:
+            # Rename is display-only: the root keeps its persisted birth-stamped
+            # identity so logs/KV labels are never orphaned. session_state.json
+            # stores the display name only.
+            inst = self.agent_pool.get_instance(old_name) if self.agent_pool else None
+            if inst is not None and getattr(inst, 'parent_instance', None) is None:
+                inst.display_name = new_name
+            elif self.agent_pool and old_name not in self.agent_pool.instances:
+                self.session['session_name'] = new_name
+            save_session_name(new_name)
+            await self._broadcast()
+            return
+
+        self.session['session_name'] = new_name
         save_session_name(new_name)
         if self.agent_pool:
             if old_name in self.agent_pool.instance_summaries:

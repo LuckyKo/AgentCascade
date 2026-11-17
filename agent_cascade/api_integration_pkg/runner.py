@@ -7,6 +7,7 @@ import random
 import sys
 from typing import Any, Dict, Iterator, List, Optional
 
+from agent_cascade.agent_identity import get_display_name
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.api_integration_pkg.state_builder import _apply_ui_config
@@ -55,7 +56,6 @@ def create_main_agent_instance(
         sys_msg = Message(role=SYSTEM, content=system_message_content)
         conversation = [sys_msg]
 
-    instance_name = pool._resolve_instance_name(instance_name)
     instance = pool.create_instance(
         instance_name=instance_name,
         agent_class='orchestrator',
@@ -63,6 +63,9 @@ def create_main_agent_instance(
         max_turns=max_turns,
         conversation=conversation,
     )
+    # create_instance may mint a birth-stamped identity; every downstream key/log
+    # must use the canonical identity, not the proposed display name.
+    instance_name = instance.instance_name
 
     # ── Skills System: Inject self-augmentation skill into main agent's system message ──
     # Self-augmentation is the foundational root skill that teaches agents how to
@@ -118,7 +121,7 @@ def create_main_agent_instance(
 
     # Populate instance_state for the main instance so get_session_history() can read it.
     # Register under the actual instance name — no legacy 'root' key needed post-unification.
-    agent_label = f"{instance_name} (Orchestrator)"
+    agent_label = f"{get_display_name(instance)} (Orchestrator)"
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
 

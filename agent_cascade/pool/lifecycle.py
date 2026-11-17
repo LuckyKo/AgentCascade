@@ -8,6 +8,9 @@ import threading
 import time
 from typing import List, Optional
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import (get_display_name, is_birth_stamped,
+                                          make_birth_stamped_name, strip_birth_stamp)
 from agent_cascade.llm.schema import Message
 from agent_cascade.log import logger
 
@@ -28,6 +31,7 @@ class LifecycleMixin:
         self,
         instance_name: str,
         exclude: Optional[str] = None,
+        allow_display: bool = False,
     ) -> str:
         """Resolve instance name to avoid case-insensitive duplicates.
 
@@ -39,6 +43,9 @@ class LifecycleMixin:
             exclude: If provided, skip this name when searching for duplicates.
                 Used when loading a session — the target instance should be excluded
                 so it can be replaced by the loaded data.
+            allow_display: When stack-swap is enabled, also match a root's display
+                name. Off by default so sub-agent resolution can never merge into a
+                root that happens to share its display label.
         """
         if not instance_name:
             raise ValueError('Instance name cannot be empty')
@@ -51,6 +58,14 @@ class LifecycleMixin:
         for name in self.instances:
             if name != exclude and name.lower() == instance_name.lower():
                 return name  # Reuse the existing canonical name
+
+        if allow_display and settings.ENABLE_STACK_SWAP:
+            for name, inst in self.instances.items():
+                if name == exclude:
+                    continue
+                if getattr(inst, 'parent_instance', None) is None and \
+                        get_display_name(inst).lower() == instance_name.lower():
+                    return name
         return instance_name
 
     def create_instance(
@@ -60,6 +75,7 @@ class LifecycleMixin:
         parent_instance: Optional[str] = None,
         max_turns: Optional[int] = None,
         conversation: Optional[List[Message]] = None,
+        display_name: Optional[str] = None,
     ) -> AgentInstance:
         """Create a new agent instance and register it in the pool.
 
@@ -69,11 +85,25 @@ class LifecycleMixin:
             parent_instance: Name of the calling agent (None for root/main).
             max_turns: Per-instance turn limit (None = use default 50).
             conversation: Initial conversation history (default: empty list).
+            display_name: UI-facing name; defaults to the identity's display form.
 
         Returns:
             The newly created AgentInstance.
         """
-        instance_name = self._resolve_instance_name(instance_name)
+        proposed_display = display_name.strip() if isinstance(display_name, str) and display_name.strip() else None
+        proposed_name = instance_name
+        if parent_instance is None and settings.ENABLE_STACK_SWAP:
+            # Mint BEFORE resolving so two roots with the same display name never
+            # collapse into one canonical identity.
+            base_display = proposed_display or strip_birth_stamp(proposed_name)
+            if proposed_display is None:
+                proposed_display = base_display
+            if not is_birth_stamped(proposed_name):
+                proposed_name = make_birth_stamped_name(base_display)
+        elif proposed_display is None:
+            proposed_display = (proposed_name.strip() if isinstance(proposed_name, str) else proposed_name)
+
+        instance_name = self._resolve_instance_name(proposed_name)
         now = time.monotonic()
         instance = AgentInstance(
             instance_name=instance_name,
@@ -81,6 +111,7 @@ class LifecycleMixin:
             conversation=conversation or [],
             max_turns=max_turns,
             parent_instance=parent_instance,
+            display_name=proposed_display or instance_name,
             created_at=now,
             last_activity=now,
             compression_summary=None,

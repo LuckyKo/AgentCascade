@@ -16,6 +16,8 @@ import json
 import os
 from pathlib import Path
 
+from agent_cascade import settings
+from agent_cascade.agent_identity import strip_birth_stamp
 from agent_cascade.log import logger
 from agent_cascade.utils.atomic_json import atomic_write_json
 
@@ -74,6 +76,10 @@ def save_session_name(name: str) -> bool:
     """Persist the active session name (atomic write). Returns True on success."""
     path = _session_state_path()
     try:
+        if settings.ENABLE_STACK_SWAP:
+            # Persist the user-facing name only; the birth stamp is an internal
+            # identity and must not leak into config/session_state.json.
+            name = strip_birth_stamp(name) or name
         existing = _read_existing(path)
         existing['session_name'] = name
         atomic_write_json(path, existing)

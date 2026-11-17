@@ -291,6 +291,7 @@ class AgentInstance:
         default=False
     )  # True once a run() consumes its first turn; reset at each run() start so the first consumption counts as one user turn in telemetry
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
+    display_name: Optional[str] = None  # UI-facing name (root's identity may carry a birth stamp; defaults to instance_name)
     system_started_at: Optional[str] = None  # Wall-clock start (YYYY-MM-DD HH:MM); set once at creation (frozen with the prompt); rendered in Session Metadata
     _child_instances: List[str] = field(
         default_factory=list
@@ -525,6 +526,8 @@ class AgentInstance:
     cache_pool: Optional['ArgumentCachePool'] = None
 
     def __post_init__(self):
+        if not self.display_name:
+            self.display_name = self.instance_name
         if self.system_started_at is None:
             self.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
