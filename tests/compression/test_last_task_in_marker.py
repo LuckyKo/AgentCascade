@@ -1,15 +1,16 @@
 """Tests for "append last supervisor re-task to compression marker" (todo.md:143).
 
 When compress_context() discards a window, the verbatim text of the last genuine
-supervisor task inside that discarded window is preserved in the marker's trailing
+supervisor task inside that discarded window is preserved in the L1 marker's trailing
 <last_supervisor_task> block so the agent does not lose the actual instruction.
+L2 consolidation markers deliberately carry NO task block: they are historical roll-ups,
+so any task they could inherit is already superseded (BUG_0341).
 
 Covers:
 - helpers.py: is_supervisor_task_message(), extract_last_supervisor_task(),
-  extract_last_task_from_marker(), build_marker_message(last_task=...),
-  build_consolidation_marker_message(last_task=...)
+  build_marker_message(last_task=...), build_consolidation_marker_message()
 - core.py: step 8b extraction (active_set[:target_discard_count], NOT target_messages)
-  and L2 consolidation carry-forward.
+  and the absence of L2 carry-forward.
 
 Unit tests are self-contained. Integration tests use the MockAgentPool harness from
 conftest.py plus a patched invoke_compression_agent — no LLM or API server required.
@@ -21,8 +22,8 @@ import pytest
 
 from agent_cascade.compression.helpers import (build_consolidation_marker_message,
                                                build_marker_message, extract_last_supervisor_task,
-                                               extract_last_task_from_marker, extract_summary_from_marker,
-                                               is_compression_marker, is_supervisor_task_message)
+                                               extract_summary_from_marker, is_compression_marker,
+                                               is_supervisor_task_message)
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.utils.pool_validation import validate_message_pool
@@ -193,12 +194,6 @@ class TestBuildMarkerMessage:
         marker = build_marker_message('summary', last_task='')
         assert '<last_supervisor_task>' not in _content(marker)
 
-    def test_whitespace_only_task_extracts_back_to_none(self):
-        # A whitespace-only block (defensive; unreachable via the real extraction path) must
-        # round-trip to None so it is never mistaken for a real task.
-        marker = build_marker_message('summary', last_task='   ')
-        assert extract_last_task_from_marker(marker) is None
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # 7. extract_summary_from_marker returns ONLY the summary (regression guard)
@@ -213,39 +208,23 @@ class TestSummaryExtractionRegression:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 9. extract_last_task_from_marker round-trip / legacy
-# ────────────────────────────────────────────────────────────────────────────
-
-
-class TestExtractLastTaskFromMarker:
-    def test_round_trip(self):
-        marker = build_marker_message('summary', last_task='the task')
-        assert extract_last_task_from_marker(marker) == 'the task'
-
-    def test_legacy_marker_returns_none(self):
-        # A marker built without a task (or an old-format marker) has no block.
-        legacy = _make_msg(USER, COMPRESSION_BASELINE_TEMPLATE.format(header='h', summary='s'))
-        assert extract_last_task_from_marker(legacy) is None
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# 10. build_consolidation_marker_message
+# 9. build_consolidation_marker_message — never carries a task (BUG_0341)
 # ────────────────────────────────────────────────────────────────────────────
 
 
 class TestBuildConsolidationMarkerMessage:
-    def test_appends_task(self):
-        m = build_consolidation_marker_message('cons summary', 3, last_task='carried task')
-        c = _content(m)
-        assert '<last_supervisor_task>' in c
-        assert 'carried task' in c
-        assert c.count('</context_summary>') == 1
-        # Placement: the task block must come AFTER the summary closing tag.
-        assert c.index('</context_summary>') < c.index('<last_supervisor_task>')
-
-    def test_none_unchanged(self):
+    def test_never_appends_task_block(self):
+        """L2 roll-ups are historical: they must NOT carry a <last_supervisor_task> block."""
         m = build_consolidation_marker_message('cons summary', 3)
-        assert '<last_supervisor_task>' not in _content(m)
+        c = _content(m)
+        assert '<last_supervisor_task>' not in c
+        assert c.count('</context_summary>') == 1
+
+    def test_last_task_param_is_gone(self):
+        # The carry-forward parameter was removed outright; a stray kwarg must fail loudly
+        # rather than be silently ignored.
+        with pytest.raises(TypeError):
+            build_consolidation_marker_message('cons summary', 3, last_task='carried task')
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -494,12 +473,17 @@ class TestCompressContextLastTask:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# L2 consolidation carry-forward (unit-level on _consolidate_markers)
+# L2 consolidation does NOT carry a task forward (unit-level on _consolidate_markers)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-class TestConsolidationCarryForward:
-    """The L2 marker must inherit the newest consolidated marker's <last_supervisor_task>."""
+class TestConsolidationDoesNotCarryTask:
+    """The L2 marker must NOT inherit any consolidated marker's <last_supervisor_task>.
+
+    L2 is a historical roll-up: the "newest" task among the merged markers is already
+    superseded by the live conversation, so appending it would misrepresent the current
+    instruction (BUG_0341). L1 markers are unchanged and still carry their own task.
+    """
 
     def _build_history_with_tasks(self, num_markers: int, task_on: int | None) -> List[Message]:
         """Markers at known positions; only marker `task_on` (0-based among markers) carries a task.
@@ -546,20 +530,22 @@ class TestConsolidationCarryForward:
         assert mock_inst.rebuild_conversation.called, 'rebuild_conversation was not called'
         return mock_inst.rebuild_conversation.call_args[0][0]
 
-    def test_newest_marker_task_carried_forward(self):
-        """The newest marker being consolidated carries a task → L2 marker keeps it."""
+    def test_newest_marker_task_not_carried_forward(self):
+        """The newest consolidated marker carries a task → the L2 marker still drops it."""
         # 3 markers; the middle one (index 1) has a task. Consolidation keeps the newest (idx 2),
-        # consolidates idx 0 and 1. The newest CONSOLIDATED is idx 1 → its task should carry forward.
+        # consolidates idx 0 and 1. The newest CONSOLIDATED is idx 1 — its task must NOT appear.
         history = self._build_history_with_tasks(num_markers=3, task_on=1)
         new_history = self._run_consolidate(history)
 
         from agent_cascade.compression.helpers import is_compression_marker
         l2_markers = [m for m in new_history if is_compression_marker(m) and 'L2' in _content(m)]
         assert len(l2_markers) >= 1, 'expected an L2 consolidation marker to be produced'
-        assert 'task from marker 1' in _content(l2_markers[0])
+        c = _content(l2_markers[0])
+        assert '<last_supervisor_task>' not in c
+        assert 'task from marker 1' not in c
 
     def test_no_task_in_consolidated_markers(self):
-        """No consolidated marker has a task → L2 marker has no block (loss, not growth)."""
+        """No consolidated marker has a task → L2 marker has no block (unchanged behaviour)."""
         history = self._build_history_with_tasks(num_markers=3, task_on=None)
         new_history = self._run_consolidate(history)
 

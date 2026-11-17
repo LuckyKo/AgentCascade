@@ -210,34 +210,6 @@ def extract_summary_from_marker(msg: Any) -> str | None:
     return None
 
 
-def extract_last_task_from_marker(msg: Any) -> str | None:
-    """Extract the <last_supervisor_task> text from a compression marker message.
-
-    Companion to ``extract_summary_from_marker``: that one returns only the
-    <context_summary> body, so L2 consolidation (which feeds summaries back to the compressor)
-    would otherwise drop the preserved task entirely. This reads the trailing
-    <last_supervisor_task> block appended by ``build_marker_message`` /
-    ``build_consolidation_marker_message`` (todo.md:143).
-
-    Args:
-        msg: A Message object or dict that is a compression marker.
-
-    Returns:
-        The extracted last-task text, or None if the marker has no such block (legacy markers)
-        or parsing fails.
-    """
-    try:
-        content = extract_text_from_message(msg, add_upload_info=False)
-        if not isinstance(content, str):
-            return None
-        if '<last_supervisor_task>' in content and '</last_supervisor_task>' in content:
-            task_text = content.split('<last_supervisor_task>', 1)[1].split('</last_supervisor_task>', 1)[0].strip()
-            return task_text if task_text else None
-    except Exception:
-        pass
-    return None
-
-
 def get_message_role(msg) -> str:
     """Extract role from a message (handles both dict and object formats)."""
     return msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
@@ -580,9 +552,8 @@ def _stamp_summary_span(msg: Message, first_ts, last_ts) -> Message:
 def _append_last_task_section(content: str, last_task: str | None) -> str:
     """Append the ``<last_supervisor_task>`` block to a marker body (todo.md:143).
 
-    Shared by :func:`build_marker_message` and :func:`build_consolidation_marker_message`.
-    Truncates before appending so the closing tag always survives. Returns *content*
-    unchanged when *last_task* is falsy.
+    Used by :func:`build_marker_message` (L1 only). Truncates before appending so the
+    closing tag always survives. Returns *content* unchanged when *last_task* is falsy.
     """
     if not last_task:
         return content
@@ -636,7 +607,6 @@ def build_consolidation_marker_message(
     num_summaries_consolidated: int,
     first_ts: float | None = None,
     last_ts: float | None = None,
-    last_task: str | None = None,
 ) -> Message:
     """Build a L2 consolidation marker message.
 
@@ -645,16 +615,16 @@ def build_consolidation_marker_message(
     timestamps are available, the combined time span of all consolidated markers is also
     included (e.g. ``"L2, 2026-09-06 10:14 → 2026-09-07 08:30, 22h 16m, 3 summaries consolidated"``).
 
+    The L2 marker deliberately carries **no** ``<last_supervisor_task>`` block: consolidation
+    is a historical roll-up, so any task found in the consolidated markers is already
+    superseded by the live conversation. Only L1 markers preserve a task (see
+    :func:`build_marker_message`).
+
     Args:
         summary_text: The raw consolidated summary text (before template wrapping).
         num_summaries_consolidated: Number of lower-level summaries merged into this one.
         first_ts: Start timestamp (unix seconds) of the first consolidated marker's window.
         last_ts: End timestamp (unix seconds) of the last consolidated marker's window.
-        last_task: Verbatim text of the newest preserved supervisor task carried forward from
-            the markers being consolidated (todo.md:143), or None. Appended AFTER
-            </context_summary> exactly as in build_marker_message; extract_summary_from_marker
-            returns only the summary body, so without this carry-forward an L2 marker would drop
-            the task entirely.
 
     Returns:
         A Message object (USER role) with the formatted consolidation marker.
@@ -668,7 +638,6 @@ def build_consolidation_marker_message(
         header=header,
         summary=summary_text,
     )
-    content = _append_last_task_section(content, last_task)
     return _stamp_summary_span(Message(role=USER, content=str(content)), first_ts, last_ts)
 
 
