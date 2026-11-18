@@ -303,6 +303,9 @@ const POOL_SETTINGS_MAP = [
   // the POOL_SETTINGS_MAP loop) because they need per-harness DOM updates.
   { id: '#setting-cli-paths-ro', prop: 'checked', key: 'cli_agent_paths_ro' },
   { id: '#setting-cli-rate-limit', prop: 'value', key: 'cli_agent_rate_limit_seconds' },
+  // Stack swap / sessions (BUG_0345)
+  { id: '#setting-enable-stack-swap', prop: 'checked', key: 'enable_stack_swap' },
+  { id: '#setting-stack-restore-on-boot', prop: 'checked', key: 'stack_restore_on_boot' },
 ];
 
 // CLI Agents (call_cli_agent): dict-valued pool maps hydrated from the server snapshot.
@@ -427,6 +430,16 @@ function syncPoolSettings(ps) {
 
   // Update two-phase input enabled state after server settings sync
   updateTwoPhaseInputsEnabled();
+
+  // Stack swap / sessions (BUG_0345): re-render sessions panel when the gate changes.
+  if (ps.enable_stack_swap !== undefined) {
+    const wasEnabled = state.stackSwapEnabled;
+    state.stackSwapEnabled = !!ps.enable_stack_swap;
+    if (state.stackSwapEnabled !== wasEnabled) {
+      if (state.stackSwapEnabled) requestSessionPanel();
+      renderSessionPanel();
+    }
+  }
 }
 
 // ── Backend-authoritative settings (Batch B, Phase 2) ──────────────────────────
@@ -1173,48 +1186,46 @@ const refreshSessionsBtn = $('#refreshSessionsBtn');
 const sessionSearch = $('#sessionSearch');
 const sessionsList = $('#sessionsList');
 
-// State for sessions
-let sessions = [];
+// ── Import logs (legacy sessions listing retargeted to import modal) ────────
+let importLogs = [];
 
-// Fetch sessions from API
-async function fetchSessions() {
+async function fetchImportLogs() {
+  const importList = $('#importList');
   try {
-    if (sessionsList) sessionsList.innerHTML = '<div class="sessions-loading">Loading...</div>';
+    if (importList) importList.innerHTML = '<div class="sessions-loading">Loading...</div>';
     const res = await fetch('/api/sessions');
     const data = await res.json();
-    sessions = data.sessions || [];
-    renderSessions();
+    importLogs = data.sessions || [];
+    renderImportLogs();
   } catch (err) {
-    console.error('Failed to fetch sessions:', err);
-    if (sessionsList) sessionsList.innerHTML = '<div class="sessions-placeholder">Error loading sessions.</div>';
+    console.error('Failed to fetch import logs:', err);
+    if (importList) importList.innerHTML = '<div class="sessions-placeholder">Error loading sessions.</div>';
   }
 }
 
-// Initial fetch
-fetchSessions();
-
-// Render session list
-function renderSessions() {
-  if (!sessionsList) return;
-  const query = sessionSearch ? sessionSearch.value.toLowerCase() : '';
-  const filtered = sessions.filter(s =>
+function renderImportLogs() {
+  const importList = $('#importList');
+  if (!importList) return;
+  const importFilter = $('#importFilter');
+  const query = importFilter ? importFilter.value.toLowerCase() : '';
+  const filtered = importLogs.filter(s =>
     s.name.toLowerCase().includes(query) ||
-    s.agent.toLowerCase().includes(query)
+    s.agent.toLowerCase().includes(query) ||
+    (s.caption || '').toLowerCase().includes(query)
   );
 
   if (filtered.length === 0) {
-    sessionsList.innerHTML = `<div class="sessions-placeholder">${query ? 'No matching sessions.' : 'No sessions found.'}</div>`;
+    importList.innerHTML = `<div class="sessions-placeholder">${query ? 'No matching logs.' : 'No logs found.'}</div>`;
     return;
   }
 
-  sessionsList.innerHTML = filtered.map(s => {
-    // Read-only session caption (compressor-generated, else truncated first user message).
-    // Only rendered when non-empty so uncaptioned sessions look unchanged.
+  importList.innerHTML = filtered.map(s => {
     const captionRow = s.caption
       ? `<div class="session-item-caption" title="${escapeHtml(s.caption)}">${escapeHtml(s.caption)}</div>`
       : '';
+    const sel = state.selectedImportPath === s.path.replace(/\\/g, '/') ? ' is-selected' : '';
     return `
-    <div class="session-item" data-path="${escapeHtml(s.path.replace(/\\/g, '/'))}">
+    <div class="session-item${sel}" data-path="${escapeHtml(s.path.replace(/\\/g, '/'))}">
       <div class="session-item-header">
         <span class="session-item-name">${escapeHtml(s.name)}</span>
         <span class="session-item-agent">${escapeHtml(s.agent)}</span>
@@ -1228,13 +1239,107 @@ function renderSessions() {
   `;
   }).join('');
 
-  // Add click listeners scoped to sessionsList (old DOM is replaced each render, so no leak)
-  sessionsList.querySelectorAll('.session-item').forEach(item => {
+  importList.querySelectorAll('.session-item').forEach(item => {
     item.addEventListener('click', () => {
-      const path = item.dataset.path;
-      loadSession(path);
+      state.selectedImportPath = item.dataset.path;
+      renderImportLogs();
     });
   });
+}
+
+// ── Sessions Panel (stack-swap, BUG_0345) ───────────────────────────────────
+state.sessions = null;
+state.sessionBusy = false;
+state.stackSwapEnabled = false;
+state.selectedImportPath = '';
+
+function requestSessionPanel() { send({ type: 'stacks_list' }); }
+
+function renderSessionPanel() {
+  const list = sessionsList;
+  const activeCard = $('#activeSessionCard');
+  if (!list) return;
+  if (!state.stackSwapEnabled) {
+    if (activeCard) activeCard.innerHTML = '';
+    list.innerHTML = `<div class="sessions-placeholder">Stack swap is off — enable it in
+      Settings → Recovery &amp; Continuity.</div>`;
+    return;
+  }
+  if (!state.sessions) { list.innerHTML = '<div class="sessions-loading">Loading...</div>'; return; }
+
+  const { active_stack_id: activeId, details = {} } = state.sessions;
+  const d = details[activeId] || {};
+  if (activeCard) {
+    activeCard.innerHTML = activeId ? `
+      <div class="stack-active-card-inner">
+        <div class="stack-active-title">● ACTIVE ${escapeHtml(d.display_name || activeId)}</div>
+        <div class="stack-meta">${d.instance_count || 0} instances · saved ${d.latest_snapshot_at ? formatDate(d.latest_snapshot_at * 1000) : 'never'}</div>
+        ${d.snapshots?.[d.snapshots.length - 1]?.caption
+          ? `<div class="session-item-caption">${escapeHtml(d.snapshots[d.snapshots.length - 1].caption)}</div>` : ''}
+        <div class="stack-actions">
+          <button class="btn btn-secondary btn-xs" data-session-action="save-now">Save now</button>
+        </div>
+      </div>` : '<div class="sessions-placeholder">No active session.</div>';
+  }
+
+  const q = (sessionSearch?.value || '').toLowerCase();
+  const rows = [];
+  for (const [sid, stack] of Object.entries(state.sessions.stacks || {})) {
+    if (sid === activeId) continue;
+    for (const snap of (details[sid]?.snapshots || [])) {
+      const name = details[sid]?.display_name || sid;
+      if (q && !(name.toLowerCase().includes(q) || (snap.caption || '').toLowerCase().includes(q))) continue;
+      rows.push({ sid, snap, name, inst: details[sid]?.instance_count || 0 });
+    }
+  }
+  rows.sort((a, b) => (b.snap.created_at || 0) - (a.snap.created_at || 0));
+
+  list.innerHTML = rows.length ? rows.map(({ sid, snap, name, inst }) => `
+    <div class="session-item" title="${escapeHtml(sid)}">
+      <div class="session-item-header">
+        <span class="session-item-name">${escapeHtml(name)}</span>
+        <span class="session-item-agent">${escapeHtml(snap.trigger || 'save')}</span>
+      </div>
+      ${snap.caption ? `<div class="session-item-caption" title="${escapeHtml(snap.caption)}">${escapeHtml(snap.caption)}</div>` : ''}
+      <div class="session-item-meta">
+        <span class="session-item-identity">${escapeHtml(sid)}</span>
+        <span>${formatDate((snap.created_at || 0) * 1000)}</span>
+        <span>${inst} inst</span>
+      </div>
+      <div class="stack-actions">
+        <button class="btn btn-secondary btn-xs" data-session-action="open"
+                data-stack-id="${escapeHtml(sid)}" data-snapshot-id="${escapeHtml(snap.snapshot_id)}">Open</button>
+        <button class="btn btn-secondary btn-xs btn-danger" data-session-action="delete"
+                data-stack-id="${escapeHtml(sid)}" data-snapshot-id="${escapeHtml(snap.snapshot_id)}">Delete</button>
+      </div>
+    </div>`).join('') : '<div class="sessions-placeholder">No saved sessions yet.</div>';
+
+  list.querySelectorAll('[data-session-action]').forEach(btn => {
+    btn.addEventListener('click', () => onSessionAction(btn.dataset.sessionAction,
+      btn.dataset.stackId, btn.dataset.snapshotId));
+  });
+  const saveBtn = activeCard ? activeCard.querySelector('[data-session-action="save-now"]') : null;
+  if (saveBtn) saveBtn.addEventListener('click', () => onSessionAction('save-now', activeId));
+}
+
+function onSessionAction(action, stackId, snapshotId) {
+  if (state.sessionBusy) return;
+  if (action === 'open') {
+    if (!confirm('Save the current session and open this one?')) return;
+    state.sessionBusy = true;
+    state.closedTabs.clear();
+    localStorage.removeItem('agent-cascade-closed-tabs');
+    clearAgentMessages();
+    invalidateAllPanelCaches();
+    send({ type: 'stacks_swap', target_stack_id: stackId, target_snapshot_id: snapshotId });
+  } else if (action === 'save-now') {
+    state.sessionBusy = true;
+    send({ type: 'stacks_snapshot', stack_id: stackId });
+  } else if (action === 'delete') {
+    if (!confirm('Delete this saved session? This cannot be undone.')) return;
+    state.sessionBusy = true;
+    send({ type: 'stacks_delete', stack_id: stackId, snapshot_id: snapshotId });
+  }
 }
 
 // Save settings when connection inputs change
@@ -1242,18 +1347,17 @@ if ($('#setting-endpoint')) $('#setting-endpoint').addEventListener('change', sa
 if ($('#setting-api-key')) $('#setting-api-key').addEventListener('change', saveSettings);
 if ($('#setting-model')) $('#setting-model').addEventListener('change', saveSettings);
 
-function loadSession(path) {
+function loadSession(path, mode) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    if (confirm('Load this session? Current unsaved state will be lost.')) {
-      state.closedTabs.clear();
-      localStorage.removeItem('agent-cascade-closed-tabs');
-      // Clear Agent Messages tab when loading a different session
-      clearAgentMessages();
-      ws.send(JSON.stringify({
-        type: 'load_session',
-        path: path
-      }));
-    }
+    state.closedTabs.clear();
+    localStorage.removeItem('agent-cascade-closed-tabs');
+    clearAgentMessages();
+    invalidateAllPanelCaches();
+    ws.send(JSON.stringify({
+      type: 'load_session',
+      path: path,
+      mode: mode || 'replace'
+    }));
   }
 }
 
@@ -1268,12 +1372,44 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-// Search and Refresh
+// Search and Refresh — wired to the sessions panel (stack-swap) or import modal
 if (sessionSearch) {
-  sessionSearch.addEventListener('input', renderSessions);
+  sessionSearch.addEventListener('input', renderSessionPanel);
 }
 if (refreshSessionsBtn) {
-  refreshSessionsBtn.addEventListener('click', fetchSessions);
+  refreshSessionsBtn.addEventListener('click', requestSessionPanel);
+}
+
+// Import modal wiring
+if ($('#importFilter')) {
+  $('#importFilter').addEventListener('input', renderImportLogs);
+}
+if ($('#openImportBtn')) {
+  $('#openImportBtn').addEventListener('click', () => {
+    state.selectedImportPath = '';
+    fetchImportLogs();
+    $('#import-modal').style.display = 'block';
+  });
+}
+if ($('#import-modal-close')) {
+  $('#import-modal-close').addEventListener('click', () => {
+    $('#import-modal').style.display = 'none';
+  });
+}
+if ($('#importAddBtn')) {
+  $('#importAddBtn').addEventListener('click', () => {
+    if (!state.selectedImportPath) return;
+    $('#import-modal').style.display = 'none';
+    loadSession(state.selectedImportPath, 'add');
+  });
+}
+if ($('#importNewBtn')) {
+  $('#importNewBtn').addEventListener('click', () => {
+    if (!state.selectedImportPath) return;
+    if (!confirm('Park the current session and open this log as a new session?')) return;
+    $('#import-modal').style.display = 'none';
+    loadSession(state.selectedImportPath, state.stackSwapEnabled ? 'new_stack' : 'replace');
+  });
 }
 
 // Appearance settings
@@ -1436,6 +1572,10 @@ function saveSettings(sendToServer) {
   // AFK is server-backed now — the server state (pool_settings afk_enabled/afk_message) is the
   // single source of truth; localStorage no longer holds afk-enabled/afk-message.
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
+
+  // Stack swap / sessions (BUG_0345)
+  if ($('#setting-enable-stack-swap')) s['enable_stack_swap'] = $('#setting-enable-stack-swap').checked;
+  if ($('#setting-stack-restore-on-boot')) s['stack_restore_on_boot'] = $('#setting-stack-restore-on-boot').checked;
 
   // Approval timeout settings
   if (approvalTimeoutEnabled) s['approval-timeout-enabled'] = approvalTimeoutEnabled.checked;
@@ -2000,6 +2140,9 @@ function connect() {
     // Re-check OAuth auth on connect so the CLI-agents panel shows the current "authenticated ✓"
     // state on load, without the user having to click "Re-check auth" first.
     send({ type: 'cli_agent_oauth_recheck', harness: 'antigravity' });
+
+    // Sessions panel: request stacks list on connect so the panel renders immediately.
+    requestSessionPanel();
   };
 
   ws.onclose = () => {
@@ -2896,6 +3039,32 @@ function handleServerMessage(data) {
       const oauthReason = data.reason || 'login unavailable';
       showInSystemToastBar(`⚠️ ${oauthHarness} login: ${oauthReason}`);
       if (cliOauthStatus) cliOauthStatus.textContent = '⚠️ ' + oauthReason;
+      break;
+    }
+
+    // ── Sessions / stack-swap (BUG_0345) ────────────────────────────────────
+    case 'stacks_result': {
+      state.sessionBusy = false;
+      if (data.enabled !== undefined) {
+        state.stackSwapEnabled = !!data.enabled;
+      }
+      if (data.stacks !== undefined) {
+        state.sessions = data;
+        renderSessionPanel();
+      }
+      if (data.failed) {
+        showInSystemToastBar(`⚠️ Sessions: ${data.reason || 'operation failed'}`);
+        requestSessionPanel();
+      }
+      break;
+    }
+
+    case 'warning': {
+      if (typeof data.message === 'string' && data.message.includes('stack swap disabled')) {
+        state.stackSwapEnabled = false;
+        renderSessionPanel();
+      }
+      showInSystemToastBar(`⚠️ ${data.message || 'Warning'}`);
       break;
     }
 
@@ -6396,7 +6565,12 @@ if (refreshBtn) {
 }
 if (mainRetryBtn) mainRetryBtn.addEventListener('click', onRetryClick);
 resetBtn.addEventListener('click', () => {
-  if (confirm('Reset the entire conversation and start a new session?')) {
+  if (state.stackSwapEnabled) {
+    const el = $('#new-session-modal');
+    $('#new-session-name').value = '';
+    el.style.display = 'block';
+    $('#new-session-name').focus();
+  } else if (confirm('Reset the entire conversation and start a new session?')) {
     // Clear closed tabs cache so all tabs reappear after reset
     state.closedTabs.clear();
     localStorage.removeItem('agent-cascade-closed-tabs');
@@ -6405,6 +6579,28 @@ resetBtn.addEventListener('click', () => {
     // Invalidate all panel caches to force full re-render after reset
     invalidateAllPanelCaches();
     send({ type: 'reset' });
+  }
+});
+
+// New Session modal handlers
+$('#new-session-cancel')?.addEventListener('click', () => {
+  $('#new-session-modal').style.display = 'none';
+});
+$('#new-session-create')?.addEventListener('click', () => {
+  const name = ($('#new-session-name').value || '').trim();
+  $('#new-session-modal').style.display = 'none';
+  state.closedTabs.clear();
+  localStorage.removeItem('agent-cascade-closed-tabs');
+  clearAgentMessages();
+  invalidateAllPanelCaches();
+  state.sessionBusy = true;
+  send({ type: 'stacks_new', name });
+});
+// Allow Enter key in the New Session name input
+$('#new-session-name')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    $('#new-session-create')?.click();
   }
 });
 

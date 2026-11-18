@@ -10,9 +10,20 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 # Ensure top-level imports work (same as start_api_server.py)
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 flipped ENABLE_STACK_SWAP to True, which turns on code paths that assume a real pool:
+    # the run-loop turn-boundary gate (_pending_swap_event / instances) and state_builder's
+    # display_name branch (pool.instances). These tests exercise streaming/telegram/heartbeat
+    # with pool doubles, so disable the flag to take the pre-S6 code path.
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
 
 
 class TestImportChain:

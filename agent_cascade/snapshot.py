@@ -21,6 +21,7 @@ single-session behavior is untouched.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -301,52 +302,67 @@ def _validate_state_block(block) -> None:
         raise ValueError(f'snapshot state block has invalid/missing state name: {name!r}')
 
 
-def _capture_log_reference(log_path: Optional[str]) -> Dict[str, Any]:
-    """Read a log's message count + append-resume byte offset (file I/O — Phase 2).
+_HASH_CACHE_MAX = 64
+_hash_cache: Dict[Tuple[str, int, float], str] = {}
 
-    Counts records that are message bodies (JSON dicts without ``metadata``/
-    ``event`` keys, matching the logger's load semantics) so the count agrees
-    with the in-memory conversation; a malformed or missing file yields count 0.
-    ``offset`` is the current byte size — the append point a restore resumes at.
+
+def _capture_log_reference(log_path: Optional[str]) -> Dict[str, Any]:
+    """Read a log's message count, byte offset and prefix hash (single pass).
+
+    ``offset`` is the current byte size and ``prefix_sha256`` the sha256 of exactly
+    ``bytes[:offset]`` — the identity of the captured history. Counting stays the same
+    (JSON dicts without ``metadata``/``event``).
     """
-    ref: Dict[str, Any] = {'path': log_path, 'message_count': 0, 'offset': 0}
+    ref: Dict[str, Any] = {'path': log_path, 'message_count': 0, 'offset': 0, 'prefix_sha256': ''}
     if not log_path or not os.path.exists(log_path):
         return ref
+    t0 = time.perf_counter()
     count = 0
+    size = 0
+    digest = hashlib.sha256()
     try:
-        with open(log_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
+        with open(log_path, 'rb') as fb:
+            for raw in fb:
+                size += len(raw)
+                digest.update(raw)
+                line = raw.strip()
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
+                    rec = json.loads(line.decode('utf-8'))
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(rec, dict) and 'metadata' not in rec and 'event' not in rec:
                     count += 1
-        ref['message_count'] = count
-        ref['offset'] = os.path.getsize(log_path)
+        hexdigest = digest.hexdigest()
+        ref.update(offset=size, prefix_sha256=hexdigest, message_count=count)
+        mtime = os.stat(log_path).st_mtime
+        if len(_hash_cache) >= _HASH_CACHE_MAX:
+            _hash_cache.pop(next(iter(_hash_cache)), None)
+        _hash_cache[(log_path, size, mtime)] = hexdigest
+        elapsed = (time.perf_counter() - t0) * 1000
+        if elapsed > 200:
+            logger.info('[STACK_SWAP] log reference capture took %.0fms for %s (size=%d)',
+                        elapsed, log_path, size)
     except OSError as e:
         logger.warning('[FLEET_SNAPSHOT] log reference read failed for %s: %s', log_path, e)
         ref['message_count'] = 0
         ref['offset'] = 0
+        ref['prefix_sha256'] = ''
     return ref
 
 
 def validate_log_reference(ref: Optional[dict]) -> Optional[str]:
-    """Single source of truth for the log-integrity comparison (refinement 4).
+    """Single source of truth for the log-integrity comparison.
 
-    Re-counts the referenced file with the SAME semantics as capture
-    (:func:`_capture_log_reference`), so gate and capture can never disagree.
-    Returns ``None`` when the reference is intact, else a human-readable reason
-    (no instance-name prefix — callers add that). Rules (fail-closed):
-      - ``ref`` must be a dict with a non-empty string ``path``;
-      - the path must exist on disk (a ref captured against a missing log is still
-        refused at restore — the snapshot is already degraded);
-      - re-counted ``message_count`` == ``ref['message_count']`` AND byte size ==
-        ``ref['offset']`` (strict equality; ANY divergence — truncation OR append —
-        means the log moved under the snapshot → refuse).
+    Refuse only real corruption; accept append-only growth.
+    Rules (fail-closed on anything ambiguous):
+      * ``ref`` has a non-empty string ``path`` and the file exists;
+      * ``size >= ref['offset']`` (a shorter file was truncated -> refuse);
+      * ``sha256(bytes[:offset]) == ref['prefix_sha256']`` (same history -> valid);
+      * a legacy ref with no ``prefix_sha256`` (written before this change) falls back
+        to the old strict ``size == offset`` + message count comparison.
+    ``size > offset`` is NORMAL for a live fleet and must not refuse.
     """
     if not isinstance(ref, dict):
         return 'log reference is missing or not a dict'
@@ -355,15 +371,59 @@ def validate_log_reference(ref: Optional[dict]) -> Optional[str]:
         return 'log reference has no usable path'
     if not os.path.exists(path):
         return f'referenced log missing: {path}'
-    current = _capture_log_reference(path)
-    expected_count = ref.get('message_count')
-    if current['message_count'] != expected_count:
-        return (f'message_count mismatch for {path}: snapshot {expected_count!r} '
-                f'!= on-disk {current['message_count']!r}')
-    expected_offset = ref.get('offset')
-    if current['offset'] != expected_offset:
-        return (f'byte offset mismatch for {path}: snapshot {expected_offset!r} '
-                f'!= on-disk {current['offset']!r}')
+
+    try:
+        st = os.stat(path)
+        current_size = st.st_size
+        current_mtime = st.st_mtime
+    except OSError as e:
+        return f'could not stat log {path}: {e}'
+
+    expected_offset = ref.get('offset', 0)
+    if not isinstance(expected_offset, int) or expected_offset < 0:
+        return f'invalid offset in log reference: {expected_offset!r}'
+
+    if current_size < expected_offset:
+        return (f'byte offset truncated for {path}: snapshot expected >= {expected_offset!r} '
+                f'but on-disk size is {current_size!r}')
+
+    prefix_sha256 = ref.get('prefix_sha256')
+    if not prefix_sha256:
+        # Legacy envelope without prefix_sha256: fall back to old strict comparison
+        if current_size != expected_offset:
+            return (f'byte offset mismatch for legacy snapshot of {path}: snapshot {expected_offset!r} '
+                    f'!= on-disk {current_size!r}')
+        current = _capture_log_reference(path)
+        expected_count = ref.get('message_count')
+        if current['message_count'] != expected_count:
+            return (f'message_count mismatch for {path}: snapshot {expected_count!r} '
+                    f'!= on-disk {current['message_count']!r}')
+        return None
+
+    # Cached hash check
+    cached = _hash_cache.get((path, expected_offset, current_mtime))
+    if cached == prefix_sha256 and current_size == expected_offset:
+        return None
+
+    # Calculate sha256 of exactly bytes[:expected_offset]
+    try:
+        digest = hashlib.sha256()
+        bytes_read = 0
+        with open(path, 'rb') as fb:
+            while bytes_read < expected_offset:
+                chunk = fb.read(min(65536, expected_offset - bytes_read))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                bytes_read += len(chunk)
+        if bytes_read != expected_offset:
+            return f'failed to read {expected_offset} bytes from {path} (read {bytes_read})'
+        actual_hash = digest.hexdigest()
+        if actual_hash != prefix_sha256:
+            return (f'prefix hash mismatch for {path}: snapshot {prefix_sha256[:12]}... '
+                    f'!= on-disk {actual_hash[:12]}...')
+    except OSError as e:
+        return f'could not read log {path} for integrity check: {e}'
     return None
 
 
@@ -949,7 +1009,8 @@ def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
     # Phase 5a — log re-attach (per instance, OUTSIDE all pool locks — this does file I/O).
     for name, snap in envelope.instances.items():
         inst = pool.instances[name]
-        pool._reattach_instance_log(inst, snap.log, mcp_block=snap.mcp)
+        pool._reattach_instance_log(inst, snap.log, mcp_block=snap.mcp,
+                                    snapshot_id=envelope.snapshot_id)
         # Re-apply after rebuild_conversation (5a) zeroed it (agent_instance.py:756).
         inst._last_actual_token_count = snap.token_counters['last_actual_token_count']
 
@@ -1092,6 +1153,115 @@ def _ensure_registry(pool, registry: Optional[StackRegistry] = None) -> StackReg
         reg = StackRegistry()
         pool._swap_registry = reg
     return reg
+
+
+_CORRUPT_DIRNAME = '_corrupt'
+
+
+def snapshot_problem(path: Path) -> Optional[str]:
+    """Return a human reason when a snapshot is NOT safely restorable, else None.
+
+    Checks: readable envelope + schema, then the append-tolerant log gate (§6.3.2).
+    A missing, truncated or rewritten log is corruption; a log that merely grew is a
+    normal live save and stays valid.
+    """
+    try:
+        env = load_snapshot_from_disk(path)
+        validate_envelope_integrity(env)
+    except (ValueError, OSError, SnapshotIntegrityError) as exc:
+        return str(exc)
+    return None
+
+
+def quarantine_snapshot(path: Path, reason: str) -> Optional[Path]:
+    """Move a corrupt snapshot into ``snapshots/_corrupt/`` (never delete) + reason sidecar."""
+    target_dir = path.parent / _CORRUPT_DIRNAME
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / path.name
+    try:
+        os.replace(path, target)
+        (target_dir / f'{path.name}.reason.txt').write_text(reason, encoding='utf-8')
+        logger.warning('[STACK_SWAP] quarantined corrupt snapshot %s: %s', path, reason)
+        return target
+    except OSError as exc:
+        logger.warning('[STACK_SWAP] could not quarantine %s: %s', path, exc)
+        return None
+
+
+def ensure_registry_loaded(pool) -> StackRegistry:
+    """Rebuild the registry from disk once (envelopes = source of truth).
+
+    Registers only snapshots that pass snapshot_problem(); corrupt files are moved to
+    ``_corrupt/`` so they neither surface in the UI nor block the rest. Sorted by
+    ``created_at``; duplicate check keeps live park entries. Never raises.
+    """
+    reg = _ensure_registry(pool)
+    if not settings.ENABLE_STACK_SWAP or getattr(pool, '_swap_registry_loaded', False):
+        return reg
+    snap_dir = get_snapshot_dir(pool)
+    entries = []
+    if snap_dir.exists():
+        for path in sorted(snap_dir.glob('*.json')):
+            reason = snapshot_problem(path)
+            if reason:
+                quarantine_snapshot(path, reason)
+                continue
+            try:
+                env = load_snapshot_from_disk(path)
+            except (ValueError, OSError):
+                continue
+            entries.append((env.created_at, env.stack_id, env.snapshot_id, str(path)))
+    entries.sort(key=lambda e: (e[0], e[2]))
+    for _created, stack_id, snapshot_id, path_str in entries:
+        reg.register(stack_id)
+        if snapshot_id not in reg.list_snapshots(stack_id):
+            reg.add_snapshot(stack_id, snapshot_id, path_str)
+    from agent_cascade.session_state_store import load_active_stack_id
+    persisted = load_active_stack_id()
+    reg.set_active(persisted if persisted in reg._snapshots else None)
+    pool._swap_registry_loaded = True
+    return reg
+
+
+def _persist_active_stack(stack_id: Optional[str]) -> None:
+    from agent_cascade.session_state_store import save_active_stack_id
+    save_active_stack_id(stack_id)
+
+
+def register_active_stack(pool, stack_id: str) -> None:
+    reg = ensure_registry_loaded(pool)
+    reg.register(stack_id)
+    reg.set_active(stack_id)
+    _persist_active_stack(stack_id)
+
+
+def set_active_stack(pool, stack_id: Optional[str]) -> None:
+    reg = ensure_registry_loaded(pool)
+    reg.set_active(stack_id)
+    _persist_active_stack(stack_id)
+
+
+def load_boot_stack(pool) -> Optional[SnapshotEnvelope]:
+    """Envelope to activate at boot, or None to use the legacy log loader.
+
+    Uses the persisted active stack id and its newest *valid* snapshot. Anything that
+    would make the restore unsafe (unreadable envelope, missing/diverged log) returns
+    None — fail-open to the legacy path and never touch the pool first.
+    """
+    reg = ensure_registry_loaded(pool)
+    target = reg.active_stack_id
+    if not target:
+        return None
+    path_str = reg.resolve_path(target)          # newest
+    if not path_str:
+        return None
+    try:
+        env = load_snapshot_from_disk(Path(path_str))
+        validate_envelope_integrity(env)         # missing/truncated/diverged log -> legacy
+    except (ValueError, OSError, SnapshotIntegrityError) as exc:
+        logger.warning('[STACK_SWAP] boot snapshot unusable (%s) - legacy load', exc)
+        return None
+    return env
 
 
 def _swap_latch(pool) -> Optional[threading.Event]:
@@ -1471,6 +1641,8 @@ def park_active_stack(
     # Empty the pool; the swap event stays latched until activation clears it so any
     # straggler thread cannot resume into the now-empty (or target) pool mid-swap.
     _clear_pool_state(pool)
+    reg.set_active(None)
+    _persist_active_stack(None)
     logger.info('[STACK_SWAP] parked stack %s (%d instance(s), snapshot %s)',
                 env.stack_id, len(env.instances), env.snapshot_id)
     return env
@@ -1498,6 +1670,7 @@ def activate_stack(pool, envelope: SnapshotEnvelope, *, gate_checked: bool = Fal
 
     reg = _ensure_registry(pool)
     reg.set_active(envelope.stack_id)
+    _persist_active_stack(envelope.stack_id)
     # Clear the latch so the activated stack begins executing again.
     latch = getattr(pool, '_pending_swap_event', None)
     if latch is not None:
@@ -1596,12 +1769,14 @@ def swap_stack(
     if source_stack_id is None:
         source_stack_id = source_env.stack_id
     reg.set_active(None)
+    _persist_active_stack(None)
 
     # 3. Activate the target; roll back to the source on ANY error. Activations are
     #    gate_checked so a mid-swap flag flip cannot silently no-op and empty the pool.
     try:
         activate_stack(pool, target_env, gate_checked=True)
         reg.set_active(target_stack_id)
+        _persist_active_stack(target_stack_id)
     except Exception:
         logger.exception('[STACK_SWAP] target %s activation failed — rolling back to source %s',
                          target_stack_id, source_stack_id)
@@ -1616,123 +1791,28 @@ def swap_stack(
                             'left empty; manual recovery required', source_stack_id, exc_info=True)
             raise
         reg.set_active(source_stack_id)
+        _persist_active_stack(source_stack_id)
         raise
 
 
 # ── Pruning & stack operations (Phase S5) ──────────────────────────────────────
 
-def _delete_snapshot_kv(pool, snapshot, keep_labels: Optional[set] = frozenset()) -> None:
-    """Delete backend autoloader KV files carried by one retired snapshot (m3).
+def _retire_snapshot(stack_id: str, snapshot_id: str, path_str: str) -> None:
+    """Remove one retired snapshot's FILE only — KV files are left untouched.
 
-    Iterates the snapshot's instances and, for each streaming instance whose KV
-    was actually saved, calls ``state_ops.delete_state(api_base, model, label)``
-    with the triple recorded in the snapshot's KV block. Best-effort: a failed
-    delete is logged and never aborts pruning.
+    KV is a cache and the JSONL log is the source of truth; orphaned KV files are
+    acceptable. Retiring (pruning / deleting a stack or a single snapshot) therefore
+    removes ONLY its envelope and never orchestrates KV-file lifecycle (no keep-set, no
+    delete_state).
 
-    KEYING (m3, BUG_0323 S5 fix): ``save_state`` keys KV by ``instance_name``
-    (``state_ops.py`` — "autoloader overwrites the same file on each save"), NOT
-    per-snapshot, so EVERY snapshot — in any stack — references the SAME on-disk KV
-    file. Deleting the shared file when the OLDEST snapshot is pruned would wipe the
-    KV that the newer STILL-KEPT snapshots still claim (``saved: true``), silently
-    dropping their restores to message-only cold start. Because KV carries no stack
-    dimension, the collision can also span stacks (a parked stack sharing an
-    instance_name with another parked stack, or with the active one), so
-    ``keep_labels`` carries the labels ANY kept snapshot in ANY stack still
-    references: a label in that set is SKIPPED (never deleted). Only labels no kept
-    snapshot references are deleted. ``keep_labels`` is ``None`` when a kept snapshot
-    exists but its envelope could not be read — because the KV file is shared we
-    cannot enumerate what it claims, so that is treated as "still referenced" and
-    every delete is skipped (conservative: an orphan KV is far cheaper than
-    destroying live-restore state).
-
-    The active stack's snapshot is never pruned (m3), so no live in-use KV is touched.
+    A snapshot whose envelope cannot be read (corrupt/absent) is moved to ``_corrupt/``
+    with a reason sidecar so it can be inspected without lingering in the active set.
     """
-    from agent_cascade.state_ops import delete_state
-
-    for inst_name, snap in snapshot.instances.items():
-        kv = getattr(snap, 'kv', None) or {}
-        if not kv.get('saved'):
-            continue
-        label = kv.get('label') or inst_name
-        # Skip labels still claimed by a saved instance in a KEPT snapshot of any
-        # stack (shared per-instance_name file); None = unreadable kept snapshot.
-        if keep_labels is None:
-            logger.debug('[SNAPSHOT_PRUNE] kept snapshot unreadable for %s — retaining KV '
-                         'label %s (shared file, cannot prove unreferenced)', inst_name, label)
-            continue
-        if label in keep_labels:
-            logger.debug('[SNAPSHOT_PRUNE] keeping KV label %s — still referenced by a kept '
-                         'snapshot (cross-stack)', label)
-            continue
-        endpoint = kv.get('endpoint_cfg') or {}
-        api_base = endpoint.get('api_base') or ''
-        model = endpoint.get('model') or ''
-        if not api_base or not model:
-            logger.debug('[SNAPSHOT_PRUNE] missing api_base/model for %s in snapshot — '
-                         'skipping KV delete', inst_name)
-            continue
-        delete_state(api_base, model, label)
-
-
-def _global_kept_kv_labels(pool, keep_paths: List[str]) -> Optional[set]:
-    """KV labels still referenced by ``saved:true`` instances in KEPT snapshots.
-
-    Scans the envelope files of the supplied KEPT snapshots (those surviving the
-    caller's keep policy — across ALL stacks, see the callers) and returns the set of
-    labels — computed exactly as :func:`_delete_snapshot_kv` computes them
-    (``kv.label or instance_name``) — that those kept snapshots' saved KV instances
-    claim. Pruning or deleting a retired snapshot must NOT delete any label in this
-    set: KV files are keyed GLOBALLY per ``(model, api_base, instance_name)`` with NO
-    stack dimension (``state_ops`` — the autoloader overwrites the same file on each
-    save), so a parked stack's instance name can collide with another parked stack's
-    (shared subagent names like ``Coder1``) or with the active stack's, and the shared
-    file must survive while ANY kept snapshot — in ANY stack — still restores from it.
-
-    Returns ``None`` when any kept envelope cannot be read (corrupt/absent): we
-    cannot enumerate what it claims, so the caller treats ALL labels as still
-    referenced and skips every delete (conservative). The list is read-only; no locks
-    are held (M5)."""
-    labels: set = set()
-    for path_str in keep_paths:
-        try:
-            snapshot = load_snapshot_from_disk(Path(path_str))
-        except (ValueError, OSError) as exc:  # unreadable: cannot prove labels unreferenced
-            logger.debug('[SNAPSHOT_PRUNE] could not load kept snapshot %s to compute '
-                         'KV label retention: %s', path_str, exc)
-            return None
-        for inst_name, snap in snapshot.instances.items():
-            kv = getattr(snap, 'kv', None) or {}
-            if kv.get('saved'):
-                labels.add(kv.get('label') or inst_name)
-    return labels
-
-
-def _retire_snapshot(pool, stack_id: str, snapshot_id: str, path_str: str,
-                     *, keep_labels: Optional[set] = frozenset()) -> None:
-    """Remove one retired snapshot: delete its KV (if loaded OK) then its file.
-
-    ``keep_labels`` is the set of KV labels still referenced by ``saved:true``
-    instances in KEPT snapshots of ANY stack (see :func:`_delete_snapshot_kv`); they
-    are skipped so the shared per-instance_name KV file is not destroyed while a kept
-    snapshot still claims it. Pass an empty set when no other stack keeps the KV (so
-    it is genuinely unreferenced and free to delete) and ``None`` to skip all deletes
-    conservatively.
-
-    A snapshot whose envelope cannot be read (corrupt/absent) still has its file
-    dropped — the KV may already be gone, and a stale file must not linger. Never
-    raises: an unlink failure is logged. The registry entry is dropped by the
-    caller (its own bookkeeping)."""
     try:
-        snapshot = load_snapshot_from_disk(Path(path_str))
-    except (ValueError, OSError) as exc:  # unreadable: skip KV cleanup, still remove the file
-        logger.debug('[SNAPSHOT_PRUNE] could not load %s of stack %s for KV cleanup: %s',
-                     snapshot_id, stack_id, exc)
-    else:
-        try:
-            _delete_snapshot_kv(pool, snapshot, keep_labels=keep_labels)
-        except Exception:  # noqa: BLE001 — KV teardown must never abort pruning
-            logger.debug('[SNAPSHOT_PRUNE] KV delete failed for snapshot %s of stack %s',
-                         snapshot_id, stack_id, exc_info=True)
+        load_snapshot_from_disk(Path(path_str))
+    except (ValueError, OSError) as exc:
+        quarantine_snapshot(Path(path_str), str(exc))
+        return
     try:
         Path(path_str).unlink(missing_ok=True)
     except OSError as exc:
@@ -1742,59 +1822,24 @@ def _retire_snapshot(pool, stack_id: str, snapshot_id: str, path_str: str,
 def prune_snapshots(pool, *, registry: Optional[StackRegistry] = None) -> int:
     """Enforce per-stack snapshot retention: keep the newest ``SNAPSHOT_RETENTION_COUNT``.
 
-    Walks every known stack (independent of the live pool) and drops the OLDEST
-    snapshots beyond the retention count (write order — oldest first). Guards:
-      * The snapshot(s) backing the currently-active stack are NEVER pruned (m3):
-        their KV is in live use, so deleting them would corrupt the running fleet.
-        This means an active stack accumulates snapshots without bound until it is
-        parked — an accepted trade-off: the active fleet must never have a restore
-        point destroyed under it, and parking transfers the set to a prunable stack.
-      * For each pruned snapshot that carried saved KV, the backend autoloader
-        cache file is deleted via ``state_ops.delete_state`` — BUT only for labels no
-        KEPT snapshot in ANY stack still references (m3 / S5 cross-stack). KV files are
-        keyed GLOBALLY per ``(model, api_base, instance_name)`` with no stack dimension,
-        so a parked stack's instance name can collide with another parked stack's
-        (shared subagent names) or the active stack's; deleting the shared file on one
-        stack's prune would break a kept snapshot's restore in a DIFFERENT stack.
-        ``_global_kept_kv_labels`` computes that retained-label set over every stack's
-        kept snapshots and it is threaded through ``_retire_snapshot`` /
-        ``_delete_snapshot_kv``.
-
-    Gated: returns ``0`` when ``ENABLE_STACK_SWAP`` is off, leaving the registry
-    byte-identical (M1). All disk I/O runs after the park call site has released
-    the pool locks, so it is lock-free (M5). Returns the number of snapshots pruned.
+    Walks every known stack and drops the OLDEST snapshots beyond the retention count
+    (write order — oldest first). Only snapshot files are pruned; KV files are left
+    untouched (KV is a cache, the JSONL log is the source of truth).
     """
     if not settings.ENABLE_STACK_SWAP:
         return 0
     reg = _ensure_registry(pool, registry)
     retention = max(1, settings.SNAPSHOT_RETENTION_COUNT)
-    active = reg.active_stack_id
-    # KV is keyed globally per (model, api_base, instance_name) — NO stack dimension —
-    # so a parked stack's instance name can collide with another parked stack's (shared
-    # subagent names) or the active one's. Build ONE global keep-set from every stack's
-    # surviving snapshots BEFORE deleting anything: the active stack contributes all of
-    # its snapshots (it is never pruned), a parked stack the newest ``retention``. This
-    # set is threaded to every retirement so pruning one stack never wipes a label
-    # another stack's kept snapshot still restores from.
-    keep_paths: List[str] = []
-    for stack_id, entries in list(reg._snapshots.items()):
-        if stack_id == active:                    # active never pruned -> all kept
-            keep_paths.extend(path for _sid, path in entries)
-        else:
-            keep_paths.extend(path for _sid, path in
-                              entries[max(0, len(entries) - retention):])
-    keep_labels = _global_kept_kv_labels(pool, keep_paths)
+
     pruned = 0
     for stack_id, entries in list(reg._snapshots.items()):
-        if stack_id == active:           # m3: never prune the active stack's snapshots
-            continue
         if len(entries) <= retention:
             continue
         keep = entries[len(entries) - retention:]
-        for sid, path in entries[:len(entries) - retention]:   # oldest first
-            _retire_snapshot(pool, stack_id, sid, path, keep_labels=keep_labels)
+        for sid, path in entries[:len(entries) - retention]:
+            _retire_snapshot(stack_id, sid, path)
             pruned += 1
-        reg._snapshots[stack_id] = keep   # keep order preserved (oldest-first)
+        reg._snapshots[stack_id] = keep
     if pruned:
         logger.info('[SNAPSHOT_PRUNE] retired %d snapshot(s) beyond retention %d',
                     pruned, retention)
@@ -1802,14 +1847,82 @@ def prune_snapshots(pool, *, registry: Optional[StackRegistry] = None) -> int:
 
 
 def list_stacks(pool, *, registry: Optional[StackRegistry] = None) -> Dict[str, Any]:
-    """Return the active stack id plus every known stack's snapshot ids (read-only).
+    """Return the active stack id plus every known stack's snapshot ids and details (read-only).
 
     The shape mirrors the REST ``GET /api/stacks`` contract and is the single
-    source the REST, WS and Telegram surfaces render from, so they never drift."""
-    reg = _ensure_registry(pool, registry)
+    source the REST, WS and Telegram surfaces render from, so they never drift.
+    """
+    reg = ensure_registry_loaded(pool) if registry is None else registry
+    active_id = reg.active_stack_id
+    stacks_dict: Dict[str, List[str]] = {}
+    details_dict: Dict[str, Dict[str, Any]] = {}
+
+    from agent_cascade.session_caption import read_session_caption
+    from agent_cascade.agent_identity import strip_birth_stamp
+
+    for stack_id, entries in list(reg._snapshots.items()):
+        valid_snapshots = []
+        valid_sids = []
+        display_name = strip_birth_stamp(stack_id) or stack_id
+        instance_count = 0
+        latest_snapshot_at = 0.0
+
+        for sid, path_str in entries:
+            p = Path(path_str)
+            if not p.exists():
+                continue
+            try:
+                env = load_snapshot_from_disk(p)
+                validate_envelope_integrity(env)
+            except Exception:
+                continue
+
+            valid_sids.append(sid)
+            root_snap = None
+            for _name, isnap in env.instances.items():
+                ident = isnap.identity or {}
+                if not ident.get('parent_instance'):
+                    root_snap = isnap
+                    break
+            if root_snap is None and env.instances:
+                root_snap = next(iter(env.instances.values()))
+
+            if root_snap is not None:
+                dname = (root_snap.identity or {}).get('display_name')
+                if dname:
+                    display_name = dname
+
+            caption = ''
+            if root_snap is not None and root_snap.log and root_snap.log.get('path'):
+                log_path = Path(root_snap.log['path'])
+                caption = read_session_caption(log_path)
+
+            instance_count = len(env.instances)
+            latest_snapshot_at = max(latest_snapshot_at, env.created_at)
+
+            valid_snapshots.append({
+                'snapshot_id': sid,
+                'created_at': env.created_at,
+                'trigger': env.trigger,
+                'caption': caption,
+            })
+
+        if not valid_sids and stack_id != active_id:
+            continue
+
+        stacks_dict[stack_id] = valid_sids
+        details_dict[stack_id] = {
+            'display_name': display_name,
+            'instance_count': instance_count,
+            'latest_snapshot_at': latest_snapshot_at,
+            'snapshots': valid_snapshots,
+        }
+
     return {
-        'active_stack_id': reg.active_stack_id,
-        'stacks': {sid: reg.list_snapshots(sid) for sid in reg._snapshots},
+        'active_stack_id': active_id,
+        'stacks': stacks_dict,
+        'details': details_dict,
+        'enabled': bool(settings.ENABLE_STACK_SWAP),
     }
 
 
@@ -1838,36 +1951,74 @@ def snapshot_stack(pool, stack_id: Optional[str] = None, *,
 
 
 def delete_stack(pool, stack_id: str, *, registry: Optional[StackRegistry] = None) -> Dict[str, Any]:
-    """Delete a parked stack: its snapshot files, their KV, and its registry entry.
+    """Delete a parked stack: its snapshot files and its registry entry.
 
     Rejects the active stack with :class:`ActiveStackDeletionError` (m4/409) — the
-    caller must park or swap to another stack first. For each removed snapshot it
-    deletes the envelope file and, when the snapshot carried saved KV, the backend
-    autoloader state (OQ3/m3) — BUT only for labels no other stack's surviving
-    snapshots still reference: KV files are keyed globally per
-    ``(model, api_base, instance_name)``, so deleting one stack must not destroy a
-    label another stack (or the active one) still restores from. Returns
-    ``{'stack_id', 'removed_snapshots'}``."""
+    caller must park or swap to another stack first. Only the envelope files are
+    removed; KV files are left untouched (KV is a cache, the JSONL log is the source
+    of truth). Returns ``{'stack_id', 'removed_snapshots'}``."""
     reg = _ensure_registry(pool, registry)
     if stack_id == reg.active_stack_id:
         raise ActiveStackDeletionError(
             f"cannot delete active stack {stack_id!r}; park or swap to another stack first")
     entries = reg._snapshots.get(stack_id, [])
-    # KV is shared GLOBALLY per (model, api_base, instance_name) with no stack
-    # dimension, so a label this stack references may also be claimed by another
-    # stack's surviving snapshots (shared subagent names) or the active stack's.
-    # Build the keep-set from every OTHER stack (the deleted stack's own snapshots
-    # contribute nothing — they are being removed; no other stack is pruned here, so
-    # all of its snapshots count). An empty registry-wide keep-set means the label is
-    # genuinely unreferenced and free to delete.
-    other_keep_paths: List[str] = []
-    for other_id, other_entries in reg._snapshots.items():
-        if other_id == stack_id:
-            continue
-        other_keep_paths.extend(path for _sid, path in other_entries)
-    keep_labels = _global_kept_kv_labels(pool, other_keep_paths)
     for sid, path in entries:
-        _retire_snapshot(pool, stack_id, sid, path, keep_labels=keep_labels)
+        _retire_snapshot(stack_id, sid, path)
     reg._snapshots.pop(stack_id, None)
     logger.info('[STACK_OPS] deleted stack %s (%d snapshot(s))', stack_id, len(entries))
     return {'stack_id': stack_id, 'removed_snapshots': len(entries)}
+
+
+def delete_snapshot(pool, stack_id: str, snapshot_id: str, *, registry=None) -> Dict[str, Any]:
+    """Delete one saved session (snapshot file + registry entry). KV files are left untouched.
+
+    Mirrors :func:`delete_stack` for a single entry: only the envelope is removed and the
+    registry row updated; KV is never touched (KV is a cache, the JSONL log is the source
+    of truth). The stack key is dropped when its last snapshot goes. Returns
+    ``{'stack_id', 'snapshot_id', 'removed_stack': bool}``.
+    """
+    reg = _ensure_registry(pool, registry)
+    entries = reg._snapshots.get(stack_id)
+    if not entries:
+        raise ValueError(f'unknown stack {stack_id!r}')
+    path_str = reg.resolve_path(stack_id, snapshot_id)
+    if path_str is None:
+        raise ValueError(f'unknown snapshot {snapshot_id!r} in stack {stack_id!r}')
+    _retire_snapshot(stack_id, snapshot_id, path_str)
+    reg._snapshots[stack_id] = [[sid, p] for sid, p in entries if sid != snapshot_id]
+    removed_stack = not reg._snapshots[stack_id]
+    if removed_stack:
+        reg._snapshots.pop(stack_id, None)
+    return {'stack_id': stack_id, 'snapshot_id': snapshot_id, 'removed_stack': removed_stack}
+
+
+def maybe_autosave_on_task_end(pool, instance_name: str) -> None:
+    """Root run end -> a session save. Never raises; no-op when not applicable.
+
+    A save is a pure manifest, so it is safe while the rest of the fleet is still
+    running (user decision: "stack save should support live swap"). There is no
+    quiescence scan and no rotation — the finishing instance is simply the trigger.
+    """
+    if not (settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED):
+        return
+    inst = getattr(pool, 'get_instance', lambda _: None)(instance_name)
+    if inst is None or getattr(inst, 'parent_instance', None) is not None:
+        return
+    latch = getattr(pool, '_pending_swap_event', None)
+    if latch is not None and latch.is_set():
+        return                       # a park/swap owns the fleet right now
+    lock = getattr(pool, '_stack_autosave_lock', None)
+    if lock is None:
+        lock = threading.Lock()
+        pool._stack_autosave_lock = lock
+    if not lock.acquire(blocking=False):
+        return                       # a save is already in flight
+    try:
+        started = time.perf_counter()
+        snapshot_stack(pool, trigger='task_end')
+        logger.info('[STACK_SWAP] task-end autosave took %.0fms',
+                    (time.perf_counter() - started) * 1000)
+    except Exception:
+        logger.exception('[STACK_SWAP] task-end autosave failed (non-fatal)')
+    finally:
+        lock.release()

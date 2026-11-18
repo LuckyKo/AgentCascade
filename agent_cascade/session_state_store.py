@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 from agent_cascade import settings
 from agent_cascade.agent_identity import strip_birth_stamp
@@ -89,6 +90,36 @@ def save_session_name(name: str) -> bool:
         return True
     except OSError as e:
         logger.error(f"[session_state] Failed to save session name to {path}: {e}")
+        return False
+
+
+def load_active_stack_id() -> str:
+    """Load the persisted active stack id, falling back to ''.
+
+    Never raises: a missing/corrupt file simply yields ''.
+    """
+    path = _session_state_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding='utf-8'))
+            sid = data.get('active_stack_id')
+            if isinstance(sid, str) and sid.strip():
+                return sid.strip()
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug(f"[session_state] Failed to read active_stack_id from {path}: {e}")
+    return ''
+
+
+def save_active_stack_id(stack_id: Optional[str]) -> bool:
+    """Persist the active stack id (atomic write). Returns True on success."""
+    path = _session_state_path()
+    try:
+        existing = _read_existing(path)
+        existing['active_stack_id'] = (stack_id or '').strip()
+        atomic_write_json(path, existing)
+        return True
+    except OSError as e:
+        logger.error(f"[session_state] Failed to save active_stack_id to {path}: {e}")
         return False
 
 

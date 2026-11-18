@@ -816,15 +816,3 @@ def _delete_state(api_base_no_v1: str, model: str, label: str):
         httpx.delete(url, timeout=10)
     except Exception as e:
         logger.debug('State delete failed for label %s: %s', label, e)
-
-
-def delete_state(api_base: str, model: str, label: str) -> None:
-    """Delete a saved KV state by label (public entry point over ``_delete_state``).
-
-    Normalizes ``api_base`` with ``_normalize_api_base`` exactly like ``save_state``
-    and ``restore_state``, so callers pass the raw endpoint api_base (with or
-    without a trailing ``/v1``). Best-effort — never raises (mirrors
-    ``_delete_state``). Used by snapshot pruning to remove autoloader KV files
-    orphaned by a retired snapshot (BUG_0323 m3).
-    """
-    _delete_state(_normalize_api_base(api_base), model, label)

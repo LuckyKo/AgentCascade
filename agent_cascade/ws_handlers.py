@@ -72,6 +72,8 @@ class MsgType(str, Enum):
     STACKS_LIST = 'stacks_list'
     STACKS_SWAP = 'stacks_swap'
     STACKS_SNAPSHOT = 'stacks_snapshot'
+    STACKS_NEW = 'stacks_new'
+    STACKS_DELETE = 'stacks_delete'
     # Outgoing-only response types.
     STATE = 'state'
     STREAM_UPDATE = 'stream_update'
@@ -129,6 +131,14 @@ def _msg_identity(msg) -> tuple:
     if content is None:
         content = ''
     return (str(ts), str(content))
+
+
+def _validate_session_display_name(name: Optional[str]) -> str:
+    """Sanitize and validate session display name."""
+    if not name or not isinstance(name, str):
+        return ''
+    cleaned = ''.join(c for c in name if c.isalnum() or c in (' ', '_', '-')).strip()
+    return cleaned[:64]
 
 
 class WsMessageHandler:
@@ -208,6 +218,8 @@ class WsMessageHandler:
             MsgType.STACKS_LIST: self.handle_stacks_list,
             MsgType.STACKS_SWAP: self.handle_stacks_swap,
             MsgType.STACKS_SNAPSHOT: self.handle_stacks_snapshot,
+            MsgType.STACKS_NEW: self.handle_stacks_new,
+            MsgType.STACKS_DELETE: self.handle_stacks_delete,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
@@ -793,6 +805,14 @@ class WsMessageHandler:
         if result[WsEnvelope.STATUS] == 'ok':
             await self._broadcast()
 
+    async def _broadcast_stacks(self) -> None:
+        """Broadcast updated stacks listing to all clients."""
+        try:
+            await self.handle_stacks_list({})
+        except Exception as e:
+            from agent_cascade.log import logger
+            logger.debug(f"Failed to broadcast stacks: {e}")
+
     async def handle_stacks_list(self, data: dict) -> None:
         """Handle 'stacks_list' — report the active stack and every parked stack's snapshots.
 
@@ -839,6 +859,7 @@ class WsMessageHandler:
             })
             return
         target = data.get('target_stack_id')
+        target_snapshot_id = data.get('target_snapshot_id')
         payload: Dict[str, Any]
         if not target or not isinstance(target, str):
             payload = {'status': 'failed', 'reason': 'bad_target',
@@ -846,10 +867,18 @@ class WsMessageHandler:
         else:
             from agent_cascade.snapshot import SnapshotIntegrityError, swap_stack
             try:
-                await asyncio.to_thread(swap_stack, self.agent_pool, target)
+                await asyncio.to_thread(swap_stack, self.agent_pool, target,
+                                        target_snapshot_id=target_snapshot_id)
                 reg = getattr(self.agent_pool, '_swap_registry', None)
                 payload = {'status': 'ok',
                            'active_stack_id': getattr(reg, 'active_stack_id', None)}
+                # Re-point session['session_name'] to the restored root
+                roots = [n for n, i in self.agent_pool.instances.items() if getattr(i, 'parent_instance', None) is None]
+                if roots:
+                    self.session['session_name'] = roots[0]
+                    from agent_cascade.agent_identity import strip_birth_stamp
+                    from agent_cascade.session_state_store import save_session_name
+                    save_session_name(strip_birth_stamp(roots[0]))
             except SnapshotIntegrityError as e:
                 payload = {'status': 'failed', 'reason': 'integrity', 'message': str(e)}
             except ValueError as e:
@@ -861,7 +890,9 @@ class WsMessageHandler:
         payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
         await self.broadcast_fn(payload)
         if payload.get('status') == 'ok':
+            self._clear_caches_safely()
             await self._broadcast()
+            await self._broadcast_stacks()
 
     async def handle_stacks_snapshot(self, data: dict) -> None:
         """Handle 'stacks_snapshot' — capture a non-destructive fleet snapshot.
@@ -883,15 +914,115 @@ class WsMessageHandler:
                 WsEnvelope.MESSAGE: 'stacks_snapshot: no agent pool',
             })
             return
+        if self._is_generating():
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'Cannot take snapshot while generation is in progress',
+            })
+            return
         from agent_cascade import snapshot
         stack_id = data.get('stack_id')
-        res = await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, stack_id)
+        res = await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, stack_id, trigger='user')
         if res is None:
             payload = {'status': 'failed', 'reason': 'no_fleet', 'message': 'no live fleet to snapshot'}
         else:
             payload = {'status': 'ok', **res}
         payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
         await self.broadcast_fn(payload)
+        if payload.get('status') == 'ok':
+            await self._broadcast_stacks()
+
+    async def handle_stacks_delete(self, data: dict) -> None:
+        """Handle 'stacks_delete' — delete a single session snapshot or whole stack."""
+        if not settings.ENABLE_STACK_SWAP:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'stack swap disabled (set ENABLE_STACK_SWAP=true)',
+            })
+            return
+        if self.agent_pool is None:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.ERROR,
+                WsEnvelope.MESSAGE: 'stacks_delete: no agent pool',
+            })
+            return
+        stack_id = data.get('stack_id')
+        snapshot_id = data.get('snapshot_id')
+        if not stack_id or not isinstance(stack_id, str):
+            payload = {'status': 'failed', 'reason': 'bad_request', 'message': "'stack_id' required"}
+            payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
+            await self.broadcast_fn(payload)
+            return
+
+        from agent_cascade.snapshot import ActiveStackDeletionError, delete_snapshot, delete_stack
+        try:
+            if snapshot_id:
+                res = await asyncio.to_thread(delete_snapshot, self.agent_pool, stack_id, snapshot_id)
+            else:
+                res = await asyncio.to_thread(delete_stack, self.agent_pool, stack_id)
+            payload = {'status': 'ok', **res}
+        except ActiveStackDeletionError as e:
+            payload = {'status': 'failed', 'reason': 'active', 'message': str(e)}
+        except ValueError as e:
+            payload = {'status': 'failed', 'reason': 'not_found', 'message': str(e)}
+        except Exception as e:
+            from agent_cascade.log import logger
+            logger.exception('[STACK_OPS] WS delete failed for stack %r, snapshot %r', stack_id, snapshot_id)
+            payload = {'status': 'failed', 'message': f'delete failed: {e}'}
+
+        payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
+        await self.broadcast_fn(payload)
+        if payload.get('status') == 'ok':
+            await self._broadcast_stacks()
+
+    async def handle_stacks_new(self, data: dict) -> None:
+        """Park the active session and start a named fresh root (stack-safe New Session).
+
+        ``name`` is the display name; empty -> DEFAULT_SESSION_NAME. The pool mints the birth
+        stamp, so an empty name yields ``Maine_<timestamp>``.
+        """
+        if not settings.ENABLE_STACK_SWAP or self.agent_pool is None:
+            await self.handle_reset(data)
+            return
+
+        self._stop_generation()
+        self._signal_stop()
+
+        from agent_cascade import snapshot
+        from agent_cascade.agent_identity import strip_birth_stamp
+        from agent_cascade.session_state_store import DEFAULT_SESSION_NAME, save_session_name
+
+        display = _validate_session_display_name(data.get('name'))
+        parked = None
+        if self.agent_pool.instances:
+            parked = await asyncio.to_thread(snapshot.park_active_stack,
+                                             self.agent_pool, trigger='new_session')
+
+        from agent_cascade.api_server import _extract_system_message
+        from agent_cascade.api_integration import create_main_agent_instance
+        sys_content = _extract_system_message(self._get_agent()) or ''
+        created = create_main_agent_instance(
+            pool=self.agent_pool,
+            instance_name=display or DEFAULT_SESSION_NAME,
+            system_message_content=sys_content)
+        if created is None:
+            if parked is not None:
+                try:
+                    snapshot.activate_stack(self.agent_pool, parked)
+                except Exception:
+                    from agent_cascade.log import logger
+                    logger.critical('[STACK_SWAP] new-session rollback failed', exc_info=True)
+            await self._broadcast_stacks()
+            return
+
+        self.session['session_name'] = created.instance_name
+        save_session_name(strip_birth_stamp(created.instance_name))
+        snapshot.register_active_stack(self.agent_pool, created.instance_name)
+        if self.agent_pool.stopped:
+            self.agent_pool.stopped = False
+        self._clear_caches_safely()
+        await self._broadcast()
+        await self._broadcast_stacks()
 
     async def handle_resume_all(self, data: dict) -> None:
         """Handle 'resume_all' — resume ALL paused instances."""
@@ -1202,6 +1333,12 @@ class WsMessageHandler:
         from agent_cascade.server_restart import restart_server_process
         logger.warning('Server restart requested via UI')
         await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Server is restarting... Please wait.'})
+        if settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED and self.agent_pool:
+            try:
+                from agent_cascade import snapshot
+                await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, trigger='restart')
+            except Exception as e:
+                logger.warning('[STACK_SWAP] restart autosave failed (non-fatal): %s', e)
         restart_server_process()
 
     async def handle_update_config(self, data: dict) -> None:
@@ -1960,9 +2097,20 @@ class WsMessageHandler:
 
     async def handle_load_session(self, data: dict) -> None:
         """Handle 'load_session' — load conversation from a log file."""
+        if self._is_generating():
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'Cannot load session while generation is in progress',
+            })
+            return
+
         path = data.get('path')
         if not path or not self.agent_pool:
             return
+
+        mode = data.get('mode', 'replace')
+        if not settings.ENABLE_STACK_SWAP and mode == 'new_stack':
+            mode = 'replace'
 
         # Extract instance_name from log file metadata BEFORE loading.
         # This avoids fragile regex parsing of status strings and lets the
@@ -1985,28 +2133,69 @@ class WsMessageHandler:
             from agent_cascade.log import logger
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
 
-        with self._session_lock:
-            # Preserve caller UI tab only when multiple root instances exist (user-created sessions).
-            # Single root is auto-loaded on restart and should be replaced cleanly.
+        from agent_cascade.agent_identity import make_birth_stamped_name, strip_birth_stamp
+
+        if mode == 'new_stack':
+            from agent_cascade import snapshot
+            if self.agent_pool.instances:
+                await asyncio.to_thread(snapshot.park_active_stack, self.agent_pool, trigger='import')
+
+        target_inst = instance_name
+        clear_sub = True
+        caller_name = None
+
+        if mode == 'add':
+            clear_sub = False
+            caller_name = self.session.get('session_name')
+            display = strip_birth_stamp(instance_name) if settings.ENABLE_STACK_SWAP else instance_name
+            if settings.ENABLE_STACK_SWAP:
+                target_inst = make_birth_stamped_name(display)
+            else:
+                idx = 2
+                target_inst = f"{display}_{idx}"
+                while target_inst in self.agent_pool.instances:
+                    idx += 1
+                    target_inst = f"{display}_{idx}"
+        else:
             caller_name = self.session.get('session_name')
             root_count = sum(1 for inst in self.agent_pool.instances.values() if inst.parent_instance is None)
             exclude_caller = (root_count > 1 and caller_name is not None and caller_name != instance_name and
                               caller_name in self.agent_pool.instances)
-            status = self.agent_pool.load_session_from_log(path,
-                                                           target_instance=instance_name,
-                                                           clear_sub_agents_before_load=True,
-                                                           caller_name=caller_name if exclude_caller else None)
+            if not exclude_caller:
+                caller_name = None
+
+        with self._session_lock:
+            status = self.agent_pool.load_session_from_log(
+                path,
+                target_instance=target_inst,
+                clear_sub_agents_before_load=clear_sub,
+                caller_name=caller_name,
+            )
         if status.startswith('Error'):
             await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: status})
             return
 
-        # Update session to reflect the loaded instance name
-        self.session['session_name'] = instance_name
-        inst = self.agent_pool.get_instance(instance_name)
-        if inst is None:
+        loaded_root = target_inst
+        roots = [inst_name for inst_name, inst in self.agent_pool.instances.items()
+                 if getattr(inst, 'parent_instance', None) is None]
+        if target_inst in roots:
+            loaded_root = target_inst
+        elif roots:
+            loaded_root = roots[0]
+
+        if mode != 'add':
+            self.session['session_name'] = loaded_root
+            if settings.ENABLE_STACK_SWAP:
+                from agent_cascade.session_state_store import save_session_name
+                from agent_cascade import snapshot
+                save_session_name(strip_birth_stamp(loaded_root))
+                snapshot.register_active_stack(self.agent_pool, loaded_root)
+
+        inst = self.agent_pool.get_instance(loaded_root)
+        if inst is None and mode != 'add':
             await self.broadcast_fn({
                 WsEnvelope.TYPE: MsgType.WARNING,
-                WsEnvelope.MESSAGE: f"Instance '{instance_name}' not found in pool after load — session may be empty."
+                WsEnvelope.MESSAGE: f"Instance '{loaded_root}' not found in pool after load — session may be empty."
             })
             return
 
@@ -2016,6 +2205,8 @@ class WsMessageHandler:
             self.agent_pool.stopped = False
         _clear_caches_safely()
         await self._broadcast()
+        if mode == 'new_stack':
+            await self._broadcast_stacks()
 
     async def handle_inject(self, data: dict) -> None:
         """Handle 'inject' — enqueue a message into an agent's queue."""

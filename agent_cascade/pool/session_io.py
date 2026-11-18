@@ -862,19 +862,18 @@ class SessionIOMixin:
             logger.debug(f"Could not backfill Message.ts from timestamp={ts_raw!r}")
 
     def _reattach_instance_log(self, instance: AgentInstance, log_ref: dict,
-                               *, mcp_block: Optional[dict] = None) -> int:
-        """Re-attach an instance to its EXISTING on-disk log in append mode (S3).
+                               *, mcp_block: Optional[dict] = None,
+                               snapshot_id: Optional[str] = None) -> int:
+        """Materialise the captured prefix into a fresh log and re-attach (append-tolerant restore).
 
-        Unlike :meth:`load_session_from_log` this does NOT copy/rewrite the log,
-        dismiss siblings, or recreate the instance. It validates the snapshot's
-        log reference (single source of truth: ``validate_log_reference`` — plan §4),
-        reads the log in place with the SAME parser load-session uses, rebuilds the
-        in-memory conversation via the SAME ``_build_working_set``, and reopens the
-        logger on the same path in append mode (``AgentInstanceLogger`` skips the
-        header when the file already starts with a metadata line — no rewrite).
+        Unlike :meth:`load_session_from_log` this does NOT dismiss siblings or recreate
+        the instance. It validates the snapshot's log reference (``validate_log_reference``),
+        materialises the captured prefix (up to offset) into a NEW log file (leaving the origin
+        untouched), writes a provenance event marker, parses the copy to rebuild the in-memory
+        conversation, and reopens the logger on the new path in append mode.
 
         Raises :class:`SnapshotIntegrityError` if the referenced log diverged from
-        the snapshot's recorded count/offset. Returns the message count restored.
+        the snapshot's recorded offset/hash. Returns the message count restored.
         """
         from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
         from agent_cascade.snapshot import SnapshotIntegrityError, validate_log_reference
@@ -883,8 +882,26 @@ class SessionIOMixin:
         if reason:
             raise SnapshotIntegrityError(f'{instance.instance_name}: {reason}')
 
-        path = log_ref['path']
-        messages, metadata = self._parse_json_input(str(path))
+        origin = log_ref['path']
+        agent_class = getattr(instance, 'agent_class', '') or 'orchestrator'
+        agent_class = agent_class.strip().lower()
+        log_dir = str(self._logger.log_dir)
+
+        # Materialise captured prefix as a NEW log (never touch the origin)
+        new_path = AgentInstanceLogger.copy_session_file(origin, log_dir, agent_class,
+                                                         instance.instance_name)
+        with open(new_path, 'r+b') as fh:
+            fh.truncate(int(log_ref['offset']))
+        with open(new_path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({
+                'event': 'restored_from',
+                'path': origin,
+                'offset': log_ref['offset'],
+                'snapshot_id': snapshot_id,
+                'ts': time.time(),
+            }) + '\n')
+
+        messages, metadata = self._parse_json_input(str(new_path))
         cleaned = [
             msg for msg in messages
             if isinstance(msg, dict) and 'event' not in msg
@@ -903,11 +920,8 @@ class SessionIOMixin:
             msg_objects.append(msg)
         instance.rebuild_conversation(msg_objects)
 
-        # Reopen the logger on the SAME path (append mode; no copy, no rewrite).
-        agent_class = (metadata.get('agent_class')
-                       or getattr(instance, 'agent_class', '') or 'orchestrator').strip().lower()
+        # Reopen the logger on the new materialised path (append mode).
         key = (instance.instance_name, agent_class)
-        log_dir = self._logger.log_dir
         with self._logger._lock:
             stale = self._logger._loggers.pop(key, None)
             if stale is not None:
@@ -918,7 +932,7 @@ class SessionIOMixin:
             try:
                 self._logger._loggers[key] = AgentInstanceLogger(
                     agent_class, instance.instance_name, log_dir,
-                    base_metadata=None, log_path=path)
+                    base_metadata=None, log_path=new_path)
             except Exception as e:
                 logger.warning(f'[FLEET_RESTORE] logger re-attach failed for {instance.instance_name}: {e}')
 

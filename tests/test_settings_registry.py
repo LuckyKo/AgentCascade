@@ -69,7 +69,10 @@ def test_registry_pool_set_matches_config_handlers():
 
 
 def test_extra_persist_keys_match():
-    assert set(EXTRA_PERSIST_KEYS) == {'disabled_tools', 'auto_security', 'compression_fraction'}
+    assert set(EXTRA_PERSIST_KEYS) == {
+        'disabled_tools', 'auto_security', 'compression_fraction',
+        'enable_stack_swap', 'stack_restore_on_boot',
+    }
 
 
 def test_disk_only_keys_have_specs():
@@ -275,3 +278,31 @@ def test_snapshot_is_json_serializable():
     # Must round-trip through JSON (the WS/REST transport).
     payload = json.loads(json.dumps(snapshot))
     assert payload == snapshot
+
+def test_stack_swap_keys_registry_coverage():
+    """BUG_0345 S6: ``enable_stack_swap`` / ``stack_restore_on_boot`` are first-class
+    registry keys (``kind='extra'``). Pin the derived counts (pool stays 113; extra-persist
+    is now 5 — the keys were added only to that set), the seed defaults, BROADCAST_KEYS
+    membership, and registered handlers, and confirm ``validate_registry()`` still passes."""
+    from agent_cascade.config_handlers import CONFIG_HANDLERS
+    from agent_cascade.settings_registry import (
+        _DEFAULTS,
+        _EXTRA_PERSIST_KEY_COUNT,
+        _POOL_SETTINGS_KEY_COUNT,
+    )
+
+    # Counts are pinned despite the two new keys: pool stays 113, extra persist is now 5.
+    assert _POOL_SETTINGS_KEY_COUNT == 113, 'pool key count must stay 113'
+    assert _EXTRA_PERSIST_KEY_COUNT == 5, 'extra-persist key count must be 5'
+
+    for key in ('enable_stack_swap', 'stack_restore_on_boot'):
+        assert key in SETTING_SPECS, f"{key} missing from the registry specs"
+        assert key in EXTRA_PERSIST_KEYS, f"{key} missing from EXTRA_PERSIST_KEYS"
+        assert key in BROADCAST_KEYS, f"{key} not broadcast to the UI"
+        assert key in CONFIG_HANDLERS, f"{key} handler not registered"
+
+    # Seed defaults — the registry contract, independent of settings.py's module default.
+    assert _DEFAULTS['enable_stack_swap'] is False
+    assert _DEFAULTS['stack_restore_on_boot'] is True
+
+    validate_registry()  # still consistent with both keys present

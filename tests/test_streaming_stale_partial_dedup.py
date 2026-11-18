@@ -21,6 +21,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -35,6 +37,15 @@ except Exception:
 from agent_cascade.llm.schema import Message, USER, ASSISTANT
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.api_integration_pkg.state_builder import _serialize_instance
+
+
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 flipped ENABLE_STACK_SWAP to True, which turns on code paths that assume a real pool:
+    # the run-loop turn-boundary gate (_pending_swap_event / instances) and state_builder's
+    # display_name branch (pool.instances). These tests exercise streaming/telegram/heartbeat
+    # with pool doubles, so disable the flag to take the pre-S6 code path.
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
 
 
 class FakePool:

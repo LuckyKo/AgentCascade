@@ -373,6 +373,10 @@ def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
     # consumes.
     pool_settings['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
+    from agent_cascade import settings as _ac_settings
+    pool_settings['enable_stack_swap'] = bool(_ac_settings.ENABLE_STACK_SWAP)
+    pool_settings['stack_restore_on_boot'] = bool(_ac_settings.STACK_RESTORE_ON_BOOT)
+
     # General-tab LLM config — persisted in
     # config/api_endpoints.json::default_llm_cfg. Broadcast it so syncPoolSettings()
     # can rehydrate the matching controls after a restart: api_base/model fall back to

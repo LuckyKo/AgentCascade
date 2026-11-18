@@ -13,6 +13,7 @@
 3. [Core Components](#3-core-components)
 4. [Data Flow](#4-data-flow)
     - [4.4.1 Fleet Snapshot & Stack Swap](#441-fleet-snapshot--stack-swap)
+    - [4.4.2 Sessions UI & Autosave](#442-sessions-ui--autosave)
 5. [Key Mechanisms](#5-key-mechanisms)
 6. [Parallel Instance Separation](#6-parallel-instance-separation)
 7. [Agent Templates & DNA](#7-agent-templates--dna)
@@ -430,6 +431,16 @@ drives validation of incoming deltas, the `pool_settings` snapshot emitted in `s
   deltas, never a full `update_config` push. `queueSettingChange()` drops changes before the
   first authoritative snapshot has arrived and no-ops values that already match it, so the
   UI cannot stomp persisted settings with un-hydrated defaults.
+- **Stack-swap toggles (`BUG_0345`).** `enable_stack_swap` and `stack_restore_on_boot` are two
+  `extra`-kind registry keys (`_EXTRA_KEYS` → top-level `pool_settings.json`, `save_trigger=True`,
+  in `BROADCAST_KEYS`); `_EXTRA_PERSIST_KEY_COUNT` is 5 while `_POOL_SETTINGS_KEY_COUNT` stays 113.
+  Their live values are runtime-state-sourced (`_RUNTIME_SOURCED`, read from the `settings` module,
+  not `PoolSettings`), so the snapshot emits the current `settings.ENABLE_STACK_SWAP` /
+  `settings.STACK_RESTORE_ON_BOOT`. `_handle_enable_stack_swap` ignores updates while
+  `AGENT_CASCADE_ENABLE_STACK_SWAP` is set (`ENABLE_STACK_SWAP_FROM_ENV`), so an explicit env var
+  always wins over the UI toggle. Note the seed default (`_SEED_DEFAULTS: enable_stack_swap=False`,
+  `stack_restore_on_boot=True`) is only the table fallback; the runtime module default for
+  `ENABLE_STACK_SWAP` is ON (see §4.4.1).
 
 ### 4.4 Session Persistence Flow
 
@@ -458,44 +469,114 @@ Resurrection via log_file parameter:
     → AgentInstance recreated in pool with restored history
 ```
 
+**New Session — park + named root (`BUG_0345`).** In the WebUI, **New Session** (WS `stacks_new`,
+`ws_handlers.py::handle_stacks_new`) opens a name dialog, **parks** the current fleet as a recoverable
+snapshot (trigger `new_session`) and mints a fresh birth-stamped root — it never wipes the old work.
+An empty name yields `Maine_<birth-stamp>` (via `DEFAULT_SESSION_NAME`); a typed name yields
+`<name>_<stamp>`. If root creation fails the parked envelope is re-activated (the pool is never left
+empty). Boot restore re-points the same way: after activating a saved stack, `session['session_name']`
+is re-pointed to the restored root (not the previous name), so a follow-up message routes to it without
+spawning a duplicate root.
+
+**Import modes (legacy log/JSON loading).** A separate **Import** window lists on-disk JSONL logs and
+loads one via `POST /api/session/restore` (`api_server.py:2245-2327`) with `mode ∈ {replace, add,
+new_stack}` (default `replace`):
+- `replace` — clears sub-agents, loads the log as the active session, re-points `session_name`, registers the active stack.
+- `add` — loads the log as an **additional** root (`clear_sub_agents_before_load=False`), keeping the current fleet; `session_name` is left unchanged.
+- `new_stack` — parks the active stack first (trigger `import`), then loads the imported log as the new active stack. Coerced to `replace` when `ENABLE_STACK_SWAP` is off.
+
 ### 4.4.1 Fleet Snapshot & Stack Swap
 
-When `settings.ENABLE_STACK_SWAP` is on (off by default), the fleet's full state — every
-running instance's conversation log, clock, and backend KV cache — can be frozen into an
-on-disk **fleet snapshot** and later swapped back in. This lets an operator park the whole
-live fleet (stack) and activate a different parked stack atomically.
+Everything below is gated on `settings.ENABLE_STACK_SWAP`. Precedence of that gate (top wins):
+an explicit `AGENT_CASCADE_ENABLE_STACK_SWAP` env var (authoritative — UI/WS/REST updates are
+ignored while it is set), else the persisted `pool_settings.json::enable_stack_swap` applied at boot,
+else the settings-module import default, which is **ON**. The feature's full state — every running
+instance's conversation log, clocks and (optionally) backend KV cache — can be frozen into an on-disk
+**fleet snapshot** and later swapped back in, letting an operator park the whole live fleet (stack) and
+atomically activate a different parked one. The **Sessions panel** (§4.4.2) is the user-facing view of
+these saves; the toggles that control them are persisted `enable_stack_swap` / `stack_restore_on_boot`
+(boot restore **ON** by default, independent of the autosave knob) and retention
+`SNAPSHOT_RETENTION_COUNT` (default **50**). **KV is a best-effort cache**: a snapshot may carry a KV
+config block to *verify/arm* on restore, but the stack code only ever *fires save/load — it never
+deletes KV files* (the JSONL log is the source of truth; orphaned KV files are acceptable).
 
 ```
 Stack Swap (atomic park + activate):
   ┌─────────────────────────── active stack (ROOT) ──────────────────────────┐
   │ live instances ── park_active_stack ──► fleet snapshot.json (disk)        │
-  │                                        + per-instance KV (autoloader)      │
+  │        (a save is a manifest: it never rotates/rewrites a log)            │
   │                                            │ registry records it           │
   │                                            ▼                               │
   └─ pool cleared ─── activate_stack(target_env) ───► target stack rehydrated ─┘
        (M2 rollback: if target activation fails, re-activate the source from
-        the in-memory envelope; the pool is never left empty)
+        the in-memory envelope; the pool is never left empty. KV files: verify/arm
+        on restore only — the stack code never deletes them.)
 ```
 
 **Core (single source of truth — `agent_cascade/snapshot.py`):**
 `StackRegistry` (tracks `active_stack_id` + a write-ordered list of snapshots per stack),
 `park_active_stack` (capture → write → register → **prune**), `activate_stack` (rehydrate),
-`swap_stack` (park source then activate target, with rollback), plus the read/operate
-helpers `list_stacks`, `snapshot_stack` (non-destructive capture) and `delete_stack`
-(refuses the active stack). REST, WebSocket and Telegram all delegate here so they can't drift.
+`swap_stack` (park source then activate target, with rollback), `snapshot_stack` (non-destructive
+capture), `prune_snapshots` (retention), `delete_stack` / `delete_snapshot` (refuse the active stack /
+a single save), `ensure_registry_loaded` (rebuild from disk), `quarantine_snapshot` (corrupt handling),
+and `list_stacks` (the single read model REST / WS / Telegram all render from so they can't drift).
 
-**Snapshot pruning (`SNAPSHOT_RETENTION_COUNT`, default 10):** each park keeps only the
-newest N snapshots per stack, deletes the retired files, and — for any retired snapshot that
-carried saved KV — removes the backend autoloader cache via `state_ops.delete_state`. The
-snapshot(s) backing the currently-active stack are **never** pruned (their KV is in live use).
+**Snapshot pruning (`SNAPSHOT_RETENTION_COUNT`, default 50):** each stack keeps only the newest N
+snapshots and retires the oldest (write order, oldest first) — for ALL stacks, including the active one.
+Only snapshot *files* are pruned; KV is left untouched (cache, not source of truth).
+
 
 **Surfaces (all gated on `ENABLE_STACK_SWAP`; return 501/warning when off):**
 
 | Surface | Operations |
 |---------|------------|
-| REST `/api/stacks` | `GET` list; `POST /api/stacks/swap` `{target_stack_id}`; `POST /api/stacks/{id}/snapshot`; `DELETE /api/stacks/{id}` (409 if active) |
-| WebSocket | `stacks_list`, `stacks_swap`, `stacks_snapshot` → `stacks_result` |
+| REST `/api/stacks` | `GET` list (returns `active_stack_id`, `stacks`, `details` incl. `enabled`); `POST /api/stacks/swap` `{target_stack_id[, target_snapshot_id]}`; `POST /api/stacks/{id}/snapshot`; `DELETE /api/stacks/{id}` (409 if active); `DELETE /api/stacks/{id}/snapshots/{snapshot_id}` (delete one save) |
+| WebSocket | `stacks_list`, `stacks_swap`, `stacks_snapshot`, `stacks_new` (New Session), `stacks_delete` (save or whole stack) → responses on `stacks_result` |
 | Telegram | `/snapshot [stack-id]`, `/stack list`, `/stack swap <stack-id>` |
+
+### 4.4.2 Sessions UI & Autosave
+
+The **Sessions panel** (`web_ui`: `#sessionsList` list + `#activeSessionCard` active card, rendered from
+the `GET /api/stacks` `details`) shows a flat newest-first list of saves — one row per snapshot — with
+the **root agent's caption** (read by the single-source `session_caption.py`, shared by the REST and
+snapshot paths so they can't drift), the save **trigger** and **time**, and the full stamped identity in
+the meta line. Per-row **Open** (swap to that stack; parks the live one first) and **Delete**; **Save
+now** on the active card (refused while generating).
+
+**Autosave triggers** (each gated on `ENABLE_STACK_SWAP`; the automatic ones also on
+`SNAPSHOT_AUTOSAVE_ENABLED`):
+
+| Trigger | Where | Note |
+|---|---|---|
+| New session | `park_active_stack(trigger='new_session')` | park is inherent to New Session |
+| Swap / import | `park_active_stack(trigger='swap'`/`'import')` | parking the source is inherent |
+| Restart | `snapshot_stack(trigger='restart')` before `restart_server_process()` | REST `/api/restart` |
+| Shutdown | `snapshot_stack(trigger='shutdown')` | `@app.on_event('shutdown')` **and** the signal handler, made idempotent by `_stack_saved_on_exit` — exactly one save |
+| Root run-end | `maybe_autosave_on_task_end(pool, inst)` in `engine/run_loop.py` | fires on **root** instances only (a save is a pure manifest, so it is safe while siblings still run — no quiescence gate, no log rotation) |
+
+`stack_restore_on_boot` (ON by default, independent of the autosave knob) restores the persisted active
+stack at boot (`load_boot_stack` → `activate_stack`), re-pointing `session_name` to the restored root.
+Only `active_stack_id` is persisted (`session_state.json`); the registry itself is **rebuilt from the
+envelope files** at startup.
+
+**Append-tolerant integrity** (`prefix_sha256` over `bytes[:offset]`): a captured log reference stores
+the byte `offset` and the sha256 of exactly `bytes[:offset]`. At restore, a log that has only **grown**
+(`size ≥ offset` with a matching prefix hash) stays valid — appends are normal for a live fleet; a
+**truncated, rewritten (same size, different bytes), or missing** log is refused. A legacy envelope with
+no `prefix_sha256` falls back to the old strict `size == offset` + message-count comparison. On a valid
+restore, `pool._reattach_instance_log` **materialises a NEW log file from the captured prefix** (truncated
+to `offset`) and writes a `restored_from` provenance event, leaving the origin untouched — it never
+restores onto a live log, which also removes the older-snapshot-after-newer-restore desync hazard.
+
+**Corruption filtering + registry rebuild:** `ensure_registry_loaded` walks `snapshots/*.json`, and
+`snapshot_problem` flags anything unsafe to restore (unreadable envelope/schema, or the log gate failing).
+Corrupt files are **quarantined** to `snapshots/_corrupt/` with a `.reason.txt` sidecar (never deleted) and
+are neither listed nor offered for restore; healthy siblings survive. `list_stacks` re-validates each entry
+and drops the corrupt ones from the UI.
+
+**Delete-snapshot:** `delete_snapshot` removes one saved session's envelope file + registry row and drops
+the stack key when its last snapshot goes (KV untouched); `delete_stack` removes a whole parked stack and
+**refuses the active stack** (`ActiveStackDeletionError`, surfaced as HTTP 409).
 
 ---
 
@@ -1273,8 +1354,26 @@ The API server broadcasts two types of messages:
 |-------------|----------|---------|
 | `state` (full snapshot) | Initial connection, periodic updates | Full serialized state from `build_state()` |
 | `stream_update` (delta) | During active LLM generation | Lightweight response delta + instance status from `build_stream_update()` |
+| `stacks_result` | Stack/session operations | Response to `stacks_list`/`stacks_swap`/`stacks_snapshot`/`stacks_new`/`stacks_delete` (status + active stack id / removed ids); a `warning` frame is sent when `ENABLE_STACK_SWAP` is off |
 
-Clients handle both types transparently — full snapshots replace the current view entirely, while stream updates merge deltas into the active response.
+Clients handle these transparently — full snapshots replace the current view entirely, while stream updates merge deltas into the active response.
+
+### Sessions Panel & Stack Controls
+
+When `ENABLE_STACK_SWAP` is on, the Settings sidebar and Sessions area render from the
+`GET /api/stacks` / `stacks_result` payloads:
+
+| Control (DOM id) | Element | Wire |
+|---|---|---|
+| `#sessionsList` | Newest-first saved-session list (caption / trigger / time per row) | rendered from `details` |
+| `#activeSessionCard` | Active-session card + **Save now** | `stacks_snapshot` |
+| `#new-session-modal` | New Session name dialog (empty → `Maine_<stamp>`) | sends `stacks_new` |
+| `#import-modal` | Import window (list logs; `replace`/`add`/`new_stack`) | `POST /api/session/restore` |
+| `#setting-enable-stack-swap`, `#setting-stack-restore-on-boot` | Settings toggles | `POOL_SETTINGS_MAP` entries → `saveSettings`; hydrated from the `pool_settings` snapshot each frame |
+
+Row **Open** sends `stacks_swap` (`{target_stack_id[, target_snapshot_id]}`); row **Delete** sends
+`stacks_delete`; the panel and toggles only appear once `stacks_result.details.enabled` is true, so a
+gate-off server shows a disabled hint instead.
 
 ### Source Style & Guards
 

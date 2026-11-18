@@ -689,10 +689,22 @@ STREAM_DELTA_ENABLED: bool = os.getenv('AGENT_CASCADE_STREAM_DELTA',
 # Stack-swap / fleet-snapshot prerequisite (BUG_0323 S1). When enabled, root
 # instance identities carry an immutable birth stamp (Maine_20261115_143022) so
 # two stacks can share a display name without colliding on KV labels or log
-# paths. False = off: root identities stay plain (Maine) and legacy behavior is
-# byte-identical.
-ENABLE_STACK_SWAP: bool = os.getenv('AGENT_CASCADE_ENABLE_STACK_SWAP',
-                                    'false').strip().lower() in ('true', '1', 'yes')
+# paths. ON by default; set AGENT_CASCADE_ENABLE_STACK_SWAP=false to restore the
+# legacy plain-identity behavior (byte-identical to pre-BUG_0323).
+_ENABLE_STACK_SWAP_ENV = 'AGENT_CASCADE_ENABLE_STACK_SWAP'
+ENABLE_STACK_SWAP_FROM_ENV: bool = _ENABLE_STACK_SWAP_ENV in os.environ
+ENABLE_STACK_SWAP: bool = os.getenv(_ENABLE_STACK_SWAP_ENV,
+                                    'true').strip().lower() in ('true', '1', 'yes')
+
+# Restore the last active saved session at server start. On by default (user decision).
+# Off = fall back to the legacy "load newest log" boot path; saves still happen, and the
+# newest log is the live one (there is no log rotation), so nothing is lost either way.
+STACK_RESTORE_ON_BOOT: bool = True
+
+# Automatic session saves (restart, shutdown, root run end). Park saves on new/swap are
+# inherent and unaffected. False = only explicit/park saves.
+SNAPSHOT_AUTOSAVE_ENABLED: bool = os.getenv('AGENT_CASCADE_SNAPSHOT_AUTOSAVE',
+                                            'true').strip().lower() in ('true', '1', 'yes')
 
 # Per-instance grace window (seconds) granted to an in-flight turn when the pool
 # parks the active stack for a swap. The turn is given this much time to reach its
@@ -715,16 +727,16 @@ SNAPSHOT_GRACE_SECONDS: int = _parse_snapshot_grace()
 
 
 def _parse_snapshot_retention() -> int:
-    """Defensively parse AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT; fall back to 10.
+    """Defensively parse AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT; fall back to 50.
 
     A non-positive value would mean "prune everything", which is never intended, so
     any parsed value below 1 clamps to 1 (always keep the newest snapshot).
     """
-    raw = os.getenv('AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT', '10').strip()
+    raw = os.getenv('AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT', '50').strip()
     try:
         value = int(raw)
     except ValueError:
-        return 10
+        return 50
     return value if value >= 1 else 1
 
 

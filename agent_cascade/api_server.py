@@ -206,123 +206,12 @@ def _signal_stop(session: dict) -> None:
         session['stop_requested'] = True
 
 
-# Display length cap for the /api/sessions caption fallback (first USER message). A first
-# user message can be a long prompt or a pasted file, so it is never returned raw. 120 chars
-# is a UI display heuristic — roughly one readable line in the session-list column; not a
-# protocol limit, so a plain module constant (no env override) is intentional.
-_SESSION_CAPTION_MAX_LEN = 120
-
-# Cache for _read_session_caption: key = (path_str, mtime, size) → caption string.
-# Avoids re-reading unchanged log files on every /api/sessions call.
-_caption_cache: dict[tuple[str, float, int], str] = {}
-_CAPTION_CACHE_MAX = 2000  # cap to prevent unbounded growth
-_caption_cache_lock = threading.Lock()
-
-
-def _caption_cache_get(path_str: str, mtime: float, size: int) -> str | None:
-    """Return cached caption or None on miss."""
-    with _caption_cache_lock:
-        return _caption_cache.get((path_str, mtime, size))
-
-
-def _caption_cache_set(path_str: str, mtime: float, size: int, caption: str) -> None:
-    """Store caption; evict oldest entries if over cap (simple FIFO by insertion)."""
-    with _caption_cache_lock:
-        if len(_caption_cache) >= _CAPTION_CACHE_MAX:
-            # Remove first 10% of entries (dict preserves insertion order)
-            for k in list(_caption_cache.keys())[:_CAPTION_CACHE_MAX // 10]:
-                del _caption_cache[k]
-        _caption_cache[(path_str, mtime, size)] = caption
-
-
-def _truncate_caption(text: str) -> str:
-    """Collapse whitespace and truncate ``text`` to ``_SESSION_CAPTION_MAX_LEN`` chars.
-
-    Appends an ellipsis (``…``) when the text was cut. Returns "" for falsy input.
-    """
-    if not text:
-        return ''
-    # Collapse internal whitespace/newlines so a multi-line prompt becomes one line.
-    collapsed = ' '.join(text.split())
-    if len(collapsed) <= _SESSION_CAPTION_MAX_LEN:
-        return collapsed
-    return collapsed[:_SESSION_CAPTION_MAX_LEN].rstrip() + '…'
-
-
-def _read_session_caption(path, mtime: float = None, size: int = None, max_scan_lines: int = 200) -> str:
-    """Read a session log's display caption without loading the whole file.
-
-    Results are cached by (path, mtime, size) so unchanged files are O(1) on repeat calls.
-    If mtime/size are not provided, no caching is performed.
-
-    Semantics (single "caption" field for the UI):
-      1. ``metadata.caption`` from line 1, if non-empty (the compressor-generated caption).
-      2. Otherwise, the first USER message's text (scanned forward from line 2, stopping
-         early — at most ``max_scan_lines`` lines) truncated to ~120 chars with an ellipsis.
-      3. Otherwise "" (no caption and no user message found / unreadable file).
-
-    Only leading lines are read; the rest of the file is never touched. All errors are
-    swallowed (returning "") so a malformed/empty/partial log can't break the listing.
-    """
-    path_str = str(path)
-    if mtime is not None and size is not None:
-        cached = _caption_cache_get(path_str, mtime, size)
-        if cached is not None:
-            return cached
-
-    caption = _read_session_caption_uncached(path, max_scan_lines)
-
-    if mtime is not None and size is not None:
-        _caption_cache_set(path_str, mtime, size, caption)
-    return caption
-
-
-def _read_session_caption_uncached(path, max_scan_lines: int = 200) -> str:
-    """Read a session log's display caption without loading the whole file (no caching).
-
-    Semantics (single "caption" field for the UI):
-      1. ``metadata.caption`` from line 1, if non-empty (the compressor-generated caption).
-      2. Otherwise, the first USER message's text (scanned forward from line 2, stopping
-         early — at most ``max_scan_lines`` lines) truncated to ~120 chars with an ellipsis.
-      3. Otherwise "" (no caption and no user message found / unreadable file).
-
-    Only leading lines are read; the rest of the file is never touched. All errors are
-    swallowed (returning "") so a malformed/empty/partial log can't break the listing.
-    """
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            # Line 1: metadata header → caption field (if present and non-empty).
-            first_line = f.readline()
-            if first_line:
-                try:
-                    meta = json.loads(first_line)
-                    cap = (meta.get('metadata') or {}).get('caption', '')
-                    if isinstance(cap, str) and cap.strip():
-                        return _truncate_caption(cap)
-                except (json.JSONDecodeError, AttributeError):
-                    pass  # malformed/missing metadata → fall through to user-message fallback
-
-            # Fallback: first USER message text, scanning forward from line 2 (stop early).
-            for _ in range(max_scan_lines):
-                line = f.readline()
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(item, dict) and item.get('role') == USER:
-                    # Pass the whole message so multimodal (list) content is handled;
-                    # extract_text_from_message accepts a dict and returns "" for empty.
-                    text = extract_text_from_message(item, add_upload_info=False)
-                    if text and text.strip():
-                        return _truncate_caption(text)
-    except Exception as e:
-        logger.debug(f"Failed to read session caption for {path}: {e}")
-    return ''
+from agent_cascade.session_caption import (
+    _SESSION_CAPTION_MAX_LEN,
+    read_session_caption as _read_session_caption,
+    read_session_caption_uncached as _read_session_caption_uncached,
+    truncate_caption as _truncate_caption,
+)
 
 
 def _scan_sessions_sync(log_dir: Path) -> list[dict]:
@@ -356,6 +245,17 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
                 timestamp = 'Unknown'
 
             st = entry.stat(follow_symlinks=False)
+            loadable = False
+            if st.st_size > 0:
+                try:
+                    with open(p, 'r', encoding='utf-8', errors='replace') as f:
+                        line1 = f.readline()
+                        if line1:
+                            json.loads(line1)
+                            loadable = True
+                except Exception:
+                    loadable = False
+
             session = {
                 'path': str(p),
                 'name': instance_name,
@@ -364,6 +264,7 @@ def _scan_sessions_sync(log_dir: Path) -> list[dict]:
                 'size': st.st_size,
                 'mtime': st.st_mtime,
                 'caption': _read_session_caption(p, mtime=st.st_mtime, size=st.st_size),
+                'loadable': loadable,
             }
             if settings.ENABLE_STACK_SWAP:
                 display_name = strip_birth_stamp(instance_name)
@@ -861,13 +762,13 @@ def build_stacks_router(agent_pool) -> 'APIRouter':
         if agent_pool is None:
             return JSONResponse(status_code=500, content={'message': 'No agent pool'})
         from agent_cascade import snapshot
-        return snapshot.list_stacks(agent_pool)
+        return await asyncio.to_thread(snapshot.list_stacks, agent_pool)
 
     @router.post('/api/stacks/swap')
     async def api_swap_stack(data: dict):
         """Atomically park the active stack and activate the requested target.
 
-        Body: ``{ "target_stack_id": str }``. Blocking (it parks + restores), so it
+        Body: ``{ "target_stack_id": str, "target_snapshot_id"?: str }``. Blocking (it parks + restores), so it
         runs on a worker thread via ``asyncio.to_thread`` to avoid stalling the loop.
         ``ValueError`` (no such snapshot) -> 400; ``SnapshotIntegrityError`` (bad
         target log / stack mismatch) -> 422.
@@ -877,12 +778,14 @@ def build_stacks_router(agent_pool) -> 'APIRouter':
         if agent_pool is None:
             return JSONResponse(status_code=500, content={'message': 'No agent pool'})
         target = (data or {}).get('target_stack_id')
+        target_snapshot_id = (data or {}).get('target_snapshot_id')
         if not target or not isinstance(target, str):
             return JSONResponse(status_code=400,
                                 content={'message': "'target_stack_id' (str) required"})
         from agent_cascade.snapshot import SnapshotIntegrityError, swap_stack
         try:
-            await asyncio.to_thread(swap_stack, agent_pool, target)
+            await asyncio.to_thread(swap_stack, agent_pool, target,
+                                    target_snapshot_id=target_snapshot_id)
         except SnapshotIntegrityError as e:
             return JSONResponse(status_code=422, content={'message': str(e)})
         except ValueError as e:
@@ -907,7 +810,7 @@ def build_stacks_router(agent_pool) -> 'APIRouter':
 
     @router.delete('/api/stacks/{stack_id}')
     async def api_delete_stack(stack_id: str):
-        """Delete a parked stack and its snapshots/KV. Rejects the active stack (409, m4)."""
+        """Delete a parked stack and its snapshot files. KV is left untouched (409 for the active stack)."""
         if not settings.ENABLE_STACK_SWAP:
             return _off()
         if agent_pool is None:
@@ -919,6 +822,22 @@ def build_stacks_router(agent_pool) -> 'APIRouter':
             return JSONResponse(status_code=409, content={'message': str(e)})
         except Exception as e:  # noqa: BLE001
             logger.exception('[STACK_OPS] REST delete of stack %r failed', stack_id)
+            return JSONResponse(status_code=500, content={'message': f'delete failed: {e}'})
+
+    @router.delete('/api/stacks/{stack_id}/snapshots/{snapshot_id}')
+    async def api_delete_snapshot(stack_id: str, snapshot_id: str):
+        """Delete one saved session snapshot."""
+        if not settings.ENABLE_STACK_SWAP:
+            return _off()
+        if agent_pool is None:
+            return JSONResponse(status_code=500, content={'message': 'No agent pool'})
+        from agent_cascade.snapshot import delete_snapshot
+        try:
+            return await asyncio.to_thread(delete_snapshot, agent_pool, stack_id, snapshot_id)
+        except ValueError as e:
+            return JSONResponse(status_code=404, content={'message': str(e)})
+        except Exception as e:  # noqa: BLE001
+            logger.exception('[STACK_OPS] REST delete snapshot %r of stack %r failed', snapshot_id, stack_id)
             return JSONResponse(status_code=500, content={'message': f'delete failed: {e}'})
 
     return router
@@ -1134,12 +1053,29 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         'stop_requested': False,
         'generation_id': 0,         # Increment on each run to prevent stale appends
     }
-    # Initial load — pool is the single source of truth for conversation state (Phase 6)
-    if agent_pool:
+    # Initial load — boot restore takes precedence when ENABLE_STACK_SWAP + STACK_RESTORE_ON_BOOT are set
+    boot_stack_env = None
+    if agent_pool is not None and settings.ENABLE_STACK_SWAP:
+        from agent_cascade import snapshot
+        snapshot.ensure_registry_loaded(agent_pool)
+        if settings.STACK_RESTORE_ON_BOOT:
+            boot_stack_env = snapshot.load_boot_stack(agent_pool)
+
+    if agent_pool and boot_stack_env is not None:
+        try:
+            snapshot.activate_stack(agent_pool, boot_stack_env)
+            roots = [n for n, i in agent_pool.instances.items() if getattr(i, 'parent_instance', None) is None]
+            session['session_name'] = roots[0] if roots else default_session_name
+        except Exception as e:
+            logger.critical('[STACK_SWAP] boot restore failed mid-restore: %s', e, exc_info=True)
+
+    if agent_pool and boot_stack_env is None and not agent_pool.instances:
         loaded_identity = _load_session_history(default_session_name, agent_pool)
         if loaded_identity:
-            # The loaded root identity may carry a birth stamp; routing must use it.
             session['session_name'] = loaded_identity
+            if settings.ENABLE_STACK_SWAP:
+                from agent_cascade import snapshot
+                snapshot.register_active_stack(agent_pool, loaded_identity)
         # Validate partial success: instance exists but has no conversation data beyond system message
         if loaded_identity:
             inst = agent_pool.get_instance(loaded_identity)
@@ -1173,6 +1109,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                         )
                         if created is not None and getattr(created, 'instance_name', None):
                             session['session_name'] = created.instance_name
+                            if settings.ENABLE_STACK_SWAP:
+                                from agent_cascade import snapshot
+                                snapshot.register_active_stack(agent_pool, created.instance_name)
                 except Exception as e:
                     logger.error(f"Failed to create fallback main agent instance: {e}")
                     logger.warning('Server starting without main agent instance — first user message may fail')
@@ -1750,6 +1689,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # browser behavior). Reuses the same locked _afk_maybe_nudge, so no double-fire.
         asyncio.create_task(_afk_nudge_loop())
 
+        if agent_pool is not None and settings.ENABLE_STACK_SWAP:
+            try:
+                from agent_cascade import snapshot
+                snapshot.ensure_registry_loaded(agent_pool)
+            except Exception as e:
+                logger.warning(f"[STACK_SWAP] startup ensure_registry_loaded failed: {e}")
+
         # Start-on-boot: if the Telegram bridge toggle was persisted ON, start the
         # in-process daemon thread now (uvicorn is serving, so the client can reach AC).
         tg_sup = getattr(agent_pool, 'telegram_supervisor', None) if agent_pool else None
@@ -1797,6 +1743,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     logger.warning(f"Dismissal broadcast skipped for {instance_name}: ws_loop={ws_loop}, closed={ws_loop.is_closed() if ws_loop else 'N/A'}, queue={'yes' if _sq else 'no'}")
 
             agent_pool.on_dismissed(_on_dismiss_callback)
+
+    @app.on_event('shutdown')
+    async def shutdown():
+        if settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED and agent_pool:
+            if not getattr(agent_pool, '_stack_saved_on_exit', False):
+                agent_pool._stack_saved_on_exit = True
+                try:
+                    from agent_cascade import snapshot
+                    await asyncio.to_thread(snapshot.snapshot_stack, agent_pool, trigger='shutdown')
+                except Exception as e:
+                    logger.warning('[STACK_SWAP] shutdown event autosave failed (non-fatal): %s', e)
 
     async def _sender_loop():
         """Global loop: reads from send_queue → broadcasts to all clients."""
@@ -2221,6 +2178,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Warning (not debug): operators should notice if clients fail to get the notice.
             logger.warning(f"Restart notice broadcast failed (non-critical): {e}")
 
+        if settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED and agent_pool:
+            try:
+                from agent_cascade import snapshot
+                await asyncio.to_thread(snapshot.snapshot_stack, agent_pool, trigger='restart')
+            except Exception as e:
+                logger.warning('[STACK_SWAP] restart autosave failed (non-fatal): %s', e)
+
         restart_server_process()
 
     @app.post('/api/auto_security')
@@ -2300,26 +2264,67 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return JSONResponse(status_code=404, content={'message': f"No session found with name '{name}'"})
         path = matches[0]['path']  # _scan_sessions_sync sorts newest-first
 
+        mode = ((data or {}).get('mode') or 'replace').strip().lower()
+        if not settings.ENABLE_STACK_SWAP and mode == 'new_stack':
+            mode = 'replace'
+
+        if mode == 'new_stack' and settings.ENABLE_STACK_SWAP:
+            from agent_cascade import snapshot
+            if agent_pool.instances:
+                await asyncio.to_thread(snapshot.park_active_stack, agent_pool, trigger='import')
+
+        from agent_cascade.agent_identity import make_birth_stamped_name
+        target_inst = name
+        clear_sub = True
+        caller_name = None
+
+        if mode == 'add':
+            clear_sub = False
+            caller_name = session.get('session_name')
+            display = strip_birth_stamp(name) if settings.ENABLE_STACK_SWAP else name
+            if settings.ENABLE_STACK_SWAP:
+                target_inst = make_birth_stamped_name(display)
+            else:
+                idx = 2
+                target_inst = f"{display}_{idx}"
+                while target_inst in agent_pool.instances:
+                    idx += 1
+                    target_inst = f"{display}_{idx}"
+
         # Load via the pool's standardized path (mirrors handle_load_session).
         status = agent_pool.load_session_from_log(
-            path, target_instance=name, clear_sub_agents_before_load=True)
+            path, target_instance=target_inst, clear_sub_agents_before_load=clear_sub,
+            caller_name=caller_name)
         if isinstance(status, str) and status.startswith('Error'):
             return JSONResponse(status_code=400, content={'message': status})
 
         # The load path may resolve a display name back to its persisted stamped
         # identity; routing must use that canonical identity.
-        instance_name = name
+        instance_name = target_inst
         roots = [inst_name for inst_name, inst in agent_pool.instances.items()
                  if getattr(inst, 'parent_instance', None) is None]
-        if roots:
+        if target_inst in roots:
+            instance_name = target_inst
+        elif roots:
             instance_name = roots[0]
 
         # Mirror WS handle_load_session exactly (_stop_generation + _signal_stop):
         # set generating=False and stop_requested=True, but do NOT bump generation_id.
-        with session_lock:
-            session['session_name'] = instance_name
-            session['generating'] = False
-            session['stop_requested'] = True
+        if mode != 'add':
+            with session_lock:
+                session['session_name'] = instance_name
+                session['generating'] = False
+                session['stop_requested'] = True
+            if settings.ENABLE_STACK_SWAP:
+                from agent_cascade.session_state_store import save_session_name
+                from agent_cascade import snapshot
+                save_session_name(strip_birth_stamp(instance_name))
+                snapshot.register_active_stack(agent_pool, instance_name)
+        else:
+            with session_lock:
+                session['generating'] = False
+                session['stop_requested'] = True
+
         if agent_pool.stopped:
             agent_pool.stopped = False
         _clear_caches_safely()
@@ -2328,6 +2333,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     'session_name': strip_birth_stamp(instance_name) if settings.ENABLE_STACK_SWAP else instance_name}
         if settings.ENABLE_STACK_SWAP:
             response['instance_name'] = instance_name
+            reg = getattr(agent_pool, '_swap_registry', None)
+            response['active_stack_id'] = getattr(reg, 'active_stack_id', None)
         return response
 
     @app.get('/api/sessions')
@@ -3270,6 +3277,14 @@ if __name__ == '__main__':
     def handle_shutdown(signum, frame):
         logger.info('\n[INFO] Initiating graceful shutdown...')
         agent_pool.stopped = True
+        if settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED and agent_pool:
+            if not getattr(agent_pool, '_stack_saved_on_exit', False):
+                agent_pool._stack_saved_on_exit = True
+                try:
+                    from agent_cascade import snapshot
+                    snapshot.snapshot_stack(agent_pool, trigger='shutdown')
+                except Exception as e:
+                    logger.warning('[STACK_SWAP] shutdown autosave failed (non-fatal): %s', e)
         # Stop the Telegram bridge in-process daemon thread (PTB stop + join) before exiting.
         tg_supervisor = getattr(agent_pool, 'telegram_supervisor', None)
         if tg_supervisor is not None:

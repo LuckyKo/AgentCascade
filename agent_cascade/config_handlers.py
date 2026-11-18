@@ -1103,6 +1103,24 @@ def _handle_auto_security(ui_cfg: dict, agent_pool: Optional[Any], agents: list)
         _runtime_state.set_auto_security(enabled)
 
 
+@register_config_handler('enable_stack_swap')
+def _handle_enable_stack_swap(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Stack swap feature gate toggle."""
+    from agent_cascade import settings as _ac_settings
+    from agent_cascade.log import logger as _logger
+    if _ac_settings.ENABLE_STACK_SWAP_FROM_ENV:
+        _logger.info('[STACK_SWAP] enable_stack_swap update ignored: AGENT_CASCADE_ENABLE_STACK_SWAP env var set')
+        return
+    _ac_settings.ENABLE_STACK_SWAP = bool(ui_cfg['enable_stack_swap'])
+
+
+@register_config_handler('stack_restore_on_boot')
+def _handle_stack_restore_on_boot(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Restore active stack on server boot toggle."""
+    from agent_cascade import settings as _ac_settings
+    _ac_settings.STACK_RESTORE_ON_BOOT = bool(ui_cfg['stack_restore_on_boot'])
+
+
 @register_config_handler('compression_min_usage_pct')
 def _handle_compression_min_usage_pct(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Refuse agent-triggered compression below this context-usage percentage (0-100)."""

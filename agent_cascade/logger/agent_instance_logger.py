@@ -182,6 +182,12 @@ class AgentInstanceLogger:
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         new_filename = f"{agent_class}_{instance_name}_{timestamp}.jsonl"
         new_log_path = os.path.join(log_dir, new_filename)
+        if os.path.exists(new_log_path):
+            counter = 1
+            while os.path.exists(new_log_path):
+                new_filename = f"{agent_class}_{instance_name}_{timestamp}_{counter}.jsonl"
+                new_log_path = os.path.join(log_dir, new_filename)
+                counter += 1
 
         # Copy the original file to the new path (preserves metadata with copy2)
         shutil.copy2(source_path, new_log_path)

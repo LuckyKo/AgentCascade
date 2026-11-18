@@ -168,8 +168,11 @@ def test_clock_projection_survives_capture_restore(pool, tmp_path, monkeypatch):
     # every clock — only the WALL projection is invariant. Capture at origin (1000, 400),
     # restore at a SHIFTED origin (1005, 900), then assert projection equality (<1.0s).
     def _frozen(t, m):
+        # BUG_0345 added time.perf_counter() to _capture_log_reference (timing-log only);
+        # a constant makes elapsed==0, which neither logs nor affects the projection math.
         return type('T', (), {'time': staticmethod(lambda: t),
-                              'monotonic': staticmethod(lambda: m)})
+                              'monotonic': staticmethod(lambda: m),
+                              'perf_counter': staticmethod(lambda: 0.0)})
     make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
     root, parked = pool.instances[ROOT], pool.instances[PARKED]
     # ROOT carries all four NON-zero projected clocks; PARKED carries 0.0 sentinels.
@@ -273,20 +276,67 @@ def test_validate_envelope_integrity_raises_with_name_and_path(pool, tmp_path, m
     assert WORKER in msg and 'worker.jsonl' in msg
 
 
-def test_integrity_gate_refuses_before_any_mutation(pool, tmp_path, monkeypatch):
+def test_append_to_captured_log_is_tolerant_and_restores_prefix(pool, tmp_path, monkeypatch):
+    """BUG_0345: append-only growth of a captured log is now LEGAL. validate_log_reference
+    is append-tolerant (size >= offset with an intact captured prefix is valid), and
+    restore re-attaches EXACTLY the captured prefix — the appended turn is ignored.
+
+    (This replaced the S3 append-REFUSAL test, which asserted the old strict rule that any
+    post-capture growth was corruption. Truncation and missing-path refusals are kept.)"""
     make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
     _write_all(tmp_path, pool, count=4)
     env = capture_fleet_snapshot(pool)
-    # append a message line: message_count/offset now diverge from the snapshot
+    captured_count = env.instances[WORKER].log['message_count']
+    assert captured_count == 4
+
+    # Append one live turn AFTER capture: the on-disk log now holds one extra message.
     with open(tmp_path / 'worker.jsonl', 'a', encoding='utf-8') as f:
         f.write('{"role":"user","content":"extra"}\n')
+
+    # Unit level: the reference validates (size > offset is normal for a live fleet).
+    assert snapshot.validate_log_reference(env.instances[WORKER].log) is None
+    # Envelope gate level: no longer refuses on append.
+    snapshot.validate_envelope_integrity(env)
+
     _dismiss(pool)
+    restore_fleet_snapshot(pool, env)
+    # Restore yields exactly the captured prefix; the appended turn is not re-attached.
+    assert len(pool.instances[WORKER].conversation) == captured_count
+    assert len(pool.instances[WORKER].conversation) < 5   # the appended line was dropped
+
+
+def test_validate_refuses_same_size_rewritten_prefix(pool, tmp_path, monkeypatch):
+    """BUG_0345: a same-size, in-place rewrite of the captured prefix is corruption —
+    it is refused by the prefix-hash comparison (size >= offset, so the truncation guard
+    does not fire). Distinct from an append (tolerated) and a truncation (size guard)."""
+    make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+    _write_all(tmp_path, pool, count=4)
+    env = capture_fleet_snapshot(pool)
+    ref = env.instances[WORKER].log
+    assert ref['prefix_sha256'], 'capture must record a prefix hash for a present log'
+
+    log = tmp_path / 'worker.jsonl'
+    off = ref['offset']
+    raw = log.read_bytes()
+    flipped = bytearray(raw)
+    i = raw.index(b'"', 0, off)              # an ASCII byte strictly inside the hashed prefix
+    flipped[i] ^= 0x01                       # 1-for-1 byte swap: size-invariant, hash-changing
+    log.write_bytes(bytes(flipped))
+    assert log.stat().st_size == len(raw) == off  # same byte size, different content
+
+    # Fresh-process precondition: production validate() runs in a process whose
+    # (path, size, mtime)-keyed digest cache does NOT already hold this exact key, so it
+    # takes the sha256 re-hash path — the real corruption catcher. Clearing the module
+    # cache here makes the assertion order-independent; the mtime in the cache key already
+    # makes a rewrite miss in the real process (write_bytes bumps mtime). We are NOT
+    # papering over a defect — we are pinning the validator's contract.
+    snapshot._hash_cache.clear()
+
+    reason = snapshot.validate_log_reference(ref)
+    assert reason and 'hash mismatch' in reason, f"expected prefix-hash refusal, got {reason!r}"
     with pytest.raises(SnapshotIntegrityError) as exc:
-        restore_fleet_snapshot(pool, env)
+        snapshot.validate_envelope_integrity(env)
     assert WORKER in str(exc.value)
-    # all-or-nothing: zero mutation
-    assert pool.instances == {}
-    assert pool._execution.active_stack == []
 
 
 def test_integrity_gate_refuses_missing_log(pool, tmp_path, monkeypatch):

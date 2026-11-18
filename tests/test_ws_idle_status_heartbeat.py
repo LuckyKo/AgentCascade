@@ -21,6 +21,15 @@ from agent_cascade.agent_instance import AgentState
 from agent_cascade.api_integration_pkg.state_builder import build_instance_status_from_pool
 
 
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 flipped ENABLE_STACK_SWAP to True, which turns on code paths that assume a real pool:
+    # the run-loop turn-boundary gate (_pending_swap_event / instances) and state_builder's
+    # display_name branch (pool.instances). These tests exercise streaming/telegram/heartbeat
+    # with pool doubles, so disable the flag to take the pre-S6 code path.
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 # ── Stubs ─────────────────────────────────────────────────────────────────────
 
 class _Inst:

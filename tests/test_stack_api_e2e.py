@@ -6,9 +6,9 @@ Covers (plan §9.5, acceptance #10, test plan #5):
   * POST /api/stacks/swap                  parks active + activates target (400 on a target
                                            with no snapshot / missing body)
   * DELETE /api/stacks/{id}                deletes a parked stack; 409 on the ACTIVE stack (m4)
-  * prune_snapshots                        keeps the newest SNAPSHOT_RETENTION_COUNT, NEVER
-                                           touches the active stack's snapshot (m3), and calls
-                                           state_ops.delete_state for saved-KV snapshots (m3)
+  * prune_snapshots                        keeps the newest SNAPSHOT_RETENTION_COUNT per stack —
+                                           INCLUDING the active stack — and NEVER touches KV
+                                           (KV is a cache; the JSONL log is the source of truth)
   * ENABLE_STACK_SWAP off                  every /api/stacks endpoint returns 501 (M1)
 
 Reuses the S3/S4 ``PoolDouble`` fleet doubles (``tests/_snapshot_fleet_double``) and the
@@ -83,6 +83,11 @@ def _build_active_source(tmp_path, monkeypatch):
     reg = _ensure_registry(p)
     reg.register(ROOT)
     reg.set_active(ROOT)
+    # A live-session pool has already run ensure_registry_loaded (its registry is built
+    # and the active pointer chosen here, in-memory). Marking it loaded stops a later
+    # list_stacks()/ensure_registry_loaded from re-reading the persisted active pointer
+    # (which the helper never wrote) and resetting it to None. Faithful to a warm pool.
+    p._swap_registry_loaded = True
     return p, reg
 
 
@@ -185,7 +190,7 @@ def test_delete_active_stack_rejected(tmp_path, monkeypatch):
 # ── Pruning ─────────────────────────────────────────────────────────────────
 
 def _saved_kv(label):
-    """A saved-KV block matching what capture stores (the shape _delete_snapshot_kv reads)."""
+    """A saved-KV block matching what capture stores (KV-bearing shape for the never-touched tests)."""
     return {
         'capable': True, 'saved': True, 'reason': None, 'label': label,
         'session_digest': 'd', 'session_digest_endpoint': ('http://x/v1', 'm'),
@@ -197,9 +202,9 @@ def _make_kv_snapshot_on_disk(tmp_path, monkeypatch, *, stack_id, unsaved_names=
     """Write a valid snapshot whose instances carry saved KV; return (snapshot_id, path_str).
 
     Captures a valid (kv=None) envelope, then stamps saved-KV onto each instance so the
-    KV-delete seam is exercised deterministically without depending on capture's
-    save-capability gating. ``unsaved_names`` marks those instances' KV as ``saved:false``
-    (so the label is NOT retained and IS eligible for deletion when pruned).
+    "KV is never touched on prune/delete" invariant is exercised on a NON-vacuous,
+    KV-bearing snapshot. ``unsaved_names`` marks those instances' KV as ``saved:false``
+    (kept from the prior keep-set tests; harmless now that no KV is ever deleted).
     """
     sid, path = _make_target_snapshot(tmp_path, monkeypatch, stack_id=stack_id)
     env = load_snapshot_from_disk(snapshot.Path(path))
@@ -212,13 +217,16 @@ def _make_kv_snapshot_on_disk(tmp_path, monkeypatch, *, stack_id, unsaved_names=
     return sid, str(new_path)
 
 
-def test_prune_never_touches_active_stack(tmp_path, monkeypatch):
-    """Keeps newest N of a parked stack but NEVER prunes the active stack's snapshots (m3)."""
+def test_prune_trims_active_stack_to_retention(tmp_path, monkeypatch):
+    """Prune trims EVERY stack — including the ACTIVE one — to the newest N. The active
+    stack's *files* age out too; KV is never touched anywhere (KV is a cache, the JSONL
+    log is the source of truth). Here we verify the shared prune path does not exempt the
+    active stack's files."""
     monkeypatch.setattr('agent_cascade.settings.SNAPSHOT_RETENTION_COUNT', 2)
     p, reg = _build_active_source(tmp_path, monkeypatch)  # active = ROOT
     reg.register(TARGET)
 
-    # 4 snapshots on the ACTIVE stack (ROOT) -> all survive regardless of retention.
+    # 4 snapshots on the ACTIVE stack (ROOT) -> newest 2 kept, oldest 2 pruned.
     active_paths = []
     for _ in range(4):
         sid, path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=ROOT)
@@ -234,32 +242,30 @@ def test_prune_never_touches_active_stack(tmp_path, monkeypatch):
 
     pruned = snapshot.prune_snapshots(p, registry=reg)
 
-    # Active stack: fully intact.
-    assert len(reg.list_snapshots(ROOT)) == 4
-    for path in active_paths:
-        assert os.path.exists(path)
-    # Parked stack: trimmed to the newest 2 (write order -> last two paths).
+    # Both stacks now trimmed to the newest 2 (write order -> last two paths kept).
+    assert len(reg.list_snapshots(ROOT)) == 2
     assert len(reg.list_snapshots(TARGET)) == 2
-    for path in parked_paths[:2]:
-        assert not os.path.exists(path)   # oldest deleted
-    for path in parked_paths[-2:]:
-        assert os.path.exists(path)       # newest kept
-    assert pruned == 2
+    for path in active_paths[-2:] + parked_paths[-2:]:
+        assert os.path.exists(path)          # newest kept
+    for path in active_paths[:2] + parked_paths[:2]:
+        assert not os.path.exists(path)      # oldest retired
+    assert pruned == 4                        # 2 active + 2 parked
 
 
-def test_prune_keeps_kv_label_shared_by_surviving_snapshot(tmp_path, monkeypatch):
-    """Major #1 (BUG_0323 S5): pruning a stack's OLDEST snapshot must NOT delete the KV
-    label a KEPT (newer) snapshot of the SAME stack still references. KV files are keyed
-    per instance_name (state_ops: autoloader overwrites the same file on each save), so
-    deleting the shared file on the oldest prune silently drops the newer restore to a
-    message-only cold start."""
+def test_prune_never_deletes_kv_claimed_by_surviving_snapshot(tmp_path, monkeypatch):
+    """Pruning a stack's oldest snapshot never calls state_ops.delete_state.
+
+    KV is a cache whose source of truth is the JSONL log; orphaned KV files are
+    acceptable, so the stack code must not orchestrate KV-file lifecycle at all —
+    regardless of whether a newer (kept) snapshot still references the same labels."""
     monkeypatch.setattr('agent_cascade.settings.SNAPSHOT_RETENTION_COUNT', 1)
     p, reg = _build_active_source(tmp_path, monkeypatch)  # active = ROOT
     reg.register(TARGET)
 
     calls = []
     monkeypatch.setattr('agent_cascade.state_ops.delete_state',
-                        lambda api_base, model, label: calls.append((api_base, model, label)))
+                        lambda api_base, model, label: calls.append((api_base, model, label)),
+                        raising=False)
 
     # Both snapshots reference the SAME per-instance labels (target_a, target_b).
     old_sid, old_path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=TARGET)  # oldest -> pruned
@@ -275,19 +281,22 @@ def test_prune_keeps_kv_label_shared_by_surviving_snapshot(tmp_path, monkeypatch
     assert calls == []
 
 
-def test_prune_calls_delete_state_only_for_unreferenced_labels(tmp_path, monkeypatch):
-    """A pruned snapshot's KV label IS deleted (m3) when no KEPT sibling still references it —
-    i.e. the kept snapshot does not carry saved KV for that instance."""
+def test_prune_never_deletes_any_kv_label(tmp_path, monkeypatch):
+    """Pruning a snapshot never calls state_ops.delete_state, even when the pruned
+    snapshot carries a label the kept snapshot does not (the pre-change "over-suppression
+    guard" would have deleted it). KV is never touched — orphaned files are acceptable."""
     monkeypatch.setattr('agent_cascade.settings.SNAPSHOT_RETENTION_COUNT', 1)
     p, reg = _build_active_source(tmp_path, monkeypatch)  # active = ROOT
     reg.register(TARGET)
 
     calls = []
     monkeypatch.setattr('agent_cascade.state_ops.delete_state',
-                        lambda api_base, model, label: calls.append((api_base, model, label)))
+                        lambda api_base, model, label: calls.append((api_base, model, label)),
+                        raising=False)
 
-    # Old (pruned) references target_a + target_b; kept (new) only saves target_a
-    # (target_b unsaved) -> target_b is unreferenced and eligible for delete.
+    # Layout: pruned snapshot saves target_a + target_b; the kept one saves target_a only
+    # (target_b unsaved). Under the new invariant nothing is deleted — this layout exists to
+    # prove even an unreferenced label is never touched.
     old_sid, old_path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=TARGET)
     new_sid, new_path = _make_kv_snapshot_on_disk(
         tmp_path, monkeypatch, stack_id=TARGET, unsaved_names=('target_b',))
@@ -298,17 +307,14 @@ def test_prune_calls_delete_state_only_for_unreferenced_labels(tmp_path, monkeyp
     assert pruned == 1
     assert os.path.exists(new_path) and not os.path.exists(old_path)
 
-    # Only target_b is deleted; target_a is retained (still saved in the kept snapshot).
-    assert calls == [(CAPABLE_CFG['api_base'], CAPABLE_CFG['model'], 'target_b')]
+    # Nothing is deleted under any layout — the stack code never orchestrates KV lifecycle.
+    assert calls == []
 
 
-def test_prune_does_not_delete_kv_shared_by_another_parked_stack(tmp_path, monkeypatch):
-    """S5 cross-stack (BUG_0323): KV files are keyed GLOBALLY per
-    (model, api_base, instance_name) with no stack dimension, so a parked stack's
-    instance name can collide with another parked stack's (shared subagent names).
-    Pruning the OLDER stack's oldest snapshot must NOT delete_state a label that a
-    kept snapshot of a DIFFERENT parked stack still restores from. The pre-fix
-    same-stack-only keep-set had no visibility into the other stack and destroyed it."""
+def test_prune_never_deletes_kv_across_stacks(tmp_path, monkeypatch):
+    """Pruning one parked stack's oldest snapshot never calls state_ops.delete_state —
+    there is no cross-stack keep-set anymore and no KV is deleted at all. KV is a cache;
+    orphaned files are acceptable (the JSONL log is the source of truth)."""
     monkeypatch.setattr('agent_cascade.settings.SNAPSHOT_RETENTION_COUNT', 1)
     p, reg = _build_active_source(tmp_path, monkeypatch)  # active = ROOT
     reg.register(TARGET)
@@ -316,18 +322,19 @@ def test_prune_does_not_delete_kv_shared_by_another_parked_stack(tmp_path, monke
 
     calls = []
     monkeypatch.setattr('agent_cascade.state_ops.delete_state',
-                        lambda api_base, model, label: calls.append((api_base, model, label)))
+                        lambda api_base, model, label: calls.append((api_base, model, label)),
+                        raising=False)
 
     # Parked stack TARGET: old (saved both labels -> pruned) + new (saved target_a only,
-    # target_b unsaved). So TARGET's OWN kept set references only target_a.
+    # target_b unsaved). So the kept TARGET snapshot references only target_a.
     old_sid, old_path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=TARGET)
     new_sid, new_path = _make_kv_snapshot_on_disk(
         tmp_path, monkeypatch, stack_id=TARGET, unsaved_names=('target_b',))
     reg.add_snapshot(TARGET, old_sid, old_path)
     reg.add_snapshot(TARGET, new_sid, new_path)
 
-    # Parked stack PARKED: one kept snapshot that STILL saves target_b (the label
-    # TARGET's own keeper no longer claims). target_b is referenced cross-stack.
+    # Parked stack PARKED: one surviving snapshot that STILL saves target_b (the label
+    # TARGET's kept snapshot no longer claims). target_b is referenced cross-stack.
     b_sid, b_path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=PARKED)
     reg.add_snapshot(PARKED, b_sid, b_path)
 
@@ -336,32 +343,33 @@ def test_prune_does_not_delete_kv_shared_by_another_parked_stack(tmp_path, monke
     assert os.path.exists(new_path) and not os.path.exists(old_path)  # TARGET trimmed
     assert os.path.exists(b_path)                                    # PARKED untouched
 
-    # target_b is absent from TARGET's own kept set but present in PARKED's -> the
-    # global keep-set protects it. Pre-fix (same-stack only) this was
+    # target_b is absent from TARGET's own kept set but present in PARKED's. There is no
+    # keep-set anymore and KV is never deleted — this is exactly the old cross-stack-deletion
+    # case, now inert. Pre-fix (same-stack-only keep-set) this was
     # [(CAPABLE_CFG['api_base'], CAPABLE_CFG['model'], 'target_b')].
     assert calls == []
 
 
-def test_delete_stack_does_not_delete_kv_shared_by_another_parked_stack(tmp_path, monkeypatch):
-    """S5 cross-stack (BUG_0323): deleting parked stack A must NOT delete_state a label
-    that a surviving stack B still restores from — KV files are keyed globally per
-    (model, api_base, instance_name) with no stack dimension. The shared label is
-    preserved; only labels genuinely unreferenced by any other stack are deleted
-    (over-suppression guard). Pre-fix delete_stack passed no keep-set at all."""
+def test_delete_stack_never_deletes_any_kv(tmp_path, monkeypatch):
+    """Deleting a parked stack never calls state_ops.delete_state — delete_stack retires
+    only the envelope files. KV is never touched regardless of any shared-label layout
+    (KV is a cache; orphaned files are acceptable)."""
     p, reg = _build_active_source(tmp_path, monkeypatch)  # active = ROOT
     reg.register(TARGET)
     reg.register(PARKED)
 
     calls = []
     monkeypatch.setattr('agent_cascade.state_ops.delete_state',
-                        lambda api_base, model, label: calls.append((api_base, model, label)))
+                        lambda api_base, model, label: calls.append((api_base, model, label)),
+                        raising=False)
 
     # Stack to delete (TARGET) saves BOTH shared labels.
     a_sid, a_path = _make_kv_snapshot_on_disk(tmp_path, monkeypatch, stack_id=TARGET)
     reg.add_snapshot(TARGET, a_sid, a_path)
 
-    # Surviving stack (PARKED) saves target_a only (target_b unsaved): target_a is the
-    # shared label (must be preserved), target_b is unreferenced elsewhere (must delete).
+    # Layout: deleted stack (TARGET) saves both shared labels; surviving stack (PARKED) saves
+    # target_a only (target_b unsaved). Under the new invariant neither label is ever deleted;
+    # the layout exists only to prove shared/unreferenced KV is never touched.
     b_sid, b_path = _make_kv_snapshot_on_disk(
         tmp_path, monkeypatch, stack_id=PARKED, unsaved_names=('target_b',))
     reg.add_snapshot(PARKED, b_sid, b_path)
@@ -372,10 +380,8 @@ def test_delete_stack_does_not_delete_kv_shared_by_another_parked_stack(tmp_path
     assert not os.path.exists(a_path)
     assert os.path.exists(b_path)
 
-    # target_a is still claimed by PARKED -> preserved (cross-stack safety).
-    # target_b is unreferenced by any surviving stack -> deleted (over-suppression guard).
-    # Pre-fix this was [(..., 'target_a'), (..., 'target_b')]: the shared label was wiped.
-    assert calls == [(CAPABLE_CFG['api_base'], CAPABLE_CFG['model'], 'target_b')]
+    # Nothing is deleted: delete_stack only removes snapshot files, never KV.
+    assert calls == []
 
 
 # ── Flag-off gating (M1) ────────────────────────────────────────────────────
@@ -392,3 +398,120 @@ def test_flag_off_all_endpoints_501(tmp_path, monkeypatch):
     # Off-path: pool untouched, active stack unchanged.
     assert set(p.instances) == {ROOT, WORKER, PARKED, PLAIN}
     assert reg.active_stack_id == ROOT
+
+# ── BUG_0345 S6 additions (plan §13.2) ──────────────────────────────────────
+
+def _register_target_snapshots(pool, reg, tmp_path, monkeypatch, *, count):
+    """Register TARGET with ``count`` distinct on-disk snapshots. Returns a list of
+    (snapshot_id, path_str) in write order (oldest first)."""
+    reg.register(TARGET)
+    out = []
+    for _ in range(count):
+        sid, path = _make_target_snapshot(tmp_path, monkeypatch)
+        reg.add_snapshot(TARGET, sid, path)
+        out.append((sid, path))
+    return out
+
+
+def test_stacks_list_carries_details_and_enabled(tmp_path, monkeypatch):
+    """GET /api/stacks exposes ``details`` (per-stack display/count/instances) and
+    ``enabled`` (the feature gate) so the UI renders without a second round-trip."""
+    p, reg = _build_active_source(tmp_path, monkeypatch)
+    sid, _ = _registered_target(p, reg, tmp_path, monkeypatch)
+    client = _make_app(p)
+
+    body = client.get('/api/stacks').json()
+    assert body['enabled'] is True                       # gate on for this suite
+    assert 'details' in body, "GET /api/stacks must carry a 'details' map"
+    assert ROOT in body['details'] and TARGET in body['details']
+
+    target_details = body['details'][TARGET]
+    for field in ('display_name', 'instance_count', 'latest_snapshot_at', 'snapshots'):
+        assert field in target_details, f"target details missing {field!r}"
+    sids = [s['snapshot_id'] for s in target_details['snapshots']]
+    assert sid in sids, 'listed snapshot id must match the registered snapshot'
+    for entry in target_details['snapshots']:
+        for field in ('snapshot_id', 'created_at', 'trigger', 'caption'):
+            assert field in entry, f"snapshot detail missing {field!r}"
+
+
+def test_swap_by_target_snapshot_id(tmp_path, monkeypatch):
+    """POST /api/stacks/swap honours ``target_snapshot_id`` to pick a SPECIFIC snapshot
+    of a multi-snapshot stack, and rejects an unknown snapshot id WITHOUT parking."""
+    monkeypatch.setattr('agent_cascade.settings.SNAPSHOT_GRACE_SECONDS', 0)
+    p, reg = _build_active_source(tmp_path, monkeypatch)
+    older, newer = _register_target_snapshots(pool=p, reg=reg, tmp_path=tmp_path,
+                                               monkeypatch=monkeypatch, count=2)
+    client = _make_app(p)
+
+    # Negative FIRST (TARGET still parked): a never-registered snapshot id is rejected
+    # (ValueError -> 400) and the active stack is untouched (pre-validation precedes
+    # parking, M2 all-or-nothing). Must precede the real swap: once TARGET is active the
+    # self-swap guard short-circuits to a 200 no-op regardless of snapshot id.
+    bad = client.post('/api/stacks/swap',
+                      json={'target_stack_id': TARGET, 'target_snapshot_id': 'no-such-sid'})
+    assert bad.status_code >= 400, bad.text
+    assert reg.active_stack_id == ROOT          # parked, not activated
+
+    # Positive: swap to the OLDER snapshot explicitly by id -> active re-points to TARGET.
+    r = client.post('/api/stacks/swap',
+                    json={'target_stack_id': TARGET, 'target_snapshot_id': older[0]})
+    assert r.status_code == 200, r.text
+    assert r.json()['active_stack_id'] == TARGET
+    assert reg.active_stack_id == TARGET
+
+
+def test_delete_snapshot_by_id(tmp_path, monkeypatch):
+    """DELETE /api/stacks/{stack}/snapshots/{sid} removes exactly one snapshot; deleting
+    the last one drops the stack; an unknown snapshot id returns 404."""
+    p, reg = _build_active_source(tmp_path, monkeypatch)
+    older, newer = _register_target_snapshots(pool=p, reg=reg, tmp_path=tmp_path,
+                                               monkeypatch=monkeypatch, count=2)
+    client = _make_app(p)
+
+    assert len(reg.list_snapshots(TARGET)) == 2
+    assert os.path.exists(older[1]) and os.path.exists(newer[1])
+
+    # Delete the older snapshot only; the newer one survives.
+    r = client.delete(f'/api/stacks/{TARGET}/snapshots/{older[0]}')
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body['snapshot_id'] == older[0] and body['removed_stack'] is False
+    assert not os.path.exists(older[1])                 # file gone
+    assert os.path.exists(newer[1])                     # sibling kept
+    assert len(reg.list_snapshots(TARGET)) == 1
+
+    # Delete the last snapshot -> the stack key is dropped entirely.
+    r = client.delete(f'/api/stacks/{TARGET}/snapshots/{newer[0]}')
+    assert r.status_code == 200, r.text
+    assert r.json()['removed_stack'] is True
+    assert TARGET not in reg._snapshots
+    assert not os.path.exists(newer[1])
+
+    # Unknown snapshot id on a surviving stack -> 404 (ValueError mapped in the router).
+    assert ROOT in reg._snapshots
+    r = client.delete(f'/api/stacks/{ROOT}/snapshots/no-such-sid')
+    assert r.status_code == 404, r.text
+
+
+def test_flag_off_delete_snapshot_501(tmp_path, monkeypatch):
+    """With ENABLE_STACK_SWAP off, the per-snapshot DELETE route also returns 501 (M1)."""
+    # Build/register with the gate ON (capture_fleet_snapshot is a no-op when the gate is
+    # off), THEN flip the flag off so the route is gated.
+    p, reg = _build_active_source(tmp_path, monkeypatch)
+    sid, _ = _registered_target(p, reg, tmp_path, monkeypatch)
+    client = _make_app(p)
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+    assert client.delete(f'/api/stacks/{TARGET}/snapshots/{sid}').status_code == 501
+    assert len(reg.list_snapshots(TARGET)) == 1         # off-path: nothing removed
+
+
+def test_snapshot_retention_default_is_50(monkeypatch):
+    """SNAPSHOT_RETENTION_COUNT falls back to 50 when AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT
+    is unset (plan §13.2). Re-parsing with the env cleared makes the assertion independent
+    of any ambient value."""
+    from agent_cascade import settings
+
+    monkeypatch.delenv('AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT', raising=False)
+    assert settings._parse_snapshot_retention() == 50

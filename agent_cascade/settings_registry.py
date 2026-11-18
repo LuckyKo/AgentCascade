@@ -95,6 +95,7 @@ _POOL_KEYS: Tuple[str, ...] = (
 # ``EXTRA_PERSIST_KEYS``).
 _EXTRA_KEYS: Tuple[str, ...] = (
     'auto_security', 'compression_fraction', 'disabled_tools',
+    'enable_stack_swap', 'stack_restore_on_boot',
 )
 
 # Disk-only keys written by ``_save_pool_settings()`` today but absent from the two
@@ -150,6 +151,7 @@ _RUNTIME_SOURCED: FrozenSet[str] = frozenset({
     'approval_timeout_seconds', 'enable_approval_timeout',
     'afk_enabled', 'afk_message', 'afk_mode',
     'enable_async_shell_console_window', 'auto_security', 'compression_fraction',
+    'enable_stack_swap', 'stack_restore_on_boot',
 })
 
 # Persist keys that are NOT currently in the state snapshot and gain broadcast in
@@ -198,6 +200,8 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'enable_async_shell_console_window': False,
     'auto_security': True,
     'compression_fraction': round(COMPRESSION_DEFAULT_FRACTION_SEED * 100, 1),
+    'enable_stack_swap': False,
+    'stack_restore_on_boot': True,
     'afk_enabled': False,
     'afk_message': '',
     'afk_mode': AFK_MODE_DEFAULT,
@@ -542,7 +546,7 @@ def spec(key: str) -> SettingSpec:
 #: Drift guard: the pinned sizes of the derived compat key sets. Adding/removing a
 #: persisted key updates these on purpose (a silent size change is a bug).
 _POOL_SETTINGS_KEY_COUNT: int = 113
-_EXTRA_PERSIST_KEY_COUNT: int = 3
+_EXTRA_PERSIST_KEY_COUNT: int = 5
 
 
 def validate_registry() -> None:

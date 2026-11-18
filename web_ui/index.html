@@ -123,21 +123,25 @@
 
           <div class="sidebar-divider"></div>
 
-          <div class="sessions-section">
+          <div class="sessions-section" id="sessionsPanel">
             <div class="sessions-section-header">
-              <label class="sidebar-label">Saved Sessions</label>
-              <button id="refreshSessionsBtn" class="btn-icon-sm" title="Refresh">
+              <label class="sidebar-label">Sessions</label>
+              <button id="refreshSessionsBtn" class="btn-icon-sm" title="Refresh sessions">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
                 </svg>
               </button>
             </div>
+            <div id="activeSessionCard" class="stack-active-card"></div>
             <div class="session-search">
-              <input type="text" id="sessionSearch" placeholder="Filter..." />
+              <input type="text" id="sessionSearch" placeholder="Filter sessions..." />
             </div>
             <div id="sessionsList" class="sessions-list">
               <div class="sessions-placeholder">Loading...</div>
             </div>
+            <button id="openImportBtn" class="btn btn-secondary" style="width:100%;margin-top:8px;">
+              📂 Import log / JSON…
+            </button>
           </div>
         </div>
       </aside>
@@ -594,6 +598,15 @@
                         <label class="setting-field">
                           <span>Max Auto-Rollbacks (-1=∞)</span>
                           <input autocomplete="off" type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
+                        </label>
+                        <div class="sidebar-divider" style="margin:8px 0;"></div>
+                        <label class="setting-field toggle-field">
+                          <span title="Enable session stack swap: saves and restores full agent fleets (Sessions panel). When off, the sidebar shows legacy saved-session logs only.">Enable Stack Swap (Sessions)</span>
+                          <input autocomplete="off" type="checkbox" id="setting-enable-stack-swap" />
+                        </label>
+                        <label class="setting-field toggle-field">
+                          <span title="Automatically restore the last active session on boot. Requires Enable Stack Swap. When off, the server starts with an empty session and you must open a saved session manually.">Restore Session on Boot</span>
+                          <input autocomplete="off" type="checkbox" id="setting-stack-restore-on-boot" checked />
                         </label>
                       </div>
                     </details>
@@ -1192,6 +1205,36 @@
         <span id="status-tokens-sec" class="status-item" title="Generation Speed">— t/s</span>
       </div>
     </footer>
+  </div>
+
+  <!-- New Session name dialog -->
+  <div id="new-session-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);">
+    <div class="modal-card" style="max-width:420px;margin:12vh auto;">
+      <h3>New Session</h3>
+      <label class="sidebar-label" for="new-session-name">Session name</label>
+      <input autocomplete="off" id="new-session-name" class="sidebar-input" placeholder="Maine" />
+      <div class="hint">Leave empty for Maine_&lt;timestamp&gt;. The current session is saved first.</div>
+      <div class="modal-actions">
+        <button id="new-session-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="new-session-create" class="btn btn-secondary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import log / JSON window -->
+  <div id="import-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);">
+    <div class="modal-card" style="max-width:760px;max-height:80vh;margin:8vh auto;display:flex;flex-direction:column;">
+      <div class="modal-header">
+        <h3>Import log / JSON</h3>
+        <button id="import-modal-close" class="btn-icon-sm">✕</button>
+      </div>
+      <div class="session-search"><input type="text" id="importFilter" placeholder="Filter logs..." /></div>
+      <div id="importList" class="sessions-list" style="overflow:auto;flex:1;"></div>
+      <div class="modal-actions">
+        <button id="importAddBtn" class="btn btn-secondary">Add to current session</button>
+        <button id="importNewBtn" class="btn btn-secondary">Open as new session</button>
+      </div>
+    </div>
   </div>
 
   <!-- CLI-agent manual-login modal (antigravity). Hidden until "Log in" asks the server for the

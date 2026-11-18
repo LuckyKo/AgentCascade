@@ -2267,6 +2267,99 @@ button.cli-agent-oauth-placeholder {
   font-size: 12px;
 }
 
+/* ─── Sessions Panel: Active Card & Stack Actions (BUG_0345) ─────────────── */
+
+.stack-active-card {
+  margin-bottom: 12px;
+}
+
+.stack-active-card-inner {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stack-active-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.stack-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.stack-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.session-item.is-selected {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+}
+
+.session-item-identity {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+/* ─── Modals (New Session, Import) ───────────────────────────────────────── */
+
+.modal-card {
+  padding: 18px;
+  background: var(--bg-panel, #1e1e1e);
+  border: 1px solid #555;
+  border-radius: 8px;
+  color: var(--text, #ddd);
+  font-size: 13px;
+}
+
+.modal-card h3 {
+  margin: 0 0 12px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.modal-header h3 {
+  margin: 0;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
 /* ─── Scrollbar ───────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

@@ -10,6 +10,7 @@ Covers the slice contract:
   * monotonic clocks are projected to wall-clock in created_at / last_activity.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from agent_cascade.agent_instance import AgentState
 from agent_cascade.snapshot import (
     CURRENT_SCHEMA_VERSION,
     capture_fleet_snapshot,
+    load_snapshot_from_disk,
     migrate_envelope,
     monotonic_to_wall,
     write_snapshot_to_disk,
@@ -260,8 +262,9 @@ class TestLogReference:
         pool.instance_loggers['coder_plain'] = _Logger(str(missing))
         env = capture_fleet_snapshot(pool)
         raw = env.to_dict()
+        # BUG_0345: the reference now always carries prefix_sha256 ('' for an absent log).
         assert raw['instances']['coder_plain']['log'] == {
-            'path': str(missing), 'message_count': 0, 'offset': 0,
+            'path': str(missing), 'message_count': 0, 'offset': 0, 'prefix_sha256': '',
         }
 
 
@@ -455,3 +458,76 @@ class TestWriteToDisk:
         on_disk = json.loads(out.read_text(encoding='utf-8'))
         assert on_disk['schema_version'] == CURRENT_SCHEMA_VERSION
         assert set(on_disk['instances']) == set(pool.instances)
+
+# ── prefix_sha256 (BUG_0345 S6) ───────────────────────────────────────────────
+
+class TestPrefixSha256:
+    """The log reference carries a sha256 of exactly bytes[:offset], and the validator is
+    append-tolerant. A legacy envelope without prefix_sha256 still loads and validates
+    under the old STRICT rule (size == offset), proving the new code is backward-compatible."""
+
+    _FLEET_LOGS = [
+        ('maine', 'Maine_20261115_143022', 5),
+        ('worker', 'coder_worker1', 3),
+        ('parked', 'coder_parked', 2),
+        ('plain', 'coder_plain', 1),
+    ]
+
+    def test_envelope_carries_prefix_sha256(self, pool, tmp_path, monkeypatch):
+        _make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+        for fname, name, cnt in self._FLEET_LOGS:
+            _write_jsonl(tmp_path / f'{fname}.jsonl', name, cnt)
+        log = tmp_path / 'maine.jsonl'
+        env = capture_fleet_snapshot(pool)
+        ref = env.to_dict()['instances']['Maine_20261115_143022']['log']
+
+        assert ref['offset'] == os.path.getsize(log)
+        expected = hashlib.sha256(log.read_bytes()[:ref['offset']]).hexdigest()
+        assert ref['prefix_sha256'] == expected
+        # The captured reference validates against the untouched file.
+        assert snapshot.validate_log_reference(ref) is None
+
+    def test_roundtrip_preserves_prefix_sha256(self, pool, tmp_path, monkeypatch):
+        _make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+        for fname, name, cnt in self._FLEET_LOGS:
+            _write_jsonl(tmp_path / f'{fname}.jsonl', name, cnt)
+        env = capture_fleet_snapshot(pool)
+        out = write_snapshot_to_disk(env, tmp_path / 'snapshots')
+
+        # The on-disk JSON carries the prefix hash for every non-empty log reference.
+        on_disk = json.loads(out.read_text(encoding='utf-8'))
+        for inst in on_disk['instances'].values():
+            if inst['log']['offset']:
+                assert inst['log']['prefix_sha256'], 'round-trip dropped prefix_sha256'
+
+        reloaded = load_snapshot_from_disk(out)
+        m = reloaded.instances['Maine_20261115_143022'].log
+        assert m['prefix_sha256'] == \
+            env.to_dict()['instances']['Maine_20261115_143022']['log']['prefix_sha256']
+        # Append-tolerant: every log is still unchanged, so the reloaded envelope validates.
+        snapshot.validate_envelope_integrity(reloaded)
+
+    def test_legacy_envelope_loads_and_validates_under_strict_rule(self, pool, tmp_path, monkeypatch):
+        _make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+        for fname, name, cnt in self._FLEET_LOGS:
+            _write_jsonl(tmp_path / f'{fname}.jsonl', name, cnt)
+        env = capture_fleet_snapshot(pool)
+        raw = env.to_dict()
+        # Strip the new field -> a pre-BUG_0345 envelope shape.
+        for isnap in raw['instances'].values():
+            isnap['log'].pop('prefix_sha256', None)
+
+        path = tmp_path / 'legacy.json'
+        path.write_text(json.dumps(raw), encoding='utf-8')
+        loaded = load_snapshot_from_disk(path)   # legacy envelope must still load
+        assert all('prefix_sha256' not in s.log for s in loaded.instances.values())
+
+        # Unchanged on-disk logs validate under the legacy STRICT rule (size == offset).
+        snapshot.validate_envelope_integrity(loaded)
+
+        # Prove the legacy branch is STRICT, not append-tolerant: an append — legal under
+        # the new prefix-hash rule — is refused here.
+        with open(tmp_path / 'worker.jsonl', 'a', encoding='utf-8') as f:
+            f.write('{"role":"user","content":"extra"}\n')
+        with pytest.raises(snapshot.SnapshotIntegrityError):
+            snapshot.validate_envelope_integrity(loaded)

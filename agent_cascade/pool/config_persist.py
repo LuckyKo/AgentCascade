@@ -56,6 +56,11 @@ class ConfigPersistMixin:
                 # a real bool after __init__, so no shadow check needed.
                 data['auto_security'] = bool(self.auto_security)
 
+                # Add enable_stack_swap + stack_restore_on_boot (BUG_0345)
+                from agent_cascade import settings as _ac_settings
+                data['enable_stack_swap'] = bool(_ac_settings.ENABLE_STACK_SWAP)
+                data['stack_restore_on_boot'] = bool(_ac_settings.STACK_RESTORE_ON_BOOT)
+
                 # Add approval timeout settings (BUG_0029 Phase 2 Step 5: read from state directly)
                 from agent_cascade.runtime_state import state as _runtime_state
                 data['enable_approval_timeout'] = _runtime_state.enable_timeout
@@ -148,6 +153,15 @@ class ConfigPersistMixin:
             afk_message_raw = data.pop('afk_message', None)
             afk_mode_raw = data.pop('afk_mode', None)
             enable_async_shell_console_window_raw = data.pop('enable_async_shell_console_window', None)
+            enable_stack_swap_raw = data.pop('enable_stack_swap', None)
+            stack_restore_on_boot_raw = data.pop('stack_restore_on_boot', None)
+
+            # Apply stack swap & boot restore settings to settings module
+            from agent_cascade import settings as _ac_settings
+            if enable_stack_swap_raw is not None and not _ac_settings.ENABLE_STACK_SWAP_FROM_ENV:
+                _ac_settings.ENABLE_STACK_SWAP = bool(enable_stack_swap_raw)
+            if stack_restore_on_boot_raw is not None:
+                _ac_settings.STACK_RESTORE_ON_BOOT = bool(stack_restore_on_boot_raw)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
             self.settings = PoolSettings.from_dict(data)
