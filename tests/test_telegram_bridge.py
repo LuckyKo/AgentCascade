@@ -1177,7 +1177,9 @@ def test_registry_contains_v1_command_set():
     expected = {'new', 'status', 'yes', 'no', 'stop', 'restart',
                 'afk', 'security', 'restore', 'help',
                 # Added by the manual Save/Load KV buttons (todo #109).
-                'savekv', 'loadkv'}
+                'savekv', 'loadkv',
+                # Added by the BUG_0323 S5 stack-swap surface (both gated off-path).
+                'snapshot', 'stack'}
     assert set(COMMANDS) == expected
     # Every handler has a non-empty description (used by /help).
     for name, cmd in COMMANDS.items():

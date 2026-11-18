@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 from agent_cascade.telegram_bridge.commands import (
     _TG_STATE_ICONS,
     _active_inst_line,
+    _cmd_snapshot,
+    _cmd_stack,
     _cmd_status,
     _fmt_usage,
 )
@@ -123,3 +125,35 @@ class TestCmdStatus:
         assert 'agent8' not in out
         assert 'agent9' not in out
         assert '… and 2 more' in out
+
+
+def test_snapshot_and_stack_off_path_short_circuit(monkeypatch):
+    """Minor #2: with ENABLE_STACK_SWAP off, /snapshot and /stack return a clear
+    'swap disabled' message and never touch the REST client — matching the REST/WS
+    local gates instead of surfacing a raw 501 to the user."""
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+    ac = MagicMock()
+    ac.list_stacks = AsyncMock(return_value={'active_stack_id': None, 'stacks': {}})
+    ac.snapshot_stack = AsyncMock()
+    ac.swap_stack = AsyncMock()
+
+    for args in ('', 'swap target'):
+        ctx = MagicMock()
+        ctx.ac = ac
+        ctx.args = args
+        assert 'disabled' in _run(_cmd_stack(ctx))
+
+    ctx = MagicMock()
+    ctx.ac = ac
+    ctx.args = 'list'
+    assert 'disabled' in _run(_cmd_stack(ctx))
+
+    ctx = MagicMock()
+    ctx.ac = ac
+    ctx.args = ''
+    assert 'disabled' in _run(_cmd_snapshot(ctx))
+
+    # Off-path: nothing was sent to the REST surface (no 501, no list/snapshot/swap call).
+    assert ac.list_stacks.await_count == 0
+    assert ac.snapshot_stack.await_count == 0
+    assert ac.swap_stack.await_count == 0
