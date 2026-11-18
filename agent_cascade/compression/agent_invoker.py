@@ -19,7 +19,7 @@ from agent_cascade.compression.helpers import format_marker_timestamp
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.prompts.dna import (COMPACTION_REVIEWER_PROMPT, COMPRESSION_END_MARKER, COMPRESSION_PROMPT,
-                                       CONSOLIDATION_PROMPT)
+                                       CONSOLIDATION_PRESERVE_ITEMS_INSTRUCTION, CONSOLIDATION_PROMPT)
 from agent_cascade.settings import (COMPACTION_REVIEWER_MAX_TURNS, COMPRESSION_AGENT_TIMEOUT, COMPRESSION_MAX_RETRIES,
                                     COMPRESSION_REVIEW_MAX_RETRIES, COMPRESSOR_AGENT_MAX_TURNS, COMPRESSOR_REUSE_ENABLED,
                                     COMPRESSOR_REVIEWER_WARM_NAME, COMPRESSOR_WARM_NAME)
@@ -878,8 +878,7 @@ def _preserve_items_instruction(preserve_items) -> str:
     _items = ', '.join(str(i).strip() for i in preserve_items if str(i).strip())
     if not _items:
         return ''
-    return (f"\n\nThe previous attempt DROPPED the following required items — you "
-            f"MUST retain them verbatim in the consolidated summary: {_items}.")
+    return CONSOLIDATION_PRESERVE_ITEMS_INSTRUCTION.format(items=_items)
 
 
 def _build_consolidation_prompt(marker_summaries, marker_time_ranges=None, preserve_items=None) -> str:

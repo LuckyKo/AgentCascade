@@ -176,6 +176,15 @@ CONSOLIDATION_PROMPT = (
     '--- START EXISTING SUMMARIES ---\n{summaries_text}\n--- END EXISTING SUMMARIES ---\n\n'
     'Present the consolidated summary below.{end_instruction}')
 
+CONSOLIDATION_PRESERVE_ITEMS_INSTRUCTION = (
+    '\n\nThe previous attempt DROPPED the following required items — you '
+    'MUST retain them verbatim in the consolidated summary: {items}.')
+
+CONSOLIDATION_CORRECTION_PROMPT = (
+    'Your previous consolidated summary DROPPED required items. Re-issue '
+    'the consolidated summary now, correcting that loss.'
+    '{preserve_items_instruction} {end_instruction}')
+
 # Post-consolidation data-integrity audit. The reviewer runs as a separate, tool-less Compressor
 # instance (NOT a dedicated soul), so this task prompt must fully carry the review role + output
 # contract — the Compressor soul would otherwise bias the model toward summarizing. The reviewer is
