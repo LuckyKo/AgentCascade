@@ -948,7 +948,13 @@ TOOL_METADATA = {
                 'type':
                     'string',
                 'description':
-                    'Host path the CLI runs in (mounted read-write at /workspace). Must be the agent\'s default workspace or one of its extra read-write paths — a read-only path or any path outside the agent\'s allowed base is rejected. Defaults to the caller\'s default workspace.'
+                    'Primary host path the CLI runs in (mounted read-write at /workspace and used as the working directory). Must be the agent\'s default workspace or one of its extra read-write paths — a read-only path or any path outside the agent\'s allowed base is rejected. Defaults to the caller\'s default workspace. Use extra_paths to mount additional dirs.'
+            },
+            'extra_paths': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description':
+                    'Optional additional host dirs to mount read-write alongside the primary workspace, at /extra_1, /extra_2, … (1-based, in the order given). Each must be the agent\'s default workspace or one of its extra read-write paths — a read-only path or any path outside the agent\'s allowed base is rejected per path. An entry equal to the primary workspace is ignored; omit for the default single-mount behavior.'
             },
             'timeout': {
                 'type':

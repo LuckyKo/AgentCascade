@@ -13,6 +13,7 @@ Everything that would need a real Docker image or real CLI binary is mocked:
 spawning happens anywhere.
 """
 
+import os
 import shutil
 import subprocess
 import threading
@@ -378,6 +379,140 @@ class TestApprovalRejected:
             pool.get_instance('Maine'))
         assert 'denied' in out.lower()
         runner.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6b. Multiple host mounts (extra_paths → /extra_1, /extra_2, …)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _mounts(cmd):
+    return [cmd[i + 1] for i, tok in enumerate(cmd) if tok == '-v']
+
+
+class TestExtraPathMounts:
+    def test_no_extra_paths_keeps_legacy_argv(self, tmp_path):
+        from agent_cascade.tools.code_interpreter import (
+            CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT, CONTAINER_PID_LIMIT,
+            _normalize_path_for_docker)
+        ws_mount = f'{_normalize_path_for_docker(os.path.realpath(str(tmp_path)))}:/workspace'
+        cmd = cli_agent_runner._build_docker_cmd(
+            container_name='c', workspace=str(tmp_path),
+            harness_cmd=['claude', '-p', 'do it'], image='img')
+        assert cmd == [
+            'docker', 'run', '--rm', '--name', 'c', '--cap-drop=ALL',
+            '--security-opt=no-new-privileges',
+            '--memory=' + CONTAINER_MEMORY_LIMIT,
+            '--cpus=' + str(CONTAINER_CPU_LIMIT),
+            '--pids-limit=' + str(CONTAINER_PID_LIMIT),
+            '-v', ws_mount, '-w', '/workspace', 'img', 'claude', '-p', 'do it',
+        ]
+        assert cmd.count('-w') == 1 and cmd[cmd.index('-w') + 1] == '/workspace'
+
+    def test_extra_paths_mount_at_extra_n(self, tmp_path):
+        from agent_cascade.tools.code_interpreter import _normalize_path_for_docker
+        primary = tmp_path / 'primary'
+        a = tmp_path / 'a'
+        b = tmp_path / 'b'
+        for d in (primary, a, b):
+            d.mkdir()
+        cmd = cli_agent_runner._build_docker_cmd(
+            container_name='c', workspace=str(primary), harness_cmd=['claude', '-p', 'do it'],
+            image='img', extra_paths=[str(a), str(b)])
+        norm = _normalize_path_for_docker
+        assert _mounts(cmd) == [
+            f'{norm(os.path.realpath(str(primary)))}:/workspace',
+            f'{norm(os.path.realpath(str(a)))}:/extra_1',
+            f'{norm(os.path.realpath(str(b)))}:/extra_2',
+        ]
+        assert cmd.count('-w') == 1 and cmd[cmd.index('-w') + 1] == '/workspace'
+
+    def test_context_lists_extra_mounts_only_when_present(self, tmp_path):
+        a = tmp_path / 'a'
+        b = tmp_path / 'b'
+        assert cli_agent_runner._extra_mount_context(None) == ''
+        assert cli_agent_runner._extra_mount_context([]) == ''
+        ctx = cli_agent_runner._extra_mount_context([str(a), str(b)])
+        assert f'/extra_1 -> {os.path.realpath(str(a))}' in ctx
+        assert f'/extra_2 -> {os.path.realpath(str(b))}' in ctx
+
+    def test_prepare_injects_context_and_mounts(self, monkeypatch, tmp_path):
+        a = tmp_path / 'a'
+        a.mkdir()
+        captured = {}
+
+        class FakeAdapter:
+            harness = 'fake'
+            binary = 'fake'
+            auth_env_var = None
+            auth_type = 'api_key'
+            auth_volume_target = None
+            model_flag = None
+
+            def build_launch_cmd(self, *, task, workspace, posture, model=None):
+                captured['task'] = task
+                return ['fake']
+
+            def child_env(self, env):
+                return env
+
+        pool = MagicMock()
+        pool.settings.cli_agent_enabled = {'fake': True}
+        pool.settings.max_cli_agent_children = 2
+        pool.settings.cli_agent_models = {}
+        monkeypatch.setattr(cli_agent_runner, '_cli_agent_image', lambda h, p: 'img')
+        prepared = cli_agent_runner.prepare_cli_agent_run(
+            adapter=FakeAdapter(), task='do it', workspace=str(tmp_path),
+            permission_posture='acceptEdits', pool=pool, caller_name='c',
+            extra_paths=[str(a)])
+        assert captured['task'].startswith(
+            f'Additional read-write dirs mounted at: /extra_1 -> {os.path.realpath(str(a))}')
+        assert captured['task'].endswith('do it')
+        assert any(m.endswith(':/extra_1') for m in _mounts(prepared.docker_cmd))
+
+
+class TestExtraPathValidation:
+    @staticmethod
+    def _pool_with_paths(mapping):
+        pool = FakePool(instances={'Maine': _make_instance('Maine')})
+
+        def resolve(path, mode='ro', instance_name=None):
+            if mode != 'rw' or path not in mapping:
+                raise ValueError(f"Path '{path}' is outside the allowed RW directories")
+            return mapping[path]
+
+        pool.operation_manager._resolve_path.side_effect = resolve
+        return pool
+
+    def _call(self, pool, dispatcher, extra_paths):
+        return dispatcher.handle_call_cli_agent(
+            {'harness': 'claude_code', 'task': 't', 'workspace': '/primary',
+             'extra_paths': extra_paths, 'execution_mode': 'sync'},
+            pool.get_instance('Maine'))
+
+    def test_valid_extra_paths_threaded(self, monkeypatch):
+        pool = self._pool_with_paths({'/primary': '/primary', '/a': '/a', '/b': '/b'})
+        dispatcher, runner = _make_handler(pool, monkeypatch)
+        out = self._call(pool, dispatcher, ['/a', '/b'])
+        assert 'done' in out
+        assert runner.call_args.kwargs['extra_paths'] == ['/a', '/b']
+
+    @pytest.mark.parametrize('bad', ['/outside', '/read-only'])
+    def test_out_of_base_or_read_only_extra_rejected(self, monkeypatch, bad):
+        # '/read-only' is modelled as mode='ro'-only in the pool resolver; both cases must be
+        # rejected by the SAME per-path RW policy as the primary (no spawn).
+        pool = self._pool_with_paths({'/primary': '/primary'})
+        dispatcher, runner = _make_handler(pool, monkeypatch)
+        out = self._call(pool, dispatcher, [bad])
+        assert 'extra path not permitted' in out
+        runner.assert_not_called()
+
+    def test_extra_equal_to_primary_is_deduped(self, monkeypatch):
+        pool = self._pool_with_paths({'/primary': '/real/primary', '/same': '/real/primary/.'})
+        dispatcher, runner = _make_handler(pool, monkeypatch)
+        out = self._call(pool, dispatcher, ['/same'])
+        assert 'done' in out
+        assert runner.call_args.kwargs['extra_paths'] == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────

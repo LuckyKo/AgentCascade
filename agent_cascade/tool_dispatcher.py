@@ -347,6 +347,33 @@ class ToolDispatcher:
 
     # ── call_cli_agent Handler ───────────────────────────────────────────────
 
+    def _resolve_cli_rw_path(self, path: str, instance: 'AgentInstance') -> str:
+        """Validate one ``call_cli_agent`` host path as RW-allowed (single source of truth).
+
+        Allowed = the agent's default workspace or one of its extra RW paths; a read-only path
+        or any path outside the agent's allowed base raises ``ValueError``.
+        """
+        op_manager = getattr(self.pool, 'operation_manager', None)
+        return str(op_manager._resolve_path(path, mode='rw',
+                                            instance_name=instance.instance_name))
+
+    @staticmethod
+    def _coerce_extra_cli_paths(raw: Any) -> list[str]:
+        """Normalize the optional ``extra_paths`` arg to a list of non-empty host-path strings."""
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            import json
+            raw = json.loads(raw)
+        if not isinstance(raw, list):
+            raise ValueError("'extra_paths' must be a JSON array of host paths.")
+        paths = []
+        for p in raw:
+            if not isinstance(p, str) or not p.strip():
+                raise ValueError("'extra_paths' entries must be non-empty strings.")
+            paths.append(p)
+        return paths
+
     def handle_call_cli_agent(self, resolved: dict, instance: 'AgentInstance') -> str:
         """Run ONE external AI coding CLI one-shot, with full gating. Additive; never
         touches slot/KV machinery (unlike call_agent). Gating order (plan §3.4/§5):
@@ -402,15 +429,31 @@ class ToolDispatcher:
         if err := self._check_nesting_depth(instance, caller_depth + 1):
             return err
 
-        # 3. Workspace resolution — must stay within the agent's RW-allowed base.
+        # 3. Workspace resolution — must stay within the agent's RW-allowed base. Each optional
+        #    extra path is validated exactly like the primary; duplicates of the primary are
+        #    dropped (same realpath) so a host dir is never double-mounted.
         op_manager = getattr(self.pool, 'operation_manager', None)
         workspace = resolved.get('workspace') or getattr(self.pool.settings, 'default_workspace', None)
         if not workspace:
             return 'Error: call_cli_agent could not resolve a workspace.'
         try:
-            ws_path = str(op_manager._resolve_path(workspace, mode='rw', instance_name=instance.instance_name))
+            ws_path = self._resolve_cli_rw_path(workspace, instance)
         except ValueError as e:
             return f"Error: workspace not permitted: {e}"
+        try:
+            extra_inputs = self._coerce_extra_cli_paths(resolved.get('extra_paths'))
+        except ValueError as e:
+            return f"Error: invalid extra_paths: {e}"
+        extra_ws_paths = []
+        primary_real = os.path.realpath(ws_path)
+        for extra in extra_inputs:
+            try:
+                extra_path = self._resolve_cli_rw_path(extra, instance)
+            except ValueError as e:
+                return f"Error: extra path not permitted: {e}"
+            if os.path.realpath(extra_path) == primary_real:
+                continue
+            extra_ws_paths.append(extra_path)
 
         # 4. Posture + timeout (Phase 0: only the default-safe 'acceptEdits' posture). The posture
         #    is a fixed constant — the deprecated caller-facing 'permission_posture' argument was
@@ -451,6 +494,7 @@ class ToolDispatcher:
                 prepared = prepare_cli_agent_run(adapter=adapter, harness=harness, task=task,
                                                  workspace=ws_path, permission_posture=posture,
                                                  pool=self.pool, caller_name=instance.instance_name,
+                                                 extra_paths=extra_ws_paths,
                                                  model=resolved.get('model'))
             except HarnessNotFoundError as e:  # preflight race / direct-runner edge
                 return f"Error: {e}"
@@ -486,6 +530,7 @@ class ToolDispatcher:
             result = run_cli_agent(adapter=adapter, task=task, workspace=ws_path,
                                    permission_posture=posture, timeout=timeout,
                                    pool=self.pool, caller_name=instance.instance_name,
+                                   extra_paths=extra_ws_paths,
                                    model=resolved.get('model'))
         except HarnessNotFoundError as e:  # preflight race / direct-runner edge
             return f"Error: {e}"

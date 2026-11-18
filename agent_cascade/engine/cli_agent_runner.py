@@ -426,6 +426,7 @@ def _cli_agent_image(harness: Optional[str] = None, pool: Optional[Any] = None) 
 
 def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[str],
                       image: str, env_vars: Optional[dict[str, str]] = None,
+                      extra_paths: Optional[list[str]] = None,
                       extra_ro_mounts: Optional[list[dict]] = None,
                       extra_volumes: Optional[list[dict]] = None) -> list[str]:
     """Build the one-shot ``docker run --rm`` argv, reusing the code_interpreter containment recipe.
@@ -436,11 +437,13 @@ def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[
     foreground one-shot; ``--rm`` auto-cleans on exit.
 
     Auth keys are injected as ``-e <VAR>=<value>`` flags (NEVER a ``secrets.json`` bind-mount)
-    so the container sees only the one native key it needs. ``extra_ro_mounts`` are mounted
-    ``:ro`` when the pool's ``cli_agent_paths_ro`` toggle is on. ``extra_volumes`` are named
-    Docker volumes (``{'name', 'target'}``) used to persist an OAuth harness's account store
-    across one-shot runs. With all three empty the argv is byte-identical to the pre-auto-setup
-    recipe (default OFF = no behavior change).
+    so the container sees only the one native key it needs. ``extra_paths`` are additional
+    read-write host dirs mounted at ``/extra_1``, ``/extra_2``, … (1-based, in order) while the
+    primary ``workspace`` stays at ``/workspace`` + the ``-w`` workdir. ``extra_ro_mounts`` are
+    mounted ``:ro`` when the pool's ``cli_agent_paths_ro`` toggle is on. ``extra_volumes`` are
+    named Docker volumes (``{'name', 'target'}``) used to persist an OAuth harness's account
+    store across one-shot runs. With all four empty the argv is byte-identical to the
+    pre-auto-setup recipe (default OFF = no behavior change).
     """
     # Lazy import: same source of truth for limits + path normalization, no copy-paste drift.
     from agent_cascade.tools.code_interpreter import (
@@ -457,6 +460,8 @@ def _build_docker_cmd(*, container_name: str, workspace: str, harness_cmd: list[
         '-v', f'{_normalize_path_for_docker(os.path.realpath(workspace))}:/workspace',
         '-w', '/workspace',
     ]
+    for _i, _p in enumerate(extra_paths or [], 1):
+        cmd += ['-v', f'{_normalize_path_for_docker(os.path.realpath(_p))}:/extra_{_i}']
     for _k, _v in (env_vars or {}).items():
         cmd += ['-e', f'{_k}={_v}']
     for _m in (extra_ro_mounts or []):
@@ -537,9 +542,19 @@ def format_cli_result_message(harness: str, result: CliAgentResult) -> str:
     return f"{header}\n\n=== STDOUT ===\n{stdout}\n\n=== STDERR ===\n{stderr}"
 
 
+def _extra_mount_context(extra_paths: Optional[list[str]]) -> str:
+    """CLI-facing header mapping each extra RW mount to its host path ('' when none)."""
+    if not extra_paths:
+        return ''
+    pairs = ', '.join(f'/extra_{i} -> {os.path.realpath(p)}'
+                      for i, p in enumerate(extra_paths, 1))
+    return f'Additional read-write dirs mounted at: {pairs}\n\n'
+
+
 def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
                           workspace: str, permission_posture: str, pool,
-                          caller_name: str, model: Optional[str] = None) -> PreparedCliAgentRun:
+                          caller_name: str, extra_paths: Optional[list[str]] = None,
+                          model: Optional[str] = None) -> PreparedCliAgentRun:
     """Resolve the adapter, run the per-harness ENABLE/auth/volume/model/RO gates, and build the
     one-shot ``docker run`` argv — WITHOUT spawning.
 
@@ -645,7 +660,8 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
 
     cap = getattr(pool.settings, 'max_cli_agent_children', 2)
     container_name = f'cli_agent_{uuid.uuid4().hex[:12]}'
-    harness_cmd = adapter.build_launch_cmd(task=task, workspace=workspace,
+    harness_cmd = adapter.build_launch_cmd(task=_extra_mount_context(extra_paths) + task,
+                                           workspace=workspace,
                                            posture=permission_posture, model=_model)
     # Fail-fast: a present-but-wrong image (e.g. silently failed build or a mis-pinned tag) would
     # otherwise spawn and die with a cryptic in-container module error. Only a definitive False
@@ -657,7 +673,8 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
             f"(e.g. set cli_agent_images['{harness}'] to a tag that has it).")
     docker_cmd = _build_docker_cmd(container_name=container_name, workspace=workspace,
                                    harness_cmd=harness_cmd, image=image,
-                                   env_vars=_env_vars, extra_ro_mounts=_extra_ro,
+                                   env_vars=_env_vars, extra_paths=extra_paths,
+                                   extra_ro_mounts=_extra_ro,
                                    extra_volumes=_extra_volumes)
     clean_env = adapter.child_env(os.environ.copy())
     return PreparedCliAgentRun(early_result=None, docker_cmd=docker_cmd,
@@ -668,7 +685,8 @@ def prepare_cli_agent_run(*, adapter: RuntimeAdapter = None, harness: str = None
 
 def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: str,
                   workspace: str, permission_posture: str, timeout: int, pool,
-                  caller_name: str, model: Optional[str] = None) -> CliAgentResult:
+                  caller_name: str, extra_paths: Optional[list[str]] = None,
+                  model: Optional[str] = None) -> CliAgentResult:
     """Spawn ONE external CLI as a one-shot Docker container, block, capture stdout+exit.
 
     Raises HarnessNotFoundError if ``harness`` is unregistered or its preflight (presence
@@ -683,6 +701,7 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
             is None) to resolve + preflight, and for log attribution; defaults to ``adapter.harness``.
         task: prompt handed to the CLI as a single positional token (no shell → no injection).
         workspace: already-validated host path to run in (mounted RW at /workspace).
+        extra_paths: already-validated additional RW host paths (mounted at /extra_1, /extra_2, …).
         permission_posture: already-authorized posture ('acceptEdits' in Phase 0).
         timeout: hard wall-clock seconds.
         pool: AgentPool (for settings; also the defensive-path preflight when adapter is None).
@@ -690,7 +709,8 @@ def run_cli_agent(*, adapter: RuntimeAdapter = None, harness: str = None, task: 
     """
     prepared = prepare_cli_agent_run(
         adapter=adapter, harness=harness, task=task, workspace=workspace,
-        permission_posture=permission_posture, pool=pool, caller_name=caller_name, model=model)
+        permission_posture=permission_posture, pool=pool, caller_name=caller_name,
+        extra_paths=extra_paths, model=model)
     if prepared.early_result is not None:
         return prepared.early_result
 

@@ -204,6 +204,14 @@ def test_call_cli_agent_launch_status_control_anyof():
     assert _is_valid(schema, {'tool_id': 5, 'task': '__status', 'execution_mode': 'async'})
     # (a) launch
     assert _is_valid(schema, {'harness': 'claude_code', 'task': 'build the thing'})
+    # (a) launch with extra RW mounts alongside the primary workspace
+    assert _is_valid(schema, {
+        'harness': 'claude_code', 'task': 'build the thing', 'extra_paths': ['/a', '/b'],
+    })
+    # extra_paths must be an array of strings, not a scalar
+    assert not _is_valid(schema, {
+        'harness': 'claude_code', 'task': 'x', 'extra_paths': '/a',
+    })
     # (a) permission_posture was removed from the LLM-facing schema (was a deprecated constant);
     #     it is now an unknown key → rejected (additionalProperties:false).
     assert not _is_valid(schema, {

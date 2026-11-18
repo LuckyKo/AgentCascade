@@ -1652,7 +1652,7 @@ live idle cost.
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Tool schema | `prompts/dna.py` (`TOOL_METADATA['call_cli_agent']`) | `harness` enum, `task`, `model`, `permission_posture`, `status` |
+| Tool schema | `prompts/dna.py` (`TOOL_METADATA['call_cli_agent']`) | `harness` enum, `task`, `workspace`, `extra_paths`, `model`, `status` |
 | Adapter registry | `engine/cli_agent_adapters/` | Per-harness argv, presence probe, auth metadata, credential strip |
 | Runner | `engine/cli_agent_runner.py` | Enable/OAuth gates, image build+refresh, docker argv, wall-clock timeout + teardown, log persistence, status |
 | Async tracker | `async_shell_pkg/cli_agent_tracker.py` | Background execution path (`execution_mode='async'`) |
@@ -1678,6 +1678,8 @@ Before spawning, the runner probes the volume for a credential file (explicit ca
 ### 12.3 Permission posture
 
 `permission_posture='acceptEdits'` is the only posture the tool schema exposes; `bypass` exists for a future config opt-in. Because the container has no TTY, an approval prompt is unanswerable — antigravity's `acceptEdits` argv therefore also carries `--dangerously-skip-permissions`. Containment is owned by Docker, not the CLI: `--cap-drop=ALL`, `--security-opt=no-new-privileges`, memory/CPU/PID caps, and only the target workspace RW (plus optional read-only extra paths).
+
+**Multiple host dirs.** `workspace` stays the single primary host path: mounted RW at `/workspace` and used as the `-w` workdir (unchanged). The optional `extra_paths` array adds further RW host dirs, each validated with the **same** per-path policy as the primary (default workspace or an extra RW path; read-only/out-of-base rejected) and mounted at `/extra_1`, `/extra_2`, … in order. An extra equal to the primary (by realpath) is skipped. When present, the CLI's task prompt is prefixed with `Additional read-write dirs mounted at: /extra_N -> <host path>` so it knows where they are; absent/empty `extra_paths` leaves the argv byte-identical to the single-mount recipe.
 
 ### 12.4 Interactive login (`agy`)
 
