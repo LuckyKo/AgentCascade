@@ -162,8 +162,9 @@ class TestCacheWasteDetection:
 
     # 10b. BUG_0273 Option A: cache counters follow the resolved endpoint.
     def test_cache_counters_follow_endpoint_not_model_fp(self, collector):
-        """With a resolved endpoint threaded, cache hits/misses move to the
-        endpoint key while the model-only fp row keeps zero cache counters."""
+        """With a resolved endpoint threaded, cache hits/misses land in the endpoint
+        key; the model-only fp row aggregates that endpoint's buckets (BUG_0338
+        bridge) so its CACHE column reflects the model's real cache behavior."""
         fp = TelemetryCollector.fingerprint_config(model='m')
         collector.record_turn_start('inst', config_fingerprint=fp,
                                     config_description={'model': 'm'})
@@ -176,12 +177,53 @@ class TestCacheWasteDetection:
             collector.record_llm_call_end('inst')
         cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
         attrib = {r['cache_key']: r for r in collector.get_cache_attribution()}
-        # The model row shows no cache (moved to the resolved endpoint).
-        assert cfgs[fp]['cache_hits'] == 0
-        assert cfgs[fp]['cache_misses'] == 0
-        # The resolved endpoint's own bucket carries the split.
+        # BUG_0338 bridge: the model row now sums its per-endpoint buckets, so it
+        # reflects the resolved endpoint's real cache behavior (1 hit + 1 miss).
+        assert cfgs[fp]['cache_hits'] == 1
+        assert cfgs[fp]['cache_misses'] == 1
+        # The resolved endpoint's own bucket carries the split (authoritative view).
         assert attrib[ck]['cache_hits'] == 1
         assert attrib[ck]['cache_misses'] == 1
+
+    # 10c. BUG_0338 bridge: the model row sums ALL of its per-endpoint buckets.
+    def test_model_row_aggregates_all_endpoint_buckets(self, collector):
+        """A model served from two endpoints: the A/B row's cache column must equal
+        the sum of BOTH endpoint buckets (not just one, and not 0/0)."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start('inst', config_fingerprint=fp,
+                                    config_description={'model': 'm'})
+        ck_a = TelemetryCollector.cache_attribution_key('http://a/v1', 'm')
+        ck_b = TelemetryCollector.cache_attribution_key('http://b/v1', 'm')
+        # 2 hits on endpoint A, 1 hit + 1 miss on endpoint B.
+        for ck, cached in ((ck_a, 10000), (ck_a, 10000), (ck_b, 10000), (ck_b, 0)):
+            collector.record_llm_call_start('inst', model='m', cache_key=ck)
+            collector.record_token_usage('inst', prompt_tokens=10000,
+                                         completion_tokens=1,
+                                         details={'cached_tokens': cached})
+            collector.record_llm_call_end('inst')
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        # Bridged: 3 hits + 1 miss across both endpoints.
+        assert cfgs[fp]['cache_hits'] == 3
+        assert cfgs[fp]['cache_misses'] == 1
+        # Hit ratio reconciles with the session-level formula.
+        assert cfgs[fp]['cache_hit_ratio'] == round(3 / 4, 3)
+
+    # 10d. BUG_0338 bridge: a cold-start call (no cache_key, no cached tokens) is a
+    # miss on the model-only fallback bucket → the bridged row shows 0 hits / 1 miss.
+    def test_model_row_cold_start_is_a_miss(self, collector):
+        """An LLM call with no resolved endpoint (no cache_key) and no cached tokens
+        classifies as a miss on the model-only fallback bucket; the bridged A/B row
+        reflects it (0 hits / 1 miss), not a fabricated 0/0."""
+        fp = TelemetryCollector.fingerprint_config(model='m')
+        collector.record_turn_start('inst', config_fingerprint=fp,
+                                    config_description={'model': 'm'})
+        collector.record_llm_call_start('inst', model='m')  # no cache_key → fallback bucket
+        collector.record_token_usage('inst', prompt_tokens=100, completion_tokens=1)
+        collector.record_llm_call_end('inst')
+        cfgs = {c['config_fingerprint']: c for c in collector.get_config_comparison()}
+        assert cfgs[fp]['cache_hits'] == 0
+        assert cfgs[fp]['cache_misses'] == 1
+        assert cfgs[fp]['cache_hit_ratio'] == 0.0
 
     # 11. optional cost: with pricing dict → computed; without → absent.
     def test_optional_cost_gated_on_pricing(self, collector, monkeypatch):

@@ -1726,14 +1726,29 @@ class TelemetryCollector:
                 # Prompt-cache counters + derived hit ratio (BUG_0260). Same formula
                 # as the session-level llm_cache_hit_ratio: hits/(hits+misses), None
                 # when nothing classified. .get(...,0) tolerates rows persisted before
-                # the field existed. NOTE (BUG_0273): since cache is now attributed to
-                # the RESOLVED endpoint via get_cache_attribution(), these per-model
-                # fields carry only the fallback bucket — classified calls whose
-                # resolved endpoint was unknown. Treat get_cache_attribution() as the
-                # authoritative cache view; a model row's hit ratio no longer
-                # describes that model's endpoints' cache behavior.
-                _cache_hits = cs.get('cache_hits', 0)
-                _cache_misses = cs.get('cache_misses', 0)
+                # the field existed.
+                #
+                # BUG_0338 bridge: since BUG_0273, classified cache hits/misses are
+                # attributed to the RESOLVED endpoint (the per-endpoint _cache_stats
+                # bucket, keyed ``api_base|model``), so the model-only row's own
+                # ``cache_hits``/``cache_misses`` stay 0 in normal operation and the
+                # A/B CACHE column read a structurally-dead field (always ``0/0``).
+                # Aggregate the per-endpoint buckets for THIS row's model (the model
+                # is the substring after ``|`` in each cache_key) and add the row's
+                # own fallback counters (endpoint-unknown calls) so the column
+                # reflects the model's real cache behavior and still reconciles with
+                # the session-level llm_cache_hit_ratio. get_cache_attribution()
+                # remains the authoritative per-endpoint view (unchanged).
+                _model_name = (cs.get('config_description') or {}).get('model', '')
+                _bridge_hits = 0
+                _bridge_misses = 0
+                if _model_name:
+                    for _ck, _cb in self._cache_stats.items():
+                        if _ck.split('|', 1)[-1] == _model_name:
+                            _bridge_hits += _cb['cache_hits']
+                            _bridge_misses += _cb['cache_misses']
+                _cache_hits = cs.get('cache_hits', 0) + _bridge_hits
+                _cache_misses = cs.get('cache_misses', 0) + _bridge_misses
                 _cache_total = _cache_hits + _cache_misses
 
                 result.append({
