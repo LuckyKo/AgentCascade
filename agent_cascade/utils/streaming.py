@@ -1,13 +1,85 @@
 """Streaming timeout utilities for AgentCascade."""
 
+import contextlib
+import contextvars
 import queue
 import threading
 import time
-from typing import Iterator, TypeVar
+from typing import Iterator, Optional, TypeVar
 
 T = TypeVar('T')
 
 _SENTINEL = object()
+
+# BUG_0344 (Fix A): per-call absolute wall-clock deadline, in ``time.monotonic()``
+# seconds, that a caller may impose on the stream TOTAL-duration guard. A caller
+# that knows its own remaining budget (the compressor's COMPRESSION_AGENT_TIMEOUT
+# window) sets this so watch_stream's existing no-chunk-required total guard
+# (:func:`watch_stream`) fires INSIDE that window while the reader is still blocked
+# awaiting the FIRST token — the one case neither the yield-gated caller timeout
+# (compression/agent_invoker) nor the yield-gated engine watchdog (engine/llm_call)
+# can cover. The deadline only ever LOWERS the effective ``max_total_seconds``
+# (never raises it); when unset the guard behaves exactly as before. A ContextVar,
+# not a parameter, so the budget threads down through the lazy generator chain
+# (engine.run -> llm_call -> backend ``_chat_stream``) WITHOUT editing every backend
+# call site. Readers that start on this thread (the consumer side of watch_stream,
+# which is where this value is read) see it; the daemon reader thread does not need
+# it. Reset is guaranteed by :func:`stream_total_deadline`.
+_STREAM_TOTAL_DEADLINE: 'contextvars.ContextVar[Optional[float]]' = contextvars.ContextVar(
+    'stream_total_deadline', default=None)
+
+# BUG_0344 (Fix B1): the reader thread's completion signal. ``watch_stream`` starts a
+# daemon reader that pulls from the backend iterator; when that reader's finally runs the
+# underlying iterator has truly ended — i.e. a parked-in-next() orphan can no longer
+# overlap the endpoint. ``watch_stream`` sets this ContextVar to a fresh Event on the
+# CONSUMER thread (so the run-loop's same-thread finally can read it) and the reader's
+# finally sets the Event. The deferred drop-exit release waits on this Event instead of a
+# blind sleep, and it is attached to the instance so the cross-thread reuse gate sees the
+# same signal. ``reset_stream_reader_done`` scopes it per run.
+_STREAM_READER_DONE: 'contextvars.ContextVar[Optional[threading.Event]]' = contextvars.ContextVar(
+    'stream_reader_done', default=None)
+
+
+def current_stream_reader_done() -> Optional[threading.Event]:
+    """The completion Event of the most recent stream created on this thread, or None."""
+    return _STREAM_READER_DONE.get()
+
+
+def reset_stream_reader_done() -> None:
+    """Clear the per-thread reader-done signal; call at the start of each run."""
+    _STREAM_READER_DONE.set(None)
+
+
+def stream_reader_in_flight(reader_done: Optional[threading.Event]) -> bool:
+    """True while a published reader-completion Event is present and not yet set.
+
+    Single definition of "the most recent LLM stream's daemon reader is still reading the
+    endpoint", shared by the run-loop defer decision (``_should_defer_drop_exit``) and the
+    cross-thread reuse gate (Gate 4 / Gate 5 in ``system_agent``). ``None`` (no stream opened
+    this run) and a set Event (reader ended) are both False, so genuine leaked permits and
+    normally-quiesced exits stay inert — only a live, abandoned, still-parked reader is True.
+    """
+    return reader_done is not None and not reader_done.is_set()
+
+
+@contextlib.contextmanager
+def stream_total_deadline(deadline_monotonic: Optional[float]):
+    """Scope an absolute ``time.monotonic()`` deadline onto the current call path.
+
+    Inside the ``with`` block, :func:`watch_stream` clamps its ``max_total_seconds``
+    down to the time left until ``deadline_monotonic``. Pass ``None`` to disable (an
+    already-expired ``deadline_monotonic`` floors to a prompt trip inside watch_stream —
+    it does not disable the guard). The value is reset on exit, so a raised stream or
+    timeout can never leak the deadline onto a later stream sharing the thread.
+    """
+    if deadline_monotonic is None:
+        yield
+        return
+    token = _STREAM_TOTAL_DEADLINE.set(deadline_monotonic)
+    try:
+        yield
+    finally:
+        _STREAM_TOTAL_DEADLINE.reset(token)
 
 
 class _Err:
@@ -69,6 +141,17 @@ def watch_stream(
             (original type preserved) so existing ``except`` arms keep firing.
     """
     prefix = f"{error_message_prefix}: " if error_message_prefix else ''
+    # BUG_0344 (Fix A): a caller on this thread may have scoped an absolute
+    # monotonic deadline (see stream_total_deadline). Clamp the total guard DOWN to
+    # the time left so a first-token stall is cut off inside the caller's budget
+    # instead of waiting out the raw max_total_seconds default. Never raises the
+    # limit; inert when no deadline is set. An already-expired deadline floors to a
+    # prompt trip rather than disabling the guard.
+    _deadline = _STREAM_TOTAL_DEADLINE.get()
+    if _deadline is not None:
+        _left = _deadline - time.monotonic()
+        if _left < max_total_seconds:
+            max_total_seconds = max(_left, 0.01)
     q: queue.Queue = queue.Queue(maxsize=1)
     # _closed is set by the consumer (generator finally) the moment it stops draining —
     # normal end, watchdog trip, forwarded error, or generator close/GC. The reader polls
@@ -77,6 +160,9 @@ def watch_stream(
     # threading.Event.set() is idempotent + thread-safe, so there is no double-stop hazard.
     _closed = threading.Event()
     _PUT_POLL = 0.1  # max block before re-checking _closed on a backpressured put
+    # BUG_0344 (Fix B1): set by the reader's finally when the underlying iterator has
+    # truly ended. The deferred drop-exit release waits on this instead of blind-sleeping.
+    reader_done = threading.Event()
 
     def _put(item) -> None:
         # Backpressure put that yields to abandonment: delivers as soon as the queue has
@@ -99,7 +185,16 @@ def watch_stream(
             _put(_Err(exc))
         finally:
             _put(_SENTINEL)                       # skipped only if consumer already gone
+            # BUG_0344 (Fix B1): signal that the daemon reader has finished unwinding —
+            # the underlying iterator has ended, so a previously parked read can no
+            # longer overlap the endpoint. Idempotent + thread-safe. This is the event the
+            # deferred drop-exit release waits on (NOT _llm_call_active, which llm_call's
+            # retry handler clears when Fix A raises StreamStalledError).
+            reader_done.set()
 
+    # BUG_0344 (Fix B1): publish the reader-completion Event on this (consumer) thread
+    # BEFORE starting the reader, so the run-loop's same-thread finally can read it.
+    _STREAM_READER_DONE.set(reader_done)
     threading.Thread(target=_reader, daemon=True, name='watch_stream-reader').start()
 
     stream_start = time.monotonic()

@@ -20,6 +20,7 @@ from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import (AUTO_SKILL_MODE_NONE, DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_AUTO,
                                     LOAD_SKILL_NONE)
+from agent_cascade.utils.streaming import stream_reader_in_flight
 from agent_cascade.utils.utils import msg_field
 
 # Security instance reuse (BUG_0029 Phase 3): min settle gap before warm instance reset.
@@ -916,7 +917,18 @@ class SystemAgentMixin:
             #    slot_queue.py) and we stay conservative: re-check and reject only if it is
             #    still set. (Insurance only — the primary leak leaves state=RUNNING, so Gate 3
             #    rejects before Gate 4 is ever reached; see plan Fix 3 / R1.)
-            if inst._slot_release is not None or inst._slot_key is not None:
+            #
+            # BUG_0344 (Fix B1): a deferred drop-exit deliberately leaves the permit held
+            # while the abandoned run's LLM reader is still reading the endpoint. The single
+            # source of truth for "still reading" is ``inst._stream_reader_done`` (the
+            # watch_stream reader-completion Event, attached by _defer_drop_exit_release).
+            # While it is UNSET the endpoint is BUSY: Gate 4 must NOT reclaim the held permit
+            # and Gate 5 must reject reuse, so a fresh spawn's scheduler.acquire blocks instead
+            # of re-hitting the still-reading endpoint. Inert for a genuine leaked permit (no
+            # such attribute, or the Event is already set) — reclaim proceeds exactly as before.
+            _reader_inflight = stream_reader_in_flight(inst._stream_reader_done)
+            if (inst._slot_release is not None or inst._slot_key is not None) \
+                    and not _reader_inflight:
                 cleared = self._discard_stale_permit(
                     inst, instance_name,
                     context='reuse-gate4-stale-permit', action='drop-stale-reuse')
@@ -928,10 +940,13 @@ class SystemAgentMixin:
                                '(rid=%s) — cleared and proceeding.', instance_name, rid)
 
             # 5. No live LLM call, and the last activity is older than a small epsilon — guards
-            #    against a generator abandoned by `break` without close() still mid-flight.
-            if inst._llm_call_active:
-                logger.debug('[SECURITY_REUSE] %s ineligible (gate=llm_call_active, rid=%s): live LLM call in flight',
-                             instance_name, rid)
+            #    against a generator abandoned by `break` without close() still mid-flight. Also
+            #    rejects a warm instance whose LLM reader is still in flight (BUG_0344 B1), which
+            #    sends the retry to a fresh spawn rather than reusing the still-BUSY instance.
+            if inst._llm_call_active or _reader_inflight:
+                logger.debug('[SECURITY_REUSE] %s ineligible (gate=live_llm_stream, rid=%s): '
+                             'LLM call active=%s reader in flight=%s',
+                             instance_name, rid, inst._llm_call_active, _reader_inflight)
                 return None
             _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
             if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:

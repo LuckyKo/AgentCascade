@@ -256,6 +256,11 @@ class AgentInstance:
     # the state machine.
     _last_llm_activity: float = field(default=0.0)  # time.monotonic() of last LLM stream chunk (or LLM call start)
     _llm_call_active: bool = field(default=False)  # True between LLM call start and end
+    # BUG_0344 (Fix B1): set by _defer_drop_exit_release to the watch_stream reader-thread
+    # completion Event of an abandoned run's LLM stream. The deferred drop-exit release WAITS
+    # on it, and the reuse gate refuses to reclaim the held permit / reuse the instance while
+    # it is unset (the endpoint is BUSY). None = no abandoned in-flight reader (inert).
+    _stream_reader_done: Optional[threading.Event] = None
 
     # Holder-side DMS blocking-tool marker (plan t220 §3.4). Set to a 3-tuple
     # (tool_name, start_monotonic, bound_seconds) while the instance is inside a

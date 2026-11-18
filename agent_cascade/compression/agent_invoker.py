@@ -26,6 +26,7 @@ from agent_cascade.settings import (COMPACTION_REVIEWER_MAX_TURNS, COMPRESSION_A
 # Shared slot-yield helper (three-path yield + pool-holder diagnostic), deduplicated
 # from security_handler.py. Depends only on stdlib+logging — no circular import.
 from agent_cascade.slot_yield_utils import yield_caller_slot
+from agent_cascade.utils.streaming import stream_total_deadline
 from agent_cascade.utils.thinking_block import (_MARKDOWN_BOLD_RE, _THINK_BLOCK_BRACKET_RE, _THINK_BLOCK_RE,
                                                 strip_thinking_blocks)
 from agent_cascade.utils.utils import (_format_tool_calls_for_text, _msg_field_or_extra, _reasoning_to_text,
@@ -458,65 +459,67 @@ def _execute_compressor_and_extract_summary(
         # re-entry then trips the L1 race guard ([BUG] entered engine.run() in
         # state RUNNING). Same pattern as core.py:691-692 and router.py:717-727.
         gen = engine.run(comp_instance)
-        try:
-            for resp in gen:
-                # Check for pool shutdown / generation change.
-                # Raise instead of break: a bare break would leave this invocation's
-                # retry loop free to re-invoke the compressor after the user pressed
-                # Stop. AgentTerminatedError is a clean abort signal that propagates
-                # through compress_context and the fallback-compression handler.
-                if agent_pool.stopped:
-                    raise AgentTerminatedError(comp_state_key)
+        # BUG_0344 (Fix A): scope this invocation's wall-clock deadline onto the
+        # stream total-duration guard so a stall blocked on the FIRST token is cut
+        # off inside the compressor budget, not after the 900s stream default. The
+        # yield-gated timeout check below stays as a secondary guard (its message
+        # contract is preserved for already-yielding streams).
+        with stream_total_deadline(start_time + max_poll_time):
+            try:
+                for resp in gen:
+                    # Check for pool shutdown / generation change.
+                    # Raise instead of break: a bare break would leave this invocation's
+                    # retry loop free to re-invoke the compressor after the user pressed
+                    # Stop. AgentTerminatedError is a clean abort signal that propagates
+                    # through compress_context and the fallback-compression handler.
+                    if agent_pool.stopped:
+                        raise AgentTerminatedError(comp_state_key)
 
-                elapsed = _time.monotonic() - start_time
-                if elapsed > max_poll_time:
-                    raise RuntimeError(
-                        f"{timeout_label} agent timed out after {elapsed:.0f}s — "
-                        f"further processing may have been incomplete"
+                    elapsed = _time.monotonic() - start_time
+                    if elapsed > max_poll_time:
+                        raise RuntimeError(
+                            f"{timeout_label} agent timed out after {elapsed:.0f}s — "
+                            f"further processing may have been incomplete"
+                        )
+
+                    now_comp = _time.monotonic()
+
+                    # Unpack (turn_output, is_streaming_tick) from engine.run() yield
+                    if isinstance(resp, tuple) and len(resp) == 2:
+                        comp_turn_output, comp_is_streaming_tick = resp
+                    else:
+                        comp_turn_output, comp_is_streaming_tick = resp, False
+
+                    # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
+                    _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
+                        pool=agent_pool,
+                        instance_name=comp_state_key,
+                        turn_output=comp_turn_output,
+                        is_streaming_tick=comp_is_streaming_tick,
+                        tick_num=_comp_tick_num,
+                        now_sec=now_comp,
+                        last_send=_last_comp_send,
+                        last_resp_len=_comp_last_resp_len,
                     )
 
-                now_comp = _time.monotonic()
+                    _comp_tick_num += 1
 
-                # Unpack (turn_output, is_streaming_tick) from engine.run() yield
-                if isinstance(resp, tuple) and len(resp) == 2:
-                    comp_turn_output, comp_is_streaming_tick = resp
-                else:
-                    comp_turn_output, comp_is_streaming_tick = resp, False
-
-                # PROBE: capture the moment the engine yielded this tick (yield→enqueue timing).
-                _comp_t_yield = _time.monotonic()
-
-                # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
-                _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
-                    pool=agent_pool,
-                    instance_name=comp_state_key,
-                    turn_output=comp_turn_output,
-                    is_streaming_tick=comp_is_streaming_tick,
-                    tick_num=_comp_tick_num,
-                    now_sec=now_comp,
-                    last_send=_last_comp_send,
-                    last_resp_len=_comp_last_resp_len,
-                    yield_time=_comp_t_yield,  # PROBE: ignored when STREAM_BACKEND_DEBUG is False
-                )
-
-                _comp_tick_num += 1
-
-        except AgentTerminatedError:
-            raise  # Clean abort signal — propagate to invoker (no retry after Stop)
-        except Exception as e:
-            logger.error(f"{timeout_label} agent execution error: {e}")
-            raise
-        finally:
-            # Deterministic generator cleanup: close() forces the suspended run()
-            # generator to unwind its exit finally block (RUNNING→IDLE transition),
-            # so the compressor instance is never left in RUNNING state. Idempotent.
-            # Guard with hasattr: engine.run() may be mocked to return a plain
-            # iterator (no .close()); only real generators need closing.
-            try:
-                if hasattr(gen, 'close'):
-                    gen.close()
-            except RuntimeError:
-                pass  # Already closed/exhausted
+            except AgentTerminatedError:
+                raise  # Clean abort signal — propagate to invoker (no retry after Stop)
+            except Exception as e:
+                logger.error(f"{timeout_label} agent execution error: {e}")
+                raise
+            finally:
+                # Deterministic generator cleanup: close() forces the suspended run()
+                # generator to unwind its exit finally block (RUNNING→IDLE transition),
+                # so the compressor instance is never left in RUNNING state. Idempotent.
+                # Guard with hasattr: engine.run() may be mocked to return a plain
+                # iterator (no .close()); only real generators need closing.
+                try:
+                    if hasattr(gen, 'close'):
+                        gen.close()
+                except RuntimeError:
+                    pass  # Already closed/exhausted
 
         # Read conversation one final time AFTER the generator completes.
         # The assistant's response is added to instance.conversation in _process_response()

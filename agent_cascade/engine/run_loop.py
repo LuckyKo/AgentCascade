@@ -10,6 +10,7 @@ change is reading the auto-skill extra-turn budget through the shared
 
 from __future__ import annotations
 
+import threading
 import time
 from enum import Enum, auto
 from typing import Iterator, List, Optional, Tuple, Union
@@ -26,6 +27,8 @@ from agent_cascade import settings as _ac_settings
 from agent_cascade.settings import (DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, SOFT_TURN_LIMIT,
                                     SOFT_TURN_LIMIT_ABSOLUTE_MAX, SOFT_TURN_LIMIT_WARNING_INTERVAL)
 from agent_cascade.tool_utils import clear_truncation_state
+from agent_cascade.utils.streaming import (current_stream_reader_done, reset_stream_reader_done,
+                                           stream_reader_in_flight)
 from agent_cascade.utils.utils import msg_field
 
 SLEEPING_LOOP_BACKOFF = 0.1  # Seconds to sleep when re-entering loop from SLEEPING state
@@ -57,6 +60,10 @@ class RunLoopMixin:
                 or a tuple of (messages_list, is_streaming_bool) during LLM streaming phases.
                 Consumers should unpack tuples before extending conversations to avoid bool leaks.
         """
+        # BUG_0344 (Fix B1): clear any stale reader-done signal left by a prior run on this
+        # thread before starting. Without this a run that opens no stream could read a
+        # previous abandoned run's still-parked Event and falsely defer its own release.
+        reset_stream_reader_done()
         self._run_preflight(instance)
         # Initialize variables before try block to handle exceptions during
         # _setup_turn
@@ -950,7 +957,24 @@ class RunLoopMixin:
 
         # Release concurrency slot on exit if still held (using helper
         # method FIX Mi3). Structured drop-exit event (change #10c).
-        self._release_slot(instance, instance.instance_name, action='drop-exit')
+        #
+        # BUG_0344 (Fix B1): an abandoned run (its generator closed by a caller timeout /
+        # GeneratorExit) can reach here while its LLM stream's daemon reader is STILL parked
+        # reading the endpoint. Releasing now frees the shared sequential endpoint slot while
+        # that orphan reader still reads it, letting a FRESH compressor re-hit the endpoint
+        # (the overlapping-retry hazard). ``_llm_call_active`` is the WRONG signal here: on the
+        # reported first-token-stall path Fix A's lowered total guard raises StreamStalledError,
+        # which llm_call's retry handler catches and stamps 'end' — clearing the flag BEFORE
+        # this finally runs. So we defer on the authoritative reader-completion Event instead.
+        # Defer the release to a bounded background thread that waits on that Event, so the
+        # endpoint stays BUSY (permit + ``_instance_held_endpoint`` held) until the orphan
+        # reader truly ends (releases in ms) and the endpoint recovers (flag cleared). Inert
+        # for a normally quiesced exit (Event set or absent) and for a terminal/terminated run.
+        _reader_done = current_stream_reader_done()
+        if self._should_defer_drop_exit(terminated, _reader_done):
+            self._defer_drop_exit_release(instance, inst_name, _reader_done)
+        else:
+            self._release_slot(instance, instance.instance_name, action='drop-exit')
 
         # FIX LogAppendFixer: Final sync to ensure all messages in
         # conversation are logged
@@ -989,8 +1013,92 @@ class RunLoopMixin:
                 f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}"
             )
 
+        # Session autosave: the log is complete, and a save is a manifest — safe to take
+        # even if siblings are still running.
+        try:
+            from agent_cascade.snapshot import maybe_autosave_on_task_end
+            maybe_autosave_on_task_end(self.pool, inst_name)
+        except Exception:  # autosave must never fail a run
+            pass
+
         self._finalize_state_transition(instance, preserve)
 
+    @staticmethod
+    def _should_defer_drop_exit(terminated: bool, reader_done: Optional[threading.Event]) -> bool:
+        """BUG_0344 (Fix B1): should this run's drop-exit slot release be deferred?
+
+        True ONLY when the run was abandoned while its LLM stream's daemon reader was still
+        reading the endpoint — i.e. ``reader_done`` (the reader-completion Event published by
+        :func:`agent_cascade.utils.streaming.watch_stream`) is present and not yet set. This
+        is the authoritative orphan-alive signal: ``_llm_call_active`` is NOT used here,
+        because Fix A raises ``StreamStalledError`` on the reported first-token-stall path
+        and llm_call's retry handler stamps 'end' (clearing the flag) BEFORE this finally
+        runs — so the flag is the wrong signal and would let the deferral never fire. A
+        terminal/terminated run is excluded (termination's slot-freeing is owned by the stop
+        path). Inert (False) for a normally quiesced exit (Event set or absent) and for any
+        run that never opened a stream (``current_stream_reader_done()`` is None), so no
+        already-working reuse path is diverted.
+        """
+        if terminated:
+            return False
+        return stream_reader_in_flight(reader_done)
+
+    def _defer_drop_exit_release(self, instance: AgentInstance, inst_name: str,
+                                 reader_done: threading.Event) -> None:
+        """BUG_0344 (Fix B1): defer a drop-exit slot release until the orphan reader ends.
+
+        Called from :meth:`_run_finalize` when the run was abandoned while its LLM stream's
+        daemon reader was still reading the endpoint (``reader_done`` unset, not a terminal
+        stop). The reader-completion Event is attached to the instance as the single source
+        of truth for the cross-thread reuse gate (Gate 4 / Gate 5 in ``system_agent`` skip
+        reclaim / reuse while it is unset), and a bounded daemon performs the release once
+        that Event is set:
+
+        - When the reader finishes (the normal first-token-stall path, ~budget + transport),
+          the release fires within milliseconds of it ending — not after a fixed wedge.
+        - A hard cap (``HTTP_READ_TIMEOUT`` + margin, the real upper bound on how long a
+          parked read can live) bounds the endpoint-BUSY window so a truly stuck reader
+          cannot wedge the endpoint for the process lifetime; on cap the Event is force-set
+          so the reuse gate recovers.
+
+        Release-once is guaranteed by ``release_slot_permit``'s atomic capture-nullify-release
+        (idempotent, returns False when nothing is held), so this needs NO ``_slot_release``
+        pre-check — polling first is exactly the TOCTOU :meth:`_discard_stale_permit` forbids.
+        ``_llm_call_active`` is cleared immediately before the release so the warm instance
+        is not permanently poisoned against reuse; clearing while the permit is still held
+        cannot race with a live run (the instance is not reusable until the permit frees).
+        """
+        # Cross-thread single source of truth: the reuse gate reads this same Event.
+        # NOTE (single-stream assumption): ``current_stream_reader_done()`` tracks only the
+        # most recent stream's reader-Done Event per thread. Correct for the reported
+        # single-call compressor path (one LLM stream per abandoned run); a run interleaving
+        # several concurrent streams would defer on the last one only.
+        instance._stream_reader_done = reader_done
+
+        def _release_later() -> None:
+            cap = _ac_settings.HTTP_READ_TIMEOUT + 5.0
+            logger.info(
+                '[SLOTPOOL] %s: deferring drop-exit slot release (LLM reader still in flight '
+                'at run exit); waiting on reader-completion, bounded by %.0fs before forced release',
+                inst_name, cap)
+            # stdlib primitive: wait blocks until the Event is set or cap elapses; returns
+            # False ONLY on timeout (the reader never unwound past the idle-read backstop).
+            if not reader_done.wait(cap):
+                # Reader never unwound (transport wedged past the idle-read backstop). Force
+                # the completion signal so the endpoint and the warm instance recover.
+                logger.warning(
+                    '[SLOTPOOL] %s: LLM reader still in flight after %.0fs cap; forcing '
+                    'completion + release', inst_name, cap)
+                reader_done.set()
+            instance._llm_call_active = False
+            self._release_slot(instance, inst_name, action='drop-exit-deferred')
+            # Permit is now free: clear the cross-thread signal so a later run (or a stale
+            # reuse probe) cannot read the completed reader Event as 'still in flight'.
+            instance._stream_reader_done = None
+
+        threading.Thread(target=_release_later,
+                         name=f'slot-deferred-release-{inst_name}',
+                         daemon=True).start()
 
     def _finalize_state_transition(self, instance, preserve: bool) -> None:
         """Move the instance to IDLE/SLEEPING at the end of a run (shared-state tail of _run_finalize).
