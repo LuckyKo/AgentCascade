@@ -22,6 +22,7 @@ from agent_cascade.exceptions import (AgentTerminatedError, CharacterRunDetected
 from agent_cascade.llm.schema import ASSISTANT, Message
 from agent_cascade.log import logger
 from agent_cascade.budget_words import budget_allocation_notice, budget_limit_notice, budget_message
+from agent_cascade import settings as _ac_settings
 from agent_cascade.settings import (DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, SOFT_TURN_LIMIT,
                                     SOFT_TURN_LIMIT_ABSOLUTE_MAX, SOFT_TURN_LIMIT_WARNING_INTERVAL)
 from agent_cascade.tool_utils import clear_truncation_state
@@ -115,6 +116,25 @@ class RunLoopMixin:
 
             while turns_available > 0 or (soft_turn_limit and
                                           max_turns - turns_available < soft_limit_absolute_cap):
+                # ── STACK-SWAP TURN-BOUNDARY / IDENTITY GATE ──────────────────
+                # park_active_stack sets pool._pending_swap_event to wind the fleet
+                # down for a swap. Honour it at the turn boundary — before any turn
+                # state is set — so an in-flight turn finishes its current turn cleanly
+                # (work preserved) and exits here. The identity check is the DURABLE
+                # halt: a force-halted turn whose blocking tool only unblocks minutes
+                # later (after _halted_instances was cleared and activate cleared the
+                # latch) must NOT resume into the now-different fleet, so it breaks when
+                # its instance is no longer the live object registered in pool.instances.
+                # Both gates are skipped when ENABLE_STACK_SWAP is off (M1 byte-identity);
+                # ENABLE_STACK_SWAP is read live (not import-time) so a runtime flip works.
+                if _ac_settings.ENABLE_STACK_SWAP:
+                    _swap_pending = getattr(self.pool, '_pending_swap_event', None)
+                    _identity_lost = instance is not getattr(self.pool, 'instances', {}).get(inst_name)
+                    if (_swap_pending is not None and _swap_pending.is_set()) or _identity_lost:
+                        logger.debug('[STACK_SWAP] %s stopping at turn boundary '
+                                     '(swap pending or identity lost)', inst_name)
+                        break
+
                 # Track current turn on instance for system_info tool access
                 instance._current_turn = max_turns - turns_available + 1
 

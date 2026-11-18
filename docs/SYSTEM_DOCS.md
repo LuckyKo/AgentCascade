@@ -12,6 +12,7 @@
 2. [Architecture Principles](#2-architecture-principles)
 3. [Core Components](#3-core-components)
 4. [Data Flow](#4-data-flow)
+    - [4.4.1 Fleet Snapshot & Stack Swap](#441-fleet-snapshot--stack-swap)
 5. [Key Mechanisms](#5-key-mechanisms)
 6. [Parallel Instance Separation](#6-parallel-instance-separation)
 7. [Agent Templates & DNA](#7-agent-templates--dna)
@@ -456,6 +457,45 @@ Resurrection via log_file parameter:
     → LoggerManager.load_session_from_log() reconstructs conversation
     → AgentInstance recreated in pool with restored history
 ```
+
+### 4.4.1 Fleet Snapshot & Stack Swap
+
+When `settings.ENABLE_STACK_SWAP` is on (off by default), the fleet's full state — every
+running instance's conversation log, clock, and backend KV cache — can be frozen into an
+on-disk **fleet snapshot** and later swapped back in. This lets an operator park the whole
+live fleet (stack) and activate a different parked stack atomically.
+
+```
+Stack Swap (atomic park + activate):
+  ┌─────────────────────────── active stack (ROOT) ──────────────────────────┐
+  │ live instances ── park_active_stack ──► fleet snapshot.json (disk)        │
+  │                                        + per-instance KV (autoloader)      │
+  │                                            │ registry records it           │
+  │                                            ▼                               │
+  └─ pool cleared ─── activate_stack(target_env) ───► target stack rehydrated ─┘
+       (M2 rollback: if target activation fails, re-activate the source from
+        the in-memory envelope; the pool is never left empty)
+```
+
+**Core (single source of truth — `agent_cascade/snapshot.py`):**
+`StackRegistry` (tracks `active_stack_id` + a write-ordered list of snapshots per stack),
+`park_active_stack` (capture → write → register → **prune**), `activate_stack` (rehydrate),
+`swap_stack` (park source then activate target, with rollback), plus the read/operate
+helpers `list_stacks`, `snapshot_stack` (non-destructive capture) and `delete_stack`
+(refuses the active stack). REST, WebSocket and Telegram all delegate here so they can't drift.
+
+**Snapshot pruning (`SNAPSHOT_RETENTION_COUNT`, default 10):** each park keeps only the
+newest N snapshots per stack, deletes the retired files, and — for any retired snapshot that
+carried saved KV — removes the backend autoloader cache via `state_ops.delete_state`. The
+snapshot(s) backing the currently-active stack are **never** pruned (their KV is in live use).
+
+**Surfaces (all gated on `ENABLE_STACK_SWAP`; return 501/warning when off):**
+
+| Surface | Operations |
+|---------|------------|
+| REST `/api/stacks` | `GET` list; `POST /api/stacks/swap` `{target_stack_id}`; `POST /api/stacks/{id}/snapshot`; `DELETE /api/stacks/{id}` (409 if active) |
+| WebSocket | `stacks_list`, `stacks_swap`, `stacks_snapshot` → `stacks_result` |
+| Telegram | `/snapshot [stack-id]`, `/stack list`, `/stack swap <stack-id>` |
 
 ---
 

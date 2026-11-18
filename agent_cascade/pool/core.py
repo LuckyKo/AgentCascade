@@ -14,6 +14,7 @@ from agent_cascade.instance_id import instance_scoped_filename
 from agent_cascade.llm.schema import USER, Message
 from agent_cascade.log import logger
 from agent_cascade.utils import boot_timing
+from agent_cascade import settings
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.runtime_state import state as _runtime_state
 
@@ -242,6 +243,14 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()  # M3 fix: stopped flag for emergency shutdown
+
+        # ── Stack swap (BUG_0323 S4) — gated, absent when ENABLE_STACK_SWAP is off ──
+        # _pending_swap_event is the turn-boundary latch: set by park_active_stack to
+        # make each in-flight run loop stop at its next turn boundary (run_loop.py).
+        # Created lazily under the swap feature flag so the off-path pool is byte-identical
+        # (run_loop reads it with getattr default; a missing attribute is inert).
+        if settings.ENABLE_STACK_SWAP:
+            self._pending_swap_event = threading.Event()
 
         # ── Version counter for lazy sync of instance_conversations (Fix #3) ──
         self._instances_version = 0  # increments on create/remove/dismiss/reset

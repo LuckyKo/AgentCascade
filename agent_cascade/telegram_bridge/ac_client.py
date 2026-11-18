@@ -193,6 +193,45 @@ class ACClient:
             return resp.json()
         raise ACError(f'{path} retry loop exhausted')
 
+    async def _token_get(self, path: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+        """GET ``path`` with the session token as a QUERY param; re-handshake once on 401.
+
+        GET twin of :meth:`_token_post` — the stack endpoints read the token from the
+        query string like ``get_status()``. Used by :meth:`list_stacks`.
+        """
+        for attempt in (1, 2):
+            token = (await self.ensure_token())[0]
+            req_params = dict(params or {})
+            req_params['token'] = token
+            resp = await self._request('GET', path, params=req_params)
+            if resp.status_code == 401 and attempt == 1:
+                logger.warning('AC %s 401; re-handshaking and retrying once', path)
+                self.invalidate_token()
+                continue
+            if resp.status_code != 200:
+                raise ACError(f"{path} failed ({resp.status_code}): {resp.text[:300]}")
+            return resp.json()
+        raise ACError(f'{path} retry loop exhausted')
+
+    async def list_stacks(self) -> Dict[str, Any]:
+        """GET /api/stacks (session_token) — active + parked stacks and their snapshots."""
+        return await self._token_get('/api/stacks')
+
+    async def swap_stack(self, target_stack_id: str) -> Dict[str, Any]:
+        """POST /api/stacks/swap (session_token) — activate ``target_stack_id``."""
+        return await self._token_post('/api/stacks/swap', {'target_stack_id': target_stack_id})
+
+    async def snapshot_stack(self, stack_id: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/stacks/{stack_id}/snapshot (session_token) — capture a fleet snapshot.
+
+        ``stack_id`` is required by the REST path segment; callers pass the live
+        (active) stack id for a manual snapshot of the running fleet. A missing id
+        would interpolate ``None`` into the path segment, so it is rejected here.
+        """
+        if not stack_id:
+            raise ValueError('snapshot_stack requires a non-empty stack_id')
+        return await self._token_post(f'/api/stacks/{stack_id}/snapshot', {})
+
     async def approve(self, request_id: str) -> Dict[str, Any]:
         """POST /api/approve/{request_id} (open endpoint)."""
         resp = await self._request('POST', f'/api/approve/{request_id}')

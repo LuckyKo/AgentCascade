@@ -829,6 +829,101 @@ def build_skills_router(agent_pool) -> 'APIRouter':
     return router
 
 
+def build_stacks_router(agent_pool) -> 'APIRouter':
+    """Build the ``/api/stacks`` fleet-snapshot & stack-swap route family (BUG_0323 S5).
+
+    Mirrors :func:`build_skills_router`: an ``APIRouter`` closing over only its
+    ``agent_pool`` parameter, with FastAPI bits lazily imported (they are
+    ``create_app`` factory-locals). ALL routes are gated on
+    ``settings.ENABLE_STACK_SWAP`` — when off they return 501 Not Implemented (M1).
+    The swap/capture/list/delete logic lives in :mod:`agent_cascade.snapshot` so the
+    REST, WS and Telegram surfaces never drift.
+
+    Routes:
+      GET    /api/stacks                      list active + parked stacks/snapshots
+      POST   /api/stacks/swap                 { "target_stack_id": str } -> swap_stack
+      POST   /api/stacks/{stack_id}/snapshot   capture a non-destructive snapshot
+      DELETE /api/stacks/{stack_id}            delete a parked stack (409 if active)
+    """
+    from fastapi import APIRouter
+    from fastapi.responses import JSONResponse
+
+    router = APIRouter()
+
+    def _off() -> 'JSONResponse':
+        return JSONResponse(status_code=501,
+                            content={'message': 'stack swap disabled (set ENABLE_STACK_SWAP=true)'})
+
+    @router.get('/api/stacks')
+    async def api_list_stacks():
+        if not settings.ENABLE_STACK_SWAP:
+            return _off()
+        if agent_pool is None:
+            return JSONResponse(status_code=500, content={'message': 'No agent pool'})
+        from agent_cascade import snapshot
+        return snapshot.list_stacks(agent_pool)
+
+    @router.post('/api/stacks/swap')
+    async def api_swap_stack(data: dict):
+        """Atomically park the active stack and activate the requested target.
+
+        Body: ``{ "target_stack_id": str }``. Blocking (it parks + restores), so it
+        runs on a worker thread via ``asyncio.to_thread`` to avoid stalling the loop.
+        ``ValueError`` (no such snapshot) -> 400; ``SnapshotIntegrityError`` (bad
+        target log / stack mismatch) -> 422.
+        """
+        if not settings.ENABLE_STACK_SWAP:
+            return _off()
+        if agent_pool is None:
+            return JSONResponse(status_code=500, content={'message': 'No agent pool'})
+        target = (data or {}).get('target_stack_id')
+        if not target or not isinstance(target, str):
+            return JSONResponse(status_code=400,
+                                content={'message': "'target_stack_id' (str) required"})
+        from agent_cascade.snapshot import SnapshotIntegrityError, swap_stack
+        try:
+            await asyncio.to_thread(swap_stack, agent_pool, target)
+        except SnapshotIntegrityError as e:
+            return JSONResponse(status_code=422, content={'message': str(e)})
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={'message': str(e)})
+        except Exception as e:  # noqa: BLE001 — surface activation errors without leaking a 500 traceback body
+            logger.exception('[STACK_SWAP] REST swap to %r failed', target)
+            return JSONResponse(status_code=500, content={'message': f'swap failed: {e}'})
+        reg = getattr(agent_pool, '_swap_registry', None)
+        return {'status': 'ok', 'active_stack_id': getattr(reg, 'active_stack_id', None)}
+
+    @router.post('/api/stacks/{stack_id}/snapshot')
+    async def api_snapshot_stack(stack_id: str):
+        if not settings.ENABLE_STACK_SWAP:
+            return _off()
+        if agent_pool is None:
+            return JSONResponse(status_code=500, content={'message': 'No agent pool'})
+        from agent_cascade import snapshot
+        res = await asyncio.to_thread(snapshot.snapshot_stack, agent_pool, stack_id)
+        if res is None:
+            return JSONResponse(status_code=409, content={'message': 'no live fleet to snapshot'})
+        return res
+
+    @router.delete('/api/stacks/{stack_id}')
+    async def api_delete_stack(stack_id: str):
+        """Delete a parked stack and its snapshots/KV. Rejects the active stack (409, m4)."""
+        if not settings.ENABLE_STACK_SWAP:
+            return _off()
+        if agent_pool is None:
+            return JSONResponse(status_code=500, content={'message': 'No agent pool'})
+        from agent_cascade.snapshot import ActiveStackDeletionError, delete_stack
+        try:
+            return await asyncio.to_thread(delete_stack, agent_pool, stack_id)
+        except ActiveStackDeletionError as e:
+            return JSONResponse(status_code=409, content={'message': str(e)})
+        except Exception as e:  # noqa: BLE001
+            logger.exception('[STACK_OPS] REST delete of stack %r failed', stack_id)
+            return JSONResponse(status_code=500, content={'message': f'delete failed: {e}'})
+
+    return router
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     """
     Create the FastAPI application.
@@ -1949,6 +2044,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # ── Skill invalidation endpoints (feature: skill_invalidation, Phase 1) ──
 
     app.include_router(build_skills_router(agent_pool))
+    app.include_router(build_stacks_router(agent_pool))
 
     @app.get('/api/state')
     async def api_get_state():

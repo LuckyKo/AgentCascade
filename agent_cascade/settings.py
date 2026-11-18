@@ -694,6 +694,44 @@ STREAM_DELTA_ENABLED: bool = os.getenv('AGENT_CASCADE_STREAM_DELTA',
 ENABLE_STACK_SWAP: bool = os.getenv('AGENT_CASCADE_ENABLE_STACK_SWAP',
                                     'false').strip().lower() in ('true', '1', 'yes')
 
+# Per-instance grace window (seconds) granted to an in-flight turn when the pool
+# parks the active stack for a swap. The turn is given this much time to reach its
+# next turn boundary and stop cooperatively (work preserved); if it is still wedged
+# when the window expires it is force-halted, its in-flight background tools are
+# killed, and its turn discarded at the last coherent point, then the swap proceeds.
+# Supersedes the old drain-rejection timeout: a parked stack is never rejected for
+# exceeding it. Only read when ENABLE_STACK_SWAP is on.
+def _parse_snapshot_grace() -> int:
+    """Defensively parse AGENT_CASCADE_SNAPSHOT_GRACE_SECONDS; fall back to 10 on bad values."""
+    raw = os.getenv('AGENT_CASCADE_SNAPSHOT_GRACE_SECONDS', '10').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 10
+    return value if value >= 0 else 10
+
+
+SNAPSHOT_GRACE_SECONDS: int = _parse_snapshot_grace()
+
+
+def _parse_snapshot_retention() -> int:
+    """Defensively parse AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT; fall back to 10.
+
+    A non-positive value would mean "prune everything", which is never intended, so
+    any parsed value below 1 clamps to 1 (always keep the newest snapshot).
+    """
+    raw = os.getenv('AGENT_CASCADE_SNAPSHOT_RETENTION_COUNT', '10').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 10
+    return value if value >= 1 else 1
+
+
+# Number of most-recent snapshots retained per stack before pruning deletes the
+# oldest ones (OQ1). Only read when ENABLE_STACK_SWAP is on.
+SNAPSHOT_RETENTION_COUNT: int = _parse_snapshot_retention()
+
 
 def _parse_stream_tail() -> int:
     """Defensively parse AGENT_CASCADE_STREAM_TAIL; fall back to 1 on bad values.

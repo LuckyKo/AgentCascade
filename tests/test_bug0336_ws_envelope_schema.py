@@ -41,6 +41,9 @@ EXPECTED_MSG_TYPES = {
     'SETTINGS_APPLIED': 'settings_applied', 'SETTINGS_CHANGED': 'settings_changed',
     'INFO': 'info', 'WARNING': 'warning', 'CLI_AGENT_OAUTH_FAILED': 'cli_agent_oauth_failed',
     'CLI_AGENT_OAUTH_STATUS': 'cli_agent_oauth_status',
+    # S4/S5 fleet stack-swap envelope (BUG_0323).
+    'STACKS_LIST': 'stacks_list', 'STACKS_RESULT': 'stacks_result',
+    'STACKS_SNAPSHOT': 'stacks_snapshot', 'STACKS_SWAP': 'stacks_swap',
 }
 
 EXPECTED_ENVELOPE_FIELDS = {

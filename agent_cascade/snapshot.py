@@ -47,6 +47,15 @@ class SnapshotIntegrityError(Exception):
     validators, never by capture. S4 rollback guard catches this type."""
 
 
+class ActiveStackDeletionError(Exception):
+    """Refusal to delete the currently-active stack (BUG_0323 m4).
+
+    Raised by :func:`delete_stack` when ``stack_id`` equals
+    ``StackRegistry.active_stack_id`` — deleting the live stack would pull it out
+    from under the running fleet. The REST layer maps this to HTTP 409 Conflict;
+    the caller must park or swap to another stack first."""
+
+
 # ── Clock projection (M3) ────────────────────────────────────────────────────
 
 def monotonic_to_wall(value: float, *, now_wall: float, now_mono: float) -> float:
@@ -1005,3 +1014,860 @@ def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
             continue
         for text in texts:
             pool.enqueue_message(name, text)                # self-locks _queue_lock; non-blocking
+
+
+# ── Park / Activate swap primitive & stack registry (S4) ─────────────────────
+#
+# A "stack" is one parked-or-active fleet (the set of instances reachable from one
+# root). At most one stack is active in the pool at a time; parked stacks live on
+# disk as snapshot envelopes. The swap primitive parks the active stack (bounded
+# grace window per in-flight turn, then force-halt + discard on expiry, then real
+# async teardown) and activates a parked one — atomically, with rollback so the
+# pool is never left empty. All behaviour is gated behind ``settings.ENABLE_STACK_SWAP``.
+
+#: Standard killed-tool-result text injected when a wedged in-flight turn is force-
+#: halted. Matches ``tool_execution._handle_orphaned_tool_calls`` verbatim so a
+#: discarded turn and a normally-halted turn carry the same coherent tool result;
+#: the async-shell/CLI heartbeat variant of this result is emitted by the trackers'
+#: ``kill_all`` themselves, not duplicated here.
+KILLED_TOOL_RESULT_TEXT = 'Tool execution skipped: instance {inst_name} was halted/stopped'
+
+
+class StackRegistry:
+    """Which stacks are known, which is active, and where each snapshot lives.
+
+    A lightweight, pool-adjacent bookkeeping object (NOT the source of truth for
+    live instance state — that stays on the pool). It only records ``stack_id`` →
+    ordered list of ``(snapshot_id, path)`` and the currently-active ``stack_id``,
+    so callers can resolve a parked stack back to a readable envelope file.
+
+    The active-stack pointer is the ONLY field that gates user-facing behaviour
+    (e.g. the REST layer must refuse to DELETE it), so it is kept as a single
+    string updated under the pool's lock-free contract (read-mostly, one writer).
+    """
+
+    def __init__(self) -> None:
+        self.active_stack_id: Optional[str] = None
+        #: stack_id -> list of (snapshot_id, path_str) in write order (oldest first).
+        self._snapshots: Dict[str, List[List[str]]] = {}
+
+    def register(self, stack_id: str) -> None:
+        """Ensure ``stack_id`` has a (possibly empty) snapshot list."""
+        self._snapshots.setdefault(stack_id, [])
+
+    def add_snapshot(self, stack_id: str, snapshot_id: str, path: str) -> None:
+        """Record a freshly written snapshot for ``stack_id``."""
+        self.register(stack_id)
+        self._snapshots[stack_id].append([snapshot_id, str(path)])
+
+    def list_snapshots(self, stack_id: str) -> List[str]:
+        """Snapshot ids for ``stack_id`` in write order."""
+        return [sid for sid, _path in self._snapshots.get(stack_id, [])]
+
+    def resolve_path(self, stack_id: str, snapshot_id: Optional[str] = None) -> Optional[str]:
+        """Path of ``snapshot_id`` (latest when ``snapshot_id`` is None), else None."""
+        entries = self._snapshots.get(stack_id, [])
+        if snapshot_id is None:
+            return entries[-1][1] if entries else None
+        for sid, path in entries:
+            if sid == snapshot_id:
+                return path
+        return None
+
+    def set_active(self, stack_id: Optional[str]) -> None:
+        """Point the pool at ``stack_id`` (None = nothing active, e.g. mid-swap)."""
+        self.active_stack_id = stack_id
+
+
+def _ensure_registry(pool, registry: Optional[StackRegistry] = None) -> StackRegistry:
+    """Return the pool's stack registry, creating it on first use.
+
+    Lazily attached so a pool built before ENABLE_STACK_SWAP ever turned on is
+    untouched; once created it persists on the pool for the swap lifetime.
+    """
+    if registry is not None:
+        return registry
+    reg = getattr(pool, '_swap_registry', None)
+    if reg is None:
+        reg = StackRegistry()
+        pool._swap_registry = reg
+    return reg
+
+
+def _swap_latch(pool) -> Optional[threading.Event]:
+    """Return (and lazily create) the per-pool turn-boundary swap latch.
+
+    The real pool mints ``_pending_swap_event`` in ``__init__`` under the feature
+    flag; this self-heals it for pools built while the flag was off (e.g. a test
+    that flips the flag later), so park always has a latch to set and run_loop,
+    which reads it with a ``getattr`` default, can observe it.
+    """
+    ev = getattr(pool, '_pending_swap_event', None)
+    if ev is None:
+        ev = threading.Event()
+        pool._pending_swap_event = ev
+    return ev
+
+
+def _inflight_turn_instances(pool) -> List[Any]:
+    """Instances whose run loop is mid-turn (the turns a grace window protects).
+
+    In-flight == state ``RUNNING`` and not terminated: that is exactly the window
+    during which the engine is in an LLM call or tool batch, i.e. the point a
+    force-halt could corrupt. ``IDLE`` instances are already at a turn boundary;
+    ``SLEEPING`` instances are parked on async results (drained, not interrupted)
+    and ``TERMINATED`` are gone. State reads are GIL-atomic single reads — a read-
+    only writer needs no lock.
+    """
+    out: List[Any] = []
+    for name, inst in list(dict(getattr(pool, 'instances', {})).items()):
+        if name in getattr(pool, 'terminated_instances', set()):
+            continue
+        state = getattr(inst, 'state', None)
+        if state is not None and getattr(state, 'name', None) == 'RUNNING':
+            out.append(inst)
+    return out
+
+
+def _kill_instance_tools(pool, name: str) -> None:
+    """Kill a single instance's in-flight background tools via the REAL trackers.
+
+    Mirrors the dismissal teardown in ``lifecycle`` (``_async_shell_tracker.kill_all``
+    then ``_cli_agent_tracker.kill_all``). Best-effort per tracker so one tracker's
+    absence or failure never aborts the park. Returns nothing; counts are logged.
+    """
+    shell = getattr(pool, '_async_shell_tracker', None)
+    if shell is not None and hasattr(shell, 'kill_all'):
+        try:
+            killed = shell.kill_all(name)
+            if killed:
+                logger.debug('[STACK_SWAP] killed %d async shell task(s) for %s', killed, name)
+        except Exception as e:  # noqa: BLE001 — tracker teardown is non-critical to the park
+            logger.debug('[STACK_SWAP] async shell kill_all failed for %s: %s', name, e)
+    cli = getattr(pool, '_cli_agent_tracker', None)
+    if cli is not None and hasattr(cli, 'kill_all'):
+        try:
+            killed = cli.kill_all(name)
+            if killed:
+                logger.debug('[STACK_SWAP] killed %d call_cli_agent run(s) for %s', killed, name)
+        except Exception as e:  # noqa: BLE001 — tracker teardown is non-critical to the park
+            logger.debug('[STACK_SWAP] call_cli_agent kill_all failed for %s: %s', name, e)
+
+
+def _drain_async_tasks(pool, names: List[str]) -> None:
+    """Terminate every instance's background tools, then shut down the async executor.
+
+    M4: ``AsyncShellTracker.kill_all`` for shell and CLI tasks per instance, then a
+    single non-blocking ``_async_registry.shutdown(wait=False)``. ``kill_all`` is
+    idempotent (already-killed tasks return 0), so it is safe to run this fleet-wide
+    even after a force-halt already killed a wedged instance's tools. Tracker
+    lookups are guarded so a double without trackers simply no-ops.
+    """
+    for name in names:
+        _kill_instance_tools(pool, name)
+    registry = getattr(pool, '_async_registry', None)
+    if registry is not None and hasattr(registry, 'shutdown'):
+        try:
+            registry.shutdown(wait=False)
+        except Exception as e:  # noqa: BLE001 — executor shutdown is non-critical to the park
+            logger.debug('[STACK_SWAP] async registry shutdown failed (non-critical): %s', e)
+
+
+def _msg_get(msg, key, default=None):
+    """Read ``key`` off a Message that is either an attr-style model or a dict."""
+    if isinstance(msg, dict):
+        return msg.get(key, default)
+    return getattr(msg, key, default)
+
+
+def _inject_killed_tool_result(pool, inst, name: str) -> None:
+    """Close a force-halted turn's dangling tool calls with the standard killed result.
+
+    Mirrors ``tool_execution._handle_orphaned_tool_calls`` in SHAPE: for every trailing
+    assistant ``function_call`` (this codebase uses the legacy single-call model — the id
+    lives in ``extra.function_id``) that has NO matching FUNCTION result yet, append one
+    ``Message(role=FUNCTION, name=call.name, content=<standard text>,
+    extra={'function_id': <call id>, 'tool_success': False})``. Pairing by ``function_id``
+    is what keeps the half-discarded turn free of orphaned call ids on the next restored
+    LLM call. If the turn has no unpaired call, nothing is appended — a lone FUNCTION
+    result with no matching call is itself an invalid shape and would 400 on replay.
+
+    This is a best-effort coherence close at park time for a turn whose engine thread is
+    wedged in a blocking tool and may never reach the live orphan handler. The FUNCTION
+    close below is appended under ``inst._compression_lock`` -- the same lock the engine's
+    ``_handle_orphaned_tool_calls`` serializes on -- but that lock only SERIALIZES the two
+    appends against interleaving; it does NOT by itself stop the double-close. What
+    discards a tool that unblocks mid-park is the identity halt: the run-loop turn-boundary
+    gate (engine/run_loop.py) and the engine-side ``_swap_identity_lost`` guard
+    (engine/tool_execution.py) drop the late real result once this instance has been parked
+    out of ``pool.instances``, so exactly one FUNCTION result -- this killed close -- stands
+    per function_id.
+    Best-effort throughout: a double without a list ``conversation`` is skipped silently.
+    """
+    from agent_cascade.llm.schema import FUNCTION, Message
+    from contextlib import nullcontext
+
+    text = KILLED_TOOL_RESULT_TEXT.format(inst_name=name)
+    conversation = getattr(inst, 'conversation', None)
+    if conversation is None or not hasattr(conversation, 'append') or not hasattr(conversation, '__iter__'):
+        return
+    # Serialize against the engine's orphan handler (engine/tool_execution.
+    # _handle_orphaned_tool_calls), which appends FUNCTION results under this same lock.
+    # The lock keeps the answered_ids scan + append below atomic vs the orphan handler so
+    # the scan is not torn mid-park. It does NOT prevent the late double close -- that is
+    # the engine-side _swap_identity_lost guard, which drops the wedged tool's real result
+    # once this instance is parked out of pool.instances. Doubles without a lock (capture
+    # tests) fall through to nullcontext and behave as before.
+    lock = getattr(inst, '_compression_lock', None)
+
+    injected = []
+    try:
+        with (lock if lock is not None else nullcontext()):
+            msgs = list(conversation)
+
+            # Collect ids/names already answered by a FUNCTION result.
+            answered_ids, answered_names = set(), set()
+            for m in msgs:
+                if _msg_get(m, 'role') == FUNCTION:
+                    fc_extra = _msg_get(m, 'extra') or {}
+                    if fc_extra.get('function_id'):
+                        answered_ids.add(fc_extra['function_id'])
+                    if _msg_get(m, 'name'):
+                        answered_names.add(_msg_get(m, 'name'))
+
+            # Close every trailing assistant function_call that has no matching result.
+            for m in msgs:
+                if _msg_get(m, 'role') != 'assistant':
+                    continue
+                fc = _msg_get(m, 'function_call')
+                if fc is None:
+                    continue
+                call_name = _msg_get(fc, 'name') or _msg_get(m, 'name')
+                call_id = (_msg_get(m, 'extra') or {}).get('function_id') or '1'
+                if (call_id and call_id in answered_ids) or (call_name and call_name in answered_names):
+                    continue
+                fn_msg = Message(
+                    role=FUNCTION, name=call_name or 'stack_swap', content=text,
+                    extra={'function_id': call_id, 'tool_success': False},
+                )
+                conversation.append(fn_msg)
+                injected.append(fn_msg)
+                answered_ids.add(call_id)
+                if call_name:
+                    answered_names.add(call_name)
+    except Exception as e:  # noqa: BLE001 — schema build must never abort the park
+        logger.debug('[STACK_SWAP] could not inject killed-tool result for %s: %s', name, e)
+
+    # Mirror the injected closes to the on-disk JSONL so the restored log is coherent.
+    # Mirrors only what THIS call appended (``injected``), kept OUTSIDE the compression
+    # lock so disk IO never holds it; best-effort, never raises.
+    loggers = getattr(pool, 'instance_loggers', None)
+    try:
+        logger_obj = loggers.get(name) if (loggers is not None and hasattr(loggers, 'get')) else None
+        if logger_obj is not None and hasattr(logger_obj, 'log_message'):
+            for m in injected:
+                logger_obj.log_message({
+                    'role': FUNCTION, 'name': _msg_get(m, 'name'),
+                    'content': _msg_get(m, 'content'),
+                    'extra': _msg_get(m, 'extra'),
+                    'metadata': {'instance_name': name},
+                })
+    except Exception as e:  # noqa: BLE001 — logging the discarded turn is non-critical
+        logger.debug('[STACK_SWAP] could not log killed-tool result for %s: %s', name, e)
+
+
+def _force_halt_turn(pool, inst, name: str) -> None:
+    """Force-halt + discard one wedged in-flight turn at its last coherent point.
+
+    Order is deliberate: kill the instance's background tools FIRST (so nothing still
+    writing produces a result for a turn we are discarding), mark the instance halted,
+    transition it to ``IDLE`` via the engine's canonical ``_transition`` (the discarded-
+    turn boundary — NOT ``TERMINATED``; the instance itself is preserved and rehydrates
+    later, and the run-loop identity gate keeps its wedged thread from resuming), then
+    inject the paired killed-tool-results to close the partial turn's tool calls.
+    """
+    _kill_instance_tools(pool, name)
+    halted = getattr(pool, '_halted_instances', None)
+    if halted is not None and hasattr(halted, 'add'):
+        halted.add(name)
+    try:
+        from agent_cascade.agent_instance import AgentState
+        transition = getattr(inst, '_transition', None)
+        if callable(transition):
+            transition(AgentState.IDLE)
+        else:
+            inst.state = AgentState.IDLE
+    except Exception as e:  # noqa: BLE001 — state transition must not block the park
+        logger.warning('[STACK_SWAP] could not transition wedged turn %s to IDLE: %s', name, e)
+        try:
+            from agent_cascade.agent_instance import AgentState
+            inst.state = AgentState.IDLE
+        except Exception:  # noqa: BLE001 — last-resort direct set, park must proceed
+            pass
+    _inject_killed_tool_result(pool, inst, name)
+
+
+def _release_held_slots(pool, instances: Dict[str, Any]) -> None:
+    """Release sticky-slot permits held by the instances being parked.
+
+    A parked stack must not keep an autoloader slot resident — otherwise the slot
+    stays pinned against a stack that is no longer running. Mirrors the capture-and-
+    nullify-release pattern of ``lifecycle._release_slot_on_lifecycle_event``: only
+    instances actually holding a permit (``_slot_release`` set) are released, via the
+    real ``slot_queue.release_slot_permit`` seam. Fully best-effort and inert when
+    the scheduler seam is absent (a bare double, or a pool with no router) so it does
+    nothing the pool was not already doing.
+    """
+    try:
+        from agent_cascade.slot_queue import release_slot_permit
+    except Exception as e:  # noqa: BLE001 — slot teardown is non-critical to the park
+        logger.debug('[STACK_SWAP] slot release unavailable, skipping: %s', e)
+        return
+    scheduler = getattr(getattr(pool, 'api_router', None), 'scheduler', None)
+    pools = getattr(scheduler, '_pools', None) if scheduler is not None else None
+    for name, inst in instances.items():
+        if getattr(inst, '_slot_release', None) is None:
+            continue
+        try:
+            _pool = None
+            if pools is not None:
+                _pool = pools.get(getattr(inst, '_slot_key', None))
+            release_slot_permit(inst, name, action='drop-park',
+                                context='stack park', pool=_pool)
+        except Exception as e:  # noqa: BLE001 — a failed permit release must not abort the park
+            logger.debug('[STACK_SWAP] slot release failed for %s (non-critical): %s', name, e)
+
+
+def _clear_pool_state(pool) -> None:
+    """Empty the pool's live fleet containers (parked → pool is empty).
+
+    Runs with each guard acquired in turn, never nested, mirroring ``reset_pool`` /
+    the restore-side dismiss: ``_pool_lock`` for the instance dicts + terminated
+    sets, ``_children_lock`` for the child graph, ``_execution._state_lock`` for the
+    active call stack, ``_queue_lock`` for the message queues. Locks are lookups with
+    a benign ``threading.Lock()`` default so a double lacking a guard is not crashed
+    by a clear. Does NOT touch threads or slot machinery — those are handled by the
+    tracker drain (M4) and slot release (above), keeping the m2 no-thread-handle
+    invariant intact.
+    """
+    with getattr(pool, '_pool_lock', threading.Lock()):
+        instances = getattr(pool, 'instances', None)
+        if instances is not None:
+            instances.clear()
+        for attr in ('instance_summaries', 'terminated_instances',
+                     '_halted_instances', '_compression_halted'):
+            target = getattr(pool, attr, None)
+            if target is not None and hasattr(target, 'clear'):
+                target.clear()
+    with getattr(pool, '_children_lock', threading.Lock()):
+        children = getattr(pool, 'children', None)
+        if children is not None:
+            children.clear()
+    execution = getattr(pool, '_execution', None)
+    if execution is not None:
+        stack = getattr(execution, 'active_stack', None)
+        if stack is not None and hasattr(stack, 'clear'):
+            with getattr(execution, '_state_lock', threading.Lock()):
+                stack.clear()
+    with getattr(pool, '_queue_lock', threading.Lock()):
+        queues = getattr(pool, 'message_queues', None)
+        if queues is not None:
+            queues.clear()
+
+
+def park_active_stack(
+    pool,
+    *,
+    trigger: str = 'swap',
+    stack_id: Optional[str] = None,
+    grace_seconds: Optional[float] = None,
+    kv_saver=None,
+    sleeper=time.sleep,
+    clock=time.monotonic,
+) -> Optional[SnapshotEnvelope]:
+    """Park the active stack into a snapshot and empty the pool, readying a swap.
+
+    Sequence (all gated on ``ENABLE_STACK_SWAP``; returns ``None`` when off):
+      1. Latch the turn-boundary swap event so every run loop stops at its next
+         boundary (cooperative, work preserved).
+      2. Grace window (``settings.SNAPSHOT_GRACE_SECONDS``): wait for in-flight turns
+         to reach that boundary. If they do, the swap is clean.
+      3. On expiry, force-halt every still-in-flight turn: kill its background tools
+         on the spot, discard the turn at the last coherent point, inject the
+         standard killed-tool-result — then CONTINUE (never a ``SnapshotTimeoutError``
+         rejection) (D-GRACE / D-KILLED).
+      4. Drain all instances' async tasks via the real trackers + executor shutdown.
+      5. Capture the fleet snapshot, write it to disk, register it, release held
+         slots, and clear the pool. The in-memory envelope is returned so ``swap_stack``
+         can roll back to it without a re-read.
+
+    Args:
+        pool: The live ``AgentPool``.
+        trigger: Snapshot trigger label (``'swap'`` by default).
+        stack_id: Stack key; defaults to the root/active-stack head (capture decides).
+        grace_seconds: Override the grace window (tests); ``None`` → settings value.
+        kv_saver: Injectable KV saver, forwarded to ``capture_fleet_snapshot``.
+        sleeper / clock: Time seams so the grace window is testable without real waits.
+    """
+    if not settings.ENABLE_STACK_SWAP:
+        logger.debug('[STACK_SWAP] park requested but ENABLE_STACK_SWAP is off — no-op')
+        return None
+
+    # 1. Latch the swap so running turns wind down at their next boundary (M6).
+    latch = _swap_latch(pool)
+    if latch is not None:
+        latch.set()
+
+    # 2. Bounded grace window. Read the knob AT CALL time so a flipped setting takes
+    #    effect immediately and the off-path never reads it.
+    grace = settings.SNAPSHOT_GRACE_SECONDS if grace_seconds is None else grace_seconds
+    deadline = clock() + max(0.0, grace)
+    while True:
+        inflight = _inflight_turn_instances(pool)
+        if not inflight or clock() >= deadline:
+            break
+        sleeper(min(0.05, max(0.0, deadline - clock())))
+    inflight = _inflight_turn_instances(pool)  # final sweep: who is still wedged?
+
+    # 3. Force-halt + discard each still-wedged turn (D-GRACE / D-KILLED).
+    if inflight:
+        logger.info('[STACK_SWAP] grace window (%.1fs) expired for %d in-flight turn(s), '
+                    'force-halting: %s', grace, len(inflight),
+                    [i.instance_name for i in inflight])
+        for inst in inflight:
+            _force_halt_turn(pool, inst, inst.instance_name)
+
+    # 4. Drain async tasks fleet-wide via the real APIs (M4).
+    drained = sorted(set(dict(getattr(pool, 'instances', {})).keys()))
+    _drain_async_tasks(pool, drained)
+
+    # 5. Capture the snapshot (read-only copy-out) — this is the retained-in-memory
+    #    envelope used for rollback if the subsequent activation fails.
+    env = capture_fleet_snapshot(pool, trigger=trigger, stack_id=stack_id, kv_saver=kv_saver)
+    if env is None:
+        # capture_fleet_snapshot is itself gated; a flip between our gate check and here
+        # (or an empty pool) yields None. The fleet was latched + any wedged turns force-
+        # halted but NOT cleared, so callers (swap_stack) un-latch and abort rather than
+        # activate into a half-parked pool with no rollback envelope.
+        logger.warning('[STACK_SWAP] capture returned None during park — returning None '
+                       'for caller to un-latch and abort (pool NOT cleared)')
+        return None
+
+    # Persist + register the snapshot so a future swap can resolve it by id.
+    reg = _ensure_registry(pool)
+    reg.register(env.stack_id)
+    path = write_snapshot_to_disk(env, get_snapshot_dir(pool))
+    reg.add_snapshot(env.stack_id, env.snapshot_id, str(path))
+
+    # Enforce per-stack retention (OQ1): retire this stack's oldest snapshots beyond
+    # SNAPSHOT_RETENTION_COUNT and delete any KV they carried (m3). Best-effort and
+    # gated, so it never aborts the park.
+    prune_snapshots(pool, registry=reg)
+
+    # Release sticky-slot permits before emptying the fleet, using the instance objects
+    # we are about to drop (still in the pool at this point).
+    _release_held_slots(pool, dict(getattr(pool, 'instances', {})))
+
+    # Empty the pool; the swap event stays latched until activation clears it so any
+    # straggler thread cannot resume into the now-empty (or target) pool mid-swap.
+    _clear_pool_state(pool)
+    logger.info('[STACK_SWAP] parked stack %s (%d instance(s), snapshot %s)',
+                env.stack_id, len(env.instances), env.snapshot_id)
+    return env
+
+
+def activate_stack(pool, envelope: SnapshotEnvelope, *, gate_checked: bool = False) -> None:
+    """Activate a parked stack by rehydrating ``envelope`` into the (empty) pool.
+
+    Thin, gated wrapper around :func:`restore_fleet_snapshot` that also re-points the
+    registry and clears the swap latch so the newly active stack's run loops start
+    running. Assumes the pool is empty (as park leaves it) — the restore's name-
+    collision gate is the backstop if it is not. Raises whatever restore raises
+    (``SnapshotIntegrityError`` / ``ValueError``) for the caller's rollback.
+
+    ``gate_checked=True`` (used by :func:`swap_stack`, which has already confirmed the
+    feature is enabled at entry) skips the off-state early-return so a runtime flag flip
+    mid-swap can never turn an activation into a silent no-op that leaves the pool empty
+    while logging success (M2 "under no condition").
+    """
+    if not gate_checked and not settings.ENABLE_STACK_SWAP:
+        logger.debug('[STACK_SWAP] activate requested but ENABLE_STACK_SWAP is off — no-op')
+        return
+
+    restore_fleet_snapshot(pool, envelope)
+
+    reg = _ensure_registry(pool)
+    reg.set_active(envelope.stack_id)
+    # Clear the latch so the activated stack begins executing again.
+    latch = getattr(pool, '_pending_swap_event', None)
+    if latch is not None:
+        latch.clear()
+    logger.info('[STACK_SWAP] activated stack %s (%d instance(s))',
+                envelope.stack_id, len(envelope.instances))
+
+
+def _prevalidate_target(pool, reg: StackRegistry, target_stack_id: str,
+                        target_snapshot_id: Optional[str]) -> SnapshotEnvelope:
+    """Load + integrity-check the target stack's snapshot WITHOUT touching the pool.
+
+    All-or-nothing gate (M2): resolve the snapshot file, validate schema (via
+    :func:`load_snapshot_from_disk`) and referenced-log integrity (via
+    :func:`validate_envelope_integrity`) BEFORE any parking occurs. Raises
+    ``ValueError`` (missing/malformed snapshot) or ``SnapshotIntegrityError``
+    (missing/truncated log) so an invalid target is rejected with the active stack
+    untouched. Returns the reconstructed envelope on success.
+    """
+    path = reg.resolve_path(target_stack_id, target_snapshot_id)
+    if path is None:
+        raise ValueError(
+            f'target stack {target_stack_id!r} has no registered snapshot '
+            f'{'with id ' + repr(target_snapshot_id) if target_snapshot_id else ''}'
+        )
+    envelope = load_snapshot_from_disk(Path(path))          # schema/version validation
+    validate_envelope_integrity(envelope)                   # log-integrity gate (refinement 4)
+    if envelope.stack_id != target_stack_id:
+        raise SnapshotIntegrityError(
+            f'target snapshot {envelope.snapshot_id!r} belongs to stack '
+            f'{envelope.stack_id!r}, not {target_stack_id!r}'
+        )
+    return envelope
+
+
+def swap_stack(
+    pool,
+    target_stack_id: str,
+    target_snapshot_id: Optional[str] = None,
+    *,
+    registry: Optional[StackRegistry] = None,
+    trigger: str = 'swap',
+    **park_kwargs,
+) -> None:
+    """Atomically park the active stack and activate ``target_stack_id``.
+
+    Guarantee (M2): the target is pre-validated BEFORE the source is parked, and any
+    failure during target activation rolls back by re-activating the source — the
+    pool is never left empty. ``park_active_stack`` is never used to "retry" a bad
+    target; it is only reached once the target is known-good.
+
+    Raises:
+        ValueError / SnapshotIntegrityError: target pre-validation failed — the active
+        stack was never parked, so the pool is exactly as it was.
+        The original activation error (after rollback): target activation failed; the
+        source stack has been restored.
+    """
+    if not settings.ENABLE_STACK_SWAP:
+        logger.debug('[STACK_SWAP] swap requested but ENABLE_STACK_SWAP is off — no-op')
+        return
+
+    reg = _ensure_registry(pool, registry)
+
+    # A self-swap would park the LIVE active stack just to "swap" it back onto itself,
+    # silently discarding unsnapshotted live turns -- almost always a caller
+    # misconfiguration, not intent. Reject it before any parking happens, at WARNING so
+    # it is visible rather than swallowed. (Off-path unaffected: this is after the
+    # ENABLE_STACK_SWAP gate.)
+    if target_stack_id == reg.active_stack_id:
+        logger.warning(
+            '[STACK_SWAP] swap(%r) rejected: target is already the active stack — a '
+            'self-swap would discard live unsnapshotted turns (no-op)', target_stack_id,
+        )
+        return
+
+    # 1. Pre-validate the target BEFORE parking the source (M2 all-or-nothing).
+    #    Raises here with the active stack fully intact.
+    target_env = _prevalidate_target(pool, reg, target_stack_id, target_snapshot_id)
+
+    source_stack_id = reg.active_stack_id
+
+    # 2. Park the active stack; retain the envelope in memory for rollback.
+    source_env = park_active_stack(pool, trigger=trigger, stack_id=source_stack_id, **park_kwargs)
+    if source_env is None:
+        # The source could not be snapshotted (e.g. capture gated off by a runtime flip,
+        # or nothing to park). We must NOT activate the target into a half-parked pool,
+        # because that path has no rollback envelope. Un-latch the still-present fleet so
+        # it resumes, then abort before touching the registry. Pool is never left empty.
+        latch = getattr(pool, '_pending_swap_event', None)
+        if latch is not None:
+            latch.clear()
+        raise SnapshotIntegrityError(
+            'stack-swap aborted: the active stack could not be parked into a snapshot, so '
+            'the swap cannot proceed with a rollback guarantee (active stack left intact)'
+        )
+    if source_stack_id is None:
+        source_stack_id = source_env.stack_id
+    reg.set_active(None)
+
+    # 3. Activate the target; roll back to the source on ANY error. Activations are
+    #    gate_checked so a mid-swap flag flip cannot silently no-op and empty the pool.
+    try:
+        activate_stack(pool, target_env, gate_checked=True)
+        reg.set_active(target_stack_id)
+    except Exception:
+        logger.exception('[STACK_SWAP] target %s activation failed — rolling back to source %s',
+                         target_stack_id, source_stack_id)
+        # Drop any partial target residue so the source rehydration lands on a clean pool.
+        _clear_pool_state(pool)
+        # Re-activate the source from the retained in-memory envelope (no disk re-read),
+        # guaranteeing the pool is never left empty.
+        try:
+            activate_stack(pool, source_env, gate_checked=True)
+        except Exception:
+            logger.critical('[STACK_SWAP] source %s rollback re-activation FAILED — pool may be '
+                            'left empty; manual recovery required', source_stack_id, exc_info=True)
+            raise
+        reg.set_active(source_stack_id)
+        raise
+
+
+# ── Pruning & stack operations (Phase S5) ──────────────────────────────────────
+
+def _delete_snapshot_kv(pool, snapshot, keep_labels: Optional[set] = frozenset()) -> None:
+    """Delete backend autoloader KV files carried by one retired snapshot (m3).
+
+    Iterates the snapshot's instances and, for each streaming instance whose KV
+    was actually saved, calls ``state_ops.delete_state(api_base, model, label)``
+    with the triple recorded in the snapshot's KV block. Best-effort: a failed
+    delete is logged and never aborts pruning.
+
+    KEYING (m3, BUG_0323 S5 fix): ``save_state`` keys KV by ``instance_name``
+    (``state_ops.py`` — "autoloader overwrites the same file on each save"), NOT
+    per-snapshot, so EVERY snapshot — in any stack — references the SAME on-disk KV
+    file. Deleting the shared file when the OLDEST snapshot is pruned would wipe the
+    KV that the newer STILL-KEPT snapshots still claim (``saved: true``), silently
+    dropping their restores to message-only cold start. Because KV carries no stack
+    dimension, the collision can also span stacks (a parked stack sharing an
+    instance_name with another parked stack, or with the active one), so
+    ``keep_labels`` carries the labels ANY kept snapshot in ANY stack still
+    references: a label in that set is SKIPPED (never deleted). Only labels no kept
+    snapshot references are deleted. ``keep_labels`` is ``None`` when a kept snapshot
+    exists but its envelope could not be read — because the KV file is shared we
+    cannot enumerate what it claims, so that is treated as "still referenced" and
+    every delete is skipped (conservative: an orphan KV is far cheaper than
+    destroying live-restore state).
+
+    The active stack's snapshot is never pruned (m3), so no live in-use KV is touched.
+    """
+    from agent_cascade.state_ops import delete_state
+
+    for inst_name, snap in snapshot.instances.items():
+        kv = getattr(snap, 'kv', None) or {}
+        if not kv.get('saved'):
+            continue
+        label = kv.get('label') or inst_name
+        # Skip labels still claimed by a saved instance in a KEPT snapshot of any
+        # stack (shared per-instance_name file); None = unreadable kept snapshot.
+        if keep_labels is None:
+            logger.debug('[SNAPSHOT_PRUNE] kept snapshot unreadable for %s — retaining KV '
+                         'label %s (shared file, cannot prove unreferenced)', inst_name, label)
+            continue
+        if label in keep_labels:
+            logger.debug('[SNAPSHOT_PRUNE] keeping KV label %s — still referenced by a kept '
+                         'snapshot (cross-stack)', label)
+            continue
+        endpoint = kv.get('endpoint_cfg') or {}
+        api_base = endpoint.get('api_base') or ''
+        model = endpoint.get('model') or ''
+        if not api_base or not model:
+            logger.debug('[SNAPSHOT_PRUNE] missing api_base/model for %s in snapshot — '
+                         'skipping KV delete', inst_name)
+            continue
+        delete_state(api_base, model, label)
+
+
+def _global_kept_kv_labels(pool, keep_paths: List[str]) -> Optional[set]:
+    """KV labels still referenced by ``saved:true`` instances in KEPT snapshots.
+
+    Scans the envelope files of the supplied KEPT snapshots (those surviving the
+    caller's keep policy — across ALL stacks, see the callers) and returns the set of
+    labels — computed exactly as :func:`_delete_snapshot_kv` computes them
+    (``kv.label or instance_name``) — that those kept snapshots' saved KV instances
+    claim. Pruning or deleting a retired snapshot must NOT delete any label in this
+    set: KV files are keyed GLOBALLY per ``(model, api_base, instance_name)`` with NO
+    stack dimension (``state_ops`` — the autoloader overwrites the same file on each
+    save), so a parked stack's instance name can collide with another parked stack's
+    (shared subagent names like ``Coder1``) or with the active stack's, and the shared
+    file must survive while ANY kept snapshot — in ANY stack — still restores from it.
+
+    Returns ``None`` when any kept envelope cannot be read (corrupt/absent): we
+    cannot enumerate what it claims, so the caller treats ALL labels as still
+    referenced and skips every delete (conservative). The list is read-only; no locks
+    are held (M5)."""
+    labels: set = set()
+    for path_str in keep_paths:
+        try:
+            snapshot = load_snapshot_from_disk(Path(path_str))
+        except (ValueError, OSError) as exc:  # unreadable: cannot prove labels unreferenced
+            logger.debug('[SNAPSHOT_PRUNE] could not load kept snapshot %s to compute '
+                         'KV label retention: %s', path_str, exc)
+            return None
+        for inst_name, snap in snapshot.instances.items():
+            kv = getattr(snap, 'kv', None) or {}
+            if kv.get('saved'):
+                labels.add(kv.get('label') or inst_name)
+    return labels
+
+
+def _retire_snapshot(pool, stack_id: str, snapshot_id: str, path_str: str,
+                     *, keep_labels: Optional[set] = frozenset()) -> None:
+    """Remove one retired snapshot: delete its KV (if loaded OK) then its file.
+
+    ``keep_labels`` is the set of KV labels still referenced by ``saved:true``
+    instances in KEPT snapshots of ANY stack (see :func:`_delete_snapshot_kv`); they
+    are skipped so the shared per-instance_name KV file is not destroyed while a kept
+    snapshot still claims it. Pass an empty set when no other stack keeps the KV (so
+    it is genuinely unreferenced and free to delete) and ``None`` to skip all deletes
+    conservatively.
+
+    A snapshot whose envelope cannot be read (corrupt/absent) still has its file
+    dropped — the KV may already be gone, and a stale file must not linger. Never
+    raises: an unlink failure is logged. The registry entry is dropped by the
+    caller (its own bookkeeping)."""
+    try:
+        snapshot = load_snapshot_from_disk(Path(path_str))
+    except (ValueError, OSError) as exc:  # unreadable: skip KV cleanup, still remove the file
+        logger.debug('[SNAPSHOT_PRUNE] could not load %s of stack %s for KV cleanup: %s',
+                     snapshot_id, stack_id, exc)
+    else:
+        try:
+            _delete_snapshot_kv(pool, snapshot, keep_labels=keep_labels)
+        except Exception:  # noqa: BLE001 — KV teardown must never abort pruning
+            logger.debug('[SNAPSHOT_PRUNE] KV delete failed for snapshot %s of stack %s',
+                         snapshot_id, stack_id, exc_info=True)
+    try:
+        Path(path_str).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug('[SNAPSHOT_PRUNE] could not remove snapshot file %s: %s', path_str, exc)
+
+
+def prune_snapshots(pool, *, registry: Optional[StackRegistry] = None) -> int:
+    """Enforce per-stack snapshot retention: keep the newest ``SNAPSHOT_RETENTION_COUNT``.
+
+    Walks every known stack (independent of the live pool) and drops the OLDEST
+    snapshots beyond the retention count (write order — oldest first). Guards:
+      * The snapshot(s) backing the currently-active stack are NEVER pruned (m3):
+        their KV is in live use, so deleting them would corrupt the running fleet.
+        This means an active stack accumulates snapshots without bound until it is
+        parked — an accepted trade-off: the active fleet must never have a restore
+        point destroyed under it, and parking transfers the set to a prunable stack.
+      * For each pruned snapshot that carried saved KV, the backend autoloader
+        cache file is deleted via ``state_ops.delete_state`` — BUT only for labels no
+        KEPT snapshot in ANY stack still references (m3 / S5 cross-stack). KV files are
+        keyed GLOBALLY per ``(model, api_base, instance_name)`` with no stack dimension,
+        so a parked stack's instance name can collide with another parked stack's
+        (shared subagent names) or the active stack's; deleting the shared file on one
+        stack's prune would break a kept snapshot's restore in a DIFFERENT stack.
+        ``_global_kept_kv_labels`` computes that retained-label set over every stack's
+        kept snapshots and it is threaded through ``_retire_snapshot`` /
+        ``_delete_snapshot_kv``.
+
+    Gated: returns ``0`` when ``ENABLE_STACK_SWAP`` is off, leaving the registry
+    byte-identical (M1). All disk I/O runs after the park call site has released
+    the pool locks, so it is lock-free (M5). Returns the number of snapshots pruned.
+    """
+    if not settings.ENABLE_STACK_SWAP:
+        return 0
+    reg = _ensure_registry(pool, registry)
+    retention = max(1, settings.SNAPSHOT_RETENTION_COUNT)
+    active = reg.active_stack_id
+    # KV is keyed globally per (model, api_base, instance_name) — NO stack dimension —
+    # so a parked stack's instance name can collide with another parked stack's (shared
+    # subagent names) or the active one's. Build ONE global keep-set from every stack's
+    # surviving snapshots BEFORE deleting anything: the active stack contributes all of
+    # its snapshots (it is never pruned), a parked stack the newest ``retention``. This
+    # set is threaded to every retirement so pruning one stack never wipes a label
+    # another stack's kept snapshot still restores from.
+    keep_paths: List[str] = []
+    for stack_id, entries in list(reg._snapshots.items()):
+        if stack_id == active:                    # active never pruned -> all kept
+            keep_paths.extend(path for _sid, path in entries)
+        else:
+            keep_paths.extend(path for _sid, path in
+                              entries[max(0, len(entries) - retention):])
+    keep_labels = _global_kept_kv_labels(pool, keep_paths)
+    pruned = 0
+    for stack_id, entries in list(reg._snapshots.items()):
+        if stack_id == active:           # m3: never prune the active stack's snapshots
+            continue
+        if len(entries) <= retention:
+            continue
+        keep = entries[len(entries) - retention:]
+        for sid, path in entries[:len(entries) - retention]:   # oldest first
+            _retire_snapshot(pool, stack_id, sid, path, keep_labels=keep_labels)
+            pruned += 1
+        reg._snapshots[stack_id] = keep   # keep order preserved (oldest-first)
+    if pruned:
+        logger.info('[SNAPSHOT_PRUNE] retired %d snapshot(s) beyond retention %d',
+                    pruned, retention)
+    return pruned
+
+
+def list_stacks(pool, *, registry: Optional[StackRegistry] = None) -> Dict[str, Any]:
+    """Return the active stack id plus every known stack's snapshot ids (read-only).
+
+    The shape mirrors the REST ``GET /api/stacks`` contract and is the single
+    source the REST, WS and Telegram surfaces render from, so they never drift."""
+    reg = _ensure_registry(pool, registry)
+    return {
+        'active_stack_id': reg.active_stack_id,
+        'stacks': {sid: reg.list_snapshots(sid) for sid in reg._snapshots},
+    }
+
+
+def snapshot_stack(pool, stack_id: Optional[str] = None, *,
+                   registry: Optional[StackRegistry] = None,
+                   trigger: str = 'user', kv_saver=None) -> Optional[Dict[str, Any]]:
+    """Capture a non-destructive fleet snapshot and register it under ``stack_id``.
+
+    Unlike :func:`park_active_stack`, this does NOT drain or clear the pool — it
+    is a read-only copy-out the user can take while the fleet keeps running. The
+    live fleet (the active stack) is captured; ``stack_id`` defaults to the root
+    instance the capture derives. Writes the envelope to disk, registers it, then
+    applies retention (pruning). Returns ``{'stack_id', 'snapshot_id'}``, or
+    ``None`` when the capture yielded nothing (empty/gated pool)."""
+    env = capture_fleet_snapshot(pool, trigger=trigger, stack_id=stack_id, kv_saver=kv_saver)
+    if env is None:
+        logger.debug('[STACK_OPS] snapshot requested but capture returned None (empty/gated pool)')
+        return None
+    reg = _ensure_registry(pool, registry)
+    reg.register(env.stack_id)
+    path = write_snapshot_to_disk(env, get_snapshot_dir(pool))
+    reg.add_snapshot(env.stack_id, env.snapshot_id, str(path))
+    prune_snapshots(pool, registry=reg)
+    logger.info('[STACK_OPS] snapshotted stack %s (snapshot %s)', env.stack_id, env.snapshot_id)
+    return {'stack_id': env.stack_id, 'snapshot_id': env.snapshot_id}
+
+
+def delete_stack(pool, stack_id: str, *, registry: Optional[StackRegistry] = None) -> Dict[str, Any]:
+    """Delete a parked stack: its snapshot files, their KV, and its registry entry.
+
+    Rejects the active stack with :class:`ActiveStackDeletionError` (m4/409) — the
+    caller must park or swap to another stack first. For each removed snapshot it
+    deletes the envelope file and, when the snapshot carried saved KV, the backend
+    autoloader state (OQ3/m3) — BUT only for labels no other stack's surviving
+    snapshots still reference: KV files are keyed globally per
+    ``(model, api_base, instance_name)``, so deleting one stack must not destroy a
+    label another stack (or the active one) still restores from. Returns
+    ``{'stack_id', 'removed_snapshots'}``."""
+    reg = _ensure_registry(pool, registry)
+    if stack_id == reg.active_stack_id:
+        raise ActiveStackDeletionError(
+            f"cannot delete active stack {stack_id!r}; park or swap to another stack first")
+    entries = reg._snapshots.get(stack_id, [])
+    # KV is shared GLOBALLY per (model, api_base, instance_name) with no stack
+    # dimension, so a label this stack references may also be claimed by another
+    # stack's surviving snapshots (shared subagent names) or the active stack's.
+    # Build the keep-set from every OTHER stack (the deleted stack's own snapshots
+    # contribute nothing — they are being removed; no other stack is pruned here, so
+    # all of its snapshots count). An empty registry-wide keep-set means the label is
+    # genuinely unreferenced and free to delete.
+    other_keep_paths: List[str] = []
+    for other_id, other_entries in reg._snapshots.items():
+        if other_id == stack_id:
+            continue
+        other_keep_paths.extend(path for _sid, path in other_entries)
+    keep_labels = _global_kept_kv_labels(pool, other_keep_paths)
+    for sid, path in entries:
+        _retire_snapshot(pool, stack_id, sid, path, keep_labels=keep_labels)
+    reg._snapshots.pop(stack_id, None)
+    logger.info('[STACK_OPS] deleted stack %s (%d snapshot(s))', stack_id, len(entries))
+    return {'stack_id': stack_id, 'removed_snapshots': len(entries)}

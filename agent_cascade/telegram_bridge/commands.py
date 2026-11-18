@@ -18,6 +18,7 @@ new commands appear automatically.
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_cascade import settings
 from agent_cascade.log import logger
 
 from .ac_client import ACClient, ACError
@@ -280,6 +281,64 @@ async def _cmd_loadkv(ctx: CommandContext) -> str:
     return f'📥 {_kv_reply(result)}'
 
 
+def _stacks_msg(result: Dict[str, Any]) -> str:
+    """Surface a stack-operation ``message`` verbatim, falling back to status."""
+    if isinstance(result, dict):
+        msg = result.get('message')
+        if msg:
+            return msg
+        status = result.get('status')
+        if status:
+            return f'ok' if status == 'ok' else f'failed: {status}'
+    return 'no result message returned'
+
+
+def _render_stacks(result: Dict[str, Any]) -> str:
+    """Render the GET /api/stacks payload as a compact Telegram list."""
+    if not isinstance(result, dict):
+        return '🗂️ no result from AC'
+    active = result.get('active_stack_id')
+    stacks = result.get('stacks') or {}
+    if not stacks:
+        return '🗂️ no stacks registered (swap disabled or nothing parked)'
+    lines = ['🗂️ stacks:']
+    for sid, snaps in stacks.items():
+        marker = ' *active' if sid == active else ''
+        lines.append(f'  {sid}{marker}: {len(snaps)} snapshot(s)')
+    return '\n'.join(lines)
+
+
+async def _cmd_snapshot(ctx: CommandContext) -> str:
+    """Capture a fleet snapshot: /snapshot [stack-id] (omitted = current active stack)."""
+    if not settings.ENABLE_STACK_SWAP:
+        return '📸 stack swap disabled (set ENABLE_STACK_SWAP=true)'
+    stack_id = ctx.args.strip() or None
+    if not stack_id:
+        active = (await ctx.ac.list_stacks()).get('active_stack_id')
+        if not active:
+            return '📸 no active stack to snapshot (swap disabled?)'
+        stack_id = active
+    result = await ctx.ac.snapshot_stack(stack_id)
+    if isinstance(result, dict) and result.get('snapshot_id'):
+        return f"📸 snapshotted stack '{result['stack_id']}' (snapshot {result['snapshot_id']})"
+    return f'📸 {_stacks_msg(result)}'
+
+
+async def _cmd_stack(ctx: CommandContext) -> str:
+    """Fleet stacks: /stack list | /stack swap <stack-id>."""
+    if not settings.ENABLE_STACK_SWAP:
+        return '🗂️ stack swap disabled (set ENABLE_STACK_SWAP=true)'
+    parts = ctx.args.split()
+    sub = parts[0].lower() if parts else 'list'
+    if sub == 'list':
+        return _render_stacks(await ctx.ac.list_stacks())
+    if sub == 'swap':
+        if len(parts) < 2:
+            return '⚠️ usage: /stack swap <stack-id>'
+        return f'🔄 {_stacks_msg(await ctx.ac.swap_stack(parts[1]))}'
+    return '⚠️ usage: /stack [list | swap <stack-id>]'
+
+
 # ---------------------------------------------------------------------------
 # Registry — adding a command is one entry here.
 # ---------------------------------------------------------------------------
@@ -297,6 +356,8 @@ COMMANDS: Dict[str, CommandHandler] = {
         CommandHandler('restore', 'Restore a saved session: /restore <name>', _cmd_restore),
         CommandHandler('savekv', 'Save KV state of an agent: /savekv [instance-name]', _cmd_savekv),
         CommandHandler('loadkv', 'Load saved KV state: /loadkv [instance-name]', _cmd_loadkv),
+        CommandHandler('snapshot', 'Capture a fleet snapshot: /snapshot [stack-id]', _cmd_snapshot),
+        CommandHandler('stack', 'Fleet stacks: /stack list | /stack swap <stack-id>', _cmd_stack),
         CommandHandler('help', 'List all commands (alias: /?)', _cmd_help),
     ]
 }

@@ -21,6 +21,7 @@ from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
+from agent_cascade import settings as _ac_settings
 from agent_cascade.settings import (DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
                                     UNTRUSTED_TOOL_OUTPUT_TAG, UNTRUSTED_TOOL_OUTPUT_WRAPPER)
 from agent_cascade.tools.mcp_manager import MCPManager
@@ -51,6 +52,26 @@ def _edit_arg_for_guard(s: str, cap: int = _MAX_EDIT_ARG_CHARS) -> str:
     if len(s) <= cap:
         return s
     return s[:cap] + f'\n…[TRUNCATED, {len(s)} chars total]'
+
+
+def _swap_identity_lost(pool, instance, inst_name: str) -> bool:
+    """True when a stack swap has parked ``instance`` out of the live fleet.
+
+    ``park_active_stack`` ends with ``_clear_pool_state``, which clears
+    ``pool.instances``; the wedged instance an engine thread still holds is then no
+    longer ``pool.instances[name]``, so its identity is lost. That is the DURABLE halt
+    signal (a force-halted turn whose blocking tool unblocks only after the swap event
+    latch and ``_halted_instances`` have been cleared still sees identity lost).
+
+    Gated on ``ENABLE_STACK_SWAP`` read live, so the off-path short-circuits before
+    touching the pool (M1 byte-identity). This mirrors the identity sub-condition of
+    the run-loop turn-boundary gate (``engine/run_loop.py``): the gate stops the turn
+    from resuming, while this predicate covers the window where a wedged tool
+    completes between the gate check and the normal-completion FUNCTION append.
+    """
+    if not getattr(_ac_settings, 'ENABLE_STACK_SWAP', False):
+        return False
+    return instance is not getattr(pool, 'instances', {}).get(inst_name)
 
 
 def _wrap_untrusted(tool_name: str, result):
@@ -441,8 +462,22 @@ class ToolExecMixin:
                         'tool_success': _tool_success,
                     },
                 )
-                self._append_and_log(instance, fn_msg)
-                response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
+                # STACK-SWAP late-result guard (D-KILLED, S4). If a swap parked this
+                # instance while its tool was wedged past the grace window, park already
+                # closed the call with the standard killed result
+                # (snapshot._inject_killed_tool_result). Appending the real result now
+                # would give two FUNCTION results sharing one function_id (invalid
+                # replay). The run-loop identity gate stops the turn from resuming, but
+                # the tool can still complete in the window between that check and this
+                # append, so re-check identity here. No-op when identity is intact
+                # (normal operation): the predicate short-circuits on ENABLE_STACK_SWAP.
+                if _swap_identity_lost(self.pool, instance, inst_name):
+                    logger.info('[STACK_SWAP] %s discarding late real tool result for '
+                                'function_id=%s (parked/swapped; killed close stands)',
+                                inst_name, function_id or '1')
+                else:
+                    self._append_and_log(instance, fn_msg)
+                    response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
 
                 # Track executed tool for orphan handling
                 executed_tools.append(tool_name)

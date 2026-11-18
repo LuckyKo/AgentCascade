@@ -69,12 +69,16 @@ class MsgType(str, Enum):
     IMPORT_SETTINGS = 'import_settings'
     MIGRATE_SETTINGS_LOCAL = 'migrate_settings_local'
     REQUEST_STATE = 'request_state'
+    STACKS_LIST = 'stacks_list'
+    STACKS_SWAP = 'stacks_swap'
+    STACKS_SNAPSHOT = 'stacks_snapshot'
     # Outgoing-only response types.
     STATE = 'state'
     STREAM_UPDATE = 'stream_update'
     ERROR = 'error'
     REFRESH_AGENTS_RESULT = 'refresh_agents_result'
     KV_STATE_RESULT = 'kv_state_result'
+    STACKS_RESULT = 'stacks_result'
     SETTINGS_APPLIED = 'settings_applied'
     SETTINGS_CHANGED = 'settings_changed'
     INFO = 'info'
@@ -201,6 +205,9 @@ class WsMessageHandler:
             MsgType.IMPORT_SETTINGS: self.handle_import_settings,
             MsgType.MIGRATE_SETTINGS_LOCAL: self.handle_migrate_settings_local,
             MsgType.REQUEST_STATE: self.handle_request_state,
+            MsgType.STACKS_LIST: self.handle_stacks_list,
+            MsgType.STACKS_SWAP: self.handle_stacks_swap,
+            MsgType.STACKS_SNAPSHOT: self.handle_stacks_snapshot,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
@@ -785,6 +792,106 @@ class WsMessageHandler:
         # Refresh instance state (kv_state_capable) after a successful op.
         if result[WsEnvelope.STATUS] == 'ok':
             await self._broadcast()
+
+    async def handle_stacks_list(self, data: dict) -> None:
+        """Handle 'stacks_list' — report the active stack and every parked stack's snapshots.
+
+        Core logic lives in ``snapshot.list_stacks`` (shared with REST
+        ``GET /api/stacks``) so the WS and REST paths cannot drift. Gated on
+        ``settings.ENABLE_STACK_SWAP``: returns a WARNING and no payload when off (M1).
+        """
+        if not settings.ENABLE_STACK_SWAP:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'stack swap disabled (set ENABLE_STACK_SWAP=true)',
+            })
+            return
+        if self.agent_pool is None:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.ERROR,
+                WsEnvelope.MESSAGE: 'stacks_list: no agent pool',
+            })
+            return
+        from agent_cascade import snapshot
+        result = await asyncio.to_thread(snapshot.list_stacks, self.agent_pool)
+        result[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
+        result[WsEnvelope.STATUS] = 'ok'
+        await self.broadcast_fn(result)
+
+    async def handle_stacks_swap(self, data: dict) -> None:
+        """Handle 'stacks_swap' — park the active stack and activate ``target_stack_id``.
+
+        Mirrors REST ``POST /api/stacks/swap``: the swap parks + restores (blocking),
+        so it runs on a worker thread. Core logic is ``snapshot.swap_stack``. ``ValueError``
+        (no such snapshot) is reported as a bad target; ``SnapshotIntegrityError`` as a
+        failed activation. Does not touch the ``generating`` session flag.
+        """
+        if not settings.ENABLE_STACK_SWAP:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'stack swap disabled (set ENABLE_STACK_SWAP=true)',
+            })
+            return
+        if self.agent_pool is None:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.ERROR,
+                WsEnvelope.MESSAGE: 'stacks_swap: no agent pool',
+            })
+            return
+        target = data.get('target_stack_id')
+        payload: Dict[str, Any]
+        if not target or not isinstance(target, str):
+            payload = {'status': 'failed', 'reason': 'bad_target',
+                       'message': "'target_stack_id' (str) required"}
+        else:
+            from agent_cascade.snapshot import SnapshotIntegrityError, swap_stack
+            try:
+                await asyncio.to_thread(swap_stack, self.agent_pool, target)
+                reg = getattr(self.agent_pool, '_swap_registry', None)
+                payload = {'status': 'ok',
+                           'active_stack_id': getattr(reg, 'active_stack_id', None)}
+            except SnapshotIntegrityError as e:
+                payload = {'status': 'failed', 'reason': 'integrity', 'message': str(e)}
+            except ValueError as e:
+                payload = {'status': 'failed', 'reason': 'bad_target', 'message': str(e)}
+            except Exception as e:  # noqa: BLE001
+                from agent_cascade.log import logger
+                logger.exception('[STACK_SWAP] WS swap to %r failed', target)
+                payload = {'status': 'failed', 'message': f'swap failed: {e}'}
+        payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
+        await self.broadcast_fn(payload)
+        if payload.get('status') == 'ok':
+            await self._broadcast()
+
+    async def handle_stacks_snapshot(self, data: dict) -> None:
+        """Handle 'stacks_snapshot' — capture a non-destructive fleet snapshot.
+
+        Mirrors REST ``POST /api/stacks/{stack_id}/snapshot``: core is
+        ``snapshot.snapshot_stack`` (captures the live fleet, never draining it).
+        ``stack_id`` is optional — when omitted the capture derives it from the root
+        instance. A ``None`` result means there was no live fleet to snapshot.
+        """
+        if not settings.ENABLE_STACK_SWAP:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.WARNING,
+                WsEnvelope.MESSAGE: 'stack swap disabled (set ENABLE_STACK_SWAP=true)',
+            })
+            return
+        if self.agent_pool is None:
+            await self.broadcast_fn({
+                WsEnvelope.TYPE: MsgType.ERROR,
+                WsEnvelope.MESSAGE: 'stacks_snapshot: no agent pool',
+            })
+            return
+        from agent_cascade import snapshot
+        stack_id = data.get('stack_id')
+        res = await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, stack_id)
+        if res is None:
+            payload = {'status': 'failed', 'reason': 'no_fleet', 'message': 'no live fleet to snapshot'}
+        else:
+            payload = {'status': 'ok', **res}
+        payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
+        await self.broadcast_fn(payload)
 
     async def handle_resume_all(self, data: dict) -> None:
         """Handle 'resume_all' — resume ALL paused instances."""
