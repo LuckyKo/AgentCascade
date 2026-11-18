@@ -20,7 +20,8 @@ from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import (AUTO_SKILL_MODE_NONE, DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_AUTO,
                                     LOAD_SKILL_NONE)
-from agent_cascade.utils.streaming import stream_reader_in_flight
+from agent_cascade.utils.streaming import instance_llm_in_flight
+from agent_cascade.reuse_reason import ReuseRejectReason
 from agent_cascade.utils.utils import msg_field
 
 # Security instance reuse (BUG_0029 Phase 3): min settle gap before warm instance reset.
@@ -788,7 +789,8 @@ class SystemAgentMixin:
                                        task: str,
                                        caller: str,
                                        rid: str = '',
-                                        context: str = '') -> Optional[Tuple[Any, bool, str]]:
+                                        context: str = '',
+                                        reject_reason_out: Optional[list] = None) -> Optional[Tuple[Any, bool, str]]:
         """Acquire a *warm* system agent for reuse, resetting its conversation to [system].
 
         BUG_0029 Phase 3 (Security instance reuse). Instead of spawning a fresh
@@ -841,10 +843,20 @@ class SystemAgentMixin:
             from agent_cascade.security_reuse import try_claim, release_claim
         from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
+        def _reject(reason: ReuseRejectReason) -> None:
+            """Record why the warm acquire missed, into the caller's out-param sink (if any).
+
+            Keeps the shared Security caller's signature/return type unchanged (it passes no
+            sink and ignores the result); only the Compressor bounded-wait consumes it. The
+            return type of this gate stays ``Optional[Tuple]`` — the reason is a side-channel."""
+            if reject_reason_out is not None:
+                reject_reason_out.append(reason)
+            return None
+
         # Gate 1 — claim. The single atomic safety property: exactly one owner at a time.
         # If another check owns this name we must NOT touch its instance → fall back.
         if not try_claim(instance_name, rid):
-            return None
+            return _reject(ReuseRejectReason.CLAIM_HELD)
 
         # We now OWN the claim. Ownership hand-off rule:
         #   * SUCCESS path  → do NOT release here; the caller's finally releases it AFTER the run
@@ -862,7 +874,7 @@ class SystemAgentMixin:
             inst = pool.instances.get(instance_name) if getattr(pool, 'instances', None) else None
             if inst is not None and inst.agent_class != agent_class:
                 # A DIFFERENT class owns this name — do NOT clobber it; treat as ineligible.
-                return None
+                return _reject(ReuseRejectReason.CLASS_MISMATCH)
 
             if inst is None:
                 # ── SEED-ON-MISS (the create-or-reuse contract the v2 BUILD dropped) ──────────
@@ -886,7 +898,7 @@ class SystemAgentMixin:
                 except Exception as e:  # noqa: BLE001
                     logger.warning('[SECURITY_REUSE] seed failed for %s (rid=%s): %s '
                                    '— falling back to fresh spawn', instance_name, rid, e)
-                    return None            # the finally below releases the claim
+                    return _reject(ReuseRejectReason.SEED_FAILED)  # the finally below releases the claim
 
                 # Freeze now, or the NEXT check fails Gate 8b and the seed is wasted. Non-stable
                 # classes keep the normal end-of-_setup_turn freeze lifecycle. `inst` was just built
@@ -906,7 +918,7 @@ class SystemAgentMixin:
                 if inst.state != AgentState.IDLE:
                     logger.debug('[SECURITY_REUSE] %s ineligible (gate=state_not_idle, rid=%s): state=%s',
                                  instance_name, rid, inst.state)
-                    return None
+                    return _reject(ReuseRejectReason.STATE_NOT_IDLE)
 
             # 4. A leaked endpoint permit (the slot-permit-leak program). Gate 3 already
             #    proved state == IDLE, so NO live run of this instance holds a permit — a set
@@ -926,16 +938,16 @@ class SystemAgentMixin:
             # and Gate 5 must reject reuse, so a fresh spawn's scheduler.acquire blocks instead
             # of re-hitting the still-reading endpoint. Inert for a genuine leaked permit (no
             # such attribute, or the Event is already set) — reclaim proceeds exactly as before.
-            _reader_inflight = stream_reader_in_flight(inst._stream_reader_done)
+            _inflight = instance_llm_in_flight(inst)
             if (inst._slot_release is not None or inst._slot_key is not None) \
-                    and not _reader_inflight:
+                    and not _inflight:
                 cleared = self._discard_stale_permit(
                     inst, instance_name,
                     context='reuse-gate4-stale-permit', action='drop-stale-reuse')
                 if not cleared and (inst._slot_release is not None or inst._slot_key is not None):
                     logger.debug('[SECURITY_REUSE] %s ineligible (gate=slot_permit_leaked, rid=%s): slot_release=%r slot_key=%r',
                                  instance_name, rid, inst._slot_release, inst._slot_key)
-                    return None
+                    return _reject(ReuseRejectReason.SLOT_PERMIT_LEAKED)
                 logger.warning('[SECURITY_REUSE] %s recovered a leaked permit at reuse-gate4 '
                                '(rid=%s) — cleared and proceeding.', instance_name, rid)
 
@@ -943,39 +955,39 @@ class SystemAgentMixin:
             #    against a generator abandoned by `break` without close() still mid-flight. Also
             #    rejects a warm instance whose LLM reader is still in flight (BUG_0344 B1), which
             #    sends the retry to a fresh spawn rather than reusing the still-BUSY instance.
-            if inst._llm_call_active or _reader_inflight:
+            if _inflight:
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=live_llm_stream, rid=%s): '
-                             'LLM call active=%s reader in flight=%s',
-                             instance_name, rid, inst._llm_call_active, _reader_inflight)
-                return None
+                             'reader/flag in flight (llm_call_active=%s)',
+                             instance_name, rid, getattr(inst, '_llm_call_active', False))
+                return _reject(ReuseRejectReason.LIVE_LLM_STREAM)
             _last_llm = getattr(inst, '_last_llm_activity', 0.0) or 0.0
             if _last_llm and (time.monotonic() - _last_llm) < _REUSE_IDLE_EPSILON:
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=llm_recent_activity, rid=%s): age=%.3fs eps=%.2fs',
                              instance_name, rid, time.monotonic() - _last_llm, _REUSE_IDLE_EPSILON)
-                return None
+                return _reject(ReuseRejectReason.LLM_RECENT_ACTIVITY)
 
             # 6. Not genuinely halted (compression-halt / manual stop).
             if getattr(pool, 'is_instance_halted', None) is not None and pool.is_instance_halted(instance_name):
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=halted, rid=%s): instance halted',
                              instance_name, rid)
-                return None
+                return _reject(ReuseRejectReason.HALTED)
 
             # 7. Not terminated (pool-level set or per-instance flag).
             if getattr(pool, 'is_instance_terminated', None) is not None and pool.is_instance_terminated(instance_name):
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=terminated_pool, rid=%s): pool-level termination set',
                              instance_name, rid)
-                return None
+                return _reject(ReuseRejectReason.TERMINATED_POOL)
             if inst.is_terminated:
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=terminated_flag, rid=%s): instance flag is_terminated',
                              instance_name, rid)
-                return None
+                return _reject(ReuseRejectReason.TERMINATED_FLAG)
 
             # 8. Conversation present and starting with a SYSTEM message (the prefix we keep).
             conv = inst.conversation
             if not conv or getattr(conv[0], 'role', None) != SYSTEM:
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=bad_conversation_head, rid=%s): len=%d head_role=%r',
                              instance_name, rid, len(conv), getattr(conv[0], 'role', None) if conv else None)
-                return None
+                return _reject(ReuseRejectReason.BAD_CONVERSATION_HEAD)
 
             # 8b. The system prompt must already be FROZEN. An unfrozen instance would re-run the
             #     _setup_turn M1 rewrite on its next turn and inject volatile run-identity lines,
@@ -983,21 +995,21 @@ class SystemAgentMixin:
             if inst._system_prompt_frozen is not True:
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=prompt_not_frozen, rid=%s): system prompt not frozen',
                              instance_name, rid)
-                return None
+                return _reject(ReuseRejectReason.PROMPT_NOT_FROZEN)
 
             # 9. No pending queued messages for this instance.
             mq = getattr(pool, 'message_queues', None)
             if mq and mq.get(instance_name):
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=queued_messages, rid=%s): count=%d',
                              instance_name, rid, len(mq.get(instance_name)))
-                return None
+                return _reject(ReuseRejectReason.QUEUED_MESSAGES)
 
             # 11. Not currently on the active stack (a live run would be mid-conversation).
             with pool._execution._state_lock:
                 if any(n == instance_name for n, _d in pool._execution.active_stack):
                     logger.debug('[SECURITY_REUSE] %s ineligible (gate=on_active_stack, rid=%s): instance on active stack',
                                  instance_name, rid)
-                    return None
+                    return _reject(ReuseRejectReason.ON_ACTIVE_STACK)
 
             # 10. Compression lock must be acquirable WITHOUT blocking — a live compressor or
             #     rollback holding it means the instance is not quiescent (plan R3). Non-blocking
@@ -1005,7 +1017,7 @@ class SystemAgentMixin:
             if not inst._compression_lock.acquire(blocking=False):
                 logger.debug('[SECURITY_REUSE] %s ineligible (gate=compression_lock_busy, rid=%s): compression lock held',
                              instance_name, rid)
-                return None
+                return _reject(ReuseRejectReason.COMPRESSION_LOCK_BUSY)
 
             try:
                 # ── Reset to [system] — keep conversation[0] as the SAME object (the cache win) ──
@@ -1100,7 +1112,7 @@ class SystemAgentMixin:
         except Exception as e:  # noqa: BLE001 — reuse is best-effort; NEVER let it break the check
             logger.warning('[SECURITY_REUSE] acquire failed for %s (rid=%s): %s — falling back to fresh spawn',
                            instance_name, rid, e)
-            return None
+            return _reject(ReuseRejectReason.ACQUIRE_EXCEPTION)
 
         finally:
             # Release the claim on EVERY non-success exit. A `finally` runs even when a `return`

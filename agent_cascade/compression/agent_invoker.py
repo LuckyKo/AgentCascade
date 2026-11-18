@@ -662,7 +662,8 @@ def invoke_compression_agent(
     existing_summary: str | None = None,
     caller_name: str | None = None,
     want_caption: bool = False,
-) -> Tuple[str, str]:
+    keep_warm_session: bool = False,
+) -> Tuple[str, str] | Tuple[str, str, Any]:
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
@@ -686,6 +687,13 @@ def invoke_compression_agent(
         (thinking blocks stripped, end marker removed — safe to put back into model
         context) and ``caption`` is the optional one-line session caption parsed from
         the same line after the end marker ("" if absent/malformed).
+
+        When ``keep_warm_session`` is True AND the warm fixed-name instance actually served
+        the request, returns a 3-tuple ``(summary, caption, session)`` where ``session`` is
+        the still-held ``WarmCompressorSession``. Claim ownership transfers to the caller (the
+        finally below does NOT release it — the caller owns the single release). Otherwise the
+        return stays a plain 2-tuple; the final element is never present, so existing 2-tuple
+        callers are unaffected.
 
     Raises:
         RuntimeError: If the compression agent fails or returns an empty summary
@@ -739,6 +747,11 @@ def invoke_compression_agent(
     if max_retries < 1:
         raise RuntimeError(f"COMPRESSION_MAX_RETRIES must be >= 1, got {max_retries}")
 
+    # Set ONLY when keep_warm_session is requested AND the warm fixed-name instance served the
+    # request (success path); the finally then suppresses its release because claim ownership
+    # has transferred to the caller. Stays None on every failure/fresh-spawn path → released as usual.
+    _l1_session = None
+
     try:
         logger.info('Compression agent invoked via engine-based execution')
 
@@ -776,6 +789,17 @@ def invoke_compression_agent(
                     agent_pool, engine, comp_instance, comp_state_key, caller_name,
                     timeout_label='Compression',
                 )
+                # Warm-session hand-off: when keep_warm_session was requested AND the warm
+                # fixed-name instance (not the fresh per-op fallback) served the request, return
+                # the still-held session so the caller can thread L2 onto this instance's warm
+                # KV prefix instead of re-acquiring. The claim transfers to the caller; the
+                # finally below skips its release. Any other path stays a plain 2-tuple.
+                if (keep_warm_session and reuse_name is not None
+                        and comp_state_key == COMPRESSOR_WARM_NAME):
+                    from agent_cascade.compressor_reuse import WarmCompressorSession
+                    _l1_session = WarmCompressorSession(
+                        comp_instance, comp_state_key, rid, engine, agent_pool, caller_name)
+                    return summary, caption, _l1_session
                 return summary, caption
 
             except RuntimeError as e:
@@ -835,8 +859,11 @@ def invoke_compression_agent(
         except Exception as cleanup_err:
             logger.error(f"Compression cleanup failed for '{comp_state_key}': {cleanup_err}", exc_info=True)
         # Release the warm claim LAST, after instance_state cleanup (BUG_0330). rid-guarded
-        # no-op when the flag was OFF or the acquire fell back to a fresh spawn.
-        compressor_reuse.release_claim(reuse_name, rid)
+        # no-op when the flag was OFF or the acquire fell back to a fresh spawn. When a live
+        # WarmCompressorSession was handed to the caller, claim ownership transferred to it (it
+        # owns the single release) — suppress here so the claim is released exactly once.
+        if _l1_session is None:
+            compressor_reuse.release_claim(reuse_name, rid)
 
 
 def _format_summaries_with_spans(

@@ -233,6 +233,29 @@ class WarmCompressorSession:
                            self.actual_name, e)
             return None
 
+    def begin_task(self, task: str, caller: str) -> bool:
+        """Thread a NEW task onto this already-held warm instance WITHOUT re-acquiring the
+        (non-reentrant) claim — used to hand the L2 consolidation task to the L1 compression
+        instance so its warm KV-cache prefix is reused instead of spawning a fresh instance.
+
+        Reuses ``refine``'s exact safety guards: reset any TERMINATED state, then append-only
+        via ``_continue_reusable_system_agent_turn`` which only appends while we still own the
+        claim for ``self.rid`` and the instance is IDLE. Returns False (claim lost / not IDLE /
+        error) so the caller degrades to the fresh path; never raises.
+        """
+        if self._released:
+            return False
+        try:
+            from agent_cascade.compression.agent_invoker import (
+                _reset_terminated_compressor_for_retry)
+            _reset_terminated_compressor_for_retry(self.agent_pool, self.instance, self.actual_name)
+            return self.engine._continue_reusable_system_agent_turn(
+                self.instance, task, caller, rid=self.rid) is not None
+        except Exception as e:  # noqa: BLE001 — best-effort; caller degrades to the fresh path
+            logger.warning('[COMPRESSOR_REUSE] warm begin_task failed for %s: %s — degrading',
+                           self.actual_name, e)
+            return False
+
     def release(self) -> None:
         """Give the warm claim back. Idempotent — safe to call unconditionally in a finally."""
         if not self._released:
@@ -251,13 +274,13 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
                                marker_time_ranges=None):
     """Open a warm consolidation session (BUG_0330 §3f), or None to signal "run today's path".
 
-    Returns None when reuse is OFF (claim registry never touched), when the warm acquire misses
-    for a NON-transient reason (claim free but the instance is not seeded / ineligible), when the
-    bounded held-claim wait below expires, or on any error — in every case the caller's
-    byte-identical fresh-spawn path proceeds. A miss where the claim is HELD by an in-flight op
-    (e.g. a concurrent L1 base compression) is transient: BUG_0340 bounded-polls up to
-    COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS for it to free, then re-acquires, instead of immediately
-    fresh-spawning (which silently drops BUG_0330's KV-cache win). 0 disables the wait (byte-
+    Returns None when reuse is OFF (claim registry never touched), when the warm acquire reports a
+    permanent reason (only a fresh seed could fix it, which never happens here), when the bounded
+    wait below expires, or on any error — in every case the caller's byte-identical fresh-spawn
+    path proceeds. A miss reporting a transient reason (the warm instance is mid-run, its last
+    reader is still draining, or another op still owns the name) is bounded-waited up to
+    COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS and re-acquired whether or not the claim is currently
+    held; a permanent reason returns None immediately. 0 disables the wait (byte-
     identical to the immediate fresh-spawn fallback). Unlike acquire_compressor_agent there is NO
     fresh spawn fallback here: an un-ran orphan fresh instance would leak. On success the returned
     session already holds the claim and the consolidation task is already appended as the warm
@@ -274,37 +297,41 @@ def acquire_warm_consolidation(agent_pool, marker_summaries, caller_name: str,
         rid = uuid.uuid4().hex
         prompt = _build_consolidation_prompt(marker_summaries, marker_time_ranges)
         engine = ExecutionEngine(agent_pool)
+        from agent_cascade.reuse_reason import is_transient
+        reject_reason_out: list = []
         got = engine._acquire_reusable_system_agent(
             agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
-            task=prompt, caller=caller_name, rid=rid)
+            task=prompt, caller=caller_name, rid=rid, reject_reason_out=reject_reason_out)
 
-        # BUG_0340 bounded claim-wait. _acquire_reusable_system_agent releases its OWN claim on
-        # every internal failure, so after a miss claim_holder is non-None only when a DIFFERENT
-        # op genuinely holds the name (a transient in-flight L1/other run) — those are worth
-        # waiting on. A miss with a FREE claim (None) means the warm instance is ineligible /
-        # empty-after-release (not transient — seeding returns a hit): fall back now, never wait
-        # on it. A failed try_claim holds
-        # nothing, so each missed poll leaks nothing and this loop never releases a claim it did
-        # not acquire; the window is bounded, so a held name can never wedge Compressor_warm for
-        # the process lifetime. With wait disabled `wait_seconds > 0` short-circuits before
-        # touching claim_holder or sleeping — byte-identical to the immediate fallback.
+        # Bounded wait, reason-driven. _acquire_reusable_system_agent releases its
+        # OWN claim on every internal miss, so a FREE claim after a miss does NOT mean "give up":
+        # a miss reporting a transient reason — the warm instance is mid-run, its last reader is
+        # still draining, or another op still owns the name (a concurrent L1 compression) — IS
+        # worth waiting on. We re-acquire on a transient miss and stop the moment the latest
+        # reason turns permanent (a permanently-ineligible warm instance only a fresh seed can
+        # fix, which never happens here). The window is bounded, so a held name can never wedge
+        # Compressor_warm for the process lifetime. With wait disabled, `wait_seconds > 0`
+        # short-circuits before reading the reason or sleeping — byte-identical to the immediate
+        # fresh-spawn fallback.
+        def _latest_reason_is_transient() -> bool:
+            return bool(reject_reason_out) and is_transient(reject_reason_out[-1])
         wait_seconds = COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS
-        held = (not _is_acquire_hit(got) and wait_seconds > 0
-                and claim_holder(COMPRESSOR_WARM_NAME) is not None)
-        if held:
-            logger.debug('[COMPRESSOR_REUSE] warm claim held — bounded-waiting up to %.1fs '
-                         'for consolidation (rid=%s)', wait_seconds, rid)
+        if not _is_acquire_hit(got) and wait_seconds > 0 and _latest_reason_is_transient():
+            logger.debug('[COMPRESSOR_REUSE] warm acquire miss (reason=%s) — bounded-waiting up to '
+                         '%.1fs for consolidation (rid=%s)',
+                         reject_reason_out[-1].value, wait_seconds, rid)
             deadline = time.monotonic() + wait_seconds
             while not _is_acquire_hit(got):
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.1)
+                reject_reason_out.clear()
                 got = engine._acquire_reusable_system_agent(
                     agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
-                    task=prompt, caller=caller_name, rid=rid)
-                if not _is_acquire_hit(got) and claim_holder(COMPRESSOR_WARM_NAME) is None:
-                    # Holder released but we could not take it (now ineligible): no longer
-                    # transient — stop early rather than burn the remaining window.
+                    task=prompt, caller=caller_name, rid=rid, reject_reason_out=reject_reason_out)
+                if not _is_acquire_hit(got) and not _latest_reason_is_transient():
+                    # Still missing but no longer transient — stop early rather than burn the
+                    # remaining window on a condition waiting cannot fix.
                     break
             if not _is_acquire_hit(got):
                 logger.info('[COMPRESSOR_REUSE] warm acquire still unavailable after %.1fs '

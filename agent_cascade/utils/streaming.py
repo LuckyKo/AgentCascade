@@ -62,6 +62,27 @@ def stream_reader_in_flight(reader_done: Optional[threading.Event]) -> bool:
     return reader_done is not None and not reader_done.is_set()
 
 
+def instance_llm_in_flight(inst) -> bool:
+    """Single authoritative predicate: is this instance's last LLM stream still live?
+
+    The reader-completion Event (``inst._stream_reader_done``) wins whenever it is present:
+    an unset Event means a daemon reader is still parked on the endpoint (the instance must
+    not be reused/reclaimed); a set Event means the reader finished, which overrides a stale
+    ``_llm_call_active`` (that flag can stick True forever on an abandoned stream, so it must
+    never be the sole authority once a completed reader contradicts it). Only when NO reader
+    Event was published this run do we fall back to ``_llm_call_active`` as defence in depth.
+
+    Every reuse-gate read of "is the endpoint busy" goes through this predicate (Gate 4's
+    reclaim-skip and Gate 5's reject in ``system_agent``) so the three raw signals
+    (``_stream_reader_done``, ``_llm_call_active``) are never read ad hoc at a gate. The
+    deferred drop-exit release owner is the only writer that clears them.
+    """
+    reader_done = getattr(inst, '_stream_reader_done', None)
+    if reader_done is not None:
+        return not reader_done.is_set()
+    return bool(getattr(inst, '_llm_call_active', False))
+
+
 @contextlib.contextmanager
 def stream_total_deadline(deadline_monotonic: Optional[float]):
     """Scope an absolute ``time.monotonic()`` deadline onto the current call path.

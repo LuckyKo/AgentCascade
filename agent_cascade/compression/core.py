@@ -322,6 +322,7 @@ def _validate_and_reconsolidate(
 def _consolidate_markers(
     agent_pool,
     target_agent_name: str,
+    l1_session=None,
 ) -> None:
     """Post-compression hierarchical consolidation.
 
@@ -410,16 +411,32 @@ def _consolidate_markers(
                 logger.debug(f"Token count check for consolidation skipped (non-fatal): {e}")
 
         # ── Phase 2: LLM call OUTSIDE lock (long-running) ──
-        from agent_cascade.compression.agent_invoker import invoke_consolidation_agent
+        from agent_cascade.compression.agent_invoker import (
+            invoke_consolidation_agent, _build_consolidation_prompt)
         from agent_cascade import compressor_reuse
-        # Warm consolidation session (BUG_0330 §3f): holds the Compressor claim across Phase 2
-        # and the Phase-2.5 review retries so corrections carry the full context (no-drop).
-        # None (flag OFF / window-expiry / free-claim ineligible / any error) = byte-identical
-        # fresh-spawn path. A HELD claim is bounded-waited for (COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS),
-        # not returned as an immediate None.
-        warm_session = compressor_reuse.acquire_warm_consolidation(
-            agent_pool, summaries_to_consolidate, target_agent_name,
-            marker_time_ranges=summary_spans)
+        # When L1's compression reused the warm fixed-name instance, its session is
+        # threaded straight through and re-primed with the consolidation prompt (append-only, no
+        # re-claim — this process already holds the claim) so the warm KV prefix is reused instead
+        # of spawning a fresh Compressor. Priming reuses the shared prompt builder so the task is
+        # byte-identical to the fresh path. If priming fails (claim lost / instance not IDLE), the
+        # inherited session is released (so the non-reentrant claim frees) and we fall through to the
+        # normal bounded-wait warm acquire below.
+        warm_session = None
+        if l1_session is not None:
+            consolidation_prompt = _build_consolidation_prompt(
+                summaries_to_consolidate, summary_spans)
+            if l1_session.begin_task(consolidation_prompt, target_agent_name):
+                warm_session = l1_session
+            else:
+                l1_session.release()  # release before any re-acquire of the non-reentrant claim
+        if warm_session is None:
+            # Warm consolidation session (BUG_0330 §3f): holds the Compressor claim across Phase 2
+            # and the Phase-2.5 review retries so corrections carry the full context (no-drop).
+            # None (flag OFF / window-expiry / free-claim ineligible / any error) = byte-identical
+            # fresh-spawn path. A HELD claim is bounded-waited (COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS).
+            warm_session = compressor_reuse.acquire_warm_consolidation(
+                agent_pool, summaries_to_consolidate, target_agent_name,
+                marker_time_ranges=summary_spans)
         try:
             try:
                 consolidated_summary, _consolidation_caption = invoke_consolidation_agent(
@@ -452,9 +469,11 @@ def _consolidate_markers(
                 warm_session=warm_session,
             )
         finally:
-            # Release the warm claim exactly once, whatever path this took — including the
-            # early returns above (§3f F-4: a held claim must never wedge the warm instance).
-            if warm_session is not None:
+            # Release the warm claim exactly once on the self-acquired path. A THREADED L1 session
+            # (warm_session is l1_session) is owned by compress_context's finally and must NOT be
+            # released here — that would drop the claim mid-consolidation / double-release it.
+            # (release() is idempotent and rid-guarded, but skipping keeps single-ownership explicit.)
+            if warm_session is not None and warm_session is not l1_session:
                 warm_session.release()
 
         # ── Phase 3: Re-read + rebuild under lock (defensive against concurrent changes) ──
@@ -883,6 +902,11 @@ def compress_context(
     # body) and stored in log metadata for UI display. Manual/precomputed paths have
     # no caption — they produce a plain summary with an empty caption.
     generated_caption = ''
+    # Threaded warm-session from L1 (step 8) → L2 (step 14). Captured only when the warm fixed-name
+    # instance actually served the L1 compression; released exactly once in the finally covering
+    # step 14. Stays None for precomputed/manual/dry-run/flag-off/fresh-spawn paths (those return a
+    # plain 2-tuple), so those paths stay byte-identical.
+    l1_session = None
     if precomputed_summary:
         # Use a pre-generated summary (e.g., from /compress command after user approval)
         generated_summary = precomputed_summary.strip()
@@ -903,240 +927,259 @@ def compress_context(
 
             # invoke_compression_agent() handles retries internally (reuses the same
             # compressor instance and resends the prompt on retryable validation failures).
-            generated_summary, generated_caption = invoke_compression_agent(
+            # With keep_warm_session, the warm-served path returns a 3-tuple whose last element is
+            # the still-held WarmCompressorSession, so step 14 can thread L2 consolidation onto this
+            # instance's warm KV prefix. A flag-off / fresh-spawn path returns a plain 2-tuple even
+            # when keep_warm_session was requested, so unpack by length to stay byte-identical.
+            _comp_result = invoke_compression_agent(
                 agent_pool=agent_pool,
                 target_messages=target_messages,
                 existing_summary=existing_summary,
                 caller_name=target_agent_name,  # Pass actual instance name for slot management
                 want_caption=_want_caption,
+                keep_warm_session=(not dry_run),
             )
+            if (not dry_run) and len(_comp_result) == 3:
+                generated_summary, generated_caption, l1_session = _comp_result
+            else:
+                generated_summary, generated_caption = _comp_result
         except RuntimeError as e:
             logger.error(f"Compression Agent failed: {e}")
             return _compression_failure(f"Compression Agent failed: {e}", mode=mode)
-    # Validate we have a usable summary
-    if not generated_summary:
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error='Failed to obtain a valid summary',
-            mode=mode,
-        )
-
-    # ── 9. Build the marker message ──
-    # NOTE: the marker body contains ONLY the clean summary — the caption is parsed out
-    # of the compressor output above and must NEVER leak into this <context_summary>
-    # body (it would otherwise re-enter model context on future turns).
-    # Extract the timestamp interval from the compressed window for the header.
-    # Positional: start = ts of the first message in target_messages, end = ts of the
-    # last message. This reflects the actual chunk being summarized (no inheritance from
-    # a previous marker's creation time, which could cause inverted spans). Non-fatal: any
-    # failure falls back to a neutral "N messages summarized" header.
-    def _msg_ts(_msg):
-        ts = _msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None)
-        return float(ts) if ts is not None else None
-
-    def _is_marker(_msg):
-        role = get_message_role(_msg)
-        content = _msg.get('content', '') if isinstance(_msg, dict) else getattr(_msg, 'content', '')
-        return (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER))
-
     try:
-        # Start: first message's ts. If it happens to be a marker (whose creation-time ts
-        # is out of order with the chunk), fall back to the next non-marker message.
-        first_ts = _msg_ts(target_messages[0])
-        if first_ts is None or _is_marker(target_messages[0]):
-            for _m in target_messages:
-                if not _is_marker(_m):
-                    _t = _msg_ts(_m)
-                    if _t is not None:
-                        first_ts = _t
-                        break
-
-        # End: last message's ts. If it happens to be a marker, walk backwards.
-        last_ts = _msg_ts(target_messages[-1])
-        if last_ts is None or _is_marker(target_messages[-1]):
-            for _m in reversed(target_messages):
-                if not _is_marker(_m):
-                    _t = _msg_ts(_m)
-                    if _t is not None:
-                        last_ts = _t
-                        break
-    except Exception as e:
-        logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
-        first_ts, last_ts = None, None
-
-    # ── 8b. Extract the last supervisor task from the DISCARDED window (todo.md:143) ──
-    # NOTE: scans active_set[:target_discard_count], NOT target_messages. On a first
-    # compression target_messages prepends U0 (the original first user message, core.py step 6)
-    # purely so the Compressor can see the initial prompt — but U0 is permanently excluded from
-    # active_set and is NOT being discarded (it survives the trim untouched at index 1). Scanning
-    # target_messages here would both be wrong (U0 stays in the pool verbatim) and duplicate the
-    # first message inside the marker — exactly what todo.md:143 warns against. When U0 is the
-    # only task, this yields None and no section is emitted, which is correct.
-    last_task = extract_last_supervisor_task(active_set[:target_discard_count])
-
-    marker_message = build_marker_message(
-        generated_summary,
-        first_ts=first_ts,
-        last_ts=last_ts,
-        n_messages=len(target_messages),
-        last_task=last_task,
-    )
-
-    # Stamp the marker's completion ts at creation time. The marker is inserted via direct
-    # pool mutation (step 10 below), bypassing append_message — the only place normal
-    # messages get their Message.ts float. Without this, a repeat compression would read
-    # getattr(marker, 'ts', None) → None and fall back to re-parsing the marker's
-    # minute-granularity header text, losing precision on every hop. Idempotent: mirrors
-    # append_message's guard (a pre-stamped ts, e.g. from JSONL reload, is never reset).
-    if marker_message.ts is None:
-        marker_message.ts = time.time()
-
-    # ── 9b. Persist the session caption to log metadata (first meaningful one wins) ──
-    # In-memory only: set_caption() updates data["metadata"]["caption"] and the existing
-    # compression rewrite path (reset_history(rewrite=True) → _sync_marker_single_write,
-    # triggered by handler._sync_logger_after_compression) re-emits line 1 with it. No new
-    # full-file rewrite is added here. Skipped for dry-run (no pool/logger mutation).
-    if generated_caption and not dry_run:
-        try:
-            _cap_inst = agent_pool.get_instance(target_agent_name)
-            _agent_class = getattr(_cap_inst, 'agent_class', None) or target_agent_name
-            _log_inst = agent_pool.get_logger(target_agent_name, _agent_class)
-            _log_inst.set_caption(generated_caption)
-        except Exception as e:
-            logger.debug(f"Failed to set session caption in metadata (non-fatal): {e}")
-
-    # ── Dry run: return early with summary but don't mutate pool ──
-    if dry_run:
-        logger.info(f"Dry-run compression for agent '{target_agent_name}': "
-                    f"would discard {target_discard_count} messages.")
-        return CompressResult(
-            success=True,
-            summary_text=generated_summary,
-            marker_message=marker_message,
-            messages_discarded=target_discard_count,
-            tail_count=len(active_set) - target_discard_count,
-            error=None,
-            mode=mode,
-            tokens_before=total_tokens,
-            tokens_after=0,  # dry_run: no actual mutation happened
-        )
-
-    # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
-    # NOTE: This is single-threaded by design — forced compression halts all other agents
-    # before running, so no concurrent pool mutations can occur during this block.
-
-    # Reuse `history` snapshot from step 1 (single source of truth).
-    insert_pos = active_start_idx + target_discard_count
-
-    # Safety check: insert position must be after the SYSTEM message
-    if insert_pos < 1:
-        raise RuntimeError(f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
-                           f"pool state corrupted for agent '{target_agent_name}'")
-
-    # Safety check: verify first kept message is not a FUNCTION response (orphaned from its A).
-    # This catches desync between pool and active_set snapshot taken at step 1.
-    if insert_pos < len(history):
-        first_kept = history[insert_pos]
-        role = get_message_role(first_kept)
-        if role == FUNCTION:
+        # Validate we have a usable summary
+        if not generated_summary:
             return CompressResult(
                 success=False,
                 summary_text=None,
                 marker_message=None,
                 messages_discarded=0,
-                tail_count=len(active_set),
-                error=f"Compression marker would be inserted before a FUNCTION response at position "
-                f"{insert_pos} — pool/active-set desync detected. "
-                f"Discard count={target_discard_count}, active_start_idx={active_start_idx}, "
-                f"history_len={len(history)}",
+                tail_count=0,
+                error='Failed to obtain a valid summary',
                 mode=mode,
             )
 
-    # Atomic mutation via copy-and-replace: build new list and assign.
-    try:
-        new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
-        agent_pool.instance_conversations[target_agent_name] = new_history
-    except Exception as e:
-        # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
-        logger.error(f"Pool mutation during compression failed: {e}")
-        return CompressResult(
-            success=False,
-            summary_text=generated_summary,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error=f"Pool mutation failed: {e}",
-            mode=mode,
-        )
+        # ── 9. Build the marker message ──
+        # NOTE: the marker body contains ONLY the clean summary — the caption is parsed out
+        # of the compressor output above and must NEVER leak into this <context_summary>
+        # body (it would otherwise re-enter model context on future turns).
+        # Extract the timestamp interval from the compressed window for the header.
+        # Positional: start = ts of the first message in target_messages, end = ts of the
+        # last message. This reflects the actual chunk being summarized (no inheritance from
+        # a previous marker's creation time, which could cause inverted spans). Non-fatal: any
+        # failure falls back to a neutral "N messages summarized" header.
+        def _msg_ts(_msg):
+            ts = _msg.get('ts') if isinstance(_msg, dict) else getattr(_msg, 'ts', None)
+            return float(ts) if ts is not None else None
 
-    # Fix #5: Re-validate conversation length after mutation to detect concurrent modification
-    post_mutation_conv = agent_pool.get_conversation(target_agent_name)
-    if len(post_mutation_conv) != len(new_history):
-        logger.warning(f"Compression aborted for '{target_agent_name}': "
-                       f"conversation was modified during compression (race condition detected). "
-                       f"Expected length {len(new_history)}, got {len(post_mutation_conv)}.")
-        return CompressResult(
-            success=False,
-            summary_text=generated_summary,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error='Concurrent modification detected',
-            mode=mode,
-        )
+        def _is_marker(_msg):
+            role = get_message_role(_msg)
+            content = _msg.get('content', '') if isinstance(_msg, dict) else getattr(_msg, 'content', '')
+            return (role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER))
 
-    # ── 11. Calculate tail count and notify logger ──
-    tail_count = len(active_set) - target_discard_count
-    # NOTE: Logger sync is now handled by handler.py's _sync_logger_after_compression()
-    # which calls reset_history(conv, rewrite=True) for all compression paths.
-    # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
-
-    # ── 12. Calculate post-compression token count for telemetry (BUG 6 fix) ──
-    # Estimate tokens_after by counting tokens of the summary marker message
-    # plus the remaining tail messages (total_tokens - discarded_tokens + summary_tokens)
-    try:
-        # Count tokens in discarded messages
-        discarded_tokens = 0
-        for msg in active_set[:target_discard_count]:
-            if isinstance(msg, dict):
-                wrapped = Message(**msg)
-            else:
-                wrapped = msg
-            content = extract_text_from_message(wrapped, add_upload_info=True)
-            discarded_tokens += qwen_count(content)
-        # Count tokens in the marker/summary message that replaces them
-        summary_content = extract_text_from_message(marker_message, add_upload_info=True) if marker_message else ''
-        summary_tokens = qwen_count(summary_content) if summary_content else 0
-        tokens_after = max(total_tokens - discarded_tokens + summary_tokens, 0)
-    except Exception:
-        # Token counting is advisory — fall back to total_tokens estimate
-        tokens_after = total_tokens
-
-    # ── 13. Log the successful compression event ──
-    logger.info(f"Clean-trim compression: Discarded {target_discard_count} messages "
-                f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
-                f"Tokens: {total_tokens} -> {tokens_after}.")
-
-    # ── 14. Post-compression hierarchical consolidation check ──
-    if not dry_run:
         try:
-            from agent_cascade.agent_pool import AgentPool
-            from agent_cascade.settings import COMPRESSION_CONSOLIDATION_THRESHOLD
+            # Start: first message's ts. If it happens to be a marker (whose creation-time ts
+            # is out of order with the chunk), fall back to the next non-marker message.
+            first_ts = _msg_ts(target_messages[0])
+            if first_ts is None or _is_marker(target_messages[0]):
+                for _m in target_messages:
+                    if not _is_marker(_m):
+                        _t = _msg_ts(_m)
+                        if _t is not None:
+                            first_ts = _t
+                            break
 
-            post_history = agent_pool.get_conversation(target_agent_name)
-            marker_count = AgentPool.count_markers(post_history)
-
-            if marker_count >= COMPRESSION_CONSOLIDATION_THRESHOLD:
-                logger.info(f"Triggering hierarchical consolidation for '{target_agent_name}': "
-                            f"{marker_count} markers present, will consolidate oldest {marker_count - 1}")
-                _consolidate_markers(agent_pool, target_agent_name)
+            # End: last message's ts. If it happens to be a marker, walk backwards.
+            last_ts = _msg_ts(target_messages[-1])
+            if last_ts is None or _is_marker(target_messages[-1]):
+                for _m in reversed(target_messages):
+                    if not _is_marker(_m):
+                        _t = _msg_ts(_m)
+                        if _t is not None:
+                            last_ts = _t
+                            break
         except Exception as e:
-            logger.error(f"Hierarchical consolidation failed for '{target_agent_name}' (non-fatal): {e}. "
-                         f"Normal compression succeeded; markers will be consolidated on next cycle.")
+            logger.debug(f"Timestamp extraction for marker header failed (non-fatal): {e}")
+            first_ts, last_ts = None, None
+
+        # ── 8b. Extract the last supervisor task from the DISCARDED window (todo.md:143) ──
+        # NOTE: scans active_set[:target_discard_count], NOT target_messages. On a first
+        # compression target_messages prepends U0 (the original first user message, core.py step 6)
+        # purely so the Compressor can see the initial prompt — but U0 is permanently excluded from
+        # active_set and is NOT being discarded (it survives the trim untouched at index 1). Scanning
+        # target_messages here would both be wrong (U0 stays in the pool verbatim) and duplicate the
+        # first message inside the marker — exactly what todo.md:143 warns against. When U0 is the
+        # only task, this yields None and no section is emitted, which is correct.
+        last_task = extract_last_supervisor_task(active_set[:target_discard_count])
+
+        marker_message = build_marker_message(
+            generated_summary,
+            first_ts=first_ts,
+            last_ts=last_ts,
+            n_messages=len(target_messages),
+            last_task=last_task,
+        )
+
+        # Stamp the marker's completion ts at creation time. The marker is inserted via direct
+        # pool mutation (step 10 below), bypassing append_message — the only place normal
+        # messages get their Message.ts float. Without this, a repeat compression would read
+        # getattr(marker, 'ts', None) → None and fall back to re-parsing the marker's
+        # minute-granularity header text, losing precision on every hop. Idempotent: mirrors
+        # append_message's guard (a pre-stamped ts, e.g. from JSONL reload, is never reset).
+        if marker_message.ts is None:
+            marker_message.ts = time.time()
+
+        # ── 9b. Persist the session caption to log metadata (first meaningful one wins) ──
+        # In-memory only: set_caption() updates data["metadata"]["caption"] and the existing
+        # compression rewrite path (reset_history(rewrite=True) → _sync_marker_single_write,
+        # triggered by handler._sync_logger_after_compression) re-emits line 1 with it. No new
+        # full-file rewrite is added here. Skipped for dry-run (no pool/logger mutation).
+        if generated_caption and not dry_run:
+            try:
+                _cap_inst = agent_pool.get_instance(target_agent_name)
+                _agent_class = getattr(_cap_inst, 'agent_class', None) or target_agent_name
+                _log_inst = agent_pool.get_logger(target_agent_name, _agent_class)
+                _log_inst.set_caption(generated_caption)
+            except Exception as e:
+                logger.debug(f"Failed to set session caption in metadata (non-fatal): {e}")
+
+        # ── Dry run: return early with summary but don't mutate pool ──
+        if dry_run:
+            logger.info(f"Dry-run compression for agent '{target_agent_name}': "
+                        f"would discard {target_discard_count} messages.")
+            return CompressResult(
+                success=True,
+                summary_text=generated_summary,
+                marker_message=marker_message,
+                messages_discarded=target_discard_count,
+                tail_count=len(active_set) - target_discard_count,
+                error=None,
+                mode=mode,
+                tokens_before=total_tokens,
+                tokens_after=0,  # dry_run: no actual mutation happened
+            )
+
+        # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
+        # NOTE: This is single-threaded by design — forced compression halts all other agents
+        # before running, so no concurrent pool mutations can occur during this block.
+
+        # Reuse `history` snapshot from step 1 (single source of truth).
+        insert_pos = active_start_idx + target_discard_count
+
+        # Safety check: insert position must be after the SYSTEM message
+        if insert_pos < 1:
+            raise RuntimeError(f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
+                               f"pool state corrupted for agent '{target_agent_name}'")
+
+        # Safety check: verify first kept message is not a FUNCTION response (orphaned from its A).
+        # This catches desync between pool and active_set snapshot taken at step 1.
+        if insert_pos < len(history):
+            first_kept = history[insert_pos]
+            role = get_message_role(first_kept)
+            if role == FUNCTION:
+                return CompressResult(
+                    success=False,
+                    summary_text=None,
+                    marker_message=None,
+                    messages_discarded=0,
+                    tail_count=len(active_set),
+                    error=f"Compression marker would be inserted before a FUNCTION response at position "
+                    f"{insert_pos} — pool/active-set desync detected. "
+                    f"Discard count={target_discard_count}, active_start_idx={active_start_idx}, "
+                    f"history_len={len(history)}",
+                    mode=mode,
+                )
+
+        # Atomic mutation via copy-and-replace: build new list and assign.
+        try:
+            new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
+            agent_pool.instance_conversations[target_agent_name] = new_history
+        except Exception as e:
+            # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
+            logger.error(f"Pool mutation during compression failed: {e}")
+            return CompressResult(
+                success=False,
+                summary_text=generated_summary,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=0,
+                error=f"Pool mutation failed: {e}",
+                mode=mode,
+            )
+
+        # Fix #5: Re-validate conversation length after mutation to detect concurrent modification
+        post_mutation_conv = agent_pool.get_conversation(target_agent_name)
+        if len(post_mutation_conv) != len(new_history):
+            logger.warning(f"Compression aborted for '{target_agent_name}': "
+                           f"conversation was modified during compression (race condition detected). "
+                           f"Expected length {len(new_history)}, got {len(post_mutation_conv)}.")
+            return CompressResult(
+                success=False,
+                summary_text=generated_summary,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=0,
+                error='Concurrent modification detected',
+                mode=mode,
+            )
+
+        # ── 11. Calculate tail count and notify logger ──
+        tail_count = len(active_set) - target_discard_count
+        # NOTE: Logger sync is now handled by handler.py's _sync_logger_after_compression()
+        # which calls reset_history(conv, rewrite=True) for all compression paths.
+        # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
+
+        # ── 12. Calculate post-compression token count for telemetry (BUG 6 fix) ──
+        # Estimate tokens_after by counting tokens of the summary marker message
+        # plus the remaining tail messages (total_tokens - discarded_tokens + summary_tokens)
+        try:
+            # Count tokens in discarded messages
+            discarded_tokens = 0
+            for msg in active_set[:target_discard_count]:
+                if isinstance(msg, dict):
+                    wrapped = Message(**msg)
+                else:
+                    wrapped = msg
+                content = extract_text_from_message(wrapped, add_upload_info=True)
+                discarded_tokens += qwen_count(content)
+            # Count tokens in the marker/summary message that replaces them
+            summary_content = extract_text_from_message(marker_message, add_upload_info=True) if marker_message else ''
+            summary_tokens = qwen_count(summary_content) if summary_content else 0
+            tokens_after = max(total_tokens - discarded_tokens + summary_tokens, 0)
+        except Exception:
+            # Token counting is advisory — fall back to total_tokens estimate
+            tokens_after = total_tokens
+
+        # ── 13. Log the successful compression event ──
+        logger.info(f"Clean-trim compression: Discarded {target_discard_count} messages "
+                    f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
+                    f"Tokens: {total_tokens} -> {tokens_after}.")
+
+        # ── 14. Post-compression hierarchical consolidation check ──
+        if not dry_run:
+            try:
+                from agent_cascade.agent_pool import AgentPool
+                from agent_cascade.settings import COMPRESSION_CONSOLIDATION_THRESHOLD
+
+                post_history = agent_pool.get_conversation(target_agent_name)
+                marker_count = AgentPool.count_markers(post_history)
+
+                if marker_count >= COMPRESSION_CONSOLIDATION_THRESHOLD:
+                    logger.info(f"Triggering hierarchical consolidation for '{target_agent_name}': "
+                                f"{marker_count} markers present, will consolidate oldest {marker_count - 1}")
+                    _consolidate_markers(agent_pool, target_agent_name, l1_session=l1_session)
+            except Exception as e:
+                logger.error(f"Hierarchical consolidation failed for '{target_agent_name}' (non-fatal): {e}. "
+                             f"Normal compression succeeded; markers will be consolidated on next cycle.")
+    finally:
+        # Threaded L1 warm-session: release exactly once on every path from capture (step 8)
+        # to consolidation (step 14) — including the summary-validation / pool-mutation /
+        # concurrent-modification early returns, the step-14 skip (marker_count < threshold),
+        # and any exception. _consolidate_markers does NOT release a threaded session, so this
+        # is the single owner of its release. No-op when l1_session is None (dry-run / manual /
+        # precomputed / flag-off / fresh-spawn paths).
+        if l1_session is not None:
+            l1_session.release()
 
     # ── 15. Memory-hint state reset (feature: memory_hint, plan §5.2) ────────
     # On a real (non-dry-run) success, clear the target instance's read-set + cooldown

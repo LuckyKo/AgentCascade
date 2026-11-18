@@ -236,6 +236,69 @@ def _acquire(engine, name=COMPRESSOR_WARM_NAME, task='summarize', caller='Maine'
         agent_class=agent_class, instance_name=name, task=task, caller=caller, rid=rid)
 
 
+class TestGateRejectReasonSink:
+    """The shared reuse gate must record WHY it missed via the ``reject_reason_out`` sink, and
+    the bounded-wait treats transient reasons differently from permanent ones. Drives the real
+    ``_acquire_reusable_system_agent`` (gate boundary), not the acquire helper."""
+
+    def setup_method(self):
+        compressor_reuse._clear_all()
+
+    def teardown_method(self):
+        compressor_reuse._clear_all()
+
+    @staticmethod
+    def _gate(warm, rid='caller_rid'):
+        from agent_cascade.reuse_reason import is_transient
+        engine = _make_engine(_make_pool(warm))
+        sink = []
+        got = engine._acquire_reusable_system_agent(
+            agent_class='Compressor', instance_name=COMPRESSOR_WARM_NAME,
+            task='summarize', caller='Maine', rid=rid, reject_reason_out=sink)
+        return got, (sink[0] if sink else None), is_transient
+
+    def test_missing_gate_records_distinct_non_none_reason(self):
+        # A miss must record EXACTLY one reason (sink appended once) — never None/empty.
+        warm = _make_warm_compressor()
+        warm.agent_class = 'Admin'  # permanent: another class owns the fixed name
+        got, reason, _ = self._gate(warm)
+        assert got is None
+        assert reason is not None, 'a miss must record a reason in the sink'
+        from agent_cascade.reuse_reason import ReuseRejectReason
+        assert reason == ReuseRejectReason.CLASS_MISMATCH
+
+    def test_transient_vs_permanent_classification(self):
+        from agent_cascade.reuse_reason import ReuseRejectReason, is_transient
+        assert is_transient(ReuseRejectReason.CLAIM_HELD) is True
+        assert is_transient(ReuseRejectReason.LIVE_LLM_STREAM) is True
+        assert is_transient(ReuseRejectReason.CLASS_MISMATCH) is False
+
+    def test_claim_held_miss_is_transient(self):
+        # Concurrent holder owns the claim -> CLAIM_HELD, worth bounded-waiting on.
+        warm = _make_warm_compressor()
+        compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, 'owner_rid')
+        got, reason, is_transient = self._gate(warm)
+        assert got is None
+        assert reason is not None and is_transient(reason) is True
+
+    def test_live_stream_miss_is_transient(self):
+        # Eligible warm instance still mid-read (reader Event present-and-unset) -> LIVE_LLM_STREAM,
+        # transient: the bounded wait must retry rather than fresh-spawn.
+        warm = _make_warm_compressor()
+        warm._stream_reader_done = threading.Event()  # present-and-unset => in flight
+        got, reason, is_transient = self._gate(warm)
+        assert got is None
+        assert reason is not None and is_transient(reason) is True
+
+    def test_class_mismatch_miss_is_permanent(self):
+        # Wrong owner class can only be fixed by a fresh seed -> permanent, stop-early.
+        warm = _make_warm_compressor()
+        warm.agent_class = 'Admin'
+        got, reason, is_transient = self._gate(warm)
+        assert got is None
+        assert reason is not None and is_transient(reason) is False
+
+
 class TestEngineWarmAcquireCompressor:
     def setup_method(self):
         compressor_reuse._clear_all()
