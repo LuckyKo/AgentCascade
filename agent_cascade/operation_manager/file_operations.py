@@ -28,7 +28,7 @@ _SIZE_UNITS = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
 
 # Cap on files counted by _compute_scope_info for directory scope reporting.
 # Prevents rglob('*') from walking arbitrarily large trees on the approval
-# critical path (A5). Only delete_file and copy_file use this helper.
+# critical path (A5). Only copy_file uses this helper.
 _SCOPE_INFO_FILE_CAP = 1000
 
 # Default cap on entries rendered by list_dir. Also used when a caller supplies an
@@ -981,7 +981,7 @@ def _edit_validate_indentation_consistency(content: str, file_path: str) -> list
             threshold_val = 16
 
         for j in range(1, len(indent_widths)):
-            prev_line_num, prev_w = indent_widths[j - 1]
+            _, prev_w = indent_widths[j - 1]
             curr_line_num, curr_w = indent_widths[j]
             diff = abs(curr_w - prev_w)
             if diff > threshold_val:
@@ -2531,7 +2531,7 @@ class FileOpsMixin:
                 return "ERROR: The 'old_content' contains only whitespace. Heuristic match mode requires at least some non-whitespace content to match."
 
             file_line_map = {}
-            for list_idx, (orig_idx, norm) in enumerate(file_line_info):
+            for list_idx, (_orig_idx, norm) in enumerate(file_line_info):
                 if norm not in file_line_map:
                     file_line_map[norm] = []
                 file_line_map[norm].append(list_idx)
@@ -3655,7 +3655,6 @@ class FileOpsMixin:
 
             # Sanity warning for large uniform indent shifts (high changed_count relative to range)
             if uniform_shift_info and total_in_range > 0:
-                _, shift_amt = uniform_shift_info
                 ratio = changed_count / total_in_range
                 if ratio > 0.7:
                     res_msg += f"\n(uniform indent shift — confirm block boundaries are intended)"

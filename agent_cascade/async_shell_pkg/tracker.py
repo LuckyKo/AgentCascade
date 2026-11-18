@@ -56,7 +56,7 @@ class _PendingSpawn:
     stdout = None
     stderr = None
 
-    def poll(self):
+    def poll(self) -> None:
         """Return None to indicate the real process has not started yet."""
         return None
 
@@ -92,7 +92,7 @@ COMPLETED_RUNS_MAX_ENTRIES = 64
 COMPLETED_RUNS_TTL = 300.0  # seconds
 
 
-def _atexit_kill_all_trackers():
+def _atexit_kill_all_trackers() -> None:
     """Single process-wide atexit hook: kill live tasks in every tracker instance."""
     for tracker in list(_ATRACKERS):
         try:
@@ -210,7 +210,7 @@ class AsyncShellTracker:
         _ATRACKERS.append(self)
 
     # ────────────────────────────────────────────────────────────────
-    def _atexit_kill_all(self):
+    def _atexit_kill_all(self) -> None:
         """Interpreter-shutdown safety net: kill every still-running tracked task.
 
         If the owning process (e.g. a pytest-xdist worker) dies without calling
@@ -576,6 +576,34 @@ class AsyncShellTracker:
         return '\n'.join(output_lines) if output_lines else ''
 
     # ────────────────────────────────────────────────────────────────
+    def _truncate_output(self, output_text: str, agent_name: str, where: str) -> str:
+        """Truncate output text to shell_char_limit via mid-mode spillover.
+
+        Shared by _send_heartbeat, _get_remaining_output_text and get_status.
+        Returns the text unchanged when shell_char_limit is disabled, the pool has
+        no operation_manager/base_dir, or truncate_with_spillover raises — a
+        truncation failure must never break the caller, so the raw text is always
+        returned. `where` labels the call site in the debug log only.
+        """
+        char_limit = self._get_shell_char_limit()
+        if char_limit > 0:
+            try:
+                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
+                    self._pool, 'operation_manager') else None
+                if base_dir:
+                    output_text = truncate_with_spillover(
+                        output_text,
+                        char_limit,
+                        instance_name=agent_name,
+                        tool_name=self._SPILLOVER_TOOL_NAME,
+                        base_dir=base_dir,
+                        operation_mode='mid',
+                    )
+            except Exception as e:
+                logger.debug(f"[AsyncShell] truncate_with_spillover failed in {where} for {agent_name}: {e}")
+        return output_text
+
+    # ────────────────────────────────────────────────────────────────
     def _spawn_process(self, agent_name: str, tool_id: int, command: str, cwd: Optional[str]) -> 'AsyncShellTask':
         """Launch the subprocess and configure pipe drain threads.
 
@@ -672,15 +700,8 @@ class AsyncShellTracker:
                         task.process = None  # Revert placeholder
                 # The spawn thread may still be running. Join briefly; if it
                 # created a process in the meantime, kill it to avoid orphans.
-                spawn_thread.join(timeout=5)
-                orphan_proc = spawn_result.get('proc')
-                if orphan_proc is not None:
-                    try:
-                        self._kill_process_tree(orphan_proc, agent_name, tool_id)
-                    except Exception as kill_err:
-                        logger.warning(f"[AsyncShell] Failed to kill orphaned spawn process "
-                                       f"for {agent_name} tool_id={tool_id}: {kill_err}")
-                elif spawn_thread.is_alive():
+                self._recover_orphaned_spawn(spawn_result, spawn_thread, agent_name, tool_id)
+                if spawn_result.get('proc') is None and spawn_thread.is_alive():
                     logger.warning(f"[AsyncShell] Spawn thread for {agent_name} tool_id={tool_id} "
                                    f"did not finish after timeout — daemon thread will be abandoned "
                                    f"(it dies at interpreter exit)")
@@ -695,14 +716,7 @@ class AsyncShellTracker:
                     task.process = None
             # Join the spawn thread and clean up a process that may have been
             # created before the error was recorded (defensive; rare).
-            spawn_thread.join(timeout=5)
-            orphan_proc = spawn_result.get('proc')
-            if orphan_proc is not None:
-                try:
-                    self._kill_process_tree(orphan_proc, agent_name, tool_id)
-                except Exception as kill_err:
-                    logger.warning(f"[AsyncShell] Failed to kill orphaned spawn process "
-                                   f"for {agent_name} tool_id={tool_id}: {kill_err}")
+            self._recover_orphaned_spawn(spawn_result, spawn_thread, agent_name, tool_id)
             raise spawn_result['error']
         proc = spawn_result['proc']
 
@@ -771,6 +785,25 @@ class AsyncShellTracker:
             task._stderr_lock = stderr_lock
 
         return task
+
+    # ────────────────────────────────────────────────────────────────
+    def _recover_orphaned_spawn(self, spawn_result, spawn_thread, agent_name: str, tool_id: int) -> None:
+        """Join the off-thread spawn and kill a late-arriving orphan, best-effort.
+
+        Shared recovery leaf for the spawn-timeout and spawn-error branches of
+        ``_spawn_process``: join the spawn thread briefly, then force-kill any
+        process that appeared while we were waiting so we never leak an orphan.
+        Each caller keeps its own branch-specific follow-up (abandon-log +
+        ``RuntimeError`` on timeout; re-raise of the recorded error on failure).
+        """
+        spawn_thread.join(timeout=5)
+        orphan_proc = spawn_result.get('proc')
+        if orphan_proc is not None:
+            try:
+                self._kill_process_tree(orphan_proc, agent_name, tool_id)
+            except Exception as kill_err:
+                logger.warning(f"[AsyncShell] Failed to kill orphaned spawn process "
+                               f"for {agent_name} tool_id={tool_id}: {kill_err}")
 
     # ────────────────────────────────────────────────────────────────
     def _poll_loop(self, agent_name: str, tool_id: int, proc: subprocess.Popen, task: 'AsyncShellTask',
@@ -869,18 +902,6 @@ class AsyncShellTracker:
 
         return timed_out
 
-    # ────────────────────────────────────────────────────────────────
-    def _wait_for_completion(self, proc: subprocess.Popen, task: 'AsyncShellTask') -> None:
-        """Wait for process to finish and capture return code.
-
-        Args:
-            proc: Popen handle for the running subprocess.
-            task: AsyncShellTask being tracked.
-        """
-        if proc.returncode is not None:
-            with task._lock:
-                task.return_code = proc.returncode
-
     @staticmethod
     def _cleanup_viewer(viewer: Optional[subprocess.Popen], tool_id: int) -> None:
         """Wait for viewer to exit naturally, force-kill if it doesn't.
@@ -896,24 +917,12 @@ class AsyncShellTracker:
         except subprocess.TimeoutExpired:
             # Viewer didn't exit in time — kill it directly to avoid orphaned processes.
             if viewer.poll() is None:
-                try:
-                    if ON_WINDOWS:
-                        subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
-                            capture_output=True,
-                            timeout=5,
-                            text=True,
-                        )
-                    else:
-                        viewer.kill()
-                    logger.debug(f"[AsyncShell] Killed viewer PID {viewer.pid}")
-                except Exception as e:
-                    logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
+                AsyncShellTracker._kill_viewer_now(viewer)
         except Exception as e:
             logger.debug(f"[AsyncShell] Viewer wait failed for tool_id={tool_id}: {e}")
 
     # ────────────────────────────────────────────────────────────────
-    def _track_task(self, agent_name: str, tool_id: int, command: str, cwd: Optional[str]):
+    def _track_task(self, agent_name: str, tool_id: int, command: str, cwd: Optional[str]) -> None:
         """Track a single shell task from launch to completion.
 
         This runs in its own thread and handles:
@@ -938,8 +947,6 @@ class AsyncShellTracker:
         timed_out = False  # Ensure defined even if exception occurs before _poll_loop
 
         try:
-            command
-
             # ── Spawn process and pipe drain threads ────────────────
             self._spawn_process(agent_name, tool_id, command, cwd)
 
@@ -1091,6 +1098,30 @@ class AsyncShellTracker:
                         del self._tasks[agent_name]
 
     # ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _kill_viewer_now(viewer: 'subprocess.Popen') -> None:
+        """Force-kill a console viewer process and log the outcome.
+
+        Shared kill leaf for _cleanup_viewer and _kill_viewer_process. Callers
+        keep their own wait/alive guard; this performs the kill (``taskkill /F /T``
+        on Windows, ``viewer.kill()`` elsewhere) and logs debug success/failure so
+        the two call sites cannot drift apart.
+        """
+        try:
+            if ON_WINDOWS:
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
+                    capture_output=True,
+                    timeout=5,
+                    text=True,
+                )
+            else:
+                viewer.kill()
+            logger.debug(f"[AsyncShell] Killed viewer PID {viewer.pid}")
+        except Exception as e:
+            logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
+
+    # ────────────────────────────────────────────────────────────────
     def _kill_viewer_process(self, task: 'AsyncShellTask') -> None:
         """Atomically retrieve and kill the viewer process under the task's lock.
 
@@ -1105,19 +1136,7 @@ class AsyncShellTracker:
             task.viewer_process = None  # Reset immediately to avoid re-kill race
 
         if viewer and viewer.poll() is None:
-            try:
-                if ON_WINDOWS:
-                    subprocess.run(
-                        ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
-                        capture_output=True,
-                        timeout=5,
-                        text=True,
-                    )
-                else:
-                    viewer.kill()
-                logger.debug(f"[AsyncShell] Killed viewer PID {viewer.pid}")
-            except Exception as e:
-                logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
+            AsyncShellTracker._kill_viewer_now(viewer)
 
     # ────────────────────────────────────────────────────────────────
     def _get_windows_descendant_pids(self, parent_pid: int) -> List[int]:
@@ -1223,7 +1242,7 @@ class AsyncShellTracker:
         return alive
 
     # ────────────────────────────────────────────────────────────────
-    def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int):
+    def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int) -> None:
         """Kill the main process tree and its associated viewer process (if any).
 
         Terminates the primary shell subprocess plus all descendants via taskkill/killpg.
@@ -1337,7 +1356,7 @@ class AsyncShellTracker:
         return combined
 
     # ────────────────────────────────────────────────────────────────
-    def _send_heartbeat(self, agent_name: str, tool_id: int):
+    def _send_heartbeat(self, agent_name: str, tool_id: int) -> None:
         """Send a periodic heartbeat with new output since last heartbeat.
 
         Reads accumulated stdout/stderr lines from the task that haven't been sent yet,
@@ -1389,22 +1408,7 @@ class AsyncShellTracker:
         line_count = len(output_text.split('\n'))
 
         # Truncate to shell_char_limit from config (same as sync mode)
-        char_limit = self._get_shell_char_limit()
-        if char_limit > 0:
-            try:
-                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
-                    self._pool, 'operation_manager') else None
-                if base_dir:
-                    output_text = truncate_with_spillover(
-                        output_text,
-                        char_limit,
-                        instance_name=agent_name,
-                        tool_name=self._SPILLOVER_TOOL_NAME,
-                        base_dir=base_dir,
-                        operation_mode='mid',
-                    )
-            except Exception as e:
-                logger.debug(f"[AsyncShell] truncate_with_spillover failed in heartbeat for {agent_name}: {e}")
+        output_text = self._truncate_output(output_text, agent_name, 'heartbeat')
 
         msg = (f"⟨{self._TOOL_NAME} heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | "
                f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
@@ -1438,22 +1442,7 @@ class AsyncShellTracker:
         output_text = self._format_output_text(remaining)
 
         # Truncate large remaining output using mid-truncation with spillover
-        char_limit = self._get_shell_char_limit()
-        if char_limit > 0:
-            try:
-                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
-                    self._pool, 'operation_manager') else None
-                if base_dir:
-                    output_text = truncate_with_spillover(
-                        output_text,
-                        char_limit,
-                        instance_name=agent_name,
-                        tool_name=self._SPILLOVER_TOOL_NAME,
-                        base_dir=base_dir,
-                        operation_mode='mid',
-                    )
-            except Exception as e:
-                logger.debug(f"[AsyncShell] truncate_with_spillover failed in remaining output for {agent_name}: {e}")
+        output_text = self._truncate_output(output_text, agent_name, 'remaining output')
 
         return output_text or None
 
@@ -1533,7 +1522,7 @@ class AsyncShellTracker:
         tool_id: int,
         timed_out: bool = False,
         error: Optional[str] = None,
-    ):
+    ) -> None:
         """Send the final completion message to the agent.
 
         Used by the exception path in _track_task (error=...) and any caller that
@@ -1580,7 +1569,7 @@ class AsyncShellTracker:
             task.completion_delivered = True
 
     # ────────────────────────────────────────────────────────────────
-    def _enqueue(self, agent_name: str, text: str):
+    def _enqueue(self, agent_name: str, text: str) -> None:
         """Inject a message into the agent's queue via the pool."""
         if self._pool:
             try:
@@ -1829,22 +1818,7 @@ class AsyncShellTracker:
             output_text = self._format_output_text(consumed_lines)
 
             # Truncate large outputs using mid-truncation with spillover
-            char_limit = self._get_shell_char_limit()
-            if char_limit > 0:
-                try:
-                    base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(
-                        self._pool, 'operation_manager') else None
-                    if base_dir:
-                        output_text = truncate_with_spillover(
-                            output_text,
-                            char_limit,
-                            instance_name=agent_name,
-                            tool_name=self._SPILLOVER_TOOL_NAME,
-                            base_dir=base_dir,
-                            operation_mode='mid',
-                        )
-                except Exception as e:
-                    logger.debug(f"[AsyncShell] truncate_with_spillover failed in get_status for {agent_name}: {e}")
+            output_text = self._truncate_output(output_text, agent_name, 'get_status')
 
             msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
         else:
