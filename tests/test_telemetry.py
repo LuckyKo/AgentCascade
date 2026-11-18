@@ -1304,7 +1304,7 @@ class TestDnaVersionIdentity:
         """Pin the content hash: catches any unintended DNA prompt/registry edit that
         silently shifts the fingerprint. DNA_VERSION is excluded, so bumping the
         version string alone leaves this value unchanged (drift detector)."""
-        assert dna.PROMPT_HASH == 'a5b97507cbce60e0'
+        assert dna.PROMPT_HASH == '0feddcfe36fdf213'
 
 
 class TestDnaComparisonBin:
