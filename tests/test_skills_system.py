@@ -2145,7 +2145,8 @@ def _make_load_pool(manager, inst):
     # actual load path. The real hermetic manager supplies enable_skill for the disabled-but-
     # servable case. Local import keeps the top-level import block untouched.
     from agent_cascade.pool.core import AgentPool
-    pool.inject_skill = lambda agent_name, skill_name: AgentPool.inject_skill(pool, agent_name, skill_name)
+    pool.inject_skill = lambda agent_name, skill_name, agent_selected=False: AgentPool.inject_skill(
+        pool, agent_name, skill_name, agent_selected=agent_selected)
     return pool, enqueued
 
 

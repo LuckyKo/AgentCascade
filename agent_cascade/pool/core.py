@@ -769,10 +769,16 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 indices.append(i)
         return indices
 
-    def inject_skill(self, agent_name: str, skill_name: str) -> tuple:
+    def inject_skill(self, agent_name: str, skill_name: str,
+                     agent_selected: bool = False) -> tuple:
         """Inject *skill_name*'s full instructions into *agent_name*'s conversation as a
         USER message — the single source of truth shared by the ``load_skill`` tool and
         the memory-hint auto-loader (BUG_0263).
+
+        Args:
+            agent_selected: When True, this inject is a DELIBERATE choice (the
+                ``load_skill`` tool), so the load also bumps ``agent_selected_loads``
+                (BUG_0356). The memory-hint auto-loader leaves it False (harness-driven).
 
         Performs the whole per-skill job: resolve instance + ``skill_manager`` ->
         ``load_full_instructions`` -> re-activate a previously-disabled skill -> dedup
@@ -810,7 +816,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
         # Load instructions (mirrors load_skill: exact match then case-insensitive fallback).
         try:
-            body = skill_manager.load_full_instructions(skill_name)
+            body = skill_manager.load_full_instructions(skill_name, agent_selected=agent_selected)
         except Exception as e:  # noqa: BLE001 — surface as failed, never crash the caller
             logger.warning("[SKILLS] inject_skill: error loading skill '%s': %s", skill_name, e)
             return ('failed', False)

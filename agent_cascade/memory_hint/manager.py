@@ -197,10 +197,12 @@ _AUTOLOAD_FAILURE_LOCK = threading.Lock()
 def _bandit_posterior(loads: int, hints: int, pbar: float, m0: float) -> tuple:
     """Beta posterior ``(a, b)`` for a skill from its ledger pair (plan §2.1).
 
-    ``successes`` are CLIPPED to trials: ``s = min(loads, hints)``. This clip is mandatory —
-    ``total_loads`` is a SUPERSET of hint-driven loads (it also counts init AUTO + advisor +
-    explicit ``load_skill`` loads), so an unclipped ``hints - loads`` can go negative and
-    yield a malformed Beta with ``b < 0`` (observed on-disk: loads≈205 / hints=73).
+    ``successes`` are CLIPPED to trials: ``s = min(loads, hints)``. ``loads`` is the
+    ``agent_selected_loads`` subset (deliberate ``load_skill`` / explicit-list loads only —
+    the feeders no longer pass the ``total_loads`` superset, BUG_0356). The clip is kept
+    defensively: it is a no-op once ``agent_selected_loads ≤ hints`` and guards against any
+    future superset regression that would make ``hints - loads`` go negative (a malformed
+    Beta with ``b < 0``; observed on-disk: loads≈205 / hints=73).
     With the clip ``b = m0·(1−p̄) + (hints − s) ≥ m0·(1−p̄) ≥ 0`` (degenerate ``b = 0`` only
     when ``p̄ = 1.0`` and loads ≥ hints, where ``_sample_beta`` returns the posterior mean).
 
@@ -643,7 +645,7 @@ class MemoryHintManager:
                 hints = int(entry.get('hints', 0) or 0)
                 if hints <= 0:
                     continue
-                loads = int(entry.get('total_loads', 0) or 0)
+                loads = int(entry.get('agent_selected_loads', 0) or 0)   # BUG_0356: deliberate loads
                 num += loads if loads < hints else hints   # clip to trials, same as posterior
                 den += hints
         except Exception as e:  # noqa: BLE001 — best-effort: unreadable ledger → neutral
@@ -1432,7 +1434,8 @@ class MemoryHintManager:
             # ── Thompson-Sampling value re-rank (self-adapting) — per-candidate math now
             # shared with the memory pipeline via _value_rank (BUG_0316/0317); behaviour is
             # byte-identical to the pre-extraction block. posterior Beta(m0·p̄+s, m0·(1−p̄)+f),
-            # s=min(loads,hints) (clipped: total_loads is a superset). Draw θ once, modulate by
+            # s=min(loads,hints) (kept defensively: loads is now the agent_selected_loads
+            # subset, not the total_loads superset — BUG_0356). Draw θ once, modulate by
             # M(θ)=clamp(θ/p̄, M_FLOOR, 1/M_FLOOR), blend W=min(1,weight), admit θ≥θ_min.
             # self-augmentation neutral (never value-ranked). Admitted-empty ⇒ raw order (never blank).
             try:
@@ -1457,7 +1460,7 @@ class MemoryHintManager:
                 if not isinstance(entry, dict):            # corrupt/mock ROW → prior (0, 0)
                     entry = {}
                 try:
-                    return (int(entry.get('total_loads', 0) or 0),
+                    return (int(entry.get('agent_selected_loads', 0) or 0),   # BUG_0356: deliberate loads
                             int(entry.get('hints', 0) or 0))
                 except (TypeError, ValueError):            # malformed field → prior (0, 0)
                     return 0, 0
@@ -1480,7 +1483,11 @@ class MemoryHintManager:
             def _loads_hints(nm):
                 entry = metrics.get(nm) or {}
                 try:
-                    return int(entry.get('total_loads', 0) or 0), int(entry.get('hints', 0) or 0)
+                    # BUG_0356: precision reads the DELIBERATE agent_selected_loads counter
+                    # (the subset of total_loads the agent/orchestrator chose on purpose), not
+                    # the total_loads superset — otherwise harness auto-loads keep a generic
+                    # skill at w≈1 and defeat the "shown-often-but-not-loaded" demotion.
+                    return int(entry.get('agent_selected_loads', 0) or 0), int(entry.get('hints', 0) or 0)
                 except (TypeError, ValueError):            # malformed field → neutral (0, 0)
                     return 0, 0
 

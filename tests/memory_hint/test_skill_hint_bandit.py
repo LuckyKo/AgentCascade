@@ -7,7 +7,7 @@ byte-identically as an ``elif`` fallback. The tests mirror the BUG_0189 recipe (
 ``get_metrics``) so the assertion is purely about the bandit.
 
 Bandit math (per candidate, O(1), over the ≤10 post-gate candidates):
-    s   = min(total_loads, hints)              # CLIPPED successes (total_loads is a superset)
+    s   = min(agent_selected_loads, hints)      # CLIPPED successes (deliberate loads; BUG_0356)
     f   = hints - s
     a,b = _bandit_posterior(loads, hints, p̄, m0) = (m0·p̄ + s,  m0·(1−p̄) + f)   # β ≥ m0·(1−p̄) > 0
     θ   ~ Beta(a, b)                            # one Thompson-Sampling draw
@@ -159,8 +159,8 @@ def test_default_off_runs_gate4_precision_fallback(tmp_path, monkeypatch):
     LOADED = 'skill-really-gets-loaded'
     sm = _StubSkillManager(
         matches=[(NEVER, 0.55), (LOADED, 0.40)],
-        metrics={NEVER: {'total_loads': 0, 'hints': 40},
-                 LOADED: {'total_loads': 10, 'hints': 10}},
+        metrics={NEVER: {'agent_selected_loads': 0, 'hints': 40},
+                 LOADED: {'agent_selected_loads': 10, 'hints': 10}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -177,7 +177,7 @@ def test_default_off_all_off_is_raw_order_byte_identical(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_mod, 'SKILL_PRECISION_WEIGHT', 0)
     sm = _StubSkillManager(
         matches=[('a', 0.55), ('b', 0.45), ('c', 0.40)],
-        metrics={'a': {'total_loads': 0, 'hints': 9999}, 'b': {'total_loads': 50, 'hints': 1}},
+        metrics={'a': {'agent_selected_loads': 0, 'hints': 9999}, 'b': {'agent_selected_loads': 50, 'hints': 1}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -196,7 +196,7 @@ def test_bandit_promotes_high_value_above_zero_value_same_relevance(tmp_path, mo
     B = 'skill-zero-value'
     sm = _StubSkillManager(
         matches=[(B, 0.50), (A, 0.50)],     # raw order puts B (the zero-value one) first
-        metrics={A: {'total_loads': 20, 'hints': 20}, B: {'total_loads': 0, 'hints': 20}},
+        metrics={A: {'agent_selected_loads': 20, 'hints': 20}, B: {'agent_selected_loads': 0, 'hints': 20}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -206,15 +206,39 @@ def test_bandit_promotes_high_value_above_zero_value_same_relevance(tmp_path, mo
     assert out != [B, A], 'raw order was the opposite — proves the bandit reordered, not tie-stability'
 
 
+def test_bandit_ignores_total_loads_counts_only_deliberate_loads(tmp_path, monkeypatch):
+    """BUG_0356: total_loads (the auto-load superset) must NOT drive the bandit — only
+    agent_selected_loads. AUTO carries total_loads=500 but zero agent_selected_loads →
+    demoted to M_FLOOR; DELIB carries the SAME total_loads=500 but agent_selected_loads=20 →
+    promoted. p̄ from {DELIB asl=20/hints=20, AUTO asl=0/hints=20} = 0.5. Two-sided: total_loads
+    cannot rescue a never-DELIBERATELY-loaded skill."""
+    _bandit_on(monkeypatch)
+    AUTO = 'skill-auto-loaded-never-chosen'
+    DELIB = 'skill-deliberately-loaded'
+    sm = _StubSkillManager(
+        matches=[(AUTO, 0.50), (DELIB, 0.50)],   # raw order puts the auto-loaded one first
+        metrics={AUTO:  {'total_loads': 500, 'agent_selected_loads': 0, 'hints': 20},
+                 DELIB: {'total_loads': 500, 'agent_selected_loads': 20, 'hints': 20}},
+    )
+    mgr, inst = _make_mgr(tmp_path, sm)
+    _neutralize_gates(mgr, monkeypatch)
+    _determinize_sampler(mgr)
+    out = mgr._match_skills_for_hint(_job(), _settings(), inst)
+    assert out == [DELIB, AUTO], (
+        'BUG_0356: bandit must floor the auto-loaded / never-chosen skill despite '
+        'total_loads=500; only agent_selected_loads counts')
+    assert out != [AUTO, DELIB], 'raw order was the opposite — proves the bandit reordered'
+
+
 # ── (c) Dormancy: 0 hints / 0 loads stays eligible (exploration bonus) ──────────
 
 def test_dormant_posterior_mean_equals_base_rate_not_zero(tmp_path, monkeypatch):
     """A never-seen skill's posterior is the informed prior, so its mean is p̄ — eligible,
     NOT pinned to 0.5 (which would mass-spam) and NOT 0 (which would suppress)."""
     monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_PRIOR_MASS', 3.0)
-    sm = _StubSkillManager(matches=[], metrics={'base': {'total_loads': 15, 'hints': 100}})
+    sm = _StubSkillManager(matches=[], metrics={'base': {'agent_selected_loads': 15, 'hints': 100}})
     mgr, _ = _make_mgr(tmp_path, sm)
-    pbar = mgr._bandit_pbar({'base': {'total_loads': 15, 'hints': 100}})  # 0.15
+    pbar = mgr._bandit_pbar({'base': {'agent_selected_loads': 15, 'hints': 100}})  # 0.15
     a, b = _bandit_posterior(0, 0, pbar, 3.0)
     assert (a + b) == pytest.approx(3.0)          # prior mass is exactly m0
     assert (a / (a + b)) == pytest.approx(pbar), (
@@ -231,8 +255,8 @@ def test_dormant_skill_outranks_known_useless_skill(tmp_path, monkeypatch):
     BASE = 'base-rate-keeper'        # not a candidate; only fixes p̄ > 0
     sm = _StubSkillManager(
         matches=[(USELESS, 0.50), (DORMANT, 0.50)],   # raw order puts USELESS first
-        metrics={USELESS: {'total_loads': 0, 'hints': 50},
-                 BASE: {'total_loads': 30, 'hints': 110}},   # p̄ = 30/110 = 0.2727
+        metrics={USELESS: {'agent_selected_loads': 0, 'hints': 50},
+                 BASE: {'agent_selected_loads': 30, 'hints': 110}},   # p̄ = 30/110 = 0.2727
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -250,12 +274,13 @@ def test_dormant_skill_outranks_known_useless_skill(tmp_path, monkeypatch):
         'TS exploration bonus: a dormant (low-evidence) skill must have larger posterior variance')
 
 
-# ── (d) min(total_loads, hints) clip prevents a malformed Beta ──────────────────
+# ── (d) min(loads, hints) clip prevents a malformed Beta ────────────────────────
 
 def test_min_clip_keeps_beta_well_formed_when_loads_exceed_hints(tmp_path):
-    """total_loads is a SUPERSET. Unclipped, hints−loads < 0 ⇒ β < 0 (malformed Beta). The
-    clip forces s = min(L, H) so β = m0·(1−p̄) + (H − s) ≥ m0·(1−p̄) > 0 always. Regression
-    guard: a future refactor removing the clip must fail this assertion."""
+    """agent_selected_loads CAN exceed hints (a skill deliberately loaded more times
+    than it was hinted — BUG_0356 N5). Unclipped, hints−loads < 0 ⇒ β < 0 (malformed
+    Beta). The clip forces s = min(L, H) so β = m0·(1−p̄) + (H − s) ≥ m0·(1−p̄) > 0
+    always. Regression guard: a future refactor removing the clip must fail this assertion."""
     # L=204 > H=73 (the on-disk project-memory-writing profile). p̄=0.5, m0=3.
     a, b = _bandit_posterior(204, 73, 0.5, 3.0)
     assert b == pytest.approx(3.0 * (1.0 - 0.5) + (73 - 73))  # = 1.5 (clip: s=73, f=0)
@@ -271,8 +296,8 @@ def test_superset_clip_skill_ranks_high_without_crash(tmp_path, monkeypatch):
     LOW = 'skill-zero-value'
     sm = _StubSkillManager(
         matches=[(LOW, 0.50), (HIGH, 0.50)],
-        metrics={HIGH: {'total_loads': 204, 'hints': 73},   # rate 1.0 after clip
-                 LOW: {'total_loads': 0, 'hints': 73}},
+        metrics={HIGH: {'agent_selected_loads': 204, 'hints': 73},   # rate 1.0 after clip
+                 LOW: {'agent_selected_loads': 0, 'hints': 73}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -345,8 +370,8 @@ def test_admit_all_identity_when_bar_zero(tmp_path, monkeypatch):
     _bandit_on(monkeypatch)
     sm = _StubSkillManager(
         matches=[('hi', 0.55), ('lo', 0.50), ('mid', 0.45)],
-        metrics={'hi': {'total_loads': 30, 'hints': 30}, 'lo': {'total_loads': 0, 'hints': 60},
-                 'mid': {'total_loads': 5, 'hints': 10}},
+        metrics={'hi': {'agent_selected_loads': 30, 'hints': 30}, 'lo': {'agent_selected_loads': 0, 'hints': 60},
+                 'mid': {'agent_selected_loads': 5, 'hints': 10}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -363,7 +388,7 @@ def test_bar_at_bound_never_blanks_the_hint(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_THETA_MAX', 0.60)
     sm = _StubSkillManager(
         matches=[('c1', 0.50), ('c2', 0.45), ('c3', 0.40)],
-        metrics={'base': {'total_loads': 10, 'hints': 100}},   # p̄ = 0.10
+        metrics={'base': {'agent_selected_loads': 10, 'hints': 100}},   # p̄ = 0.10
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -408,7 +433,7 @@ def test_non_dict_metrics_row_degrades_not_blanks(tmp_path, monkeypatch):
     _bandit_on(monkeypatch)
     sm = _StubSkillManager(
         matches=[('skill-bad-row', 0.50), ('skill-good', 0.45)],
-        metrics={'base-rate-keeper': {'total_loads': 30, 'hints': 100},   # p̄ = 0.30 (> 0)
+        metrics={'base-rate-keeper': {'agent_selected_loads': 30, 'hints': 100},   # p̄ = 0.30 (> 0)
                  'skill-bad-row': 'oops'},                                # corrupt ROW → guard
     )
     mgr, inst = _make_mgr(tmp_path, sm)
@@ -425,7 +450,7 @@ def test_sampler_failure_falls_back_to_posterior_mean(tmp_path, monkeypatch):
     A, B = 'skill-high-value', 'skill-zero-value'
     sm = _StubSkillManager(
         matches=[(B, 0.50), (A, 0.50)],
-        metrics={A: {'total_loads': 20, 'hints': 20}, B: {'total_loads': 0, 'hints': 20}},
+        metrics={A: {'agent_selected_loads': 20, 'hints': 20}, B: {'agent_selected_loads': 0, 'hints': 20}},
     )
     mgr, inst = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -444,8 +469,8 @@ def test_self_augmentation_excluded_from_base_rate(monkeypatch, tmp_path):
     sm = _StubSkillManager(matches=[])
     mgr, _ = _make_mgr(tmp_path, sm)
     metrics = {
-        'self-augmentation': {'total_loads': 708, 'hints': 4},   # would give 708/4 ≫ 1
-        'x': {'total_loads': 10, 'hints': 100},                  # true signal: 10/100 = 0.10
+        'self-augmentation': {'agent_selected_loads': 708, 'hints': 4},   # excluded by name
+        'x': {'agent_selected_loads': 10, 'hints': 100},                  # true signal: 10/100 = 0.10
     }
     pbar = mgr._bandit_pbar(metrics)
     assert pbar == pytest.approx(0.10), (
@@ -457,11 +482,11 @@ def test_dormant_pbar_cache_is_set_once(tmp_path, monkeypatch):
     sm = _StubSkillManager(matches=[])
     mgr, _ = _make_mgr(tmp_path, sm)
     assert mgr._skill_bandit_pbar is None
-    mgr._bandit_pbar({'x': {'total_loads': 1, 'hints': 10}})     # 0.10
+    mgr._bandit_pbar({'x': {'agent_selected_loads': 1, 'hints': 10}})     # 0.10
     first = mgr._skill_bandit_pbar
     assert first == pytest.approx(0.10)
     # A changed ledger must NOT re-scan — the cached value is returned unchanged.
-    second = mgr._bandit_pbar({'x': {'total_loads': 9, 'hints': 10}})
+    second = mgr._bandit_pbar({'x': {'agent_selected_loads': 9, 'hints': 10}})
     assert second == first == 0.10, 'p̄ must be cached, not recomputed per call'
 
 

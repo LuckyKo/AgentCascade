@@ -143,6 +143,30 @@ def _iso_to_epoch(iso: str) -> float:
     return dt.timestamp()
 
 
+def _is_explicit_skill_list(load_skill_value) -> bool:
+    """Return True when a per-call load_skill value is an EXPLICIT skill list.
+
+    Covers the two shapes callers/LLMs use to name specific skills:
+      - a native Python list, e.g. ["docker", "httpx-connection-pooling"]
+      - a JSON-encoded list string, e.g. '["docker"]' (LLMs sometimes emit this)
+    Bare "AUTO"/"NONE"/None and any non-list string are NOT explicit lists —
+    they fall through to auto-matching / no-skill handling instead.
+
+    Canonical home of this predicate (BUG_0356): the engine gate and the skill
+    ledger's agent-selected-load counting must agree on what counts as deliberate,
+    so this single definition is imported by ``engine/system_agent.py`` rather than
+    duplicated. Pure function — no manager state.
+    """
+    if isinstance(load_skill_value, list):
+        return True
+    if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
+        try:
+            return isinstance(_json.loads(load_skill_value), list)
+        except (ValueError, TypeError):
+            return False  # not valid JSON — treat as a plain string, not a list
+    return False
+
+
 def _default_metrics_entry(status: str = 'active') -> dict:
     """Fresh per-skill metrics record (schema 1.3). Single source for the default shape so
     a future field addition happens in one place instead of being copy-pasted at every
@@ -155,7 +179,14 @@ def _default_metrics_entry(status: str = 'active') -> dict:
             # .get(field, default)). promotions/discards = Gate B rating-gate outcomes
             # (evaluate_candidates), updates = candidate registered (SKILL.md rewrite /
             # version bump), transitions = lifetime promote/discard/disable/enable.
-            'transitions': 0, 'promotions': 0, 'discards': 0, 'updates': 0}
+            'transitions': 0, 'promotions': 0, 'discards': 0, 'updates': 0,
+            # BUG_0356: deliberate agent-selected loads — the SUBSET of total_loads that
+            # the agent (or an orchestrator naming skills in call_agent) chose on purpose,
+            # as opposed to harness auto-loads. The skill-hint precision demote + Thompson
+            # bandit read THIS, not total_loads, so a generically auto-loaded skill no
+            # longer games the "shown-often-but-not-loaded" penalty. Additive: readers use
+            # .get('agent_selected_loads', 0).
+            'agent_selected_loads': 0}
 
 
 def _priority_for_root(root: Path) -> int:
@@ -1239,14 +1270,26 @@ class SkillManager:
             result['error'] = str(e)
         return result
 
-    def _increment_load_count(self, skill_name: str, version: str) -> None:
+    def _increment_load_count(self, skill_name: str, version: str,
+                              agent_selected: bool = False) -> None:
         """Increment load counter for a skill+version combo (buffered).
+
+        ``agent_selected=True`` additionally bumps ``agent_selected_loads`` — the
+        deliberate subset of ``total_loads`` read by the skill-hint precision demote and
+        Thompson bandit (BUG_0356). Only the two deliberate entry points pass it: the
+        ``load_skill`` tool and the caller-explicit ``call_agent(load_skill=[...])`` list.
+        Harness auto-loads (init AUTO / advisor / basic keyword match / memory-hint) keep
+        the default False, so they bump ``total_loads`` only.
 
         Flushes to disk when pending count reaches threshold OR 30 seconds have elapsed.
         """
         with self._metrics_lock:
             entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
             entry['total_loads'] += 1
+            if agent_selected:
+                # .get() so a legacy hand-built fresh-entry lacking the additive field
+                # still increments (BUG_0312 pattern — no schema bump / no migration).
+                entry['agent_selected_loads'] = entry.get('agent_selected_loads', 0) + 1
             entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
             # Real "last used" supersedes any migration seed (schema 1.3). Multi-instance
             # last-writer-wins = most recently used; runs under _metrics_lock like the counters.
@@ -1930,7 +1973,8 @@ class SkillManager:
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 
-    def load_full_instructions(self, skill_name: str, count_load: bool = True) -> Optional[str]:
+    def load_full_instructions(self, skill_name: str, count_load: bool = True,
+                               agent_selected: bool = False) -> Optional[str]:
         """Load full SKILL.md body (Tier 2) for a skill.
 
         Supports case-insensitive matching to tolerate LLM input variations.
@@ -1941,6 +1985,11 @@ class SkillManager:
                 metric on a successful load. Pass False for pure loadability checks
                 (e.g. ``_resolve_skill_names``) that must not inflate the metric —
                 the real body-load in ``resolve_load_skill`` is what counts.
+            agent_selected: When True (and only meaningful with ``count_load=True``),
+                ALSO bump ``agent_selected_loads`` — the deliberate subset of
+                ``total_loads`` the skill-hint precision demote / bandit read
+                (BUG_0356). Set only by the ``load_skill`` tool and the caller-explicit
+                ``call_agent(load_skill=[...])`` list; harness auto-loads leave it False.
 
         Returns:
             Full markdown instructions string, or None if skill not found / not loadable.
@@ -1975,7 +2024,7 @@ class SkillManager:
                         if count_load:
                             # §5.3: the fallback counts a real load — using an evicted skill
                             # should give it a chance to be re-rated / re-enabled.
-                            self._increment_load_count(skill_name, version)
+                            self._increment_load_count(skill_name, version, agent_selected=agent_selected)
                         logger.debug("[SKILLS] Loaded evicted skill '%s' from servable disk (%d chars)",
                                      skill_name, len(body))
                         return body or None
@@ -1994,7 +2043,7 @@ class SkillManager:
                 body = parsed['body']
                 logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)", skill_name, len(body))
                 if count_load:
-                    self._increment_load_count(skill_name, version)
+                    self._increment_load_count(skill_name, version, agent_selected=agent_selected)
                 return body or None
 
             # Fallback: re-read from disk
@@ -2006,7 +2055,7 @@ class SkillManager:
                     body = parsed.get('body', '')
                     logger.debug("[SKILLS] Re-parsed '%s' from disk (%d chars)", skill_name, len(body))
                     if count_load:
-                        self._increment_load_count(skill_name, version)
+                        self._increment_load_count(skill_name, version, agent_selected=agent_selected)
                     return body or None
                 except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
                     # Non-loadable skills are expected during AUTO matching — keep this
@@ -2148,13 +2197,22 @@ class SkillManager:
         successful body-load increments the global per-skill load metric (via
         ``load_full_instructions`` with its default ``count_load=True``).
 
+        BUG_0356: this loop serves BOTH the caller-explicit ``call_agent(load_skill=[...])``
+        list (a deliberate choice — the orchestrator names the skills) and the basic
+        AUTO keyword-match (harness-driven). Only the explicit shape also bumps
+        ``agent_selected_loads``; ``_is_explicit_skill_list`` is the shared predicate the
+        engine gate uses too, so the telemetry and the ledger agree on "explicit". The
+        AUTO branch is reached only via a bare "AUTO"/None value, which is never an
+        explicit list — so AUTO never counts.
+
         Returns:
             List of ``(skill_name, full_instruction_body)`` tuples, one per
             successfully loaded skill (unresolvable names are dropped).
         """
         pairs: List[Tuple[str, str]] = []
+        is_explicit = _is_explicit_skill_list(load_skill_value)
         for name in self._resolve_skill_names(load_skill_value, task_text, context_text):
-            body = self.load_full_instructions(name)
+            body = self.load_full_instructions(name, agent_selected=is_explicit)
             if body:
                 pairs.append((name, body))
         return pairs

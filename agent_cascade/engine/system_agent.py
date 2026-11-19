@@ -32,25 +32,10 @@ from agent_cascade.utils.utils import msg_field
 # a minimal tail buffer. (plan 3.4 item 5 / R1.)
 _REUSE_IDLE_EPSILON = 0.1
 
-
-def _is_explicit_skill_list(load_skill_value) -> bool:
-    """Return True when a per-call load_skill value is an EXPLICIT skill list.
-
-    Covers the two shapes callers/LLMs use to name specific skills:
-      - a native Python list, e.g. ["docker", "httpx-connection-pooling"]
-      - a JSON-encoded list string, e.g. '["docker"]' (LLMs sometimes emit this)
-    Bare "AUTO"/"NONE"/None and any non-list string are NOT explicit lists —
-    they fall through to auto-matching / no-skill handling instead.
-    """
-    if isinstance(load_skill_value, list):
-        return True
-    if isinstance(load_skill_value, str) and load_skill_value.strip().startswith('['):
-        try:
-            import json as _json_list_check
-            return isinstance(_json_list_check.loads(load_skill_value), list)
-        except (ValueError, TypeError):
-            return False  # not valid JSON — treat as a plain string, not a list
-    return False
+# Canonical "explicit skill list" predicate lives in skills/manager.py (BUG_0356) so the
+# advisor gate and the ledger's agent-selected-load counting share ONE definition. engine->skills
+# is the allowed import direction (no skills module imports engine).
+from agent_cascade.skills.manager import _is_explicit_skill_list
 
 
 class SystemAgentMixin:

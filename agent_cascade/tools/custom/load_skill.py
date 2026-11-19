@@ -129,7 +129,7 @@ class LoadSkill(BaseTool):
             # -> record _loaded_skill_names -> telemetry. It returns (status, was_re_enabled);
             # re-enable is reported independently of the loaded/already_loaded outcome, so a
             # re-enabled-but-already-loaded skill still shows in the Re-enabled summary line.
-            status, was_re_enabled = self.agent_pool.inject_skill(agent_name, name)
+            status, was_re_enabled = self.agent_pool.inject_skill(agent_name, name, agent_selected=True)
             if was_re_enabled:
                 re_enabled.append(name)
             if status == 'loaded':

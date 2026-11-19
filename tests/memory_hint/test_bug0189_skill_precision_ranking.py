@@ -162,7 +162,7 @@ def test_precision_demotes_never_loaded_skill_below_a_loaded_one(tmp_path, monke
     sm = _StubSkillManager(
         matches=[(NEVER, 0.55), (LOADED, 0.40)],
         metrics={NEVER: {'total_loads': 0, 'hints': 40},
-                 LOADED: {'total_loads': 10, 'hints': 10}},
+                 LOADED: {'agent_selected_loads': 10, 'hints': 10}},
     )
     mgr, inst, _ = _make_mgr(tmp_path, sm)
     _neutralize_gates(mgr, monkeypatch)
@@ -172,6 +172,31 @@ def test_precision_demotes_never_loaded_skill_below_a_loaded_one(tmp_path, monke
         'BUG_0189 #5: precision must promote the loaded skill above the never-loaded one')
     # Sanity: the raw topically-descending order was the opposite.
     assert out != [NEVER, LOADED]
+
+
+def test_precision_counts_only_deliberate_loads_not_total_loads(tmp_path, monkeypatch, gate4_off):
+    """BUG_0356: harness auto-loads must NOT rescue a never-DELIBERATELY-loaded skill.
+
+    AUTO carries total_loads=500 (the auto-load superset) but zero agent_selected_loads, so
+    precision reads the deliberate field → w = max(0.35, min(1, 1/41)) = 0.35 → effective
+    0.55*0.35 = 0.1925. DELIB carries the SAME total_loads=500 but agent_selected_loads=8 →
+    w=1.0 → effective 0.40. Re-ranked desc → [DELIB, AUTO]; raw topical order was the opposite.
+    This is the exact defect: total_loads can no longer defeat the precision demote.
+    (hints=40 < N so AUTO is DEMOTED, not suppressed.)"""
+    AUTO = 'skill-auto-loaded-never-chosen'
+    DELIB = 'skill-deliberately-loaded'
+    sm = _StubSkillManager(
+        matches=[(AUTO, 0.55), (DELIB, 0.40)],
+        metrics={AUTO:  {'total_loads': 500, 'agent_selected_loads': 0, 'hints': 40},
+                 DELIB: {'total_loads': 500, 'agent_selected_loads': 8, 'hints': 8}},
+    )
+    mgr, inst, _ = _make_mgr(tmp_path, sm)
+    _neutralize_gates(mgr, monkeypatch)
+    out = mgr._match_skills_for_hint(_job(), _settings(), inst)
+    assert out == [DELIB, AUTO], (
+        'BUG_0356: precision must floor the auto-loaded / never-chosen skill despite '
+        'total_loads=500; only agent_selected_loads counts')
+    assert out != [AUTO, DELIB], 'raw topical order must have been the opposite'
 
 
 def test_missing_hints_field_is_neutral_not_dropped(tmp_path, monkeypatch, gate4_off):
