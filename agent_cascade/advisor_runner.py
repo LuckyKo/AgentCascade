@@ -129,6 +129,12 @@ def run_lightweight_advisor(
     try:
         # ── 1. Fresh engine per call (NOT shared) ────────────────────────────
         engine = ExecutionEngine(pool)
+        # BUG_0359: tag this run as a transient advisor so the pool-level
+        # run-generation supersede gate does NOT self-abort it when an unrelated real
+        # run bumps pool._run_generation. Advisors are read-only + bounded
+        # (AFK_ADMIN_FIRST_YIELD_TIMEOUT); letting one finish after a gen bump is safe
+        # and correct — a real run's bump must not silently kill a background advisor.
+        engine._is_advisor_run = True
 
         # ── 2. Acquire the advisor instance: warm-reuse first, fresh-spawn fallback ──────
         # Shared two-branch logic (see security_reuse.acquire_security_agent). The fallback name is

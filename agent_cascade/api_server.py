@@ -1066,6 +1066,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             snapshot.activate_stack(agent_pool, boot_stack_env)
             roots = [n for n, i in agent_pool.instances.items() if getattr(i, 'parent_instance', None) is None]
             session['session_name'] = roots[0] if roots else default_session_name
+            # BUG_0359 (diagnostic): record the restored root's state immediately after
+            # activate_stack — a not-cleanly-IDLE boot root would be rejected by the
+            # engine's IDLE→RUNNING entry guard on the first run.
+            _root_inst = agent_pool.instances.get(session['session_name'])
+            logger.debug(
+                '[STACK_SWAP] boot restore: root=%s state=%s',
+                session['session_name'],
+                getattr(getattr(_root_inst, 'state', None), 'name', None))
         except Exception as e:
             logger.critical('[STACK_SWAP] boot restore failed mid-restore: %s', e, exc_info=True)
 
@@ -1645,7 +1653,29 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             om = getattr(agent_pool, 'operation_manager', None)
             text = _afk_admin_analysis(instance_name)
             if text is None:
-                # Admin unavailable / timed out / failed / empty — the basic nudge keeps AFK alive.
+                # Admin unavailable / superseded / timed out / failed / empty.
+                if agent_pool.get_instance(instance_name) is None:
+                    return  # instance dismissed while the analysis was running
+                # BUG_0359: a superseded/empty review must never leave the orchestrator
+                # IDLE with pending text and no runner. If the root is IDLE with
+                # unprocessed text, re-drive it via relaunch_idle_agent. That primitive's
+                # state gate is authoritative and SUPERSEDES the _is_generating flag
+                # precheck used by the basic-nudge path below: a stale `generating` flag
+                # over a truly-IDLE root is handled by the state gate, so no separate flag
+                # precheck is needed here (a live flag over a stale-IDLE read just loses
+                # the atomic IDLE->RUNNING race and spawns a wasted thread, never a
+                # double-run). IDLE-ONLY by design: if the root is genuinely
+                # RUNNING/COMPLETING (not just a stale flag), relaunch_idle_agent returns
+                # False and this path does NOT re-drive — that case defers to the live
+                # run, which drains the queue itself.
+                if agent_pool.has_messages(instance_name):
+                    from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
+                    if relaunch_idle_agent(agent_pool, instance_name):
+                        logger.debug(
+                            '[AFK-ADMIN] re-driving IDLE root %s after superseded/empty '
+                            'review (pending text, no runner)', instance_name)
+                    return
+                # No pending text: the ordinary AFK case — the basic nudge keeps AFK alive.
                 text = afk_idle_nudge_text(om)
             # A real run may have started while the analysis was running; never interrupt it.
             if _is_generating(session):

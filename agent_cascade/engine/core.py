@@ -100,6 +100,14 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             pool: The AgentPool instance that manages all agent state.
         """
         self.pool = pool
+        # BUG_0359: default to a normal (non-advisor) run. `advisor_runner` sets this to True
+        # so the pool-level run-generation supersede gate (run_loop._is_terminal_stop /
+        # _finalize_state_transition) does NOT self-abort a transient, read-only background
+        # advisor when an unrelated real run bumps pool._run_generation. Sub-agents spawned
+        # under an advisor engine (child_runner reuses the same engine object) inherit the
+        # flag — intentional: the whole background advisor tree is transient, and the gate
+        # still honors global stop + instance termination, so this never affects normal runs.
+        self._is_advisor_run = False
         # Phase 4.1: Initialize lifecycle manager with lazy engine reference
         self.lifecycle = AgentLifecycleManager(pool)
         # Phase 4.2: Initialize compression handler with lazy engine reference

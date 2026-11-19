@@ -137,6 +137,13 @@ def run_agent_thread_unified(
 
         # ── Create main agent instance if it doesn't exist ───────────────
         instance = pool.get_instance(instance_name)
+        # BUG_0359 (diagnostic): record the target, whether it resolved, and its state at
+        # entry — closes the a/b/c open question (bail vs entry-guard vs name-resolution)
+        # on the next restart.
+        logger.debug(
+            '[RUN_AGENT_UNIFIED] target=%s found=%s state=%s',
+            instance_name, instance is not None,
+            getattr(getattr(instance, 'state', None), 'name', None))
         if (instance is None or not instance.conversation) and system_message_content:
             create_main_agent_instance(
                 pool=pool,

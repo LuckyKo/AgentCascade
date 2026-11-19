@@ -2529,9 +2529,9 @@ class _AfkLoopOm:
         self.afk_enabled = afk_enabled
         self.afk_message = ''
         self.afk_mode = afk_mode
-        # Valid path so get_session_log_dir() resolves without raising (the session-history
-        # load at startup is non-fatal either way, but this keeps the run log clean).
-        self.base_dir = tempfile.gettempdir()
+        # A real Path (not a str): get_session_log_dir() does `base_dir / 'logs'` when
+        # ENABLE_STACK_SWAP is on (create_app → snapshot.ensure_registry_loaded).
+        self.base_dir = Path(tempfile.gettempdir())
 
 
 class _AfkLoopPool:
@@ -2553,6 +2553,10 @@ class _AfkLoopPool:
         # No-op generation counter: run_agent_thread_unified does `pool._run_generation += 1`
         # (run_agent_unified.py); without it the spawned run thread logs a benign AttributeError.
         self._run_generation = 0
+        # Real dict: the boot-restore path in create_app reads `agent_pool.instances`
+        # (api_server ~1080) when ENABLE_STACK_SWAP is on; an empty dict means "no saved
+        # stack" so the path falls through to get_instance() without a stack swap.
+        self.instances = {}
 
     def set_auto_security(self, value):
         # create_app invokes this at construction (app.current_auto_security setter); record it.

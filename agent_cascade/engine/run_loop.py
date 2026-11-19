@@ -637,6 +637,14 @@ class RunLoopMixin:
             if instance.state == AgentState.IDLE:
                 instance._transition(AgentState.RUNNING)
             else:
+                # BUG_0359 (diagnostic): a boot-restored root that is not cleanly IDLE is
+                # rejected here — log the state so the next restart distinguishes the
+                # (a)/(b)/(c) candidates.
+                logger.debug(
+                    '[RUN_PREFLIGHT] %s rejected at IDLE→RUNNING entry guard: state=%s '
+                    '(boot_kv_restore_pending=%s)',
+                    instance.instance_name, instance.state.name,
+                    getattr(instance, '_boot_kv_restore_pending', False))
                 # Safety net: If we reach here, the L1 session_lock guard in
                 # api_server.py
                 # failed to prevent a race condition. Raise to surface the bug
@@ -1119,7 +1127,12 @@ class RunLoopMixin:
         transition is a no-op in both old and new code. Byte-identical for normal, terminated, and Stop
         runs.
         """
-        if self._my_generation != self.pool._run_generation:
+        # BUG_0359: a transient advisor run is exempt from the generation-supersede gate —
+        # an unrelated real run bumping pool._run_generation must not silently abort a
+        # background read-only advisor. Normal (non-advisor) runs keep the gate: on a gen
+        # mismatch they leave shared state to the live run.
+        advisor_run = getattr(self, '_is_advisor_run', False)
+        if not advisor_run and self._my_generation != self.pool._run_generation:
             logger.debug('EXIT - %s: superseded (gen %s != %s); leaving shared state to the live run',
                          instance.instance_name, self._my_generation, self.pool._run_generation)
             return
@@ -1150,7 +1163,11 @@ class RunLoopMixin:
         Does NOT return True for compression-halt or manual halt — those are suspendable.
         """
         global_stop = self.pool.stopped
-        gen_mismatch = self._my_generation != self.pool._run_generation
+        # BUG_0359: relax the generation-mismatch term for transient advisor runs — an
+        # unrelated real run's gen bump must not terminate a background read-only advisor.
+        # global_stop and inst_terminated stay intact for everyone (advisors included).
+        advisor_run = getattr(self, '_is_advisor_run', False)
+        gen_mismatch = (not advisor_run) and (self._my_generation != self.pool._run_generation)
         inst_terminated = self.pool.is_instance_terminated(inst_name)
         result = global_stop or gen_mismatch or inst_terminated
         return result
