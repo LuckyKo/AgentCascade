@@ -1018,6 +1018,13 @@ class WsMessageHandler:
         self.session['session_name'] = created.instance_name
         save_session_name(strip_birth_stamp(created.instance_name))
         snapshot.register_active_stack(self.agent_pool, created.instance_name)
+        # New-session mints a FRESH instance (not activate_stack), so it must clear the
+        # swap latch itself: park_active_stack above set it, and the run-loop
+        # turn-boundary gate (run_loop.py:137-143) would otherwise break on the new
+        # session's FIRST turn, stranding any message queued into it.
+        _latch = getattr(self.agent_pool, '_pending_swap_event', None)
+        if _latch is not None:
+            _latch.clear()
         if self.agent_pool.stopped:
             self.agent_pool.stopped = False
         _clear_caches_safely()

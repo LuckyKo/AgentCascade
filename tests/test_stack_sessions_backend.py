@@ -803,6 +803,73 @@ def test_new_session_rolls_back_on_create_failure(tmp_path, monkeypatch):
     assert p.instances  # pool not left empty
 
 
+def test_new_session_first_turn_not_stranded_by_swap_gate(tmp_path, monkeypatch):
+    """e2e: after New Session, the user's first message must get its turn.
+
+    Regression for the stuck-in-queue bug: ``handle_stacks_new`` parks the active
+    stack (``park_active_stack`` sets ``pool._pending_swap_event``) but then mints a
+    FRESH instance via ``create_main_agent_instance`` — it does NOT go through
+    ``activate_stack``, the only path that clears the latch. The latch therefore
+    stays set, and the run-loop turn-boundary gate (run_loop.py:137-143) breaks on the
+    new instance's FIRST turn. A message queued into the new session is never
+    drained — it sits in the queue forever ("my message is stuck, nothing happens").
+
+    Drives the REAL ``handle_stacks_new`` and then evaluates the exact gate predicate
+    the run-loop uses; asserts the gate would NOT break so the queued message is
+    processed. Red on the current tree (latch left set), green once the handler
+    clears the latch for the freshly-minted session.
+    """
+    import agent_cascade.api_integration as api_int
+    from agent_cascade import ws_handlers as wh
+
+    p, _ = _single_root_pool(tmp_path)
+
+    def fake_park(pool, *, trigger):
+        # Faithful to production park: lazily create the latch, then set it.
+        ev = getattr(pool, '_pending_swap_event', None)
+        if ev is None:
+            ev = threading.Event()
+            pool._pending_swap_event = ev
+        ev.set()
+        return SimpleNamespace(stack_id='parked', marker=True)
+
+    def fake_create(pool, instance_name, system_message_content, **kw):
+        stamped = make_birth_stamped_name(instance_name)
+        inst = make_instance(stamped, agent_class='orchestrator',
+                             display=instance_name, cfg=None)
+        register(p, inst)
+        return inst
+
+    monkeypatch.setattr(snapshot, 'park_active_stack', fake_park)
+    monkeypatch.setattr(api_int, 'create_main_agent_instance', fake_create)
+    monkeypatch.setattr(snapshot, 'register_active_stack', lambda *a, **kw: None)
+    monkeypatch.setattr('agent_cascade.api_server._extract_system_message', lambda *a: '')
+    monkeypatch.setattr(wh, '_clear_caches_safely', lambda: None)
+
+    h, _b = _make_handler(p)
+    asyncio.run(h.handle_stacks_new({'name': 'Alpha'}))
+
+    new_name = h.session['session_name']
+    assert new_name and new_name != ROOT
+
+    # The user's first message into the new session — this is what gets stranded.
+    inst = p.instances[new_name]
+    p.enqueue_message(new_name, 'hello, new session')
+    assert p.message_queues[new_name] == ['hello, new session']
+
+    # Evaluate the EXACT run-loop turn-boundary gate predicate (run_loop.py:138-140):
+    # the new instance's first turn breaks iff the latch is set OR identity is lost.
+    _swap_pending = getattr(p, '_pending_swap_event', None)
+    _identity_lost = inst is not p.instances.get(new_name)
+    gate_breaks = (_swap_pending is not None and _swap_pending.is_set()) or _identity_lost
+
+    assert not gate_breaks, (
+        'New-session first turn breaks at the stack-swap gate '
+        f'(swap_pending={bool(_swap_pending and _swap_pending.is_set())}, '
+        f'identity_lost={_identity_lost}); the queued message is stranded.'
+    )
+
+
 def test_additive_import_keeps_fleet(tmp_path, monkeypatch):
     """mode='add' -> prior instances remain."""
     from agent_cascade import ws_handlers as wh
