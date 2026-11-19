@@ -1087,6 +1087,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                         f"but conversation has only {conv_len} message(s) — treating as fresh session"
                     )
                     loaded_identity = False  # Fall through to fallback creation below
+                else:
+                    # BUG_0354: a real session was hydrated from disk on boot. Arm a one-shot
+                    # KV restore that the engine consumes the FIRST time this instance holds a
+                    # slot (engine/turn_setup.py). Do NOT restore here: no slot is held at boot
+                    # and resolve_held_endpoint is cursor-based, so a load now could evict a
+                    # sibling. See plans/BUG_0354_boot-kv-restore-plan.md sec 3.3.
+                    inst._boot_kv_restore_pending = True
 
         # If log loading failed, create an empty instance so build_state_from_pool() doesn't return None.
         # This mirrors how the original branch always had session['history'] = [] even on load failure.

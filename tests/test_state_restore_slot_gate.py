@@ -559,3 +559,133 @@ class TestSafeModeRestoreDeferral:
             f'the default path must still restore exactly once: {load_urls}'
         assert AUTOLOADER_X.rstrip('/') in load_urls[0] and 'model-A' in load_urls[0], \
             f'default restore must target the held endpoint: {load_urls[0]}'
+
+
+# ============================================================================
+# BUG_0354 - boot-time KV auto-restore by stable label (one-shot)
+#
+# A real session hydrated from disk at boot arms inst._boot_kv_restore_pending
+# (api_server session-load). The engine consumes it the FIRST time the instance
+# holds a slot, inside the existing _setup_turn restore gate, by calling
+# _restore_held_slot_state(label=instance_name). These tests assert at the
+# BEHAVIOR layer (recorded /state/load POST URLs), not merely that a helper ran,
+# and mirror the three-layer-proof pattern used by TestSetupTurnRestoreGate.
+# ============================================================================
+
+
+class TestBootKvRestore:
+
+    def _arm(self, inst):
+        """Mark this instance for a one-shot boot KV restore."""
+        inst._boot_kv_restore_pending = True
+
+    def test_boot_restore_loads_onto_held_endpoint_and_consumes_flag(self):
+        """Armed + slot held + matching save endpoint -> exactly ONE state/load to
+        the HELD endpoint X/model-A (never the stale config Y), and the one-shot
+        flag is consumed. Behavior layer: recorded /state/load URLs prove EFFECT.
+        A wraps-spy pins the wiring (label == instance_name) without disabling the
+        real helper, so the load still happens."""
+        inst = make_instance(label=None)  # no pending _state_label -> boot branch path
+        # Real boot state: _last_endpoint_config is None in a fresh process, so the P5
+        # endpoint-match guard on the explicit-label path is inert (isinstance(None, dict)
+        # is False). make_instance() would otherwise leave a STALE_Y config here.
+        with inst._state_lock:
+            inst._last_endpoint_config = None
+        inst._slot_release = lambda: None  # holding the conc=0 slot
+        self._arm(inst)
+
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock, \
+             patch.object(engine, '_restore_held_slot_state',
+                          wraps=engine._restore_held_slot_state) as spy:
+            post_mock.return_value.status_code = 200
+            drive_setup_turn(engine, inst)
+
+        load_urls = _recorded_load_urls(post_mock)
+        assert len(load_urls) == 1, f'exactly one boot state/load expected: {load_urls}'
+        url = load_urls[0]
+        assert AUTOLOADER_X.rstrip('/') in url and 'model-A' in url, \
+            f'boot restore must target the held endpoint X: {url}'
+        assert STALE_Y not in url and 'stale-model-B' not in url, \
+            f'boot restore must NOT target stale config Y: {url}'
+        # one-shot: consumed regardless of outcome.
+        assert inst._boot_kv_restore_pending is False
+        # wiring complement: restore is driven by the STABLE instance-name label,
+        # independent of _state_label (which is None on this path).
+        assert spy.call_args.kwargs.get('label') == inst.instance_name, \
+            'boot restore must pass label=instance_name'
+
+    def test_no_slot_held_skips_boot_restore(self):
+        """Eviction-safety at boot: the no-slot guard precedes the boot branch, so
+        an armed instance holding NO slot issues ZERO state/load and the router is
+        never consulted for restore."""
+        inst = make_instance(label=None)
+        inst._slot_release = None  # no slot held
+        self._arm(inst)
+
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            drive_setup_turn(engine, inst)
+
+        assert _recorded_load_urls(post_mock) == [], \
+            f'no state/load may fire without a held slot: {_recorded_load_urls(post_mock)}'
+        pool.api_router.get_effective_slot_info.assert_not_called()
+        # No attempt was made, so the one-shot flag is NOT consumed - it remains
+        # pending for a later turn that actually holds a slot.
+        assert inst._boot_kv_restore_pending is True
+
+    def test_endpoint_moved_skips_boot_restore_and_consumes_flag(self):
+        """Armed + slot held but the saved-file endpoint differs from the held one
+        -> P5 skip (zero state/load), yet the flag IS consumed (an attempt ran)."""
+        inst = make_instance(label=None)  # default _last_endpoint_config = STALE_Y (differs from held X)
+        inst._slot_release = lambda: None
+        self._arm(inst)
+
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)  # held = X/model-A, save endpoint = STALE_Y -> P5 skip
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            drive_setup_turn(engine, inst)
+
+        assert _recorded_load_urls(post_mock) == [], \
+            'endpoint moved: boot restore must skip with zero state/load'
+        assert inst._boot_kv_restore_pending is False, \
+            'the boot branch consumed the one-shot flag even though P5 skipped the load'
+
+    def test_opt_in_negative_twin_does_not_fire(self):
+        """Slot held, no saved label, flag NOT armed -> zero state/load. Proves the
+        new branch is opt-in, not always-on."""
+        inst = make_instance(label=None)  # _boot_kv_restore_pending defaults False
+        inst._slot_release = lambda: None
+
+        engine, pool = make_engine(inst)
+        wire_router_held_endpoint(pool)
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            drive_setup_turn(engine, inst)
+
+        assert _recorded_load_urls(post_mock) == [], \
+            'boot branch must not fire without _boot_kv_restore_pending armed'
+
+    def test_resolution_error_never_evicts_and_consumes_flag(self):
+        """Router resolution raising -> boot restore skipped (zero state/load), no
+        exception escapes _setup_turn, and the one-shot flag is consumed."""
+        inst = make_instance(label=None)
+        inst._slot_release = lambda: None
+        self._arm(inst)
+
+        engine, pool = make_engine(inst)
+        pool.api_router.get_effective_slot_info.side_effect = RuntimeError('boom')
+
+        with patch.object(state_ops.httpx, 'post') as post_mock:
+            result = drive_setup_turn(engine, inst)  # must not raise
+
+        assert result is not None, 'setup turn must complete despite resolution error'
+        assert _recorded_load_urls(post_mock) == [], \
+            'no state/load may fire on resolution failure'
+        assert inst._boot_kv_restore_pending is False, \
+            'flag cleared before the call -> never re-attempted on error'

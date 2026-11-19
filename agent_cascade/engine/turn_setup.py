@@ -68,8 +68,19 @@ class TurnSetupMixin:
             # Clear it so it does not leak and re-trigger an expensive state/load next turn.
             self._clear_orphaned_state_label(instance, inst_name)
         elif not has_saved_state:
-            logger.debug('[STATE_RESTORE_SKIP] %s has no saved state to restore (no dispatch this turn) - '
-                         'keeping warm KV cache', inst_name)
+            # Lock-free read+clear of _boot_kv_restore_pending is safe: it is a single bool on a
+            # per-instance field whose turns are serialized by slot acquisition (atomic in
+            # CPython); the _state_lock-held termination clear is a disjoint path.
+            if getattr(instance, '_boot_kv_restore_pending', False):
+                # BUG_0354: consume-once boot restore by stable on-disk label. Runs ONLY here,
+                # where _slot_release is set, so it targets an endpoint we actually hold.
+                # label=inst_name makes it independent of _state_label (separate path).
+                instance._boot_kv_restore_pending = False  # one-shot regardless of outcome
+                logger.info('[BOOT_KV_RESTORE] %s - boot KV restore attempt by stable label', inst_name)
+                self._restore_held_slot_state(instance, inst_name, label=inst_name)
+            else:
+                logger.debug('[STATE_RESTORE_SKIP] %s has no saved state to restore (no dispatch this turn) - '
+                             'keeping warm KV cache', inst_name)
         else:
             self._restore_held_slot_state(instance, inst_name)
 

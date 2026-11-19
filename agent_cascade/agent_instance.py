@@ -419,6 +419,7 @@ class AgentInstance:
     _state_label: Optional[str] = None  # Last saved state label for this instance
     _last_endpoint_config: Optional[
         dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
+    _boot_kv_restore_pending: bool = False  # BUG_0354: one-shot boot KV restore armed at session-load, consumed at first slot-held turn
     # BUG_0187: NInfer publishes one retained KV session per catalog cell and reports the
     # digest the finished turn was retained under in its final SSE chunk. state_ops sends
     # it with /state/save so the autoloader saves THIS session's cell instead of assuming
@@ -939,6 +940,7 @@ class AgentInstance:
             self._state_label = None
             self._last_endpoint_config = None
             self._safe_mode_kv = False  # safe-mode KV override must not leak past termination
+            self._boot_kv_restore_pending = False  # BUG_0354: one-shot boot restore must not survive termination
 
         # Phase 3: Cancel any pending tickets for this agent.
         # This is best-effort — the pool reference may not be available here,

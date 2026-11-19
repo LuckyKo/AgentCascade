@@ -380,6 +380,7 @@ class LifecycleMixin:
             with inst._state_lock:
                 inst._state_label = None
                 inst._last_endpoint_config = None
+                inst._boot_kv_restore_pending = False  # BUG_0354: no KV-state flag survives cleanup
         except Exception as e:
             logger.debug(f"Clearing state label for {inst.instance_name} failed (non-critical): {e}")
 
