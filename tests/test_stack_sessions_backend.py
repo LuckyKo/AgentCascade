@@ -518,7 +518,6 @@ def _make_handler(pool, *, session=None):
     h.broadcast_fn = broadcast_fn
     h._broadcast = _noop_async
     h._broadcast_stacks = _noop_async
-    h._clear_caches_safely = lambda: None
     h._stop_generation = lambda: None
     h._signal_stop = lambda: None
     h._is_generating = lambda: False

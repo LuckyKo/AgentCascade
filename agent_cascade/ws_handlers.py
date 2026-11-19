@@ -890,7 +890,7 @@ class WsMessageHandler:
         payload[WsEnvelope.TYPE] = MsgType.STACKS_RESULT
         await self.broadcast_fn(payload)
         if payload.get('status') == 'ok':
-            self._clear_caches_safely()
+            _clear_caches_safely()
             await self._broadcast()
             await self._broadcast_stacks()
 
@@ -1020,7 +1020,7 @@ class WsMessageHandler:
         snapshot.register_active_stack(self.agent_pool, created.instance_name)
         if self.agent_pool.stopped:
             self.agent_pool.stopped = False
-        self._clear_caches_safely()
+        _clear_caches_safely()
         await self._broadcast()
         await self._broadcast_stacks()
 
