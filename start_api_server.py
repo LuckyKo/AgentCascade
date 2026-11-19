@@ -18,7 +18,9 @@ CLI Flags:
 """
 
 import argparse
+import asyncio
 import os
+import sys
 
 # ── Parse instance-id BEFORE any agent_cascade imports ───────────────────────
 # This is critical because agent_cascade.log reads AGENT_CASCADE_INSTANCE_ID
@@ -141,6 +143,87 @@ def _bind_socket_with_retry(host: str, port: int, *, max_attempts: int = 20, del
     raise RuntimeError(f"Port {port} still in use after {max_attempts} attempts (~{budget:.0f}s)")
 
 
+# ── BUG_0353: fatal-exception hardening (observability + self-recovery) ──────
+# These hooks are INERT until an unhandled exception occurs; the normal boot path
+# is unchanged. Handlers resolve the LIVE agent_cascade logger at call time (local
+# import) so they reach the per-instance child logger when --instance-id is set.
+
+_FATAL_EXCEPTHOOK_INSTALLED = False
+_prev_asyncio_handler = None
+
+
+def _ac_asyncio_exception_handler(loop, context):
+    """Log an unhandled asyncio task exception to console.log at CRITICAL.
+
+    Installed as the running loop's exception handler (see _ac_serve_with_handler)
+    so that unhandled exceptions raised inside a task — which do NOT propagate out
+    of server.serve() and are the silent-death signature of BUG_0353 — are
+    diagnosable in console.log instead of vanishing.
+
+    Truly inert absent an unhandled task exception: asyncio's call_exception_handler
+    also fires for non-exception loop diagnostics (slow-callback warnings, "Task was
+    destroyed but it is pending!", "coroutine ignored GeneratorExit"). Those are
+    delegated to the previously-installed handler (captured in _prev_asyncio_handler)
+    so we never suppress asyncio's standard handling of them.
+    """
+    exc = context.get('exception')
+    if exc is None:
+        # Non-exception loop diagnostic: route to the previous handler (asyncio's
+        # default if none was installed). In the unit test _prev is None → dropped.
+        prev = _prev_asyncio_handler
+        if prev is not None:
+            prev(loop, context)
+        return
+    try:
+        from agent_cascade.log import logger  # live logger (instance-safe)
+        logger.critical('[FATAL] unhandled asyncio exception: %s', exc, exc_info=exc)
+    except Exception:
+        pass  # never let the handler itself raise (would mask asyncio's default routing)
+
+
+async def _ac_serve_with_handler(server, sock):
+    """Serve via uvicorn's Server.serve() with the fatal-exception handler armed.
+
+    Provably equivalent to server.run(sockets=[sock]) (uvicorn 0.34.3: run() ==
+    config.setup_event_loop(); asyncio.run(self.serve(sockets))) EXCEPT it sets the
+    running loop's exception handler FIRST (capturing the previous handler so
+    non-exception diagnostics keep their standard routing), so unhandled task
+    exceptions are logged to console.log. The pre-bound sock is still handed to
+    uvicorn via sockets=[sock] — do NOT revert to bare server.run() (it
+    re-introduces the port-bind race).
+    """
+    global _prev_asyncio_handler
+    loop = asyncio.get_running_loop()
+    _prev_asyncio_handler = loop.get_exception_handler()
+    loop.set_exception_handler(_ac_asyncio_exception_handler)
+    await server.serve(sockets=[sock])
+
+
+def _install_fatal_excepthook():
+    """Wrap sys.excepthook so any unhandled main-thread exception is logged to
+    console.log at CRITICAL with a [FATAL] marker BEFORE the original hook runs.
+
+    The original hook (installed by init_logging(), _logging_excepthook) is captured
+    and delegated to, so normal traceback-to-stderr / exit behavior is preserved.
+    Idempotent: safe to call more than once (would otherwise double-log).
+    """
+    global _FATAL_EXCEPTHOOK_INSTALLED
+    if _FATAL_EXCEPTHOOK_INSTALLED:
+        return
+    original = sys.excepthook
+
+    def _fatal_excepthook(exc_type, exc_value, exc_tb):
+        try:
+            from agent_cascade.log import logger  # live logger (instance-safe)
+            logger.critical('[FATAL] unhandled exception', exc_info=(exc_type, exc_value, exc_tb))
+        except Exception:
+            pass  # never mask the original hook; logging may be unavailable at shutdown
+        original(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _fatal_excepthook
+    _FATAL_EXCEPTHOOK_INSTALLED = True
+
+
 def initialize_agents():
     """Set up agents, pool, and config. Returns (all_agents, agent_pool, chatbot_config)."""
     logger.info('Initializing Agent Orchestrator (API Server)...')
@@ -177,6 +260,11 @@ def initialize_agents():
 if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
+
+    # BUG_0353: arm the fatal-exception hooks so an unhandled main-thread exception is
+    # logged to console.log at CRITICAL before the original hook runs. Inert on the
+    # normal boot path (only fires on an unhandled exception).
+    _install_fatal_excepthook()
 
     # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
     # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
@@ -290,8 +378,26 @@ if __name__ == '__main__':
         # uvicorn 0.34.x binds internally without SO_REUSEADDR and calls sys.exit(1) on
         # EADDRINUSE (surfacing as SystemExit, not OSError), so the old errno-98 handler
         # was dead code. The pre-bound socket above makes that path unreachable.
+        #
+        # uvicorn 0.34.x: run the equivalent two-step (Server.run ==
+        # config.setup_event_loop(); asyncio.run(self.serve(sockets))) through
+        # _ac_serve_with_handler so the running loop's exception handler is armed FIRST
+        # — unhandled task exceptions are logged to console.log at CRITICAL instead of
+        # vanishing (the silent-death signature).
+        #
+        # uvicorn 0.36.0+ removed setup_event_loop (replaced by get_loop_factory); there
+        # the standard run() path handles the loop, so degrade to it (still serves via the
+        # pre-bound sock; the fatal hook is simply not armed) instead of raising and
+        # crash-looping the watchdog. setup_event_loop was removed in 0.36.0 and
+        # re-added as a raising stub in 0.36.1 — so it is present on 0.34.x and on 0.36.0+
+        # alike, and is NOT a usable predicate (get_loop_factory is absent on 0.34.x /
+        # present on 0.36.0+).
         boot_timing.mark('uvicorn_ready')
-        server.run(sockets=[sock])
+        if hasattr(config, 'get_loop_factory'):
+            server.run(sockets=[sock])
+        else:
+            config.setup_event_loop()
+            asyncio.run(_ac_serve_with_handler(server, sock))
     except Exception as e:
         logger.error('[FATAL] Server crashed: %s', e)
         raise SystemExit(1)
