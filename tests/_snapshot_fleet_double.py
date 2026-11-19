@@ -125,6 +125,9 @@ def make_instance(name, *, agent_class='coder', parent=None, depth=0,
         _last_endpoint_config=cfg,
         _session_digest='dig-' + name,
         _session_digest_endpoint=(cfg['api_base'], cfg['model']) if cfg else None,
+        # Live-stream flag read by the canonical ``instance_llm_in_flight`` predicate
+        # (no ``_stream_reader_done`` here, so this is the authority).
+        _llm_call_active=False,
         _state_lock=threading.RLock(),
     )
 
@@ -169,6 +172,7 @@ def make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
     parked = make_instance('coder_parked', parent=ROOT, depth=1, cfg=CAPABLE_CFG)
     incapable = make_instance('coder_plain', parent=ROOT, depth=1, cfg=None)
     for inst in (root, worker, parked, incapable):
+        inst._llm_call_active = inst.instance_name in streaming_names
         register(pool, inst)
 
     pool.instance_loggers = {

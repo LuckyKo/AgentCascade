@@ -521,6 +521,19 @@ capture), `prune_snapshots` (retention), `delete_stack` / `delete_snapshot` (ref
 a single save), `ensure_registry_loaded` (rebuild from disk), `quarantine_snapshot` (corrupt handling),
 and `list_stacks` (the single read model REST / WS / Telegram all render from so they can't drift).
 
+**KV coverage (which instances get a KV block):** explicit captures (park / Save now / shutdown /
+restart) stay best-effort over every instance whose endpoint is `state_save_enabled` and resolves.
+The **automatic turn-end save** (`only_streaming=True`) is narrower: only instances that are
+*actively streaming* right now — a live LLM stream (`utils.streaming.instance_llm_in_flight`) —
+plus the finishing instance named in `just_finished`. A resolvable endpoint alone is not enough:
+every instance keeps a cached/effective endpoint, so idle siblings and callers blocked on a
+`call_agent` child would also qualify, and their sessions are no longer retained by the engine —
+saving them is refused (400/409) after a multi-GB attempt, and can race the live stream on a shared
+concurrency-1 slot. The finishing root's stream has ended and its slot is released by the time the
+snapshot runs, but its retained session is the freshest and is exactly what a later resume wants.
+Instances without a KV block still get their conversation log (always captured) and restore with
+`kv: null`, i.e. cold-start for the LLM but complete conversation state.
+
 **Snapshot pruning (`SNAPSHOT_RETENTION_COUNT`, default 50):** each stack keeps only the newest N
 snapshots and retires the oldest (write order, oldest first) — for ALL stacks, including the active one.
 Only snapshot *files* are pruned; KV is left untouched (cache, not source of truth).

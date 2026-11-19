@@ -30,7 +30,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from agent_cascade import settings
 
@@ -594,19 +594,50 @@ class _NullContext:
         return False
 
 
-def _is_streaming(pool, instance, endpoint_cfg: Dict[str, Any]) -> bool:
-    """True when ``instance`` is in the actively-streaming set (decision 1).
+def _kv_save_capable(pool, instance, endpoint_cfg: Dict[str, Any]) -> bool:
+    """True when an instance is a candidate for an explicit (best-effort) KV save.
 
-    Streaming == ``state_save_enabled`` (per the frozen endpoint config) AND
-    currently holds that endpoint's slot — the precise mechanical condition the save
-    API requires. The slot is resolved live via the real ``state_ops.resolve_held_endpoint``
-    seam (we want the slot state at capture time), never inferred from a cached flag.
+    Explicit captures (park / Save now / shutdown / restart) try every warm instance
+    whose endpoint is save-capable and resolvable; a stale session is then refused by
+    the engine and recorded as ``saved: false``. The automatic task-end save is
+    narrower — see :func:`_is_streaming`.
     """
     from agent_cascade.state_ops import is_state_save_capable, resolve_held_endpoint
 
     if not is_state_save_capable(endpoint_cfg):
         return False
     return resolve_held_endpoint(pool, instance) is not None
+
+
+def _is_streaming(pool, instance, endpoint_cfg: Dict[str, Any], *,
+                  just_finished: bool = False) -> bool:
+    """True when ``instance`` is in the actively-streaming set (decision 1).
+
+    A KV save can only capture a session the engine still retains, so the instance
+    must either be mid-stream right now (its stream owns the retained catalog cell)
+    or be the instance whose stream just ended (:attr:`just_finished` — its cell is
+    the freshest one and is exactly what the snapshot wants to resume from).
+
+    ``state_save_enabled`` plus a resolvable endpoint is NOT sufficient: the endpoint
+    resolver returns the instance's cached/effective endpoint whether or not it is
+    generating, so idle siblings and callers blocked on a child both look "streaming".
+    Saving them writes sessions the engine no longer retains (the digest is stale by
+    the next turn) and, on a shared concurrency-1 slot, races the live stream's KV.
+    ``instance_llm_in_flight`` is the canonical live-stream predicate, so an abandoned
+    stream whose reader has already finished is not mistaken for an active one.
+    """
+    from agent_cascade.state_ops import is_state_save_capable, resolve_held_endpoint
+    from agent_cascade.utils.streaming import instance_llm_in_flight
+
+    if not is_state_save_capable(endpoint_cfg):
+        return False
+    if just_finished:
+        # Its stream ended on this endpoint (the permit is already released, so the
+        # slot resolver need not answer); the engine still retains its session cell.
+        return True
+    if resolve_held_endpoint(pool, instance) is None:
+        return False
+    return instance_llm_in_flight(instance)
 
 
 def _save_streaming_kv(instance, kv_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -690,6 +721,8 @@ def capture_fleet_snapshot(
     *,
     stack_id: Optional[str] = None,
     kv_saver=None,
+    just_finished: Optional[Iterable[str]] = None,
+    only_streaming: bool = False,
 ) -> Optional[SnapshotEnvelope]:
     """Build a versioned fleet-snapshot envelope from the live pool.
 
@@ -706,6 +739,16 @@ def capture_fleet_snapshot(
         kv_saver: Injectable override for the per-instance KV save (defaults to
             :func:`_save_streaming_kv`). Exists so tests exercise the streaming
             path without a real autoloader; production never passes one.
+        just_finished: Instance names whose LLM stream ended immediately before this
+            capture (the task-end autosave passes the finishing root). They no longer
+            have a stream in flight, but their KV is the freshest retained session, so
+            they are saved alongside instances that are still streaming. Only read when
+            ``only_streaming`` is true.
+        only_streaming: Restrict KV saves to instances that are streaming right now
+            (plus ``just_finished``). The automatic task-end save sets this: saving the
+            idle fleet there is what wrote stale sessions (400/409) and multi-GB files
+            on every turn end. Explicit captures (park / Save now / shutdown / restart)
+            leave it false and keep best-effort coverage of every warm instance.
     """
     if not settings.ENABLE_STACK_SWAP:
         logger.debug('[FLEET_SNAPSHOT] requested but ENABLE_STACK_SWAP is off — no-op')
@@ -748,12 +791,17 @@ def capture_fleet_snapshot(
     from agent_cascade import agent_identity
 
     # ── Phase 2: I/O (log refs) and KV saves — NO pool lock held ────────────
+    finished = frozenset(just_finished or ())
     log_refs: Dict[str, Dict[str, Any]] = {}
     kv_blocks: Dict[str, Optional[Dict[str, Any]]] = {}
     for name, inst in instances.items():
         log_refs[name] = _capture_log_reference(_resolve_instance_log_path(pool, name))
         endpoint_cfg = kv_configs[name]['endpoint_cfg']
-        if _is_streaming(pool, inst, endpoint_cfg):
+        if only_streaming:
+            save_kv = _is_streaming(pool, inst, endpoint_cfg, just_finished=name in finished)
+        else:
+            save_kv = _kv_save_capable(pool, inst, endpoint_cfg)
+        if save_kv:
             kv_blocks[name] = kv_saver(inst, kv_configs[name]) if kv_saver else _save_streaming_kv(inst, kv_configs[name])
         else:
             kv_blocks[name] = None
@@ -1928,7 +1976,9 @@ def list_stacks(pool, *, registry: Optional[StackRegistry] = None) -> Dict[str, 
 
 def snapshot_stack(pool, stack_id: Optional[str] = None, *,
                    registry: Optional[StackRegistry] = None,
-                   trigger: str = 'user', kv_saver=None) -> Optional[Dict[str, Any]]:
+                   trigger: str = 'user', kv_saver=None,
+                   just_finished: Optional[Iterable[str]] = None,
+                   only_streaming: bool = False) -> Optional[Dict[str, Any]]:
     """Capture a non-destructive fleet snapshot and register it under ``stack_id``.
 
     Unlike :func:`park_active_stack`, this does NOT drain or clear the pool — it
@@ -1937,7 +1987,9 @@ def snapshot_stack(pool, stack_id: Optional[str] = None, *,
     instance the capture derives. Writes the envelope to disk, registers it, then
     applies retention (pruning). Returns ``{'stack_id', 'snapshot_id'}``, or
     ``None`` when the capture yielded nothing (empty/gated pool)."""
-    env = capture_fleet_snapshot(pool, trigger=trigger, stack_id=stack_id, kv_saver=kv_saver)
+    env = capture_fleet_snapshot(pool, trigger=trigger, stack_id=stack_id,
+                                 kv_saver=kv_saver, just_finished=just_finished,
+                                 only_streaming=only_streaming)
     if env is None:
         logger.debug('[STACK_OPS] snapshot requested but capture returned None (empty/gated pool)')
         return None
@@ -1998,6 +2050,12 @@ def maybe_autosave_on_task_end(pool, instance_name: str) -> None:
     A save is a pure manifest, so it is safe while the rest of the fleet is still
     running (user decision: "stack save should support live swap"). There is no
     quiescence scan and no rotation — the finishing instance is simply the trigger.
+
+    Only the instances that are actually streaming are snapshotted: ``instance_name``
+    (whose stream just ended and whose retained session is the freshest) plus any
+    other instance whose LLM stream is live. Idle siblings — including callers
+    blocked on a ``call_agent`` child — are not saved; their sessions are no longer
+    retained, so the save would either be refused or race the live stream.
     """
     if not (settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED):
         return
@@ -2015,7 +2073,8 @@ def maybe_autosave_on_task_end(pool, instance_name: str) -> None:
         return                       # a save is already in flight
     try:
         started = time.perf_counter()
-        snapshot_stack(pool, trigger='task_end')
+        snapshot_stack(pool, trigger='task_end', just_finished={instance_name},
+                       only_streaming=True)
         logger.info('[STACK_SWAP] task-end autosave took %.0fms',
                     (time.perf_counter() - started) * 1000)
     except Exception:

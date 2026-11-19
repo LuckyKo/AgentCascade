@@ -116,6 +116,9 @@ def _instance(name, *, agent_class='coder', parent=None, depth=0,
         _last_endpoint_config=cfg,
         _session_digest='dig-' + name,
         _session_digest_endpoint=(cfg['api_base'], cfg['model']) if cfg else None,
+        # Live-stream flag read by the canonical ``instance_llm_in_flight`` predicate
+        # (no ``_stream_reader_done`` here, so this is the authority).
+        _llm_call_active=False,
         _state_lock=threading.RLock(),
     )
     return inst
@@ -157,8 +160,10 @@ def pool():
 def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
     """Root + streaming child + a capable-but-no-slot instance + a non-capable child.
 
-    Returns (root, worker, parked, incapable). resolve_held_endpoint is faked to
-    return a held endpoint only for ``streaming_names``.
+    Returns (root, worker, parked, incapable). ``resolve_held_endpoint`` is faked to
+    return a held endpoint only for ``streaming_names``, and those same instances are
+    marked as mid-stream (``_llm_call_active``) — the two conditions the KV-coverage
+    predicate requires.
     """
     import agent_cascade.state_ops as state_ops
 
@@ -168,6 +173,7 @@ def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
     parked = _instance('coder_parked', parent='Maine_20261115_143022', depth=1, cfg=CAPABLE_CFG)
     incapable = _instance('coder_plain', parent='Maine_20261115_143022', depth=1, cfg=None)
     for inst in (root, worker, parked, incapable):
+        inst._llm_call_active = inst.instance_name in streaming_names
         _register(pool, inst)
 
     # Register log paths on the pool (source of truth capture reads).
@@ -314,6 +320,79 @@ class TestKvCoverage:
         assert snapshot._is_streaming(pool, worker, cfg_capable) is True
         assert snapshot._is_streaming(pool, parked, cfg_capable) is False   # capable, no slot
         assert snapshot._is_streaming(pool, incapable, cfg_none) is False    # non-capable
+
+    def test_idle_instance_with_a_resolvable_endpoint_is_not_streaming(self, pool, tmp_path, monkeypatch):
+        """A cached endpoint is not a live stream (BUG_0358).
+
+        ``resolve_held_endpoint`` answers for any instance that has an endpoint
+        config, so a sibling that is idle (or a caller blocked on its child) still
+        resolves one. Requiring a resolvable endpoint therefore saved the whole
+        fleet on every task end: multi-second saves of stale sessions, 400s for an
+        evicted model, and a 409 for a digest the engine no longer retained.
+        """
+        _make_fleet(pool, tmp_path, monkeypatch, streaming_names=('coder_parked',))
+        parked = pool.instances['coder_parked']
+        parked._llm_call_active = False                     # idle: no live stream
+        assert snapshot._is_streaming(pool, parked, CAPABLE_CFG) is False
+
+        parked._llm_call_active = True                      # same endpoint, now streaming
+        assert snapshot._is_streaming(pool, parked, CAPABLE_CFG) is True
+
+    def test_capture_saves_only_streaming_and_just_finished(self, pool, tmp_path, monkeypatch):
+        """Task end saves the finishing root + live streams, never the idle fleet.
+
+        The finishing root's stream has already ended (its slot was released), so it
+        is selected by ``just_finished``; a sibling that is idle at capture time is
+        not saved even though its endpoint resolves.
+        """
+        saved = {}
+
+        def saver(inst, kv_cfg):
+            saved[inst.instance_name] = True
+            return {'capable': True, 'saved': True, 'reason': None,
+                    'label': inst.instance_name, 'session_digest': kv_cfg['session_digest'],
+                    'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
+                    'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'],
+                                     'model': CAPABLE_CFG['model']}}
+
+        root_name = 'Maine_20261115_143022'
+        # parked resolves an endpoint but is idle; worker is genuinely mid-stream.
+        _make_fleet(pool, tmp_path, monkeypatch,
+                    streaming_names=('coder_worker1', 'coder_parked'))
+        pool.instances['coder_parked']._llm_call_active = False
+
+        env = capture_fleet_snapshot(pool, trigger='task_end', kv_saver=saver,
+                                     just_finished={root_name}, only_streaming=True)
+        raw = env.to_dict()
+
+        assert saved == {'coder_worker1': True, root_name: True}
+        assert raw['instances']['coder_parked']['kv'] is None
+        assert raw['instances']['coder_plain']['kv'] is None
+
+    def test_explicit_capture_keeps_warm_fleet_coverage(self, pool, tmp_path, monkeypatch):
+        """Park / Save now stay best-effort over every warm-capable instance.
+
+        Only the automatic task-end save is streaming-only; an explicit capture still
+        tries every instance (a stale session is refused by the engine and recorded as
+        ``saved: false``, which the restore side already fails closed on).
+        """
+        saved = {}
+
+        def saver(inst, kv_cfg):
+            saved[inst.instance_name] = True
+            return {'capable': True, 'saved': True, 'reason': None,
+                    'label': inst.instance_name, 'session_digest': kv_cfg['session_digest'],
+                    'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
+                    'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'],
+                                     'model': CAPABLE_CFG['model']}}
+
+        _make_fleet(pool, tmp_path, monkeypatch,
+                    streaming_names=('Maine_20261115_143022', 'coder_worker1', 'coder_parked'))
+        capture_fleet_snapshot(pool, trigger='user', kv_saver=saver)
+
+        # Everything with a capable endpoint is attempted; the non-capable child is not.
+        assert saved == {'Maine_20261115_143022': True, 'coder_worker1': True,
+                         'coder_parked': True}
 
     def test_save_streaming_kv_calls_save_instance_state_set_label_false(self, monkeypatch):
         import agent_cascade.state_ops as state_ops

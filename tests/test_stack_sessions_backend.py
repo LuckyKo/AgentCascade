@@ -315,6 +315,11 @@ def test_task_end_autosave_saves_while_sibling_runs(tmp_path, monkeypatch):
     maybe_autosave_on_task_end(p, ROOT)
     assert len(calls) == 1
     assert calls[0].get('trigger') == 'task_end'
+    # The finishing root is named explicitly: its stream has ended by the time the
+    # snapshot runs, so it is not "in flight" and would otherwise lose its KV block.
+    assert calls[0].get('just_finished') == {ROOT}
+    # And the automatic save is restricted to streaming instances + that root.
+    assert calls[0].get('only_streaming') is True
 
 
 def test_task_end_autosave_independent_of_boot_restore(tmp_path, monkeypatch):
