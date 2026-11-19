@@ -41,7 +41,7 @@ AVAILABLE_TOOLS: List[str] = [
     # Mutating file ops
     'write_file',  # Create or overwrite files
     'edit_file',  # Surgical text replacement in existing files
-    're_indent',  # Re-indent code blocks
+    # 're_indent',  # Re-indent code blocks - low usage with good models, might be good for small ones that error often but for now keep it off
     'delete_file',  # Delete files (with backup)
     'copy_file',  # Copy files or directories
 
@@ -443,16 +443,17 @@ AUTO_SKILL_REFLECTION_PROMPT = (
     '- actively misleading or harmful → very low (0-4)\n'
     'Discourage generosity bias: a skill that was merely present but not needed should NOT get a '
     'high rating. Do NOT rate skills you did not apply.\n\n'
-    '### 2. Propose new / updated skills (only if warranted)\n'
-    'If you discover a non-obvious, particularly useful and reusable pattern or procedure that the loaded skills did not cover, propose '
-    'a new skill (or preferably update an existing one with a streamlined/improved version) by calling `propose_skill`. If you notice any skills providing contradictory instructions, resolve by update using common sense and best practices. '
+    '### 2. Update skills\n'
+    'If you notice that any used skills could be improved with the additional experience you gained, '
+    'that they could use tighter or clearer prose, or if they provide contradictory or erroneous instructions, '
+    'resolve by updating them using common sense and best practices.\n'
     'Before updating an existing skill, call `scan_skills` with `preview="<name>"` and submit the '
-    'full current file plus your changes — do not rewrite it from memory. '
-    'The `name` argument is authoritative — it becomes the registered name. New skills start '
-    'unrated; rate them after you actually use them. An update is queued as a candidate that '
-    'serves immediately and is promoted or discarded later by the rating gate.\n\n'
-    '### 3. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
-    '### 4. If you noticed any bugs/issues/unnecessary friction with the AgentCascade tooling/helper systems, log them using the established bug tracking methods.\n'
+    'full current file with your changes — do not rewrite it from memory.\n'
+    '### 3. Propose new skills (only if warranted)\n'
+    'If you discover a non-obvious, particularly useful and reusable pattern or procedure that the loaded skills did not cover, propose '
+    'a new skill by calling `propose_skill`.\n'
+    '### 4. Optionally leave a project memory for any non-obvious failure or gotcha worth avoiding next time (see Self-Augmentation)\n'
+    '### 5. If you noticed any bugs/issues/unnecessary friction with the AgentCascade tooling/helper systems, log them using the established bug tracking methods.\n\n'
     '### Skill creation guide\n\n{skill_creator_body}\n')
 
 # --- Knowledge Base Templates ---
