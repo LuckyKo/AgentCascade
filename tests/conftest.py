@@ -54,6 +54,14 @@ os.environ['AGENT_CASCADE_DISABLE_ASYNC_SHELL_CONSOLE_WINDOW'] = '1'
 os.environ['AGENT_CASCADE_SKILLS_METRICS_FILE'] = str(
     Path(tempfile.gettempdir()) / f'agent_cascade_{_derive_test_instance_id()}' / 'skills-metrics.json')
 
+# Default workspace: AgentPool's LoggerManager falls back to DEFAULT_WORKSPACE
+# (agent_cascade/pool/logger_mgr.py:27) when built without an explicit workspace_dir, and
+# detect_workspace_dir resolves that from AGENT_CASCADE_DEFAULT_WORKSPACE first
+# (agent_cascade/shared_init.py:59, priority 1). Point it at a per-process temp dir so pool
+# base_dir / instance log dirs land in temp instead of the project tree.
+os.environ['AGENT_CASCADE_DEFAULT_WORKSPACE'] = str(
+    Path(tempfile.gettempdir()) / f'agent_cascade_{_derive_test_instance_id()}' / 'workspace')
+
 # Ensure the project root is on sys.path so top-level packages like `config`
 # are importable in xdist workers (which don't inherit CWD from the launcher).
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)

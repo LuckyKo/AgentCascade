@@ -152,6 +152,13 @@ model_cache/
 tests/_tmp_p_case*/
 tests/_test_output*
 
+# Per-instance test log dirs created by instance_id.make_instance_dir
+# (logs_<AGENT_CASCADE_INSTANCE_ID>) during xdist/serial test runs. Untracked artifacts.
+logs_test_*/
+
+# machine-local, untracked (rewritten with absolute paths by POST /api/media_gen)
+config/media_gen/media_gen.json
+
 # Timestamped runtime settings dumps (same family as pool_settings/secrets)
 config/agent-cascade-settings-*.json
 
