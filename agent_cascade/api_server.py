@@ -1064,6 +1064,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     if agent_pool and boot_stack_env is not None:
         try:
             snapshot.activate_stack(agent_pool, boot_stack_env)
+            # BUG_0359: a boot-restore has no live run threads, so normalize any
+            # restored instance left in a live-run state (RUNNING/SLEEPING/COMPLETING)
+            # to IDLE — otherwise the engine's IDLE->RUNNING entry guard rejects the
+            # first run and strands queued messages. (Boot-restore exception to phase
+            # 5b's "never blanket" rule, which is correct for runtime swaps.)
+            snapshot.normalize_boot_restore_states(agent_pool)
             roots = [n for n, i in agent_pool.instances.items() if getattr(i, 'parent_instance', None) is None]
             session['session_name'] = roots[0] if roots else default_session_name
             # BUG_0359 (diagnostic): record the restored root's state immediately after

@@ -271,3 +271,40 @@ def test_no_pending_text_keeps_basic_nudge_fallback(monkeypatch):
 
     assert pool._enqueue_calls and pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
     assert re_drives == []  # no pending text → no re-drive
+
+
+# ── Part D: boot-restore state normalization ──────────────────────────────────────────────
+
+
+def _make_instance(name: str, state: AgentState):
+    """A minimal instance double with just the attributes normalize_boot_restore_states reads."""
+    inst = MagicMock()
+    inst.instance_name = name
+    inst.state = state
+    inst._state_lock = threading.RLock()
+    return inst
+
+
+def test_normalize_boot_restore_states_flips_live_run_to_idle():
+    """BUG_0359: a boot-restore has no live run threads, so any restored instance left in a
+    live-run state (RUNNING/SLEEPING/COMPLETING) must be normalized to IDLE; TERMINATED and
+    IDLE are kept verbatim. Without this, the engine's IDLE->RUNNING entry guard rejects the
+    first run and strands queued messages (the root looks 'idle' in the UI but is RUNNING)."""
+    from agent_cascade import snapshot
+
+    pool = MagicMock()
+    pool.instances = {
+        'root': _make_instance('root', AgentState.RUNNING),
+        'sleeper': _make_instance('sleeper', AgentState.SLEEPING),
+        'completer': _make_instance('completer', AgentState.COMPLETING),
+        'dead': _make_instance('dead', AgentState.TERMINATED),
+        'already_idle': _make_instance('already_idle', AgentState.IDLE),
+    }
+
+    snapshot.normalize_boot_restore_states(pool)
+
+    assert pool.instances['root'].state is AgentState.IDLE
+    assert pool.instances['sleeper'].state is AgentState.IDLE
+    assert pool.instances['completer'].state is AgentState.IDLE
+    assert pool.instances['dead'].state is AgentState.TERMINATED      # kept verbatim
+    assert pool.instances['already_idle'].state is AgentState.IDLE    # unchanged

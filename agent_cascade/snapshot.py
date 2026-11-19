@@ -1696,6 +1696,27 @@ def park_active_stack(
     return env
 
 
+def normalize_boot_restore_states(pool) -> None:
+    """BUG_0359: a boot-restore has NO live run threads (unlike a runtime swap), so any
+    restored instance left in a live-run state (RUNNING/SLEEPING/COMPLETING) is STALE —
+    the engine's IDLE->RUNNING entry guard would reject the first run and strand queued
+    messages (the UI shows the root "idle" while its internal state is RUNNING).
+
+    Normalize live-run states to IDLE (TERMINATED kept verbatim). This is the
+    boot-restore exception to phase 5b's "never blanket" rule, which is correct for
+    runtime swaps (where the live run threads continue) but not for a fresh boot
+    (where they do not).
+    """
+    from agent_cascade.agent_instance import AgentState
+    for inst in pool.instances.values():
+        with inst._state_lock:
+            if inst.state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
+                prev = inst.state
+                inst.state = AgentState.IDLE
+                logger.info('[FLEET_RESTORE] boot-restore: %s %s -> IDLE (no live run thread)',
+                            inst.instance_name, prev.name)
+
+
 def activate_stack(pool, envelope: SnapshotEnvelope, *, gate_checked: bool = False) -> None:
     """Activate a parked stack by rehydrating ``envelope`` into the (empty) pool.
 
