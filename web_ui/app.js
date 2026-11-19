@@ -1284,13 +1284,16 @@ function renderSessionPanel() {
 
   const q = (sessionSearch?.value || '').toLowerCase();
   const rows = [];
-  for (const [sid, stack] of Object.entries(state.sessions.stacks || {})) {
-    if (sid === activeId) continue;
-    for (const snap of (details[sid]?.snapshots || [])) {
-      const name = details[sid]?.display_name || sid;
-      if (q && !(name.toLowerCase().includes(q) || (snap.caption || '').toLowerCase().includes(q))) continue;
-      rows.push({ sid, snap, name, inst: details[sid]?.instance_count || 0 });
-    }
+  for (const sid of Object.keys(state.sessions.stacks || {})) {
+    if (sid === activeId) continue;                       // ACTIVE card is separate — untouched
+    const snaps = details[sid]?.snapshots || [];
+    if (!snaps.length) continue;
+    // One card per logical session (stack_id): keep only the most-recent snapshot.
+    let latest = snaps[0];
+    for (const s of snaps) { if ((s.created_at || 0) > (latest.created_at || 0)) latest = s; }
+    const name = details[sid]?.display_name || sid;
+    if (q && !(name.toLowerCase().includes(q) || (latest.caption || '').toLowerCase().includes(q))) continue;
+    rows.push({ sid, snap: latest, name, inst: details[sid]?.instance_count || 0 });
   }
   rows.sort((a, b) => (b.snap.created_at || 0) - (a.snap.created_at || 0));
 
