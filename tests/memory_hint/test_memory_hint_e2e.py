@@ -320,7 +320,7 @@ class TestMemoryHintE2E:
         assert self._wait_for_hint(inst), 'expected a hint on _tool_warnings'
         hint = inst._tool_warnings[0]
         assert '[MEMORY HINT]' in hint
-        assert 'Skills you may want to load' in hint
+        assert 'Suggested skill' in hint
         assert 'docker-best-practices' in hint
         # The memory lesson still rides the SAME single message (combined hint).
         assert 'compression-debug.md' in hint

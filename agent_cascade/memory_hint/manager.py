@@ -997,7 +997,8 @@ class MemoryHintManager:
         # align 1:1. Empty hub entries stay empty → byte-identical render (no-op).
         memory_hubs = [self._hubs.get(p) for p in memory_bare] if memory_bare else None
         hint_text = self._build_combined(memory_display, skill_names, skill_counts, loaded,
-                                        memory_hubs)
+                                        memory_hubs,
+                                        settings.get('skill_autoload_threshold', 3))
         if not hint_text:
             return
 
@@ -1095,9 +1096,10 @@ class MemoryHintManager:
             if skill_counts.get(n, 0) < threshold or n.lower() in loaded:
                 # BUG_0263 observability: the below-threshold / already-loaded skip was
                 # silent — record WHY a hinted skill was NOT auto-loaded so the
-                # "hinted N×, 0 loads" root-cause question is closable. DEBUG = no
-                # production (INFO) noise. Pure logging: `continue` + counters unchanged.
-                logger.debug('[MEMORY_HINT] %s: not auto-loading skill %r '
+                # "hinted N×, 0 loads" root-cause question is closable. INFO makes
+                # it visible at production log level (tier7 §(c)). Pure logging:
+                # `continue` + counters unchanged.
+                logger.info('[MEMORY_HINT] %s: not auto-loading skill %r '
                              '(hints=%d, threshold=%d, loaded=%s)',
                              name, n, skill_counts.get(n, 0), threshold, n.lower() in loaded)
                 continue
@@ -1509,7 +1511,8 @@ class MemoryHintManager:
 
     def _skill_block(self, names: List[str],
                      skill_counts: Optional[Dict[str, int]] = None,
-                     loaded: Optional[set] = None) -> str:
+                     loaded: Optional[set] = None,
+                     autoload_threshold: int = 3) -> str:
         """Skill section of a combined hint ('' when empty). Skill names are short
         snake_case strings — no per-entry clipping needed.
 
@@ -1524,27 +1527,33 @@ class MemoryHintManager:
         The ``loaded`` set is defense-in-depth: the gate already filters loaded skills
         out of ``names``, so in production the suffix is always appended; the set is
         passed so the branch stays correct if that gate ever changes.
+
+        tier7 §(c) top-1: only the single top-scoring skill (``names[0]`` — the list is
+        already sorted by Gate-4 effective score) is rendered. The rest are dropped
+        from the hint to cut weak-signal noise; they still pass Gate-4 but the
+        quality-bar rule (P2) says surface ONE, gate the rest.
         """
         if not names:
             return ''
         counts = skill_counts or {}
         loaded = loaded or set()
-        lines = []
-        for n in names:
-            line = f"  - {n}"
-            c = counts.get(n)
-            if c is not None and c >= 3:
-                suffix = f"hinted {_ordinal(c)} time this session"
-                if n.lower() not in loaded:
-                    suffix += ', not loaded'
-                line += f" — {suffix}"
-            lines.append(line)
-        return f"Skills you may want to load ({len(names)}):\n" + '\n'.join(lines)
+        n = names[0]
+        line = f"  - {n}"
+        c = counts.get(n)
+        if c is not None and c >= 3:
+            suffix = f"hinted {_ordinal(c)} time this session"
+            if n.lower() not in loaded:
+                suffix += ', not loaded'
+                if c < autoload_threshold:
+                    suffix += f" ({c} < autoload threshold {autoload_threshold})"
+            line += f" — {suffix}"
+        return f"Suggested skill:\n{line}"
 
     def _build_combined(self, memory_display: List[str], skill_names: List[str],
                         skill_counts: Optional[Dict[str, int]] = None,
                         loaded: Optional[set] = None,
-                        memory_hubs: Optional[List[Optional[str]]] = None) -> str:
+                        memory_hubs: Optional[List[Optional[str]]] = None,
+                        autoload_threshold: int = 3) -> str:
         """Merge the two sub-pipelines into ONE hint string (plan §D5).
 
         Memory-only output is BYTE-IDENTICAL to the legacy ``_build_hint`` result; a
@@ -1553,9 +1562,12 @@ class MemoryHintManager:
         per-line recurrence marker and are optional (default ``None`` → no marker).
         ``memory_hubs`` (Feature B) is an optional list index-aligned with
         ``memory_display``; it only adds per-line hub breadcrumbs when present.
+        ``autoload_threshold`` (tier7 §(c)) is threaded to ``_skill_block`` so the
+        recurrence marker can state count-vs-threshold for below-threshold skills.
         """
         mem_block = self._build_hint(memory_display, memory_hubs)   # '' if empty
-        skill_block = self._skill_block(skill_names, skill_counts, loaded)   # '' if empty
+        skill_block = self._skill_block(skill_names, skill_counts, loaded,
+                                       autoload_threshold)           # '' if empty
         if mem_block and skill_block:
             return mem_block + '\n' + skill_block      # both sections, memory first (stable order)
         if mem_block:

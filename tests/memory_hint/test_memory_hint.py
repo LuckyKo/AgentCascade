@@ -1016,7 +1016,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert '[MEMORY HINT]' in hint
-        assert 'Skills you may want to load' in hint
+        assert 'Suggested skill' in hint
         assert 'docker-best-practices' in hint
         # Cooldown recorded for the suggested skill.
         assert 'docker-best-practices' in inst._recently_skill_hinted
@@ -1036,7 +1036,7 @@ class TestManagerSkillHints:
         mgr._process_job(job)
         # The memory hint still fires (clear winner), but with NO skill section.
         assert len(inst._tool_warnings) == 1
-        assert 'Skills you may want to load' not in inst._tool_warnings[0]
+        assert 'Suggested skill' not in inst._tool_warnings[0]
         assert inst._recently_skill_hinted == {}
         # The stub score sits below BOTH the seed and the junk guard; the read floor is
         # whatever the (unchanged-by-this-job) EWMA says.
@@ -1067,7 +1067,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert '[MEMORY HINT]' in hint
-        assert 'Skills you may want to load' in hint
+        assert 'Suggested skill' in hint
         assert 'docker-best-practices' in hint
         # Skill-only hints carry the umbrella tag; no memory section.
         assert 'Relevant memories' not in hint
@@ -1088,7 +1088,7 @@ class TestManagerSkillHints:
         mgr._process_job(job)
         # Memory hint fires; the loaded skill is excluded (no skill section at all).
         assert len(inst._tool_warnings) == 1
-        assert 'Skills you may want to load' not in inst._tool_warnings[0]
+        assert 'Suggested skill' not in inst._tool_warnings[0]
         assert 'docker-best-practices' not in inst._recently_skill_hinted
 
     def test_skill_hint_cooldown_blocks_repeat(self, tmp_path):
@@ -1104,7 +1104,7 @@ class TestManagerSkillHints:
             skill_manager=self._stub_skill_manager([('docker-best-practices', SKILL_HINT_MIN_SCORE + 0.1)]))
         mgr._process_job(job)
         assert len(inst._tool_warnings) == 1
-        assert 'Skills you may want to load' in inst._tool_warnings[0]
+        assert 'Suggested skill' in inst._tool_warnings[0]
         # Immediately re-process: skill still in cooldown → no new skill section.
         job2 = {'instance_name': 'w', 'query': job['query'], 'agent_class': 'test_agent',
                 'submitted_at': time.monotonic(), 'turn': 4}
@@ -1162,11 +1162,10 @@ class TestManagerSkillHints:
         mgr._process_job(job)
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
-        # Top-3 by score are listed; the 4th (skill-3) is capped out.
-        for n in ('skill-0', 'skill-1', 'skill-2'):
-            assert n in hint, f'{n} (top-3) missing from hint: {hint}'
-        assert 'skill-3' not in hint, '4th skill must be capped out of the hint'
-        assert '(3)' in hint  # section header count reflects the cap
+        # tier7 §(c) top-1: only the single top-scoring skill is rendered.
+        assert 'skill-0' in hint, f'top-1 skill-0 missing from hint: {hint}'
+        assert 'skill-1' not in hint, '2nd skill must not be rendered (top-1 rule)'
+        assert 'skill-2' not in hint, '3rd skill must not be rendered (top-1 rule)'
 
     def test_skill_and_memory_combined_format(self, tmp_path):
         """Both fire → ONE message: memory block (byte-format preserved) + skill section."""
@@ -1185,7 +1184,7 @@ class TestManagerSkillHints:
         # Exact combined shape: memory block first, skill section appended.
         mem_block = mgr._build_hint([mgr._display_path('compression-debug.md')])
         expected = (mem_block + '\n'
-                    + 'Skills you may want to load (1):\n'
+                    + 'Suggested skill:\n'
                     + '  - docker-best-practices')
         assert hint == expected, f'combined hint shape mismatch:\n{hint!r}\nvs\n{expected!r}'
 
@@ -1217,7 +1216,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert 'compression-debug.md' in hint
-        assert 'Skills you may want to load' not in hint
+        assert 'Suggested skill' not in hint
 
     def test_skill_manager_magicmock_noop(self, tmp_path):
         """A bare MagicMock pool (no explicit skill_manager) → the skill sub-pipeline
@@ -1237,7 +1236,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert 'compression-debug.md' in hint
-        assert 'Skills you may want to load' not in hint
+        assert 'Suggested skill' not in hint
         assert inst._recently_skill_hinted == {}
 
     def test_skill_suggestions_toggle_off(self, tmp_path):
@@ -1256,7 +1255,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert 'compression-debug.md' in hint
-        assert 'Skills you may want to load' not in hint
+        assert 'Suggested skill' not in hint
 
     def test_skill_failure_isolated_from_memory(self, tmp_path):
         """skill_manager.match_skills raising → memory hint still delivered; no exception."""
@@ -1274,7 +1273,7 @@ class TestManagerSkillHints:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert 'compression-debug.md' in hint
-        assert 'Skills you may want to load' not in hint
+        assert 'Suggested skill' not in hint
 
     def test_feature_disabled_skips_both(self, tmp_path):
         """memory_hint_enabled=False → neither memory nor skill hints."""
@@ -1422,7 +1421,7 @@ class TestSkillHintRecurrence:
         mgr, _inst = self._mgr_for(tmp_path)
         out = mgr._skill_block(['x'], {'x': 2}, set())
         assert 'time this session' not in out
-        assert out == 'Skills you may want to load (1):\n  - x'
+        assert out == 'Suggested skill:\n  - x'
 
     @pytest.mark.parametrize('n,expected', [
         (1, '1st'), (2, '2nd'), (3, '3rd'), (4, '4th'),
@@ -1626,7 +1625,7 @@ class TestSkillSubpipelineRealManager:
         assert len(inst._tool_warnings) == 1, f'expected a hint, got {inst._tool_warnings!r}'
         hint = inst._tool_warnings[0]
         assert '[MEMORY HINT]' in hint
-        assert 'Skills you may want to load' in hint
+        assert 'Suggested skill' in hint
         assert 'docker-best-practices' in hint
         # The disabled skill must NOT be suggested.
         assert 'kubernetes-deploy-notes' not in hint
@@ -1678,7 +1677,7 @@ class TestSkillSubpipelineRealManager:
         assert '[MEMORY HINT]' in hint
         assert 'compression-debug.md' in hint
         # No skill section was produced (the real match path failed / returned nothing).
-        assert 'Skills you may want to load' not in hint
+        assert 'Suggested skill' not in hint
 
         # The worker loop itself is unaffected: a FRESH, non-cooldown job still processes
         # cleanly. Use a different query (skill-creator-notes) so the compression lesson's
@@ -1810,7 +1809,7 @@ class TestSkillContentGateBug0226:
         mgr, inst, job = self._make_mgr(tmp_path, query, sm)
         mgr._process_job(job)
         hint = '\n'.join(inst._tool_warnings)
-        assert 'Skills you may want to load' in hint, f'no skill hint delivered: {inst._tool_warnings!r}'
+        assert 'Suggested skill' in hint, f'no skill hint delivered: {inst._tool_warnings!r}'
         assert BUG_0226_WEBUI not in hint, f'stopword-only skill was suggested: {hint!r}'
         # Over-filtering guard: the genuinely relevant skill survives.
         assert on_topic in hint, f'relevant skill was filtered out: {hint!r}'
@@ -1823,7 +1822,7 @@ class TestSkillContentGateBug0226:
         assert ok
         mgr, inst, job = self._make_mgr(tmp_path, BUG_0226_TURN_SHARED_PREFIX, sm)
         mgr._process_job(job)
-        assert not any('Skills you may want to load' in w for w in inst._tool_warnings), \
+        assert not any('Suggested skill' in w for w in inst._tool_warnings), \
             f'expected no skill hint, got {inst._tool_warnings!r}'
 
     def test_noise_gate_still_counts_pre_filter_candidates(self, tmp_path):
@@ -1838,7 +1837,7 @@ class TestSkillContentGateBug0226:
         assert len(raw) == 4, f'fixture drifted, expected 4 candidates: {raw}'
         mgr, inst, job = self._make_mgr(tmp_path, BUG_0226_TURN_TABLE_ROW, sm)
         mgr._process_job(job)
-        assert not any('Skills you may want to load' in w for w in inst._tool_warnings), \
+        assert not any('Suggested skill' in w for w in inst._tool_warnings), \
             f'noise gate was bypassed by the content filter: {inst._tool_warnings!r}'
 
     def test_gate_fails_open_without_a_real_index(self):
@@ -2529,7 +2528,7 @@ class TestSkillAdaptiveFloor:
         mgr, inst, job = self._make_mgr(
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
-        assert not any('Skills' in w for w in inst._tool_warnings)
+        assert not any('Suggested skill' in w for w in inst._tool_warnings)
         # EWMA must be untouched (junk guard returns before _update_skill_floor).
         assert mgr._skill_adaptive_floor == SKILL_FLOOR_SEED
 
@@ -2541,7 +2540,7 @@ class TestSkillAdaptiveFloor:
         # At seed floor (0.055), 0.0375 < 0.055 → still suppressed by floor gate.
         # But EWMA IS fed (junk guard passed).
         mgr._process_job(job)
-        assert not any('Skills' in w for w in inst._tool_warnings)
+        assert not any('Suggested skill' in w for w in inst._tool_warnings)
         # EWMA was updated: norm = 0.0375 * (2/40) = 0.001875
         expected = SKILL_EWMA_ALPHA * (SKILL_JUNK_MIN * (2 / 40)) + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
         assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
@@ -2674,7 +2673,7 @@ class TestSkillAdaptiveFloor:
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
         # noise_max = max(3, int(10*0.6)) = 6; to_hint has 10 entries > 6 → suppressed.
-        assert not any('Skills' in w for w in inst._tool_warnings)
+        assert not any('Suggested skill' in w for w in inst._tool_warnings)
 
     def test_noise_gate_passes_focused_query(self, tmp_path):
         """Few skills survive dedup → noise gate passes, hint fires."""
@@ -2685,7 +2684,7 @@ class TestSkillAdaptiveFloor:
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
         # noise_max = max(3, int(3*0.6)) = 3; to_hint has 3 entries <= 3 → passes.
-        assert any('Skills' in w for w in inst._tool_warnings)
+        assert any('Suggested skill' in w for w in inst._tool_warnings)
 
     def test_noise_gate_is_post_dedup(self, tmp_path):
         """Already-loaded skills don't count toward the noise gate."""
@@ -2699,7 +2698,7 @@ class TestSkillAdaptiveFloor:
             inst._loaded_skill_names = [f's{i}' for i in range(3, 10)]
         mgr._process_job(job)
         # Only s0, s1, s2 survive → to_hint=3, noise_max=max(3,6)=6, 3<=6 → passes.
-        assert any('Skills' in w for w in inst._tool_warnings)
+        assert any('Suggested skill' in w for w in inst._tool_warnings)
 
     # ── Stats fallback (MagicMock shape validation) ───────────────────────────
 
@@ -2711,7 +2710,7 @@ class TestSkillAdaptiveFloor:
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
         # Should fire (0.10 > seed 0.055, > junk 0.0375).
-        assert any('Skills' in w for w in inst._tool_warnings)
+        assert any('Suggested skill' in w for w in inst._tool_warnings)
         # EWMA fed with n_in_vocab=0 → pass-through norm=top1=0.10.
         expected = SKILL_EWMA_ALPHA * 0.10 + (1 - SKILL_EWMA_ALPHA) * SKILL_FLOOR_SEED
         assert abs(mgr._skill_adaptive_floor - expected) < 1e-9
@@ -2726,7 +2725,7 @@ class TestSkillAdaptiveFloor:
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
         # Falls back to match_skills → should fire.
-        assert any('Skills' in w for w in inst._tool_warnings)
+        assert any('Suggested skill' in w for w in inst._tool_warnings)
 
     def test_stats_shape_validation_rejects_wrong_length(self, tmp_path):
         """match_skills_with_stats returning 2-tuple → falls back to match_skills."""
@@ -2736,7 +2735,7 @@ class TestSkillAdaptiveFloor:
         mgr, inst, job = self._make_mgr(
             tmp_path, self.LESSONS, 'test query', skill_manager=sm)
         mgr._process_job(job)
-        assert any('Skills' in w for w in inst._tool_warnings)
+        assert any('Suggested skill' in w for w in inst._tool_warnings)
 
 
     def test_skill_short_after_long_query_still_fires(self, tmp_path):
@@ -2760,7 +2759,7 @@ class TestSkillAdaptiveFloor:
         job['turn'] = 4
         mgr._process_job(job)
         # The short query's raw top1 (0.30) must still clear the floor.
-        assert any('Skills' in w for w in inst._tool_warnings), (
+        assert any('Suggested skill' in w for w in inst._tool_warnings), (
             f"short-after-long regression: hint suppressed. "
             f"floor={mgr._skill_adaptive_floor:.4f}")
 
@@ -2795,7 +2794,7 @@ class TestSkillAdaptiveFloor:
                         inst._recently_skill_hinted[f's{i}'] = now - 1.0
             job['turn'] = 3
             mgr._process_job(job)
-            fired = any('Skills' in w for w in inst._tool_warnings)
+            fired = any('Suggested skill' in w for w in inst._tool_warnings)
             assert fired == should_fire, (
                 f"n_matches={n_matches}, n_survive={n_survive}: "
                 f"expected fire={should_fire}, got {fired}")
