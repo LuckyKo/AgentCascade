@@ -813,10 +813,15 @@ TOOL_METADATA = {
             'backend is REQUIRED. '
             'Handles VRAM management automatically. '
             "Pass prompt='__help' (no other args) to list every backend, its configs, and exact params. "
+            'Pass prompts=[...] and/or variations=N to generate several outputs in one call '
+            '(seeds increment from overrides.seed, or from a random base); every output is '
+            'labelled with its prompt+seed. '
             'media_type is NOT a parameter — it is derived from the backend/workflow.'
         ),
         'parameters': {
-            'prompt': 'Text prompt for generation (or the text to speak for TTS).',
+            'prompt': 'Text prompt for generation (or the text to speak for TTS). Use instead of prompts, not both.',
+            'prompts': 'Array of prompts, each rendered once (cross-product with variations; N x K outputs total). Use instead of prompt (passing both is an error). Runs serially, one backend invocation at a time, under a single VRAM swap; capped by MEDIA_GEN_MAX_BATCH.',
+            'variations': 'K takes per prompt with incremental seeds: one contiguous run across all outputs, starting at overrides.seed (or one random base when absent). Must be >= 1. On seedless backends (e.g. kobold_tts) you still get K takes, labelled take=k/K instead of a seed.',
             'backend': 'REQUIRED for generation. Backend id: see __help (backend names are listed there). No AUTO — you must name the backend. Omit only for the __help command.',
             'config': "Config name (filename stem) or full .json path; everything else is derived from it. Omit to use the backend's configured default. See __help for the exact config stems each backend accepts.",
             'negative_prompt': 'Negative prompt to exclude elements (image backends).',

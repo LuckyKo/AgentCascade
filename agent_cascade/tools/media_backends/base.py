@@ -37,6 +37,11 @@ import json
 # Canonical media-type vocabulary. Exactly three types.
 MEDIA_TYPES = ('image', 'video', 'audio')
 
+# Seed ceiling shared by every backend that accepts a seed: ComfyUI's unsigned
+# 32-bit range (sdcpp's CLI uses the same domain). media_gen batch seeds wrap
+# here when incrementing (BUG_0350). Single source of truth — leaf module, stdlib-only.
+MAX_SEED = 2**32 - 1
+
 # ── Unified media-gen timeout ─────────────────────────────────────────────────
 # The single source of truth for a render's timeout is the top-level UI value
 # (config['timeout']). Every backend resolves it identically through

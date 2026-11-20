@@ -470,6 +470,10 @@ HOLDER_DMS_WINDOW_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_WINDOW_S'
 # never shield a holder forever. Default 900s == the media/image fallback
 # ceiling; must stay >= any legitimate sync tool's max bound or genuine long ops get killed.
 HOLDER_DMS_MAX_BOUND_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_MAX_BOUND_S', 900.0))
+# Max outputs from ONE media_gen batch call (len(prompts) × variations), BUG_0350. Guards GPU
+# time, the holder-DMS shield (dms_bound scales with batch size) and (for vision agents)
+# context growth from N images in one tool result. 0 = off (uncapped). Env-only knob (no UI).
+MEDIA_GEN_MAX_BATCH: int = int(os.getenv('AGENT_CASCADE_MEDIA_GEN_MAX_BATCH', 8))
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 # ── Two-tier loop detection ──
 # Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.

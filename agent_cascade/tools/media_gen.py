@@ -54,6 +54,7 @@ about.
 import json
 import jsonschema
 import os
+import random
 import tempfile
 import threading
 import time
@@ -62,6 +63,7 @@ from typing import List, Optional
 
 import httpx
 
+from agent_cascade import settings
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -71,7 +73,7 @@ from agent_cascade.tools.media_backends import manifest_ids
 from agent_cascade.tools.media_backends import BACKEND_MANIFEST
 from agent_cascade.tools.schema_common import tool_params
 from agent_cascade.tools.media_backends.base import (
-    MEDIA_TYPES, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
+    MEDIA_TYPES, MAX_SEED, MediaRequest, resolve_media_timeout, resolve_release_model_around_call,
     resolve_block_dir, list_voice_samples,
 )
 
@@ -168,6 +170,16 @@ class MediaGen(BaseTool):
             'prompt': {
                 'type': 'string',
                 'description': TOOL_METADATA['media_gen']['parameters']['prompt'],
+            },
+            'prompts': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': TOOL_METADATA['media_gen']['parameters']['prompts'],
+            },
+            'variations': {
+                'type': 'integer',
+                'minimum': 1,
+                'description': TOOL_METADATA['media_gen']['parameters']['variations'],
             },
             'backend': {
                 'type': 'string',
@@ -406,7 +418,16 @@ class MediaGen(BaseTool):
         # have one declare ``teardown_headroom`` seconds in their manifest, and the
         # DMS wall-clock bound carries it. Backends without teardown declare 0.
         headroom = (BACKEND_MANIFEST.get(backend_id) or {}).get('teardown_headroom') or 0
-        return resolve_media_timeout(config, block) + headroom
+        # BUG_0350: a batch call fans out len(batch) renders, so the bound scales with the
+        # batch size — computed through the SAME parser call() uses (single source of truth).
+        # Falls back to 1 on any parse error (never larger than a single render's bound for
+        # garbage args); capped by MEDIA_GEN_MAX_BATCH inside _parse_batch, so the DMS
+        # shield is never unbounded. Non-batch args parse to [] -> max(1, 0) = 1 = today.
+        try:
+            batch_size = max(1, len(self._parse_batch(params)))
+        except Exception:
+            batch_size = 1
+        return resolve_media_timeout(config, block) * batch_size + headroom
 
     def call(self, params, **kwargs) -> List[ContentItem]:
         try:
@@ -435,22 +456,16 @@ class MediaGen(BaseTool):
         # backend's prompt requirement intact.
         prompt_optional = _m.get('prompt_optional_with_reference_file', False)
 
-        if not (is_text_output or prompt_optional) and (not isinstance(prompt, str) or not prompt.strip()):
+        # Prompt gate: satisfied by 'prompt' OR a 'prompts' array (the schema already
+        # types 'prompts' as array-of-string; content validation lives in _parse_batch).
+        if not (is_text_output or prompt_optional) and (not isinstance(prompt, str) or not prompt.strip()) \
+                and not isinstance(params.get('prompts'), list):
             return [ContentItem(text="ERROR: 'prompt' is required and must be a non-empty string.")]
 
-        # Build the normalised request. media_type is DERIVED (single-type backends
-        # in the resolver; comfyui from the workflow in preflight) — not caller-supplied.
-        req = MediaRequest(
-            backend_id=params.get('backend') or '',
-            config_name=params.get('config'),
-            prompt=prompt,
-            negative_prompt=params.get('negative_prompt') or '',
-            reference_file=params.get('reference_file'),
-            media_size=params.get('media_size'),
-            overrides=params.get('overrides'),
-            config=_get_media_gen_config(),
-            agent_pool=self.agent_pool,
-        )
+        try:
+            batch_items = self._parse_batch(params)
+        except ValueError as e:
+            return [ContentItem(text=f"ERROR: {e}")]
 
         instance = self._get_instance(kwargs)
         # Parallel-media_gen batch flags (threaded per-call by the dispatch loop, single source of truth
@@ -458,17 +473,248 @@ class MediaGen(BaseTool):
         # FIRST call of a batch does the save/unload prologue, only the LAST does the restore.
         is_first_vram = kwargs.get('is_first_vram', True)
         is_last_vram = kwargs.get('is_last_vram', True)
-        state = {'saved': False, 'held': None}
 
-        # ── PRE-VRAM: everything that can fail cheaply (V1) ──
+        if not batch_items:
+            # ── Single-shot path: identical code path and result shape to pre-batch media_gen ──
+            try:
+                backend, req = self._prepare_item(
+                    {'prompt': prompt, 'seed': None, 'take': 1, 'takes': 1}, params,
+                    _get_media_gen_config())
+            except (RuntimeError, ValueError, OSError) as e:
+                # audit defect 6: _load_workflow raises FileNotFoundError/OSError; resolve_tool_path
+                # raises ValueError. None of these touch VRAM.
+                return [ContentItem(text=f"ERROR: {e}")]
+            return self._run_item(backend, req, instance, is_first_vram, is_last_vram)
+
+        # ── Batch path (BUG_0350): fan-out inside ONE call, serialised by design (one
+        # backend invocation in flight at a time), ONE VRAM swap for the whole batch. ──
+        n = len(batch_items)
+        backend_id = requested_backend
+        seeds = [it['seed'] for it in batch_items if it['seed'] is not None]
+        ready = []            # [(item_idx, item, backend, req), ...]
+        preflight_errors = []  # [(item_idx, item, error_text), ...]
+        out_paths = []        # temp files created by successful preflights (batch-level cleanup)
         try:
-            backend = resolve_backend(req)
-            backend.preflight(req)
-        except (RuntimeError, ValueError, OSError) as e:
-            # audit defect 6: _load_workflow raises FileNotFoundError/OSError; resolve_tool_path
-            # raises ValueError. None of these touch VRAM.
-            return [ContentItem(text=f"ERROR: {e}")]
+            # All-or-nothing validation: every item resolved + preflighted BEFORE any VRAM
+            # work. A bad item fails the whole call with zero VRAM churn and zero GPU time.
+            for item_idx, item in enumerate(batch_items):
+                try:
+                    backend, req = self._prepare_item(item, params, _get_media_gen_config())
+                except (RuntimeError, ValueError, OSError) as e:
+                    preflight_errors.append((item_idx, item, f"ERROR: {e}"))
+                    continue
+                out_path = (req.prepared or {}).get('out_path')
+                if out_path:
+                    out_paths.append(out_path)
+                ready.append((item_idx, item, backend, req))
 
+            if preflight_errors:
+                results = [ContentItem(text=self._batch_summary(
+                    0, n, len(preflight_errors), backend_id, params.get('config') or '', seeds))]
+                for item_idx, item, err_text in preflight_errors:
+                    results.append(ContentItem(text=f"{self._batch_label(item, item_idx + 1, n)} — {err_text}"))
+                return results
+
+            # Run serially. VRAM ownership composes with the engine's turn-batch flags:
+            # item 0 owns save/unload, item n-1 owns restore — but only when this call is
+            # itself turn-first / turn-last, so a batch call that is 2nd of 3 media_gen
+            # calls in one turn neither saves nor restores (the turn's first/last do).
+            produced = []
+            ok = 0
+            for run_idx, (item_idx, item, backend, req) in enumerate(ready):
+                item_first = is_first_vram and run_idx == 0
+                item_last = is_last_vram and run_idx == n - 1
+                out = self._run_item(backend, req, instance, item_first, item_last)
+                failed = bool(out) and (out[0].text or '').startswith('ERROR:')
+                label = self._batch_label(item, item_idx + 1, n)
+                for j, ci in enumerate(out):
+                    if ci.text:
+                        out[j] = ContentItem(text=f'{label} — {ci.text}')
+                        break
+                produced.extend(out)
+                if not failed:
+                    ok += 1
+
+            config_name = (ready[0][3].prepared or {}).get('config_name', '')
+            results = [ContentItem(text=self._batch_summary(
+                ok, n, 0, backend_id, config_name, seeds))]
+            results.extend(produced)
+            return results
+        finally:
+            # V8 belt-and-suspenders: unlink every preflighted temp file (idempotent;
+            # _run_item's own finally already did it for every item it entered).
+            for p in out_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    # ── Batch internals (BUG_0350) ────────────────────────────────────────────
+
+    def _parse_batch(self, params: dict) -> list:
+        """Resolve the batch take list (BUG_0350). PURE: no I/O, no VRAM, no backend
+        work — safe to call from dms_bound and from call(). Raises ValueError with
+        self-diagnosing messages; the caller turns those into ERROR results BEFORE any
+        preflight/VRAM.
+
+        Returns [] when this is not a batch call (neither 'prompts' nor 'variations'
+        present) → the caller keeps the exact single-shot path. Otherwise one overlay
+        dict per output, in fan-out order ``for prompt in prompts: for take in 1..K``:
+
+            {'prompt': str, 'seed': int|None, 'take': int, 'takes': int}
+
+        Seed resolution (single source of truth for dms_bound, labels and injection):
+        'variations' omitted → seed None per item (today's per-backend randomisation);
+        'variations' present on a seed-capable backend → ONE base seed ('overrides.seed',
+        else one random draw) then a contiguous run across ALL outputs, wrapping at
+        MAX_SEED; seedless backend ('seed' not in manifest overrides_keys, e.g. kobold_tts)
+        → seed None (takes still produced, labelled take=k/K — not an error).
+        """
+        prompts = params.get('prompts')
+        variations = params.get('variations')
+        if prompts is None and variations is None:
+            return []
+
+        prompt = params.get('prompt')
+        if prompts is not None and isinstance(prompt, str) and prompt.strip():
+            raise ValueError("pass either 'prompt' or 'prompts', not both.")
+
+        # bool is an int subclass — reject it explicitly so variations=True is not a sneaky 1.
+        if variations is not None and (
+                isinstance(variations, bool) or not isinstance(variations, int) or variations < 1):
+            raise ValueError("'variations' must be an integer >= 1.")
+
+        if prompts is not None:
+            if not isinstance(prompts, list):
+                raise ValueError("'prompts' must be an array of strings.")
+            if not prompts:
+                raise ValueError("'prompts' must not be empty.")
+            if not all(isinstance(p, str) and p.strip() for p in prompts):
+                raise ValueError("'prompts' must be an array of non-empty strings.")
+        else:
+            # variations-only: K takes of the shared 'prompt'. An absent/empty 'prompt'
+            # is already rejected by call()'s prompt gate (or permitted by the backend's
+            # prompt_optional_with_reference_file opt-out), so no check here.
+            prompts = [prompt]
+
+        backend_id = (params.get('backend') or '').strip()
+        manifest = BACKEND_MANIFEST.get(backend_id) or {}
+        if manifest.get('output_kind') == 'text':
+            raise ValueError(
+                f"backend '{backend_id}' produces text, not media; batching is not supported.")
+
+        takes = variations if variations is not None else 1
+        total = len(prompts) * takes
+        cap = settings.MEDIA_GEN_MAX_BATCH
+        if cap and total > cap:
+            raise ValueError(
+                f'batch of {total} exceeds MEDIA_GEN_MAX_BATCH ({cap}). '
+                'Raise AGENT_CASCADE_MEDIA_GEN_MAX_BATCH or split the call.')
+
+        seed_capable = 'seed' in (manifest.get('overrides_keys') or ())
+        base_seed = None
+        if variations is not None and seed_capable:
+            overrides = params.get('overrides')
+            raw = overrides.get('seed') if isinstance(overrides, dict) else None
+            if raw is None:
+                base_seed = random.randint(0, MAX_SEED)  # drawn ONCE so the run is contiguous
+            else:
+                try:
+                    base_seed = int(raw)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "'overrides.seed' must be an integer when 'variations' is used "
+                        '(the seed set is built by incrementing it).')
+
+        items = []
+        out_idx = 0
+        for p in prompts:
+            for take in range(1, takes + 1):
+                seed = None
+                if base_seed is not None:
+                    seed_val = base_seed + out_idx  # one global contiguous run across ALL outputs
+                    # Increment wraps at the unsigned-32-bit ceiling. A negative base
+                    # passes through unwrapped (passthrough semantics of today's seed).
+                    seed = seed_val % (MAX_SEED + 1) if seed_val > MAX_SEED else seed_val
+                items.append({'prompt': p, 'seed': seed, 'take': take, 'takes': takes})
+                out_idx += 1
+        return items
+
+    def _batch_label(self, item: dict, idx: int, total: int) -> str:
+        """One-line identity prefix for a batch item result (the ONLY place labels are
+        formatted — every output is reproducible from it: re-run with that seed as
+        'overrides.seed'). Falls back to take=k/K when no seed was resolved (seedless
+        backend, or variations omitted)."""
+        if item['seed'] is not None:
+            seed_part = f"seed={item['seed']}"
+        else:
+            seed_part = f"take={item['take']}/{item['takes']}"
+        prompt_text = item['prompt'] or ''
+        return f'[{idx}/{total}] prompt="{prompt_text}" {seed_part}'
+
+    def _batch_summary(self, ok: int, total: int, failed_preflight: int,
+                       backend_id: str, config_name: str, seeds: list) -> str:
+        """First line of a batch result — the contract with _detect_tool_result_failure:
+        a partial batch is NOT a failed tool call (non-ERROR first line); a batch with
+        zero produced outputs starts with ERROR: so telemetry/frontend still flag it."""
+        parts = []
+        if backend_id:
+            parts.append(f'backend={backend_id}')
+        if config_name:
+            parts.append(f'config={config_name}')
+        distinct = sorted(set(seeds))
+        if len(distinct) > 1:
+            parts.append(f'seeds={distinct[0]}-{distinct[-1]}')
+        elif len(distinct) == 1:
+            parts.append(f'seeds={distinct[0]}')
+        suffix = f" ({', '.join(parts)})" if parts else ''
+        if failed_preflight:
+            return (f'ERROR: media_gen batch aborted before generation — {failed_preflight} of '
+                    f'{total} item(s) failed preflight, 0 generated, VRAM untouched{suffix}')
+        if ok == 0:
+            return f'ERROR: all {total} media_gen batch items failed{suffix}'
+        if ok < total:
+            return f'Batch: {ok}/{total} generated, {total - ok} failed{suffix}'
+        return f'Batch: {ok}/{total} generated{suffix}'
+
+    def _prepare_item(self, item: dict, params: dict, config: dict):
+        """Build one batch item's MediaRequest, then resolve_backend + preflight — both
+        strictly PRE-VRAM (the same V1 gate the single path had inline). Shared params
+        (backend/config/negative_prompt/media_size/reference_file/overrides) come from
+        the call; only prompt and the resolved seed are per-item, and the overrides dict
+        is copied before the seed is set so items cannot contaminate each other.
+
+        Raises RuntimeError/ValueError/OSError (the existing pre-VRAM error class).
+        Returns (backend, req)."""
+        overrides = params.get('overrides')
+        if item['seed'] is not None:
+            overrides = dict(overrides or {})
+            overrides['seed'] = item['seed']
+        req = MediaRequest(
+            backend_id=params.get('backend') or '',
+            config_name=params.get('config'),
+            prompt=item['prompt'],
+            negative_prompt=params.get('negative_prompt') or '',
+            reference_file=params.get('reference_file'),
+            media_size=params.get('media_size'),
+            overrides=overrides,
+            config=config,
+            agent_pool=self.agent_pool,
+        )
+        backend = resolve_backend(req)
+        backend.preflight(req)
+        return backend, req
+
+    def _run_item(self, backend, req, instance, is_first_vram: bool,
+                  is_last_vram: bool) -> List[ContentItem]:
+        """VRAM gate + generation + save for ONE already-preflighted request. Unchanged
+        error paths (restore on every early exit, NOT in finally). The VRAM flags compose
+        with the engine's turn-batch flags: in a batch only item 0 gets is_first_vram=True
+        and only item n-1 gets is_last_vram=True, so the fan-out shares one save/unload/
+        restore and only one model swap-in (deferred-restore semantics: see
+        _restore_if_needed).
+        """
+        state = {'saved': False, 'held': None}
         # ── VRAM + GENERATE ──
         try:
             # Per-backend opt-out (default True = today's behaviour): when a backend's
@@ -480,7 +726,9 @@ class MediaGen(BaseTool):
             # it returns before arming any save or _state_label, and every later call (is_first_vram=False)
             # also skips the prologue — so the whole batch generates with the model resident (no VRAM freed).
             # This is accepted: it is rare (only a first-call preflight failure), self-heals, and has no
-            # correctness impact — the safety net / label restore paths are simply never armed, so nothing leaks.)
+            # correctness impact — the safety net / label restore paths are simply never armed, so nothing leaks.
+            # (BUG_0350 note: inside ONE batch call this gap no longer exists — _parse_batch + the
+            # all-or-nothing preflight gate make any item's preflight failure abort before any VRAM work.)
             if is_first_vram:
                 self._vram_release(
                     instance, state,
@@ -512,8 +760,10 @@ class MediaGen(BaseTool):
         # ── POST: TEXT-output backends return the transcript inline (no media save). ──
         # Result shaping only: skip save_media_to_media + the typed media item. The VRAM restore
         # path is identical (restore after all work). The transcript file was already unlinked by
-        # the finally above; the string is carried in result.text. Reuses the is_text_output gate
-        # computed above (single source of truth — the requested backend's manifest output_kind).
+        # the finally above; the string is carried in result.text. Same manifest gate the single
+        # path used (output_kind from the request's backend — value-identical to the old
+        # requested_backend lookup, and batch calls reject text backends upstream).
+        is_text_output = (BACKEND_MANIFEST.get((req.backend_id or '').strip()) or {}).get('output_kind') == 'text'
         if is_text_output:
             self._restore_if_needed(instance, state, is_last_vram)
             feedback = self._build_feedback_text(backend.id, req.prepared, _gen_elapsed, result.text)
@@ -645,6 +895,8 @@ class MediaGen(BaseTool):
             "             after. Set a backend's \"release_model_around_call\" to false to keep the model loaded",
             '             (faster swap, more VRAM contention). Applies only when your endpoint supports state save.',
             '  help:      prompt="__help" lists backends and their available configs. No generation runs.',
+            '  batch:     prompts=["a","b"] and/or variations=N -> cross product of takes, one backend invocation',
+            f'             at a time, one VRAM swap (cap MEDIA_GEN_MAX_BATCH={settings.MEDIA_GEN_MAX_BATCH}); seeds increment from overrides.seed',
             '',
         ]
         # Ownership map: every stem claimed by ANY backend block (this is what makes
