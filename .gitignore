@@ -142,6 +142,9 @@ agents/global/skills/
 # xdist worker crash dumps (faulthandler diagnostics, see tests/conftest.py)
 tests/_crash_dumps/
 
+# BUG_0357 per-worker xdist crash capture dir (sitecustomize vector; evidence logs)
+tmp_ac_iso/
+
 # git filter-branch / filter-repo scratch dir (accidentally committed; do not track)
 .git-rewrite/
 

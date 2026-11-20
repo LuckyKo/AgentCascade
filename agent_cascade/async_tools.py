@@ -374,7 +374,7 @@ class AsyncToolRegistry:
                             pass
             return (parent_name, function_id, resolved) if parent_name else None
 
-    def shutdown(self, wait: bool = True):
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False):
         """Shutdown the executor.
 
         Call during pool teardown to cleanly stop background tool execution.
@@ -382,5 +382,8 @@ class AsyncToolRegistry:
         Args:
             wait: If True, wait for all pending tasks to complete before returning.
                   If False, return immediately (useful for "quick stop" scenarios).
+            cancel_futures: If True, cancel queued (not-yet-started) futures so they
+                  don't keep executor worker threads alive. Default False preserves the
+                  historical drain-to-completion behavior (used by resize_executor()).
         """
-        self._executor.shutdown(wait=wait)
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)

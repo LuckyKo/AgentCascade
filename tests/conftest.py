@@ -533,15 +533,31 @@ def _stop_real_agent_pools():
                 pool.stopped = True  # signals candidate-eval loop + idle/async/memory-hint shutdown
             except Exception:
                 pass
-            # Bounded join so a stuck thread can't hang teardown (daemon threads die
-            # with the process anyway; this just reclaims them promptly between tests).
-            # _candidate_eval_thread / _skill_rebalance_thread are pool attrs; the
-            # memory-hint worker lives on pool.memory_hint_manager._worker.
+            # Full deterministic stop+join (work threads -> ZMQ clients -> term context).
+            # Idempotent + bounded; a raising teardown is swallowed so it never hangs a test.
+            try:
+                pool.shutdown()
+            except Exception:
+                pass
+            # Belt-and-suspenders bounded join so a stuck thread can't hang teardown (daemon
+            # threads die with the process anyway; this just reclaims them promptly between
+            # tests). Covers the idle-checker and the async-executor workers in addition to
+            # the candidate-eval / rebalance / memory-hint threads. After shutdown() most of
+            # these are already joined (idle._checker_thread is nulled),
+            # so this is a safety net for any thread that outlived the bounded joins.
             candidates = [getattr(pool, attr, None) for attr in
                           ('_candidate_eval_thread', '_skill_rebalance_thread')]
+            idle = getattr(pool, '_idle', None)
+            if idle is not None:
+                candidates.append(getattr(idle, '_checker_thread', None))
             mhm = getattr(pool, 'memory_hint_manager', None)
             if mhm is not None:
                 candidates.append(getattr(mhm, '_worker', None))
+            registry = getattr(pool, '_async_registry', None)
+            if registry is not None:
+                executor = getattr(registry, '_executor', None)
+                for t in list(getattr(executor, '_threads', set())):
+                    candidates.append(t)
             for t in candidates:
                 if isinstance(t, threading.Thread) and t.is_alive():
                     try:

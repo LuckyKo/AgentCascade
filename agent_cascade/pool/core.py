@@ -20,6 +20,12 @@ from agent_cascade.runtime_state import state as _runtime_state
 
 from ..agent_instance import ACTIVE_STATES, AgentInstance, PoolSettings
 from ..async_tools import AsyncToolRegistry
+try:
+    # ZMQ kernel-client teardown (drains sockets, terms the owned context LAST). Imported
+    # defensively so the pool still loads when zmq is unavailable (mirrors lifecycle.py).
+    from agent_cascade.tools.code_interpreter import cleanup_kernels_for_session
+except ImportError:  # pragma: no cover — zmq optional
+    cleanup_kernels_for_session = None
 from .config_persist import ConfigPersistMixin
 from .conversation import ConversationMixin
 from .idle_manager import IdleManager
@@ -243,6 +249,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()  # M3 fix: stopped flag for emergency shutdown
+        self._shutdown_done = False  # idempotency guard for the terminal shutdown() teardown
 
         # ── Stack swap (BUG_0323 S4) — gated, absent when ENABLE_STACK_SWAP is off ──
         # _pending_swap_event is the turn-boundary latch: set by park_active_stack to
@@ -498,6 +505,111 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             except Exception as e:
                 logger.debug(f"Memory-hint manager restart (non-critical): {e}")
             logger.debug('Stopped flag cleared — ready for new execution')
+
+    def shutdown(self):
+        """Full deterministic stop+join teardown of the pool background threads + ZMQ clients.
+
+        This is the blocking teardown counterpart to the signal-only ``stopped`` setter
+        (which stays fast and resume-capable): ``shutdown()`` performs the *blocking* bounded
+        joins so no background thread or ZMQ context is left to race interpreter/GC teardown —
+        a leaked non-daemon async executor rides CPython's ``_python_exit``, and a leaked
+        ``zmq.Context`` hangs in ``__del__ -> term()``. Wired into the test-suite conftest
+        teardown (the empirically-dominant window for that race); not called on the production
+        stop/resume path.
+
+        Ordered stop+join (work threads FIRST, ZMQ LAST):
+          1. idle-checker   -> IdleManager.stop_and_join(timeout=2.0)
+          2. candidate-eval -> _candidate_eval_stop.set() + _candidate_eval_thread.join(2.0)
+          3. memory-hint    -> memory_hint_manager.stop() + _worker.join(2.0)
+          4. async executor -> shutdown(wait=False, cancel_futures=True) + best-effort join
+                               of the executor's private _threads (a lingering worker there
+                               is acceptable — the point is not to block indefinitely, and to
+                               remove the interpreter-exit race deterministically)
+          5. ZMQ clients    -> cleanup_kernels_for_session(...) per instance: drains the
+                               sockets, then terms the owned zmq.Context LAST (the ordering
+                               that prevents the observed zmq.Context.__del__->term() hang).
+
+        Every stop/join is bounded (timeout<=2.0) and null/type-safe; a raising stop is
+        swallowed (it never breaks teardown). Idempotent: a second call is a no-op.
+        """
+        if getattr(self, '_shutdown_done', False):
+            return
+        self._shutdown_done = True
+
+        # ── (1) idle-checker: bounded stop+join (the previously-dead stop_and_join) ──
+        try:
+            self._idle.stop_and_join(timeout=2.0)
+        except Exception as e:  # noqa: BLE001 — a failing stop must never break teardown
+            logger.debug(f"Idle checker stop_and_join failed (non-critical): {e}")
+
+        # ── (1b) skill-rebalance: one-shot self-exiting daemon — bounded join ──
+        _rebal = getattr(self, '_skill_rebalance_thread', None)
+        if isinstance(_rebal, threading.Thread) and _rebal.is_alive():
+            try:
+                _rebal.join(timeout=2.0)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Skill rebalance thread join failed (non-critical): {e}")
+
+        # ── (2) candidate-eval: signal the timer, then bounded-join the thread ──
+        try:
+            self._candidate_eval_stop.set()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Candidate eval timer signal failed (non-critical): {e}")
+        _cet = getattr(self, '_candidate_eval_thread', None)
+        if isinstance(_cet, threading.Thread) and _cet.is_alive():
+            try:
+                _cet.join(timeout=2.0)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Candidate eval thread join failed (non-critical): {e}")
+
+        # ── (3) memory-hint: sentinel stop, then bounded-join the worker ──
+        _mhm = getattr(self, 'memory_hint_manager', None)
+        if _mhm is not None:
+            try:
+                _mhm.stop()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Memory-hint manager stop failed (non-critical): {e}")
+            _worker = getattr(_mhm, '_worker', None)
+            if isinstance(_worker, threading.Thread) and _worker.is_alive():
+                try:
+                    _worker.join(timeout=2.0)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"Memory-hint worker join failed (non-critical): {e}")
+
+        # ── (4) async executor: quick stop + best-effort bounded join of workers ──
+        # cancel_futures=True so queued-but-not-started tools don't keep workers alive.
+        # CAVEAT: Python 3.12 ThreadPoolExecutor.shutdown has NO timeout kwarg, so the
+        # worker join cannot be bounded via the public API. We best-effort join the
+        # executor's private _threads set — a lingering worker there is acceptable (the
+        # goal is to not block, and to reclaim the non-daemon workers deterministically
+        # rather than leaving them to CPython _python_exit at interpreter shutdown).
+        _registry = getattr(self, '_async_registry', None)
+        if _registry is not None:
+            try:
+                _registry.shutdown(wait=False, cancel_futures=True)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Async registry shutdown failed (non-critical): {e}")
+            _executor = getattr(_registry, '_executor', None)
+            _exec_threads = getattr(_executor, '_threads', set())
+            for _t in list(_exec_threads):
+                if isinstance(_t, threading.Thread) and _t.is_alive():
+                    try:
+                        _t.join(timeout=2.0)
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"Async executor worker join failed (non-critical): {e}")
+
+        # ── (5) ZMQ clients: drain the sockets, then term the owned context LAST ──
+        # cleanup_kernels_for_session() shuts down each session's kernel-client sockets and
+        # destroys (terms) the owned zmq.Context only AFTER the sockets are drained — the
+        # exact ordering that prevents the observed zmq.Context.__del__->term() hang.
+        if cleanup_kernels_for_session is not None:
+            for _name in list(getattr(self, 'instances', {}).keys()):
+                try:
+                    cleanup_kernels_for_session(_name)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"ZMQ kernel cleanup for '{_name}' failed (non-critical): {e}")
+
+        logger.debug('Pool shutdown complete (work threads joined, ZMQ clients drained)')
 
     def set_auto_security(self, enabled: bool) -> None:
         """BUG_0029 Phase 2: the single writer for auto-security mode.
