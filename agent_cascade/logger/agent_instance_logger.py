@@ -659,7 +659,29 @@ class AgentInstanceLogger:
                 for msg in formatted_msgs:
                     lines.append(json.dumps(msg, ensure_ascii=False) + '\n')
 
-                # Fix 4: atomic write — temp file + os.replace() prevents partial-write corruption.
+                # Byte-equal short-circuit: when the on-disk file already matches the
+                # serialized content, skip the atomic write to preserve mtime and the
+                # KV-cache stable prefix. A byte-identical file can never lose data,
+                # so the shrink guard is irrelevant here.
+                #
+                # Read in text mode so the comparison is immune to the platform
+                # line-ending difference (the file is written in text mode; on
+                # Windows that yields \r\n, while the in-memory lines use \n).
+                new_text = ''.join(lines)
+                if self.log_path and os.path.isfile(self.log_path):
+                    try:
+                        with open(self.log_path, 'r', encoding='utf-8') as f:
+                            if f.read() == new_text:
+                                self.data['history'] = formatted_msgs
+                                self._file_history_synced = True
+                                logger.debug(
+                                    f"Skipped rewrite of {self.log_path}: "
+                                    f"content unchanged (caller={caller}).")
+                                return True
+                    except OSError:
+                        pass  # fall through to the write path
+
+                # Atomic write — temp file + os.replace() prevents partial-write corruption.
                 if not self._atomic_write_lines(lines):
                     return False
 

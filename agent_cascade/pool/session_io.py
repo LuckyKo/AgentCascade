@@ -775,24 +775,33 @@ class SessionIOMixin:
         try:
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
 
-            original_log_path = metadata.get('current_log_path')
-            if original_log_path and Path(original_log_path).exists():
-                new_log_path = AgentInstanceLogger.copy_session_file(
-                    source_path=original_log_path,
-                    log_dir=str(self._logger.log_dir),
-                    agent_class=normalized_agent_class,
-                    instance_name=instance_name,
-                )
+            src = metadata.get('current_log_path')
+            # Reuse the log in-place when the load restores it into its own identity
+            # (same instance name, modulo birth-stamp). Copy only for clone/legacy
+            # import where the source is loaded under a different instance name.
+            if src and Path(src).exists():
+                same_identity = (strip_birth_stamp(instance_name).lower()
+                                 == strip_birth_stamp(metadata.get('instance_name', '')).lower())
+                if same_identity:
+                    new_log_path = src
+                else:
+                    new_log_path = AgentInstanceLogger.copy_session_file(
+                        source_path=src,
+                        log_dir=str(self._logger.log_dir),
+                        agent_class=normalized_agent_class,
+                        instance_name=instance_name,
+                    )
             else:
                 new_log_path = None
 
             # Update metadata for the new session context
             updated_metadata = dict(metadata) if metadata else {}
-            updated_metadata['current_log_path'] = new_log_path or original_log_path
+            updated_metadata['current_log_path'] = new_log_path or src
             if settings.ENABLE_STACK_SWAP:
                 updated_metadata['display_name'] = get_display_name(new_inst)
-            if new_log_path:
-                updated_metadata['original_log_path'] = str(Path(original_log_path or '').name)
+            # Record the source filename only when a copy was made (clone/legacy import).
+            if new_log_path and new_log_path != src:
+                updated_metadata['original_log_path'] = str(Path(src or '').name)
 
             log_inst = AgentInstanceLogger(
                 agent_class=agent_class,
