@@ -37,6 +37,7 @@ from agent_cascade.snapshot import (
     SnapshotIntegrityError,
     capture_fleet_snapshot,
     delete_snapshot,
+    delete_stack,
     ensure_registry_loaded,
     list_stacks,
     maybe_autosave_on_task_end,
@@ -650,6 +651,81 @@ def test_delete_snapshot_refuses_unknown(tmp_path, monkeypatch):
         delete_snapshot(p, 'Parked', 'no-such-snap', registry=reg)
 
 
+def test_delete_stack_no_registry_rebuilds_from_disk(tmp_path, monkeypatch):
+    """delete_stack with registry=None rebuilds the registry from disk (fresh-restart path)."""
+    snap_dir = _snap_dir(tmp_path, monkeypatch)
+    p = PoolDouble(log_dir=tmp_path)
+    env, _ = _capture_env(tmp_path, root='Parked', log_name='parked.jsonl')
+    path = write_snapshot_to_disk(env, snap_dir)
+    assert path.exists()
+
+    # Simulate a fresh restart: clear in-memory registry state.
+    p._swap_registry = None
+    p._swap_registry_loaded = False
+
+    result = delete_stack(p, 'Parked')  # no registry arg -> ensure_registry_loaded path
+    assert result['removed_snapshots'] == 1
+    assert not path.exists()
+
+
+def test_delete_snapshot_no_registry_rebuilds_from_disk(tmp_path, monkeypatch):
+    """delete_snapshot with registry=None rebuilds the registry from disk (fresh-restart path)."""
+    snap_dir = _snap_dir(tmp_path, monkeypatch)
+    p = PoolDouble(log_dir=tmp_path)
+    env, _ = _capture_env(tmp_path, root='Parked', log_name='parked.jsonl')
+    path = write_snapshot_to_disk(env, snap_dir)
+    assert path.exists()
+
+    # Simulate a fresh restart: clear in-memory registry state.
+    p._swap_registry = None
+    p._swap_registry_loaded = False
+
+    result = delete_snapshot(p, 'Parked', env.snapshot_id)  # no registry arg
+    assert result['removed_stack'] is True
+    assert not path.exists()
+
+
+def test_load_session_replace_parks(tmp_path, monkeypatch):
+    """mode='replace' -> park_active_stack called (outgoing session persisted)."""
+    from agent_cascade import ws_handlers as wh
+    monkeypatch.setattr(wh, '_clear_caches_safely', lambda: None)
+    parks = []
+    monkeypatch.setattr(snapshot, 'park_active_stack',
+                        lambda *a, **kw: parks.append(kw.get('trigger')))
+
+    p, _ = _single_root_pool(tmp_path)
+    p.get_instance = p.instances.get
+
+    def fake_load(log_input, *, target_instance=None, **kw):
+        p.instances.clear()
+        p.instances[target_instance] = make_instance(target_instance, parent=None, cfg=None)
+        return 'loaded'
+
+    p.load_session_from_log = fake_load
+    src = tmp_path / 'src.jsonl'
+    write_jsonl(src, 'Imported', 2)
+
+    h, _b = _make_handler(p, session={'session_name': ROOT})
+    asyncio.run(h.handle_load_session({'path': str(src), 'mode': 'replace'}))
+    assert parks == ['import']  # outgoing session parked before replace
+    assert h.session['session_name'] in p.instances
+
+
+def test_session_name_property():
+    """AgentPool.session_name returns the root instance name, or None if empty."""
+    from agent_cascade.pool.core import AgentPool
+    from types import SimpleNamespace as NS
+
+    pool = AgentPool.__new__(AgentPool)  # bypass __init__
+    pool.instances = {}
+    assert pool.session_name is None
+
+    root = NS(parent_instance=None)
+    sub = NS(parent_instance='Main')
+    pool.instances = {'Main': root, 'Sub': sub}
+    assert pool.session_name == 'Main'
+
+
 def test_list_stacks_details_include_caption(tmp_path, monkeypatch):
     """caption from root log; trigger/time present; filter drops corrupt."""
     snap_dir = _snap_dir(tmp_path, monkeypatch)
@@ -930,3 +1006,18 @@ def test_new_stack_import_parks(tmp_path, monkeypatch):
     asyncio.run(h.handle_load_session({'path': str(src), 'mode': 'new_stack'}))
     assert parks == ['import']  # old stack parked first
     assert h.session['session_name'] in p.instances  # imported root active
+
+
+def test_load_session_arms_kv_restore_pending(tmp_path):
+    """load_session_from_log sets _boot_kv_restore_pending on the fresh instance."""
+    p, log_path = _single_root_pool(tmp_path)
+    # Negative baseline: a fresh instance that did NOT go through load_session
+    # has the flag unset (default False from AgentInstance.__init__).
+    pre = p.instances[ROOT]
+    assert getattr(pre, '_boot_kv_restore_pending', False) is False
+    # PoolDouble lacks LifecycleMixin / dismiss plumbing; stub what load_session needs.
+    p._resolve_instance_name = lambda name, **kw: name
+    p._dismiss_all_instances = lambda *a, **kw: None
+    p.load_session_from_log(str(log_path))
+    loaded = p.instances[ROOT]
+    assert loaded._boot_kv_restore_pending is True

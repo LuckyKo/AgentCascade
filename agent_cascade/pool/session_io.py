@@ -733,6 +733,9 @@ class SessionIOMixin:
             # and find_or_create_instance(), which set it on `self` (the AgentPool); done inside the
             # same state lock that installs the instance.
             new_inst._pool_ref = self
+            # Arm deferred KV restore: the engine will issue state/load by stable
+            # instance-name label on the first slot-held turn (turn_setup.py boot path).
+            new_inst._boot_kv_restore_pending = True
             # Re-derive the deferred-MCP discovery tail from the FULL prior history (``cleaned``)
             # so a resumed instance offers the tools it had already unlocked, without needing to
             # re-search. Read from ``cleaned`` (the full loaded dict list), not the in-memory

@@ -91,6 +91,14 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # set_auto_security() (the single writer).
         _runtime_state._assign_auto_security(bool(value))
 
+    @property
+    def session_name(self) -> Optional[str]:
+        """Return the current root instance name (the session's identity)."""
+        for name, inst in self.instances.items():
+            if getattr(inst, 'parent_instance', None) is None:
+                return name
+        return None
+
     def __init__(
         self,
         llm_cfg: dict,

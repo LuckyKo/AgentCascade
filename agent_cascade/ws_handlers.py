@@ -2192,7 +2192,7 @@ class WsMessageHandler:
 
         from agent_cascade.agent_identity import disambiguate_instance_name, strip_birth_stamp
 
-        if mode == 'new_stack':
+        if mode in ('new_stack', 'replace'):
             from agent_cascade import snapshot
             if self.agent_pool.instances:
                 await asyncio.to_thread(snapshot.park_active_stack, self.agent_pool, trigger='import')

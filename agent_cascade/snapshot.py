@@ -2015,7 +2015,7 @@ def delete_stack(pool, stack_id: str, *, registry: Optional[StackRegistry] = Non
     caller must park or swap to another stack first. Only the envelope files are
     removed; KV files are left untouched (KV is a cache, the JSONL log is the source
     of truth). Returns ``{'stack_id', 'removed_snapshots'}``."""
-    reg = _ensure_registry(pool, registry)
+    reg = ensure_registry_loaded(pool) if registry is None else registry
     if stack_id == reg.active_stack_id:
         raise ActiveStackDeletionError(
             f"cannot delete active stack {stack_id!r}; park or swap to another stack first")
@@ -2035,7 +2035,7 @@ def delete_snapshot(pool, stack_id: str, snapshot_id: str, *, registry=None) -> 
     of truth). The stack key is dropped when its last snapshot goes. Returns
     ``{'stack_id', 'snapshot_id', 'removed_stack': bool}``.
     """
-    reg = _ensure_registry(pool, registry)
+    reg = ensure_registry_loaded(pool) if registry is None else registry
     entries = reg._snapshots.get(stack_id)
     if not entries:
         raise ValueError(f'unknown stack {stack_id!r}')

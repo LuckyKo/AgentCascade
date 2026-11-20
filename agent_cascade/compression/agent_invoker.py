@@ -731,10 +731,10 @@ def invoke_compression_agent(
 
     # Get the caller name for parent tracking and slot management
     if caller_name is None:
-        caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+        caller_name = getattr(agent_pool, 'session_name', None) or 'Orchestrator'
 
     # Log warning if caller_name couldn't be resolved properly
-    if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
+    if caller_name == 'Orchestrator' and not getattr(agent_pool, 'session_name', None):
         logger.warning(
             f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
             f"slot management may not work correctly. Pass caller_name explicitly."
@@ -981,7 +981,7 @@ def invoke_consolidation_agent(
 
         # Get the caller name for parent tracking and slot management
         if caller_name is None:
-            caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+            caller_name = getattr(agent_pool, 'session_name', None) or 'Orchestrator'
 
         # Acquire proper AgentInstance: warm fixed-name instance when reuse enabled, fresh
         # per-op spawn otherwise (byte-identical to the pre-BUG_0330 path).
