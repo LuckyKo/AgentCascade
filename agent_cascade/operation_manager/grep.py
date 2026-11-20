@@ -1852,6 +1852,7 @@ class GrepMixin:
                             base_dir=self.base_dir,
                             operation_mode='head',
                             spill_path=_resolve_spill_path(spill_file_path),
+                            include_spill_in_notice=False,
                         )
                         if result is not output_text:
                             output_text = result

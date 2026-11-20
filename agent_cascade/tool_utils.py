@@ -175,22 +175,19 @@ def _write_spillover(
     spill_path: Path,
     base_dir: Path,
 ) -> str:
-    """Write text to a spillover file and return its workspace-relative path.
+    """Write text to a spillover file and return its absolute path.
 
     Args:
         text: Full text content to write.
         spill_path: Absolute path for the spillover file.
-        base_dir: Base directory for computing relative path.
+        base_dir: Base directory (unused for path display; kept for API compat).
 
     Returns:
-        Workspace-relative path string (forward slashes).
+        Absolute path string (forward slashes).
     """
     spill_path.parent.mkdir(parents=True, exist_ok=True)
     spill_path.write_text(text, encoding='utf-8')
-    try:
-        return str(spill_path.relative_to(base_dir)).replace('\\', '/')
-    except ValueError:
-        return str(spill_path).replace('\\', '/')
+    return str(spill_path.resolve()).replace('\\', '/')
 
 
 def truncate_with_spillover(
@@ -204,6 +201,7 @@ def truncate_with_spillover(
     total_lines_hint: Optional[int] = None,
     shown_lines_hint: Optional[int] = None,
     skip_spillover: bool = False,
+    include_spill_in_notice: bool = True,
 ) -> str:
     """Truncate text to char_limit and write full content to a spillover file.
 
@@ -229,6 +227,9 @@ def truncate_with_spillover(
         skip_spillover: If True, do NOT write a spillover file. Used by tools that
             already have their own pagination (read_file, read_logs) where the full
             content remains accessible on disk via start_line/limit.
+        include_spill_in_notice: If False, omit the spillover path from the head
+            truncation notice (the caller is expected to surface it elsewhere, e.g.
+            a tail marker). Default True.
 
     Returns:
         Truncated text with notice, or original text if under limit.
@@ -274,7 +275,7 @@ def truncate_with_spillover(
         shown_lines=shown_lines,
         total_lines=total_lines,
         total_chars=original_len,
-        spill_path=rel_spill,
+        spill_path=rel_spill if include_spill_in_notice else None,
     )
     return f"{truncated}\n\n{notice}"
 

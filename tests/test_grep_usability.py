@@ -296,7 +296,7 @@ def test_extract_spill_path():
 
 
 def test_grep_fast_path_truncation_surfaces_spillover():
-    """BUG_0010: an overflowing fast-path grep must surface the spillover file path.
+    """BUG_0010/0366: an overflowing fast-path grep must surface the spillover file path.
 
     Skips gracefully when no subprocess grep tool (rg/grep) is available, since this
     only exercises the subprocess fast path.
@@ -312,13 +312,52 @@ def test_grep_fast_path_truncation_surfaces_spillover():
         result = om.grep(pattern='line', path='.')
         # Truncation must be signalled...
         assert '[TRUNCATED' in result, f"Expected truncation marker: {result[:300]}"
-        # ...and the spillover file path must now be surfaced (the BUG_0010 fix).
-        # Case-insensitive: format_truncation_notice emits "Full output saved to:" (capitalized).
-        assert 'full output saved to:' in result.lower(), \
-            f"Spillover path notice missing from fast-path grep response: {result[:400]}"
-        assert 'logs/spillover/' in result, \
-            f"Spillover file path not surfaced in fast-path grep response: {result[:400]}"
+        # BUG_0366: the spillover path appears in the tail marker (not the head notice).
+        assert 'spillover' in result.lower(), \
+            f"Spillover reference missing from fast-path grep response: {result[:400]}"
+        # The path must be absolute (BUG_0366).
+        import re
+        spill_refs = re.findall(r'[\w/\\:-]+spillover/[\w_\-]+\.txt', result)
+        assert spill_refs, f"No spillover path found in: {result[:400]}"
+        for ref in spill_refs:
+            assert Path(ref).is_absolute(), f"Spillover path is not absolute: {ref}"
         print('[PASS] test_grep_fast_path_truncation_surfaces_spillover')
+
+
+def test_spillover_path_absolute_and_once(tmp_path):
+    """BUG_0366: _write_spillover returns an absolute path; truncate_with_spillover
+    with include_spill_in_notice=False omits the path from the head notice."""
+    from agent_cascade.tool_utils import _write_spillover, truncate_with_spillover
+    import os
+
+    # _write_spillover returns an absolute path.
+    spill = tmp_path / 'logs' / 'spillover' / 'test.txt'
+    result = _write_spillover('hello', spill, tmp_path)
+    assert os.path.isabs(result), f"Expected absolute path, got: {result}"
+    assert result == str(spill.resolve()).replace('\\', '/')
+
+    # truncate_with_spillover with include_spill_in_notice=False omits the path
+    # from the head notice (the caller surfaces it in a tail marker).
+    long_text = 'x' * 5000
+    out = truncate_with_spillover(
+        long_text, 100, 'test', 'tool', tmp_path,
+        include_spill_in_notice=False,
+    )
+    # Head notice should NOT contain the spillover path.
+    head_notice = out[out.rfind('[TRUNCATED'):]
+    assert 'Full output saved to:' not in head_notice, \
+        f"Head notice should not contain spillover path: {head_notice}"
+    # But the spillover file was still written.
+    spill_files = list((tmp_path / 'logs' / 'spillover').glob('*.txt'))
+    assert len(spill_files) >= 1, 'Spillover file should have been written'
+
+    # Default (include_spill_in_notice=True) DOES include the path.
+    out2 = truncate_with_spillover(
+        long_text, 100, 'test2', 'tool', tmp_path,
+    )
+    head_notice2 = out2[out2.rfind('[TRUNCATED'):]
+    assert 'Full output saved to:' in head_notice2, \
+        f"Default head notice should contain spillover path: {head_notice2}"
 
 
 def test_grep_fast_path_truncation_has_end_of_body_marker():
