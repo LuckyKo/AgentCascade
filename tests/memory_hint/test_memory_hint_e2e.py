@@ -23,6 +23,15 @@ from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.llm.schema import ASSISTANT, USER, Message
 
 
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 def _write_lesson(vault: Path, rel_path: str, name: str, description: str, body: str) -> None:
     p = vault / rel_path
     p.parent.mkdir(parents=True, exist_ok=True)

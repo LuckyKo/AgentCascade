@@ -16,11 +16,22 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import Message
 from agent_cascade.telemetry import TelemetryCollector
+
+
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
 
 
 def _make_instance(name='A'):

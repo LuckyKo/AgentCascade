@@ -25,6 +25,15 @@ from agent_cascade.agent_instance import PoolSettings
 from agent_cascade.runtime_state import state as _runtime_state
 
 
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 class _MockRouter:
     """Minimal api_router stand-in: records update_default_llm_cfg calls."""
 

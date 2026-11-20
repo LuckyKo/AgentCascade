@@ -31,11 +31,11 @@ def _make_inject_pool(inst, enqueued, *, fail=False):
     """Stub pool exposing exactly what AgentPool.inject_skill touches, with the REAL method
     bound (not auto-mocked). If ``fail`` is set, inject_skill itself raises (A5)."""
     if fail:
-        def _raise(agent_name, skill_name):
+        def _raise(agent_name, skill_name, agent_selected=False):
             raise RuntimeError('boom: inject_skill blew up')
         return SimpleNamespace(
             skill_manager=SimpleNamespace(
-                load_full_instructions=lambda n: 'BODY',
+                load_full_instructions=lambda n, agent_selected=False: 'BODY',
                 is_skill_disabled=lambda n: False,
             ),
             get_instance=lambda name: inst,
@@ -45,14 +45,15 @@ def _make_inject_pool(inst, enqueued, *, fail=False):
         )
     pool = SimpleNamespace(
         skill_manager=SimpleNamespace(
-            load_full_instructions=lambda n: 'BODY',
+            load_full_instructions=lambda n, agent_selected=False: 'BODY',
             is_skill_disabled=lambda n: False,
         ),
         get_instance=lambda name: inst,
         enqueue_message=lambda name, content: enqueued.append((name, content)),
         telemetry=None,
     )
-    pool.inject_skill = lambda agent_name, skill_name: AgentPool.inject_skill(pool, agent_name, skill_name)
+    pool.inject_skill = lambda agent_name, skill_name, agent_selected=False: \
+        AgentPool.inject_skill(pool, agent_name, skill_name, agent_selected=agent_selected)
     return pool
 
 

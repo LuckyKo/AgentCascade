@@ -39,6 +39,15 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 class _MockLLMHandler(BaseHTTPRequestHandler):
     """Minimal OpenAI-compatible mock LLM server for the API-layer tests.
 

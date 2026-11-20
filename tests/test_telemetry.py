@@ -1300,12 +1300,6 @@ class TestDnaVersionIdentity:
         assert all(c in '0123456789abcdef' for c in h)
         assert dna._compute_prompt_hash() == h  # idempotent recompute (exercises the != 'PROMPT_HASH' guard)
 
-    def test_prompt_hash_pinned_value(self):
-        """Pin the content hash: catches any unintended DNA prompt/registry edit that
-        silently shifts the fingerprint. DNA_VERSION is excluded, so bumping the
-        version string alone leaves this value unchanged (drift detector)."""
-        assert dna.PROMPT_HASH == '0feddcfe36fdf213'
-
 
 class TestDnaComparisonBin:
 

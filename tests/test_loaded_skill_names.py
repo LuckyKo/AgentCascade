@@ -44,7 +44,7 @@ def _make_pool(inst, skill_bodies):
     found" so the tool routes it to the failed list. Returns ``(pool, enqueued)`` where
     ``enqueued`` records every ``(agent_name, content)`` passed to ``enqueue_message``.
     """
-    def _load_full(name):
+    def _load_full(name, agent_selected=False):
         """Mirror SkillManager.load_full_instructions: exact match first, then a
         case-insensitive fallback (manager.py:716-723). Returns the body for the
         canonical registry name, or None if not found."""
@@ -74,7 +74,8 @@ def _make_pool(inst, skill_bodies):
     # must expose it and it must be the REAL method (not auto-mocked) for these tests to still
     # prove load/enqueue/record behavior. SimpleNamespace + the pool attrs it needs
     # (skill_manager/get_instance/enqueue_message/telemetry) satisfy inject_skill's contract.
-    pool.inject_skill = lambda agent_name, skill_name: AgentPool.inject_skill(pool, agent_name, skill_name)
+    pool.inject_skill = lambda agent_name, skill_name, agent_selected=False: \
+        AgentPool.inject_skill(pool, agent_name, skill_name, agent_selected=agent_selected)
     return pool, enqueued
 
 

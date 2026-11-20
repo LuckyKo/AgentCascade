@@ -29,6 +29,16 @@ from unittest import mock
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 API_SERVER = os.path.join(PROJECT_ROOT, 'agent_cascade', 'api_server.py')
 

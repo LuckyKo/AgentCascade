@@ -587,7 +587,7 @@ class TestCompressContextTargetMessages:
 
         captured_target_messages = []
 
-        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
+        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False, keep_warm_session=False):
             captured_target_messages.append(target_messages)
             return ('Summary', '')
 
@@ -631,7 +631,7 @@ class TestCompressContextTargetMessages:
 
         captured_target_messages = []
 
-        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False):
+        def capture_invoke(agent_pool, target_messages, existing_summary=None, caller_name=None, want_caption=False, keep_warm_session=False):
             captured_target_messages.append((target_messages, existing_summary))
             return ('Compound summary', '')
 

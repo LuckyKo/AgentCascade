@@ -39,6 +39,16 @@ from tests.conftest_e2e import derive_shared_secret, encrypt_payload, generate_c
 
 pytestmark = pytest.mark.timeout(90)
 
+
+@pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
 # ── Config Isolation Fixture ──────────────────────────────────────────────────
 
 

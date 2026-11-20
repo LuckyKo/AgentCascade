@@ -49,6 +49,15 @@ FAKE_ALLOWED_USER_ID = 1111111111
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture(autouse=True)
+def _disable_stack_swap_gate(monkeypatch):
+    # S6 (BUG_0345) flipped ENABLE_STACK_SWAP to True, exposing run-loop/state_builder
+    # code paths that assume a real pool (turn-boundary gate + display_name branch read
+    # pool.instances). These tests use pool doubles, so disable the flag to take the
+    # pre-S6 code path (full rationale: test_skill_generation.py).
+    monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
+
+
+@pytest.fixture(autouse=True)
 def fresh_manager(tmp_path):
     """Fresh SkillManager isolated to a per-test tmp dir (mirrors test_tg_push_model)."""
     from agent_cascade.skills.manager import SkillManager
