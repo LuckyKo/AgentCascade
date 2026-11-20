@@ -79,6 +79,17 @@ def create_main_agent_instance(
     except Exception as e:
         logger.warning(f"[SKILLS] Skill injection failed for main agent instance '{instance_name}': {e}")
 
+    # Stamp identity before logging so the first system message on disk carries the
+    # canonical instance name, not the soul name. Mirrors the metadata pre-log writer
+    # below and turn_setup's in-memory rewrite. Safe on restore: the logging loop is
+    # gated on empty history (see below), so an existing log's line 2 is never rewritten.
+    try:
+        from agent_cascade.lifecycle_manager import _stamp_identity_to_instance_name
+        if isinstance(conversation[0], Message):
+            _stamp_identity_to_instance_name(conversation[0], instance_name)
+    except Exception as e:
+        logger.warning(f"[IDENTITY] system message identity stamp failed for '{instance_name}': {e}")
+
     # FIX (todo.md:155): Inject the Session Metadata block into the root's system message
     # BEFORE it is logged to JSONL. The sub-agent path does this via lifecycle_manager, but the
     # root bypasses that path — so without this, the block never reaches disk (fresh or restored).

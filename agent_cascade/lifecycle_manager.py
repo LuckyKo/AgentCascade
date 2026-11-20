@@ -171,6 +171,33 @@ def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance:
                 sys_msg.content = '\n'.join(content_lines)
 
 
+def _stamp_identity_to_instance_name(sys_msg, instance_name: str) -> None:
+    """Stamp a system message's identity line to 'You are {instance_name}.' in place.
+
+    Runs at instance-creation time, before the first JSONL write, so a fresh session's
+    first logged system message is byte-faithful to the live prompt. Mirrors the in-memory
+    identity rewrite in engine/turn_setup.py (same regex, same instance_name source), so
+    disk and live prompt agree without turn_setup needing to re-rewrite on first turn.
+
+    Idempotent: an already-correct identity line matches the pattern and rewrites to the
+    identical bytes, so a second call (e.g. on reuse, or after build_system_message
+    already stamped it) changes nothing and never produces a double stamp. Only the first
+    identity occurrence is touched; body prose (e.g. 'You are a curious ...') does not
+    match because it is not followed by a word character immediately before the period.
+
+    Args:
+        sys_msg: System message to mutate in place. Non-Message objects, empty content, and
+            non-string content are left untouched. No message is added or removed.
+        instance_name: Canonical instance name to stamp (instance.instance_name).
+    """
+    content = getattr(sys_msg, 'content', None)
+    if not isinstance(content, str) or not content.strip():
+        return
+    pattern = r'(?i)You are\s+\w+\.'
+    if re.search(pattern, content):
+        sys_msg.content = re.sub(pattern, f"You are {instance_name}.", content, count=1)
+
+
 class AgentLifecycleManager:
     """Manages agent instance lifecycle: creation, reuse, and configuration.
 
@@ -545,6 +572,7 @@ class AgentLifecycleManager:
         # instance class. This is the PERSISTING writer. The refresh-only path in _setup_turn()
         # only updates an already-present block and never first-injects — so do NOT remove this
         # call assuming _setup_turn covers persistence.
+        _stamp_identity_to_instance_name(sys_msg, instance.instance_name)
         _inject_metadata_into_message(sys_msg, self.pool, instance)
 
         # L1 (BUG_0278) prefix-stability guard. Stable system-agent classes reuse their KV
