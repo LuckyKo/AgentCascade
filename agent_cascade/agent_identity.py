@@ -1,43 +1,24 @@
-"""Root identity vs. display name helpers (BUG_0323 S1).
+"""Instance identity vs. display name helpers.
 
-Root instances may carry an immutable birth stamp in their identity
-(``Maine_20261115_143022``) so two stacks rooted at the same display name have
-distinct dict keys, log filenames and KV labels. The stamp is part of the
-persisted identity and must be reused verbatim on restore — never re-minted.
+A root's identity is its clean display name (``ACDev``). When two live stacks
+share a display name the pool appends a numeric suffix (``ACDev_2``) so they do
+not collide on dict keys, KV labels or log paths. The identity is therefore
+stable across reloads and swaps.
 
-Sub-agents are never stamped; they are scoped through their root.
+Legacy sessions persisted a birth stamp in the identity
+(``Maine_20261115_143022``). Those stamps are preserved verbatim on restore;
+the ``birth_stamp`` / ``strip_birth_stamp`` helpers exist to read them and
+present the clean label. Never mint a new stamp.
+
+Sub-agents are scoped through their root and are never suffixed.
 """
 
 from __future__ import annotations
 
-import datetime
 import re
-import threading
 from typing import Optional
 
-#: Filename-safe, sortable stamp shape shared with the JSONL logger.
-BIRTH_STAMP_FORMAT = '%Y%m%d_%H%M%S'
-
 _BIRTH_STAMP_RE = re.compile(r'_(\d{8}_\d{6})$')
-
-_stamp_lock = threading.Lock()
-_last_stamp_dt: Optional[datetime.datetime] = None
-
-
-def mint_birth_stamp(now: Optional[datetime.datetime] = None) -> str:
-    """Return a unique stamp in ``BIRTH_STAMP_FORMAT``.
-
-    Two roots created in the same wall-clock second would otherwise collide, so
-    successive calls in this process are monotonically advanced by one second.
-    Stamps remain sortable and keep the documented shape.
-    """
-    global _last_stamp_dt
-    with _stamp_lock:
-        stamp_dt = (now or datetime.datetime.now()).replace(microsecond=0)
-        if _last_stamp_dt is not None and stamp_dt <= _last_stamp_dt:
-            stamp_dt = _last_stamp_dt + datetime.timedelta(seconds=1)
-        _last_stamp_dt = stamp_dt
-        return stamp_dt.strftime(BIRTH_STAMP_FORMAT)
 
 
 def birth_stamp(name: str) -> Optional[str]:
@@ -62,10 +43,28 @@ def strip_birth_stamp(name: str) -> str:
     return name[:match.start()] if match else name
 
 
-def make_birth_stamped_name(display_name: str, stamp: Optional[str] = None) -> str:
-    """Build ``<display>_<stamp>``, stripping any pre-existing stamp first."""
-    base = strip_birth_stamp(str(display_name)) or str(display_name)
-    return f'{base}_{stamp or mint_birth_stamp()}'
+def _name_taken(candidate: str, taken) -> bool:
+    """True when *candidate* matches a name in *taken* (case-insensitive)."""
+    names = taken.keys() if hasattr(taken, 'keys') else taken
+    needle = candidate.lower()
+    return any(isinstance(name, str) and name.lower() == needle for name in names)
+
+
+def disambiguate_instance_name(base: str, taken, *, force_suffix: bool = False) -> str:
+    """Return *base* or ``<base>_N`` (N >= 2) not present in *taken*.
+
+    Matching is case-insensitive to mirror ``_resolve_instance_name``. With
+    ``force_suffix=True`` the result is always suffixed (add-mode clones).
+    A legacy birth stamp on *base* is stripped first so suffixes never stack on
+    top of a timestamp.
+    """
+    base = strip_birth_stamp(str(base)) or str(base)
+    if not force_suffix and not _name_taken(base, taken):
+        return base
+    idx = 2
+    while _name_taken(f'{base}_{idx}', taken):
+        idx += 1
+    return f'{base}_{idx}'
 
 
 def get_display_name(instance) -> str:

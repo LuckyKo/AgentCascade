@@ -63,8 +63,9 @@ def create_main_agent_instance(
         max_turns=max_turns,
         conversation=conversation,
     )
-    # create_instance may mint a birth-stamped identity; every downstream key/log
-    # must use the canonical identity, not the proposed display name.
+    # create_instance may append a numeric suffix (Maine_2) when the clean name is
+    # already live; every downstream key/log must use the canonical identity, not
+    # the proposed display name.
     instance_name = instance.instance_name
 
     # ── Skills System: Inject self-augmentation skill into main agent's system message ──

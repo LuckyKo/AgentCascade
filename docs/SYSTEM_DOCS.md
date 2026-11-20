@@ -471,9 +471,9 @@ Resurrection via log_file parameter:
 
 **New Session — park + named root (`BUG_0345`).** In the WebUI, **New Session** (WS `stacks_new`,
 `ws_handlers.py::handle_stacks_new`) opens a name dialog, **parks** the current fleet as a recoverable
-snapshot (trigger `new_session`) and mints a fresh birth-stamped root — it never wipes the old work.
-An empty name yields `Maine_<birth-stamp>` (via `DEFAULT_SESSION_NAME`); a typed name yields
-`<name>_<stamp>`. If root creation fails the parked envelope is re-activated (the pool is never left
+snapshot (trigger `new_session`) and creates a clean-named root — it never wipes the old work.
+An empty name yields `Maine` (via `DEFAULT_SESSION_NAME`); a typed name yields
+`<name>` (or `<name>_2`, `<name>_3`, … if the name is already live in the pool). If root creation fails the parked envelope is re-activated (the pool is never left
 empty). Boot restore re-points the same way: after activating a saved stack, `session['session_name']`
 is re-pointed to the restored root (not the previous name), so a follow-up message routes to it without
 spawning a duplicate root.
@@ -552,7 +552,7 @@ Only snapshot *files* are pruned; KV is left untouched (cache, not source of tru
 The **Sessions panel** (`web_ui`: `#sessionsList` list + `#activeSessionCard` active card, rendered from
 the `GET /api/stacks` `details`) shows a flat newest-first list of saves — one row per snapshot — with
 the **root agent's caption** (read by the single-source `session_caption.py`, shared by the REST and
-snapshot paths so they can't drift), the save **trigger** and **time**, and the full stamped identity in
+snapshot paths so they can't drift), the save **trigger** and **time**, and the clean identity in
 the meta line. Per-row **Open** (swap to that stack; parks the live one first) and **Delete**; **Save
 now** on the active card (refused while generating).
 
@@ -1380,7 +1380,7 @@ When `ENABLE_STACK_SWAP` is on, the Settings sidebar and Sessions area render fr
 |---|---|---|
 | `#sessionsList` | Newest-first saved-session list (caption / trigger / time per row) | rendered from `details` |
 | `#activeSessionCard` | Active-session card + **Save now** | `stacks_snapshot` |
-| `#new-session-modal` | New Session name dialog (empty → `Maine_<stamp>`) | sends `stacks_new` |
+| `#new-session-modal` | New Session name dialog (empty → `Maine`) | sends `stacks_new` |
 | `#import-modal` | Import window (list logs; `replace`/`add`/`new_stack`) | `POST /api/session/restore` |
 | `#setting-enable-stack-swap`, `#setting-stack-restore-on-boot` | Settings toggles | `POOL_SETTINGS_MAP` entries → `saveSettings`; hydrated from the `pool_settings` snapshot each frame |
 

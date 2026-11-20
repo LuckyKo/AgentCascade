@@ -980,8 +980,8 @@ class WsMessageHandler:
     async def handle_stacks_new(self, data: dict) -> None:
         """Park the active session and start a named fresh root (stack-safe New Session).
 
-        ``name`` is the display name; empty -> DEFAULT_SESSION_NAME. The pool mints the birth
-        stamp, so an empty name yields ``Maine_<timestamp>``.
+        ``name`` is the clean display name; empty -> DEFAULT_SESSION_NAME. The pool keeps the
+        clean identity and appends a numeric suffix (``Maine_2``) only if the name is live.
         """
         if not settings.ENABLE_STACK_SWAP or self.agent_pool is None:
             await self.handle_reset(data)
@@ -2190,7 +2190,7 @@ class WsMessageHandler:
             from agent_cascade.log import logger
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
 
-        from agent_cascade.agent_identity import make_birth_stamped_name, strip_birth_stamp
+        from agent_cascade.agent_identity import disambiguate_instance_name, strip_birth_stamp
 
         if mode == 'new_stack':
             from agent_cascade import snapshot
@@ -2204,15 +2204,10 @@ class WsMessageHandler:
         if mode == 'add':
             clear_sub = False
             caller_name = self.session.get('session_name')
-            display = strip_birth_stamp(instance_name) if settings.ENABLE_STACK_SWAP else instance_name
-            if settings.ENABLE_STACK_SWAP:
-                target_inst = make_birth_stamped_name(display)
-            else:
-                idx = 2
-                target_inst = f"{display}_{idx}"
-                while target_inst in self.agent_pool.instances:
-                    idx += 1
-                    target_inst = f"{display}_{idx}"
+            # Add-mode clones an existing session as a new live stack; always take a
+            # fresh numeric suffix so it never clobbers the stack it was cloned from.
+            target_inst = disambiguate_instance_name(
+                instance_name, self.agent_pool.instances, force_suffix=True)
         else:
             caller_name = self.session.get('session_name')
             root_count = sum(1 for inst in self.agent_pool.instances.values() if inst.parent_instance is None)

@@ -25,7 +25,6 @@ is reset per pool (plan §15 risk table).
 import asyncio
 import json
 import os
-import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +33,6 @@ import pytest
 
 from agent_cascade import snapshot, settings
 from agent_cascade.agent_instance import AgentState
-from agent_cascade.agent_identity import make_birth_stamped_name
 from agent_cascade.snapshot import (
     SnapshotIntegrityError,
     capture_fleet_snapshot,
@@ -59,9 +57,6 @@ from tests._snapshot_fleet_double import (
     register,
     write_jsonl,
 )
-
-# Birth stamp suffix minted by make_birth_stamped_name: ``YYYYmmdd_HHMMSS``.
-_STAMP_RE = re.compile(r'^[A-Za-z0-9_-]+_\d{8}_\d{6}$')
 
 
 @pytest.fixture(autouse=True)
@@ -757,16 +752,20 @@ def test_swap_repoints_session_name(tmp_path, monkeypatch):
     assert h.session['session_name'] == 'target_a'
 
 
-def test_new_session_uses_name_and_stamp(tmp_path, monkeypatch):
-    """name='Alpha' -> Alpha_<stamp>; empty -> Maine_<stamp>."""
+def test_new_session_uses_name_and_numeric_suffix(tmp_path, monkeypatch):
+    """name='Alpha' -> Alpha; a second New Session with the same name -> Alpha_2;
+    empty -> Maine (DEFAULT_SESSION_NAME)."""
     import agent_cascade.api_integration as api_int
     created = []
 
     def fake_create(pool, instance_name, system_message_content, **kw):
-        # The real pool.create_instance mints the birth stamp; model exactly that.
-        stamped = make_birth_stamped_name(instance_name)
-        inst = SimpleNamespace(instance_name=stamped)
-        created.append(stamped)
+        # Mirror the real create_main_agent_instance clean-name behavior: keep the
+        # clean name, append _N only if the name is already live, then register it.
+        from agent_cascade.agent_identity import disambiguate_instance_name
+        name = disambiguate_instance_name(instance_name, pool.instances)
+        inst = SimpleNamespace(instance_name=name)
+        pool.instances[name] = inst
+        created.append(name)
         return inst
 
     monkeypatch.setattr(api_int, 'create_main_agent_instance', fake_create)
@@ -779,13 +778,15 @@ def test_new_session_uses_name_and_stamp(tmp_path, monkeypatch):
     h, _b = _make_handler(p)
 
     asyncio.run(h.handle_stacks_new({'name': 'Alpha'}))
-    assert _STAMP_RE.match(h.session['session_name'])
-    assert h.session['session_name'].startswith('Alpha_')
+    assert h.session['session_name'] == 'Alpha'
+
+    h_again, _ = _make_handler(p)
+    asyncio.run(h_again.handle_stacks_new({'name': 'Alpha'}))
+    assert h_again.session['session_name'] == 'Alpha_2'
 
     h2, _ = _make_handler(p)
     asyncio.run(h2.handle_stacks_new({'name': ''}))
-    assert h2.session['session_name'].startswith('Maine_')
-    assert _STAMP_RE.match(h2.session['session_name'])
+    assert h2.session['session_name'] == 'Maine'
 
 
 def test_new_session_rolls_back_on_create_failure(tmp_path, monkeypatch):
@@ -839,8 +840,11 @@ def test_new_session_first_turn_not_stranded_by_swap_gate(tmp_path, monkeypatch)
         return SimpleNamespace(stack_id='parked', marker=True)
 
     def fake_create(pool, instance_name, system_message_content, **kw):
-        stamped = make_birth_stamped_name(instance_name)
-        inst = make_instance(stamped, agent_class='orchestrator',
+        # Mirror the real create_instance clean-name behavior: keep the clean name,
+        # append _N only if the name is already live, then register it.
+        from agent_cascade.agent_identity import disambiguate_instance_name
+        name = disambiguate_instance_name(instance_name, pool.instances)
+        inst = make_instance(name, agent_class='orchestrator',
                              display=instance_name, cfg=None)
         register(p, inst)
         return inst

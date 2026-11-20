@@ -2316,7 +2316,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             if agent_pool.instances:
                 await asyncio.to_thread(snapshot.park_active_stack, agent_pool, trigger='import')
 
-        from agent_cascade.agent_identity import make_birth_stamped_name
+        from agent_cascade.agent_identity import disambiguate_instance_name
         target_inst = name
         clear_sub = True
         caller_name = None
@@ -2324,15 +2324,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         if mode == 'add':
             clear_sub = False
             caller_name = session.get('session_name')
-            display = strip_birth_stamp(name) if settings.ENABLE_STACK_SWAP else name
-            if settings.ENABLE_STACK_SWAP:
-                target_inst = make_birth_stamped_name(display)
-            else:
-                idx = 2
-                target_inst = f"{display}_{idx}"
-                while target_inst in agent_pool.instances:
-                    idx += 1
-                    target_inst = f"{display}_{idx}"
+            # Add-mode clones an existing session as a new live stack; always take a
+            # fresh numeric suffix so it never clobbers the stack it was cloned from.
+            target_inst = disambiguate_instance_name(
+                name, agent_pool.instances, force_suffix=True)
 
         # Load via the pool's standardized path (mirrors handle_load_session).
         status = agent_pool.load_session_from_log(

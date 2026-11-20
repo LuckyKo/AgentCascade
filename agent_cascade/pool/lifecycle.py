@@ -9,8 +9,8 @@ import time
 from typing import List, Optional
 
 from agent_cascade import settings
-from agent_cascade.agent_identity import (get_display_name, is_birth_stamped,
-                                          make_birth_stamped_name, strip_birth_stamp)
+from agent_cascade.agent_identity import (disambiguate_instance_name, get_display_name,
+                                          is_birth_stamped, strip_birth_stamp)
 from agent_cascade.llm.schema import Message
 from agent_cascade.log import logger
 
@@ -93,13 +93,14 @@ class LifecycleMixin:
         proposed_display = display_name.strip() if isinstance(display_name, str) and display_name.strip() else None
         proposed_name = instance_name
         if parent_instance is None and settings.ENABLE_STACK_SWAP:
-            # Mint BEFORE resolving so two roots with the same display name never
-            # collapse into one canonical identity.
+            # Disambiguate BEFORE resolving so two live roots with the same display
+            # name never collapse into one canonical identity. A legacy birth-stamped
+            # identity (persisted session) is preserved verbatim.
             base_display = proposed_display or strip_birth_stamp(proposed_name)
             if proposed_display is None:
                 proposed_display = base_display
             if not is_birth_stamped(proposed_name):
-                proposed_name = make_birth_stamped_name(base_display)
+                proposed_name = disambiguate_instance_name(base_display, self.instances)
         elif proposed_display is None:
             proposed_display = (proposed_name.strip() if isinstance(proposed_name, str) else proposed_name)
 

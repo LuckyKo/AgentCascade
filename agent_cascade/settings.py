@@ -686,11 +686,13 @@ STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv('AGENT_CASCADE_STREAM_MAX_TOTA
 STREAM_DELTA_ENABLED: bool = os.getenv('AGENT_CASCADE_STREAM_DELTA',
                                        '1').strip().lower() not in ('0', 'false', 'off', 'no')
 
-# Stack-swap / fleet-snapshot prerequisite (BUG_0323 S1). When enabled, root
-# instance identities carry an immutable birth stamp (Maine_20261115_143022) so
-# two stacks can share a display name without colliding on KV labels or log
-# paths. ON by default; set AGENT_CASCADE_ENABLE_STACK_SWAP=false to restore the
-# legacy plain-identity behavior (byte-identical to pre-BUG_0323).
+# Stack-swap / fleet-snapshot prerequisite (BUG_0323 S1, refined by BUG_0362). When
+# enabled, a root's identity is its clean display name (Maine); a second live stack
+# sharing that name gets a numeric suffix (Maine_2) so two stacks never collide on
+# KV labels or log paths. Birth stamps (Maine_20261115_143022) are legacy-only —
+# preserved verbatim when restoring old sessions, never minted. ON by default; set
+# AGENT_CASCADE_ENABLE_STACK_SWAP=false to restore the legacy plain-identity behavior
+# (byte-identical to pre-BUG_0323).
 _ENABLE_STACK_SWAP_ENV = 'AGENT_CASCADE_ENABLE_STACK_SWAP'
 ENABLE_STACK_SWAP_FROM_ENV: bool = _ENABLE_STACK_SWAP_ENV in os.environ
 ENABLE_STACK_SWAP: bool = os.getenv(_ENABLE_STACK_SWAP_ENV,

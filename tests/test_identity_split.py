@@ -1,20 +1,22 @@
-"""BUG_0323 S1: birth-stamped root identity vs. user-facing display name.
+"""BUG_0362: clean root identity vs. user-facing display name.
 
 Covers the slice contract:
   * flag OFF keeps plain root identities (byte-identical legacy behavior),
-  * flag ON stamps roots, leaves sub-agents unstamped,
-  * restores reuse the persisted stamp (never mint a new one),
+  * flag ON keeps a clean root identity and appends a numeric suffix (``Maine_2``)
+    only when the name is already live; sub-agents are never suffixed,
+  * restores reuse the persisted identity verbatim (a legacy birth stamp is never
+    re-minted; a clean identity stays clean),
   * session listings show display names,
   * two roots sharing one endpoint/model get distinct KV labels.
 """
 
+import asyncio
 import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
-from agent_cascade.agent_identity import strip_birth_stamp
 from agent_cascade.pool.lifecycle import LifecycleMixin
 from tests.test_session_restore_pool_ref import _FakeInstanceLogger, _PoolDouble
 
@@ -66,11 +68,10 @@ class TestFlagOff:
 
 
 class TestFlagOn:
-    def test_root_is_stamped_and_display_is_clean(self, lifecycle_pool, monkeypatch):
+    def test_root_identity_is_clean_display_name(self, lifecycle_pool, monkeypatch):
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
         inst = lifecycle_pool.create_instance('Maine', 'orchestrator')
-        assert inst.instance_name.startswith('Maine_')
-        assert strip_birth_stamp(inst.instance_name) == 'Maine'
+        assert inst.instance_name == 'Maine'
         assert inst.display_name == 'Maine'
 
     def test_two_roots_same_display_have_distinct_identities_and_kv_labels(
@@ -88,7 +89,7 @@ class TestFlagOn:
 
         first = lifecycle_pool.create_instance('Maine', 'orchestrator')
         second = lifecycle_pool.create_instance('Maine', 'orchestrator')
-        assert first.instance_name != second.instance_name
+        assert {first.instance_name, second.instance_name} == {'Maine', 'Maine_2'}
         assert first.display_name == second.display_name == 'Maine'
 
         cfg = {'api_base': 'http://127.0.0.1:1234/v1', 'model': 'shared-model',
@@ -99,7 +100,7 @@ class TestFlagOn:
 
         assert len(labels) == 2
         assert labels[0] != labels[1]
-        assert {strip_birth_stamp(name) for name in labels} == {'Maine'}
+        assert set(labels) == {'Maine', 'Maine_2'}
 
     def test_subagent_is_never_minted(self, lifecycle_pool, monkeypatch):
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
@@ -108,7 +109,54 @@ class TestFlagOn:
         assert child.instance_name == 'Coder1'
         assert child.display_name == 'Coder1'
 
-    def test_restore_reuses_persisted_stamp(self, no_real_logger, monkeypatch):
+    def test_second_root_gets_numeric_suffix(self, lifecycle_pool, monkeypatch):
+        """A second (and third) live root sharing a display name gets ``_2`` / ``_3``."""
+        monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
+        first = lifecycle_pool.create_instance('Maine', 'orchestrator')
+        second = lifecycle_pool.create_instance('Maine', 'orchestrator')
+        third = lifecycle_pool.create_instance('Maine', 'orchestrator')
+        assert [i.instance_name for i in (first, second, third)] == ['Maine', 'Maine_2', 'Maine_3']
+        assert all(i.display_name == 'Maine' for i in (first, second, third))
+
+    def test_add_mode_clone_gets_numeric_suffix(self, tmp_path, monkeypatch):
+        """Add-mode clone always takes a fresh ``_N`` suffix (force_suffix) so it never
+        clobbers the stack it was cloned from — even when the clean name is free."""
+        from agent_cascade import ws_handlers as wh
+        from tests.test_stack_sessions_backend import _make_handler
+
+        log = tmp_path / 'orchestrator_Maine_20261115_150512.jsonl'
+        log.write_text(json.dumps({'metadata': {'instance_name': 'Maine',
+                                               'agent_class': 'Orchestrator'}}) + '\n',
+                       encoding='utf-8')
+
+        calls = []
+
+        class _AddPool:
+            stopped = False
+
+            def load_session_from_log(self, path, *, target_instance,
+                                      clear_sub_agents_before_load, caller_name):
+                calls.append(target_instance)
+                return f'Loaded session into {target_instance}'
+
+            def get_instance(self, name):
+                return self.instances.get(name)
+
+        pool = _AddPool()
+        pool.instances = {'Maine': object()}
+        monkeypatch.setattr(wh, '_clear_caches_safely', lambda: None)
+        h, _ = _make_handler(pool)
+
+        # First clone of a live 'Maine' -> 'Maine_2'.
+        asyncio.run(h.handle_load_session({'path': str(log), 'mode': 'add'}))
+        assert calls == ['Maine_2']
+
+        # A second clone stacks on the first -> 'Maine_3'.
+        pool.instances['Maine_2'] = object()
+        asyncio.run(h.handle_load_session({'path': str(log), 'mode': 'add'}))
+        assert calls == ['Maine_2', 'Maine_3']
+
+    def test_restore_preserves_legacy_stamped_identity(self, no_real_logger, monkeypatch):
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
         persisted = 'Maine_20261115_143022'
         log = '\n'.join([
@@ -126,19 +174,44 @@ class TestFlagOn:
         assert restored.instance_name == persisted
         assert restored.display_name == 'Maine'
 
+    def test_restore_preserves_clean_identity(self, no_real_logger, monkeypatch):
+        """A clean (un-stamped) persisted identity is restored verbatim — no suffix minted."""
+        monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
+        persisted = 'Maine'
+        log = '\n'.join([
+            json.dumps({'metadata': {'instance_name': persisted, 'agent_class': 'Orchestrator'}}),
+            json.dumps({'role': 'system', 'content': 'You are a test orchestrator.'}),
+            json.dumps({'role': 'user', 'content': 'Do the thing.'}),
+        ])
+        pool = _PoolDouble()
+
+        status = pool.load_session_from_log(
+            log, target_instance='Maine', clear_sub_agents_before_load=False)
+
+        assert not status.startswith('Error'), status
+        restored = pool.instances[persisted]
+        assert restored.instance_name == 'Maine'
+        assert restored.display_name == 'Maine'
+
     def test_session_scan_shows_display_name(self, tmp_path, monkeypatch):
         import agent_cascade.api_server as api_server
 
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
-        identity = 'Maine_20261115_143022'
-        log = tmp_path / f'orchestrator_{identity}_20261115_150512.jsonl'
-        log.write_text(json.dumps({'metadata': {'instance_name': identity}}) + '\n',
-                       encoding='utf-8')
+        # Clean-identity log (post-BUG_0362): one trailing timestamp.
+        clean_log = tmp_path / 'orchestrator_Maine_20261115_150512.jsonl'
+        clean_log.write_text(json.dumps({'metadata': {'instance_name': 'Maine'}}) + '\n',
+                             encoding='utf-8')
+        # Legacy stamped log (pre-BUG_0362): identity keeps the birth stamp.
+        legacy_identity = 'Maine_20261115_143022'
+        legacy_log = tmp_path / f'orchestrator_{legacy_identity}_20261115_150512.jsonl'
+        legacy_log.write_text(json.dumps({'metadata': {'instance_name': legacy_identity}}) + '\n',
+                              encoding='utf-8')
 
-        [session] = api_server._scan_sessions_sync(tmp_path)
-        assert session['name'] == 'Maine'
-        assert session['display_name'] == 'Maine'
-        assert session['instance_name'] == identity
+        sessions = {s['instance_name']: s for s in api_server._scan_sessions_sync(tmp_path)}
+        assert sessions['Maine']['name'] == 'Maine'
+        assert sessions['Maine']['display_name'] == 'Maine'
+        assert sessions[legacy_identity]['name'] == 'Maine'
+        assert sessions[legacy_identity]['display_name'] == 'Maine'
 
 
 class TestStateBuilderDisplay:

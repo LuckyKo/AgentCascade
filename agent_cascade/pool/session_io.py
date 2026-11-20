@@ -637,8 +637,10 @@ class SessionIOMixin:
                 requested = str(target_instance).strip()
                 if persisted_identity and requested != persisted_identity and \
                         strip_birth_stamp(requested).lower() == strip_birth_stamp(persisted_identity).lower():
-                    # A display-name target for a stamped log must resolve back to the
-                    # persisted stamp — never mint a new one on restore.
+                    # Legacy-only branch: a display-name target for a stamped log must
+                    # resolve back to the persisted stamp — never mint a new one on
+                    # restore. Clean identities (post-BUG_0362) never reach here because
+                    # requested == persisted_identity.
                     resolved_identity = persisted_identity if is_birth_stamped(persisted_identity) else requested
                 else:
                     resolved_identity = requested

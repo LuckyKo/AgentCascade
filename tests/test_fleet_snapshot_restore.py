@@ -23,7 +23,6 @@ import threading
 import pytest
 
 from agent_cascade import snapshot, state_ops
-from agent_cascade.agent_identity import birth_stamp, is_birth_stamped
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.snapshot import (
     SnapshotIntegrityError,
@@ -36,10 +35,12 @@ from agent_cascade.snapshot import (
 )
 from tests._snapshot_fleet_double import (
     CAPABLE_CFG,
+    LoggerDouble,
     PoolDouble,
     ROOT,
     make_fleet,
     make_instance,
+    register,
     write_jsonl,
 )
 
@@ -109,7 +110,7 @@ def test_roundtrip_rehydrates_fleet(pool, tmp_path, monkeypatch):
     path = write_snapshot_to_disk(env, tmp_path / 'snap')
     reloaded = load_snapshot_from_disk(path)
 
-    stamps_before = {name: birth_stamp(name) for name in pool.instances}
+    names_before = set(pool.instances)
     _dismiss(pool)
     restore_fleet_snapshot(pool, reloaded)
 
@@ -139,16 +140,57 @@ def test_roundtrip_rehydrates_fleet(pool, tmp_path, monkeypatch):
     assert worker._last_endpoint_config['api_base'] == CAPABLE_CFG['api_base']
     assert pool.instances[PARKED]._state_label is None   # not streaming → not armed
 
-    # S1 identity carry: names verbatim, birth stamp never re-minted, pool back-ref set
-    assert is_birth_stamped(ROOT)                          # root name carries a birth stamp
-    assert birth_stamp(ROOT) == stamps_before[ROOT]        # the stamp survived restore
-    for name, expected in stamps_before.items():           # every name: stamp unchanged
-        assert birth_stamp(pool.instances[name].instance_name) == expected
+    # S1 identity carry: names restored verbatim (stamped root stays stamped, clean
+    # roots stay clean), pool back-ref re-seeded.
+    assert set(pool.instances) == names_before
+    for name in names_before:
+        assert pool.instances[name].instance_name == name
     for inst in pool.instances.values():
         assert inst._pool_ref is pool                      # back-reference re-seeded
 
     # message queues re-enqueued in FIFO order
     assert pool.message_queues[WORKER] == ['ping', 'pong']
+
+
+def test_clean_identity_fleet_restores_verbatim(pool, tmp_path, monkeypatch):
+    """A fleet whose root carries a CLEAN identity (no birth stamp) round-trips
+    exactly — the restore engine never mints a stamp onto a clean name."""
+    import agent_cascade.state_ops as state_ops
+
+    clean_root, clean_worker = 'Maine', 'coder_worker1'
+    root = make_instance(clean_root, agent_class='orchestrator', display='Maine',
+                         depth=0, cfg=CAPABLE_CFG)
+    worker = make_instance(clean_worker, agent_class='coder', parent=clean_root,
+                           depth=1, cfg=CAPABLE_CFG)
+    for inst in (root, worker):
+        inst._llm_call_active = False
+        register(pool, inst)
+    pool.instance_loggers = {
+        clean_root: LoggerDouble(str(tmp_path / 'maine.jsonl')),
+        clean_worker: LoggerDouble(str(tmp_path / 'worker.jsonl')),
+    }
+    pool.children = {clean_root: [clean_worker]}
+
+    monkeypatch.setattr(state_ops, 'resolve_held_endpoint', lambda p, inst: None)
+
+    write_jsonl(tmp_path / 'maine.jsonl', clean_root, 6)
+    write_jsonl(tmp_path / 'worker.jsonl', clean_worker, 3)
+    pool.message_queues[clean_worker] = ['hi']
+
+    env = capture_fleet_snapshot(pool, kv_saver=_saver)
+    path = write_snapshot_to_disk(env, tmp_path / 'snap')
+    reloaded = load_snapshot_from_disk(path)
+
+    names_before = set(pool.instances)
+    _dismiss(pool)
+    restore_fleet_snapshot(pool, reloaded)
+
+    assert set(pool.instances) == {clean_root, clean_worker}
+    assert pool.instances[clean_root].instance_name == clean_root    # clean, not stamped
+    assert pool.instances[clean_worker].instance_name == clean_worker
+    assert pool.instances[clean_root].display_name == 'Maine'
+    for inst in pool.instances.values():
+        assert inst._pool_ref is pool
 
 
 # ── 9.2 clock projection + sentinel ─────────────────────────────────────────
