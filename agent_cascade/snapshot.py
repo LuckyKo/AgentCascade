@@ -2020,6 +2020,14 @@ def delete_stack(pool, stack_id: str, *, registry: Optional[StackRegistry] = Non
         raise ActiveStackDeletionError(
             f"cannot delete active stack {stack_id!r}; park or swap to another stack first")
     entries = reg._snapshots.get(stack_id, [])
+    # Stale-registry fallback (BUG_0368): if the target stack is missing from the
+    # in-memory registry but the registry was previously loaded, the in-memory
+    # view may be stale (e.g. a snapshot was written after the last disk glob).
+    # Clear the loaded flag and re-glob so the delete can find the entry.
+    if not entries and registry is None and getattr(pool, '_swap_registry_loaded', False):
+        pool._swap_registry_loaded = False
+        reg = ensure_registry_loaded(pool)
+        entries = reg._snapshots.get(stack_id, [])
     for sid, path in entries:
         _retire_snapshot(stack_id, sid, path)
     reg._snapshots.pop(stack_id, None)
@@ -2037,6 +2045,13 @@ def delete_snapshot(pool, stack_id: str, snapshot_id: str, *, registry=None) -> 
     """
     reg = ensure_registry_loaded(pool) if registry is None else registry
     entries = reg._snapshots.get(stack_id)
+    # Stale-registry fallback (BUG_0368): same as delete_stack — if the target
+    # stack is missing from the in-memory registry but was previously loaded,
+    # force a fresh disk re-glob before raising.
+    if not entries and registry is None and getattr(pool, '_swap_registry_loaded', False):
+        pool._swap_registry_loaded = False
+        reg = ensure_registry_loaded(pool)
+        entries = reg._snapshots.get(stack_id)
     if not entries:
         raise ValueError(f'unknown stack {stack_id!r}')
     path_str = reg.resolve_path(stack_id, snapshot_id)

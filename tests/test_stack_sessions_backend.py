@@ -685,6 +685,32 @@ def test_delete_snapshot_no_registry_rebuilds_from_disk(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+def test_delete_stack_stale_registry_fallback_reglobs(tmp_path, monkeypatch):
+    """BUG_0368: delete_stack re-globs disk when the in-memory registry is stale.
+
+    Simulates: registry loaded (flag set) → snapshot exists on disk but is
+    missing from the in-memory view → delete triggers the fallback re-glob.
+    """
+    snap_dir = _snap_dir(tmp_path, monkeypatch)
+    p = PoolDouble(log_dir=tmp_path)
+    # Write a snapshot to disk.
+    env, _ = _capture_env(tmp_path, root='Orphan', log_name='orphan.jsonl')
+    path = write_snapshot_to_disk(env, snap_dir)
+    assert path.exists()
+
+    # Mark the registry as loaded (so ensure_registry_loaded short-circuits)
+    # but with an EMPTY in-memory view — simulating a stale state where the
+    # disk has an entry the in-memory registry doesn't know about.
+    reg = ensure_registry_loaded(p)  # loads from disk, sets _swap_registry_loaded=True
+    reg._snapshots.pop(env.stack_id, None)  # remove the entry to simulate staleness
+    assert env.stack_id not in reg._snapshots
+
+    # Delete with no registry arg → fallback re-glob should find the snapshot.
+    result = delete_stack(p, 'Orphan')
+    assert result['removed_snapshots'] == 1
+    assert not path.exists()
+
+
 def test_load_session_replace_parks(tmp_path, monkeypatch):
     """mode='replace' -> park_active_stack called (outgoing session persisted)."""
     from agent_cascade import ws_handlers as wh
