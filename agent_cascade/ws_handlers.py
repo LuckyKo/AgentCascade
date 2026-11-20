@@ -916,7 +916,7 @@ class WsMessageHandler:
                 WsEnvelope.MESSAGE: 'stacks_snapshot: no agent pool',
             })
             return
-        if self._is_generating():
+        if self._is_generating() and not (self.agent_pool and self.agent_pool.is_paused()):
             await self.broadcast_fn({
                 WsEnvelope.TYPE: MsgType.WARNING,
                 WsEnvelope.MESSAGE: 'Cannot take snapshot while generation is in progress',
