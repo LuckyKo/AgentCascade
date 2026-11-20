@@ -2070,21 +2070,25 @@ button.cli-agent-oauth-placeholder {
   padding: 5px 12px;
 }
 
+/* Destructive-action buttons (Terminate / Terminate Tool / Stop / session
+   Delete) now share the neutral .btn-secondary palette so they no longer stand
+   out from the rest of the toolbar (user request 2026-11-20). The .btn-stop
+   opacity/dim transition is preserved for the idle-dimming behavior. */
 .btn-danger {
-  background: var(--danger-dim);
-  color: var(--danger);
-  border-color: var(--danger);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-color: var(--bg-elevated);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: var(--danger);
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .btn-stop {
-  background: var(--danger-dim);
-  color: var(--danger);
-  border-color: var(--danger);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-color: var(--bg-elevated);
   opacity: 1;
   transition: opacity 0.3s ease-in-out;
 }
@@ -2094,8 +2098,8 @@ button.cli-agent-oauth-placeholder {
 }
 
 .btn-stop:hover {
-  background: var(--danger);
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .btn-kv {
