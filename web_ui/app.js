@@ -3056,8 +3056,11 @@ function handleServerMessage(data) {
         state.sessions = data;
         renderSessionPanel();
       }
-      if (data.failed) {
-        showInSystemToastBar(`⚠️ Sessions: ${data.reason || 'operation failed'}`);
+      if (data.status === 'failed') {
+        showInSystemToastBar(`⚠️ Sessions: ${data.message || data.reason || 'operation failed'}`);
+        requestSessionPanel();
+      } else if (data.status === 'ok' && data.stacks === undefined) {
+        // Successful mutation (delete/snapshot) — refresh the panel
         requestSessionPanel();
       }
       break;
