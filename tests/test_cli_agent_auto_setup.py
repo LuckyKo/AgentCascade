@@ -290,7 +290,7 @@ def test_cli_agent_status_shape(monkeypatch):
                           cli_agent_agy_auth_volume='vol-1',
                           cli_agent_rate_limit_seconds=0.0))
     st = runner.cli_agent_status(pool)
-    assert set(st.keys()) == {'claude_code', 'opencode', 'antigravity'}
+    assert set(st.keys()) == {'claude_code', 'opencode', 'antigravity', 'copilot'}
     assert st['claude_code'] == {'enabled': True, 'auth_type': 'api_key', 'key_configured': True,
                                  'image_present': True, 'quota_available': 'unknown',
                                  'model': None, 'rate_limit_seconds': 0.0,
@@ -302,6 +302,13 @@ def test_cli_agent_status_shape(monkeypatch):
     # key-based harnesses carry no `authenticated` field at all.
     assert 'authenticated' not in st['opencode']
     assert st['opencode']['model'] == 'm-x'
+    # copilot (api_key, unconfigured): enabled only if listed in cli_agent_enabled (it isn't),
+    # key_configured False (no cli_copilot_key secret), and no `authenticated` field (not oauth).
+    assert st['copilot'] == {'enabled': False, 'auth_type': 'api_key', 'key_configured': False,
+                             'image_present': True, 'quota_available': 'unknown',
+                             'model': None, 'rate_limit_seconds': 0.0,
+                             'next_run_in_seconds': 0.0}
+    assert 'authenticated' not in st['copilot']
 
 
 def test_cli_agent_status_oauth_volume_off_is_indeterminate(monkeypatch):

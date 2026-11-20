@@ -1,7 +1,7 @@
 """Runtime-adapter registry for external CLI coding agents (``call_cli_agent``).
 
 A *harness* is an external AI coding CLI (Claude Code, opencode, Google Antigravity
-``agy``). Everything else in the ``call_cli_agent`` pipeline — the one-shot Docker
+``agy``, GitHub Copilot). Everything else in the ``call_cli_agent`` pipeline — the one-shot Docker
 runner, concurrency cap, approval + Security-advisor gating, untrusted wrapping,
 hard timeout + container teardown, no-credential-inheritance — is **harness-agnostic**.
 
@@ -136,18 +136,19 @@ def append_task_guarded(cmd: list[str], task: str) -> None:
 
 
 def _build_registry() -> dict[str, RuntimeAdapter]:
-    """Eagerly construct the Phase-0 adapter registry from the three harness modules.
+    """Eagerly construct the Phase-0 adapter registry from the four harness modules.
 
     Explicit (not self-registering) so the registry contents are statically obvious and
     there is no import-order magic. Each adapter is stateless and reusable.
     """
     from agent_cascade.engine.cli_agent_adapters.antigravity import AntigravityAdapter
     from agent_cascade.engine.cli_agent_adapters.claude_code import ClaudeCodeAdapter
+    from agent_cascade.engine.cli_agent_adapters.copilot import CopilotAdapter
     from agent_cascade.engine.cli_agent_adapters.opencode import OpencodeAdapter
 
     return {
         a.harness: a
-        for a in (ClaudeCodeAdapter(), OpencodeAdapter(), AntigravityAdapter())
+        for a in (ClaudeCodeAdapter(), OpencodeAdapter(), AntigravityAdapter(), CopilotAdapter())
     }
 
 

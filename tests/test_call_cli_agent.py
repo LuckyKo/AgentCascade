@@ -27,6 +27,7 @@ from agent_cascade import constants
 from agent_cascade.engine import tool_execution
 from agent_cascade.engine.cli_agent_adapters.antigravity import AntigravityAdapter
 from agent_cascade.engine.cli_agent_adapters.claude_code import ClaudeCodeAdapter
+from agent_cascade.engine.cli_agent_adapters.copilot import CopilotAdapter
 from agent_cascade.engine.cli_agent_adapters.opencode import OpencodeAdapter
 from agent_cascade.engine import cli_agent_runner
 from agent_cascade.engine.cli_agent_runner import CliAgentResult
@@ -671,3 +672,54 @@ class TestAdapterArgv:
         # task is inherently guarded; a '--' separator would be wrong there.
         agy = AntigravityAdapter().build_launch_cmd(task='-r', workspace='/ws', posture='acceptEdits')
         assert agy[-1] == '-p=-r' and '--' not in agy
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 13. GitHub Copilot CLI harness adapter
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestCopilotAdapter:
+    """Mirror TestAdapterArgv's coverage for the 'copilot' harness: registration, declared
+    attributes, exact one-shot argv, and the credential-strip contract (GitHub token kept,
+    AC OPENAI_* stripped)."""
+
+    def test_registered(self):
+        from agent_cascade.engine.cli_agent_adapters import get_adapter, registered_harnesses
+        assert 'copilot' in registered_harnesses()
+        assert isinstance(get_adapter('copilot'), CopilotAdapter)
+
+    def test_declared_attributes(self):
+        a = CopilotAdapter()
+        assert a.harness == 'copilot'
+        assert a.binary == 'copilot'
+        assert a.auth_env_var == 'GITHUB_TOKEN'
+        assert a.auth_type == 'api_key'
+        assert a.model_flag is None
+        assert a.auth_volume_target is None  # key-based auth: no persistent volume
+
+    def test_copilot_argv(self):
+        cmd = CopilotAdapter().build_launch_cmd(task='a task', workspace='/ws', posture='acceptEdits')
+        assert cmd == ['copilot', '-p', '--yes', 'a task']
+
+    def test_model_ignored(self):
+        # copilot -p exposes no model flag (model_flag is None); a requested model leaves the
+        # argv unchanged (byte-safe), per the schema's "harnesses without a model flag ignore it".
+        cmd = CopilotAdapter().build_launch_cmd(task='x', workspace='/ws', posture='acceptEdits',
+                                                model='gpt-4o')
+        assert cmd == ['copilot', '-p', '--yes', 'x']
+
+    def test_leading_dash_task_guarded(self):
+        cmd = CopilotAdapter().build_launch_cmd(task='-r', workspace='/ws', posture='acceptEdits')
+        assert cmd == ['copilot', '-p', '--yes', '--', '-r']
+
+    def test_child_env_strips_openai_keeps_github(self):
+        # AC's OPENAI_* namespace must never reach the child; GitHub-native auth survives.
+        child = CopilotAdapter().child_env({
+            'OPENAI_API_KEY': 'AC_SECRET',
+            'OPENAI_BASE_URL': 'http://ac-endpoint',
+            'GITHUB_TOKEN': 'gh_harness_native',
+        })
+        assert 'OPENAI_API_KEY' not in child
+        assert 'OPENAI_BASE_URL' not in child
+        assert child.get('GITHUB_TOKEN') == 'gh_harness_native'

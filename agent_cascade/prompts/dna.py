@@ -940,7 +940,7 @@ TOOL_METADATA = {
     },
     'call_cli_agent': {
         'description': (
-            'Run ONE external AI coding CLI (Claude Code, opencode, or Google Antigravity) EXACTLY once as a '
+            'Run ONE external AI coding CLI (Claude Code, opencode, Google Antigravity, or GitHub Copilot) EXACTLY once as a '
             'one-shot Docker container and return its stdout. The CLI is spawned with its own account/credential '
             'store — it does NOT inherit AgentCascade\'s LLM keys. Output is external and therefore untrusted: it is '
             'trust-wrapped automatically. This is a bounded, single-turn "run and capture" call — NOT a conversational '
@@ -953,9 +953,9 @@ TOOL_METADATA = {
             'harness': {
                 'type':
                     'string',
-                'enum': ['claude_code', 'opencode', 'antigravity'],
+                'enum': ['claude_code', 'opencode', 'antigravity', 'copilot'],
                 'description':
-                    'Which external AI coding CLI to run: claude_code (claude -p), opencode (opencode run), or antigravity (agy -p).'
+                    'Which external AI coding CLI to run: claude_code (claude -p), opencode (opencode run), antigravity (agy -p), or copilot (copilot -p).'
             },
             'task': {
                 'type': 'string',
