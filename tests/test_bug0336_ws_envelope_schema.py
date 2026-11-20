@@ -21,7 +21,8 @@ EXPECTED_MSG_TYPES = {
     'MESSAGE': 'message', 'CONTINUE': 'continue', 'STOP': 'stop', 'KV_STATE': 'kv_state',
     'PAUSE': 'pause', 'RESUME_ALL': 'resume_all', 'RESUME': 'resume',
     'TERMINATE_AGENT_INSTANCE': 'terminate_agent_instance',
-    'TERMINATE_SUB_AGENT': 'terminate_sub_agent', 'RETRY': 'retry', 'RESET': 'reset',
+    'TERMINATE_SUB_AGENT': 'terminate_sub_agent', 'TERMINATE_TOOLS': 'terminate_tools',
+    'RETRY': 'retry', 'RESET': 'reset',
     'REFRESH_SOULS': 'refresh_souls', 'REFRESH_AGENTS': 'refresh_agents',
     'RESTART_SERVER': 'restart_server', 'UPDATE_CONFIG': 'update_config',
     'UPDATE_SETTINGS': 'update_settings', 'SET_WORK_FOLDERS': 'set_work_folders',
@@ -44,6 +45,7 @@ EXPECTED_MSG_TYPES = {
     # S4/S5 fleet stack-swap envelope (BUG_0323).
     'STACKS_LIST': 'stacks_list', 'STACKS_RESULT': 'stacks_result',
     'STACKS_SNAPSHOT': 'stacks_snapshot', 'STACKS_SWAP': 'stacks_swap',
+    'STACKS_NEW': 'stacks_new', 'STACKS_DELETE': 'stacks_delete',
 }
 
 EXPECTED_ENVELOPE_FIELDS = {

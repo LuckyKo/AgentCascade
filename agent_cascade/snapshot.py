@@ -1350,26 +1350,11 @@ def _inflight_turn_instances(pool) -> List[Any]:
 def _kill_instance_tools(pool, name: str) -> None:
     """Kill a single instance's in-flight background tools via the REAL trackers.
 
-    Mirrors the dismissal teardown in ``lifecycle`` (``_async_shell_tracker.kill_all``
-    then ``_cli_agent_tracker.kill_all``). Best-effort per tracker so one tracker's
-    absence or failure never aborts the park. Returns nothing; counts are logged.
+    Delegates to the shared ``kill_instance_tools`` helper (best-effort per
+    tracker so one tracker's absence or failure never aborts the park).
     """
-    shell = getattr(pool, '_async_shell_tracker', None)
-    if shell is not None and hasattr(shell, 'kill_all'):
-        try:
-            killed = shell.kill_all(name)
-            if killed:
-                logger.debug('[STACK_SWAP] killed %d async shell task(s) for %s', killed, name)
-        except Exception as e:  # noqa: BLE001 — tracker teardown is non-critical to the park
-            logger.debug('[STACK_SWAP] async shell kill_all failed for %s: %s', name, e)
-    cli = getattr(pool, '_cli_agent_tracker', None)
-    if cli is not None and hasattr(cli, 'kill_all'):
-        try:
-            killed = cli.kill_all(name)
-            if killed:
-                logger.debug('[STACK_SWAP] killed %d call_cli_agent run(s) for %s', killed, name)
-        except Exception as e:  # noqa: BLE001 — tracker teardown is non-critical to the park
-            logger.debug('[STACK_SWAP] call_cli_agent kill_all failed for %s: %s', name, e)
+    from agent_cascade.async_shell_pkg.kill import kill_instance_tools
+    kill_instance_tools(pool, name)
 
 
 def _drain_async_tasks(pool, names: List[str]) -> None:

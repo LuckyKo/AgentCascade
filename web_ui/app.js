@@ -723,6 +723,7 @@ const chatInput = $('#chatInput');
 const sendBtn = $('#sendBtn');
 const continueBtn = $('#continueBtn');
 const stopBtn = $('#stopBtn');
+const terminateToolBtn = $('#terminateToolBtn');
 const pauseBtn = $('#pauseBtn');
 const saveKvBtn = $('#saveKvBtn');
 const loadKvBtn = $('#loadKvBtn');
@@ -6487,6 +6488,14 @@ function proxyLocalMediaPaths(text) {
 
 sendBtn.addEventListener('click', sendMessage);
 if (stopBtn) stopBtn.addEventListener('click', () => send({ type: 'stop' }));
+
+// Terminate in-flight tools (async shell / call_cli_agent) for the active agent
+// (and the root orchestrator); the agent stays alive and resumable.
+if (terminateToolBtn) terminateToolBtn.addEventListener('click', () => {
+  const activeInstance = getActiveAgentName();
+  if (!activeInstance) return;
+  send({ type: 'terminate_tools', instance_name: activeInstance });
+});
 
 // Generic pause/resume toggle button factory — works for any agent instance
 function createPauseButton(btn, instanceSource) {

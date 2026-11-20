@@ -40,6 +40,7 @@ class MsgType(str, Enum):
     RESUME = 'resume'
     TERMINATE_AGENT_INSTANCE = 'terminate_agent_instance'
     TERMINATE_SUB_AGENT = 'terminate_sub_agent'
+    TERMINATE_TOOLS = 'terminate_tools'
     RETRY = 'retry'
     RESET = 'reset'
     REFRESH_SOULS = 'refresh_souls'
@@ -186,6 +187,7 @@ class WsMessageHandler:
             MsgType.RESUME: self.handle_resume,
             MsgType.TERMINATE_AGENT_INSTANCE: self.handle_terminate,
             MsgType.TERMINATE_SUB_AGENT: self.handle_terminate,  # Alias
+            MsgType.TERMINATE_TOOLS: self.handle_terminate_tools,
             MsgType.RETRY: self.handle_retry,
             MsgType.RESET: self.handle_reset,
             MsgType.REFRESH_SOULS: self.handle_refresh_souls,
@@ -1184,6 +1186,54 @@ class WsMessageHandler:
             self.agent_pool.dismiss_instance(instance_name)
 
             await self._broadcast()
+
+    async def handle_terminate_tools(self, data: dict) -> None:
+        """Kill in-flight background tool runners (async shell + CLI-agent) for an
+        instance, reusing the existing ``kill_all`` primitives (the same calls the
+        dismissal path makes). The instance is left ALIVE and RESUMABLE: no
+        dismissal, and the sticky-slot scheduler permit is intentionally NOT
+        released, so the instance keeps its held endpoint.
+
+        Scope is background runners only. The foreground sync shell is not
+        independently killable from a WS handler (it is superseded by a pool-level
+        Stop), and ``media_gen`` runs synchronously inside the turn and registers
+        nothing in the trackers, so neither is reachable from this path.
+        """
+        instance_name = data.get(WsEnvelope.INSTANCE_NAME) or self._resolve_instance_name(data)
+        pool = self.agent_pool
+        if pool is None:
+            return
+        from agent_cascade.log import logger
+        inst = pool.get_instance(instance_name)
+        if inst is None:
+            logger.info(f"terminate_tools: instance '{instance_name}' not found — no-op")
+            return
+
+        # BUG_0352 Finding 1: the root guard was removed. terminate_tools is
+        # non-destructive (no dismissal, no state transition, sticky-slot permit
+        # untouched) — killing the root's own background runners IS the feature.
+        # The dominant killable cases (async shell + CLI-agent) are keyed by the
+        # caller (the root), so guarding against the root defeats the primary use case.
+
+        # Offload the (sleep-bounded) fire-and-forget kills off the event loop so the
+        # DRAIN_THREAD_FLUSH_DELAY sleep in kill_all does not stall the WS loop.
+        from agent_cascade.async_shell_pkg.kill import kill_instance_tools
+        killed_shell, killed_cli = await asyncio.to_thread(
+            kill_instance_tools, pool, instance_name,
+        )
+        total = killed_shell + killed_cli
+        msg = (f"[SYSTEM]: terminated {total} in-flight tool(s) for '{instance_name}' "
+               f"({killed_shell} shell, {killed_cli} cli-agent)." if total
+               else f"[SYSTEM]: no in-flight tools running for '{instance_name}'.")
+        # Resumable feedback into the instance (it stays alive), then refresh the UI.
+        pool.enqueue_message(instance_name, msg)
+        # Immediate feedback: push a transient INFO frame so the clicked-button
+        # result is visible now (not just in the turn-injection queue).
+        await self.broadcast_fn({
+            WsEnvelope.TYPE: MsgType.INFO,
+            WsEnvelope.MESSAGE: msg,
+        })
+        await self._broadcast()
 
     async def handle_retry(self, data: dict) -> None:
         """Handle 'retry' — remove trailing assistant/function messages, keep user message, send stack."""
