@@ -1454,7 +1454,7 @@ class MemoryHintManager:
             except Exception:                              # best-effort: admit-all on bar-read failure
                 theta_min = 0.0
             m0 = SKILL_BANDIT_PRIOR_MASS
-            m_floor = SKILL_PRECISION_FLOOR                # reuse demote floor (0.35) — demote-only
+            m_floor = SKILL_PRECISION_FLOOR                # reuse demote floor — demote-only
             w = min(1.0, max(0.0, SKILL_BANDIT_WEIGHT))    # 0 ⇒ raw order, 1 ⇒ full TS re-rank
 
             def _skill_ledger(nm):                         # metric row → (loads, hints), guarded

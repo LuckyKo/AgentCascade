@@ -1046,9 +1046,8 @@ SKILL_PRECISION_K: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_K', '1
 # SKILL_PRECISION_FLOOR: lower bound on w(s), so a heavy-hint / low-load skill is demoted
 # but never buried below FLOOR × score — other skills stay promotable (the guardrail for
 # rare-but-correct skills that are rarely topical and so never accumulate enough hints).
-# tier7 §(c): tightened from 0.35 → 0.15 so a skill hinted 10× with 0 loads gets
-# w≈0.10 (was 0.35) — decayed out instead of re-shown forever.
-SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.15'))
+# Lower floor ⇒ repeatedly-unloaded skills decay out faster (less hint noise). Default 0.10.
+SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FLOOR', '0.10'))
 
 # ── Skill-hint Thompson-Sampling bandit (self-adapting value ranking) ──────────
 # A ranking-only layer that REPLACES Gate-4's precision demote re-rank when enabled,
