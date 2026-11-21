@@ -166,70 +166,94 @@ class TurnSetupMixin:
                 # Calling update_history() with fresh timestamp causes dedup to
                 # fail and create duplicates.
 
-            # Frozen-prompt guard (todo 134): read under _compression_lock at the
-            # point of use. RLock reentrancy is safe - freeze_system_prompt() acquires
-            # the same lock on this thread later in this turn, and no other thread can
-            # flip the flag between this read and the write below (only this thread's
-            # own freeze call at the end of _setup_turn sets it).
+            # Frozen-prompt guard (todo 134 / BUG_0372): read the flag under
+            # _compression_lock at the point of use. RLock reentrancy is safe -
+            # freeze_system_prompt() acquires the same lock on this thread later in this
+            # turn, and no other thread can flip the flag between this read and the
+            # write below (only this thread's own freeze call at the end of _setup_turn
+            # sets it).
+            #
+            # Semantics (BUG_0372 / BUG_0364 decouple): freeze gates the VOLATILE
+            # sections only - session metadata, available resources, and the trust
+            # boundary (steps 2-4). The identity rewrite (step 1) is the ONE mutation
+            # that runs on a frozen prompt: it is idempotent ("You are X." -> "You are
+            # X." is byte-identical), so re-running it on an already-correct identity is
+            # a no-op and the KV-cache prefix is preserved. A genuine soul -> instance
+            # heal (a session-loaded / swapped-in instance whose log retains the soul
+            # name) is a one-time, correctness-required re-prefill - the identity line
+            # sits at byte 0, so it invalidates the prefix wherever it is written, and
+            # the agent must know its own name (BUG_0364). The identity line is NOT in
+            # the BUG_0372 protected list ("timestamps, log paths, resources"), so it
+            # must not be gated off.
             with instance._compression_lock:
                 sys_prompt_frozen = instance._system_prompt_frozen
-            if m0_role == SYSTEM and not sys_prompt_frozen:
+            if m0_role == SYSTEM:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):
                     original_content = m0_content
-                    # 1. Update identity "You are [instance]."
+                    # 1. Update identity "You are [instance]." — RUNS ALWAYS, even when
+                    # frozen (BUG_0364 self-heal; idempotent => KV-safe, see the guard
+                    # note above). Keep the re.search precondition, the regex, and
+                    # count=1 verbatim: together they are the idempotency guarantee the
+                    # freeze relies on. Do NOT route the write through
+                    # edit_message_in_place(0) — that raises SystemPromptFrozenError.
                     pattern = rf"(?i)You are\s+\w+\."
                     if re.search(pattern, m0_content):
                         m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
 
-                    # 2. Refresh Session Metadata section.
-                    # Always a refresh (never first-injection) because the pre-log writers handle
-                    # persistence for every instance class. _replace_section's byte-identical early-out
-                    # makes this a no-op when unchanged, preserving the KV-cache prefix. Do NOT re-add
-                    # a first-injection branch here: todo.md:155.
-                    meta_block = _build_session_metadata(self.pool, instance)
-                    if meta_block:
-                        m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
+                    # 2-4. VOLATILE sections - gated by freeze (BUG_0372 KV-prefix
+                    # preservation). Skip entirely on a frozen prompt: regenerating
+                    # timestamps / log paths / resources would change the KV cache
+                    # prefix and force a full re-prefill of the restored context.
+                    if not sys_prompt_frozen:
+                        # 2. Refresh Session Metadata section.
+                        # Always a refresh (never first-injection) because the pre-log writers handle
+                        # persistence for every instance class. _replace_section's byte-identical early-out
+                        # makes this a no-op when unchanged, preserving the KV-cache prefix. Do NOT re-add
+                        # a first-injection branch here: todo.md:155.
+                        meta_block = _build_session_metadata(self.pool, instance)
+                        if meta_block:
+                            m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
 
-                    # 3. Inject/update available resources (agent types and
-                    # cache pool note based on feature flags)
-                    # Note: Using already-resolved template, no need for
-                    # re-lookup
-                    new_block = _build_resources_block(self.pool, template, instance)
-                    if new_block:
-                        if '## AVAILABLE AGENTS' in m0_content:
-                            # Replace the existing block with fresh data
-                            # (handles dynamic tool changes)
-                            m0_content = _replace_resources_block(m0_content, new_block)
-                        else:
-                            # Legacy migration support only: strip the old "--- CURRENT AVAILABLE RESOURCES"
-                            # block from restored sessions that predate the "## AVAILABLE AGENTS" format.
-                            if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
-                                escaped_old = re.escape('--- CURRENT AVAILABLE RESOURCES')
-                                old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
-                                m0_content = re.sub(old_pattern, '', m0_content, count=1, flags=re.DOTALL)
-
-                            # First injection - insert before ## Active Skills if present,
-                            # otherwise append at end. This ensures consistent order:
-                            # identity/metadata -> available agents -> active skills
-                            if '## Active Skills' in m0_content:
-                                # Insert before the Active Skills section
-                                m0_content = m0_content.replace('## Active Skills', new_block + '\n\n## Active Skills',
-                                                                1)
+                        # 3. Inject/update available resources (agent types and
+                        # cache pool note based on feature flags)
+                        # Note: Using already-resolved template, no need for
+                        # re-lookup
+                        new_block = _build_resources_block(self.pool, template, instance)
+                        if new_block:
+                            if '## AVAILABLE AGENTS' in m0_content:
+                                # Replace the existing block with fresh data
+                                # (handles dynamic tool changes)
+                                m0_content = _replace_resources_block(m0_content, new_block)
                             else:
-                                # No skills section - append at end as fallback
-                                m0_content += new_block
+                                # Legacy migration support only: strip the old "--- CURRENT AVAILABLE RESOURCES"
+                                # block from restored sessions that predate the "## AVAILABLE AGENTS" format.
+                                if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
+                                    escaped_old = re.escape('--- CURRENT AVAILABLE RESOURCES')
+                                    old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
+                                    m0_content = re.sub(old_pattern, '', m0_content, count=1, flags=re.DOTALL)
 
-                    # 4. Inject/update the standing trust-boundary instruction (OWASP
-                    # LLM01). Present only when UNTRUSTED_TOOL_OUTPUT_WRAPPER is ON;
-                    # absent otherwise. _replace_section is idempotent and byte-identical
-                    # (KV-cache-safe); the first injection appends at the end of conv[0].
-                    if UNTRUSTED_TOOL_OUTPUT_WRAPPER:
-                        trust_block = _TRUST_BOUNDARY_HEADING + '\n' + _build_trust_boundary_line()
-                        if _TRUST_BOUNDARY_HEADING in m0_content:
-                            m0_content = _replace_section(m0_content, _TRUST_BOUNDARY_HEADING, trust_block)
-                        else:
-                            m0_content += '\n\n' + trust_block
+                                # First injection - insert before ## Active Skills if present,
+                                # otherwise append at end. This ensures consistent order:
+                                # identity/metadata -> available agents -> active skills
+                                if '## Active Skills' in m0_content:
+                                    # Insert before the Active Skills section
+                                    m0_content = m0_content.replace('## Active Skills', new_block + '\n\n## Active Skills',
+                                                                    1)
+                                else:
+                                    # No skills section - append at end as fallback
+                                    m0_content += new_block
+
+                        # 4. Inject/update the standing trust-boundary instruction (OWASP
+                        # LLM01). Present only when UNTRUSTED_TOOL_OUTPUT_WRAPPER is ON;
+                        # absent otherwise. _replace_section is idempotent and byte-identical
+                        # (KV-cache-safe); the first injection appends at the end of conv[0].
+                        if UNTRUSTED_TOOL_OUTPUT_WRAPPER:
+                            trust_block = _TRUST_BOUNDARY_HEADING + '\n' + _build_trust_boundary_line()
+                            if _TRUST_BOUNDARY_HEADING in m0_content:
+                                m0_content = _replace_section(m0_content, _TRUST_BOUNDARY_HEADING, trust_block)
+                            else:
+                                m0_content += '\n\n' + trust_block
 
                     # Update the message ONLY if content actually changed
                     # (preserves LLM prefix caching)

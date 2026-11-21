@@ -316,9 +316,13 @@ class TestFileSyncFlag:
 
 
 class TestBug0372SystemPromptFrozen:
-    """BUG_0372: session-loaded instances must have _system_prompt_frozen=True
-    so _refresh_system_prompt is a no-op on the first turn, preserving the
-    KV cache prefix and avoiding a full context re-prefill."""
+    """BUG_0372: session-loaded instances must have _system_prompt_frozen=True so
+    _refresh_system_prompt skips the VOLATILE sections (session metadata / resources /
+    trust boundary) on the first turn — preserving the KV cache prefix and avoiding a
+    full context re-prefill. The identity rewrite is the one allowed frozen mutation
+    (idempotent, BUG_0364/BUG_0372 decouple) and is a no-op when identity already
+    equals instance_name.
+    """
 
     def test_loaded_instance_has_frozen_prompt(self, tmp_path):
         """After load_session_from_log, the instance's system prompt must be frozen."""

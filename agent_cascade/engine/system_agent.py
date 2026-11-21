@@ -1017,9 +1017,16 @@ class SystemAgentMixin:
                 # non-blocking acquire we already hold.
                 inst.reset_conversation()
                 inst.rebuild_conversation([sys_msg])
-                # THE one field reset_conversation() clears that must be restored: freezing makes
-                # the _setup_turn M1 rewrite (core.py:1642) skip, so conversation[0] is never
-                # re-stamped with volatile run-identity on a reused turn.
+                # THE one field reset_conversation() clears that must be restored: freeze
+                # gates the VOLATILE sections of the _setup_turn M1 rewrite (the
+                # `if not sys_prompt_frozen:` block in _refresh_system_prompt — session
+                # metadata / resources / trust boundary), so conversation[0] is not
+                # re-stamped with volatile run-identity on a reused turn and the KV
+                # prefix is preserved. The identity rewrite (step 1, the
+                # `re.sub(..., "You are {inst_name}.", ...)` in _refresh_system_prompt)
+                # still runs but is a no-op here: reused instances had identity stamped
+                # at creation, so it already equals instance_name (BUG_0364/BUG_0372
+                # decouple).
                 inst._system_prompt_frozen = True
 
                 # ── DELTA resets — fields reset_conversation() does NOT touch (plan §7) ────────
