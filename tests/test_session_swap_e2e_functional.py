@@ -36,12 +36,14 @@ FAIL; see the plan's non-vacuity note.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.engine.core import ExecutionEngine
 from agent_cascade.llm.schema import SYSTEM, Message
+from agent_cascade.pool.session_io import _build_working_set
 from agent_cascade.snapshot import (
     activate_stack,
     load_snapshot_from_disk,
@@ -63,6 +65,20 @@ INSTANCE = 'Main'
 STACK = 'A'
 SOUL_IDENTITY = f'You are {SOUL_NAME}.'
 SOUL_SYSTEM_LINE = f'{SOUL_IDENTITY} Technical lead.'
+
+# Committed real-log fixture: a 212-line researcher session carrying a REAL
+# compression marker (USER message starting '--- CONTEXT COMPRESSED ...' with a
+# <context_summary>...</context_summary> block) plus tail messages after it.
+# Resolved relative to this test file so the path is portable across drive
+# letters. The fixture's own metadata.current_log_path is an absolute Windows
+# path that does not exist in the test env; load_session_from_log does NOT read
+# it (it reads the path passed to it) and re-persists the FULL loaded history to
+# a NEW log under the pool's log_dir, so the post-swap reattach does not depend
+# on that dead path (session_io.py:828).
+FIXTURE = Path(__file__).parent / 'fixtures' / 'fullstack_e2e_seed_log.jsonl'
+# Value of agent_cascade.prompts.dna.COMPRESSION_MARKER, inlined so the marker
+# predicate stays readable and self-documenting at the assertion site.
+COMPRESSED_PREFIX = '--- CONTEXT COMPRESSED'
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -91,6 +107,36 @@ def _write_soul_log(tmp_path, instance_name=INSTANCE):
         for m in lines:
             f.write(json.dumps(m) + '\n')
     return log_file
+
+
+def _cleaned_dicts(conv):
+    """Project ``Message`` objects to the ``{role, content}`` dicts _build_working_set reads.
+
+    Only ``role``/``content`` are projected — the two keys ``_is_compression_marker``
+    and the working-set split actually consume. Volatile in-memory fields (``ts``,
+    injected session-metadata, self-augmentation skill) are intentionally left out so
+    the pre-/post-swap comparison targets conversation content only.
+    """
+    return [
+        {'role': getattr(m, 'role', ''), 'content': getattr(m, 'content', '')}
+        for m in conv
+    ]
+
+
+def _marker_contents(conv):
+    """Compression-marker message contents (str) in conversation order."""
+    return [
+        m.content
+        for m in conv
+        if getattr(m, 'role', None) == 'user'
+        and isinstance(getattr(m, 'content', None), str)
+        and m.content.startswith(COMPRESSED_PREFIX)
+    ]
+
+
+def _ws_signature(working_set):
+    """Order-preserving ``(role, content)`` signature of a _build_working_set result."""
+    return [(m.get('role'), m.get('content')) for m in working_set]
 
 
 @pytest.fixture(autouse=True)
@@ -202,3 +248,142 @@ class TestSwapFunctionalE2E:
         #     re-frozen at the end of _setup_turn by _sync_turn_cache).
         assert live._system_prompt_frozen is True, (
             'KV-preservation invariant: swapped-in instance must remain frozen')
+
+    def test_compressed_context_survives_real_park_activate_swap(self, pool, tmp_path, monkeypatch):
+        """A COMPRESSED context (markers + summary) survives a real park/activate swap.
+
+        Why this test exists
+        --------------------
+        The sibling test in this class proves a swapped-in *identity* self-heals and
+        is functional. Nothing yet proves the OTHER compression-bearing invariant:
+        that a context which has ALREADY been compressed — a `--- CONTEXT COMPRESSED`
+        marker plus its `<context_summary>`, and the live `compression_summary`
+        string derived from it — survives a REAL ``park_active_stack`` /
+        ``activate_stack`` (``restore_fleet_snapshot``) swap byte-for-byte, with the
+        post-swap working set still being ``[SYS][U0][marker][tail]`` rather than
+        regurgitating the summarized history. That contract spans two independent
+        code paths that must agree on the SAME marker: ``snapshot`` capture/restore
+        (``compression_summary`` round-trips via snapshot.py:502 -> 946) and the
+        rehydration path (``_reattach_instance_log`` rebuilds conversation from the
+        materialised log through the SAME ``_build_working_set`` that load uses). A
+        drift anywhere in that chain silently re-inflates a compressed context.
+
+        Unlike the swap-primitive tests (PoolDouble) and the identity-runtime test
+        (SessionIOMixin mock pool), this drives the REAL ``AgentPool(DUMMY_LLM_CFG)``
+        and the REAL swap primitives against a REAL committed log with a REAL
+        compression marker — no synthetic marker, no mock pool, no real LLM, no
+        sleeps and no wall-clock dependency.
+
+        Non-vacuity (BUG_0364 / BUG_0372 consistency gate)
+        -------------------------------------------------
+        If the fixture ever lost its marker, step 2's preconditions fail LOUDLY
+        (empty marker list, empty summary) rather than letting assertions (a)-(e)
+        quietly compare vacuous empty sets — the test stops exercising compression
+        and announces it. The swap is re-named (target 'Main' != the fixture's own
+        'thinking_stream_trace' identity), so load re-persists the full loaded
+        history to a fresh tmp log (session_io.py:828) and reattach rebuilds the
+        working set from THAT log — proving the compressed shape is reconstructed,
+        not merely carried in memory. The "no re-inflation" promise is enforced by
+        the RAW conversation-shape assertion (e): (d) only compares the output of
+        _build_working_set, which is idempotent/normalizing and therefore cannot by
+        itself tell a compressed working set apart from a regurgitated full history,
+        so (e) compares the raw in-memory conversation length and byte sequence.
+        """
+        # Isolate the pool logger to tmp: the re-named load (target 'Main' != fixture
+        # identity) takes the copy/rewrite branch, so without this the full-history log
+        # it writes would land in the real workspace session-log corpus (rule 12).
+        logs_dir = tmp_path / 'swap_logs'
+        logs_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(pool._logger, 'log_dir', logs_dir)
+        monkeypatch.setattr(pool._logger, 'workspace_dir', tmp_path)
+
+        # 1. Load the real compressed-log fixture as 'Main'. No real LLM is contacted
+        #    (DUMMY_LLM_CFG points at a dead port); the dead metadata.current_log_path
+        #    is irrelevant because load reads the path we pass and re-persists history.
+        status = pool.load_session_from_log(
+            str(FIXTURE), target_instance=INSTANCE, clear_sub_agents_before_load=False)
+        assert not str(status).startswith('Error'), f'session load failed: {status}'
+
+        inst = pool.instances[INSTANCE]
+
+        # 2. PRECONDITION (non-vacuity). The reattached conversation must carry >=1 real
+        #    compression marker; derive ref_summary the SAME way the swap path does —
+        #    _build_working_set returns (working_set, marker_summary) and marker_summary
+        #    is the stripped text of the LAST marker's FIRST <context_summary> block.
+        assert _marker_contents(inst.conversation), (
+            'non-vacuity: loaded conversation carries no "CONTEXT COMPRESSED" marker — '
+            'the fixture has lost its compression state')
+        _, ref_summary = _build_working_set(_cleaned_dicts(inst.conversation))
+        assert ref_summary and ref_summary.strip(), (
+            'non-vacuity: the fixture marker has no non-empty <context_summary> block')
+
+        # 3. Simulate a live post-compression state so the swap has a real, explicit
+        #    summary to preserve. (load_session leaves compression_summary=None —
+        #    _reattach_instance_log never touches it — so this set is REQUIRED, not
+        #    redundant; without it (b) would compare None to None vacuously.)
+        inst.compression_summary = ref_summary
+
+        # 4. PRE-swap fingerprint (raw conversation shape + markers + working set).
+        #    pre_conv_raw is the anti-regurgitation baseline compared at (e); pre_ws is
+        #    _build_working_set's projection used for the working-set check (d).
+        pre_conv_raw = [(m.role, m.content) for m in inst.conversation]
+        pre_markers = _marker_contents(inst.conversation)
+        pre_ws = _build_working_set(_cleaned_dicts(inst.conversation))[0]
+
+        # 5. Real park -> activate swap (mirrors the sibling test above).
+        reg = _ensure_registry(pool)
+        reg.register(STACK)
+        reg.set_active(STACK)
+        env = park_active_stack(
+            pool, stack_id=STACK, grace_seconds=0.0,
+            sleeper=lambda *_a, **_k: None, clock=lambda: 0.0)
+        assert env is not None and env.stack_id == STACK, 'park must return the source envelope'
+        assert pool.instances.get(INSTANCE) is None, 'park must empty the pool'
+        activate_stack(pool, env, gate_checked=True)
+
+        live = pool.instances[INSTANCE]
+        assert live is not None, 'restored instance must be re-installed'
+
+        # 6. POST-swap consistency of the compressed context.
+        # (a) Marker count unchanged and the LAST marker byte-identical: the compressed
+        #     region of history is neither re-inflated nor lost, and its summary header
+        #     (incl. the inlined <context_summary>) is preserved verbatim.
+        post_markers = _marker_contents(live.conversation)
+        assert len(post_markers) == len(pre_markers), (
+            f'marker count changed across swap: {len(pre_markers)} -> {len(post_markers)}')
+        assert post_markers[-1] == pre_markers[-1], (
+            'last compression marker is not byte-identical across the swap')
+        # (b) The compression_summary survived the park/activate snapshot round-trip.
+        assert live.compression_summary == ref_summary, (
+            'compression_summary did not survive the park/activate swap')
+        # (c) latest_marker_index is WRITE-ONLY across the codebase (no readers): marker
+        #     position is always re-derived by scanning the conversation via
+        #     _build_working_set, so restore_fleet_snapshot deliberately hardcodes -1
+        #     on restore ("not captured; matches load_session default" — snapshot.py:947).
+        #     Pin it: a future reader-introduction or value-drift should fail here.
+        assert live.latest_marker_index == -1, (
+            'latest_marker_index must restore to -1 (write-only by design, snapshot.py:947)')
+        # (d) Working-set PROJECTION consistency: the compression-aware projection that
+        #     _build_working_set derives post-swap matches the one it derived pre-swap.
+        #     NOTE: this check alone is NOT an anti-regurgitation guard — _build_working_set
+        #     is idempotent/normalizing (it drops non-marker history between the first user
+        #     message and the last marker), so a regurgitated full-history conversation and a
+        #     compressed one yield the SAME working set. (e) is the load-bearing shape check.
+        post_ws = _build_working_set(_cleaned_dicts(live.conversation))[0]
+        assert _ws_signature(post_ws) == _ws_signature(pre_ws), (
+            'post-swap working set is not byte-consistent with the pre-swap working set')
+        # (e) RAW conversation shape — THE anti-regurgitation guard. The in-memory
+        #     conversation itself (NOT routed through the normalizing _build_working_set)
+        #     must keep the same length and the same byte-identical [SYS][U0][marker][tail]
+        #     sequence after restore. A restore that dumped the summarized history back
+        #     would blow up the length (compressed working set << full history) and/or
+        #     reorder the tail — both caught here, both invisible to (d).
+        #     Scope note: this compares (role, content) pairs — i.e. content/shape, NOT
+        #     full Message identity (tool-call/extra metadata are out of scope here).
+        assert len(live.conversation) == len(pre_conv_raw), (
+            f'in-memory conversation length changed across swap: '
+            f'{len(pre_conv_raw)} -> {len(live.conversation)} (silent re-inflation?)')
+        post_conv_raw = [(m.role, m.content) for m in live.conversation]
+        assert post_conv_raw == pre_conv_raw, (
+            'raw post-swap conversation is not byte-identical to pre-swap (compression '
+            'shape drifted: marker/tail reordered or summarized history re-inflated)')
