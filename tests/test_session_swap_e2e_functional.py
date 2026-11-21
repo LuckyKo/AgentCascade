@@ -76,6 +76,13 @@ SOUL_SYSTEM_LINE = f'{SOUL_IDENTITY} Technical lead.'
 # a NEW log under the pool's log_dir, so the post-swap reattach does not depend
 # on that dead path (session_io.py:828).
 FIXTURE = Path(__file__).parent / 'fixtures' / 'fullstack_e2e_seed_log.jsonl'
+# L2 consolidation-marker fixture: a compact slice of a real log (5534 msgs, 7 L1 +
+# 1 L2 marker) carrying a genuine `--- CONTEXT COMPRESSED (L2, ...)` marker. Both
+# tiers share the same `--- CONTEXT COMPRESSED` prefix, so the swap-compression
+# invariant must hold for L1 and L2 markers alike.
+L2_FIXTURE = Path(__file__).parent / 'fixtures' / 'l2_consolidation_seed_log.jsonl'
+# Fixtures the swap-compression test runs against: L1 single-tier + L2 consolidation.
+SWAP_COMPRESSION_FIXTURES = [FIXTURE, L2_FIXTURE]
 # Value of agent_cascade.prompts.dna.COMPRESSION_MARKER, inlined so the marker
 # predicate stays readable and self-documenting at the assertion site.
 COMPRESSED_PREFIX = '--- CONTEXT COMPRESSED'
@@ -249,7 +256,11 @@ class TestSwapFunctionalE2E:
         assert live._system_prompt_frozen is True, (
             'KV-preservation invariant: swapped-in instance must remain frozen')
 
-    def test_compressed_context_survives_real_park_activate_swap(self, pool, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        'fixture', SWAP_COMPRESSION_FIXTURES,
+        ids=['l1_single_tier', 'l2_consolidation'])
+    def test_compressed_context_survives_real_park_activate_swap(
+            self, pool, tmp_path, monkeypatch, fixture):
         """A COMPRESSED context (markers + summary) survives a real park/activate swap.
 
         Why this test exists
@@ -273,6 +284,10 @@ class TestSwapFunctionalE2E:
         and the REAL swap primitives against a REAL committed log with a REAL
         compression marker — no synthetic marker, no mock pool, no real LLM, no
         sleeps and no wall-clock dependency.
+
+        The test is parametrized over SWAP_COMPRESSION_FIXTURES: an L1 single-tier
+        marker log and an L2 consolidation-marker log, so the invariant is proven
+        for BOTH marker tiers (they share the `--- CONTEXT COMPRESSED` prefix).
 
         Non-vacuity (BUG_0364 / BUG_0372 consistency gate)
         -------------------------------------------------
@@ -301,7 +316,7 @@ class TestSwapFunctionalE2E:
         #    (DUMMY_LLM_CFG points at a dead port); the dead metadata.current_log_path
         #    is irrelevant because load reads the path we pass and re-persists history.
         status = pool.load_session_from_log(
-            str(FIXTURE), target_instance=INSTANCE, clear_sub_agents_before_load=False)
+            str(fixture), target_instance=INSTANCE, clear_sub_agents_before_load=False)
         assert not str(status).startswith('Error'), f'session load failed: {status}'
 
         inst = pool.instances[INSTANCE]
