@@ -1415,9 +1415,9 @@ class ShellCmd(BaseTool):
                     # approval window before this unload, but the state FILE it wrote
                     # survives the load, so re-issuing state/load for the stable label
                     # re-warms the KV. Never raises.
-                    from agent_cascade.state_ops import restore_held_slot_state
+                    from agent_cascade.state_ops import restore_held_slot_state, kv_save_label
                     restored = bool(restore_held_slot_state(pool, instance, agent_name,
-                                                            label=instance.instance_name))
+                                                            label=kv_save_label(instance)))
                 elif freed:
                     # The tool's own save FAILED or timed out, and no advisor owns the
                     # label — there is nothing fresh to restore. Loading would apply an

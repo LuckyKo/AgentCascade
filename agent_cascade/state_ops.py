@@ -200,6 +200,19 @@ def kv_save_effectively_enabled(instance: 'AgentInstance', toggle: bool) -> bool
     return bool(getattr(instance, '_safe_mode_kv', False))
 
 
+def kv_save_label(instance: 'AgentInstance') -> str:
+    """THE single source of the per-session KV save/restore label.
+
+    ``<instance_name>_<kv_birth_ts>``, where ``kv_birth_ts`` is the STABLE per-session
+    birth timestamp captured once at genuine instance creation (``agent_instance.py``)
+    and carried VERBATIM across restart / resume-from-log / D-CONTINUE rehydrate (never
+    re-minted). Every save producer, restore caller, snapshot producer and arm-guard MUST
+    derive the label through this helper so ``save(key)`` and ``load(key)`` always agree;
+    passing a bare ``instance_name`` would 404 a restore against the stamped key.
+    """
+    return f"{instance.instance_name}_{instance.kv_birth_ts}"
+
+
 def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bool:
     """Save KV cache state for an instance.
 
@@ -212,8 +225,8 @@ def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bo
             the instance, arming the automatic next-turn restore. When False (the
             manual user-initiated path), perform the save but do NOT touch
             _state_label: the KV stays warm and no automatic restore is scheduled.
-            The saved FILE still exists under the stable label and can be loaded
-            explicitly via restore_held_slot_state(..., label=instance_name).
+            The saved FILE still exists under the stable per-session label and can be loaded
+            explicitly via restore_held_slot_state(..., label=kv_save_label(instance)).
 
     Returns:
         True if state was saved (and label stored when set_label is True), False otherwise.
@@ -247,10 +260,15 @@ def save_instance_state(instance: 'AgentInstance', set_label: bool = True) -> bo
                 and digest_endpoint == (api_base, model)):
             session_digest = None
 
+        # Single source of the per-session key: <name>_<birthTS>. Passed to save_state as
+        # `label` (flows to the POST body + the returned _state_label); the BARE instance_name
+        # arg is still forwarded for the path-traversal check and cleanup prefix.
+        kv_label = kv_save_label(instance)
         if session_digest:
-            label = save_state(api_base, model, instance.instance_name, session_digest=session_digest)
+            label = save_state(api_base, model, instance.instance_name,
+                               session_digest=session_digest, label=kv_label)
         else:
-            label = save_state(api_base, model, instance.instance_name)
+            label = save_state(api_base, model, instance.instance_name, label=kv_label)
         if label:
             if set_label:
                 with instance._state_lock:
@@ -357,7 +375,8 @@ def restore_instance_state(instance: 'AgentInstance', held_endpoint_cfg: Optiona
 
 
 def save_state(api_base: str, model: str, instance_name: str,
-               session_digest: Optional[str] = None) -> Optional[str]:
+               session_digest: Optional[str] = None,
+               label: Optional[str] = None) -> Optional[str]:
     """Save KV cache state. Returns label if successful, None on failure.
 
     ``session_digest`` (BUG_0187) is NInfer's identity for the retained session the
@@ -376,10 +395,12 @@ def save_state(api_base: str, model: str, instance_name: str,
 
         base = _normalize_api_base(api_base)
 
-        # Use instance_name as stable label — autoloader overwrites the same file on each save.
-        # Previous timestamped labels caused per-model eviction of live agent state.
-        # Autoloader's _sanitize_label() strips \, /, .. to prevent path traversal.
-        label = instance_name
+        # The caller (save_instance_state) passes the stable per-session key via the `label`
+        # kwarg (kv_save_label -> <name>_<birthTS>); fall back to the bare instance_name only
+        # for legacy/external callers. The autoloader treats the label as an opaque filename;
+        # _sanitize_label() strips \, /, .. to prevent path traversal. The path-traversal check
+        # above runs on the BARE instance_name, independent of the stamped label.
+        label = label if label is not None else instance_name
         url = f"{base}/v1/models/{model}/state/save"
         body = {'label': label}
         if isinstance(session_digest, str) and session_digest:
@@ -390,8 +411,10 @@ def save_state(api_base: str, model: str, instance_name: str,
         resp = httpx.post(url, json=body, timeout=STATE_HTTP_TIMEOUT)
 
         if resp.status_code == 200:
-            # Cleanup old states for this instance after successful save
-            _cleanup_old_states(base, model, instance_name)
+            # Cleanup old states for this instance after successful save. Pass the just-saved
+            # live label so cleanup NEVER deletes the current session key (E6 — otherwise the
+            # save would delete its own <name>_<TS> file on the same call).
+            _cleanup_old_states(base, model, instance_name, keep_label=label)
             return label
         # Body kept (DEBUG: saves are best-effort and a non-capable endpoint answers 501 on
         # every attempt, so a WARNING here would be periodic noise). See _refusal_detail.
@@ -691,8 +714,10 @@ def verify_and_restore_instance_kv(pool, instance: 'AgentInstance', kv_block) ->
 
     All checks must hold before arming:
       1. ``kv_block`` is a dict with ``capable`` AND ``saved`` True;
-      2. ``label`` is a non-empty str equal to ``instance.instance_name`` — the label
-         is the deterministic KV filename, a mismatch would load ANOTHER instance's KV;
+      2. ``label`` is a non-empty str equal to ``kv_save_label(instance)`` (the
+         ``<instance_name>_<kv_birth_ts>`` key) — the label is the deterministic KV
+         filename, a mismatch would load ANOTHER instance's KV. Exact equality is valid
+         because E1b carries ``kv_birth_ts`` verbatim across rehydration.
       3. ``session_digest_endpoint`` is coherent with ``endpoint_cfg`` (a torn block
          means the save was interrupted between the digest and the endpoint pair).
          ``_session_digest`` itself may be None — a stale-digest SOFT signal, not a
@@ -712,7 +737,8 @@ def verify_and_restore_instance_kv(pool, instance: 'AgentInstance', kv_block) ->
     if not (kv_block.get('capable') is True and kv_block.get('saved') is True):
         return False
     label = kv_block.get('label')
-    if not isinstance(label, str) or not label or label != inst_name:
+    expected_label = kv_save_label(instance)
+    if not isinstance(label, str) or not label or label != expected_label:
         logger.info('[FLEET_RESTORE] %s KV label missing/mismatched (%r), refusing arm', inst_name, label)
         return False
     endpoint_cfg = kv_block.get('endpoint_cfg') or {}
@@ -768,8 +794,14 @@ def clear_orphaned_state_label(instance: 'AgentInstance', inst_name: str) -> Non
         logger.debug('Failed to clear state label for %s: %s', inst_name, e)
 
 
-def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
+def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str,
+                        keep_label: Optional[str] = None):
     """Clean up legacy timestamped state files for this instance (pre-fix artifacts).
+
+    ``keep_label`` is the LIVE per-session key just written by the caller (``<name>_<birthTS>``).
+    It is ALWAYS excluded from the deletion set — without this the new stamped key matches the
+    ``<name>_<`` prefix and the save would delete its own file on the same call. Genuine older
+    session ``<name>_<oldTS>`` files under the prefix MAY still be purged (those are dead).
 
     Per-instance tracking: once no legacy files are found for an instance, it's added to a
     set and all future cleanup checks for that instance return immediately — avoids one HTTP
@@ -790,11 +822,13 @@ def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
         data = resp.json()
         labels = data.get('labels', [])
 
-        # Only match legacy timestamped format: instance_name_TIMESTAMP
+        # Only match legacy timestamped format: instance_name_TIMESTAMP, but NEVER the live
+        # per-session key (keep_label) — that is the file we just saved and must keep.
         legacy_pattern = instance_name + '_'
-        legacy_states = [l for l in labels if l.startswith(legacy_pattern)]
+        legacy_states = [l for l in labels
+                         if l.startswith(legacy_pattern) and l != keep_label]
 
-        # Delete all legacy timestamped states — the current stable label file is kept.
+        # Delete all legacy timestamped states — the current live session key file is kept.
         for label in legacy_states:
             _delete_state(api_base_no_v1, model, label)
 

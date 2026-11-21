@@ -642,7 +642,7 @@ class WsMessageHandler:
         # it skips (returns False) if the held endpoint can't be resolved or the
         # saved file's endpoint differs (state_ops.py) — never raises.
         ok = state_ops.restore_held_slot_state(agent_pool, instance, instance_name,
-                                               label=instance_name)
+                                               label=state_ops.kv_save_label(instance))
         if ok:
             logger.info(f"[KV_MANUAL] Loaded KV state for {instance_name}")
             return WsMessageHandler._kv_result('load', instance_name, 'ok',

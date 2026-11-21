@@ -320,6 +320,13 @@ class AgentLifecycleManager:
         instance_name = self.pool._resolve_instance_name(instance_name)
         now = time.monotonic()
         existing = self.pool.instances.get(instance_name)
+        # E1c: the KV birth TS is a STABLE session identity. If a prior instance already exists
+        # under this name, this is a restart/reuse of the SAME session, so carry its kv_birth_ts
+        # and the KV save key <name>_<birthTS> stays constant (load(key) finds the earlier save).
+        # Captured here because the reuse logic below may set `existing` to None (active case).
+        # force_fresh (Security/Compressor) is intentionally a brand-new session -> do NOT carry.
+        prior_kv_birth = None if force_fresh else (
+            getattr(existing, 'kv_birth_ts', None) if existing is not None else None)
         is_reuse = False
         inst = None  # Initialize to ensure it's always defined
 
@@ -366,6 +373,12 @@ class AgentLifecycleManager:
                 latest_marker_index=-1,
                 _nest_depth=nest_depth,
             )
+            # Carry the prior session's birth TS on a restart (do NOT re-mint) so the KV save
+            # key stays stable across the restart. Only present when a same-named prior instance
+            # existed and this is not a force_fresh run; a brand-new session keeps the stamp that
+            # __post_init__ already minted.
+            if prior_kv_birth:
+                inst.kv_birth_ts = prior_kv_birth
 
             if existing is not None:
                 # Warn about overwriting an active instance

@@ -298,6 +298,13 @@ class AgentInstance:
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
     display_name: Optional[str] = None  # UI-facing name (clean display label; defaults to instance_name)
     system_started_at: Optional[str] = None  # Wall-clock start (YYYY-MM-DD HH:MM); set once at creation (frozen with the prompt); rendered in Session Metadata
+    # Per-session KV save key birth timestamp (YYYYMMDD_HHMMSS), captured ONCE at genuine
+    # instance creation. It is a STABLE session identity: carried VERBATIM across restart /
+    # resume-from-log / D-CONTINUE rehydrate (never re-minted), so the KV save key
+    # <instance_name>_<kv_birth_ts> (see state_ops.kv_save_label) survives so that a later
+    # load(key) finds the earlier save(key). Empty until __post_init__ mints it (mint only
+    # for a fresh instance); the carry paths assign it after construction.
+    kv_birth_ts: str = ''
     _child_instances: List[str] = field(
         default_factory=list
     )  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
@@ -536,6 +543,11 @@ class AgentInstance:
             self.display_name = self.instance_name
         if self.system_started_at is None:
             self.system_started_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        # Mint the KV birth TS only for a genuinely NEW instance. The carry paths (snapshot
+        # D-CONTINUE rehydrate, session_io.load_session_from_log, lifecycle_manager restart)
+        # assign kv_birth_ts AFTER construction, so an empty value here means a fresh birth.
+        if not self.kv_birth_ts:
+            self.kv_birth_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
     # These methods encapsulate ALL conversation-LIST mutations, keeping cached

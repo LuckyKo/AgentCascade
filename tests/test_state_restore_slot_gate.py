@@ -612,10 +612,10 @@ class TestBootKvRestore:
             f'boot restore must NOT target stale config Y: {url}'
         # one-shot: consumed regardless of outcome.
         assert inst._boot_kv_restore_pending is False
-        # wiring complement: restore is driven by the STABLE instance-name label,
+        # wiring complement: restore is driven by the STABLE per-session stamped label,
         # independent of _state_label (which is None on this path).
-        assert spy.call_args.kwargs.get('label') == inst.instance_name, \
-            'boot restore must pass label=instance_name'
+        assert spy.call_args.kwargs.get('label') == state_ops.kv_save_label(inst), \
+            'boot restore must pass the stable stamped label'
 
     def test_no_slot_held_skips_boot_restore(self):
         """Eviction-safety at boot: the no-slot guard precedes the boot branch, so

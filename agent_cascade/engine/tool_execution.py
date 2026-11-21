@@ -716,10 +716,11 @@ class ToolExecMixin:
         if ran_mg and not reached_last_mg:
             mg_inst = self.pool.get_instance(inst_name) or instance
             if mg_inst is not None and getattr(mg_inst, '_state_label', None) is not None:
+                from agent_cascade.state_ops import kv_save_label
                 logger.debug(
                     f"[STATE_RESTORE_SAFETY_NET] {inst_name} — batch exited before the last media_gen; "
                     f"forcing the deferred KV restore")
-                self._restore_held_slot_state(mg_inst, inst_name, label=inst_name)
+                self._restore_held_slot_state(mg_inst, inst_name, label=kv_save_label(mg_inst))
 
     def _format_tool_dispatch_error(self, e: Exception, tool_name: str, inst_name: str) -> str:
         """Log/dedupe a dispatcher/plumbing crash and return the compact ``Error: ...`` string.

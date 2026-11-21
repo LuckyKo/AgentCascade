@@ -74,10 +74,12 @@ class TurnSetupMixin:
             if getattr(instance, '_boot_kv_restore_pending', False):
                 # BUG_0354: consume-once boot restore by stable on-disk label. Runs ONLY here,
                 # where _slot_release is set, so it targets an endpoint we actually hold.
-                # label=inst_name makes it independent of _state_label (separate path).
+                # label=kv_save_label(instance) keeps it independent of _state_label (separate
+                # path) and targets the stable per-session key, not the bare name.
+                from agent_cascade.state_ops import kv_save_label
                 instance._boot_kv_restore_pending = False  # one-shot regardless of outcome
                 logger.info('[BOOT_KV_RESTORE] %s - boot KV restore attempt by stable label', inst_name)
-                self._restore_held_slot_state(instance, inst_name, label=inst_name)
+                self._restore_held_slot_state(instance, inst_name, label=kv_save_label(instance))
             else:
                 logger.debug('[STATE_RESTORE_SKIP] %s has no saved state to restore (no dispatch this turn) - '
                              'keeping warm KV cache', inst_name)

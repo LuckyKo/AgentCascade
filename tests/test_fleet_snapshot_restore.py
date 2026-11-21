@@ -35,6 +35,7 @@ from agent_cascade.snapshot import (
 )
 from tests._snapshot_fleet_double import (
     CAPABLE_CFG,
+    KV_TS,
     LoggerDouble,
     PoolDouble,
     ROOT,
@@ -67,7 +68,7 @@ def _saver(inst, kv_cfg):
         'capable': True,
         'saved': True,
         'reason': None,
-        'label': inst.instance_name,
+        'label': state_ops.kv_save_label(inst),
         'session_digest': kv_cfg['session_digest'],
         'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
         'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']},
@@ -135,7 +136,7 @@ def test_roundtrip_rehydrates_fleet(pool, tmp_path, monkeypatch):
     assert root._child_instances == [WORKER, PARKED, PLAIN]
 
     # KV verify+arm (no HTTP): engine consumes this at turn start
-    assert worker._state_label == WORKER
+    assert worker._state_label == f'{WORKER}_{KV_TS}'
     assert worker._last_endpoint_config['state_save_enabled'] is True
     assert worker._last_endpoint_config['api_base'] == CAPABLE_CFG['api_base']
     assert pool.instances[PARKED]._state_label is None   # not streaming → not armed
@@ -400,11 +401,11 @@ def test_integrity_gate_refuses_missing_log(pool, tmp_path, monkeypatch):
 
 # ── 9.5 KV fail-closed per instance ─────────────────────────────────────────
 
-def _kv_block(label, *, api_base=None, model=None, digest=None, capable=True, saved=True):
+def _kv_block(name, *, api_base=None, model=None, digest=None, capable=True, saved=True):
     api_base = CAPABLE_CFG['api_base'] if api_base is None else api_base
     model = CAPABLE_CFG['model'] if model is None else model
     ep = digest if digest is not None else (api_base, model)
-    return {'capable': capable, 'saved': saved, 'reason': None, 'label': label,
+    return {'capable': capable, 'saved': saved, 'reason': None, 'label': f'{name}_{KV_TS}',
             'session_digest': 'd', 'session_digest_endpoint': list(ep),
             'endpoint_cfg': {'api_base': api_base, 'model': model}}
 
@@ -421,7 +422,7 @@ def test_kv_verify_arms_on_happy_path(monkeypatch):
                         lambda p, i: {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']})
     inst = _armed_inst(WORKER)
     assert state_ops.verify_and_restore_instance_kv(None, inst, _kv_block(WORKER)) is True
-    assert inst._state_label == WORKER
+    assert inst._state_label == f'{WORKER}_{KV_TS}'
     assert inst._last_endpoint_config == {'api_base': CAPABLE_CFG['api_base'],
                                           'model': CAPABLE_CFG['model'], 'state_save_enabled': True}
 

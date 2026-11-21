@@ -82,6 +82,7 @@ def _instance(name, *, agent_class='coder', parent=None, depth=0,
         created_at=0.0,
         last_activity=0.0,
         system_started_at=None,
+        kv_birth_ts='20260101_143022',
         compression_summary=None,
         _force_compress_count=0,
         _force_compress_fail_streak=0,
@@ -409,7 +410,7 @@ class TestKvCoverage:
         assert calls == [False]          # warm-only save: never arms an automatic restore
         assert block['saved'] is True
         assert block['capable'] is True
-        assert block['label'] == 'coder_worker1'
+        assert block['label'] == 'coder_worker1_20260101_143022'
 
     def test_save_streaming_kv_records_failure_not_exception(self, monkeypatch):
         import agent_cascade.state_ops as state_ops

@@ -71,6 +71,9 @@ class PoolDouble(SessionIOMixin):
             self.message_queues.setdefault(instance_name, []).append(text)
 
 
+KV_TS = '20260101_143022'  # stable birth TS carried by instance doubles (YYYYMMDD_HHMMSS)
+
+
 def make_instance(name, *, agent_class='coder', parent=None, depth=0,
                   display=None, state=AgentState.RUNNING, cfg=None):
     """A lightweight instance double with exactly the fields capture reads.
@@ -91,6 +94,7 @@ def make_instance(name, *, agent_class='coder', parent=None, depth=0,
         created_at=0.0,
         last_activity=0.0,
         system_started_at=None,
+        kv_birth_ts=KV_TS,
         compression_summary=None,
         _force_compress_count=0,
         _force_compress_fail_streak=0,

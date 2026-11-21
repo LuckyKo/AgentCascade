@@ -317,8 +317,8 @@ class MediaGen(BaseTool):
         pool = getattr(self, 'agent_pool', None)
         if pool is None:
             return False
-        from agent_cascade.state_ops import restore_held_slot_state
-        restore_held_slot_state(pool, instance, instance.instance_name, label=instance.instance_name)
+        from agent_cascade.state_ops import restore_held_slot_state, kv_save_label
+        restore_held_slot_state(pool, instance, instance.instance_name, label=kv_save_label(instance))
         return True
 
     def _restore_vram_state(self, instance, held: dict) -> None:

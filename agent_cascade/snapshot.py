@@ -491,6 +491,10 @@ def _capture_instance(
         'created_at': monotonic_to_wall(instance.created_at, now_wall=now_wall, now_mono=now_mono),
         'last_activity': monotonic_to_wall(instance.last_activity, now_wall=now_wall, now_mono=now_mono),
         'system_started_at': _safe_get(instance, 'system_started_at'),
+        # kv_birth_ts is a wall-clock 'YYYYMMDD_HHMMSS' string (the per-session KV key birth
+        # TS) — verbatim, NOT projected. Restored verbatim in _instantiate_instance so a
+        # rehydrated instance keeps the SAME KV save key and the arm guard arms, not refuses.
+        'kv_birth_ts': _safe_get(instance, 'kv_birth_ts'),
     }
     state = {
         'state': _safe_get(instance, 'state').name if _safe_get(instance, 'state') is not None else 'IDLE',
@@ -649,7 +653,7 @@ def _save_streaming_kv(instance, kv_cfg: Dict[str, Any]) -> Optional[Dict[str, A
     Phase-1 ``kv_cfg`` freeze so it is coherent; the actual save re-reads authoritative
     config under its own lock. Recorded ``saved`` lets a restore fail closed.
     """
-    from agent_cascade.state_ops import save_instance_state
+    from agent_cascade.state_ops import save_instance_state, kv_save_label
 
     endpoint_cfg = kv_cfg['endpoint_cfg']
     saved = False
@@ -662,7 +666,7 @@ def _save_streaming_kv(instance, kv_cfg: Dict[str, Any]) -> Optional[Dict[str, A
         'capable': True,
         'saved': saved,
         'reason': None if saved else 'save_failed',
-        'label': instance.instance_name,
+        'label': kv_save_label(instance),
         'session_digest': kv_cfg['session_digest'],
         'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
         'endpoint_cfg': {
@@ -949,8 +953,15 @@ def _instantiate_instance(
     inst._pool_ref = pool
     inst._nest_depth = snap.identity['nest_depth']
     # system_started_at is a wall-clock '%Y-%m-%d %H:%M' string — verbatim, NOT
-    # projected. Capture stores it in the clocks block (snapshot.py:405).
+    # projected. Capture stores it in the clocks block (snapshot.py:~491-495).
     inst.system_started_at = snap.clocks.get('system_started_at')
+    # kv_birth_ts (per-session KV key birth TS) carried VERBATIM — a rehydrated instance is the
+    # SAME continuing session, so it must keep the same kv_save_label; __post_init__ already
+    # minted a fresh stamp on the new AgentInstance, so overwrite it with the captured value.
+    # Fall back to the freshly minted stamp only for legacy snapshots with no kv_birth_ts.
+    _carried_birth = snap.clocks.get('kv_birth_ts')
+    if _carried_birth:
+        inst.kv_birth_ts = _carried_birth
     inst.state = AgentState[snap.state['state']]            # provisional; refined in 5b
     inst.is_terminated = bool(snap.state['is_terminated'])
     inst._terminated_reason = snap.state['terminated_reason']

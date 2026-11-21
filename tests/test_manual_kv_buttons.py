@@ -71,6 +71,7 @@ def _make_instance(name='agent-1', *, endpoint=CAPABLE_EP, holds_slot=False):
     """A stand-in AgentInstance carrying exactly the attributes the seam reads."""
     inst = MagicMock()
     inst.instance_name = name
+    inst.kv_birth_ts = '20260101_143022'   # stable per-session birth TS (kv_save_label suffix)
     inst.agent_class = 'assistant'
     # Real AgentInstance uses threading.RLock; the save path re-acquires under an
     # outer lock, so a non-reentrant Lock would deadlock in real-save tests.
@@ -209,8 +210,8 @@ class TestKvSeamGuards:
             WsMessageHandler.do_load_kv(pool, 'agent-1')
         m_restore.assert_called_once()
         args, kwargs = m_restore.call_args
-        assert kwargs.get('label') == 'agent-1', \
-            f"manual load must pass stable label: {args}, {kwargs}"
+        assert kwargs.get('label') == 'agent-1_20260101_143022', \
+            f"manual load must pass the stable stamped label: {args}, {kwargs}"
 
 
 class TestLoadOwnershipGuard:
