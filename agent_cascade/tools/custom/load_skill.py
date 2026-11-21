@@ -17,6 +17,10 @@ from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
 
+# Skill names must start with an alphanumeric char and contain only alphanumerics, hyphens, and
+# underscores. Shared by the degenerate-input pre-filter (BUG_0374) and the per-name load loop.
+VALID_SKILL_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+
 
 @register_tool('load_skill', allow_overwrite=True)
 class LoadSkill(BaseTool):
@@ -66,6 +70,17 @@ class LoadSkill(BaseTool):
         if not skill_names:
             return 'No skill names provided.'
 
+        # BUG_0374: drop degenerate names (empty-after-strip, lone quote, anything not matching the
+        # skill-name regex). A malformed call is a soft no-op success, NOT a counted "not found"
+        # tool failure. A real-but-unknown name still matches the regex and falls through to be
+        # reported normally by the load loop below.
+        skill_names = [
+            n for n in skill_names
+            if isinstance(n, str) and n.strip() and VALID_SKILL_NAME_RE.match(n.strip())
+        ]
+        if not skill_names:
+            return 'No valid skill names provided; nothing to load.'
+
         # Get SkillManager from pool
         if self.agent_pool is None:
             return 'No agent pool available.'
@@ -94,9 +109,6 @@ class LoadSkill(BaseTool):
 
         if inst is None:
             return f"Could not find agent instance '{agent_name}' to load skills into."
-
-        # Validate and normalize skill names
-        VALID_SKILL_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 
         # Load each skill via the shared AgentPool.inject_skill (single source of truth,
         # BUG_0263). Name validation stays above; injection/dedup/record are the helper's job.

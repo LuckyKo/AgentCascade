@@ -4,6 +4,12 @@ scope: [agentcascade]
 
 # Compressor disabled_tools Bug Investigation Notes
 
+> **Superseded (partial) — BUG_0373, 2026-11-21:** The "agent_invoker reads the caller's UI
+> disabled_tools" passthrough described in this file was REMOVED. `_configure_compressor_instance`
+> now forces the all-tools-disabled union, identical to `_configure_reviewer_instance`. All line
+> numbers below have long since drifted; the resolver layering is still valid, but the Compressor's
+> `_generate_cfg_override` is now forced. Canonical memory: [[bug0373-compressor-forced-toolless]].
+
 ## Trace Summary (as of 2025-06-25)
 
 ### Call Chain for Tool Filtering

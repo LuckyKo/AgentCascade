@@ -283,55 +283,26 @@ def _configure_compressor_instance(
     comp_instance: Any,
     caller_name: str,
 ) -> None:
-    """Configure Compressor instance settings from the caller's UI-disabled tools.
+    """Force the system-launched Compressor to be fully tool-less (output-only).
 
-    Passes through the caller's UI-disabled tools if present; otherwise leaves disabled_tools
-    unset so the resolver applies its safe baseline at runtime (no hardcoded merge — the UI is
-    the single source of truth, seeded by the one-time class-defaults migration).
+    The Compressor is a pure summarizer: it receives the messages inline and must only emit
+    a summary. Every known tool is disabled here — the same known-tool union the reviewer uses
+    (TOOL_REGISTRY | RUNTIME_REGISTERED_TOOLS + __all_mcp_tools__) — so the model is offered
+    zero tools and cannot make a (malformed) tool call such as the empty-name load_skill loop
+    (BUG_0374). This overrides the caller's UI-disabled-tools passthrough: the Compressor must
+    be tool-less regardless of the caller's config (BUG_0373, todo.md:133).
+
+    agent_pool and caller_name are retained in the signature for call-site compatibility and to
+    document the contract; the tool-less forcing no longer depends on them.
+
     Mutates comp_instance._generate_cfg_override in-place.
-
-    Args:
-        agent_pool: The AgentPool instance.
-        comp_instance: The Compressor AgentInstance to configure.
-        caller_name: Name of the calling agent instance.
     """
-    template = agent_pool.get_template('Compressor')
-    cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
-
-    caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
-    ui_disabled_tools = None
-
-    if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
-        raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
-        if raw_dt:
-            # Could be a dict (per-agent format) or a flat list
-            if isinstance(raw_dt, dict):
-                # Look up Compressor-specific disabled tools from per-agent dict.
-                # Try exact match first, then case-insensitive fallback for robustness.
-                ui_disabled_tools = raw_dt.get('Compressor', []) or []
-                if not ui_disabled_tools:
-                    for key in raw_dt:
-                        if key.lower() == 'compressor':
-                            ui_disabled_tools = raw_dt[key] or []
-                            break
-            elif isinstance(raw_dt, (list, tuple)):
-                # Flat list applies to all agents
-                ui_disabled_tools = list(raw_dt)
-
-    # No hardcoded merge — UI config is authoritative (seeded by the one-time migration).
-    # Pass through the caller's UI-disabled tools if present; otherwise leave unset so the
-    # resolver applies the Layer 4 safe baseline at runtime. Compressor keeps shell_cmd available
-    # in restricted mode (the migration seeds its config without shell_cmd).
-    if ui_disabled_tools:
-        cfg['disabled_tools'] = ui_disabled_tools
-
-    if template and hasattr(template, 'llm'):
-        comp_instance._generate_cfg_override = cfg
-    else:
-        logger.warning(
-            '[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — '
-            'template not available or missing llm attribute. Agent may have unrestricted tools.'
-        )
+    from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+    from agent_cascade.tools.base import TOOL_REGISTRY
+    disabled = set(TOOL_REGISTRY.keys()) | set(RUNTIME_REGISTERED_TOOLS)
+    # Sentinel that blocks all dynamically registered MCP tools; not a real tool name.
+    disabled.add('__all_mcp_tools__')
+    comp_instance._generate_cfg_override = {'disabled_tools': sorted(disabled)}
 
 
 def _reset_terminated_compressor_for_retry(agent_pool: Any, comp_instance: Any, comp_state_key: str) -> None:

@@ -53,11 +53,14 @@ DEFAULT_SECURITY_DISABLED_TOOLS: frozenset[str] = frozenset({
     'write_file',  # Create or overwrite files
 })
 
-# Default disabled tools for Compressor agent.
+# Default disabled tools for Compressor agent (static class-default fallback baseline).
 # Compressor agent needs all tools disabled — it only performs compression internally.
+# Best-effort static completion only; the authoritative all-tools union is forced at runtime in
+# _configure_compressor_instance (agent_invoker.py) — see BUG_0373.
 DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = frozenset({
     'calculate',  # Evaluate mathematical expressions
     'call_agent',  # Delegate tasks to specialized agent instances
+    'call_cli_agent',  # Run external AI coding CLI harnesses
     'code_interpreter',  # Run Python code in a sandboxed environment
     'code_map',  # Map code file structure
     'compress_context',  # Summarize conversation history
@@ -75,14 +78,18 @@ DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = frozenset({
     'read_file',  # Read file contents
     'read_logs',  # Read JSON/JSONL log files
     'scan_skills',  # Scan registered skills
+    'send_message',  # Send async message to another agent or user
     'shell_cmd',  # Execute shell commands on the host system
     'syntax_check',  # Check file syntax without executing
     'system_info',  # Retrieve current system information
+    'tool_search',  # Discover/unlock deferred MCP tools
     'view_image',  # View image files or capture screen content
     'view_media',  # View image/audio/video with crop/slice/extract
     'web_extractor',  # Get content of a webpage
     'web_search',  # Search for information from the internet
     'write_file',  # Create or overwrite files
+    # Sentinel that blocks all dynamically registered MCP tools; not a real tool name.
+    '__all_mcp_tools__',
 })
 
 # Default disabled tools for Generalist agent.
