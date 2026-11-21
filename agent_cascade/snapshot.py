@@ -916,6 +916,65 @@ def load_snapshot_from_disk(snapshot_path: Path) -> SnapshotEnvelope:
         raise ValueError(f'snapshot {path} does not match schema: {exc}') from exc
 
 
+def find_birth_ts_for_log(pool, log_path) -> Optional[str]:
+    """Return the ``kv_birth_ts`` recorded by the MOST RECENT snapshot envelope whose
+    instance log reference matches ``log_path``; ``None`` if no envelope references it
+    (the caller then lets ``AgentInstance.__post_init__`` mint a fresh birth TS).
+
+    This is the bare-log-import carrier: the JSONL is NOT a home for ``kv_birth_ts`` —
+    the envelope is (E1b captures it verbatim into ``clocks``). Reading it back here means
+    a ``load_session_from_log`` keeps the prior session's save key instead of re-minting,
+    which would orphan the prior ``<name>_<oldTS>`` KV file and force a cold start.
+
+    Deliberately does NOT use :func:`load_snapshot_from_disk`: that path is fail-closed
+    (integrity validation can refuse an *unrelated* snapshot) and we only need a string,
+    so a raw JSON parse keeps this side-effect-free and robust to one bad envelope.
+    The match key is the log FILENAME basename — the JSONL filename timestamp (the logger's
+    start_time) is immutable and uniquely identifies the session log, so it is a safe join
+    key regardless of relative-vs-absolute path spelling. The JSONL filename TS itself is
+    never read or written here. Read-only: no pool or disk mutation.
+    """
+    if not log_path:
+        return None
+    target = os.path.normcase(os.path.basename(str(log_path)))
+    if not target:
+        return None
+    try:
+        snap_dir = get_snapshot_dir(pool)
+    except Exception:  # snapshot-dir resolution must never abort a load
+        return None
+    try:
+        candidates = list(Path(snap_dir).glob('*.json')) if snap_dir else []
+    except OSError:
+        return None
+    best_ts: Optional[str] = None
+    best_mtime = -1.0
+    for f in candidates:
+        try:
+            raw = json.loads(f.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        instances = raw.get('instances') if isinstance(raw, dict) else None
+        if not isinstance(instances, dict):
+            continue
+        for snap in instances.values():
+            if not isinstance(snap, dict):
+                continue
+            p = (snap.get('log') or {}).get('path')
+            if not p or os.path.normcase(os.path.basename(str(p))) != target:
+                continue
+            ts = (snap.get('clocks') or {}).get('kv_birth_ts')
+            if not ts:
+                continue
+            try:
+                m = f.stat().st_mtime
+            except OSError:
+                m = 0.0
+            if m > best_mtime:
+                best_mtime, best_ts = m, ts
+    return best_ts
+
+
 def _instantiate_instance(
     snap: InstanceSnapshot, pool, now_wall: float, now_mono: float) -> 'AgentInstance':
     """Rebuild one fresh ``AgentInstance`` from a captured ``InstanceSnapshot``.

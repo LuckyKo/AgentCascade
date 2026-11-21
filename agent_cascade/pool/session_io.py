@@ -726,6 +726,19 @@ class SessionIOMixin:
                 latest_marker_index=-1,
             )
             self.instances[instance_name] = new_inst
+            # Carry the per-session KV birth TS from the PRIOR snapshot envelope — the
+            # envelope is the single home for kv_birth_ts (E1b); the JSONL is NOT. Without
+            # this the instance keeps its freshly-minted __post_init__ stamp and saves under
+            # a new key, so the prior session's <name>_<oldTS> KV can never be loaded (cold
+            # start). Falls back to that fresh mint only when no prior envelope references
+            # this log (genuinely brand-new). The JSONL filename TS is never read or written.
+            try:
+                from agent_cascade.snapshot import find_birth_ts_for_log
+                _carried = find_birth_ts_for_log(self, (metadata or {}).get('current_log_path'))
+                if _carried:
+                    new_inst.kv_birth_ts = _carried
+            except Exception as e:  # KV-identity plumbing must never abort a load
+                logger.debug(f'[KV_LABEL] carry kv_birth_ts from snapshot failed for {instance_name}: {e}')
             # Tier 1.5 fix (BUG_0052 sibling): a session-restored instance must carry _pool_ref,
             # or release_slot_permit's router recovery (_get_router_from_holder) returns None and
             # the single _last_released_endpoint write is skipped — leaving the global marker stale

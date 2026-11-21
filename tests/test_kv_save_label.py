@@ -8,9 +8,11 @@ Guard the locked plan reports/kv-save-label-plan-v2.md end to end:
   * E5 arm-guard accepts the stamped label and rejects the bare name;
   * D-CONTINUE rehydration carries kv_birth_ts VERBATIM (E1b) — the re-mint bug
     that would otherwise make the arm-guard silently refuse on every rehydrate;
-  * LOAD-BEARING (E1b/E1c): the snapshot envelope (D-CONTINUE) and an in-memory
-    lifecycle_manager restart CARRY kv_birth_ts (key unchanged); force_fresh / brand-new
-    / a bare load_session_from_log import MINTS a new one (the JSONL is NOT a home).
+  * LOAD-BEARING (E1b/E1c): the snapshot envelope is the single home. A D-CONTINUE
+    rehydrate, an in-memory lifecycle_manager restart, AND a bare load_session_from_log
+    import all CARRY kv_birth_ts (from the envelope) so the save key is unchanged; only
+    a genuinely brand-new session (no prior envelope / force_fresh) MINTS a new one.
+    The JSONL (and its filename timestamp) is NOT a home for kv_birth_ts.
 
 A birth TS has second resolution, so "fresh vs carried" is asserted against an
 obviously-old sentinel rather than between two same-second mints.
@@ -216,6 +218,27 @@ def test_dcontinue_rehydrate_carries_kv_birth_ts(pool, tmp_path, monkeypatch):
     assert rehydrated.kv_birth_ts == _SENTINEL_TS   # carried, NOT re-minted by __post_init__
 
 
+def test_find_birth_ts_for_log_reads_real_envelope(pool, tmp_path, monkeypatch):
+    """The bare-log-import carrier must read the EXACT envelope schema a real capture writes
+    (instances[*].log.path -> identity join, instances[*].clocks.kv_birth_ts -> value).
+    Drives capture_fleet_snapshot + write_snapshot_to_disk, then the helper — not a hand-built dict.
+    """
+    from agent_cascade.snapshot import (capture_fleet_snapshot, write_snapshot_to_disk,
+                                        find_birth_ts_for_log)
+    make_fleet(pool, tmp_path, monkeypatch)
+    pool.instances[ROOT].kv_birth_ts = _SENTINEL_TS   # the prior session's stable birth TS
+    env = capture_fleet_snapshot(pool)               # ROOT.clocks.kv_birth_ts captured verbatim
+
+    snap_dir = tmp_path / 'snaps'
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr('agent_cascade.snapshot.get_snapshot_dir', lambda p: snap_dir)
+    write_snapshot_to_disk(env, snap_dir)            # REAL serialized envelope on disk
+
+    root_log = str(tmp_path / 'maine.jsonl')          # the ROOT log path the envelope references
+    assert find_birth_ts_for_log(pool, root_log) == _SENTINEL_TS   # real-schema round-trip
+    assert find_birth_ts_for_log(pool, 'logs/no_such_zzz.jsonl') is None   # miss -> caller mints
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # E1c — LOAD-BEARING: resume-from-log and lifecycle restart CARRY the birth TS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,29 +286,53 @@ def _stamped_log(instance_name, current_log_path):
     return '\n'.join(lines)
 
 
-def test_load_session_from_log_remints_from_bare_jsonl(_no_real_instance_logger):
-    """Simplified design: the snapshot ENVELOPE is the single home for kv_birth_ts.
-    A bare JSONL import (load_session_from_log) does NOT carry kv_birth_ts from the log
-    — not from its filename stamp, not from metadata — it re-mints via __post_init__.
-    A stamped filename must NOT leak into kv_birth_ts: the JSONL filename TS is left
-    untouched but is deliberately NOT a save-key source."""
-    pool = _SessionPool()
-    pool.load_session_from_log(
-        _stamped_log('Main', 'logs/coder_Main_20200101_120000.jsonl'),  # filename HAS a stamp
-        target_instance='Main', clear_sub_agents_before_load=False)
-    ts = pool.instances['Main'].kv_birth_ts
-    assert _TS_RE.match(ts), ts                         # a fresh, valid __post_init__ mint
-    assert ts != '20200101_120000'                      # NOT carried from the filename
+def _point_snapshot_dir(monkeypatch, tmp_path):
+    """Point snapshot.get_snapshot_dir at an isolated tmp dir so the carrier reads planted
+    envelopes (and never scans the real workspace logs). _SessionPool has no operation_manager,
+    so without this the helper would resolve to DEFAULT_WORKSPACE/logs."""
+    snap_dir = tmp_path / 'snapshots'
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr('agent_cascade.snapshot.get_snapshot_dir', lambda pool: snap_dir)
+    return snap_dir
 
 
-def test_load_session_from_log_mints_when_unstamped(_no_real_instance_logger):
+def _write_prior_envelope(snap_dir, log_path, kv_birth_ts):
+    """Minimal raw envelope JSON referencing ``log_path`` with clocks.kv_birth_ts.
+    find_birth_ts_for_log only needs instances[*].log.path and clocks.kv_birth_ts."""
+    (snap_dir / 'prior.json').write_text(json.dumps({
+        'instances': {'Main': {'log': {'path': log_path},
+                               'clocks': {'kv_birth_ts': kv_birth_ts}}},
+    }), encoding='utf-8')
+
+
+def test_load_session_from_log_carries_prior_snapshot_birth_ts(
+        _no_real_instance_logger, monkeypatch, tmp_path):
+    """LOAD-BEARING: a bare-log import CARRIES kv_birth_ts from the prior snapshot envelope
+    (NOT re-mint, NOT the JSONL). The prior envelope references this log; the imported log's
+    metadata current_log_path basename matches it, so the carried birth TS must survive (key
+    unchanged) — otherwise the prior <name>_<oldTS> KV is orphaned and the session cold-starts."""
+    log_path = 'logs/coder_Main_20150304_050607.jsonl'
+    snap_dir = _point_snapshot_dir(monkeypatch, tmp_path)
+    _write_prior_envelope(snap_dir, log_path, _SENTINEL_TS)
     pool = _SessionPool()
     pool.load_session_from_log(
-        _stamped_log('Main', 'logs/coder_Main.jsonl'),   # no birth stamp in filename
+        _stamped_log('Main', log_path),
+        target_instance='Main', clear_sub_agents_before_load=False)
+    assert pool.instances['Main'].kv_birth_ts == _SENTINEL_TS   # carried from the envelope
+
+
+def test_load_session_from_log_mints_when_no_prior_snapshot(
+        _no_real_instance_logger, monkeypatch, tmp_path):
+    """Brand-new: no prior snapshot envelope references the log -> __post_init__ mints a fresh
+    kv_birth_ts (the documented fallback)."""
+    _point_snapshot_dir(monkeypatch, tmp_path)   # empty snapshot dir -> carrier finds nothing
+    pool = _SessionPool()
+    pool.load_session_from_log(
+        _stamped_log('Main', 'logs/coder_Main.jsonl'),
         target_instance='Main', clear_sub_agents_before_load=False)
     ts = pool.instances['Main'].kv_birth_ts
-    assert _TS_RE.match(ts), ts                          # a fresh, valid mint
-    assert ts != '20200101_120000'
+    assert _TS_RE.match(ts), ts                              # a fresh, valid mint
+    assert ts != _SENTINEL_TS
 
 
 def _mgr_pool():
