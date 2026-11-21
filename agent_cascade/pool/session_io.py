@@ -774,6 +774,15 @@ class SessionIOMixin:
             except Exception as e:
                 logger.warning(f"[METADATA] Session metadata injection on restore failed for {instance_name}: {e}")
 
+            # BUG_0372: freeze the system prompt AFTER metadata self-heal so the
+            # KV cache prefix is preserved. The prompt was already persisted in the
+            # log; regenerating it (timestamps, log paths, resources) would change
+            # the KV cache prefix and force a full re-prefill of the restored context.
+            # Must come after the injection block above because _inject_metadata_into_message
+            # early-returns when _system_prompt_frozen is True, which would skip the
+            # todo.md:155 restart self-heal.
+            new_inst._system_prompt_frozen = True
+
         # --- 8. Set up logger pointing to the log file ---------------------
         try:
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger

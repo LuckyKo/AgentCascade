@@ -313,3 +313,34 @@ class TestFileSyncFlag:
                 'environmental AV/lock artifact, not a sync-flag regression')
         assert log_inst._file_history_synced, \
             '_file_history_synced should be True after load_session_from_log'
+
+
+class TestBug0372SystemPromptFrozen:
+    """BUG_0372: session-loaded instances must have _system_prompt_frozen=True
+    so _refresh_system_prompt is a no-op on the first turn, preserving the
+    KV cache prefix and avoiding a full context re-prefill."""
+
+    def test_loaded_instance_has_frozen_prompt(self, tmp_path):
+        """After load_session_from_log, the instance's system prompt must be frozen."""
+        from agent_cascade.agent_pool import AgentPool
+
+        pool = AgentPool(DUMMY_LLM_CFG)
+
+        # Build a minimal JSONL log with a system message
+        log_lines = [
+            {'role': 'system', 'content': 'You are Bob.\n## Session Metadata\n- Test'},
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': 'hi'},
+        ]
+        log_file = tmp_path / 'test_session.jsonl'
+        with open(log_file, 'w') as f:
+            for line in log_lines:
+                f.write(json.dumps(line) + '\n')
+
+        status = pool.load_session_from_log(str(log_file), target_instance='TestInst')
+        assert not status.startswith('Error'), f"Load failed: {status}"
+
+        inst = pool.instances.get('TestInst')
+        assert inst is not None, 'Instance not created'
+        assert inst._system_prompt_frozen is True, \
+            'BUG_0372: _system_prompt_frozen must be True after load_session_from_log'
