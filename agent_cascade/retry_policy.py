@@ -22,8 +22,11 @@ class RetryPolicy:
         base_delay: Initial backoff delay in seconds.
         max_delay: Cap for exponential backoff. With 3 engine attempts and
             exponential growth (1→2→4→8), total retry wait maxes at ~15s.
-        jitter_factor: ±percentage randomization to avoid thundering herd.
+        jitter_factor: ±percentage randomization to avoid thundering herd
+            (only used when jitter_mode="plus").
         endpoint_max_retries: Retries per endpoint before failover to next.
+        jitter_mode: "full" (default, AWS full jitter) or "plus"
+            (legacy additive jitter).
     """
 
     retry_max_attempts: int = 3
@@ -31,6 +34,7 @@ class RetryPolicy:
     max_delay: float = 8.0
     jitter_factor: float = 0.1
     endpoint_max_retries: int = 1
+    jitter_mode: str = 'full'
 
 
 # ── Predefined policies ───────────────────────────────────────────────────────
@@ -201,7 +205,8 @@ def is_deterministic_client_error(error: Exception) -> bool:
 def calculate_backoff(attempt: int, policy: RetryPolicy) -> float:
     """Calculate backoff delay with exponential growth and jitter.
 
-    Formula: min(max(base_delay * 2^(attempt-1) + jitter, 0.1), max_delay)
+    Full jitter (default): random.uniform(0.1, min(raw, max_delay))
+    Plus jitter (legacy): raw + random.uniform(0, jitter_factor) * raw
 
     Args:
         attempt: 1-based attempt number (first retry = 1).
@@ -210,6 +215,9 @@ def calculate_backoff(attempt: int, policy: RetryPolicy) -> float:
     Returns:
         Delay in seconds, bounded between 0.1 and policy.max_delay.
     """
-    raw = policy.base_delay * (2**(attempt - 1))
-    jitter = random.uniform(0, policy.jitter_factor) * raw
-    return min(max(raw + jitter, 0.1), policy.max_delay)
+    raw = policy.base_delay * (2 ** (attempt - 1))
+    if policy.jitter_mode == 'plus':
+        jitter = random.uniform(0, policy.jitter_factor) * raw
+        return min(max(raw + jitter, 0.1), policy.max_delay)
+    # Full (AWS) jitter: spread over [0.1, min(raw, max_delay)]
+    return max(random.uniform(0.1, min(raw, policy.max_delay)), 0.1)

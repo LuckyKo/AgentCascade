@@ -14,6 +14,8 @@ ARCHITECTURE NOTE (documenting current state):
   decoupled in the retry refactoring.
 """
 
+from dataclasses import replace
+
 import pytest
 
 import agent_cascade.api_router_pkg.router as router_mod
@@ -518,10 +520,10 @@ class TestPerformanceBaseline:
         # Exactly one backoff: after the single failure, before the successful retry.
         delays = record_backoff_delays
         assert len(delays) == 1, f"Expected exactly 1 backoff delay, got {len(delays)}: {delays}"
-        # First-retry backoff ≈ base_delay * 2^0 = 1.0s (jitter adds up to +10%). Tolerant
-        # bound absorbs jitter; deterministic (no wall clock).
-        assert delays[0] >= 0.9 and delays[0] <= 1.2, \
-            f"First-retry backoff {delays[0]:.3f}s outside expected [0.9, 1.2]s"
+        # First-retry backoff is full (AWS) jitter over [0.1, raw], with
+        # raw = base_delay * 2^0 = 1.0s. Deterministic bound (no wall clock).
+        assert 0.1 <= delays[0] <= 1.0, \
+            f"First-retry backoff {delays[0]:.3f}s outside full-jitter bound [0.1, 1.0]s"
         print(f"[BASELINE] One retry: backoff={delays[0]:.3f}s")
 
     def test_latency_max_retries_exhausted(self, record_backoff_delays):
@@ -623,10 +625,17 @@ class TestBackoffTiming:
         """Router uses exponential backoff: base_delay * 2^(attempt-1), capped at max_delay.
 
         Deterministic: asserts on REQUESTED backoff delays (via patched
-        _interruptible_sleep) instead of wall-clock elapsed time. POLICY_DEFAULT:
-        base_delay=1.0, max_delay=8.0, jitter_factor=0.1.
+        _interruptible_sleep) instead of wall-clock elapsed time. Uses POLICY_DEFAULT
+        (base_delay=1.0, max_delay=8.0) but overrides to the legacy jitter_mode="plus"
+        below, so the additive-growth invariant this baseline documents holds
+        deterministically (full jitter can dip below raw).
         """
         router = make_router()
+        # Pin to legacy additive (plus) jitter so this baseline deterministically proves
+        # exponential growth. Under the default full (AWS) jitter a delay can fall
+        # BELOW raw, so max(delays) is no longer >= base*2^(n-1). Full jitter's spread is
+        # covered by range assertions in test_retry_policy.py.
+        router.policy = replace(router.policy, jitter_mode='plus')
         ep = APIEndpoint(
             id='ep-backoff',
             name='Backoff-EP',
@@ -666,13 +675,83 @@ class TestBackoffTiming:
             f"Backoff delay exceeded cap {max_delay}s: {delays}"
 
         # Exponential growth: the 3rd retry of a max_retries=3 endpoint must reach
-        # ~base * 2^(3-1) = base*4. Jitter only ADDS (never subtracts), so the largest
-        # recorded delay is deterministically >= that value. This proves exponential growth
-        # without depending on exact counts or cross-endpoint ordering (the fallback resets
-        # its counter, so the flat list is NOT globally non-decreasing).
+        # ~base * 2^(3-1) = base*4. With plus-mode jitter pinned above, jitter only ADDS
+        # (never subtracts), so the largest recorded delay is deterministically >= that
+        # value. This proves exponential growth without depending on exact counts or
+        # cross-endpoint ordering (the fallback resets its counter, so the flat list is
+        # NOT globally non-decreasing).
         expected_third_retry = base * (2 ** 2)  # attempt index 2 → calculate_backoff(3) = base*4
         assert max(delays) >= expected_third_retry, \
             (f"Backoff did not grow exponentially: max delay {max(delays):.3f}s < "
              f"{expected_third_retry:.3f}s; delays={[round(d, 3) for d in delays]}")
         print(f"[BASELINE] Backoff exponential: {[round(d, 3) for d in delays]} "
               f"(base={base}, cap={max_delay})")
+
+    def test_router_backoff_full_jitter(self, record_backoff_delays):
+        """Router-level integration coverage for the default full-jitter backoff.
+
+        Sibling to ``test_router_backoff_exponential`` (which PINS the legacy
+        ``jitter_mode="plus"`` to prove additive growth). This drives ``calculate_backoff``
+        through the real router retry path with the PRODUCTION DEFAULT
+        ``jitter_mode="full"`` — no pin — and asserts the observed delays land in the
+        documented full-jitter band. Under full jitter
+        (``max(random.uniform(0.1, min(raw, max_delay)), 0.1)``) each delay falls in
+        ``[0.1, min(raw, max_delay)]``, so across all attempts every delay is within
+        ``[0.1, max_delay]`` — unlike plus mode, full jitter may dip BELOW raw, so no
+        per-attempt lower bound above 0.1 is asserted. The probability-1 "dips below raw"
+        check (``min(delays) < base``) is the deterministic backbone: it proves the jitter
+        de-synchronizes retries with zero flake risk, independent of draw count.
+
+        Closes reviewer nit #3 on BUG_0370: full jitter was unit-covered in
+        ``test_retry_policy.py`` but had no router-level integration test.
+        """
+        router = make_router()
+        # jitter_mode intentionally NOT pinned: "full" is the RetryPolicy default
+        # (retry_policy.py: jitter_mode: str = "full"), so this exercises the production
+        # default path end-to-end.
+        ep = APIEndpoint(
+            id='ep-backoff-full',
+            name='Backoff-Full-EP',
+            api_base='http://localhost:9980/v1',
+            model='backoff-model',
+            max_retries=3,
+        )
+        router.add_endpoint(ep)
+        # set_agent_priorities makes the chain deterministic regardless of
+        # config/api_endpoints.json state (see test_router_backoff_exponential).
+        router.set_agent_priorities('coder', [ep.id])
+
+        llm = MockLLM(fail_count=10, fail_type=ConnectionError)
+
+        def do_call(llm_cfg):
+            result = llm.chat(messages=[{'role': 'user', 'content': 'hi'}], stream=True)
+            list(result)
+            return True
+
+        # Drive the router once to accumulate full-jitter draws.
+        with pytest.raises(RuntimeError):
+            router.call_with_fallback('coder', do_call, agent_instance_name='backoff-full-test')
+
+        delays = record_backoff_delays
+        base = router.policy.base_delay      # 1.0 (POLICY_DEFAULT)
+        max_delay = router.policy.max_delay  # 8.0 (POLICY_DEFAULT)
+
+        assert len(delays) >= 3, \
+            f"Expected at least 3 backoff delays for max_retries=3, got {len(delays)}: {delays}"
+
+        # Full-jitter bounds re-derived from the function's full branch: every draw is in
+        # [0.1, min(raw, max_delay)], hence globally within [0.1, max_delay].
+        assert all(0.1 <= d <= max_delay for d in delays), \
+            f"Full-jitter delay escaped [0.1, {max_delay}]s: {[round(d, 3) for d in delays]}"
+
+        # Non-degeneracy — deterministic backbone: under full jitter the FIRST delay is
+        # uniform(0.1, base_delay=1.0), ALWAYS strictly below the legacy plus-mode floor of
+        # raw=base_delay (plus jitter never subtracts). A regression to additive behavior
+        # would push every delay >= base_delay, so this pins "full jitter dips below raw"
+        # with probability 1, independent of how many draws the failover path emits.
+        assert min(delays) < base, \
+            (f"Full jitter degenerate — min delay {min(delays):.3f}s >= base {base}s; "
+             f"delays={[round(d, 3) for d in delays]}")
+
+        print(f"[BASELINE] Backoff full jitter: {[round(d, 3) for d in delays]} "
+              f"(base={base}, cap={max_delay}, min={min(delays):.3f})")

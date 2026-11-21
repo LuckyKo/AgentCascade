@@ -1648,7 +1648,7 @@ A **durable, cross-restart per-skill clock** — not a per-session counter (`man
 
 ### 10.6 Precision Demotion (in the hint gate)
 
-Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` triggers a **re-rank, not a hard drop** (`memory_hint/manager.py:900-927`, knobs `settings.py:762-770`). A skill's effective order is `score × w` where `w = max(SKILL_PRECISION_FLOOR, min(1, (loads+K)/(hints+K)))` with `K=SKILL_PRECISION_K=1.0` (Laplace smoothing) and `SKILL_PRECISION_FLOOR=0.35`. A heavy-hinted but rarely-loaded skill is softly demoted (surfaced lower) — but never buried below `FLOOR × score`, so a rare-but-correct skill stays promotable. When `SKILL_PRECISION_WEIGHT=0` the layer is a no-op and order stays score-descending.
+Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` triggers a **re-rank, not a hard drop** (`memory_hint/manager.py:900-927`, knobs `settings.py:1041-1050`). A skill's effective order is `score × w` where `w = max(SKILL_PRECISION_FLOOR, min(1, (loads+K)/(hints+K)))` with `K=SKILL_PRECISION_K=1.0` (Laplace smoothing) and `SKILL_PRECISION_FLOOR=0.10`. A heavy-hinted but rarely-loaded skill is softly demoted (surfaced lower) — but never buried below `FLOOR × score`, so a rare-but-correct skill stays promotable. When `SKILL_PRECISION_WEIGHT=0` the layer is a no-op and order stays score-descending.
 
 ### 10.7 Settings (knobs)
 
@@ -1659,8 +1659,8 @@ Inside the §9.5 skill gate, after dedup/cooldown, `SKILL_PRECISION_WEIGHT` trig
 | `memory_hint_skill_autoload_enabled` | `True` | On/off for the auto-load above. |
 | `SKILL_ACTIVE_TARGET_K` | `1.0` | Multiplier for the value-driven target `round(K × n_valuable)` (`settings.py:906`); continuity multiplier (OD-2). |
 | `SKILL_ACTIVE_MIN_CAP` / `SKILL_ACTIVE_MAX_CAP` | `20` / `200` | Hard **eviction** floor/ceiling only (`settings.py:907-908`); they do NOT size the pool — see the value-bar note in §10.4. |
-| `SKILL_PRECISION_WEIGHT` | `1` | Enable the hint re-rank (§10.6); `0` = off (`settings.py:762`). |
-| `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.35` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:766,770`). |
+| `SKILL_PRECISION_WEIGHT` | `1` | Enable the hint re-rank (§10.6); `0` = off (`settings.py:1041`). |
+| `SKILL_PRECISION_K` / `SKILL_PRECISION_FLOOR` | `1.0` / `0.10` | Smoothing pseudo-count / floor weight for the re-rank (`settings.py:1045,1050`). |
 | `CANDIDATE_MIN_RATINGS` / `CANDIDATE_MAX_PENDING_DAYS` | `5` / `14` | Decision-gate bar for promoting/discarding an update candidate (`settings.py:921-928`). |
 | `AGENT_CASCADE_SKILLS_METRICS_FILE` | `agents/global/skills-metrics.json` | Env override for the durable metrics store path; empty/unset = default. The test suite points it at a per-test temp file so the live store is never written. |
 | `AGENT_CASCADE_DEBUG_SLOTS` | `0` (off) | Env switch to emit redundant per-module slot traces (`EndpointScheduler.acquire` internals, `SLOT_REACQUIRED`, router recovery, `last_released_endpoint`, `SECURITY_SLOT_*`), the per-turn `[MEMORY_HINT]` submit line, and toggle-off `[STATE_SAVE_SKIP]`/`[STATE_RESTORE_SKIP]` repeats. Set to `1` to re-enable. Off for routine DEBUG runs; deliberately independent of `AGENT_CASCADE_DEBUG` (`settings.py`; gated sites: `scheduler.py`, `engine/slot_lifecycle.py`, `slot_queue.py`, `security_handler.py`, `memory_hint/manager.py`). |

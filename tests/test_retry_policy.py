@@ -36,6 +36,10 @@ class TestRetryPolicyDefaults:
     def test_default_endpoint_max_retries(self):
         assert RetryPolicy().endpoint_max_retries == 1
 
+    def test_default_jitter_mode_is_full(self):
+        """Default jitter is full (AWS) for thundering-herd de-sync."""
+        assert RetryPolicy().jitter_mode == 'full'
+
     def test_policy_is_frozen(self):
         """RetryPolicy is frozen (immutable) to prevent accidental mutation."""
         policy = RetryPolicy()
@@ -295,64 +299,82 @@ class TestIsDeterministicClientErrorHelper:
 
 
 class TestCalculateBackoffExponentialGrowth:
-    """Verify exponential backoff formula without jitter interference."""
+    """Verify the full-jitter ceiling grows exponentially (1→2→4→8) per attempt.
+
+    Full jitter randomises within [0.1, min(raw, max_delay)], so we assert the
+    deterministic ceiling (raw-driven) rather than a point value.
+    """
 
     def test_attempt_1(self):
-        """First retry: base_delay * 2^0 = base_delay."""
-        policy = RetryPolicy(base_delay=1.0, jitter_factor=0.0)
-        result = calculate_backoff(1, policy)
-        assert result == pytest.approx(1.0)
+        """First retry: ceiling = base_delay * 2^0 = base_delay."""
+        policy = RetryPolicy(base_delay=1.0)
+        raw = policy.base_delay * 2 ** (1 - 1)  # 1.0
+        assert 0.1 <= calculate_backoff(1, policy) <= min(raw, policy.max_delay)
 
     def test_attempt_2(self):
-        """Second retry: base_delay * 2^1 = 2 * base_delay."""
-        policy = RetryPolicy(base_delay=1.0, jitter_factor=0.0)
-        result = calculate_backoff(2, policy)
-        assert result == pytest.approx(2.0)
+        """Second retry: ceiling = base_delay * 2^1 = 2 * base_delay."""
+        policy = RetryPolicy(base_delay=1.0)
+        raw = policy.base_delay * 2 ** (2 - 1)  # 2.0
+        assert 0.1 <= calculate_backoff(2, policy) <= min(raw, policy.max_delay)
 
     def test_attempt_3(self):
-        """Third retry: base_delay * 2^2 = 4 * base_delay."""
-        policy = RetryPolicy(base_delay=1.0, jitter_factor=0.0)
-        result = calculate_backoff(3, policy)
-        assert result == pytest.approx(4.0)
+        """Third retry: ceiling = base_delay * 2^2 = 4 * base_delay."""
+        policy = RetryPolicy(base_delay=1.0)
+        raw = policy.base_delay * 2 ** (3 - 1)  # 4.0
+        assert 0.1 <= calculate_backoff(3, policy) <= min(raw, policy.max_delay)
 
     def test_attempt_4(self):
-        """Fourth retry: base_delay * 2^3 = 8 * base_delay."""
-        policy = RetryPolicy(base_delay=1.0, jitter_factor=0.0)
-        result = calculate_backoff(4, policy)
-        assert result == pytest.approx(8.0)
+        """Fourth retry: ceiling = base_delay * 2^3 = 8 * base_delay (== max_delay)."""
+        policy = RetryPolicy(base_delay=1.0)
+        raw = policy.base_delay * 2 ** (4 - 1)  # 8.0
+        assert 0.1 <= calculate_backoff(4, policy) <= min(raw, policy.max_delay)
 
     def test_custom_base_delay(self):
-        """Backoff scales with custom base_delay."""
-        policy = RetryPolicy(base_delay=0.5, jitter_factor=0.0)
-        assert calculate_backoff(1, policy) == pytest.approx(0.5)
-        assert calculate_backoff(2, policy) == pytest.approx(1.0)
-        assert calculate_backoff(3, policy) == pytest.approx(2.0)
+        """Backoff ceiling scales with custom base_delay (0.5 → 0.5, 1.0, 2.0)."""
+        policy = RetryPolicy(base_delay=0.5)
+        for attempt in (1, 2, 3):
+            raw = policy.base_delay * 2 ** (attempt - 1)
+            assert 0.1 <= calculate_backoff(attempt, policy) <= min(raw, policy.max_delay)
+
+    def test_ceiling_grows_discriminating(self):
+        """A constant-ceiling regression (e.g. always returning base_delay) must fail.
+
+        Over N draws of attempt-3 (raw=4.0), at least one draw must exceed the
+        attempt-1 ceiling (raw=1.0). A constant-ceiling bug returning a fixed value
+        in [0.1, 1.0] would fail this; real full jitter passes with P≈1.
+        """
+        policy = RetryPolicy(base_delay=1.0)  # max_delay=8.0
+        ceil_3 = min(1.0 * 4, policy.max_delay)  # 4.0
+        ceil_1 = min(1.0 * 1, policy.max_delay)  # 1.0
+        results = [calculate_backoff(3, policy) for _ in range(100)]
+        assert max(results) > ceil_1, \
+            f"Ceiling does not grow: max of 100 attempt-3 draws is {max(results):.3f} <= {ceil_1}"
 
 
 class TestCalculateBackoffJitter:
-    """Verify jitter adds positive-only randomness within expected bounds."""
+    """Verify full (AWS) jitter spreads delays across the raw-driven range."""
 
     def test_jitter_stays_within_bounds(self):
-        """Jitter should keep result between raw and raw*(1+jitter_factor) — never reduces delay."""
-        # Use max_delay high enough that jitter bounds are not affected by capping
-        policy = RetryPolicy(base_delay=1.0, max_delay=100.0, jitter_factor=0.1)  # +10% max
+        """Full jitter keeps every draw within [0.1, min(raw, max_delay)]."""
+        # max_delay high enough that the cap does not clamp the ceiling
+        policy = RetryPolicy(base_delay=1.0, max_delay=100.0)
         raw = 1.0  # attempt 1: 1 * 2^0
 
         # Run many times to ensure jitter is actually applied and stays in bounds
         results = [calculate_backoff(1, policy) for _ in range(100)]
 
-        lower_bound = raw  # Positive-only jitter never reduces delay
-        upper_bound = raw * (1 + policy.jitter_factor)
+        lower_bound = 0.1
+        upper_bound = min(raw, policy.max_delay)
 
-        # All results should be within jitter bounds (max_delay is high enough not to interfere)
         assert all(lower_bound <= r <= upper_bound for r in results), \
             f"Some results outside [{lower_bound}, {upper_bound}]"
 
     def test_jitter_produces_variation(self):
-        """Jitter should produce different values (not always the same)."""
-        policy = RetryPolicy(base_delay=1.0, jitter_factor=0.5)
+        """Full jitter should produce different values (not always the same)."""
+        policy = RetryPolicy(base_delay=1.0)
 
-        # With +50% jitter, it's statistically unlikely all 50 calls return the same value
+        # Full jitter draws from uniform[0.1, raw=1.0]; it's statistically unlikely
+        # all 50 calls return the same value.
         results = [calculate_backoff(1, policy) for _ in range(50)]
         unique_results = set(results)
 
@@ -363,23 +385,23 @@ class TestCalculateBackoffCaps:
     """Verify backoff respects min and max bounds."""
 
     def test_max_delay_cap(self):
-        """Backoff never exceeds max_delay."""
-        policy = RetryPolicy(base_delay=1.0, max_delay=5.0, jitter_factor=0.0)
+        """Full-jitter ceiling is capped at max_delay regardless of attempt."""
+        policy = RetryPolicy(base_delay=1.0, max_delay=5.0)
 
-        # Attempt 4 would be 8.0, but should be capped at 5.0
-        result = calculate_backoff(4, policy)
-        assert result == pytest.approx(5.0)
+        # Attempt 4 raw=8.0 > max_delay, so every draw is capped within [0.1, 5.0]
+        results = [calculate_backoff(4, policy) for _ in range(100)]
+        assert all(0.1 <= r <= 5.0 for r in results)
 
-        # Even higher attempts stay capped
-        result = calculate_backoff(10, policy)
-        assert result == pytest.approx(5.0)
+        # Even higher attempts stay capped at max_delay
+        results = [calculate_backoff(10, policy) for _ in range(100)]
+        assert all(0.1 <= r <= 5.0 for r in results)
 
     def test_min_delay_floor(self):
         """Backoff never goes below 0.1 seconds."""
-        # Very small base_delay with negative jitter could push below 0.1
-        policy = RetryPolicy(base_delay=0.05, jitter_factor=0.9)
+        # raw = 0.05 < 0.1, so the 0.1 floor clamp dominates the whole draw range.
+        policy = RetryPolicy(base_delay=0.05)
 
-        # Run many times; even with worst-case jitter, result should be >= 0.1
+        # Every draw must respect the 0.1s floor.
         for _ in range(100):
             result = calculate_backoff(1, policy)
             assert result >= 0.1, f"Backoff {result} below minimum 0.1"
@@ -389,20 +411,37 @@ class TestCalculateBackoffIntegration:
     """End-to-end backoff behavior with realistic policy."""
 
     def test_default_policy_sequence(self):
-        """Default policy should produce reasonable delays across attempts."""
-        policy = POLICY_DEFAULT  # base_delay=1.0, max_delay=8.0, jitter_factor=0.1
+        """Default full-jitter policy keeps delays within [0.1, min(raw, max_delay)]."""
+        policy = POLICY_DEFAULT  # base_delay=1.0, max_delay=8.0
 
-        # With ±10% jitter, attempt 1 should be around 1.0s (range: ~0.9-1.1)
-        delay_1 = calculate_backoff(1, policy)
-        assert 0.8 <= delay_1 <= 1.2
+        # attempt 1 raw=1.0 → [0.1, 1.0]
+        assert 0.1 <= calculate_backoff(1, policy) <= 1.0
+        # attempt 2 raw=2.0 → [0.1, 2.0]
+        assert 0.1 <= calculate_backoff(2, policy) <= 2.0
+        # attempt 3 raw=4.0 → [0.1, 4.0]
+        assert 0.1 <= calculate_backoff(3, policy) <= 4.0
 
-        # Attempt 2 should be around 2.0s (range: ~1.8-2.2)
-        delay_2 = calculate_backoff(2, policy)
-        assert 1.6 <= delay_2 <= 2.4
 
-        # Attempt 3 should be around 4.0s (range: ~3.6-4.4)
-        delay_3 = calculate_backoff(3, policy)
-        assert 3.4 <= delay_3 <= 5.0
+class TestCalculateBackoffPlusMode:
+    """Legacy additive (plus) jitter: raw + uniform(0, jitter_factor) * raw.
+
+    Retained so the old behaviour stays covered and reversible via jitter_mode="plus".
+    """
+
+    def test_calculate_backoff_plus_mode(self):
+        """Plus mode never reduces delay below raw and stays within raw*(1+jitter_factor)."""
+        policy = RetryPolicy(base_delay=1.0, max_delay=100.0,
+                             jitter_factor=0.1, jitter_mode='plus')
+        raw = 1.0  # attempt 1: 1 * 2^0
+
+        results = [calculate_backoff(1, policy) for _ in range(100)]
+        lower_bound = raw  # positive-only jitter never reduces delay
+        upper_bound = raw * (1 + policy.jitter_factor)
+
+        assert all(lower_bound <= r <= upper_bound for r in results), \
+            f"Plus-mode results outside [{lower_bound}, {upper_bound}]"
+        # Jitter still produces variation
+        assert len(set(results)) > 1
 
 
 # ── Policy creation from settings ───────────────────────────────────────────
