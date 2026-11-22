@@ -41,6 +41,7 @@ from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_C
                                      MEMORY_BANDIT_TARGET_FIRE, MEMORY_BANDIT_GAIN,
                                      MEMORY_BANDIT_THETA_MAX, MEMORY_BANDIT_M_FLOOR)
 
+from .handle import HintHandle
 from .matcher import MemoryMatcher
 from .skill_gate import describe_dropped, filter_stopword_only_names
 from .vault import VaultIndex, discover_vaults
@@ -273,6 +274,16 @@ class MemoryHintManager:
         self._memory_stats = {}                     # merged in-memory lesson ledger mirror (rel → {reads, hints})
         self._memory_stats_ready = False            # mirror seeded flag; rescan_vaults / first weight>0 clears it
 
+        # BUG_0382 delivery-mode counters (in-memory, re-seed per process — like the
+        # bandit state above). 'inline' = same-turn SYSTEM note claimed at the post-Phase-4
+        # peek (engine increments); 'deferred' = turn-B tool-warning delivery (the worker's
+        # _deliver increments, covering BOTH the legacy non-inline path and the inline
+        # peek-abandoned path, since every _deliver call rides the deferred/turn-B queue).
+        # Plain int += only: a rare lost increment on a telemetry counter is acceptable and
+        # avoids a new lock on the hot delivery path.
+        self._inline_delivered = 0
+        self._deferred_delivered = 0
+
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
 
@@ -317,7 +328,7 @@ class MemoryHintManager:
 
     # ── Producer (turn-loop hook) ────────────────────────────────────────────
 
-    def submit(self, instance_name: str, query: str, agent_class: str, turn: int = -1) -> None:
+    def submit(self, instance_name: str, query: str, agent_class: str, turn: int = -1) -> 'Optional[HintHandle]':
         """Non-blocking submit of a hint job. Most-recent-wins per instance.
 
         A newer submit REPLACES any still-pending job for the same instance: the pending
@@ -325,9 +336,14 @@ class MemoryHintManager:
         may therefore hold stale duplicates (queue.Queue can't remove arbitrary items);
         the worker filters them by comparing each popped job's generation against the
         current one, so only the most recent submission for an instance is ever processed.
+
+        BUG_0382 (same-turn delivery): when ``settings.MEMORY_HINT_INLINE`` is True, the
+        job carries a fresh ``HintHandle`` and this method RETURNS it (the caller stashes
+        it on the instance for the post-Phase-4 peek). When inline is OFF it returns
+        ``None`` and attaches no extra key to the job — the path is byte-identical to today.
         """
         if not (instance_name and query and query.strip()):
-            return
+            return None
         now = time.monotonic()
         with self._pending_lock:
             gen = self._generation.get(instance_name, 0) + 1
@@ -340,6 +356,13 @@ class MemoryHintManager:
                 'turn': turn,
                 '_gen': gen,
             }
+            handle = None
+            if settings.MEMORY_HINT_INLINE:
+                # Same-turn mode: hand the caller a non-blocking completion handle. The
+                # worker marks it ready once hint_text is final; the engine peek claims
+                # inline (SYSTEM note) or abandons (defers to turn B). See plan §3/§3.1.
+                handle = HintHandle(instance_name, gen)
+                job['handle'] = handle
             # Replace any existing pending job for this instance (most-recent-wins).
             self._pending[instance_name] = job
         try:
@@ -349,6 +372,29 @@ class MemoryHintManager:
                              instance_name, turn, len(query))
         except Exception as e:  # noqa: BLE001 — never block/raise on the main path
             logger.debug('[MEMORY_HINT] submit failed for %s: %s', instance_name, e)
+        return handle
+
+    def forget_instance(self, instance_name: str) -> None:
+        """Drop any pending hint job for a dismissed/terminated instance (BUG_0382 §5).
+
+        Cancels a never-processed or mid-flight job so it cannot linger in the pending
+        set, and marks its handle (if any) 'deferred'+abandoned so a worker that finishes
+        RIGHT after dismissal does not queue a tool-warning for a dead instance — defense
+        in depth alongside the worker's own get_instance→None drop. Best-effort; the call
+        sites guard it. No hang risk: nothing here blocks.
+        """
+        try:
+            with self._pending_lock:
+                job = self._pending.pop(instance_name, None)
+                self._generation.pop(instance_name, None)
+            h = (job or {}).get('handle') if job else None
+            if h is not None:
+                with h.lock:
+                    if h.owner is None:  # don't overwrite a peek that already claimed inline
+                        h.abandoned = True
+                        h.owner = 'deferred'
+        except Exception as e:  # noqa: BLE001 — best-effort, never break dismissal/terminate
+            logger.debug('[MEMORY_HINT] forget_instance failed for %s: %s', instance_name, e)
 
     # ── Vault index management ───────────────────────────────────────────────
 
@@ -518,6 +564,12 @@ class MemoryHintManager:
             'skill_threshold': skill_threshold,
             'skill_autoload_enabled': skill_autoload_enabled,
             'skill_autoload_threshold': skill_autoload_threshold,
+            # BUG_0382: same-turn delivery is active iff the module-level sub-toggle AND
+            # the master memory_hint_enabled gate are both on. _process_job reads this to
+            # decide whether to mark the job's handle ready (the handle only exists when
+            # inline was on at submit time, so this re-check just keeps the worker in sync
+            # with a UI toggle that flipped mid-flight).
+            'inline': bool(settings.MEMORY_HINT_INLINE and cfg.get('memory_hint_enabled', False)),
         }
 
     def _current_floor(self, override: float) -> float:
@@ -922,6 +974,39 @@ class MemoryHintManager:
                         self._pending.pop(name, None)
                         self._generation.pop(name, None)
 
+    def _finalize_inline_handle(self, job: dict, inst, name: str, hint_text: str) -> None:
+        """Resolve one hint job's delivery mode: claim-inline vs queue-deferred.
+
+        BUG_0382 §3/§3.1. When the job carries a completion handle (inline mode), the
+        worker sets ``ready`` + makes the defer-decision in ONE ``h.lock`` region, so it
+        is mutually exclusive with the engine peek's whole claim/abandon decision:
+
+        - If the peek already ran-and-abandoned this job (inline lost), own it as
+          'deferred' and queue it onto the tool-warning path (turn B) — the existing
+          behavior.
+        - If the peek has not run yet, leave the job unowned; the peek will claim inline
+          (or re-abandon under the SAME lock) — exactly one outcome is guaranteed.
+
+        When there is no handle (inline OFF, or the handle was already claimed), fall back
+        to the legacy _deliver path. ``_deliver`` runs OUTSIDE ``h.lock`` so the worker
+        lock is never coupled to ``inst._compression_lock`` (plan §8.3).
+        """
+        h = job.get('handle')
+        if h is None:
+            self._deliver(inst, name, hint_text, mode='deferred')
+            return
+        need_queue = False
+        with h.lock:
+            h.text = hint_text
+            h.ready.set()
+            # Only queue the legacy tool-warning if the peek already ran-and-abandoned this
+            # job. If the peek has not run, leave it unowned — it will claim inline.
+            if h.owner is None and h.abandoned:
+                h.owner = 'deferred'
+                need_queue = True
+        if need_queue:
+            self._deliver(inst, name, hint_text, mode='deferred')
+
     def _process_job(self, job: dict) -> None:
         name = job['instance_name']
         query = job['query']
@@ -1046,7 +1131,7 @@ class MemoryHintManager:
         # here must never break the hint path — _maybe_autoload_skills swallows all exceptions.
         self._maybe_autoload_skills(inst, name, skill_names, skill_counts, loaded, settings)
 
-        self._deliver(inst, name, hint_text)
+        self._finalize_inline_handle(job, inst, name, hint_text)
 
         # BUG_0311: book the posted hint for observability. Single choke point — every
         # non-empty hint passes through here, so this counts hints and captures the exact
@@ -1650,13 +1735,21 @@ class MemoryHintManager:
             lines.append(line)
         return header + '\n' + '\n'.join(lines)
 
-    def _deliver(self, inst, name: str, hint_text: str) -> None:
-        """Queue the hint via the existing tool-warning path (NO user injection)."""
+    def _deliver(self, inst, name: str, hint_text: str, *, mode: str = 'deferred') -> None:
+        """Queue the hint via the existing tool-warning path (NO user injection).
+
+        mode tags the INFO delivery line for BUG_0382 observability so inline vs deferred
+        counts stay comparable. Every _deliver call rides the deferred/turn-B tool-warning
+        queue (the legacy non-inline path AND the inline peek-abandoned path), so the
+        deferred counter is bumped here; the inline counter is bumped by the engine's peek
+        when it claims a ready hint.
+        """
         try:
+            self._deferred_delivered += 1
             from agent_cascade.operation_manager.path_security import _queue_tool_warning
             _queue_tool_warning(self._pool, name, hint_text)
-            logger.info('[MEMORY_HINT] %s: queued hint (%d entries):\n%s',
-                        name, hint_text.count('\n  - '), hint_text)
+            logger.info('[MEMORY_HINT] %s: queued hint (mode=%s) (%d entries):\n%s',
+                        name, mode, hint_text.count('\n  - '), hint_text)
         except Exception as e:  # noqa: BLE001 — best-effort delivery
             logger.warning('[MEMORY_HINT] delivery failed for %s: %s', name, e)
 

@@ -30,6 +30,7 @@ from .manager import (
     SKILL_JUNK_MIN,
     SKILL_REF_TOKENS,
 )
+from .handle import HintHandle
 from .matcher import MemoryMatcher
 from .skill_gate import (
     MIN_CONTENT_TERMS,
@@ -44,6 +45,7 @@ from .stats import bump_read_count, bump_hint_count, load_stats
 
 __all__ = [
     'MemoryHintManager',
+    'HintHandle',
     'EWMA_ALPHA',
     'FLOOR_MIN',
     'FLOOR_SEED',

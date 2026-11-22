@@ -24,6 +24,7 @@ from agent_cascade.memory_hint import (
     HINT_COOLDOWN_SECONDS,
     JOB_TTL_SECONDS,
     MAX_HINTS_PER_TURN,
+    HintHandle,
     MemoryHintManager,
     MemoryMatcher,
     SKILL_EWMA_ALPHA,
@@ -35,6 +36,8 @@ from agent_cascade.memory_hint import (
     SKILL_JUNK_MIN,
     SKILL_REF_TOKENS,
 )
+from agent_cascade.engine.memory_hint import MemoryHintMixin
+from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.memory_hint.stats import bump_read_count, load_stats
 from agent_cascade.memory_hint.skill_gate import (
     filter_stopword_only_names,
@@ -2863,3 +2866,314 @@ class TestSkillLengthDecay:
         # Results should be sorted by score descending.
         scores = [s for _, s in results]
         assert scores == sorted(scores, reverse=True)
+
+
+# ── BUG_0382: same-turn, opportunistic hint delivery ──────────────────────────
+
+class _AttachInst:
+    """Minimal instance exposing only what the inline peek reads/writes.
+
+    _pending_hint_job is the engine-thread-only handle the submit hook stashes; the peek
+    reads it, claims it, and clears it. conversation is appended to by the recorded
+    _append_and_log_to_llm so the test can assert the SYSTEM note landed.
+    """
+
+    def __init__(self, name='w'):
+        self.instance_name = name
+        self.conversation = []
+        self._pending_hint_job = None
+
+
+class _InlineFakeEngine(MemoryHintMixin):
+    """Engine double that drives the real _maybe_attach_inline_memory_hint.
+
+    Only the outermost transport is replaced: _append_and_log_to_llm records exactly the
+    message the peek would hand to the append path (and mirrors it into conversation +
+    llm_messages), so the test asserts role==SYSTEM + exact text — the R1 invariant —
+    without the full logger/cache machinery. The peek logic itself is the production
+    method (inherited from MemoryHintMixin), not a stub.
+    """
+
+    def __init__(self, pool):
+        self.pool = pool
+        self.appended = []  # list of (instance, Message)
+
+    def _append_and_log_to_llm(self, instance, msg, llm_messages, *, lock_held=False):
+        self.appended.append((instance, msg))
+        instance.conversation.append(msg)
+        if llm_messages is not None:
+            llm_messages.append(msg)
+
+
+class TestBug0382SameTurn:
+    """Same-turn handle protocol: peek/worker claim race, lifecycle, OFF parity."""
+
+    @pytest.fixture(autouse=True)
+    def _inline_default_on(self, monkeypatch):
+        """Default MEMORY_HINT_INLINE ON for this class.
+
+        The production _maybe_attach_inline_memory_hint now early-returns when the flag is
+        False (OFF-path purity, plan §177), so the inline-path tests below must run with it
+        on. Tests that verify OFF behavior override this to False explicitly.
+        """
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+
+    @staticmethod
+    def _mgr_for_finalize(tmp_path):
+        """Real manager + real _deliver plumbing (no LLM) for finalize-helper tests."""
+        v = tmp_path / 'proj' / '.agent_lessons'
+        v.mkdir(parents=True)
+        inst = _FakeInst()
+        pool = MagicMock()
+        pool.llm_cfg = {'memory_hint_enabled': True,
+                        'memory_hint_max_entries': 3,
+                        'memory_hint_cooldown_seconds': 600,
+                        'memory_hint_query_chars': 1000}
+        pool.operation_manager = _make_om(v.parent)
+        pool.get_instance.return_value = inst
+        mgr = MemoryHintManager(pool)
+        return mgr, inst
+
+    # ── Peek path ────────────────────────────────────────────────────────────
+
+    def test_ready_claim_inline_appends_system_note(self):
+        """A ready, non-empty handle claims inline and appends it as a SYSTEM note."""
+        eng = _InlineFakeEngine(MagicMock())
+        inst = _AttachInst('w')
+        h = HintHandle('w', 1)
+        h.text = '[MEMORY HINT] inline lesson'
+        h.ready.set()
+        inst._pending_hint_job = h
+        msgs = []
+        eng._maybe_attach_inline_memory_hint(inst, msgs, msgs)
+
+        # Exactly one append, the EXACT worker text, and as a SYSTEM (never USER) note.
+        assert len(eng.appended) == 1
+        _, msg = eng.appended[0]
+        assert msg.role == SYSTEM
+        assert msg.role != USER
+        assert msg.content == '[MEMORY HINT] inline lesson'
+        # Visible to the next action: in conversation AND the local llm_messages copy.
+        assert inst.conversation[-1].role == SYSTEM
+        assert msgs[-1].role == SYSTEM
+        # Claimed + ref cleared.
+        assert h.owner == 'inline'
+        assert inst._pending_hint_job is None
+
+    def test_not_ready_defers_no_block(self):
+        """Not-ready → abandon (no append), no block; the worker still owns deferred."""
+        eng = _InlineFakeEngine(MagicMock())
+        inst = _AttachInst('w')
+        h = HintHandle('w', 1)  # ready never set
+        inst._pending_hint_job = h
+        t0 = time.monotonic()
+        eng._maybe_attach_inline_memory_hint(inst, [], [])
+        delta = time.monotonic() - t0
+
+        assert eng.appended == []          # nothing attached this turn
+        assert h.abandoned is True          # opt-out flag for the worker
+        assert h.owner is None              # worker still queues deferred on completion
+        assert inst._pending_hint_job is None
+        assert delta < 0.005               # non-blocking peek (single is_set())
+
+    def test_ready_empty_text_claims_inline_no_append(self):
+        """A ready-but-empty handle claims inline (so the worker won't queue empty text)."""
+        eng = _InlineFakeEngine(MagicMock())
+        inst = _AttachInst('w')
+        h = HintHandle('w', 1)
+        h.text = ''
+        h.ready.set()
+        inst._pending_hint_job = h
+        eng._maybe_attach_inline_memory_hint(inst, [], [])
+        assert eng.appended == []
+        assert h.owner == 'inline'
+        assert inst._pending_hint_job is None
+
+    def test_attach_stale_instance_is_noop(self):
+        """A handle stashed for a different instance is ignored and left untouched."""
+        eng = _InlineFakeEngine(MagicMock())
+        inst = _AttachInst('w')
+        h = HintHandle('other', 1)
+        h.text = 'x'
+        h.ready.set()
+        inst._pending_hint_job = h
+        eng._maybe_attach_inline_memory_hint(inst, [], [])
+        assert eng.appended == []
+        assert h.owner is None              # not claimed by the wrong instance
+        assert inst._pending_hint_job is h  # ref not cleared (returned before resolve)
+
+    def test_feature_off_attach_is_noop(self, monkeypatch):
+        """OFF path (MEMORY_HINT_INLINE=False) → attach never reads the handle; pure no-op.
+
+        Strengthened for FIX 2: even with a READY handle stashed, the flag-based early
+        return must skip processing entirely (no append, no owner claim) — proving the OFF
+        path neither reads nor acts on any inline state.
+        """
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', False)
+        eng = _InlineFakeEngine(MagicMock())
+        inst = _AttachInst('w')
+        h = HintHandle('w', 1)
+        h.text = '[MEMORY HINT] should not appear'
+        h.ready.set()
+        inst._pending_hint_job = h
+        eng._maybe_attach_inline_memory_hint(inst, [], [])
+        assert eng.appended == []
+        assert inst.conversation == []
+        assert h.owner is None              # guard returned before the lock — never claimed
+
+    # ── Worker finalize path ─────────────────────────────────────────────────
+
+    def test_worker_defers_when_abandoned(self, tmp_path):
+        """§3.1 case 1: peek abandoned earlier → worker queues the deferred tool-warning."""
+        mgr, inst = self._mgr_for_finalize(tmp_path)
+        h = HintHandle('w', 1)
+        h.abandoned = True
+        h.owner = None
+        mgr._finalize_inline_handle({'handle': h}, inst, 'w', '[MEMORY HINT] deferred')
+        assert len(inst._tool_warnings) == 1
+        assert '[MEMORY HINT] deferred' in inst._tool_warnings[0]
+        assert h.owner == 'deferred'
+        assert mgr._deferred_delivered == 1
+        assert mgr._inline_delivered == 0
+
+    def test_worker_does_not_double_queue_when_inline_claimed(self, tmp_path):
+        """§3.1 case 2 tail: already inline-claimed → worker must NOT queue deferred."""
+        mgr, inst = self._mgr_for_finalize(tmp_path)
+        h = HintHandle('w', 1)
+        h.owner = 'inline'
+        h.ready.set()
+        mgr._finalize_inline_handle({'handle': h}, inst, 'w', '[MEMORY HINT] dup')
+        assert inst._tool_warnings == []
+        assert mgr._deferred_delivered == 0
+
+    def test_no_handle_falls_back_to_legacy_deliver(self, tmp_path):
+        """No handle (inline OFF) → the finalize helper just queues via the legacy path."""
+        mgr, inst = self._mgr_for_finalize(tmp_path)
+        mgr._finalize_inline_handle({}, inst, 'w', '[MEMORY HINT] legacy')
+        assert len(inst._tool_warnings) == 1
+        assert mgr._deferred_delivered == 1
+
+    # ── The claim race (§3.1) ────────────────────────────────────────────────
+
+    # Note on deterministic coverage (FIX 1): a "0-deliveries-under-a-lock-free-`ready`-
+    # read" reproduction is deliberately NOT written against the production peek. The peek's
+    # `ready` read AND its abandoned/owner commit are ONE uninterruptible `h.lock` region
+    # (engine/memory_hint.py), so the original lost-hint race (a stale lock-free read) is
+    # structurally unreachable through the real method — exercising it would require a
+    # deliberately-buggy peek variant in-test (fragile; tests non-production code). Instead:
+    # the deterministic test below pins the worker-first→inline endpoint (total==1), the
+    # deferred endpoint is pinned by test_worker_defers_when_abandoned /
+    # test_not_ready_defers_no_block, the 200× threaded test below exercises the real race
+    # window, and correctness of the in-lock `ready` re-check is verified by direct read.
+    def test_interleaving4_deterministic_no_lost_hint(self, tmp_path):
+        """§3.1 case 4 result: worker completes first (no queue), peek then claims inline.
+
+        This is the lost-hint guard: with the peek re-checking ready UNDER the lock, the
+        worker (which saw abandoned=False and did NOT queue) and the peek (which now sees
+        ready=True and claims inline) yield exactly ONE delivery — never neither.
+        """
+        mgr, inst = self._mgr_for_finalize(tmp_path)
+        eng = _InlineFakeEngine(SimpleNamespace(memory_hint_manager=mgr))
+        ainst = _AttachInst('w')
+        h = HintHandle('w', 1)
+        ainst._pending_hint_job = h
+
+        # Worker runs first: sets ready, sees abandoned=False & owner=None → does NOT queue.
+        mgr._finalize_inline_handle({'handle': h}, inst, 'w', '[MEMORY HINT] raced')
+        assert inst._tool_warnings == []
+        assert mgr._deferred_delivered == 0
+
+        # Peek runs after and, re-checking ready under the lock, claims INLINE.
+        eng._maybe_attach_inline_memory_hint(ainst, [], [])
+        assert len(eng.appended) == 1
+        assert eng.appended[0][1].content == '[MEMORY HINT] raced'
+        assert h.owner == 'inline'
+
+        # Exactly one of {inline append} xor {deferred queue}.
+        total = len(eng.appended) + len(inst._tool_warnings)
+        assert total == 1
+        assert mgr._inline_delivered == 1
+        assert mgr._deferred_delivered == 0
+
+    def test_interleaving_concurrent_exactly_one_delivery(self, tmp_path):
+        """Stress the two single-lock regions over 200 runs: total delivered == 1 always."""
+        mgr, inst = self._mgr_for_finalize(tmp_path)
+        deferred = []
+        # Patch only the transport (not finalize) to count queued-deferred without pool wiring.
+        mgr._deliver = lambda inst_, name_, txt, *, mode='deferred': deferred.append(txt)
+        eng = _InlineFakeEngine(SimpleNamespace(memory_hint_manager=mgr))
+
+        for _ in range(200):
+            h = HintHandle('w', 1)
+            ainst = _AttachInst('w')
+            ainst._pending_hint_job = h
+            eng.appended = []
+            deferred.clear()
+
+            def worker():
+                mgr._finalize_inline_handle({'handle': h}, inst, 'w', '[MEMORY HINT] c')
+
+            def peek():
+                eng._maybe_attach_inline_memory_hint(ainst, [], [])
+
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=peek)
+            t1.start(); t2.start(); t1.join(); t2.join()
+
+            n_inline = len(eng.appended)
+            n_defer = len(deferred)
+            assert n_inline + n_defer == 1, \
+                f'exactly one delivery expected, got inline={n_inline} deferred={n_defer}'
+            # xor — never both, never neither.
+            assert (n_inline == 1) != (n_defer == 1)
+
+    # ── Lifecycle ────────────────────────────────────────────────────────────
+
+    def test_forget_instance_cancels_pending(self, tmp_path):
+        mgr, _inst = self._mgr_for_finalize(tmp_path)
+        h = HintHandle('w', 5)
+        mgr._pending['w'] = {'handle': h, '_gen': 5}
+        mgr._generation['w'] = 5
+        mgr.forget_instance('w')
+        assert 'w' not in mgr._pending
+        assert 'w' not in mgr._generation
+        assert h.abandoned is True
+        assert h.owner == 'deferred'
+
+    def test_forget_instance_does_not_clobber_inline_claim(self, tmp_path):
+        """A handle the peek already claimed inline must keep owner='inline'."""
+        mgr, _inst = self._mgr_for_finalize(tmp_path)
+        h = HintHandle('w', 5)
+        h.owner = 'inline'
+        h.ready.set()
+        mgr._pending['w'] = {'handle': h, '_gen': 5}
+        mgr._generation['w'] = 5
+        mgr.forget_instance('w')
+        assert 'w' not in mgr._pending
+        assert h.owner == 'inline'
+        assert h.abandoned is False
+
+    # ── Submit + OFF parity ──────────────────────────────────────────────────
+
+    def test_submit_returns_handle_only_when_inline(self, monkeypatch, tmp_path):
+        """OFF → submit returns None and stores no handle key; ON → returns a HintHandle."""
+        mgr, _inst = self._mgr_for_finalize(tmp_path)
+
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', False)
+        h = mgr.submit('w', 'query one', 'c', turn=1)
+        assert h is None
+        assert 'handle' not in mgr._pending['w']
+
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+        h = mgr.submit('w2', 'query two', 'c', turn=2)
+        assert isinstance(h, HintHandle)
+        assert h.instance_name == 'w2'
+        assert not h.ready.is_set()
+        assert mgr._pending['w2']['handle'] is h
+        assert h.gen == mgr._generation['w2']
+
+    def test_empty_query_returns_none(self, monkeypatch, tmp_path):
+        """Even with inline ON, an empty query returns None (guard runs before handle)."""
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+        mgr, _inst = self._mgr_for_finalize(tmp_path)
+        assert mgr.submit('w', '   ', 'c', turn=1) is None

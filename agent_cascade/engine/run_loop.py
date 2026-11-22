@@ -251,13 +251,23 @@ class RunLoopMixin:
         # ── Memory-Hint trigger (feature: memory_hint) ────────────────
         # Phase-3/Phase-4 boundary: turn_output is fully populated here. Best-effort;
         # never blocks, never mutates the turn budget. Hints ride the tool-warning
-        # queue (NO user-message injection — plan §0 / R1).
+        # queue (NO user-message injection — plan §0 / R1). When inline mode is on this
+        # also returns + stashes a completion handle for the post-Phase-4 peek below.
         self._maybe_submit_memory_hint(instance, turn_output)
 
         # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)}
         # messages from LLM")
         # ── Phase 4: Response Processing and Tool Execution ─────────
-        if self._process_response(instance, turn_output, messages, llm_messages, response):
+        tool_turn = self._process_response(instance, turn_output, messages, llm_messages, response)
+
+        # BUG_0382 §4: opportunistic, NON-BLOCKING same-turn SYSTEM-note attach. This is
+        # the peek that closes the overlap window opened at the submit hook above: if the
+        # worker finished the hint during Phase 4, it lands now (same turn, as a SYSTEM
+        # note — never a user message); otherwise it defers to the next turn unchanged.
+        # There is NO wait/join/sleep; best-effort and never raises into the loop.
+        self._maybe_attach_inline_memory_hint(instance, messages, llm_messages)
+
+        if tool_turn:
             # NOTE: auto-continue deliberately does NOT reset turns_available — the
             # per-iteration decrement (turns_available -= 1) already ran before this
             # LLM call, so every auto-continue consumes exactly one real turn and

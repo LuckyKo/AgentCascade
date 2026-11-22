@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
-from agent_cascade.llm.schema import ASSISTANT, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, USER, Message
 
 
 @pytest.fixture(autouse=True)
@@ -461,3 +461,138 @@ class TestMemoryHintPoolStopResume:
             mgr.stop()
         except Exception:  # noqa: BLE001 — best-effort teardown
             pass
+
+
+class TestMemoryHintSameTurnE2E:
+    """Drive the REAL run loop with MEMORY_HINT_INLINE on.
+
+    The unit tests (TestBug0382SameTurn) prove the handle/claim-race protocol in
+    isolation; these prove the WIRING end-to-end: the Phase-3/4 submit hook stashes a
+    completion handle, the post-Phase-4 peek turns a ready handle into an in-conversation
+    SYSTEM note (never a user message — R1), an unfinished handle defers to the
+    tool-warning queue, and the peek never blocks the run.
+    """
+
+    # Reuse the sibling harness's static helpers without inheriting the test class
+    # (inheriting would make pytest re-collect TestMemoryHintE2E's own tests under
+    # this class, doubling them). Delegate the three shared statics; _make_sync_processor
+    # and _conv_roles are local to this class.
+    _make_pool = staticmethod(TestMemoryHintE2E._make_pool)
+    _conv_contents = staticmethod(TestMemoryHintE2E._conv_contents)
+    _wait_for_hint = staticmethod(TestMemoryHintE2E._wait_for_hint)
+
+    @staticmethod
+    def _make_sync_processor(mgr):
+        """Swap mgr._job_queue for a synchronous processor.
+
+        submit()'s put_nowait(job) runs _process_job on the CALLER (engine) thread, so the
+        worker finishes BEFORE the post-Phase-4 peek → deterministic inline (same-turn) win.
+        The real matching + finalize + peek + _append_and_log_to_llm code all still runs;
+        only the worker-thread handoff is removed. The stop() sentinel is routed to a
+        private queue so the (still running) worker thread idle-ticks and never hangs.
+        """
+        import queue as _queue
+
+        class _SyncQueue:
+            def __init__(self, m):
+                self._m = m
+                self._stop = _queue.Queue()
+
+            def put_nowait(self, job):
+                if job is None:
+                    self._stop.put(None)  # let the worker's get() receive the sentinel
+                    return
+                self._m._process_job(job)
+
+            def get(self, timeout=None):
+                return self._stop.get(timeout=timeout)
+
+            def get_nowait(self):
+                return self._stop.get_nowait()
+
+            def qsize(self):
+                return self._stop.qsize()
+
+        mgr._job_queue = _SyncQueue(mgr)
+
+    @staticmethod
+    def _conv_roles(conv):
+        return [m.role if isinstance(m, Message) else m.get('role', '') for m in conv]
+
+    def test_inline_same_turn_appends_system_note(self, tmp_path, monkeypatch):
+        """Worker finishes during Phase 4 → the hint lands THIS turn as a SYSTEM note.
+
+        Asserts: (a) a '[MEMORY HINT]' SYSTEM message is appended after the assistant reply
+        in the SAME turn, (b) it is SYSTEM and never USER (R1), (c) nothing is queued to the
+        deferred tool-warning queue (inline won the race)."""
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+        engine, inst, pool, run, mgr = self._make_pool(tmp_path, max_turns=1).__next__()
+        self._make_sync_processor(mgr)  # force worker to complete before the peek
+        run()
+
+        roles = self._conv_roles(inst.conversation)
+        contents = self._conv_contents(inst.conversation)
+        # The hint is in the conversation THIS turn...
+        hint_idx = next((i for i, c in enumerate(contents) if '[MEMORY HINT]' in str(c)), -1)
+        assert hint_idx != -1, f'expected an inline SYSTEM hint in conversation, got {contents}'
+        # ...as a SYSTEM message (never USER — invariant R1)...
+        assert roles[hint_idx] == SYSTEM, f'hint must be SYSTEM, got {roles[hint_idx]!r}'
+        assert 'compression-debug.md' in str(contents[hint_idx])
+        # ...and after the assistant reply it was generated from.
+        reply_idx = next(i for i, c in enumerate(contents) if 'reply 1' in str(c))
+        assert hint_idx > reply_idx, 'inline note must follow the assistant turn it augments'
+        assert USER not in [roles[i] for i, c in enumerate(contents)
+                            if '[MEMORY HINT]' in str(c)], 'R1: hint must never be a user msg'
+        # Inline won → nothing was deferred to the tool-warning queue.
+        assert inst._tool_warnings == [], f'inline win must not also queue deferred: {inst._tool_warnings}'
+
+    def test_deferred_when_worker_not_ready(self, tmp_path, monkeypatch):
+        """Worker not finished at the peek → peek abandons; hint defers to turn-B queue.
+
+        The slow worker forces the peek to see a not-ready handle: NO in-conversation note
+        this turn, and the hint instead rides the existing tool-warning queue — i.e. today's
+        behavior is preserved when the inline window is missed."""
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+        engine, inst, pool, run, mgr = self._make_pool(tmp_path, max_turns=1).__next__()
+        # Make the worker miss the peek window, then deliver deferred on completion.
+        real_process = mgr._process_job
+
+        def slow(job):
+            time.sleep(0.25)
+            real_process(job)
+
+        mgr._process_job = slow
+        run()
+
+        # No inline SYSTEM note was attached this turn (the peek saw a not-ready handle).
+        for role, c in zip(self._conv_roles(inst.conversation),
+                           self._conv_contents(inst.conversation)):
+            assert not ('[MEMORY HINT]' in str(c)), \
+                f'deferred turn must not attach an inline note, found: {c!r}'
+        # ...but the worker still delivered it via the tool-warning queue (deferred path).
+        assert self._wait_for_hint(inst), 'deferred hint must still reach _tool_warnings'
+        assert '[MEMORY HINT]' in inst._tool_warnings[0]
+        assert 'compression-debug.md' in inst._tool_warnings[0]
+
+    def test_inline_on_never_blocks_or_injects_user(self, tmp_path, monkeypatch):
+        """With inline ON and the REAL async worker, the run completes normally: no block,
+        no exception, and no '[MEMORY HINT]' ever injected as a user message.
+
+        This is the zero-delay guarantee under the real (non-forced) worker: whatever the
+        worker timing, the run finishes and R1 holds. (The unit test proves the peek's
+        sub-millisecond non-blocking bound; here we prove the full run survives.)"""
+        monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
+        engine, inst, pool, run, mgr = self._make_pool(tmp_path, max_turns=2).__next__()
+        t0 = time.monotonic()
+        run()
+        elapsed = time.monotonic() - t0
+
+        # Run completed (both replies present) and never blocked on the worker.
+        assert any('reply 2' in str(c) for c in self._conv_contents(inst.conversation)), \
+            'run must complete normally with inline mode on'
+        assert elapsed < 5.0, f'inline path must not stall the run (took {elapsed:.2f}s)'
+        # R1: whatever was delivered, it was never a user message.
+        for role, c in zip(self._conv_roles(inst.conversation),
+                           self._conv_contents(inst.conversation)):
+            if '[MEMORY HINT]' in str(c):
+                assert role == SYSTEM, f'any inline hint must be SYSTEM, got {role!r}'

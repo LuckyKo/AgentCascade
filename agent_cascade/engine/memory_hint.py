@@ -9,7 +9,8 @@ its own module and test surface.
 from __future__ import annotations
 
 from agent_cascade.engine.helpers import _extract_direct_text_content
-from agent_cascade.llm.schema import ASSISTANT
+from agent_cascade import settings
+from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
 from agent_cascade.log import logger
 
 # Justifications carried in the hint query. Deliberately small: the query is
@@ -58,10 +59,76 @@ class MemoryHintMixin:
             if not query:
                 return  # no text, reasoning, or justifications → nothing to match.
 
-            manager.submit(instance.instance_name, query, getattr(instance, 'agent_class', ''),
-                           turn=getattr(instance, '_current_turn', -1))
+            handle = manager.submit(instance.instance_name, query, getattr(instance, 'agent_class', ''),
+                                    turn=getattr(instance, '_current_turn', -1))
+            # BUG_0382 §3.3: stash the same-turn completion handle (returned only when
+            # inline mode is on) on the instance so the post-Phase-4 peek can find it.
+            # No-op when inline is OFF (handle is None) → field never read in the OFF path.
+            if handle is not None:
+                with instance._compression_lock:
+                    # Field is engine-thread-only (agent_instance.py) and read lock-free by
+                    # the same-thread peek, so this lock is kept only defensively, for
+                    # consistency with the other memory-hint state writes.
+                    instance._pending_hint_job = handle
         except Exception as e:  # noqa: BLE001 — best-effort, never break the run
             logger.debug('[MEMORY_HINT] submit hook failed for %s: %s',
+                         getattr(instance, 'instance_name', '?'), e)
+
+    def _maybe_attach_inline_memory_hint(self, instance, messages, llm_messages) -> None:
+        """Best-effort, NON-BLOCKING same-turn SYSTEM-note attach (BUG_0382 §4).
+
+        Runs right after Phase 4 (response normalize + tool execution = the overlap
+        window during which the worker computed the hint). Peeks the stashed handle ONCE:
+        a non-blocking ``ready.is_set()`` read, always under ``h.lock`` and re-checked
+        INSIDE the lock (the §3.1 interleaving-4 fix). There is NO wait/join/sleep —
+        this is a turn-critical-path method and must never block.
+
+        Outcomes (exactly one delivery, per §3.1):
+          - ready + non-empty text → claim 'inline', append it as a SYSTEM note
+            (NEVER a user message — R1) via the unified _append_and_log_to_llm helper.
+          - ready + empty text → claim 'inline' (no append) so the worker won't re-queue.
+          - not ready → mark abandoned; the worker queues it to the next turn (turn B).
+          - already owned / no handle / stale instance → no-op.
+
+        ``messages`` is accepted for call-site parity with the submit hook; the note lands
+        in instance.conversation via _append_and_log_to_llm, not in the local copy.
+        Best-effort: the whole body is wrapped — it must never raise into the run loop.
+        """
+        try:
+            if not settings.MEMORY_HINT_INLINE:
+                return  # OFF path: never read _pending_hint_job (plan §177)
+            h = getattr(instance, '_pending_hint_job', None)
+            if h is None or h.instance_name != instance.instance_name:
+                return  # no pending handle, or stashed for a different instance (stale)
+            claim_text = None
+            # Single-locked decision — re-check ready UNDER the lock so the worker's
+            # "ready + defer-decision" region and this peek's claim region are mutually
+            # exclusive (closes interleaving 4; never read h.ready lock-free here).
+            with h.lock:
+                if h.owner is None:
+                    if not h.ready.is_set():
+                        h.abandoned = True          # opt-out; worker defers on completion
+                    elif not h.text:
+                        h.owner = 'inline'          # computed-empty: claim, do not re-queue
+                    else:
+                        h.owner = 'inline'
+                        claim_text = h.text
+            # Drop the engine-thread-only ref once the peek has resolved the handle. The
+            # worker still holds it via the job dict it popped — harmless.
+            instance._pending_hint_job = None
+            if claim_text:
+                # Append OUTSIDE h.lock — never couple h.lock to _compression_lock (§8.3).
+                self._append_and_log_to_llm(
+                    instance, Message(role=SYSTEM, content=claim_text), llm_messages)
+                mgr = getattr(self.pool, 'memory_hint_manager', None)
+                if mgr is not None:
+                    # Counts ACTUAL deliveries: a ready-but-empty handle claims
+                    # owner='inline' without reaching here, so it does NOT increment.
+                    mgr._inline_delivered += 1
+                logger.info('[MEMORY_HINT] %s: queued hint (mode=inline):\n%s',
+                            instance.instance_name, claim_text)
+        except Exception as e:  # noqa: BLE001 — best-effort, never break the run
+            logger.debug('[MEMORY_HINT] inline attach failed for %s: %s',
                          getattr(instance, 'instance_name', '?'), e)
 
     @staticmethod

@@ -139,6 +139,22 @@ class LifecycleMixin:
         """
         return self.instances.get(instance_name.strip())
 
+    def _forget_memory_hint_job(self, instance_name: str) -> None:
+        """Best-effort drop of any pending memory-hint job for a removed/terminated
+        instance (BUG_0382 §5).
+
+        Guards on the manager existing (the pool sets memory_hint_manager to a manager
+        or None) and swallows all exceptions so lifecycle removal can never be broken by
+        the non-critical hint system.
+        """
+        mgr = getattr(self, 'memory_hint_manager', None)
+        if mgr is None or not hasattr(mgr, 'forget_instance'):
+            return
+        try:
+            mgr.forget_instance(instance_name)
+        except Exception as e:
+            logger.debug(f"[MEMORY_HINT] forget_instance failed for {instance_name}: {e}")
+
     def remove_instance(self, instance_name: str):
         """Remove an agent instance from the pool.
 
@@ -149,6 +165,9 @@ class LifecycleMixin:
         self._instances_version += 1  # Fix #3: signal that instances changed
         with self._pool_lock:
             inst = self.instances.pop(instance_name, None)
+        # BUG_0382 §5: cancel any pending hint job so a mid-flight worker does not later
+        # queue a warning for a now-dead instance.
+        self._forget_memory_hint_job(instance_name)
         # Capture agent_class from the popped instance BEFORE removal — re-deriving it
         # from instance_classes (derived from self.instances) would yield '' and make
         # the logger key miss, leaking the cached file handle. Normalize as get_logger does.
@@ -278,6 +297,11 @@ class LifecycleMixin:
             inst = self.instances.get(instance_name)
             # Add to terminated_instances FIRST so stop-checks can detect dismissal immediately
             self.terminated_instances.add(instance_name)
+
+        # BUG_0382 §5: cancel any pending hint job regardless of whether the instance
+        # object is still present — a mid-flight worker must not re-queue for a
+        # terminated instance. Best-effort (helper guards + swallows).
+        self._forget_memory_hint_job(instance_name)
 
         if inst:
             # Check if instance was in an active state before calling terminate()

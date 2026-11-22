@@ -527,6 +527,13 @@ class AgentInstance:
     # "this session"), so it is reset ONLY by reset_conversation() — NOT by
     # _reset_memory_hint_state(), which also runs on within-session compression.
     _skill_hint_counts: dict = field(default_factory=dict)
+    # BUG_0382: same-turn delivery completion handle, set by the Phase-3/4 submit hook
+    # and read by the post-Phase-4 peek. ENGINE-THREAD-ONLY state (read/written on the
+    # single run-loop thread per instance), so it needs no lock and is intentionally NOT
+    # cleared by _reset_memory_hint_state() — it is transient per-turn state, replaced on
+    # every submit and dropped when the instance is GC'd. None = no pending hint (the
+    # OFF-by-default path never reads or sets it).
+    _pending_hint_job: Any = None
 
     # ── Cache Notification Queue ──────────────────────────────────────────────
     # Parallel to _tool_warnings but for cache pool events. Drained into tool

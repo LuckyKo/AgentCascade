@@ -1119,6 +1119,15 @@ MEMORY_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_TH
 #   to the skill's demote floor; default identical (0.35).
 MEMORY_BANDIT_M_FLOOR: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_M_FLOOR', '0.35'))
 
+# Same-turn, opportunistic hint delivery (BUG_0382). OFF by default; the feature
+# stays off via llm_cfg 'memory_hint_enabled' regardless. When True AND memory_hint
+# enabled, the submit at the Phase-3/4 boundary returns a completion handle and the
+# post-Phase-4 peek attaches an already-computed hint to the SAME turn as a SYSTEM
+# note. If the worker is not ready at the peek, the hint defers to the next turn
+# exactly as today (no block, no regression). NO wait budget: the peek is always
+# non-blocking, so there is no delay knob to tune.
+MEMORY_HINT_INLINE: bool = os.getenv('AGENT_CASCADE_MEMORY_HINT_INLINE', '0').lower() in ('1', 'true', 'yes')
+
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly
