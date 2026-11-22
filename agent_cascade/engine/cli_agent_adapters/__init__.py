@@ -13,7 +13,7 @@ An adapter is the only harness-specific piece. It supplies:
 * ``project``       — workspace/skill projection (NO-OP in Phase 0; Phase 2 insertion point).
 
 The registry key (and the tool schema enum) is the *harness name* (``claude_code``,
-``opencode``, ``antigravity``); the *binary token* inside ``build_launch_cmd`` is the
+``opencode``, ``antigravity``, ``copilot``); the *binary token* inside ``build_launch_cmd`` is the
 CLI's real executable, which differs from the harness name for Antigravity
 (``agy``, not ``antigravity`` — verified against the installed binary).
 """

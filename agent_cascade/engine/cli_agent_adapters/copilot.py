@@ -4,8 +4,9 @@ Copilot CLI convention (best-known; the one-shot/print mode mirrors ``claude -p`
 * ``-p`` — one-shot "print the response and exit"; response → stdout, diagnostics → stderr.
 * Default output is plain text, so (like opencode) the ``--output-format`` flag is declared
   but not emitted in argv (Phase 0 does not rely on a JSON contract).
-* ``--yes`` — auto-accept edits (the default-safe autonomy posture). ``--yolo`` is the
-  destructive, opt-in bypass; it is never the default and is gated by the runner, not here.
+* ``--allow-all-tools`` — auto-approve tool use (the default-safe autonomy posture). ``--yolo`` is
+  the destructive, opt-in full-permissions bypass; it is never the default and is gated by the
+  runner, not here.
 
 If a future Copilot CLI release renames these flags, adjust ``_POSTURE_FLAGS`` only — the
 argv shape, the shared posture resolver, and the task guard are already harness-agnostic.
@@ -40,10 +41,11 @@ class CopilotAdapter:
 
     # Posture → argv tokens. 'bypass' is destructive and is never selected by the tool schema
     # (Phase 0 exposes only 'acceptEdits'); it exists here for a future config opt-in and is
-    # gated by the runner, not by this adapter. '--yes' is the default-safe autonomy token.
+    # gated by the runner, not by this adapter. '--allow-all-tools' is the default-safe autonomy
+    # token (non-interactive mode denies tools it is not told to allow).
     _POSTURE_FLAGS: dict[str, list[str]] = {
-        'acceptEdits': ['--yes'],  # auto-accept edits
-        'bypass': ['--yolo'],  # destructive, opt-in only
+        'acceptEdits': ['--allow-all-tools'],  # auto-approve tool use
+        'bypass': ['--yolo'],  # full-permissions bypass; destructive, opt-in only
     }
 
     def preflight(self) -> bool:
@@ -52,17 +54,19 @@ class CopilotAdapter:
 
     def build_launch_cmd(self, *, task: str, workspace: str, posture: str,
                          model: Optional[str] = None) -> list[str]:
-        """Build the one-shot argv: ``copilot -p [--yes] <task>``.
+        """Build the one-shot argv: ``copilot -p <task> [--allow-all-tools | --yolo]``.
 
-        ``workspace`` is unused here — the working directory is set by the runner's
-        ``docker run -w`` (keeps the adapter container-agnostic). The task is a single
-        positional token (no shell → no metacharacter injection); a task starting with ``-``
-        is guarded with ``--`` (via the shared ``append_task_guarded``) so it is not parsed
-        as a flag. ``model`` is ignored — copilot -p exposes no model flag (``model_flag``
-        is None), so a requested model leaves the argv unchanged (byte-safe default).
+        The task value MUST immediately follow ``-p`` (clap requires ``--prompt <text>`` to have
+        its value there); the posture flags trail it. ``workspace`` is unused here — the working
+        directory is set by the runner's ``docker run -w`` (keeps the adapter container-agnostic).
+        The task is a single token (no shell → no metacharacter injection); a task starting with
+        ``-`` is guarded with ``--`` (via the shared ``append_task_guarded``) so it is not parsed
+        as a flag. ``model`` is ignored — copilot -p exposes no model flag (``model_flag`` is
+        None), so a requested model leaves the argv unchanged (byte-safe default).
         """
-        cmd = [self.binary, '-p', *resolve_posture_flags(self._POSTURE_FLAGS, posture)]
-        append_task_guarded(cmd, task)
+        cmd = [self.binary, '-p']
+        append_task_guarded(cmd, task)  # task value must immediately follow -p
+        cmd.extend(resolve_posture_flags(self._POSTURE_FLAGS, posture))
         return cmd
 
     def child_env(self, base_env: dict[str, str]) -> dict[str, str]:

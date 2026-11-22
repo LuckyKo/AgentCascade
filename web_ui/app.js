@@ -311,7 +311,7 @@ const POOL_SETTINGS_MAP = [
 // CLI Agents (call_cli_agent): dict-valued pool maps hydrated from the server snapshot.
 // Server is authoritative (no localStorage). The enable map is {harness: bool}; the model
 // map is {harness: string}. Key values live ONLY in secrets.json server-side and never appear here.
-const CLI_HARNESSES = ['claude_code', 'opencode', 'antigravity'];
+const CLI_HARNESSES = ['claude_code', 'opencode', 'antigravity', 'copilot'];
 let cliAgentEnabledMap = {};
 let cliAgentModelsMap = {};
 
