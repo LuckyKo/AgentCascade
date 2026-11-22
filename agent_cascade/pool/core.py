@@ -212,6 +212,28 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         self._halted_instances: set = set()  # per-instance halt state (legacy, kept for compat)
         self._compression_halted: set = set()  # halted by forced compression (not manual)
         self.terminated_instances: set = set()  # marked for immediate termination
+
+        # ── terminate-tools (abort the in-flight tool batch, keep the run) ──────────
+        # A ONE-SHOT, per-instance signal, distinct from _halted_instances (suspend,
+        # resumable) and terminated_instances (run-kill). When set, the turn's tool
+        # loop crashes out the in-flight batch, substituting a TOOL_TERMINATED marker
+        # for each tool result, and the turn COMPLETES normally (agent stays RUNNING;
+        # no state-machine transition, no run abort). Cleared on consume, so it is
+        # scoped to one batch. _terminate_tools_lock makes the check-and-clear atomic;
+        # it is a leaf lock (never held while acquiring _pool_lock/_foreground_lock).
+        self._terminate_tools_requested: set = set()
+        self._terminate_tools_lock = threading.Lock()
+
+        # Per-instance foreground-process registry: OS handles of the tools currently
+        # blocking the engine thread (sync shell_cmd and any other sync child that
+        # exposes a Popen). request_terminate_tools uses it to OS-tree-kill the blocking
+        # process so the sync call unblocks immediately. _foreground_lock is a leaf lock;
+        # kills are performed OUTSIDE it. Best-effort — a kill failure never blocks the
+        # result-marker path.
+        self._foreground_processes: Dict[str,
+                                        set] = {}  # instance_name -> set(Popen handles)
+        self._foreground_lock = threading.Lock()
+
         self._instance_threads: Dict[str,
                                      threading.Thread] = {}  # instance_name -> execution thread (join on dismissal)
         self._instance_threads_lock = threading.Lock()  # guards _instance_threads access

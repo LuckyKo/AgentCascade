@@ -1188,16 +1188,25 @@ class WsMessageHandler:
             await self._broadcast()
 
     async def handle_terminate_tools(self, data: dict) -> None:
-        """Kill in-flight background tool runners (async shell + CLI-agent) for an
-        instance, reusing the existing ``kill_all`` primitives (the same calls the
-        dismissal path makes). The instance is left ALIVE and RESUMABLE: no
-        dismissal, and the sticky-slot scheduler permit is intentionally NOT
-        released, so the instance keeps its held endpoint.
+        """Abort an instance's in-flight tool batch.
 
-        Scope is background runners only. The foreground sync shell is not
-        independently killable from a WS handler (it is superseded by a pool-level
-        Stop), and ``media_gen`` runs synchronously inside the turn and registers
-        nothing in the trackers, so neither is reachable from this path.
+        Does three things, and NOTHING else:
+        1. Sets the pool's one-shot per-instance terminate-tools signal, which makes the
+           engine crash out the running tool batch by replacing each tool result with a
+           ``[TOOL TERMINATED]`` marker while the TURN COMPLETES NORMALLY — the instance
+           stays ALIVE and RUNNING, no state-machine halt/terminate transition.
+           ``request_terminate_tools`` also best-effort OS-tree-kills the foreground
+           processes currently blocking the engine thread (sync ``shell_cmd`` and any sync
+           child exposing a Popen) so a blocking call unblocks immediately.
+        2. Kills the real background runners (async shell + CLI-agent) via the existing
+           ``kill_all`` primitives.
+        3. Pushes a transient ``INFO`` frame so the clicked-button result is visible in
+           the UI now.
+
+        Per the corrected spec this injects NO user/system message into the instance —
+        the previous behaviour of enqueueing a ``[SYSTEM]`` "terminated N" /
+        "no in-flight tools" message is explicitly removed. The sticky-slot scheduler
+        permit is intentionally NOT released, so the instance keeps its held endpoint.
         """
         instance_name = data.get(WsEnvelope.INSTANCE_NAME) or self._resolve_instance_name(data)
         pool = self.agent_pool
@@ -1209,11 +1218,17 @@ class WsMessageHandler:
             logger.info(f"terminate_tools: instance '{instance_name}' not found — no-op")
             return
 
-        # BUG_0352 Finding 1: the root guard was removed. terminate_tools is
+        # The root guard was removed. terminate_tools is
         # non-destructive (no dismissal, no state transition, sticky-slot permit
         # untouched) — killing the root's own background runners IS the feature.
         # The dominant killable cases (async shell + CLI-agent) are keyed by the
         # caller (the root), so guarding against the root defeats the primary use case.
+
+        # Set the terminate signal FIRST (off the event loop: request_terminate_tools
+        # also performs a best-effort subprocess tree-kill). The engine observes it and
+        # substitutes [TOOL TERMINATED] markers; a foreground-kill failure inside it is
+        # swallowed so the signal always stands.
+        await asyncio.to_thread(pool.request_terminate_tools, instance_name)
 
         # Offload the (sleep-bounded) fire-and-forget kills off the event loop so the
         # DRAIN_THREAD_FLUSH_DELAY sleep in kill_all does not stall the WS loop.
@@ -1222,16 +1237,16 @@ class WsMessageHandler:
             kill_instance_tools, pool, instance_name,
         )
         total = killed_shell + killed_cli
-        msg = (f"[SYSTEM]: terminated {total} in-flight tool(s) for '{instance_name}' "
-               f"({killed_shell} shell, {killed_cli} cli-agent)." if total
-               else f"[SYSTEM]: no in-flight tools running for '{instance_name}'.")
-        # Resumable feedback into the instance (it stays alive), then refresh the UI.
-        pool.enqueue_message(instance_name, msg)
-        # Immediate feedback: push a transient INFO frame so the clicked-button
-        # result is visible now (not just in the turn-injection queue).
+        logger.info(f"terminate_tools: abort requested for '{instance_name}' "
+                    f"({total} background runner(s) killed: {killed_shell} shell, {killed_cli} cli-agent)")
+        # UI-only feedback: push a transient INFO frame so the clicked-button result is
+        # visible now. This does NOT touch the instance conversation — per the corrected
+        # spec there is deliberately NO enqueue_message of a [SYSTEM] note.
         await self.broadcast_fn({
             WsEnvelope.TYPE: MsgType.INFO,
-            WsEnvelope.MESSAGE: msg,
+            WsEnvelope.MESSAGE: (f"Terminate requested for '{instance_name}': {total} background "
+                                  f"tool(s) killed; the in-flight tool batch will be replaced with "
+                                  f"[TOOL TERMINATED] results."),
         })
         await self._broadcast()
 

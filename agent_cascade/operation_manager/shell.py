@@ -1362,6 +1362,18 @@ class ShellMixin:
                                                 name='shell_stop_watcher')
                 stop_watcher.start()
 
+            # Expose the blocking foreground handle to the pool so a
+            # Terminate-tools request can OS-tree-kill it and unblock this proc.wait()
+            # immediately (the 60s-sync repro). Keyed by agent_name == instance name.
+            # Best-effort and strictly paired: registered right before the blocking wait
+            # and unregistered in the finally below, which covers success/timeout/kill.
+            _fg_pool = getattr(self, 'agent_pool', None)
+            if _fg_pool is not None:
+                try:
+                    _fg_pool.register_foreground_process(agent_name, proc)
+                except Exception as _fg_reg_err:
+                    logger.debug(f'[shell_cmd] foreground register failed (non-critical): {_fg_reg_err}')
+
             try:
                 proc.wait(timeout=effective_timeout)
                 result_ok = True
@@ -1374,6 +1386,11 @@ class ShellMixin:
                 watcher_done.set()
                 if stop_watcher is not None:
                     stop_watcher.join(timeout=SHELL_STOP_POLL_INTERVAL)
+                if _fg_pool is not None:
+                    try:
+                        _fg_pool.unregister_foreground_process(agent_name, proc)
+                    except Exception as _fg_unreg_err:
+                        logger.debug(f'[shell_cmd] foreground unregister failed (non-critical): {_fg_unreg_err}')
 
             # Wait for reader threads to drain remaining pipe buffers.
             t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)

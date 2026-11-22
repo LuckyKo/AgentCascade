@@ -1211,6 +1211,16 @@ def restore_fleet_snapshot(pool, envelope: SnapshotEnvelope) -> None:
 #: ``kill_all`` themselves, not duplicated here.
 KILLED_TOOL_RESULT_TEXT = 'Tool execution skipped: instance {inst_name} was halted/stopped'
 
+#: Standard marker text substituted for the result of an in-flight or not-yet-run
+#: tool when the user presses the Terminate-tool button. Distinct from
+#: ``KILLED_TOOL_RESULT_TEXT``: terminate does NOT halt the run — the turn
+#: completes normally with these markers and the agent stays RUNNING, so the
+#: wording names an explicit user abort rather than a halt/stop. Emitted by
+#: ``tool_execution`` for both the not-yet-dispatched tools (loop head) and the
+#: currently-blocking tool (post-dispatch overwrite); the foreground OS-tree kill
+#: unblocks the blocking call, but a kill failure never breaks this marker path.
+TOOL_TERMINATED_TEXT = '[TOOL TERMINATED] execution aborted by user request (instance {inst_name})'
+
 
 class StackRegistry:
     """Which stacks are known, which is active, and where each snapshot lives.

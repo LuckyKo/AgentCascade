@@ -276,6 +276,106 @@ class SlotsMixin:
         """Resume a halted instance."""
         self._halted_instances.discard(instance_name)
 
+    # ── terminate-tools (abort the in-flight tool batch, keep the run) ──────────────
+    #
+    # A one-shot per-instance signal distinct from halt (suspend/resume) and terminal
+    # stop (run-kill). When requested, the turn's tool loop crashes out the in-flight
+    # batch with a TOOL_TERMINATED marker in place of each result and the turn
+    # COMPLETES normally — the agent stays RUNNING, no state-machine transition, and no
+    # user/system message is injected. request/consume are atomic check-and-clear under
+    # a leaf lock so the signal fires exactly once per batch.
+
+    def request_terminate_tools(self, instance_name: str):
+        """Signal the instance's in-flight tool batch to crash out with markers.
+
+        Sets the one-shot signal FIRST (so the engine's loop-head/post-dispatch checks
+        observe it), then best-effort OS-tree-kills the foreground processes currently
+        blocking the engine thread (sync shell_cmd and any sync child exposing a Popen)
+        so the blocking call unblocks immediately. The kill is best-effort: a failure
+        here NEVER prevents the signal — the engine-side result overwrite still yields
+        the [TOOL TERMINATED] marker even if the process cannot be killed. Background
+        runners are torn down separately by the caller (``kill_instance_tools``).
+        """
+        instance_name = instance_name.strip()
+        with self._terminate_tools_lock:
+            self._terminate_tools_requested.add(instance_name)
+        try:
+            self.kill_foreground_process_trees(instance_name)
+        except Exception as e:  # best-effort; the signal above already stands
+            logger.debug(f'request_terminate_tools foreground kill failed for {instance_name}: {e}')
+
+    def consume_terminate_tools(self, instance_name: str) -> bool:
+        """Atomically check-and-clear the terminate signal for an instance.
+
+        Returns True exactly once per ``request_terminate_tools`` call, so the batch
+        scope is one-shot. Short-circuits (returns False) when no request is pending —
+        this is the off-path fast rejection used by the tool-execution loop.
+        """
+        instance_name = instance_name.strip()
+        with self._terminate_tools_lock:
+            if instance_name in self._terminate_tools_requested:
+                self._terminate_tools_requested.discard(instance_name)
+                return True
+            return False
+
+    def has_terminate_tools_requested(self, instance_name: str) -> bool:
+        """Introspection/test-only: non-consuming read of the terminate signal.
+
+        Does not clear it. No production/UI consumer today — kept for assertions.
+        """
+        instance_name = instance_name.strip()
+        with self._terminate_tools_lock:
+            return instance_name in self._terminate_tools_requested
+
+    def register_foreground_process(self, instance_name: str, proc) -> None:
+        """Track a foreground OS handle currently blocking ``instance_name``'s engine
+        thread so ``request_terminate_tools`` can tree-kill it. Best-effort; a sync tool
+        registers immediately after spawn and unregisters in its finally."""
+        if proc is None:
+            return
+        instance_name = instance_name.strip()
+        with self._foreground_lock:
+            self._foreground_processes.setdefault(instance_name, set()).add(proc)
+
+    def unregister_foreground_process(self, instance_name: str, proc) -> None:
+        """Drop a foreground handle when the blocking call returns (success/timeout/kill)."""
+        if proc is None:
+            return
+        instance_name = instance_name.strip()
+        with self._foreground_lock:
+            handles = self._foreground_processes.get(instance_name)
+            if handles:
+                handles.discard(proc)
+                if not handles:
+                    self._foreground_processes.pop(instance_name, None)
+
+    def kill_foreground_process_trees(self, instance_name: str) -> int:
+        """Best-effort OS-tree-kill of every registered foreground handle for an
+        instance. Snapshots under ``_foreground_lock`` then kills OUTSIDE the lock
+        (the kill may block; never hold it across OS calls). Reuses
+        ``OperationManager._terminate_shell_process`` — the same Windows taskkill-tree /
+        POSIX killpg path the Stop/timeout shells use — when it is available; a missing
+        handle or a kill failure is swallowed (the result-marker path is unaffected).
+        Returns the number of kill attempts that did not raise."""
+        instance_name = instance_name.strip()
+        with self._foreground_lock:
+            handles = list(self._foreground_processes.get(instance_name, ()))
+        if not handles:
+            return 0
+        # Reuse the proven cross-platform tree-kill when reachable; degrade gracefully
+        # when operation_manager is absent (tests/mocks) or lacks the helper.
+        terminate_fn = getattr(getattr(self, 'operation_manager', None), '_terminate_shell_process', None)
+        if terminate_fn is None:
+            return 0
+        killed = 0
+        for proc in handles:
+            try:
+                terminate_fn(proc)
+                killed += 1
+            except Exception as e:
+                logger.debug(f'kill_foreground_process_trees failed for a {instance_name} handle: {e}')
+        return killed
+
     # ── Activity tracking ──────────────────────────────────────────────────
 
     def _mark_activity(self, instance_name: str):

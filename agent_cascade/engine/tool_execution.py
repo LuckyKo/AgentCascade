@@ -22,6 +22,9 @@ from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
 from agent_cascade import settings as _ac_settings
+# TOOL_TERMINATED_TEXT only pulls agent_cascade.settings at module load (snapshot's
+# other imports are lazy), which the line above already loaded — no import cycle.
+from agent_cascade.snapshot import TOOL_TERMINATED_TEXT
 from agent_cascade.settings import (DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
                                     UNTRUSTED_TOOL_OUTPUT_TAG, UNTRUSTED_TOOL_OUTPUT_WRAPPER)
 from agent_cascade.tools.mcp_manager import MCPManager
@@ -164,6 +167,15 @@ class ToolExecMixin:
         # are inert and the single-edit path is unchanged.
         file_groups = self._scan_file_mutation_groups(turn_output, inst_name)
         _already_emitted = set()
+        # Index set of tool calls whose FUNCTION result is already closed
+        # (dispatched, auto-denied, grouped, or terminate-marker-emitted). The terminate
+        # batch uses it to emit exactly one marker per still-open tool call — never a
+        # double, never a miss — keeping the batch schema-valid. Stays empty unless a
+        # terminate is observed, so the normal path is byte-identical.
+        closed_idx = set()
+        # One-shot latch: flipped once a terminate signal is observed this batch, so every
+        # remaining tool is marked without re-reading the (already-cleared) pool signal.
+        terminate_active = False
 
         # ── Resolve tool policy once (template, disabled tools, function map) ────────
         # Outside the loop. Template and disabled tool list don't change during the loop.
@@ -250,8 +262,31 @@ class ToolExecMixin:
                     self._auto_deny_tool_call(
                         instance, inst_name, out, tool_name, deny_reason, response, executed_tools)
 
+                    closed_idx.add(_out_idx)  # denial closed this tool call's result
                     used_any_tool = True
                     continue  # Skip actual tool execution
+
+                # ── terminate-tools: crash out the batch with markers ────────────────
+                # Off-path-safe: _consume_terminate_tools short-circuits when no request
+                # is pending (and degrades to False on mock/bare pools), so a normal run
+                # is unchanged. When the signal is observed — the user pressed Terminate
+                # while THIS batch is running — mark every still-open tool call with a
+                # [TOOL TERMINATED] FUNCTION result and dispatch nothing further. The turn
+                # then COMPLETES normally (no break, no run abort, instance stays RUNNING);
+                # terminate_active latches so the cleared signal need not be read again.
+                if terminate_active:
+                    # Already latched (loop-head or post-dispatch). The latch-edge scan
+                    # closed every still-open tool call in turn_output — a fixed list that
+                    # nothing opens later — so skip dispatch WITHOUT re-scanning. A
+                    # per-iteration re-walk of the now-closed batch is O(N^2) for no gain.
+                    continue
+                if self._consume_terminate_tools(inst_name):
+                    terminate_active = True
+                    if self._terminate_remaining_tools(
+                            instance, inst_name, turn_output, response,
+                            executed_tools, closed_idx) > 0:
+                        used_any_tool = True
+                    continue
 
                 # ── Multi-edit same-file grouping (engine-level) ────────────
                 # A reducible same-file run collapses to one approval + N serial
@@ -278,6 +313,11 @@ class ToolExecMixin:
                                 instance, turn_output[_m], _m,
                                 f'Error: edit_file execution failed: {_batch_err}',
                                 executed_tools, _already_emitted, response, inst_name=inst_name)
+                    # The batch closed the leader + every member's FUNCTION
+                    # result (successes, failures, and the fallback above), so mark them
+                    # all closed — terminate markers must skip them.
+                    closed_idx.add(_out_idx)
+                    closed_idx.update(_group)
                     used_any_tool = True
                     continue
 
@@ -432,6 +472,18 @@ class ToolExecMixin:
                     # stale references across concurrent calls
                     clear_current_instance_name()
 
+                # ── terminate-tools: overwrite the just-returned result ────────────────
+                # The signal was set DURING this blocking call (the loop head checked and
+                # did not see it). Replace the real tool output with the [TOOL TERMINATED]
+                # marker and force tool_success=False BEFORE fn_msg is built. A foreground
+                # OS-tree-kill failure never surfaces here as an exception — this overwrite
+                # is what guarantees the marker regardless of kill outcome. consume is
+                # check-and-clear, so the tools after this one are marked right below.
+                if not terminate_active and self._consume_terminate_tools(inst_name):
+                    terminate_active = True
+                    tool_result = TOOL_TERMINATED_TEXT.format(inst_name=inst_name)
+                    _tool_success = False
+
                 # Track compress_context execution and record telemetry
                 if tool_name == 'compress_context':
                     inst = self.pool.get_instance(inst_name)
@@ -481,6 +533,17 @@ class ToolExecMixin:
 
                 # Track executed tool for orphan handling
                 executed_tools.append(tool_name)
+                # This tool call's FUNCTION result is now closed.
+                closed_idx.add(_out_idx)
+                # If a terminate fired DURING the blocking call above (post-dispatch latch),
+                # mark every tool still open in this batch now, then let the loop continue
+                # normally — remaining iterations just continue-skip (terminate_active is
+                # latched and everything is closed), so the turn completes with [TOOL
+                # TERMINATED] markers and no run abort.
+                if terminate_active and self._terminate_remaining_tools(
+                        instance, inst_name, turn_output, response,
+                        executed_tools, closed_idx) > 0:
+                    used_any_tool = True
 
         finally:
             # Guarantee a still-pending deferred parent/KV restore is NOT lost when the batch
@@ -630,6 +693,123 @@ class ToolExecMixin:
             if tools_processed > 0:
                 logger.warning(
                     f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+
+    def _consume_terminate_tools(self, inst_name) -> bool:
+        """Atomically consume the pool's terminate-tools signal for an instance.
+
+        Best-effort by construction — terminate must never crash a turn — so this degrades
+        to ``False`` when the pool does not implement ``consume_terminate_tools`` (mock /
+        bare-harness / legacy pools) or the call raises. The ``is True`` identity check on
+        the pool's return is deliberate: a MagicMock/test pool auto-fabricates a TRUTHY
+        child mock, and only the real bool ``True`` singleton may open the terminate path
+        (see .agent_lessons/magicmock-pool-setting-truthy-default.md). Off-path cost when
+        no terminate is pending is a getattr + one short-circuiting call — negligible vs.
+        the tool execution it guards.
+        """
+        consume = getattr(self.pool, 'consume_terminate_tools', None)
+        if consume is None:
+            return False
+        try:
+            return consume(inst_name) is True
+        except Exception as e:  # best-effort: a pool error must never break the run
+            logger.debug(f'consume_terminate_tools failed for {inst_name}: {e}')
+            return False
+
+    def _terminate_remaining_tools(self, instance, inst_name, turn_output, response,
+                                   executed_tools, closed_idx) -> int:
+        """Emit a ``[TOOL TERMINATED]`` FUNCTION result for every tool call in
+        ``turn_output`` that is still open, so an aborted batch stays schema-valid (no
+        orphaned ``function_call`` -> no API 400 on replay) and the turn can complete.
+
+        Index-based and idempotent: a tool index is skipped if it already appears in
+        ``closed_idx`` (dispatched, auto-denied, grouped, or emitted by a prior call here),
+        so repeated calls never double-emit and never miss. ``closed_idx`` is the single
+        source of truth — every path that closes a tool call adds to it — so no separate
+        emitted-set is needed. Mirrors ``_handle_orphaned_tool_calls``' FUNCTION shape but
+        does NOT stop the run — the caller continues the turn normally. Returns the number
+        of markers emitted.
+        """
+        emitted = 0
+        for _idx, out in enumerate(turn_output):
+            if _idx in closed_idx:
+                continue
+            use_tool, tool_name, _args, _extra = self._detect_tool(out)
+            if not use_tool:
+                continue
+            self._emit_terminated_fn_msg(instance, out, tool_name, _idx, inst_name, response)
+            executed_tools.append(tool_name)
+            closed_idx.add(_idx)
+            emitted += 1
+        if emitted:
+            logger.warning(f"Added {emitted} [TOOL TERMINATED] FUNCTION messages for aborted tools in {inst_name}")
+        return emitted
+
+    def _emit_terminated_fn_msg(self, instance, out, tool_name, idx, inst_name, response) -> None:
+        """Append exactly one ``[TOOL TERMINATED]`` FUNCTION result for a tool
+        call left open by a terminate request, closing its ``function_id`` so the batch
+        stays schema-valid on replay.
+
+        Same shape as the orphan placeholder (role/name/content + ``extra={function_id,
+        tool_success: False}``) and the same exception-safety as ``_emit_synthetic_fn_msg``:
+        the message is appended to the conversation and the UI ``response`` list even if
+        building it, recording telemetry, or logging it fails — terminate must never crash
+        the run. Unlike the orphan handler this is NOT gated on a halt/stop flag; it is the
+        user-requested abort marker and the turn continues afterward.
+
+        Not folded into a single shared helper with ``_handle_orphaned_tool_calls`` /
+        ``_emit_synthetic_fn_msg`` despite the near-identical build/telemetry/append shape:
+        the orphan handler holds ``instance._compression_lock`` across its whole batch and
+        appends with ``lock_held=True`` using plain content, while the synthetic helper is
+        hardcoded to ``'edit_file'`` and derives ``tool_success`` from a result-string
+        heuristic. Unifying would couple this new path to those proven-path policies for no
+        behavioral gain, so the consistent FUNCTION shape is shared by convention instead.
+        """
+        fn_content = TOOL_TERMINATED_TEXT.format(inst_name=inst_name)
+        # Extract function_id with the same pattern as the orphan/primary-loop path.
+        extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+        function_id = extra_data.get('function_id')
+        # Build defensively: even if the first construction raises, retry with the same
+        # safe defaults so we always have a marker to append (no orphaned function_call).
+        try:
+            fn_msg = Message(
+                role=FUNCTION,
+                name=tool_name,
+                content=_wrap_untrusted(tool_name, fn_content),
+                extra={'function_id': function_id or '1', 'tool_success': False},
+            )
+        except Exception as build_err:
+            logger.error(f'terminate marker build failed (idx={idx}): {format_crash(build_err)}')
+            # Genuine fallback: drop the trust-boundary wrapper (the wrapper calls into the
+            # feature-flag/allowlist path, the more fragile half of the build) and use plain
+            # content — mirroring _handle_orphaned_tool_calls, which appends plain content.
+            # A retry with identical args could re-raise on the same input; this cannot, so
+            # we always have a marker to append and no function_call is orphaned.
+            fn_msg = Message(
+                role=FUNCTION,
+                name=tool_name,
+                content=fn_content,
+                extra={'function_id': function_id or '1', 'tool_success': False},
+            )
+        # Telemetry: one start/end pair per emitted marker (never breaks the run).
+        if (tel := self._telemetry()) is not None:
+            try:
+                tel.record_tool_call_start(inst_name, tool_name)
+                tel.record_tool_call_end(
+                    inst_name,
+                    tool_name,
+                    success=False,
+                    result_chars=len(fn_content),
+                    truncated=False,
+                    error='Tool terminated by user request',
+                    is_call_agent=(tool_name == 'call_agent'),
+                )
+            except Exception as tel_err:
+                logger.debug(f'terminate marker telemetry failed (idx={idx}): {format_crash(tel_err)}')
+        try:
+            self._append_and_log(instance, fn_msg)
+        except Exception as append_err:
+            logger.error(f'terminate marker log append failed (idx={idx}): {format_crash(append_err)}')
+        response.append(fn_msg)  # Stream to UI (separate list for streaming)
 
     def _run_deferred_state_restore_safety_nets(self, instance: AgentInstance, inst_name: str,
                                                ran_ca: bool, reached_last_ca: bool,
