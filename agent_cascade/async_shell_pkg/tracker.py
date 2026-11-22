@@ -28,6 +28,10 @@ from agent_cascade.async_shell_pkg.windows import ON_WINDOWS, _send_windows_ctrl
 from agent_cascade.log import logger
 from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, EARLY_OUTPUT_CHECK_TIMEOUT, HEARTBEAT_CHECK_INTERVAL,
                                     MAX_ASYNC_SHELL_PER_AGENT)
+# BUG_0385 — async shell stall (wedge) watchdog idle-floor policy knobs. Read as module
+# attributes so tests can monkeypatch them on the tracker namespace. See settings.py rationale.
+from agent_cascade.settings import (ASYNC_SHELL_STALL_KILL_DEFAULT, ASYNC_SHELL_STALL_KILL_FRACTION,
+                                    ASYNC_SHELL_STALL_WARN_FRACTION)
 from agent_cascade.shell_utils import (DRAIN_THREAD_JOIN_TIMEOUT, build_shell_env, configure_windows_utf8,
                                        drain_pipe_lines, git_autogc_hint_for_output)
 from agent_cascade.tool_utils import truncate_with_spillover
@@ -148,17 +152,32 @@ class AsyncShellTracker:
         """
         return git_autogc_hint_for_output('\n'.join(self._get_combined_output(task)))
 
-    # ── Stall watchdog hooks (BUG_0343) ─────────────────────────────
-    # Defaults are 0 = OFF, so the shell path keeps its historical behavior
-    # (no new poll-loop work, no new status lines, byte-identical output).
-    # A non-shell runner that wants stall detection overrides these.
+    # ── Stall watchdog hooks (BUG_0343 / BUG_0385) ─────────────────────
+    # Shell enables an idle floor derived from task.timeout so a wedged-but-alive child (alive,
+    # zero new output) is closed BEFORE the deadline; the timeout stays the unconditional
+    # top-down tree-kill backstop. Rationale + threshold derivation: the ASYNC_SHELL_STALL_*
+    # constants in settings.py. 0 disables the watchdog (legacy).
     def _stall_warn_seconds(self, task: 'AsyncShellTask') -> float:
-        """Seconds of output silence before __status reports "STALLED" (0 = off)."""
-        return 0.0
+        """Seconds of output silence before __status reports "STALLED" (0 = off).
+
+        Derived as a fraction of the kill floor, so it always precedes the kill. Status/
+        log only — never terminates the run by itself.
+        """
+        kill = self._stall_kill_seconds(task)
+        return ASYNC_SHELL_STALL_WARN_FRACTION * kill
 
     def _stall_kill_seconds(self, task: 'AsyncShellTask') -> float:
-        """Seconds of output silence before the run is terminated (0 = off)."""
-        return 0.0
+        """Seconds of output silence before the async shell is terminated (0 = off).
+
+        Threshold derivation + rationale: see ASYNC_SHELL_STALL_* in settings.py.
+        """
+        if ASYNC_SHELL_STALL_KILL_DEFAULT <= 0:
+            return 0.0
+        # 1s clamp so a tiny timeout never asks us to reap on sub-second silence. If the clamp
+        # dominates (timeout so small that min(...) >= timeout), the _poll_loop timeout branch
+        # fires at the deadline instead — still a single tree-kill (killed/kill_in_progress).
+        cap = max(1.0, ASYNC_SHELL_STALL_KILL_FRACTION * task.timeout)
+        return min(ASYNC_SHELL_STALL_KILL_DEFAULT, cap)
 
     def _status_progress_lines(self, task: 'AsyncShellTask', *, elapsed: float,
                                silent_for: float, has_output: bool) -> List[str]:

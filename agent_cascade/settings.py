@@ -972,6 +972,37 @@ MAX_ASYNC_SHELL_PER_AGENT: int = 5  # Max concurrent async shells per agent
 ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('AGENT_CASCADE_ASYNC_SHELL_HEARTBEAT_CHARS',
                                                           '800'))  # noqa: F841
 ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600  # Default timeout for async shells (1 hour)
+
+# ── Async shell stall-watchdog idle floor (BUG_0385) ─────────────────────────────
+# The declared `timeout` is the LAST-RESORT top-down tree-kill backstop, NOT the close
+# trigger: a wedged-but-alive child (alive, zero new stdout/stderr, internally crashed) must
+# close strictly BEFORE the deadline. These knobs feed AsyncShellTracker._stall_*_seconds
+# (tracker.py), which drive the already-built poll-loop wedge detector (line-count delta) and
+# the stall branch in _track_task that reuses the SAME _kill_process_tree tree-killer as the
+# timeout path. They are OWNER-TUNABLE policy knobs; the detector only counts new output
+# lines, so any progress resets it — the residual risk (premature kill of a legitimately
+# silent-but-working command, e.g. a buffered compile) is bounded by choosing CONSERVATIVE
+# fractions of the user's own `timeout`.
+#
+# The kill floor is derived as min(ASYNC_SHELL_STALL_KILL_DEFAULT,
+# ASYNC_SHELL_STALL_KILL_FRACTION * timeout). Because the fraction is < 1, the kill floor
+# sits below timeout for any realistic timeout, so enabling the watchdog can only ADVANCE
+# closure past today's behavior, never delay it beyond the existing deadline. The `timeout`
+# backstop (_track_task -> _kill_process_tree) stays the unconditional ceiling for hangs the
+# idle detector cannot see (e.g. an output trickle that never stays quiet long enough to trip).
+#: Cap on the idle floor (seconds): never wait longer than this on silence, even for a very
+#: large `timeout` — a run silent for this long has almost certainly wedged. The ONLY lever to
+#: widen the floor once it is cap-dominated is raising ASYNC_SHELL_STALL_KILL_DEFAULT itself;
+#: raising `timeout` widens the floor only while KILL_FRACTION * timeout < KILL_DEFAULT and has
+#: NO effect once the KILL_DEFAULT cap dominates. 0 = OFF.
+ASYNC_SHELL_STALL_KILL_DEFAULT: float = float(os.getenv('AGENT_CASCADE_ASYNC_SHELL_STALL_KILL_DEFAULT', '600'))
+#: Fraction of `task.timeout` the kill floor is capped to (must be < 1.0 so the wedge-close
+#: always precedes the deadline): the kill floor is min(KILL_DEFAULT, this * timeout).
+ASYNC_SHELL_STALL_KILL_FRACTION: float = float(os.getenv('AGENT_CASCADE_ASYNC_SHELL_STALL_KILL_FRACTION', '0.8'))
+#: Fraction of the kill floor at which __status first logs/verdicts a warning (status only,
+#: never kills). Kept well below the kill floor so a slow step is reported before it is reaped.
+ASYNC_SHELL_STALL_WARN_FRACTION: float = float(os.getenv('AGENT_CASCADE_ASYNC_SHELL_STALL_WARN_FRACTION', '0.5'))
+
 HEARTBEAT_CHECK_INTERVAL: float = 0.5  # How often the tracker thread checks for heartbeats (seconds)
 HEARTBEAT_TRUNCATE_FIRST_LINES: int = 5  # Lines kept at start when truncating heartbeat output
 HEARTBEAT_TRUNCATE_LAST_LINES: int = 10  # Lines kept at end when truncating heartbeat output
