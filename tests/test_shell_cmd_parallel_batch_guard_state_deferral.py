@@ -76,6 +76,9 @@ class _SimpleInstance:
         self._state_lock = threading.RLock()
         self._last_endpoint_config = last_endpoint_config
         self._state_label = None
+        # Stable per-session KV save key birth TS (str, YYYYMMDD_HHMMSS); production mints it
+        # in AgentInstance.__post_init__. save_instance_state builds <name>_<kv_birth_ts>.
+        self.kv_birth_ts = '20260101_000000'
         self._slot_release = slot_release
         self._slot_key = None
         self._safe_mode_kv = False
@@ -228,7 +231,7 @@ def test_multi_guard_batch_saves_once_and_loads_once():
     turn_output = [_sc_msg(c) for c in GUARD_CMDS]  # 3 guard-needing shell_cmd
 
     sv = rs = None
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as save, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as save, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as restore, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -265,7 +268,7 @@ def test_multi_guard_batch_load_fires_after_last_guard():
         flags.append(('load',))  # recorded inside execute_shell_command → after this guard's dispatch
         return True
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name), \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name), \
          patch('agent_cascade.state_ops.restore_state', side_effect=_load_marker), \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -292,7 +295,7 @@ def test_single_guard_control_one_save_one_load():
     caller, engine, op_manager, flags = _setup()
     turn_output = [_sc_msg('rm only.txt')]
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -314,7 +317,7 @@ def test_auto_approved_shell_cmd_zero_guard_ops():
     caller, engine, op_manager, flags = _setup(safe_cmds=(SAFE_CMD,))
     turn_output = [_sc_msg(SAFE_CMD)]
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -334,7 +337,7 @@ def test_compress_truncation_two_windows():
     caller, engine, op_manager, flags = _setup()
     turn_output = [_sc_msg('rm a.txt'), _compress_msg(), _sc_msg('rm b.txt')]
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -377,7 +380,7 @@ def test_mis_prediction_no_crash_and_no_worse_state():
     op_manager.evaluate_shell_command_safety = _eval
     # seam: ls is auto-approved -> returns early, no save/reacquire.
     try:
-        with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+        with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
              patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
              patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
              patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -401,7 +404,7 @@ def test_terminal_stop_before_last_guard_net_forces_one_load():
     caller, engine, op_manager, flags = _setup(terminal_stop_after_first=True)
     turn_output = [_sc_msg(c) for c in GUARD_CMDS]  # 3 guards; loop breaks before the 2nd
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):
@@ -420,7 +423,7 @@ def test_completed_batch_net_contributes_zero_loads():
     caller, engine, op_manager, flags = _setup()
     turn_output = [_sc_msg(c) for c in GUARD_CMDS]
 
-    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name) as sv, \
+    with patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name, label=None: label if label is not None else name) as sv, \
          patch('agent_cascade.state_ops.restore_state', return_value=True) as rs, \
          patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG), \
          patch('agent_cascade.state_ops.kv_save_effectively_enabled', return_value=True):

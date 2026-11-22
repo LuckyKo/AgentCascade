@@ -46,6 +46,7 @@ def _make_instance(*, endpoint=CAPABLE_EP, digest=None, digest_endpoint=None):
     """Stand-in AgentInstance carrying exactly the attributes the save seam reads."""
     inst = MagicMock()
     inst.instance_name = 'Maine'
+    inst.kv_birth_ts = '20260101_000000'
     inst.agent_class = 'Orchestrator'
     # Real instances use an RLock; the save path re-acquires it.
     inst._state_lock = threading.RLock()
@@ -95,13 +96,13 @@ def test_callback_ignores_empty_digest():
 def test_save_body_includes_digest_for_matching_endpoint():
     inst = _make_instance(digest='deadbeef', digest_endpoint=_endpoint_tuple(CAPABLE_EP))
     body = _capture_save_body(inst)
-    assert body == {'label': 'Maine', 'session_digest': 'deadbeef'}
+    assert body == {'label': 'Maine_20260101_000000', 'session_digest': 'deadbeef'}
 
 
 def test_save_body_omits_digest_without_one():
     inst = _make_instance()
     body = _capture_save_body(inst)
-    assert body == {'label': 'Maine'}
+    assert body == {'label': 'Maine_20260101_000000'}
 
 
 def test_save_body_drops_digest_from_a_different_endpoint():

@@ -180,7 +180,8 @@ class TestYieldKvSurvivesSwap:
             saved = engine.save_before_slot_yield(inst, 'A', reason='before_security_check')
             assert saved is True, 'save must set a pending label'
             with inst._state_lock:
-                assert inst._state_label == 'A'
+                # save sets _state_label to the stamped kv_save_label, not the bare name.
+                assert inst._state_label == f"A_{inst.kv_birth_ts}"
 
             # 2. A releases its slot (now slotless).
             inst._slot_release = None

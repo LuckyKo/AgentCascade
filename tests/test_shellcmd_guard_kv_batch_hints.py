@@ -157,8 +157,10 @@ def test_skip_save_issues_no_state_save(guard_harness):
 
 
 def test_no_skip_save_issues_one_state_save(guard_harness):
+    caller = guard_harness['caller']
     events = _drive(guard_harness, 'rid_save', skip=False, defer=False)
-    assert _count(events, 'save') == ['caller'], f"kv_skip_save=False must issue ONE /state/save, got {events}"
+    expected = [f"caller_{caller.kv_birth_ts}"]
+    assert _count(events, 'save') == expected, f"kv_skip_save=False must issue ONE /state/save, got {events}"
 
 
 def test_defer_restore_keeps_label_pending_no_load(guard_harness):
@@ -196,16 +198,18 @@ def test_safe_mode_forces_save_and_clears_label(guard_harness):
     # TRAP §4.4: safe mode suppresses kv_skip_save (save forced ON) and forces defer OFF, then
     # skip_kv_restore=True CLEARS the label (no load from the guard — the tool restores by label later).
     events = _drive(h, 'rid_safe', skip=True, defer=True, safe_mode=True)
-    assert _count(events, 'save') == ['caller'], f"safe mode must FORCE the save despite kv_skip_save, got {events}"
+    assert _count(events, 'save') == [f"caller_{caller.kv_birth_ts}"], f"safe mode must FORCE the save despite kv_skip_save, got {events}"
     assert _count(events, 'load') == [], f"safe mode skips the advisor load, got {events}"
     assert caller._state_label is None, 'safe mode must CLEAR the pending label (skip_kv_restore wins over defer)'
 
 
 def test_single_guard_control_one_save_one_load(guard_harness):
     # No hints (single/non-batched guard) -> full save + full load, exactly as today.
+    caller = guard_harness['caller']
     events = _drive(guard_harness, 'rid_control', skip=False, defer=False)
-    assert _count(events, 'save') == ['caller']
-    assert _count(events, 'load') == ['caller']
+    expected = [f"caller_{caller.kv_birth_ts}"]
+    assert _count(events, 'save') == expected
+    assert _count(events, 'load') == expected
     assert guard_harness['caller']._state_label is None
 
 

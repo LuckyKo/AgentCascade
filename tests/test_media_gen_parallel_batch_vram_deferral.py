@@ -50,6 +50,9 @@ class _SimpleInstance:
         self._state_lock = threading.RLock()
         self._last_endpoint_config = last_endpoint_config
         self._state_label = None
+        # Stable per-session KV save key birth TS (str, YYYYMMDD_HHMMSS); production mints it
+        # in AgentInstance.__post_init__. save_instance_state builds <name>_<kv_birth_ts>.
+        self.kv_birth_ts = '20260101_000000'
         self.is_terminated = is_terminated
 
 
@@ -157,7 +160,8 @@ def _run_batch(engine, pool, parent, turn_output, flags_seen):
 
 def _state_ops_patches():
     """Patch the state_ops seams: the two HTTP calls + the held-endpoint resolver."""
-    save = patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name)
+    save = patch('agent_cascade.state_ops.save_state',
+                 side_effect=lambda api_base, model, name, label=None: label if label is not None else name)
     restore = patch('agent_cascade.state_ops.restore_state', return_value=True)
     resolve = patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG)
     return save, restore, resolve

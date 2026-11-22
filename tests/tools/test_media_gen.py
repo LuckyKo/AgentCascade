@@ -835,6 +835,7 @@ class TestReleaseModelFlag:
         tool = MediaGen(agent_pool=MagicMock(name='agent_pool'))
         inst = _fake_instance()
         inst.instance_name = 'caller_agent'
+        inst.kv_birth_ts = '20260101_000000'
         order = []
 
         def _save(inst_):
@@ -847,7 +848,7 @@ class TestReleaseModelFlag:
             order.append('restore')
             # The real helper resolves the held endpoint from pool.api_router;
             # assert it received the pool and the stable label, not a stale cfg.
-            assert label == 'caller_agent' and inst_name == 'caller_agent'
+            assert label == f'caller_agent_{inst.kv_birth_ts}' and inst_name == 'caller_agent'
             return True
 
         def _run(argv, **kwargs):
@@ -876,7 +877,7 @@ class TestReleaseModelFlag:
         args, kwargs = held_restore.call_args
         assert args[0] is not None                      # the pool is threaded through
         assert args[2] == 'caller_agent'
-        assert kwargs.get('label') == 'caller_agent'    # stable label, not _state_label
+        assert kwargs.get('label') == f'caller_agent_{inst.kv_birth_ts}'  # stable stamped label, not _state_label
         fallback_restore.assert_not_called()            # production path, not the fallback
 
 

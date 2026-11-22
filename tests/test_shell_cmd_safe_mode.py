@@ -49,6 +49,7 @@ def _make_instance(*, endpoint=CAPABLE_EP, holds_slot=True, agent_class='assista
     """
     inst = MagicMock()
     inst.instance_name = 'agent-1'
+    inst.kv_birth_ts = '20260101_000000'
     inst.agent_class = agent_class
     # Real AgentInstance uses threading.RLock (agent_instance.py:243); the seam's
     # save path re-acquires it under an outer lock, so a non-reentrant Lock would
@@ -104,9 +105,20 @@ def _make_tool(pool):
 
 
 def _fake_popen(order):
-    """A subprocess.Popen stand-in that records 'run' and completes cleanly."""
+    """A subprocess.Popen stand-in that records 'run' for the command and completes cleanly.
+
+    BUG_0384 added a normal-completion process-tree reap that Popen's taskkill/wmic helper
+    commands (a LIST argv) after EVERY blocking command. The safe-mode command under test is
+    always Popen'd as a single string (e.g. 'chcp ... & python heavy.py'). Record 'run' only
+    for that command, not the reap helpers, so the order asserts stay a faithful signal of
+    command-vs-save/approval/unload/restore ordering rather than counting mock helpers.
+    """
     def _spawn(*a, **k):
-        order.append('run')
+        argv0 = a[0] if a else None
+        is_reap_helper = (isinstance(argv0, (list, tuple)) and argv0
+                          and str(argv0[0]).lower() in ('taskkill', 'wmic', 'tasklist'))
+        if not is_reap_helper:
+            order.append('run')
         proc = MagicMock()
         proc.returncode = 0
         proc.pid = 0
@@ -721,7 +733,7 @@ class TestSafeStableLabelRestore:
         # THE FIX: a state/load IS issued after the unload, for the stable label,
         # even though _state_label was None at the finally.
         assert restore_calls, 'restore_state must be issued after the unload (P1 fix)'
-        assert all(lbl == 'agent-1' for lbl in restore_calls), \
+        assert all(lbl == 'agent-1_20260101_000000' for lbl in restore_calls), \
             f'restore must target the stable label: {restore_calls}'
         # The label was consumed (None) at the finally — proving the old path would no-op.
         with inst._state_lock:
@@ -739,9 +751,9 @@ class TestSafeStableLabelRestore:
 
         _wire_approval_consume(om, order, inst)
 
-        def _save_http(api_base, model, name):
+        def _save_http(api_base, model, name, label=None):
             order.append('save')
-            return name  # real label == instance_name
+            return label if label is not None else name  # stamped label flows into _state_label
 
         stack, restore_calls = _http_seam(order, save_factory=_save_http)
         with stack:
@@ -749,7 +761,7 @@ class TestSafeStableLabelRestore:
                                justification='run it', cwd='.', timeout=None)
 
         assert order == ['save', 'approval', 'unload', 'run']
-        assert restore_calls == ['agent-1'], \
+        assert restore_calls == ['agent-1_20260101_000000'], \
             f'restore_state must use the stable label: {restore_calls}'
 
     def test_stale_or_absent_file_no_exception_escapes_finally(self):
@@ -770,7 +782,7 @@ class TestSafeStableLabelRestore:
             result = tool._execute_safe(agent_name='agent-1', command='python heavy.py',
                                         justification='run it', cwd='.', timeout=None)
 
-        assert restore_calls == ['agent-1']  # restore attempted with the stable label
+        assert restore_calls == ['agent-1_20260101_000000']  # restore attempted with the stable label
         assert isinstance(result, str)        # no exception escaped the finally
         with inst._state_lock:
             assert inst._state_label is None  # cleared on failure (no retry storm)
@@ -790,9 +802,9 @@ class TestSafeStableLabelRestore:
 
         # Pass a save_factory that records 'save' so the save side is observed (the default
         # _http_seam save stub is a silent no-op that would make the save assertion vacuous).
-        def _recording_save(api_base, model, label):
+        def _recording_save(api_base, model, instance_name, label=None):
             order.append('save')
-            return label
+            return label if label is not None else instance_name
 
         stack, restore_calls = _http_seam(order, save_factory=_recording_save)
         with stack:
@@ -803,7 +815,7 @@ class TestSafeStableLabelRestore:
         assert order == ['save', 'approval', 'unload', 'run']
         # THE GUARD: a state/load IS issued for the stable label even with the toggle off —
         # this is what the old kv_toggle-gated path suppressed (restore_calls would be []).
-        assert restore_calls == ['agent-1'], \
+        assert restore_calls == ['agent-1_20260101_000000'], \
             f'safe mode must issue a state/load despite the toggle being off: {restore_calls}'
         assert 'KV state restored after' in _note(inst)  # no cold-reload branch anymore
 

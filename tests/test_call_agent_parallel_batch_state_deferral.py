@@ -45,6 +45,9 @@ class _SimpleInstance:
         self._state_lock = threading.RLock()
         self._last_endpoint_config = last_endpoint_config
         self._state_label = None
+        # Stable per-session KV save key birth TS (str, YYYYMMDD_HHMMSS). save_instance_state
+        # builds the label as <instance_name>_<kv_birth_ts>; production mints it in __post_init__.
+        self.kv_birth_ts = '20260101_000000'
         self._slot_release = slot_release
         self._nest_depth = nest_depth
         self.parent_instance = None
@@ -149,7 +152,8 @@ def _run_batch(engine, caller, turn_output):
 
 def _state_ops_patches():
     """Patch the three state_ops seams: the two HTTP calls + the held-endpoint resolver."""
-    save = patch('agent_cascade.state_ops.save_state', side_effect=lambda api_base, model, name: name)
+    save = patch('agent_cascade.state_ops.save_state',
+                 side_effect=lambda api_base, model, name, label=None: label if label is not None else name)
     restore = patch('agent_cascade.state_ops.restore_state', return_value=True)
     resolve = patch('agent_cascade.state_ops.resolve_held_endpoint', return_value=_HELD_CFG)
     return save, restore, resolve
@@ -311,7 +315,7 @@ def test_mixed_batch_last_async_no_in_batch_load():
     assert rs.call_count == 0, (
         f"no in-batch /state/load when the last call_agent is async, got {rs.call_count}")
     # The label stays pending — it self-heals at the next turn's _setup_turn.
-    assert caller._state_label == CALLER_NAME, 'label must remain pending for the next-turn self-heal'
+    assert caller._state_label == f'{CALLER_NAME}_20260101_000000', 'label must remain pending for the next-turn self-heal'
     # The last child genuinely routed async.
     assert pool.register_async_call.called, 'last call_agent must have taken the async path'
 

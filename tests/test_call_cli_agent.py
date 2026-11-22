@@ -700,18 +700,18 @@ class TestCopilotAdapter:
 
     def test_copilot_argv(self):
         cmd = CopilotAdapter().build_launch_cmd(task='a task', workspace='/ws', posture='acceptEdits')
-        assert cmd == ['copilot', '-p', '--yes', 'a task']
+        assert cmd == ['copilot', '-p', 'a task', '--allow-all-tools']
 
     def test_model_ignored(self):
         # copilot -p exposes no model flag (model_flag is None); a requested model leaves the
         # argv unchanged (byte-safe), per the schema's "harnesses without a model flag ignore it".
         cmd = CopilotAdapter().build_launch_cmd(task='x', workspace='/ws', posture='acceptEdits',
                                                 model='gpt-4o')
-        assert cmd == ['copilot', '-p', '--yes', 'x']
+        assert cmd == ['copilot', '-p', 'x', '--allow-all-tools']
 
     def test_leading_dash_task_guarded(self):
         cmd = CopilotAdapter().build_launch_cmd(task='-r', workspace='/ws', posture='acceptEdits')
-        assert cmd == ['copilot', '-p', '--yes', '--', '-r']
+        assert cmd == ['copilot', '-p', '--', '-r', '--allow-all-tools']
 
     def test_child_env_strips_openai_keeps_github(self):
         # AC's OPENAI_* namespace must never reach the child; GitHub-native auth survives.

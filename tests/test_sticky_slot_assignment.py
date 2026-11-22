@@ -2198,10 +2198,10 @@ class TestN17AutoloaderKVGuardAroundCaption:
         save_calls, restore_calls = [], []
         events = []  # ordered: 'save' / 'http' / 'restore'
 
-        def fake_save_state(api_base, model, instance_name):
+        def fake_save_state(api_base, model, instance_name, label=None):
             save_calls.append(instance_name)
             events.append('save')
-            return instance_name  # label == instance_name (stable)
+            return label if label is not None else instance_name  # stamped label → _state_label
 
         def fake_restore_state(api_base, model, label):
             restore_calls.append(label)
@@ -2226,7 +2226,7 @@ class TestN17AutoloaderKVGuardAroundCaption:
         assert 'http' in events, f"a caption HTTP must have fired: {events}"
         assert events.index('save') < events.index('http'), \
             f"KV save must precede the first caption HTTP: {events}"
-        assert restore_calls == ['agent1'], f"restore_instance_state must run: {restore_calls}"
+        assert restore_calls == [f'agent1_{inst.kv_birth_ts}'], f"restore_instance_state must run: {restore_calls}"
         assert events.index('http') < events.index('restore'), \
             f"KV restore must follow the caption loop: {events}"
         # A successful restore clears the label (prevents double-restore) — still valid.
@@ -2261,9 +2261,9 @@ class TestN17AutoloaderKVGuardAroundCaption:
 
         save_calls, restore_calls = [], []
 
-        def fake_save_state(api_base, model, instance_name):
+        def fake_save_state(api_base, model, instance_name, label=None):
             save_calls.append(instance_name)
-            return instance_name
+            return label if label is not None else instance_name  # stamped label → _state_label
 
         def fake_restore_state(api_base, model, label):
             restore_calls.append(label)
@@ -2280,7 +2280,7 @@ class TestN17AutoloaderKVGuardAroundCaption:
 
         # Save ran before the (failing) HTTP; restore STILL ran in the finally.
         assert save_calls == ['agent1'], f"save_instance_state must run: {save_calls}"
-        assert restore_calls == ['agent1'], \
+        assert restore_calls == [f'agent1_{inst.kv_birth_ts}'], \
             f"restore_instance_state must run even when a caption call raises: {restore_calls}"
         # A successful restore clears the label (no stale double-restore) — even though
         # the caption call itself raised, the KV guard's finally still restored.

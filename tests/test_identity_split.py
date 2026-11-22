@@ -81,14 +81,16 @@ class TestFlagOn:
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
         labels = []
 
-        def fake_save_state(api_base, model, instance_name, session_digest=None):
-            labels.append(instance_name)
-            return f'label:{instance_name}'
+        def fake_save_state(api_base, model, instance_name, session_digest=None, label=None):
+            labels.append(label if label is not None else instance_name)
+            return label if label is not None else instance_name
 
         monkeypatch.setattr(state_ops, 'save_state', fake_save_state)
 
         first = lifecycle_pool.create_instance('Maine', 'orchestrator')
         second = lifecycle_pool.create_instance('Maine', 'orchestrator')
+        first.kv_birth_ts = '20260101_000000'
+        second.kv_birth_ts = '20260101_000000'
         assert {first.instance_name, second.instance_name} == {'Maine', 'Maine_2'}
         assert first.display_name == second.display_name == 'Maine'
 
@@ -100,7 +102,7 @@ class TestFlagOn:
 
         assert len(labels) == 2
         assert labels[0] != labels[1]
-        assert set(labels) == {'Maine', 'Maine_2'}
+        assert set(labels) == {'Maine_20260101_000000', 'Maine_2_20260101_000000'}
 
     def test_subagent_is_never_minted(self, lifecycle_pool, monkeypatch):
         monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', True)
