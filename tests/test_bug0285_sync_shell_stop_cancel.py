@@ -15,6 +15,7 @@ Covered here:
     WMIC leaf sweep stays plain /F.
 """
 
+import os
 import subprocess
 import threading
 import time
@@ -86,9 +87,13 @@ def _record_tree_kills(monkeypatch, proc):
     """Windows tree-kill stand-in: record the PID and actually stop the fake."""
     killed = []
 
-    def _fake_tree_kill(self, pid):
+    def _fake_tree_kill(self, pid, expect_root_exited=False):
         killed.append(pid)
-        proc.kill()
+        # Only a still-running fake needs unblocking (Stop/timeout path). On the
+        # completion reap the proc already finished, so leave its returncode untouched —
+        # exactly like the real dead-root kill, which cannot change an exited returncode.
+        if proc.returncode is None:
+            proc.kill()
 
     monkeypatch.setattr(ShellMixin, '_terminate_process_tree_windows', _fake_tree_kill)
     return killed
@@ -161,7 +166,9 @@ class TestSyncShellStopCancellation:
 
         assert 'Command completed successfully' in result
         assert 'cancelled' not in result
-        assert killed == []
+        # Reap-on-exit: even a command that finished cleanly sweeps the tree once
+        # to collect any grandchild the wrapper detached. Exactly one dead-root pass.
+        assert killed == [proc.pid]
 
     def test_poll_interval_zero_disables_watcher(self, monkeypatch):
         monkeypatch.setattr(shell_mod, 'SHELL_STOP_POLL_INTERVAL', 0)
@@ -179,7 +186,8 @@ class TestSyncShellStopCancellation:
 
         assert 'Command completed successfully' in result
         assert 'cancelled' not in result
-        assert killed == []
+        # Watcher disabled → no Stop path; normal completion still reaps once.
+        assert killed == [proc.pid]
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -227,3 +235,71 @@ class TestTreeKillTaskkillFlags:
         # Leaf PIDs are killed WITHOUT /T (adopted children must not be swept).
         for leaf in leaf_kills:
             assert '/T' not in leaf
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Reap-on-exit: dead-root-safe kill shape (expect_root_exited=True)
+# ────────────────────────────────────────────────────────────────────────────────
+class TestReapOnExitExpectRootExited:
+    """The blocking completion path calls _terminate_shell_process(proc,
+    expect_root_exited=True) because the shell wrapper has already exited. These
+    mock-only tests pin the two dead-root behaviors that make that correct and
+    quiet: Windows skips the dead-root taskkill passes but still sweeps descendants
+    via WMIC; POSIX kills the group via the stored PID (getpgid would raise ESRCH
+    once the group leader is reaped).
+    """
+
+    def test_windows_skips_root_taskkill_still_sweeps_wmic(self, monkeypatch):
+        calls = []
+
+        class _Completed:
+            returncode = 0
+            stdout = 'ProcessId\n987\n'
+
+        def _fake_run(args, **kwargs):
+            calls.append(list(args))
+            return _Completed()
+
+        monkeypatch.setattr(shell_mod.subprocess, 'run', _fake_run)
+        monkeypatch.setattr(shell_mod.time, 'sleep', lambda s: None)
+
+        _make_om(_FakePool())._terminate_process_tree_windows(100, expect_root_exited=True)
+
+        # No dead-root taskkill on the wrapper PID (neither pass-1 /F /T nor pass-2 /F).
+        root_kills = [c for c in calls if 'taskkill' in c and c[-1] == '100']
+        assert root_kills == [], f"dead-root taskkill must be skipped, got: {root_kills}"
+        # The WMIC descendant sweep still runs and the discovered leaf is killed.
+        assert any('wmic' in c for c in calls), f"expected WMIC sweep, got: {calls}"
+        assert ['taskkill', '/F', '/PID', '987'] in calls, \
+            f"expected leaf kill for discovered descendant, got: {calls}"
+
+    @pytest.mark.skipif(os.name != 'posix', reason='POSIX-only: os.killpg / signal.SIGKILL')
+    def test_posix_kills_group_via_stored_pid_not_getpgid(self, monkeypatch):
+        monkeypatch.setattr(shell_mod, 'ON_WINDOWS', False)
+        killpg_calls = []
+        monkeypatch.setattr(
+            shell_mod.os, 'killpg', lambda pgid, sig: killpg_calls.append((pgid, sig)))
+
+        def _getpgid_must_not_run(*a, **k):
+            raise OSError('getpgid must not run on a reaped group leader')
+        monkeypatch.setattr(shell_mod.os, 'getpgid', _getpgid_must_not_run)
+
+        _make_om(_FakePool())._terminate_shell_process(
+            _BlockingProc(pid=4242), expect_root_exited=True)
+
+        assert killpg_calls == [(4242, shell_mod.signal.SIGKILL)], \
+            f"expected killpg(stored_pid, SIGKILL), got: {killpg_calls}"
+
+    @pytest.mark.skipif(os.name != 'posix', reason='POSIX-only: os.killpg / signal.SIGKILL')
+    def test_posix_live_root_still_uses_getpgid(self, monkeypatch):
+        # Regression guard: the default (live-root) POSIX path is unchanged.
+        monkeypatch.setattr(shell_mod, 'ON_WINDOWS', False)
+        killpg_calls = []
+        monkeypatch.setattr(
+            shell_mod.os, 'killpg', lambda pgid, sig: killpg_calls.append((pgid, sig)))
+        monkeypatch.setattr(shell_mod.os, 'getpgid', lambda pid: pid + 1)
+
+        _make_om(_FakePool())._terminate_shell_process(_BlockingProc(pid=100))
+
+        assert killpg_calls == [(101, shell_mod.signal.SIGKILL)], \
+            f"live-root path must use getpgid's result, got: {killpg_calls}"

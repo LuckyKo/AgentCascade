@@ -1010,7 +1010,7 @@ class ShellMixin:
         return configure_windows_utf8(command, create_new_console=False)
 
     # ------------------------------------------------------------------
-    def _terminate_process_tree_windows(self, pid: int):
+    def _terminate_process_tree_windows(self, pid: int, expect_root_exited: bool = False):
         """Kill a Windows process and all its descendants.
 
         Three-stage strategy to handle race conditions where children spawn
@@ -1024,25 +1024,36 @@ class ShellMixin:
           3. WMIC sweep — discovers deeper descendants (grandchildren+) that may
              have been created during passes 1–2 and kills them individually
              (plain /F: these are leaf PIDs, see _run_taskkill).
+
+        When ``expect_root_exited`` is True the root is known already dead (a
+        blocking command that finished normally), so passes 1 and 2 are skipped:
+        taskkill on a dead root only logs spurious failures, and the WMIC sweep
+        alone reaches the still-running grandchildren — a dead wrapper still owns
+        them in the parent-PID map. False (default) keeps the full three-stage
+        live-root kill used by the timeout and user-Stop paths.
         """
-        # First pass: taskkill with tree flag
-        try:
-            result = _run_taskkill(pid, tree=True)
-            if result.returncode != 0:
-                logger.warning(f"taskkill returned code {result.returncode} for PID {pid}")
-        except Exception as e:
-            logger.warning(f"taskkill failed for PID {pid}: {e}")
+        if not expect_root_exited:
+            # First pass: taskkill with tree flag
+            try:
+                result = _run_taskkill(pid, tree=True)
+                if result.returncode != 0:
+                    logger.warning(f"taskkill returned code {result.returncode} for PID {pid}")
+            except Exception as e:
+                logger.warning(f"taskkill failed for PID {pid}: {e}")
 
-        # Second pass: retry taskkill after brief delay
-        time.sleep(TASKKILL_RETRY_DELAY)
-        try:
-            result = _run_taskkill(pid)
-            if result.returncode != 0:
-                logger.debug(f"Second-pass taskkill returned code {result.returncode} for PID {pid}")
-        except Exception as e:
-            logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
+            # Second pass: retry taskkill after brief delay
+            time.sleep(TASKKILL_RETRY_DELAY)
+            try:
+                result = _run_taskkill(pid)
+                if result.returncode != 0:
+                    logger.debug(f"Second-pass taskkill returned code {result.returncode} for PID {pid}")
+            except Exception as e:
+                logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
 
-        # WMIC sweep for deeper descendants
+        # WMIC/CIM sweep for deeper descendants. Runs on EVERY path now — including
+        # the normal-completion path (expect_root_exited=True), where this is the only
+        # stage that reaches the still-running grandchildren. ``wmic`` is a deprecated
+        # Windows 11 dependency: the sweep is best-effort and a no-op if it is absent.
         try:
 
             def _get_child_pids(parent_pid):
@@ -1085,19 +1096,41 @@ class ShellMixin:
                 except Exception as e:
                     logger.debug(f"WMIC child kill failed (non-critical): {e}")
         except Exception as e:
-            logger.warning(f"WMIC descendant sweep failed: {e}")
+            # Clean-completion reaps (expect_root_exited=True) run this sweep on every
+            # blocking command; demote to debug so a missing/failing wmic can't spam the
+            # WARNING log. Timeout/Stop (live root) keeps the WARNING.
+            if expect_root_exited:
+                logger.debug(f"WMIC descendant sweep failed (non-critical): {e}")
+            else:
+                logger.warning(f"WMIC descendant sweep failed: {e}")
 
     # ------------------------------------------------------------------
-    def _terminate_shell_process(self, proc) -> None:
+    def _terminate_shell_process(self, proc, expect_root_exited: bool = False) -> None:
         """Force-terminate a Popen started by execute_shell_command (best effort).
 
         Windows: kill the whole process tree (taskkill /F /T + WMIC sweep) so the
         cmd.exe wrapper's children die with it. POSIX: kill the process group,
         falling back to ``proc.kill()``. Shared by the timeout path and the
         user-Stop watcher so both kill identically.
+
+        When ``expect_root_exited`` is True the shell wrapper is known to have
+        already exited (normal completion). The group leader has been reaped, so
+        ``os.getpgid`` would raise ESRCH; because start_new_session made it its own
+        group leader (pgid == pid) we can ``os.killpg`` the stored PID to reach any
+        in-group grandchild, and on Windows the dead-root taskkill passes are
+        skipped (see _terminate_process_tree_windows). False (default) keeps the
+        live-root kill used by timeout/Stop.
         """
         if ON_WINDOWS:
-            self._terminate_process_tree_windows(proc.pid)
+            self._terminate_process_tree_windows(proc.pid, expect_root_exited=expect_root_exited)
+            return
+        if expect_root_exited:
+            # Leader already reaped → getpgid raises ESRCH; pgid == pid by
+            # start_new_session, so killpg(pid) still signals the in-group orphans.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception as e:
+                logger.debug(f"Unix process-group kill on exited root (no-op if group gone): {e}")
             return
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -1391,6 +1424,15 @@ class ShellMixin:
                         _fg_pool.unregister_foreground_process(agent_name, proc)
                     except Exception as _fg_unreg_err:
                         logger.debug(f'[shell_cmd] foreground unregister failed (non-critical): {_fg_unreg_err}')
+
+            # Contract: a blocking shell_cmd must not leave orphans. start_new_session made
+            # the shell wrapper a session/group leader; once it exits, any detached grandchild
+            # survives. Reap it with the same tree-killer used on timeout/Stop, in
+            # dead-root-quiet mode. Placed after unregister_foreground_process so the terminate
+            # button can no longer be holding this handle. result_ok excludes the timeout branch
+            # (already tree-killed); not cancelled excludes the Stop-watcher path.
+            if result_ok and not cancelled.is_set():
+                self._terminate_shell_process(proc, expect_root_exited=True)
 
             # Wait for reader threads to drain remaining pipe buffers.
             t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)

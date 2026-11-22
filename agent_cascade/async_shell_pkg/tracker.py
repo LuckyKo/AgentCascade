@@ -921,6 +921,20 @@ class AsyncShellTracker:
         except Exception as e:
             logger.debug(f"[AsyncShell] Viewer wait failed for tool_id={tool_id}: {e}")
 
+    def _reap_completed_tree(self, proc, agent_name: str, tool_id: int, tag: str) -> None:
+        """Best-effort, dead-root-quiet reap of a finished command's orphaned
+        descendants. Safe to call from the completion/delivery path: it never raises
+        (failures are logged at debug), so it can never gate result delivery. The root
+        is known to have already exited (poll() not None), hence expect_root_exited=True.
+        ``tag`` only distinguishes the caller in the log ("Post-kill" / "Completion").
+        """
+        if proc is not None and proc.poll() is not None:
+            try:
+                self._kill_process_tree(proc, agent_name, tool_id, expect_root_exited=True)
+            except Exception as e:
+                logger.debug(f"[AsyncShell] {tag} reap failed (non-critical) "
+                             f"for {agent_name} tool_id={tool_id}: {e}")
+
     # ────────────────────────────────────────────────────────────────
     def _track_task(self, agent_name: str, tool_id: int, command: str, cwd: Optional[str]) -> None:
         """Track a single shell task from launch to completion.
@@ -972,9 +986,14 @@ class AsyncShellTracker:
                 if proc is not None and proc.poll() is None:
                     self._kill_process_tree(proc, agent_name, tool_id)
                     time.sleep(PROCESS_KILL_SETTLE_DELAY)
-                elif task.viewer_process is not None:
-                    # Main process already finished but kill was requested — just kill viewer.
-                    self._kill_viewer_process(task)
+                else:
+                    # Main already exited (kill raced natural completion). Clean up any
+                    # viewer, then reap orphaned descendants — the alive tree-kill above is
+                    # skipped here because the root is gone, so grandchildren it detached
+                    # would otherwise leak. Best-effort, never raises into the result path.
+                    if task.viewer_process is not None:
+                        self._kill_viewer_process(task)
+                    self._reap_completed_tree(proc, agent_name, tool_id, 'Post-kill')
             elif timed_out or stall_killed:
                 # Timeout / stall watchdog — kill both main process tree and viewer.
                 self._kill_process_tree(proc, agent_name, tool_id)
@@ -989,6 +1008,14 @@ class AsyncShellTracker:
                     task.viewer_process = None  # Cleanup reference before waiting
 
                 self._cleanup_viewer(viewer, tool_id)
+
+                # Contract: an async command must not leave orphans on normal completion.
+                # The poll_loop exited because the main proc finished, so reap any grandchild
+                # it detached with the same tree-killer, dead-root-quiet mode. viewer_process is
+                # already None above, so _kill_process_tree's viewer cleanup is a no-op and the
+                # console window is not disturbed. Best-effort: placed before task.completed but
+                # must never raise into the result/delivery path.
+                self._reap_completed_tree(proc, agent_name, tool_id, 'Completion')
 
             # ── Mark completed immediately so _get_launch_result() can detect it ───
             # Set completed and return_code right after poll_loop exits (process finished).
@@ -1242,7 +1269,8 @@ class AsyncShellTracker:
         return alive
 
     # ────────────────────────────────────────────────────────────────
-    def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int) -> None:
+    def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int,
+                           expect_root_exited: bool = False) -> None:
         """Kill the main process tree and its associated viewer process (if any).
 
         Terminates the primary shell subprocess plus all descendants via taskkill/killpg.
@@ -1265,12 +1293,22 @@ class AsyncShellTracker:
             proc: Popen handle for the main process.
             agent_name: Owner agent name (for task lookup).
             tool_id: Task identifier (for task lookup and logging).
+            expect_root_exited: The main process is known to have already exited (async
+                completion). The finished-root skip below is bypassed, the Windows root
+                ``taskkill /F /T`` pass is skipped (a dead root only logs a spurious
+                failure), and POSIX kills the process group via the stored PID — the leader
+                is reaped so ``os.getpgid`` would raise ESRCH, but pgid == pid by
+                start_new_session. The descendant sweep still runs: a dead wrapper still
+                owns orphaned children in the PPID map. False (default) keeps the live-root
+                kill used by timeout/stall/__kill.
         """
         pid = proc.pid
         logger.debug(f"[AsyncShell] Killing process tree for {agent_name} tool_id={tool_id}, PID={pid}")
 
-        # Skip if already dead
-        if proc.poll() is not None:
+        # Skip if already dead — UNLESS the root is known to have exited (completion
+        # reap) and we still need to sweep its descendants. A dead root still owns
+        # orphaned children in the PPID map, so the sweep below is meaningful post-exit.
+        if proc.poll() is not None and not expect_root_exited:
             logger.debug(f"[AsyncShell] Process {pid} already finished, skipping kill")
             return
 
@@ -1283,23 +1321,27 @@ class AsyncShellTracker:
                     f"[AsyncShell] Captured {len(descendant_pids)} descendant PID(s) for tool_id={tool_id}: {descendant_pids}"
                 )
 
-            try:
-                # First pass: taskkill with tree flag (main process)
-                result = subprocess.run(
-                    ['taskkill', '/F', '/T', '/PID', str(pid)],
-                    capture_output=True,
-                    timeout=10,
-                    text=True,
-                )
-                time.sleep(PROCESS_KILL_SETTLE_DELAY)
-                if result.returncode == 0:
-                    logger.debug(f"[AsyncShell] Successfully killed PID {pid} (taskkill succeeded)")
-                else:
-                    logger.warning(
-                        f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}"
+            if not expect_root_exited:
+                try:
+                    # First pass: taskkill with tree flag (main process). Only when the
+                    # root is alive — under expect_root_exited it is already dead, so this
+                    # would only log a spurious failure; the survivor/second-pass below
+                    # reaps the still-running descendants instead.
+                    result = subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(pid)],
+                        capture_output=True,
+                        timeout=10,
+                        text=True,
                     )
-            except Exception as e:
-                logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
+                    time.sleep(PROCESS_KILL_SETTLE_DELAY)
+                    if result.returncode == 0:
+                        logger.debug(f"[AsyncShell] Successfully killed PID {pid} (taskkill succeeded)")
+                    else:
+                        logger.warning(
+                            f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
 
             # Verify all captured PIDs are dead; warn about survivors. Runs unconditionally
             # (not gated on descendant_pids) so a surviving main process with no descendants
@@ -1334,8 +1376,14 @@ class AsyncShellTracker:
         else:
             try:
                 import signal
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-                logger.debug(f"[AsyncShell] Sent SIGKILL to process group {pid}")
+                if expect_root_exited:
+                    # Leader already reaped → getpgid would raise ESRCH; pgid == pid by
+                    # start_new_session, so killpg(pid) still signals the in-group orphans.
+                    os.killpg(pid, signal.SIGKILL)
+                    logger.debug(f"[AsyncShell] Sent SIGKILL to process group {pid} (root exited)")
+                else:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    logger.debug(f"[AsyncShell] Sent SIGKILL to process group {pid}")
             except OSError:
                 try:
                     proc.kill()

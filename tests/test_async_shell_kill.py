@@ -1058,5 +1058,75 @@ class TestAtexitCleanup:
                     pass
 
 
+# ============================================================================
+# expect_root_exited (completion reap): async _kill_process_tree dead-root shape
+# ============================================================================
+
+class TestKillProcessTreeExpectRootExited:
+    """The async completion path (A1/A7) calls _kill_process_tree(proc, ...,
+    expect_root_exited=True) because the main process has already exited. These
+    mock-only tests pin the dead-root behaviors: the finished-root skip is bypassed,
+    the Windows dead-root ``taskkill /F /T`` is skipped while the survivor/second-pass
+    still reaps orphans, and POSIX kills the group via the stored PID.
+    """
+
+    def test_windows_no_early_return_skips_root_taskkill_still_second_pass(self, monkeypatch):
+        from agent_cascade.async_shell_pkg import tracker as tracker_mod
+        monkeypatch.setattr(tracker_mod, 'ON_WINDOWS', True)
+        monkeypatch.setattr(tracker_mod.time, 'sleep', lambda s: None)
+
+        taskkill_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            taskkill_calls.append(list(cmd))
+            return MagicMock(returncode=0, stdout='', stderr='')
+        monkeypatch.setattr(tracker_mod.subprocess, 'run', _fake_run)
+
+        tracker = AsyncShellTracker(pool=None)
+        proc = MagicMock()
+        proc.pid = 1000
+        proc.poll.return_value = 0  # already exited — must NOT early-return
+
+        # Survivor check reports the orphan 2000 alive first, dead after second pass.
+        with patch.object(tracker, '_get_windows_descendant_pids',
+                          return_value=[2000]) as mock_desc:
+            with patch.object(tracker, '_check_windows_pids_alive',
+                              side_effect=[[2000], []]):
+                tracker._kill_process_tree(proc, 'test_agent', 1, expect_root_exited=True)
+
+            # Not early-returned despite a dead root: descendant discovery ran.
+            mock_desc.assert_called_once_with(1000)
+
+        # Root is dead → no tree taskkill (/T) on the wrapper PID.
+        root_tree_kills = [c for c in taskkill_calls if c[-1] == '1000' and '/T' in c]
+        assert root_tree_kills == [], f"dead-root taskkill must be skipped, got: {taskkill_calls}"
+        # The orphan is reaped by the second pass (plain /F, no /T).
+        assert ['taskkill', '/F', '/PID', '2000'] in taskkill_calls, \
+            f"expected second-pass leaf kill for orphan 2000, got: {taskkill_calls}"
+
+    @pytest.mark.skipif(os.name != 'posix', reason='POSIX-only: os.killpg / signal.SIGKILL')
+    def test_posix_kills_group_via_stored_pid_not_getpgid(self, monkeypatch):
+        import signal
+        from agent_cascade.async_shell_pkg import tracker as tracker_mod
+        monkeypatch.setattr(tracker_mod, 'ON_WINDOWS', False)
+
+        killpg_calls = []
+        monkeypatch.setattr(
+            tracker_mod.os, 'killpg', lambda pgid, sig: killpg_calls.append((pgid, sig)))
+
+        def _getpgid_must_not_run(*a, **k):
+            raise OSError('getpgid must not run on a reaped group leader')
+        monkeypatch.setattr(tracker_mod.os, 'getpgid', _getpgid_must_not_run)
+
+        tracker = AsyncShellTracker(pool=None)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.poll.return_value = 0  # exited — must not early-return
+        tracker._kill_process_tree(proc, 'test_agent', 1, expect_root_exited=True)
+
+        assert killpg_calls == [(4242, signal.SIGKILL)], \
+            f"expected killpg(stored_pid, SIGKILL), got: {killpg_calls}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
