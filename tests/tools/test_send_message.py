@@ -181,8 +181,8 @@ class TestSendMessageAgentToAgent:
         assert 'exists' in result.lower()
 
     @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
-    def test_inactive_agent_destination_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
-        """Sending to an inactive agent (IDLE/TERMINATED) returns an error."""
+    def test_idle_agent_destination_is_queued_not_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
+        """BUG_0396: sending to an IDLE agent queues the message and does not start it."""
         from agent_cascade.agent_instance import AgentState
 
         # Set agentB to IDLE
@@ -192,7 +192,30 @@ class TestSendMessageAgentToAgent:
         params = json.dumps({'destination': 'agentB', 'message': 'hello'})
         result = send_message_tool.call(params)
 
-        assert 'ERROR' in result and 'IDLE' in result
+        # IDLE targets are queued (not rejected) with queued-not-delivered feedback.
+        assert 'ERROR' not in result, f"Expected queuing, got: {result}"
+        assert 'queued' in result.lower() and 'idle agent' in result.lower(), result
+        # The message landed in the queue (drain to confirm).
+        msgs = agent_pool_with_agents.drain_queue('agentB')
+        assert msgs == ['[MESSAGE from agentA]: hello'], f"Unexpected queue: {msgs}"
+        # The agent was NOT started — it is still IDLE.
+        assert agent_pool_with_agents.instances['agentB'].state == AgentState.IDLE
+
+    @patch('agent_cascade.tools.custom.send_message._get_current_instance_name', return_value='agentA')
+    def test_terminated_agent_destination_rejected(self, mock_get_name, send_message_tool, agent_pool_with_agents):
+        """BUG_0396: sending to a TERMINATED agent is still rejected and nothing is queued."""
+        from agent_cascade.agent_instance import AgentState
+
+        # Set agentB to TERMINATED
+        with agent_pool_with_agents._pool_lock:
+            agent_pool_with_agents.instances['agentB'].state = AgentState.TERMINATED
+
+        params = json.dumps({'destination': 'agentB', 'message': 'hello'})
+        result = send_message_tool.call(params)
+
+        assert 'ERROR' in result and 'TERMINATED' in result, result
+        # Nothing is queued to a terminated agent.
+        assert agent_pool_with_agents.drain_queue('agentB') == []
 
 
 # ---------------------------------------------------------------------------

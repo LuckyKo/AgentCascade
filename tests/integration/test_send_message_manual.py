@@ -58,6 +58,11 @@ class FakeAgentPool:
         with self._queue_lock:
             return self.message_queues.pop(instance_name, [])
 
+    def get_queue_messages(self, instance_name: str):
+        """Non-destructive peek of a queue (BUG_0396: assert queued, not drained)."""
+        with self._queue_lock:
+            return list(self.message_queues.get(instance_name, []))
+
 
 def setup_agent_pool():
     """Build a FakeAgentPool with two RUNNING agents."""
@@ -183,6 +188,76 @@ def test_agent_to_user(pool):
 
         ws_loop.call_soon_threadsafe(ws_loop.stop)
         loop_thread.join(timeout=2.0)
+
+
+def test_send_to_idle_agent_queues_not_starts(pool):
+    """BUG_0396: an IDLE target is queued (not delivered) and not auto-started."""
+    print('\n[TEST] IDLE Agent -> Queued, Not Started')
+    print('-' * 40)
+
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.agent_instance import AgentState
+    from agent_cascade.operation_manager.path_security import _thread_locals
+
+    with pool._pool_lock:
+        pool.instances['idleB'] = make_mock_agent('idleB', AgentState.IDLE)
+
+    tool = SendMessage(agent_pool=pool)
+    original_name = getattr(_thread_locals, 'instance_name', None)
+    _thread_locals.instance_name = 'agentA'
+    try:
+        params = json.dumps({'destination': 'idleB', 'message': 'please review when awake'})
+        result = tool.call(params)
+        print(f"  send_message result: {result}")
+
+        # 1) feedback notes queued-not-delivered
+        assert 'idle agent' in result.lower() and 'not delivered' in result.lower(), result
+        # 2) message IS queued (peek, not drain)
+        msgs = pool.get_queue_messages('idleB')
+        assert len(msgs) == 1, f"Expected 1 queued message, got {msgs}"
+        assert msgs[0] == '[MESSAGE from agentA]: please review when awake', msgs[0]
+        # 3) target is STILL IDLE — send_message did not start it.
+        assert pool.instances['idleB'].state == AgentState.IDLE, pool.instances['idleB'].state
+
+        print('  ✓ Queued without starting the idle agent')
+        return True
+    finally:
+        if original_name is not None:
+            _thread_locals.instance_name = original_name
+        else:
+            delattr(_thread_locals, 'instance_name')
+
+
+def test_send_to_terminated_agent_rejected(pool):
+    """BUG_0396: a TERMINATED target is rejected and nothing is queued."""
+    print('\n[TEST] TERMINATED Agent -> Rejected')
+    print('-' * 40)
+
+    from agent_cascade.tools.custom.send_message import SendMessage
+    from agent_cascade.agent_instance import AgentState
+    from agent_cascade.operation_manager.path_security import _thread_locals
+
+    with pool._pool_lock:
+        pool.instances['deadB'] = make_mock_agent('deadB', AgentState.TERMINATED)
+
+    tool = SendMessage(agent_pool=pool)
+    original_name = getattr(_thread_locals, 'instance_name', None)
+    _thread_locals.instance_name = 'agentA'
+    try:
+        params = json.dumps({'destination': 'deadB', 'message': 'hi'})
+        result = tool.call(params)
+        print(f"  send_message result: {result}")
+
+        assert 'ERROR' in result and 'TERMINATED' in result, result
+        assert pool.get_queue_messages('deadB') == [], 'Message should NOT be queued to a terminated agent'
+
+        print('  ✓ TERMINATED target rejected, nothing queued')
+        return True
+    finally:
+        if original_name is not None:
+            _thread_locals.instance_name = original_name
+        else:
+            delattr(_thread_locals, 'instance_name')
 
 
 def main():

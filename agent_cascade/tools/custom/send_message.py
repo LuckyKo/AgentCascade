@@ -7,7 +7,7 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.schema_common import tool_params
 
 logger = logging.getLogger(__name__)
-from agent_cascade.agent_instance import ACTIVE_STATES
+from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
 from agent_cascade.operation_manager.path_security import _get_current_instance_name
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.user_message_log import log_user_message
@@ -135,14 +135,30 @@ class SendMessage(BaseTool):
             # Use direct .state field (AgentState enum), not get_state() which doesn't exist
             current_state = target_instance.state
             if current_state not in ACTIVE_STATES:
-                state_name = current_state.name
-                return f"ERROR: Agent '{destination}' is currently {state_name}. Messages are only delivered to actively running agents."
+                # BUG_0396: an IDLE agent still exists and can hold queued messages;
+                # they are delivered on its next explicit start (user steer / call_agent).
+                # Do NOT start it here. TERMINATED agents are gone — keep rejecting.
+                if current_state == AgentState.IDLE:
+                    is_idle_target = True
+                else:
+                    state_name = current_state.name
+                    return (f"ERROR: Agent '{destination}' is currently {state_name}. "
+                            'Messages are only delivered to actively running agents.')
+            else:
+                is_idle_target = False
 
         # Tag message with sender for agent-to-agent context
         tagged_message = f"[MESSAGE from {sender}]: {message}"
 
-        # Enqueue outside the pool lock (enqueue_message has its own queue lock)
+        # Enqueue outside the pool lock (enqueue_message has its own queue lock).
+        # Safe for both ACTIVE and IDLE targets: enqueue_message self-locks and does
+        # no state check; the agent is NOT started by this call.
         pool.enqueue_message(destination, tagged_message)
+
+        if is_idle_target:
+            return (f"Message queued for idle agent '{destination}' "
+                    '(sent to an idle agent (queued, not delivered)). '
+                    'It will be delivered on their next explicit start.')
 
         return f"Message sent successfully to '{destination}'. It will be delivered on their next turn."
 
