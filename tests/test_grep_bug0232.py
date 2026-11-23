@@ -186,3 +186,20 @@ def test_spillover_path_in_tail_not_header(tmp_path):
     assert 'Full output saved to:' not in header, f"spillover path leaked into header: {header}"
     # The tail marker MUST contain the spillover pointer.
     assert 'read_logs/read_file on' in body, f"spillover pointer missing from tail: {body[-200:]}"
+
+
+def test_partial_truncation_spillover_path_in_tail_not_header(tmp_path):
+    """BUG_0397: for the partially-shown (shown>0) fast-path truncation, the spillover
+    path must also appear only in the tail marker, not the header."""
+    om = _make_om(tmp_path)
+    # 10 short matches; char_limit=80 lets ~5 fit ⇒ shown=5, total=10 (partial, not all-spilled).
+    events = '\n'.join(_match_event(f'f{i}.txt', 1, f'hit{i}') for i in range(10)) + '\n'
+    with _force_fast_path(), patch('subprocess.run', side_effect=_fake_run(events)):
+        out = om.grep('hit', '.', char_limit=80)
+
+    header, _, body = out.partition('\n')
+    # The header must NOT contain the spillover path.
+    assert 'read the spillover file' not in header, f"spillover path leaked into header: {header}"
+    assert 'Full output saved to:' not in header, f"spillover path leaked into header: {header}"
+    # The tail marker MUST contain the spillover pointer.
+    assert 'read the spillover file' in body, f"spillover pointer missing from tail: {body[-200:]}"
