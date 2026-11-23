@@ -129,6 +129,7 @@ def test_dispatch_calls_run_child_core_with_pinned_kwargs(monkeypatch):
     assert seen['instance_name'] == 'AFK_Admin'
     assert seen['prefix'] == 'Agent'
     assert seen['args']['task'].startswith('You are the fleet overseer')
+    assert seen['args']['load_skill'] == 'NONE'
     assert seen['engine']._is_advisor_run is True
     text = _enqueue_text(calls[0][1])
     assert text.strip().startswith('Context: This is a message from AFK_Admin.')

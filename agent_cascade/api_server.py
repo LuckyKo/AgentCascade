@@ -1590,7 +1590,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     result = run_child_core(
                         engine=engine, pool=agent_pool,
                         agent_class='Admin', instance_name=AFK_ADMIN_INSTANCE_NAME,
-                        args={'task': afk_prompt},
+                        args={'task': afk_prompt, 'load_skill': 'NONE'},
                         caller_name=instance_name,
                         child_depth=1,
                         force_fresh=False,
