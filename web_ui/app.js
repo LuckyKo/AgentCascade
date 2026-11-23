@@ -1353,6 +1353,7 @@ if ($('#setting-model')) $('#setting-model').addEventListener('change', saveSett
 
 function loadSession(path, mode) {
   if (ws && ws.readyState === WebSocket.OPEN) {
+    state.sessionJustLoaded = true;
     state.closedTabs.clear();
     localStorage.removeItem('agent-cascade-closed-tabs');
     clearAgentMessages();
@@ -4981,6 +4982,12 @@ async function onMcpToggleChange(checkbox, enabled) {
 function renderSubAgents() {
   const t0 = performance.now();
 
+  // BUG_0389: consume the session-just-loaded flag into a local and clear it
+  // immediately, so re-entry (switchMainTab -> renderSubAgents) and the
+  // empty-agents early return can never re-apply or strand the flag.
+  const sessionJustLoaded = state.sessionJustLoaded;
+  state.sessionJustLoaded = false;
+
   // Preserve chat input focus and cursor position during DOM manipulation.
   // renderSubAgents rebuilds message panels which can steal focus from #chatInput,
   // causing the caret to jump while typing or during streaming.
@@ -5152,7 +5159,9 @@ function renderSubAgents() {
   // refresh, or cleanupStaleSubAgents reset), activate the session primary agent.
   // Use direct DOM activation here instead of switchMainTab() to avoid a second
   // full render of all sub-agent tabs.
+  let didAutoActivate = false;
   if (!state.activeSubTab && namesArr.length > 0) {
+    didAutoActivate = true;
     const primaryName = getSessionPrimaryInstanceName();
     const tabName = namesArr.includes(primaryName) ? primaryName : namesArr[0];
     const tabId = 'sub-' + tabName;
@@ -5170,6 +5179,14 @@ function renderSubAgents() {
     }
 
     ActivityBar.setActiveTab();
+  }
+
+  // BUG_0389: a freshly-loaded session's active tab was auto-activated via
+  // direct DOM (no render pass painted it) — force the canonical refresh now.
+  // Gated on didAutoActivate so a same-name-surviving (already-painted) tab is
+  // NOT re-rendered. Reuses the click-refresh path (switchMainTab).
+  if (sessionJustLoaded && didAutoActivate && state.activeSubTab) {
+    switchMainTab(state.activeSubTab);
   }
 
   // Diagnostic: warn on slow renders
