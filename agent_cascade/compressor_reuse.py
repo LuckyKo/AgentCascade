@@ -228,7 +228,6 @@ class WarmCompressorSession:
                 self.agent_pool, self.engine, self.instance, self.actual_name, self.caller_name,
                 timeout_label='Consolidation')
         except Exception as e:  # noqa: BLE001 — warm path is best-effort; degrade, never escalate
-            from agent_cascade.log import logger
             logger.warning('[COMPRESSOR_REUSE] warm refine failed for %s: %s — degrading to fresh respawn',
                            self.actual_name, e)
             return None

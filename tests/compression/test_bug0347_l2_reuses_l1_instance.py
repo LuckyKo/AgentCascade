@@ -317,6 +317,36 @@ class TestBeginTask:
         assert 'SUMMARY UNDER REVIEW' in joined        # correction saw the carried context
         assert len(warm.conversation) == 4             # append-only: system + task + summary + correction
 
+    def test_refine_unavailable_path_logs_info_not_unboundlocalerror(self):
+        # (BUG_0387) When the engine refuses to continue the turn (returns None), refine must take
+        # the "unavailable" branch: log the intended INFO and return None — NOT raise
+        # UnboundLocalError. Pre-fix, a function-local `from agent_cascade.log import logger` in the
+        # except block shadowed the module logger for the whole function, so the earlier
+        # logger.info raised UnboundLocalError, which the except masked as a misleading warning.
+        # Patching the module-level logger proves the intended INFO now fires (and the masked
+        # UnboundLocalError warning does not).
+        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.compression import agent_invoker as _inv
+        import agent_cascade.compressor_reuse as cr
+        warm = _warm_compressor()
+        warm.append_message(Message(role=USER, content='L2 TASK'))
+        warm.append_message(Message(role='assistant', content='SUMMARY UNDER REVIEW'))
+        rid = 'rf_unavail_rid'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        engine = MagicMock()
+        engine._continue_reusable_system_agent_turn.return_value = None  # engine refuses
+        session = compressor_reuse.WarmCompressorSession(
+            warm, COMPRESSOR_WARM_NAME, rid, engine, _fake_pool(warm), 'Caller')
+        fake_logger = MagicMock()
+        with patch.object(_inv, '_reset_terminated_compressor_for_retry'), \
+                patch.object(_inv, '_execute_compressor_and_extract_summary'), \
+                patch.object(cr, 'logger', fake_logger):
+            out = session.refine(['keep me'])
+        assert out is None
+        fake_logger.info.assert_called_once()
+        assert 'warm refine unavailable' in fake_logger.info.call_args[0][0]
+        fake_logger.warning.assert_not_called()
+
     def test_reset_helper_is_idempotent_and_byte_identical(self):
         # (c) Two calls on an already-clean instance are a safe no-op and keep conversation[0]
         # byte-identical (same object + same serialized content).
