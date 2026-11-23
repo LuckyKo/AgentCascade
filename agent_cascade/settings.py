@@ -135,8 +135,6 @@ AFK_ADMIN_MAX_TURNS: int = int(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_TURNS', 30))  # Turn budget for the AFK Admin agent
 AFK_ADMIN_FIRST_YIELD_TIMEOUT: float = float(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_FIRST_YIELD_TIMEOUT', 45.0))  # First-yield guard (s)
-AFK_ADMIN_NUDGE_MAX_CHARS: int = int(
-    os.getenv('AGENT_CASCADE_AFK_ADMIN_NUDGE_MAX_CHARS', 4000))  # Admin result cap (chars)
 # Fixed instance_name of the session-continuing AFK Admin call_agent child. Re-called on every
 # AFK window so the child's session (and KV) persists across windows; the reaper provides the
 # fresh view once it goes idle past AGENT_IDLE_TIMEOUT. Must match the name the root passes in

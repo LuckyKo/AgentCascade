@@ -33,13 +33,18 @@ def _extract_task_block(output: str) -> str:
     Returns the task text (the content between the markers, stripped). When no valid
     [TASK]…[END] block is present, falls back to the whole output (stripped) so the
     dispatch still posts a usable task. Empty output returns ''.
+
+    Uses the LAST [TASK]…[END] block: the prompt contract requires the block to be the
+    final element of the message, so any earlier literal `[TASK]…[END]` mentions in the
+    Admin's prose (e.g. when it describes the format) are false positives. findall
+    returns each block's inner text; the last is the real task.
     """
     if not output:
         return ''
-    m = _AFK_TASK_BLOCK_RE.search(output)
-    if not m:
-        return output.strip()
-    return m.group(1).strip()
+    matches = _AFK_TASK_BLOCK_RE.findall(output)
+    if matches:
+        return matches[-1].strip()
+    return output.strip()
 
 
 # ── Helper functions ────────────────────────────────────────────────────────
@@ -406,14 +411,6 @@ def run_child_core(
     # extended run return its pre-reflection task output snapshot instead of the
     # reflection-tail message (plan §3.3); non-auto-skill runs are unaffected.
     result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool, instance=inst)
-
-    # Cap an Admin oversight report: the read-only Admin returns a findings block for the
-    # caller's context, and an unbounded result would flood it as a single oversized tool
-    # message. Bounded at the same lever as the legacy enqueued nudge.
-    if agent_class.lower() == 'admin':
-        from agent_cascade.settings import AFK_ADMIN_NUDGE_MAX_CHARS
-        if result and len(result) > AFK_ADMIN_NUDGE_MAX_CHARS:
-            result = result[:AFK_ADMIN_NUDGE_MAX_CHARS] + '\n…[truncated — report exceeded the character cap]'
 
     # Detect if the child's only output is a system error or termination notice.
     # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".

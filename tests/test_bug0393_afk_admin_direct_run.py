@@ -271,8 +271,8 @@ def test_is_generating_recheck_gates_enqueue(monkeypatch):
 
 
 def test_extract_task_block_unit():
-    """_extract_task_block: extracts the [TASK]…[END] block; falls back to the whole
-    message when no block; returns '' for empty input; first block wins."""
+    """_extract_task_block: extracts the LAST [TASK]…[END] block; falls back to the whole
+    message when no block; returns '' for empty input."""
     from agent_cascade.child_runner import _extract_task_block
 
     # block present -> extracts the task
@@ -283,5 +283,12 @@ def test_extract_task_block_unit():
     assert _extract_task_block('Just a plain message.') == 'Just a plain message.'
     # empty -> ''
     assert _extract_task_block('') == ''
-    # first block wins
-    assert _extract_task_block('[TASK] a [END] x [TASK] b [END]') == 'a'
+    # LAST block wins (the real task is always the final element of the message)
+    assert _extract_task_block('[TASK] a [END] x [TASK] b [END]') == 'b'
+    # false-positive prose: literal [TASK]…[END] mentions in the prose are ignored; the
+    # real task block (the last one) wins. This is the exact bug where the Admin's prose
+    # described the format and the old first-match grabbed a bare '…'.
+    assert _extract_task_block(
+        'I emitted a [TASK]…[END] block. Then more prose [TASK]…[END] again. '
+        '[TASK] Close out the loose ends [END]'
+    ) == 'Close out the loose ends'
