@@ -104,15 +104,15 @@ def _enqueue_text(content):
 
 def test_dispatch_calls_run_child_core_with_pinned_kwargs(monkeypatch):
     """Direct-run dispatch: fresh engine, _is_advisor_run=True, force_fresh=False,
-    caller_name=root, child_depth=1, raw=True."""
+    caller_name=root, child_depth=1, extract_task=True."""
     pool = _AfkPool()
     seen = {}
 
     def spy(*, engine, pool, agent_class, instance_name, args, caller_name,
-           child_depth, force_fresh, prefix, raw):
+           child_depth, force_fresh, prefix, extract_task):
         seen.update(engine=engine, agent_class=agent_class, instance_name=instance_name,
                    args=args, caller_name=caller_name, child_depth=child_depth,
-                   force_fresh=force_fresh, raw=raw, prefix=prefix)
+                   force_fresh=force_fresh, extract_task=extract_task, prefix=prefix)
         pool._dispatch_fired = True
         return 'Fix the X bug'
 
@@ -124,22 +124,25 @@ def test_dispatch_calls_run_child_core_with_pinned_kwargs(monkeypatch):
     assert seen['force_fresh'] is False
     assert seen['caller_name'] == 'w1'
     assert seen['child_depth'] == 1
-    assert seen['raw'] is True
+    assert seen['extract_task'] is True
     assert seen['agent_class'] == 'Admin'
     assert seen['instance_name'] == 'AFK_Admin'
     assert seen['prefix'] == 'Agent'
     assert seen['args']['task'].startswith('You are the fleet overseer')
     assert seen['engine']._is_advisor_run is True
-    assert _enqueue_text(calls[0][1]).strip() == 'Fix the X bug'
+    text = _enqueue_text(calls[0][1])
+    assert text.strip().startswith('Context: This is a message from AFK_Admin.')
+    assert 'Task: Fix the X bug' in text
 
 
-def test_dispatch_posts_task_line_as_is_no_framing(monkeypatch):
-    """TASK-only shape: the enqueued text is the bare line — no Completed/Failed header,
-    no STATUS/FINDINGS preamble."""
+def test_dispatch_posts_wrapped_task(monkeypatch):
+    """The enqueued text is the task wrapped as a normal call_agent task
+    (Context: ... / Task: ... / Please help with this task.), not a bare line,
+    and carries no STATUS/FINDINGS preamble."""
     pool = _AfkPool()
 
     def spy(*, engine, pool, agent_class, instance_name, args, caller_name,
-           child_depth, force_fresh, prefix, raw):
+           child_depth, force_fresh, prefix, extract_task):
         pool._dispatch_fired = True
         return 'Run the regression suite'
 
@@ -148,11 +151,9 @@ def test_dispatch_posts_task_line_as_is_no_framing(monkeypatch):
     calls = _drive_dispatch(monkeypatch, pool)
     text = _enqueue_text(calls[0][1])
 
-    assert text.strip() == 'Run the regression suite'
-    assert '[Agent' not in text
-    assert 'Completed' not in text
-    assert 'generated:' not in text
-    assert 'cost:' not in text
+    assert text.strip() == ('Context: This is a message from AFK_Admin.\n\n'
+                           'Task: Run the regression suite\n\n'
+                           'Please help with this task.')
     assert 'STATUS:' not in text
     assert 'FINDINGS:' not in text
 
@@ -172,8 +173,11 @@ def test_failure_posts_basic_nudge_fallback(monkeypatch):
     assert _enqueue_text(calls[0][1]).strip() == 'AFK basic nudge text'
 
 
-def test_rejection_result_posts_basic_nudge_fallback(monkeypatch):
-    """A structured-rejection string ([Agent ... Rejected]) -> basic-nudge fallback."""
+def test_no_block_result_posted_verbatim_as_wrapped_task(monkeypatch):
+    """A non-empty result with no [TASK]…[END] block is posted verbatim as the task
+    (the whole message), wrapped in the call_agent task frame — NOT a nudge.
+    (This exercises the dispatch-wrap layer; the parser's no-block fallback itself is
+    covered by test_extract_task_block_unit.)"""
     pool = _AfkPool()
 
     def spy(*, engine, pool, **kwargs):
@@ -183,8 +187,10 @@ def test_rejection_result_posts_basic_nudge_fallback(monkeypatch):
     monkeypatch.setattr('agent_cascade.child_runner.run_child_core', spy)
 
     calls = _drive_dispatch(monkeypatch, pool)
+    text = _enqueue_text(calls[0][1])
 
-    assert _enqueue_text(calls[0][1]).strip() == 'AFK basic nudge text'
+    assert text.strip().startswith('Context: This is a message from AFK_Admin.')
+    assert 'advisor denied the delegation' in text
 
 
 def test_empty_result_posts_basic_nudge_fallback(monkeypatch):
@@ -233,8 +239,9 @@ def test_supersede_resistance_survives_mid_run_gen_bump(monkeypatch):
     monkeypatch.setattr('agent_cascade.child_runner.run_child_core', spy)
 
     calls = _drive_dispatch(monkeypatch, pool)
-
-    assert _enqueue_text(calls[0][1]).strip() == 'Fix the flaky test'
+    text = _enqueue_text(calls[0][1])
+    assert text.strip().startswith('Context: This is a message from AFK_Admin.')
+    assert 'Task: Fix the flaky test' in text
 
 
 def test_is_generating_recheck_gates_enqueue(monkeypatch):
@@ -261,3 +268,20 @@ def test_is_generating_recheck_gates_enqueue(monkeypatch):
     calls = _drive_dispatch(monkeypatch, pool, wait_for='fired')
 
     assert calls == []
+
+
+def test_extract_task_block_unit():
+    """_extract_task_block: extracts the [TASK]…[END] block; falls back to the whole
+    message when no block; returns '' for empty input; first block wins."""
+    from agent_cascade.child_runner import _extract_task_block
+
+    # block present -> extracts the task
+    assert _extract_task_block('analysis\n[TASK] Fix bug BUG_0389 [END]') == 'Fix bug BUG_0389'
+    # multi-line task inside the block
+    assert _extract_task_block('[TASK]\nRun the full suite\n[END]') == 'Run the full suite'
+    # no block -> whole message
+    assert _extract_task_block('Just a plain message.') == 'Just a plain message.'
+    # empty -> ''
+    assert _extract_task_block('') == ''
+    # first block wins
+    assert _extract_task_block('[TASK] a [END] x [TASK] b [END]') == 'a'

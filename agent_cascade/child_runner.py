@@ -5,6 +5,7 @@ Unifies the duplicated execution paths from tool_dispatcher.py, agent_pool.py,
 and api_integration.py (root agent recovery). See DESIGN_REWRITE.md §4.3.
 """
 
+import re
 import time
 
 from agent_cascade.compression.helpers import extract_instance_output
@@ -17,6 +18,28 @@ class ChildAgentFailedError(Exception):
     or termination notice. Propagates through slots.py to async_tools.py
     so the parent receives [Background Tool Error] instead of [Background Tool Result]."""
     pass
+
+
+# AFK Admin [TASK]…[END] block parser. The AFK Admin prompt requires the final message to
+# end with a [TASK]…[END] block; the dispatch extracts only that block and posts it to the
+# root as a normal call_agent task. When no block is present, the whole final message is
+# used as the task (the Admin skipped the block).
+_AFK_TASK_BLOCK_RE = re.compile(r'\[TASK\]\s*(.*?)\s*\[END\]', re.DOTALL)
+
+
+def _extract_task_block(output: str) -> str:
+    """Extract the [TASK]…[END] block from an AFK Admin output.
+
+    Returns the task text (the content between the markers, stripped). When no valid
+    [TASK]…[END] block is present, falls back to the whole output (stripped) so the
+    dispatch still posts a usable task. Empty output returns ''.
+    """
+    if not output:
+        return ''
+    m = _AFK_TASK_BLOCK_RE.search(output)
+    if not m:
+        return output.strip()
+    return m.group(1).strip()
 
 
 # ── Helper functions ────────────────────────────────────────────────────────
@@ -320,15 +343,16 @@ def run_child_core(
     force_fresh: bool = False,
     prefix: str = 'Agent',
     max_auto_retries: int = 3,
-    raw: bool = False,
+    extract_task: bool = False,
 ) -> str:
     """Core child agent execution logic shared by sync and async paths.
 
     Handles the entire lifecycle: creation, loop detection with inline rollback
     (handled inside engine.run()), status checking, and result formatting.
-    Returns a formatted result string. When ``raw=True`` the post-clamp, unwrapped
-    result is returned instead of the framed ``_format_result`` string — used by the
-    AFK-Admin direct-run dispatch so the TASK line reaches the root unadorned.
+    Returns a formatted result string. When ``extract_task=True`` the [TASK]…[END] block
+    is extracted from the result (falling back to the whole result when no block is
+    present) — used by the AFK-Admin direct-run dispatch so only the task reaches the
+    root, wrapped as a normal call_agent task.
 
     Args:
         max_auto_retries: Kept for backward compatibility (no longer used; rollback
@@ -415,8 +439,10 @@ def run_child_core(
     generated_tokens = max(0, _after_generated - baseline_generated)
     total_cost = max(0.0, _after_cost - baseline_cost)
     elapsed_s = time.monotonic() - _child_start
-    if raw:
-        return result
+    if extract_task:
+        # AFK Admin path: return just the [TASK]…[END] block (or the whole message if the
+        # block is absent) so the dispatch can post it as a normal call_agent task.
+        return _extract_task_block(result)
     return _format_result(
         instance_name=instance_name,
         result=result,

@@ -1595,17 +1595,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                         child_depth=1,
                         force_fresh=False,
                         prefix='Agent',
-                        raw=True,
+                        extract_task=True,
                     )
                     candidate = (result or '').strip()
-                    is_bad = (not candidate
-                              or candidate.startswith('[Agent ')
-                              or candidate.startswith('Sub-agent ')
-                              or 'finished but provided no text output' in candidate.lower())
-                    if is_bad:
+                    if not candidate:
                         text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
                     else:
-                        text = candidate
+                        # Wrap the task as a normal call_agent task so the
+                        # "Context: This is a message from AFK_Admin." prefix survives
+                        # compression (the is_supervisor_task_message convention).
+                        text = (f'Context: This is a message from {AFK_ADMIN_INSTANCE_NAME}.\n\n'
+                               f'Task: {candidate}\n\nPlease help with this task.')
                 except Exception as e:
                     logger.warning('[AFK-ADMIN] direct run failed for %s: %s', instance_name, e)
                     text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
