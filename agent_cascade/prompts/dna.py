@@ -329,11 +329,11 @@ SKILL_ADVISOR_PROMPT = (
     'whenever a revised delegation could pass; otherwise write "none". Omit both lines on APPROVE.\n'
     'After your [VERDICT] line, append [END] on the same line to signal your response is complete. Do NOT make any further tool calls after [END].')
 
-# --- AFK Admin-mode nudge (api_server._afk_admin_trigger_text) ---
+# --- AFK Admin-mode nudge (api_server._afk_admin_nudge) ---
 # The Admin is a session-continuing call_agent child of the root; this prompt is its `task`.
-# The whole final text is returned to the root as the Admin sub-agent's call_agent tool result —
-# so it must be written FOR the supervisor, not for the user.
-# Placeholders: {root_name}, {log_path}, {last_step}, {telemetry_hint}, {max_findings}.
+# The Admin's final message is posted to the root's user queue AS-IS — it must be a single
+# imperative TASK line, not a STATUS/FINDINGS report.
+# Placeholders: {root_name}, {log_path}, {last_step}, {telemetry_hint}.
 AFK_ADMIN_PROMPT = (
     'You are the fleet overseer running an AFK-window review. The user is away; the '
     'supervisor "{root_name}" has just gone idle. Your job is to judge whether its work '
@@ -416,21 +416,18 @@ AFK_ADMIN_PROMPT = (
     'is risky, hard to reverse, or trades fidelity/correctness (e.g. recoverable '
     'information) for a minor speed/cost gain, do NOT push it — escalate to the user.\n'
     '- Quality over speed: prefer the correct, well-verified change over the fast one.\n\n'
-    '## Output contract (IMPORTANT)\n'
-    'Your ENTIRE final text is returned to {root_name} as a call_agent tool result. Begin with '
-    'a provenance header on the very first line — `[AFK-Admin review — supervisor: {root_name}]` '
-    '— so you stay identifiable as the fleet overseer (not a user turn) even after {root_name}\'s '
-    'own history is summarized. Then structure the rest as:\n'
-    '   STATUS: <complete | partial | stuck | drifting> — one line of evidence\n'
-    '   FINDINGS: <short numbered list, at most {max_findings}, or "none">, evidence-cited\n'
-    '   TASK: <the single highest-priority, concrete instruction {root_name} should act '
-    'on next, chosen from the ladder above and respecting the Guardrails (no major/'
-    'architectural change, net-improvement only) — name the tier and the exact next '
-    'action>\n'
-    'Do not address the user. Do not ask questions. Do not end with a question — end with '
-    'the actionable continuation for {root_name}. Even when STATUS is "complete", the TASK '
-    'line MUST be a concrete next action (walk down the ladder to tier 7 free research) - '
-    'never "stand by", "window closed", or "nothing AFK-dispatchable remains".\n'
+    '## Output contract (IMPORTANT) — the ENTIRE final message is posted verbatim to '
+    '{root_name}\'s user queue as its next turn\n'
+    'Your ENTIRE final text is a SINGLE imperative TASK line for {root_name} — one short, '
+    'actionable instruction (e.g. "Fix the X bug", "Run the regression suite", "No action '
+    'needed — work is complete"). No STATUS/FINDINGS preamble, no provenance header, no '
+    'output-contract boilerplate, no extra commentary, no questions, no closing remarks. '
+    'Do all your analysis in your reasoning BEFORE this final message; the final message '
+    'contains ONLY the single TASK line. Choose it from the ladder above and respect the '
+    'Guardrails (no major/architectural change, net-improvement only) — name the tier and '
+    'the exact next action inline. Even when everything is complete, the TASK line must be '
+    'a concrete next action (walk down the ladder to tier 7 free research) — never "stand '
+    'by" or "nothing AFK-dispatchable remains".\n'
 )
 
 # --- Auto-Skill Reflection (extended-turns phase) ---

@@ -1539,20 +1539,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             with agent_pool._afk_nudge_lock:
                 agent_pool._afk_last_nudge_ts = 0.0   # release the claim so the next run-end retries
 
-    def _afk_admin_trigger_text(instance_name: str):
-        """Build the AFK-window trigger text the root receives as its next turn.
-
-        The daemon runs no LLM work: it hands the root trigger text, and the root's own turn
-        delegates to a fixed-name read-only Admin sub-agent via call_agent — so the review runs
-        in-turn and reuses that child's prior-window session. The Admin's root-state save is
-        handled by the call_agent parent-save path (this is a root turn holding its slot), so no
-        manual save is needed here.
-
-        Returns None only when the Admin template is unavailable, signalling the caller to fall
-        back to the basic nudge. Never raises.
-        """
+    def _afk_admin_build_prompt(instance_name: str):
+        """Build the AFK-window prompt the Admin runs against. Returns None only when
+        the Admin template is unavailable, signalling the caller to fall back to the
+        basic nudge. Never raises."""
         from agent_cascade.prompts.dna import AFK_ADMIN_PROMPT
-        from agent_cascade.settings import AFK_ADMIN_INSTANCE_NAME, AFK_ADMIN_MAX_FINDINGS
         from agent_cascade.child_runner import _last_step_hint, _resolve_child_log_path
 
         get_template = getattr(agent_pool, 'get_template', None)
@@ -1562,68 +1553,70 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         log_path, _is_exact = _resolve_child_log_path(agent_pool, instance_name)
         inst = agent_pool.get_instance(instance_name)
         last_step = _last_step_hint(getattr(inst, 'conversation', None), instance_name)
-        admin_task = AFK_ADMIN_PROMPT.format(
+        return AFK_ADMIN_PROMPT.format(
             root_name=instance_name,
             log_path=log_path,
             last_step=last_step or '(no completed step recorded)',
             telemetry_hint=('use system_info with help="telemetry" for a live dump; '
                             'raw JSONL is available via the /api/telemetry endpoint'),
-            max_findings=AFK_ADMIN_MAX_FINDINGS,
-        )
-        # Hard fallback (no new completion-signal channel): the basic-nudge text is embedded
-        # verbatim so the root echoes it deterministically if the delegation fails, rather than
-        # synthesizing or losing it. The name/class are pinned so the re-call never trips the
-        # call_agent identity guard (N4).
-        basic_nudge = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
-        return (
-            f'Context: this is an AFK oversight window for "{instance_name}"; the user is away.\n\n'
-            f'## What to do\n'
-            f'Delegate this AFK-window review to your read-only fleet-oversight sub-agent, then '
-            f'act on its report. The sub-agent uses a FIXED identity so it keeps memory across '
-            f'AFK windows — pass this exact name and class:\n'
-            f"    call_agent(instance_name='{AFK_ADMIN_INSTANCE_NAME}', agent_class='Admin', "
-            f'task=<the review task below>)\n\n'
-            f'## Review task (pass it verbatim as `task`)\n'
-            f'{admin_task}\n\n'
-            f'## After the call\n'
-            f'The sub-agent returns a provenance-headed report (STATUS / FINDINGS / TASK). Act on '
-            f'the TASK line now. It may be continuing work it dispatched in an earlier AFK window '
-            f'(its prior turns are in its context) — advance it; do not restart closed work.\n\n'
-            f'## If the call fails (error / timeout / empty result)\n'
-            f'Do NOT retry the sub-agent and do NOT loop. Reply with EXACTLY this text instead:\n'
-            f'{basic_nudge}'
         )
 
     def _afk_admin_nudge(instance_name: str, loop) -> None:
-        """Daemon-thread dispatcher for AFK admin mode: build the AFK-window trigger text and
-        enqueue it as the root's next turn. The root's own turn then delegates to the
-        session-continuing read-only Admin sub-agent via call_agent (falling back to the basic
-        nudge if the Admin template is unavailable).
+        """Daemon-thread dispatcher for AFK admin mode: directly run the Admin (a
+        session-continuing, read-only call_agent child) with the AFK prompt and post
+        its TASK-only last message to the root's user queue — no root turn involved.
 
-        Owns the _afk_admin_in_flight flag (a dispatch debounce): set on entry, cleared in
-        ``finally``. The cooldown claim (taken by _afk_maybe_nudge) is released only if nothing
-        was enqueued, so the next tick / run-end can retry.
+        Owns the _afk_admin_in_flight flag (a dispatch debounce) spanning the whole run.
+        On any failure the deterministic basic-nudge text is posted instead.
         """
         agent_pool._afk_admin_in_flight = True
         enqueued = False
         try:
-            text = _afk_admin_trigger_text(instance_name)
-            if text is None:
+            afk_prompt = _afk_admin_build_prompt(instance_name)
+            text = None
+            if afk_prompt is None:
                 # Admin template unavailable — deterministic basic-nudge fallback.
                 if agent_pool.get_instance(instance_name) is None:
-                    return  # instance dismissed while building the trigger text
+                    return  # instance dismissed while building the prompt
                 text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
-            # A real run may have started while the trigger text was being built; never interrupt it.
+            else:
+                try:
+                    from agent_cascade.engine.core import ExecutionEngine
+                    from agent_cascade.child_runner import run_child_core
+                    from agent_cascade.settings import AFK_ADMIN_INSTANCE_NAME
+
+                    engine = ExecutionEngine(agent_pool)  # R1: fresh engine per dispatch
+                    engine._is_advisor_run = True          # R2: exempt from run-generation supersede
+                    result = run_child_core(
+                        engine=engine, pool=agent_pool,
+                        agent_class='Admin', instance_name=AFK_ADMIN_INSTANCE_NAME,
+                        args={'task': afk_prompt},
+                        caller_name=instance_name,
+                        child_depth=1,
+                        force_fresh=False,
+                        prefix='Agent',
+                        raw=True,
+                    )
+                    candidate = (result or '').strip()
+                    is_bad = (not candidate
+                              or candidate.startswith('[Agent ')
+                              or candidate.startswith('Sub-agent ')
+                              or 'finished but provided no text output' in candidate.lower())
+                    if is_bad:
+                        text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
+                    else:
+                        text = candidate
+                except Exception as e:
+                    logger.warning('[AFK-ADMIN] direct run failed for %s: %s', instance_name, e)
+                    text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
+
+            # A real run may have started while the Admin was running; never interrupt it.
             if _is_generating(session):
                 return
             if agent_pool.get_instance(instance_name) is None:
-                return  # instance dismissed while the trigger text was being built
-            # The daemon drives the turn itself right after enqueue, so there is no
-            # "pending text, no runner" window on this path (the dead relaunch primitive is
-            # gone; the enqueue-and-drive pattern below always leaves the root a live runner).
+                return  # instance dismissed while the Admin was running
             agent_pool.enqueue_message(instance_name, _parse_multimodal_content(text))
-            enqueued = True  # if _start_generation raises below the claim is KEPT (no double-enqueue),
-                            # unlike the basic path which releases — deliberate asymmetry
+            enqueued = True  # claim KEPT on _start_generation failure (no double-enqueue)
             gen_id = _start_generation(session)
             threading.Thread(
                 target=run_agent_thread,

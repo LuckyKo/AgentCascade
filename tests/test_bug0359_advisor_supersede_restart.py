@@ -222,21 +222,21 @@ def _enqueue_text(content):
     return content if isinstance(content, str) else json.dumps(content)
 
 
-def test_admin_dispatch_delivers_trigger_text_with_pinned_identity(monkeypatch):
-    """BUG_0392 (v2, observable layer): with the Admin template available, the daemon enqueues
-    AFK-window TRIGGER text carrying the pinned call_agent identity (fixed name + class), and
-    does NOT call relaunch_idle_agent (the BUG_0359 re-drive branch was dropped — under v2 the
-    daemon drives the turn itself right after enqueue, so there is never a
-    'pending text, no runner' window)."""
+def test_admin_dispatch_falls_back_to_basic_nudge_when_run_unavailable(monkeypatch):
+    """BUG_0393: with the Admin template available, the daemon drives a direct
+    ``run_child_core`` dispatch (no trigger text, no relaunch). The pool double here cannot
+    run a real Admin (no engine settings), so the dispatch deterministically falls back to
+    the basic nudge text."""
+    from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+
     pool = _AfkPool(afk_mode='admin')
     pool.get_template = lambda name: (name == 'Admin')  # template available
 
     calls, relaunch_calls = _drive_admin_dispatch(monkeypatch, pool)
-    assert calls, 'expected the daemon to enqueue the AFK trigger text'
+    assert calls, 'expected the daemon to enqueue the AFK fallback nudge'
     text = _enqueue_text(calls[0][1])
-    assert "instance_name='AFK_Admin'" in text, 'pinned instance_name missing from trigger'
-    assert "agent_class='Admin'" in text, 'pinned agent_class missing from trigger'
-    assert relaunch_calls == [], 'relaunch_idle_agent must not be invoked under v2'
+    assert text == AFK_DEFAULT_MESSAGE
+    assert relaunch_calls == [], 'relaunch_idle_agent must not be invoked'
 
 
 def test_admin_template_unavailable_falls_back_to_basic_nudge(monkeypatch):

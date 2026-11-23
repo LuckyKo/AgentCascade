@@ -320,12 +320,15 @@ def run_child_core(
     force_fresh: bool = False,
     prefix: str = 'Agent',
     max_auto_retries: int = 3,
+    raw: bool = False,
 ) -> str:
     """Core child agent execution logic shared by sync and async paths.
 
     Handles the entire lifecycle: creation, loop detection with inline rollback
     (handled inside engine.run()), status checking, and result formatting.
-    Returns a formatted result string.
+    Returns a formatted result string. When ``raw=True`` the post-clamp, unwrapped
+    result is returned instead of the framed ``_format_result`` string — used by the
+    AFK-Admin direct-run dispatch so the TASK line reaches the root unadorned.
 
     Args:
         max_auto_retries: Kept for backward compatibility (no longer used; rollback
@@ -412,6 +415,8 @@ def run_child_core(
     generated_tokens = max(0, _after_generated - baseline_generated)
     total_cost = max(0.0, _after_cost - baseline_cost)
     elapsed_s = time.monotonic() - _child_start
+    if raw:
+        return result
     return _format_result(
         instance_name=instance_name,
         result=result,

@@ -2636,12 +2636,12 @@ class TestAfkIdleRenudgeLoop:
 
 
 class TestAfkAdminNudge:
-    """BUG_0392 v2: the AFK-admin daemon is a trigger DISPATCHER (no LLM run, no manual
-    root-state save). It enqueues AFK-window trigger text instructing the root to delegate to a
-    fixed-identity read-only Admin call_agent child, falling back to the basic nudge only when
-    the Admin template is unavailable. Covers the live guards still present in ``_afk_admin_nudge``:
-    generation-started drop, instance-dismissed drop, single-dispatch-per-window, and the dropped
-    relaunch_idle_agent path."""
+    """BUG_0393: the AFK-admin daemon is a direct-run dispatcher — it drives
+    ``run_child_core`` (session-continuing, read-only Admin) and posts the Admin's
+    TASK-only last message to the root's user queue, falling back to the basic nudge on
+    any failure (template unavailable, run error). Covers the live guards still present in
+    ``_afk_admin_nudge``: generation-started drop, instance-dismissed drop,
+    single-dispatch-per-window, and the dropped relaunch_idle_agent path."""
 
     def _build_pool(self, monkeypatch, *, template_available=True, instance=None):
         import tempfile
@@ -2719,15 +2719,16 @@ class TestAfkAdminNudge:
                 time.sleep(0.02)
         return pool
 
-    def test_admin_mode_enqueues_trigger_text_with_pinned_identity(self, monkeypatch):
-        from agent_cascade import constants, settings
+    def test_admin_mode_falls_back_to_basic_nudge_when_run_unavailable(self, monkeypatch):
+        """BUG_0393: with the Admin template available, the daemon drives a direct
+        ``run_child_core`` dispatch (no trigger text). The pool double here cannot run a
+        real Admin (no engine settings), so the dispatch deterministically falls back to
+        the basic nudge text."""
+        from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
         pool = self._build_pool(monkeypatch, template_available=True)
         self._drive(monkeypatch, pool)
         assert len(pool._enqueue_calls) == 1
-        content = pool._enqueue_calls[0][1]
-        assert isinstance(content, str)
-        assert f"instance_name='{settings.AFK_ADMIN_INSTANCE_NAME}'" in content
-        assert "agent_class='Admin'" in content
+        assert pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
         assert pool._relaunch_calls == []
 
     def test_admin_mode_missing_template_falls_back_to_basic(self, monkeypatch):
