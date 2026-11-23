@@ -1751,6 +1751,17 @@ def park_active_stack(
     # we are about to drop (still in the pool at this point).
     _release_held_slots(pool, dict(getattr(pool, 'instances', {})))
 
+    # Flush a telemetry checkpoint so the outgoing stack's running totals survive
+    # this swap (and any later process restart) no matter how this process ends.
+    # Done BEFORE clearing pool state, while the collector still tracks the source
+    # stack — this is the continuity guarantee for the next resume/swap-back.
+    telem = getattr(pool, 'telemetry', None)
+    if telem is not None and settings.ENABLE_STACK_SWAP and hasattr(telem, 'write_checkpoint'):
+        try:
+            telem.write_checkpoint()
+        except Exception:
+            logger.exception('[STACK_SWAP] telemetry write_checkpoint failed before park')
+
     # Empty the pool; the swap event stays latched until activation clears it so any
     # straggler thread cannot resume into the now-empty (or target) pool mid-swap.
     _clear_pool_state(pool)
@@ -1805,6 +1816,18 @@ def activate_stack(pool, envelope: SnapshotEnvelope, *, gate_checked: bool = Fal
     reg = _ensure_registry(pool)
     reg.set_active(envelope.stack_id)
     _persist_active_stack(envelope.stack_id)
+    # Re-point telemetry at the now-active stack so its aggregates track whichever
+    # stack is live (per-stack continuity). This single hook covers boot-resume and
+    # runtime swap; attach_session is idempotent, so the normal boot (which already
+    # opened this stack's keyed file in the collector __init__) is a no-op. The swap
+    # rollback path re-invokes this function with the source envelope, so telemetry
+    # follows the pool back to the source without a separate hook.
+    telem = getattr(pool, 'telemetry', None)
+    if telem is not None and settings.ENABLE_STACK_SWAP and hasattr(telem, 'attach_session'):
+        try:
+            telem.attach_session(envelope.stack_id)
+        except Exception:
+            logger.exception('[STACK_SWAP] telemetry attach_session(%s) failed', envelope.stack_id)
     # Clear the latch so the activated stack begins executing again.
     latch = getattr(pool, '_pending_swap_event', None)
     if latch is not None:

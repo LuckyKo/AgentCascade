@@ -13,11 +13,18 @@ Design notes:
 - All tests are deterministic: no sleeps, network, or LLM calls.
 """
 
+import collections
+import json
 import logging
+import os
+from pathlib import Path
 
 import pytest
 
 import agent_cascade.log as log_mod
+import agent_cascade.session_state_store as session_state_store
+import agent_cascade.telemetry as telemetry_mod
+from agent_cascade import settings
 from agent_cascade.log import _AppLoggerProxy
 from agent_cascade.prompts import dna
 from agent_cascade.telemetry import TelemetryCollector
@@ -2188,3 +2195,176 @@ class TestHintTelemetry:
             assert k in s, f'missing key {k}'
         # sanity: a pre-existing key still present
         assert 'total_compressions' in s
+
+
+# ---------------------------------------------------------------------------
+# L. Per-session continuity (resume / swap / checkpoint / concurrency)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionContinuity:
+    """Keyed telemetry: same-file reuse, stats restore, swap re-key, lock degrade."""
+
+    def _enable_keyed(self, monkeypatch, stack_id):
+        """Point the collector at stack_id via the persisted-id SSOT (no I/O)."""
+        monkeypatch.setattr(settings, 'ENABLE_STACK_SWAP', True)
+        monkeypatch.setattr(session_state_store, 'load_active_stack_id', lambda: stack_id)
+
+    @staticmethod
+    def _session_start_count(path):
+        return sum(1 for l in path.read_text(encoding='utf-8').splitlines()
+                   if '"session_start"' in l)
+
+    def test_same_file_reuse_on_resume(self, tmp_path, monkeypatch):
+        self._enable_keyed(monkeypatch, 'stackA')
+        d = str(tmp_path)
+        c1 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        assert c1.log_path.name == 'telemetry_stackA.jsonl'
+        assert c1._stack_id == 'stackA'
+        path = c1.log_path
+        c1.record_auto_continue('w', 'x')
+        c1.close()
+        c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        assert c2.log_path == path  # no new file minted
+        types = [e['type'] for e in c1.events]
+        assert 'auto_continue' in types
+        c2.close()
+
+    def test_stats_restore_on_resume(self, tmp_path, monkeypatch):
+        self._enable_keyed(monkeypatch, 'stackA')
+        d = str(tmp_path)
+        c1 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        c1.record_tool_call_start('w', 'shell')
+        c1.record_tool_call_end('w', 'shell', success=True)
+        c1.record_auto_continue('w', 'x')
+        rec = c1._ensure_instance_usage('worker')
+        rec['total_tokens'] = 100
+        rec['generated_tokens'] = 7
+        c1.record_skills_loaded('coder', ['a-skill'], 'auto')
+        before = {
+            'total_tool_calls': c1._session_stats['total_tool_calls'],
+            'total_auto_continues': c1._session_stats['total_auto_continues'],
+            'tool_calls_by_name': dict(c1._session_stats['tool_calls_by_name']),
+            'instance': dict(c1._instance_usage['worker']),
+            'skill_modes': dict(c1._skill_usage_stats['a-skill']['modes']),
+            'skill_classes': set(c1._skill_usage_stats['a-skill']['agent_classes']),
+        }
+        path = c1.log_path
+        c1.record_session_end()  # checkpoint + session_end + close + release lock
+
+        c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        s = c2._session_stats
+        assert s['total_tool_calls'] == before['total_tool_calls']
+        assert s['total_auto_continues'] == before['total_auto_continues']
+        assert dict(s['tool_calls_by_name']) == before['tool_calls_by_name']
+        assert s['tool_calls_by_name'].default_factory is int  # defaultdict restored
+        assert s['tool_calls_by_name']['brand_new'] == 0  # += safe on absent key
+        assert dict(c2._instance_usage['worker']) == before['instance']
+        assert dict(c2._skill_usage_stats['a-skill']['modes']) == before['skill_modes']
+        assert c2._skill_usage_stats['a-skill']['agent_classes'] == before['skill_classes']
+        assert isinstance(c2._skill_usage_stats['a-skill']['modes'], collections.Counter)
+        assert self._session_start_count(path) == 1  # exactly one header across resume
+        c2.close()
+
+    def test_fresh_path_when_swap_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, 'ENABLE_STACK_SWAP', False)
+        c = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        import re
+        assert re.fullmatch(r'telemetry_\d{8}_\d{8,}\.jsonl', c.log_path.name)
+        assert c._stack_id is None
+        assert c.get_session_summary()['total_tool_calls'] == 0
+        c.close()
+
+    def test_legacy_file_untouched(self, tmp_path):
+        c0 = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        log_dir = c0.log_dir
+        c0.close()
+        legacy = log_dir / 'telemetry_20240101_000000000000.jsonl'
+        legacy.write_text('{"type":"session_start"}\n', encoding='utf-8')
+        before = legacy.read_bytes()
+        c1 = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        assert c1.log_path != legacy
+        assert legacy.read_bytes() == before
+        c1.close()
+
+    def test_swap_rekey_two_files_no_bleed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, 'ENABLE_STACK_SWAP', True)
+        # Pin the ambient id to '' so __init__ deterministically takes the timestamp
+        # path. The re-key below is then a genuine timestamp->A transition on every
+        # machine; a real persisted id would make attach_session('A') a silent no-op
+        # and the old_handle.closed assertion would not hold.
+        monkeypatch.setattr(session_state_store, 'load_active_stack_id', lambda: '')
+        c = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        assert c._stack_id is None  # deterministic fresh/timestamp construction
+        c.record_turn_start('w')
+        assert 'w' in c._active_turns
+        old_handle = c._log_file
+        c.attach_session('A')
+        assert old_handle.closed is True  # prior handle closed — no fd leak
+        file_a = c.log_path
+        assert file_a.name == 'telemetry_A.jsonl' and c._stack_id == 'A'
+        assert c._active_turns == {} and c._active_llm_calls == {} \
+            and c._active_tool_calls == {} and c._cache_scan_state == {}
+        # recent-events ring drops the outgoing stack's events after re-key
+        assert 'turn_start' not in {e['type'] for e in c.events}
+        c.record_auto_continue('A', 'x')
+        c.record_session_end()  # checkpoint A, close, release lock
+
+        handle_a = c._log_file
+        c.attach_session('B')
+        file_b = c.log_path
+        assert file_b.name == 'telemetry_B.jsonl' and file_b != file_a
+        assert c._stack_id == 'B'
+        # fresh B starts zeroed (no inherit of A's totals) — no cross-contamination
+        assert c._session_stats['total_auto_continues'] == 0
+        assert file_a.exists() and file_b.exists()
+        assert self._session_start_count(file_a) == 1
+        assert self._session_start_count(file_b) == 1
+        # idempotent same-id no-op: handle + path unchanged
+        handle_b = c._log_file
+        c.attach_session('B')
+        assert c._log_file is handle_b and c.log_path == file_b
+        c.close()
+
+    def test_swap_swapback_restores_per_stack(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, 'ENABLE_STACK_SWAP', True)
+        # Deterministic construction (timestamp path) on every machine — see
+        # test_swap_rekey_two_files_no_bleed.
+        monkeypatch.setattr(session_state_store, 'load_active_stack_id', lambda: '')
+        d = str(tmp_path)
+        c = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        c.attach_session('A')
+        c.record_auto_continue('A', 'x')  # A now has 1
+        c.record_session_end()
+        c.attach_session('B')
+        assert c._session_stats['total_auto_continues'] == 0  # fresh B
+        c.attach_session('A')  # swap back: reload A's checkpoint
+        assert c._session_stats['total_auto_continues'] == 1
+        c.close()
+
+    def test_concurrency_degrade_to_timestamp(self, tmp_path, monkeypatch):
+        self._enable_keyed(monkeypatch, 'stackA')
+        d = str(tmp_path)
+        c = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        c.close()  # leave a held-by-another-process lock behind
+        lock = Path(str(c.log_path) + '.lock')
+        # Force the holder to look alive/un-probeable so reclaim declines.
+        monkeypatch.setattr(telemetry_mod, '_telemetry_holder_is_dead', lambda pid: False)
+        lock.write_text(json.dumps({'pid': os.getpid() + 1_234_567}), encoding='utf-8')
+        c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        assert c2._stack_id is None
+        assert c2.log_path != c.log_path
+        assert c2.log_path.name != 'telemetry_stackA.jsonl'  # never opened the shared file
+        c2.close()
+
+    def test_concurrency_reclaim_dead_holder(self, tmp_path, monkeypatch):
+        self._enable_keyed(monkeypatch, 'stackA')
+        d = str(tmp_path)
+        c = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        c.close()
+        lock = Path(str(c.log_path) + '.lock')
+        monkeypatch.setattr(telemetry_mod, '_telemetry_holder_is_dead', lambda pid: True)
+        lock.write_text(json.dumps({'pid': 999_999_999}), encoding='utf-8')
+        c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        assert c2.log_path == c.log_path  # reclaimed the stale lock, same keyed file
+        c2.close()

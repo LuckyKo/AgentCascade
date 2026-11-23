@@ -9,9 +9,12 @@ Each event is tagged with a config fingerprint so different framework configurat
 """
 
 import collections
+import copy
 import datetime
 import hashlib
 import json
+import os
+import re
 import threading
 import time
 from collections import defaultdict
@@ -41,6 +44,37 @@ MAX_ERROR_MESSAGE_LENGTH = 200
 # this floor — small deltas are normal prompt variation, not wasted recompute.
 CACHE_MISS_NOISE_FLOOR_TOKENS = 1024
 
+#: Allow-list for the telemetry session key. The active-stack id is persisted by
+#: session_state_store but originates from user/UI text and is NOT sanitized
+#: upstream, so it is gated through this pattern before it can become a filename
+#: segment. Any non-matching character falls back to timestamp naming — this
+#: never mints a path-traversal-capable telemetry file.
+_SESSION_KEY_RE = re.compile(r'[A-Za-z0-9_]+')
+
+#: Sub-fields of ``_session_stats`` that accumulate with ``+=`` on possibly-absent
+#: keys. Rebuilt as ``defaultdict``s on checkpoint load so a post-resume key never
+#: KeyErrors. Mirrors the aggregate construction in ``__init__``.
+_SESSION_STATS_DEFAULTDICTS = {
+    'tool_calls_by_name': int,
+    'tool_failures_by_name': int,
+    'tool_latency_by_name': float,
+    'llm_calls_by_model': int,
+}
+
+#: Nested sub-fields of each ``_config_stats`` row that accumulate with ``+=``.
+_CONFIG_STATS_DEFAULTDICTS = {
+    'tool_calls_by_name': int,
+    'tool_failures_by_name': int,
+}
+
+#: Aggregate dicts snapshotted by ``_serialize_state`` and restored by
+#: ``_load_state`` — the raw internal state a resumed session continues from,
+#: distinct from the derived ``get_session_summary`` tables.
+_AGGREGATE_FIELDS = (
+    '_session_stats', '_config_stats', '_cache_stats', '_instance_usage',
+    '_agent_class_stats', '_dna_stats', '_skill_usage_stats',
+)
+
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
 from agent_cascade.settings import DEFAULT_RECENT_EVENT_COUNT, MAX_EVENTS_IN_MEMORY, MODEL_PRICING
 
@@ -62,9 +96,14 @@ class TelemetryCollector:
         # Session-level tracking — use _now_iso() for consistent UTC timestamps
         now_dt = datetime.datetime.now(datetime.timezone.utc)
         now_str = now_dt.isoformat()
-        # Include microseconds in session_id to avoid collisions when multiple sessions start simultaneously
-        self.session_id = now_dt.strftime('%Y%m%d_%H%M%S%f')
-        self.log_path = self.log_dir / f"telemetry_{self.session_id}.jsonl"
+        # Single source of truth for the session identity and its log file: keyed
+        # to the persisted active-stack id when stack-swap is enabled and the id
+        # passes the filename allow-list, otherwise timestamp-named (byte-identical
+        # to the legacy behavior). Both session_id and log_path derive from here.
+        stack_key, session_id, log_path = self._compute_session_identity(now_dt)
+        self._stack_id = stack_key
+        self.session_id = session_id
+        self.log_path = log_path
 
         # In-memory event buffer — deque with maxlen gives O(1) rotation
         self.events: collections.deque[Dict] = collections.deque(maxlen=MAX_EVENTS_IN_MEMORY)
@@ -197,22 +236,353 @@ class TelemetryCollector:
         # breakdown (explicit / auto / advisor / self-augmentation / runtime).
         self._skill_usage_stats: Dict[str, Dict] = {}
 
+        # Frozen zeroed snapshot of every aggregate dict, used to reset to a clean
+        # slate when attach_session switches to a target stack that has no stored
+        # checkpoint (a brand-new stack must not inherit the outgoing stack's
+        # totals). Captured now — before any event or the header — so it holds
+        # exactly the __init__ defaults.
+        self._empty_aggregate_template = self._serialize_state()
+
         # Guard against duplicate session_end events (BUG 8 fix)
         self._session_ended = False
 
-        # Keep file handle open to avoid per-event open/close overhead
+        # Cross-process lock sidecar + append-mode handle, opened through the one
+        # shared helper also used by attach_session. A continued keyed session
+        # (file already present) reloads its last aggregate snapshot instead of
+        # starting at zero; a fresh or legacy file keeps today's zeroed behavior.
         self._log_file = None
+        self._lock_path = None
+        _existed = self._open_log_file()
+        if _existed:
+            self._load_state(self._read_last_checkpoint())
+
+        # Write the session header exactly once per file. A continued keyed file
+        # already carries one from the run that created it, so re-writing would
+        # double it; fresh and legacy files need the header now.
+        if not _existed:
+            self._write_event({
+                'type': 'session_start',
+                'session_id': self.session_id,
+                'stack_id': self._stack_id,
+                'timestamp': now_str,
+            })
+
+    # ── Per-Session Continuity ───────────────────────────────────────────
+
+    def _compute_session_identity(self, now_dt) -> tuple:
+        """Single source of truth for ``(stack_key, session_id, log_path)``.
+
+        When ``settings.ENABLE_STACK_SWAP`` is on and a non-empty active-stack id
+        passes :data:`_SESSION_KEY_RE`, the session is keyed to that id so a
+        resumed/reattached stack continues ``telemetry_<stack_id>.jsonl``. Any
+        other case (feature off, no persisted id, or an id containing a
+        path-unsafe character) yields the historical ``telemetry_<timestamp>``
+        naming — the safety fallback that can never mint a traversal-capable
+        path. Reading the persisted id is a pure config read with no pool
+        dependency, so it is safe at construction time.
+        """
+        timestamp_id = now_dt.strftime('%Y%m%d_%H%M%S%f')
+        stack_key = None
+        try:
+            from agent_cascade import settings
+            if settings.ENABLE_STACK_SWAP:
+                from agent_cascade.session_state_store import load_active_stack_id
+                candidate = (load_active_stack_id() or '').strip()
+                if candidate and _SESSION_KEY_RE.fullmatch(candidate):
+                    stack_key = candidate
+        except Exception as e:
+            _logger.warning('Telemetry could not resolve an active-stack key (%s); '
+                            'falling back to timestamp naming', e)
+        session_id = stack_key if stack_key else timestamp_id
+        return stack_key, session_id, self.log_dir / f'telemetry_{session_id}.jsonl'
+
+    def _open_log_file(self) -> bool:
+        """Open ``self.log_path`` for appending under the cross-process lock.
+
+        Returns True when the file we opened already existed (a continued
+        session — its aggregates should be reloaded and its header is already
+        present), False for a fresh file. On lock contention a second process
+        owns the session, so we mint a private timestamp-named file instead:
+        never blocking, never interleaving into a file another process holds.
+        Sets the cached ``_log_file`` handle and ``_lock_path``; the lock is
+        released by ``close`` / ``__del__``.
+        """
+        existed = self.log_path.exists()
+        if self._stack_id is not None and not self._try_acquire_session_lock(self.log_path):
+            _logger.warning(
+                'Telemetry session for stack %s is locked by another process; degrading '
+                'to a private timestamp-named file (no shared-file writes)', self._stack_id,
+            )
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S%f')
+            self.log_path = self.log_dir / f'telemetry_{stamp}.jsonl'
+            self.session_id = stamp
+            self._stack_id = None
+            existed = False
+        prior = getattr(self, '_log_file', None)
+        if prior is not None and not prior.closed:
+            try:
+                prior.close()
+            except Exception as e:
+                _logger.warning('Error closing telemetry handle before reopen: %s', e)
         try:
             self._log_file = open(self.log_path, 'a', encoding='utf-8')
         except Exception as e:
             _logger.warning('Failed to open telemetry log file %s: %s', self.log_path, e)
+            self._log_file = None
+        return existed
 
-        # Write session header
+    def _try_acquire_session_lock(self, log_path) -> bool:
+        """Best-effort cross-process single-writer lock for telemetry *log_path*.
+
+        Creates ``<log_path>.lock`` atomically with ``O_CREAT | O_EXCL`` and
+        records the holder PID. Returns True when we now own the lock. On
+        contention we attempt a one-shot reclaim of a dead holder's lock (a
+        prior crash); otherwise we return False so the caller degrades.
+        Defense-in-depth behind the per-instance-dir isolation; in-process
+        writes remain serialized by ``_telemetry_lock`` regardless. Never raises.
+        """
+        lock_path = Path(str(log_path) + '.lock')
+        for attempt in (0, 1):
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                # Only a positively-dead holder is reclaimed; anything else degrades.
+                if attempt == 0 and self._reclaim_stale_lock(lock_path):
+                    continue
+                return False
+            except OSError as e:
+                _logger.warning('Telemetry could not create lock %s: %s', lock_path, e)
+                return False
+            try:
+                os.write(fd, json.dumps({'pid': os.getpid(), 'ts': time.time()}).encode('utf-8'))
+            finally:
+                os.close(fd)
+            self._lock_path = lock_path
+            return True
+        return False
+
+    def _reclaim_stale_lock(self, lock_path) -> bool:
+        """Unlink a lock sidecar whose recorded holder is provably gone.
+
+        Returns True if the lock was reclaimed so the caller can retry, else
+        False to leave it in place (a possibly-live writer must never be
+        pre-empted). An unreadable/corrupt lock is treated conservatively as
+        live: we degrade rather than risk corrupting a shared file.
+        """
+        try:
+            pid = int(json.loads(Path(lock_path).read_text(encoding='utf-8')).get('pid', 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        if pid == os.getpid():
+            return self._release_lock_path(lock_path)
+        if not _telemetry_holder_is_dead(pid):
+            return False
+        return self._release_lock_path(lock_path)
+
+    def _release_lock_path(self, lock_path) -> bool:
+        """Unlink a telemetry lock sidecar (best-effort). Returns True on success."""
+        try:
+            os.unlink(str(lock_path))
+            return True
+        except OSError as e:
+            _logger.debug('Could not remove telemetry lock %s: %s', lock_path, e)
+            return False
+
+    def _release_session_lock(self):
+        """Release the cross-process lock this collector currently holds (if any)."""
+        lock_path = getattr(self, '_lock_path', None)
+        if lock_path is not None:
+            self._release_lock_path(lock_path)
+            self._lock_path = None
+
+    def _read_last_checkpoint(self) -> Optional[Dict]:
+        """Return the ``state`` of the last ``telemetry_stats`` record in the log.
+
+        Scans the file tail-first in bounded chunks so a boot loads with a single
+        read and no event replay. Malformed or split-across-chunk lines are
+        skipped, so a corrupt tail never aborts a resume and history stays
+        readable even without a checkpoint. Returns None when absent/empty.
+        """
+        try:
+            if not self.log_path.exists():
+                return None
+            with open(self.log_path, 'r', encoding='utf-8') as fh:
+                fh.seek(0, 2)
+                pos = fh.tell()
+                pending = ''
+                while pos > 0:
+                    read = min(pos, 65536)
+                    pos -= read
+                    fh.seek(pos)
+                    block = fh.read(read) + pending
+                    lines = block.splitlines()
+                    if pos > 0 and lines:
+                        # First line is the tail of a line split across the chunk
+                        # boundary; carry it back to rejoin with the older block.
+                        pending = lines.pop(0)
+                    else:
+                        pending = ''
+                    for line in reversed(lines):
+                        if line.strip():
+                            try:
+                                rec = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if rec.get('type') == 'telemetry_stats':
+                                return rec.get('state')
+                # Oldest remaining line (complete once pos reached 0).
+                if pending.strip():
+                    try:
+                        rec = json.loads(pending)
+                        if rec.get('type') == 'telemetry_stats':
+                            return rec.get('state')
+                    except json.JSONDecodeError:
+                        pass
+        except OSError as e:
+            _logger.warning('Telemetry could not read checkpoint from %s: %s', self.log_path, e)
+        return None
+
+    def _serialize_state(self) -> Dict:
+        """Snapshot the raw internal aggregate dicts as a JSON-safe structure.
+
+        Deep-copies every aggregate established in ``__init__`` so a resumed
+        session continues its own running totals rather than the process-wide
+        ones. Sets become sorted lists (JSON has no set type) and
+        Counter/defaultdict sub-maps become plain dicts; ``_load_state`` restores
+        the accumulation types. This is the verbatim internal state — distinct
+        from the derived, lossy ``get_session_summary`` tables it replaces here.
+        """
+        def encode(value):
+            if isinstance(value, (set, frozenset)):
+                return sorted(value, key=str)
+            if isinstance(value, dict):
+                return {k: encode(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [encode(v) for v in value]
+            return value
+        with _telemetry_lock:
+            return {name: encode(getattr(self, name)) for name in _AGGREGATE_FIELDS}
+
+    def _load_state(self, payload) -> bool:
+        """Restore the aggregate dicts from a checkpoint payload, in place.
+
+        Mutates the freshly-initialized aggregates under ``_telemetry_lock``. Keys
+        absent from an older payload keep their ``__init__`` defaults (tolerant
+        reader), and accumulation containers (defaultdicts / Counter / the
+        agent-classes set) are rebuilt to their live types so post-resume ``+=``
+        is safe. No-op when *payload* is empty. Returns True when any state was
+        restored.
+        """
+        if not payload:
+            return False
+        with _telemetry_lock:
+            session = payload.get('_session_stats')
+            if isinstance(session, dict):
+                for key, value in session.items():
+                    factory = _SESSION_STATS_DEFAULTDICTS.get(key)
+                    if factory is not None:
+                        self._session_stats[key] = defaultdict(factory, value or {})
+                    else:
+                        self._session_stats[key] = value
+            config = payload.get('_config_stats')
+            if isinstance(config, dict):
+                for row in config.values():
+                    if isinstance(row, dict):
+                        for key, factory in _CONFIG_STATS_DEFAULTDICTS.items():
+                            row[key] = defaultdict(factory, row.get(key, {}))
+                self._config_stats = config
+            for name in ('_cache_stats', '_instance_usage', '_agent_class_stats', '_dna_stats'):
+                value = payload.get(name)
+                if isinstance(value, dict):
+                    setattr(self, name, value)
+            skills = payload.get('_skill_usage_stats')
+            if isinstance(skills, dict):
+                for entry in skills.values():
+                    if isinstance(entry, dict):
+                        entry['agent_classes'] = set(entry.get('agent_classes', []))
+                        entry['modes'] = collections.Counter(entry.get('modes', {}))
+                self._skill_usage_stats = skills
+            return True
+
+    def write_checkpoint(self):
+        """Append a raw-state checkpoint record for a later boot/swap to resume from.
+
+        The record has ``type='telemetry_stats'`` and carries the verbatim
+        internal aggregate dicts. It is additive: consumers that filter on known
+        event types ignore it, and DNA/AB tooling that globs ``telemetry_*.jsonl``
+        still sees the file. Best-effort and never raises — a write failure is
+        logged and counted, never interrupting the caller. Written at graceful
+        shutdown and on every stack-park so a usable checkpoint always exists for
+        the next resume of whichever stack this collector is currently tracking.
+        """
         self._write_event({
-            'type': 'session_start',
+            'type': 'telemetry_stats',
             'session_id': self.session_id,
-            'timestamp': now_str,
+            'stack_id': self._stack_id,
+            'timestamp': _now_iso(),
+            'state': self._serialize_state(),
         })
+
+    def attach_session(self, stack_id):
+        """Re-point this collector to *stack_id*'s telemetry file on a stack swap.
+
+        Called by ``snapshot.activate_stack`` so the collector always tracks
+        whichever stack is active (boot-resume and runtime swap alike). Idempotent:
+        a no-op when already keyed to *stack_id* — the normal boot already opened
+        the active stack's file in ``__init__``, so the subsequent activate is inert.
+        On an actual re-key it, in order under ``_telemetry_lock``: closes the
+        prior handle (no fd leak), releases its lock, re-keys path/id, clears the
+        live per-turn tracking so the outgoing stack's in-flight state never
+        bleeds in, reopens under the shared lock helper, and reloads the target's
+        aggregate snapshot (or writes its header once if new).
+        """
+        new_key = (stack_id or '').strip()
+        try:
+            from agent_cascade import settings
+            enabled = settings.ENABLE_STACK_SWAP
+        except Exception:
+            enabled = False
+        if not (enabled and new_key and _SESSION_KEY_RE.fullmatch(new_key)):
+            # Disabled / unsafe / empty id: keep the current path; nothing to re-key.
+            return
+        with _telemetry_lock:
+            if self._stack_id == new_key:
+                return
+            prior = self._log_file
+            if prior is not None and not prior.closed:
+                try:
+                    prior.close()
+                except Exception as e:
+                    _logger.warning('Error closing telemetry handle before re-key: %s', e)
+            self._log_file = None
+            self._release_session_lock()
+            self._stack_id = new_key
+            self.session_id = new_key
+            self.log_path = self.log_dir / f'telemetry_{new_key}.jsonl'
+            self._session_ended = False   # a freshly tracked stack is active again
+            # Clear live per-instance tracking (keyed by instance_name) so no
+            # in-flight turn/LLM/tool/cache state from the outgoing stack leaks in.
+            self._active_turns.clear()
+            self._active_llm_calls.clear()
+            self._active_tool_calls.clear()
+            self._cache_scan_state.clear()
+            # Drop the in-memory recent-events ring too so the dashboard reflects
+            # only the active stack (consistent with the per-stack aggregate reset);
+            # the outgoing stack's history remains readable on its own keyed file.
+            self.events.clear()
+            existed = self._open_log_file()
+            # A resumed stack reloads its own checkpoint; a fresh (or checkpointless)
+            # stack resets to the clean template so the outgoing stack's totals never
+            # bleed in. Per-stack aggregates therefore always reflect the attached stack.
+            state = self._read_last_checkpoint() if existed else None
+            self._load_state(state or copy.deepcopy(self._empty_aggregate_template))
+            if not existed:
+                self._write_event({
+                    'type': 'session_start',
+                    'session_id': self.session_id,
+                    'stack_id': self._stack_id,
+                    'timestamp': _now_iso(),
+                })
 
     # ── Config Fingerprinting ─────────────────────────────────────────────
 
@@ -1998,6 +2368,7 @@ class TelemetryCollector:
             'dna_comparison': dna_comparison,           # BUG_0337 Phase 1 (additive)
         }
         try:
+            self.write_checkpoint()      # raw-state snapshot for the next resume
             self._write_critical_event(event)
             self.close()  # Flush and close file handle after final event
         except Exception as e:
@@ -2041,7 +2412,10 @@ class TelemetryCollector:
                     self._log_file.write(line)
                     self._log_file.flush()  # Flush to avoid data loss on crash
                 else:
-                    # Fallback: reopen file handle so subsequent writes don't pay open/close cost
+                    # Fallback: reopen file handle so subsequent writes don't pay
+                    # open/close cost. The session lock is held for the handle's
+                    # entire lifetime (acquired at open, released only on close or
+                    # degrade), so no re-acquire is needed here.
                     fh = open(self.log_path, 'a', encoding='utf-8')
                     fh.write(line)
                     fh.flush()
@@ -2075,7 +2449,7 @@ class TelemetryCollector:
         self._write_to_file(event, raise_on_error=False)
 
     def close(self):
-        """Flush and close the log file handle. Call during shutdown cleanup."""
+        """Flush and close the log file handle and release the session lock."""
         with _telemetry_lock:
             if self._log_file is not None and not self._log_file.closed:
                 try:
@@ -2083,9 +2457,10 @@ class TelemetryCollector:
                     self._log_file.close()
                 except Exception as e:
                     _logger.warning('Error closing telemetry log file: %s', e)
+            self._release_session_lock()
 
     def __del__(self):
-        """Cleanup guarantee: close file handle if still open (handles crashes/uncaught exceptions)."""
+        """Cleanup guarantee: close handle + release lock if still held (crashes/uncaught exceptions)."""
         # Defensive no-op if already closed or not yet initialized
         try:
             if hasattr(self, '_log_file') and self._log_file is not None and not self._log_file.closed:
@@ -2093,11 +2468,30 @@ class TelemetryCollector:
                     self._log_file.close()
                 except Exception as e:
                     _logger.warning('Error in __del__ closing telemetry log file: %s', e)
+            if hasattr(self, '_lock_path') and self._lock_path is not None:
+                self._release_session_lock()
         except Exception:
             # Last resort: never let __del__ raise (avoids interpreter shutdown issues)
             pass
 
     # ── Aggregation & Reporting (moved above persistence for logical grouping) ─
+
+
+def _telemetry_holder_is_dead(pid: int) -> bool:
+    """Whether the process recorded as *pid* in a telemetry lock is no longer running.
+
+    Conservative: returns False on any uncertainty (missing psutil, invalid pid,
+    probe error) so a live holder's lock is never stolen and a concurrent writer
+    never interleaves into the same file. psutil is imported lazily because it is
+    not a hard dependency of this module; without it we simply decline to reclaim.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        import psutil
+        return not psutil.pid_exists(pid)
+    except Exception:
+        return False
 
 
 def _now_iso() -> str:
