@@ -158,13 +158,15 @@ def pool():
     return _PoolDouble()
 
 
-def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
+def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=(), on_stack=None):
     """Root + streaming child + a capable-but-no-slot instance + a non-capable child.
 
     Returns (root, worker, parked, incapable). ``resolve_held_endpoint`` is faked to
     return a held endpoint only for ``streaming_names``, and those same instances are
     marked as mid-stream (``_llm_call_active``) — the two conditions the KV-coverage
-    predicate requires.
+    predicate requires. ``on_stack`` selects which names sit on ``active_stack``;
+    ``None`` keeps the default (all four), which is fine for the streaming-predicate
+    tests but the loaded-set (BUG_0390) tests pass a realistic subset.
     """
     import agent_cascade.state_ops as state_ops
 
@@ -175,7 +177,7 @@ def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
     incapable = _instance('coder_plain', parent='Maine_20261115_143022', depth=1, cfg=None)
     for inst in (root, worker, parked, incapable):
         inst._llm_call_active = inst.instance_name in streaming_names
-        _register(pool, inst)
+        _register(pool, inst, on_stack=(on_stack is None or inst.instance_name in on_stack))
 
     # Register log paths on the pool (source of truth capture reads).
     pool.instance_loggers = {
@@ -193,6 +195,50 @@ def _make_fleet(pool, tmp_path, monkeypatch, *, streaming_names=()):
 
     monkeypatch.setattr(state_ops, 'resolve_held_endpoint', fake_held)
     return root, worker, parked, incapable
+
+
+def _make_linear_fleet(pool, tmp_path, monkeypatch, *, all_resolve=True):
+    """A realistic linear active_stack root->A->B->C for the explicit-park scenario.
+
+    Models the post-force-halt state (BUG_0390): every in-flight stream has ended
+    (``_llm_call_active`` False everywhere), yet the four endpoints still resolve
+    (``all_resolve=True``) — exactly what made the old sweep attempt stale saves on the
+    blocked callers A/B and the root. The engine only retains the leaf's (C's) cell, so
+    the loaded-set gate must select C alone despite all four resolving.
+
+    Returns (root, a, b, c). Caller registers log paths via the returned pool.
+    """
+    import agent_cascade.state_ops as state_ops
+
+    root = _instance('Maine_20261115_143022', agent_class='orchestrator', display='Maine', depth=0, cfg=CAPABLE_CFG)
+    a = _instance('coder_A', parent='Maine_20261115_143022', depth=1, cfg=CAPABLE_CFG)
+    b = _instance('coder_B', parent='coder_A', depth=2, cfg=CAPABLE_CFG)
+    c = _instance('coder_C', parent='coder_B', depth=3, cfg=CAPABLE_CFG)
+    for inst in (root, a, b, c):
+        inst._llm_call_active = False                     # post-force-halt: nobody mid-stream
+        _register(pool, inst, on_stack=True)              # linear chain: all four on the stack
+
+    pool.instance_loggers = {
+        'Maine_20261115_143022': _Logger(str(tmp_path / 'maine.jsonl')),
+        'coder_A': _Logger(str(tmp_path / 'a.jsonl')),
+        'coder_B': _Logger(str(tmp_path / 'b.jsonl')),
+        'coder_C': _Logger(str(tmp_path / 'c.jsonl')),
+    }
+    pool.children = {
+        'Maine_20261115_143022': ['coder_A'],
+        'coder_A': ['coder_B'],
+        'coder_B': ['coder_C'],
+    }
+
+    def fake_held(p, inst):
+        # All four resolve (the old sweep condition) OR none — either way the loaded-set
+        # gate, not the endpoint resolver, must decide who is saved.
+        if all_resolve:
+            return {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']}
+        return None
+
+    monkeypatch.setattr(state_ops, 'resolve_held_endpoint', fake_held)
+    return root, a, b, c
 
 
 # ── Gate ─────────────────────────────────────────────────────────────────────
@@ -279,9 +325,10 @@ class TestLogReference:
 
 class TestKvCoverage:
     def test_non_streaming_instances_always_kv_null(self, pool, tmp_path, monkeypatch):
-        # No instance holds a slot → every kv is null.
+        # Autosave path: no live stream, nothing just finished -> every kv is null.
+        # (The BUG_0390 explicit path is covered separately by the loaded-set tests.)
         _make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
-        env = capture_fleet_snapshot(pool)
+        env = capture_fleet_snapshot(pool, only_streaming=True)
         raw = env.to_dict()
         assert all(raw['instances'][n]['kv'] is None for n in raw['instances'])
 
@@ -295,10 +342,10 @@ class TestKvCoverage:
                     'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
                     'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']}}
 
-        # worker1 streams (capable + slot). parked is capable but holds NO slot → null.
-        # plain is non-capable → null regardless.
+        # worker1 streams (capable + slot). parked is capable but idle (no slot) -> null.
+        # plain is non-capable -> null regardless. This is the autosave/streaming path.
         _make_fleet(pool, tmp_path, monkeypatch, streaming_names=('coder_worker1',))
-        env = capture_fleet_snapshot(pool, kv_saver=saver)
+        env = capture_fleet_snapshot(pool, kv_saver=saver, only_streaming=True)
         raw = env.to_dict()
 
         assert raw['instances']['coder_worker1']['kv'] is not None
@@ -370,30 +417,35 @@ class TestKvCoverage:
         assert raw['instances']['coder_parked']['kv'] is None
         assert raw['instances']['coder_plain']['kv'] is None
 
-    def test_explicit_capture_keeps_warm_fleet_coverage(self, pool, tmp_path, monkeypatch):
-        """Park / Save now stay best-effort over every warm-capable instance.
+    def test_explicit_capture_saves_only_the_loaded_leaf(self, pool, tmp_path, monkeypatch):
+        """BUG_0390: explicit park/Save-now saves ONLY the loaded leaf, not the fleet.
 
-        Only the automatic task-end save is streaming-only; an explicit capture still
-        tries every instance (a stale session is refused by the engine and recorded as
-        ``saved: false``, which the restore side already fails closed on).
+        Linear stack root->A->B->C, all streams force-halted (none in flight), all four
+        endpoints resolve (the old sweep's precondition). The engine only retains the
+        leaf C's KV, so a recording kv_saver must be invoked exactly once, for C, and
+        never for root/A/B — the loaded-set gate must prevent the call, not swallow an
+        error from it. The envelope still carries every agent with an intact log_ref.
         """
-        saved = {}
+        saved = []
 
         def saver(inst, kv_cfg):
-            saved[inst.instance_name] = True
+            saved.append(inst.instance_name)
             return {'capable': True, 'saved': True, 'reason': None,
                     'label': inst.instance_name, 'session_digest': kv_cfg['session_digest'],
                     'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
                     'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'],
                                      'model': CAPABLE_CFG['model']}}
 
-        _make_fleet(pool, tmp_path, monkeypatch,
-                    streaming_names=('Maine_20261115_143022', 'coder_worker1', 'coder_parked'))
-        capture_fleet_snapshot(pool, trigger='user', kv_saver=saver)
+        _make_linear_fleet(pool, tmp_path, monkeypatch, all_resolve=True)
+        env = capture_fleet_snapshot(pool, trigger='user', kv_saver=saver)
+        raw = env.to_dict()
 
-        # Everything with a capable endpoint is attempted; the non-capable child is not.
-        assert saved == {'Maine_20261115_143022': True, 'coder_worker1': True,
-                         'coder_parked': True}
+        # The gate prevents the save for root/A/B: the recorder sees only the leaf C.
+        assert saved == ['coder_C']
+        assert raw['instances']['coder_C']['kv'] is not None
+        assert raw['instances']['Maine_20261115_143022']['kv'] is None
+        assert raw['instances']['coder_A']['kv'] is None
+        assert raw['instances']['coder_B']['kv'] is None
 
     def test_save_streaming_kv_calls_save_instance_state_set_label_false(self, monkeypatch):
         import agent_cascade.state_ops as state_ops
@@ -611,3 +663,85 @@ class TestPrefixSha256:
             f.write('{"role":"user","content":"extra"}\n')
         with pytest.raises(snapshot.SnapshotIntegrityError):
             snapshot.validate_envelope_integrity(loaded)
+
+# ── BUG_0390: explicit KV-save narrowed to the loaded set ─────────────────────
+
+def _recording_saver(sink):
+    """A kv_saver that records the saved instance names and returns a coherent block.
+
+    The recorder proves the gate prevents the save CALL for unloaded agents (it is never
+    invoked), rather than a save being attempted and its error swallowed.
+    """
+    def saver(inst, kv_cfg):
+        sink.append(inst.instance_name)
+        return {'capable': True, 'saved': True, 'reason': None,
+                'label': inst.instance_name, 'session_digest': kv_cfg['session_digest'],
+                'session_digest_endpoint': kv_cfg['session_digest_endpoint'],
+                'endpoint_cfg': {'api_base': CAPABLE_CFG['api_base'], 'model': CAPABLE_CFG['model']}}
+    return saver
+
+
+class TestLoadedKvSet:
+    """BUG_0390: the explicit park/swap/Save-now path saves only the loaded agent(s)."""
+
+    def test_loaded_kv_names_helper(self, pool):
+        root_name = 'Maine_20261115_143022'
+        # A linear stack selects only the deepest leaf.
+        assert snapshot._loaded_kv_names(
+            [(root_name, 0), ('A', 1), ('B', 2), ('C', 3)], pool.instances, root_name) == {'C'}
+        # A single root-only stack is the root.
+        assert snapshot._loaded_kv_names([(root_name, 0)], pool.instances, root_name) == {root_name}
+        # An empty (collapsed/parked) stack is the root — the whole fleet is idle.
+        assert snapshot._loaded_kv_names([], pool.instances, root_name) == {root_name}
+        # Hypothetical parallel leaves at the max depth all count (forward-looking hedge).
+        assert snapshot._loaded_kv_names(
+            [(root_name, 0), ('C', 3), ('D', 3)], pool.instances, root_name) == {'C', 'D'}
+
+    def test_idle_fleet_explicit_capture_saves_root_only(self, pool, tmp_path, monkeypatch):
+        """Collapsed (idle) active_stack -> the root is saved, the parked children cold-start."""
+        saved = []
+        _make_linear_fleet(pool, tmp_path, monkeypatch, all_resolve=True)
+        pool.active_stack = []                     # all idle / parked: no leaf on the stack
+        env = capture_fleet_snapshot(pool, trigger='user', kv_saver=_recording_saver(saved))
+        raw = env.to_dict()
+
+        assert saved == ['Maine_20261115_143022']
+        assert raw['instances']['Maine_20261115_143022']['kv'] is not None
+        for n in ('coder_A', 'coder_B', 'coder_C'):
+            assert raw['instances'][n]['kv'] is None
+
+    def test_envelope_captures_all_agents_regardless_of_kv(self, pool, tmp_path, monkeypatch):
+        """A/B cold (kv=None) yet still in the envelope with log_ref + blocking edges."""
+        for fname, name, cnt in (('maine', 'Maine_20261115_143022', 4), ('a', 'coder_A', 2),
+                                 ('b', 'coder_B', 2), ('c', 'coder_C', 2)):
+            _write_jsonl(tmp_path / f'{fname}.jsonl', name, cnt)
+        _make_linear_fleet(pool, tmp_path, monkeypatch, all_resolve=True)
+        # Only the leaf is saved, but the envelope identity/topology is independent of KV.
+        env = capture_fleet_snapshot(pool, trigger='user', kv_saver=_recording_saver([]))
+        raw = env.to_dict()
+
+        assert set(raw['instances']) == {'Maine_20261115_143022', 'coder_A', 'coder_B', 'coder_C'}
+        for n in raw['instances']:
+            assert raw['instances'][n]['log']['message_count'] > 0   # log_ref rehydratable
+        assert raw['instances']['coder_A']['kv'] is None
+        assert raw['instances']['coder_B']['kv'] is None
+        edges = {(e['parent'], e['child']) for e in raw['pool_state']['blocking_calls']}
+        assert {('Maine_20261115_143022', 'coder_A'),
+                ('coder_A', 'coder_B'), ('coder_B', 'coder_C')} <= edges
+
+    def test_unloaded_kv_none_survives_roundtrip_for_restore(self, pool, tmp_path, monkeypatch):
+        """The kv=None the gate writes round-trips so restore Phase 6 cold-starts (skips) them.
+
+        Phase 6 (snapshot.py) ``continue``s on ``snap.kv is None`` before calling
+        ``verify_and_restore_instance_kv``; this asserts the data shape that drives that
+        skip is intact through write -> load, without a heavy live-restore harness.
+        """
+        _make_linear_fleet(pool, tmp_path, monkeypatch, all_resolve=True)
+        env = capture_fleet_snapshot(pool, trigger='user', kv_saver=_recording_saver([]))
+        out = write_snapshot_to_disk(env, tmp_path / 'snapshots')
+        reloaded = load_snapshot_from_disk(out)
+
+        assert reloaded.instances['coder_A'].kv is None      # cold start at restore
+        assert reloaded.instances['coder_B'].kv is None
+        assert reloaded.instances['Maine_20261115_143022'].kv is None
+        assert reloaded.instances['coder_C'].kv is not None  # the loaded leaf keeps its KV

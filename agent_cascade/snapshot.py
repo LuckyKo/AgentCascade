@@ -598,21 +598,6 @@ class _NullContext:
         return False
 
 
-def _kv_save_capable(pool, instance, endpoint_cfg: Dict[str, Any]) -> bool:
-    """True when an instance is a candidate for an explicit (best-effort) KV save.
-
-    Explicit captures (park / Save now / shutdown / restart) try every warm instance
-    whose endpoint is save-capable and resolvable; a stale session is then refused by
-    the engine and recorded as ``saved: false``. The automatic task-end save is
-    narrower — see :func:`_is_streaming`.
-    """
-    from agent_cascade.state_ops import is_state_save_capable, resolve_held_endpoint
-
-    if not is_state_save_capable(endpoint_cfg):
-        return False
-    return resolve_held_endpoint(pool, instance) is not None
-
-
 def _is_streaming(pool, instance, endpoint_cfg: Dict[str, Any], *,
                   just_finished: bool = False) -> bool:
     """True when ``instance`` is in the actively-streaming set (decision 1).
@@ -642,6 +627,29 @@ def _is_streaming(pool, instance, endpoint_cfg: Dict[str, Any], *,
     if resolve_held_endpoint(pool, instance) is None:
         return False
     return instance_llm_in_flight(instance)
+
+
+def _loaded_kv_names(active_stack, instances, root_name) -> set:
+    """Names whose KV the engine currently retains.
+
+    The warm cell holds the KV of the loaded agent(s) only. After an explicit
+    park/swap force-halts every in-flight stream, the engine still retains the
+    session cell of whichever agent was loaded when the stack froze:
+
+    - Non-empty ``active_stack``  -> the active leaf/leaves (deepest nest_depth).
+    - Empty / root-only           -> the root (the whole fleet is idle).
+
+    The returned set is fed to :func:`_is_streaming` as its ``just_finished``
+    argument on the explicit path, i.e. "its stream ended; the engine still
+    retains its cell". Agents outside this set are cold-started (``kv=None``)
+    by design, never issued a stale/racy save. The engine holds at most one
+    warm cell, so in practice this is a single leaf; the set form is the
+    forward-looking hedge for parallel leaves.
+    """
+    if not active_stack:
+        return {root_name}
+    max_depth = max(depth for _, depth in active_stack)
+    return {name for name, depth in active_stack if depth == max_depth}
 
 
 def _save_streaming_kv(instance, kv_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -749,10 +757,12 @@ def capture_fleet_snapshot(
             they are saved alongside instances that are still streaming. Only read when
             ``only_streaming`` is true.
         only_streaming: Restrict KV saves to instances that are streaming right now
-            (plus ``just_finished``). The automatic task-end save sets this: saving the
-            idle fleet there is what wrote stale sessions (400/409) and multi-GB files
-            on every turn end. Explicit captures (park / Save now / shutdown / restart)
-            leave it false and keep best-effort coverage of every warm instance.
+            (plus ``just_finished``). The automatic task-end save sets this. Explicit
+            captures (park / Save now / shutdown / restart) leave it false but are still
+            narrow: they save only the loaded set — the active leaf, or the root when the
+            fleet is idle — i.e. the agents whose KV the engine actually retains. Sweeping
+            the idle/blocked fleet there wrote stale sessions (400/409) and multi-GB files
+            on every turn end (BUG_0390).
     """
     if not settings.ENABLE_STACK_SWAP:
         logger.debug('[FLEET_SNAPSHOT] requested but ENABLE_STACK_SWAP is off — no-op')
@@ -796,6 +806,13 @@ def capture_fleet_snapshot(
 
     # ── Phase 2: I/O (log refs) and KV saves — NO pool lock held ────────────
     finished = frozenset(just_finished or ())
+    # The engine retains the KV of only the loaded agent(s). For the explicit path
+    # (only_streaming=False) this is the active leaf (or the root when the fleet is
+    # idle), computed from the frozen active_stack — NOT resolve_held_endpoint, which
+    # resolves for blocked callers and idle siblings and so swept stale saves fleet-wide
+    # (BUG_0390). Fed as _is_streaming's just_finished so the capable guard is preserved.
+    root_name = _root_instance_name(instances)
+    loaded = _loaded_kv_names(active_stack, instances, root_name)
     log_refs: Dict[str, Dict[str, Any]] = {}
     kv_blocks: Dict[str, Optional[Dict[str, Any]]] = {}
     for name, inst in instances.items():
@@ -804,7 +821,7 @@ def capture_fleet_snapshot(
         if only_streaming:
             save_kv = _is_streaming(pool, inst, endpoint_cfg, just_finished=name in finished)
         else:
-            save_kv = _kv_save_capable(pool, inst, endpoint_cfg)
+            save_kv = _is_streaming(pool, inst, endpoint_cfg, just_finished=name in loaded)
         if save_kv:
             kv_blocks[name] = kv_saver(inst, kv_configs[name]) if kv_saver else _save_streaming_kv(inst, kv_configs[name])
         else:
