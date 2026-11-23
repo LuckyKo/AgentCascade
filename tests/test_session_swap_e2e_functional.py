@@ -256,6 +256,103 @@ class TestSwapFunctionalE2E:
         assert live._system_prompt_frozen is True, (
             'KV-preservation invariant: swapped-in instance must remain frozen')
 
+    def test_frozen_swapped_in_prompt_heals_missing_agents_block_and_is_kv_safe(
+            self, pool, tmp_path):
+        """A FROZEN swapped-in prompt lacking ## AVAILABLE AGENTS is healed once, then
+        stays byte-identical (KV-safe).
+
+        Why this test exists
+        --------------------
+        The identity rewrite (step 1 of ``_refresh_system_prompt``) self-heals a frozen,
+        swapped-in prompt because it runs unconditionally and is idempotent. The
+        ``## AVAILABLE AGENTS`` registry is a STABLE section (the agent-class list rarely
+        changes), so it must follow the SAME "first-injection runs always" pattern. If
+        that first-injection were gated behind ``not sys_prompt_frozen``, a swapped-in
+        frozen prompt that lacked the block would NEVER get it and the orchestrator
+        would have to guess the ``agent_class`` for ``call_agent``. This test drives the
+        real pool + swap primitives + real ``ExecutionEngine._setup_turn`` (same harness
+        as the sibling identity test above) and proves:
+
+          (a) HEAL  - the ``## AVAILABLE AGENTS`` block appears on a FROZEN prompt that
+              genuinely lacked it before ``_setup_turn`` (assertion 3 below);
+          (b) KV-safe - a SECOND ``_setup_turn`` (cache miss forced again) is a
+              byte-identical no-op: the block is now present, so neither the first
+              injection (guarded by ``not had_resources_block``) nor the freeze-gated
+              refresh re-stamps the prompt.
+
+        Non-vacuity: the heal assertion (3) only passes because the FIRST injection
+        runs on a FROZEN prompt. Re-gating that first injection behind
+        ``not sys_prompt_frozen`` (the pre-fix shape) leaves the block absent and makes
+        assertion (3) FAIL - the swap re-applies ``_system_prompt_frozen=True``, so the
+        heal provably crosses the freeze gate.
+        """
+        log_file = _write_soul_log(tmp_path)
+
+        # 1. Seed a session-loaded 'Main' (frozen). _write_soul_log writes only the
+        #    bare soul identity line, so the loaded prompt carries NO AVAILABLE
+        #    AGENTS block — exactly the state a swap-restored orchestrator must heal.
+        status = pool.load_session_from_log(
+            str(log_file), target_instance=INSTANCE, clear_sub_agents_before_load=False)
+        assert not str(status).startswith('Error'), f'session load failed: {status}'
+
+        loaded = pool.instances[INSTANCE]
+        assert loaded._system_prompt_frozen is True, 'precondition: loaded instance is frozen'
+        assert '## AVAILABLE AGENTS' not in loaded.conversation[0].content, (
+            'precondition: soul log must carry no AVAILABLE AGENTS block')
+
+        # 2. Real park -> activate swap (mirrors the sibling identity test). The
+        #    restore rebuilds m0 from the on-disk SOUL log (still no block) and
+        #    re-applies _system_prompt_frozen=True.
+        reg = _ensure_registry(pool)
+        reg.register(STACK)
+        reg.set_active(STACK)
+        env = park_active_stack(
+            pool, stack_id=STACK, grace_seconds=0.0,
+            sleeper=lambda *_a, **_k: None, clock=lambda: 0.0)
+        assert env is not None and env.stack_id == STACK, 'park must return the source envelope'
+        assert pool.instances.get(INSTANCE) is None, 'park must empty the pool'
+        activate_stack(pool, env, gate_checked=True)
+
+        live = pool.instances[INSTANCE]
+        assert live is not None, 'restored instance must be re-installed'
+
+        # Forced regression preconditions: the swapped-in prompt genuinely LACKS the
+        # block AND is frozen. If a future swap path ever pre-injected the block, these
+        # asserts fail loudly so the heal assertion never silently stops exercising it.
+        assert live._system_prompt_frozen is True, 'precondition: swapped-in instance is frozen'
+        assert '## AVAILABLE AGENTS' not in live.conversation[0].content, (
+            'precondition: swapped-in prompt must still lack the AVAILABLE AGENTS '
+            'block before _setup_turn')
+
+        # 3. HEAL assertion. First real turn-setup: force a cache miss so
+        #    _refresh_system_prompt actually runs against the frozen m0.
+        engine = ExecutionEngine(pool)
+        live._last_config_version = -1
+        engine._setup_turn(live)
+
+        healed = live.conversation[0].content
+        assert '## AVAILABLE AGENTS' in healed, (
+            'frozen swapped-in prompt must self-heal the AVAILABLE AGENTS block during '
+            '_setup_turn (first-injection runs even when frozen)')
+        # Avoid a vacuous header-only pass: when the real pool enumerates agents the
+        # block lists registered classes, so a concrete name must appear.
+        if 'Available Agent Types' in healed:
+            assert 'coder' in healed, (
+                'AVAILABLE AGENTS block should enumerate registered classes; expected '
+                'coder to be listed')
+
+        # 4. KV-SAFE assertion. A second turn-setup (cache miss forced again) must be a
+        #    byte-identical no-op. The block is now present so the first-injection is
+        #    skipped; the prompt stays frozen so the refresh / metadata / trust-boundary
+        #    sections are gated off; and the identity rewrite is idempotent. Nothing
+        #    re-stamps the prompt -> the KV-cache prefix is preserved.
+        before = live.conversation[0].content
+        live._last_config_version = -1
+        engine._setup_turn(live)
+        assert live.conversation[0].content == before, (
+            'second _setup_turn on an already-healed frozen prompt must be byte-identical '
+            '(KV-cache prefix preservation)')
+
     @pytest.mark.parametrize(
         'fixture', SWAP_COMPRESSION_FIXTURES,
         ids=['l1_single_tier', 'l2_consolidation'])

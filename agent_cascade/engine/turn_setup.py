@@ -203,10 +203,44 @@ class TurnSetupMixin:
                     if re.search(pattern, m0_content):
                         m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
 
-                    # 2-4. VOLATILE sections - gated by freeze (BUG_0372 KV-prefix
-                    # preservation). Skip entirely on a frozen prompt: regenerating
-                    # timestamps / log paths / resources would change the KV cache
-                    # prefix and force a full re-prefill of the restored context.
+                    # 3. Inject/update available resources (the agent-class registry
+                    # plus the cache-pool note). The "## AVAILABLE AGENTS" registry is
+                    # a STABLE section (the class list rarely changes), not a volatile
+                    # one, so its FIRST-injection runs unconditionally — the same
+                    # idempotent self-heal as the identity rewrite above. A restored or
+                    # swapped-in prompt that predates the block would otherwise never
+                    # receive it, leaving the agent with no class registry from which to
+                    # delegate. _build_resources_block is a pure function, so the block
+                    # is computed once here regardless of freeze state, and presence is
+                    # captured BEFORE any injection so the gated refresh below can tell a
+                    # just-injected block from a pre-existing one.
+                    resources_block = _build_resources_block(self.pool, template, instance)
+                    had_resources_block = '## AVAILABLE AGENTS' in m0_content
+                    if resources_block and not had_resources_block:
+                        # Legacy migration: strip the old "--- CURRENT AVAILABLE
+                        # RESOURCES" block from sessions that predate the
+                        # "## AVAILABLE AGENTS" format.
+                        if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
+                            escaped_old = re.escape('--- CURRENT AVAILABLE RESOURCES')
+                            old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
+                            m0_content = re.sub(old_pattern, '', m0_content, count=1, flags=re.DOTALL)
+
+                        # First injection - insert before ## Active Skills if present,
+                        # otherwise append at end. This ensures consistent order:
+                        # identity/metadata -> available agents -> active skills
+                        if '## Active Skills' in m0_content:
+                            # Insert before the Active Skills section
+                            m0_content = m0_content.replace(
+                                '## Active Skills', resources_block + '\n\n## Active Skills', 1)
+                        else:
+                            # No skills section - append at end as fallback
+                            m0_content += resources_block
+
+                    # 2, 4 + refresh. VOLATILE operations - gated by freeze for
+                    # KV-prefix preservation. Skip entirely on a frozen prompt:
+                    # regenerating session metadata / refreshing the resource block /
+                    # the trust boundary would change the KV cache prefix and force a
+                    # full re-prefill of the restored context.
                     if not sys_prompt_frozen:
                         # 2. Refresh Session Metadata section.
                         # Always a refresh (never first-injection) because the pre-log writers handle
@@ -217,34 +251,12 @@ class TurnSetupMixin:
                         if meta_block:
                             m0_content = _replace_section(m0_content, '## Session Metadata', meta_block)
 
-                        # 3. Inject/update available resources (agent types and
-                        # cache pool note based on feature flags)
-                        # Note: Using already-resolved template, no need for
-                        # re-lookup
-                        new_block = _build_resources_block(self.pool, template, instance)
-                        if new_block:
-                            if '## AVAILABLE AGENTS' in m0_content:
-                                # Replace the existing block with fresh data
-                                # (handles dynamic tool changes)
-                                m0_content = _replace_resources_block(m0_content, new_block)
-                            else:
-                                # Legacy migration support only: strip the old "--- CURRENT AVAILABLE RESOURCES"
-                                # block from restored sessions that predate the "## AVAILABLE AGENTS" format.
-                                if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
-                                    escaped_old = re.escape('--- CURRENT AVAILABLE RESOURCES')
-                                    old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
-                                    m0_content = re.sub(old_pattern, '', m0_content, count=1, flags=re.DOTALL)
-
-                                # First injection - insert before ## Active Skills if present,
-                                # otherwise append at end. This ensures consistent order:
-                                # identity/metadata -> available agents -> active skills
-                                if '## Active Skills' in m0_content:
-                                    # Insert before the Active Skills section
-                                    m0_content = m0_content.replace('## Active Skills', new_block + '\n\n## Active Skills',
-                                                                    1)
-                                else:
-                                    # No skills section - append at end as fallback
-                                    m0_content += new_block
+                        # 3b. Refresh an EXISTING resource block with fresh data (handles
+                        # dynamic tool changes). Only when the block was already present
+                        # BEFORE the first-injection above; re-stamping a just-injected
+                        # block would be a redundant no-op.
+                        if resources_block and had_resources_block:
+                            m0_content = _replace_resources_block(m0_content, resources_block)
 
                         # 4. Inject/update the standing trust-boundary instruction (OWASP
                         # LLM01). Present only when UNTRUSTED_TOOL_OUTPUT_WRAPPER is ON;
